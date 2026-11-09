@@ -5,7 +5,7 @@ Status: implemented
 配套决策：[ADR 0109](../../../docs/decisions/0109-decisions-gate-single-source-and-collision-rule.md)
 （本轮同时立法「撞号消解规则」，改写 `docs/decisions/README.md` 的编号纪律条目）。
 
-## 决定
+## Decision
 
 1. 判定真源唯一：`scripts/check-decisions.mjs`（R1–R7）；`scripts/verify-decisions.ps1` 自建判据全部删除，
    只剩 `& node check-decisions.mjs @args` 转发 + 无 node 时 fail-closed。

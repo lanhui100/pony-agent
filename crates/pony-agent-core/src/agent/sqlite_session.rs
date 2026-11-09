@@ -2657,6 +2657,10 @@ impl SqliteSessionBackend {
                 if session.conversation_id != id {
                     session.conversation_id = id.clone();
                 }
+                // 轻量行不读 legacy trace 表：真源是日志/规范化投影（逐会话扫 205MB 表是启动主项）。
+                if commit::is_index_only_row(&data) {
+                    return Some((id, session));
+                }
                 let table_traces = self.read_session_traces(conn, &id).ok()?;
                 session.turn_trace_history = self.merge_trace_history(&session, table_traces.clone());
                 // PA-088/PA-090：节点 materialize——按 refs 从**全量表**恢复节点 trace。
@@ -2888,6 +2892,9 @@ impl SessionBackend for SqliteSessionBackend {
     /// 3. 折叠超预算 / 日志不可读 / fold 失败 ⇒ 回落索引侧 `normalized_*` 投影（只读句柄同样补全，补全**不读日志**）；
     /// 4. PA-174 P1：投影侧全空的会话由 durable `turn_events` 重建历史（不留空壳）。
     fn load_store(&self) -> Option<PersistedStore> {
+        // ADR 0107 修复：**每次装载**重新起算启动自愈预算（旧实现进程级冻结 ⇒ 长驻进程后续
+        // 装载永久跳过历史重建，表现为"新一轮没有历史"）。同一次装载内的各入口仍共用一条。
+        super::session::startup_repair::reset_startup_budget();
         let mut store = self.load_index_store()?;
         if self.storage_read_only {
             let covered = std::collections::HashSet::new();
@@ -2901,9 +2908,7 @@ impl SessionBackend for SqliteSessionBackend {
         );
         // 日志没给出的轻量行 + observation 投影都从索引补回（补全不读日志）。
         let covered: std::collections::HashSet<String> = outcome.folded.iter().cloned().collect();
-        self.fill_index_only_rows_from_index_projection(&mut store.sessions, &covered);
-        self.attach_index_trace_projections(&mut store.sessions, &covered);
-        self.rebuild_history_from_turn_events_when_projection_empty(&mut store.sessions);
+        self.run_startup_self_heal(&mut store.sessions, &covered, Self::startup_self_heal_deadline());
         Some(store)
     }
 

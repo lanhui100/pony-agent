@@ -6,7 +6,7 @@ Status: implemented
 - 关联：ADR 0101（trace 审核 loop）/ PA-169（确定性节点）
 - 轮次：`r3-dim3`（维度 3 失败语义）
 
-## 决定
+## Decision
 
 1. 新增判定节点 `scripts/audit/assertions/dim3.sh`：D1 降级保真 / D2 超时终态三侧可判定 /
    D3 三侧结局无矛盾 / D4 控制组不误报；四者阈值均为「违规会话数 = 0」，证据缺失单列 exit=2。

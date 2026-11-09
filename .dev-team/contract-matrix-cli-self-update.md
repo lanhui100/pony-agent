@@ -7,8 +7,10 @@
 
 ## C1 模块与 API：新增 `crates/pony-agent-core/src/agent/updater.rs`
 
-平台标识（发布侧与客户端唯一真值，`#[non_exhaustive]` 风格字符串常量）：
+平台标识（**客户端协议词表**唯一真值，`#[non_exhaustive]` 风格字符串常量）：
 `linux-x86_64` / `linux-aarch64` / `macos-x86_64` / `macos-aarch64` / `windows-x86_64`
+〔口径修订见 §AMEND-5：本清单是「客户端认识什么」，**不是**「发布侧发什么」；后者唯一真值源
+`scripts/cli-platforms.mjs`，两侧对齐由 `npm run contract:cli` 机器校验〕
 
 ```rust
 pub const CLI_MANIFEST_ASSET: &str = "pony-cli-latest.json";
@@ -68,6 +70,9 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 - `/update` 斜杠命令：**保持既有 tag 口径的只读检查实现不变**（`perform_update_check` 零改动），仅升级指引追加一行「本机升级（CLI 二进制）：`pony update`」（**不自动替换用户的二进制**）。〔本条已被收口时裁决取代：见 §AMEND-4 第 5 条——`/update` 答「有没有新发布」，`pony update` 答「CLI 能否升」，强行复用会让其中一个说假话。〕
 
 ## C3 发布侧：`.github/workflows/release.yml` 新增 job
+
+〔本节步骤 1–6（单 job、单平台、job 内联生成清单）已被 §AMEND-5 修订：改为 `build-cli` 平台矩阵 +
+`publish-cli` 单点装配。步骤 7 的版本递增门禁不变，位置随装配步骤一起前移到 `publish-cli`。〕
 
 新增 `build-cli-linux`（`runs-on: ubuntu-latest`，**`needs: build-and-release`** —— 桌面 job 内部完成 publish，故 CLI job 在其后 `gh release upload --clobber`；若 CLI job 失败，发布已发生但缺 CLI 清单，客户端发现逻辑会回落到更旧的含清单 release，属**优雅降级**而非坏版本，需在 job 里显式打印该风险），步骤契约：
 1. `cargo build --release --bin pony`；
@@ -176,3 +181,30 @@ impl UpdateError { pub fn user_message(&self) -> String; pub fn exit_code(&self)
 7. **`build-cli-linux` 的 `-D warnings`**：该 job 与 verify 作业同用 `actions-rust-lang/setup-rust-toolchain@v1`，该 action 默认注入 `RUSTFLAGS=-D warnings`（见 `scripts/check-rust-test-lints.mjs` 头注），故 advisory「未设 deny-warnings」**不成立**，不新增 env。
 8. **超限用例区分力**：L3-B 变异证明 `update_rejects_oversized_artifact_without_writing` 对 `MAX_ARTIFACT_BYTES` 分支零区分力 ⇒ 由 Test Agent 补 `error.code == "too_large"` 断言。
 9. **不入本波（登记后续条）**：`<exe>.part` 无 RAII 守卫（kill 后残留半包，危害低、下次覆盖）；`pony update --help`/`.env.example` 缺 6 个 `PONY_UPDATE_*` 自检入口（当前走 `Invalid` 退出 2 并给出取值口径）。
+
+## AMEND-5（Lead 裁决，2026-11-09：发布平台与承诺对齐 — [ADR 0108](../docs/decisions/0108-cli-release-platform-matrix.md)）
+
+1. **C1 的 5 项标识定性为「客户端协议词表」，不再是「发布侧与客户端唯一真值」**。原句把两个概念写成一处，
+   导致的现场故障是：客户端认 5 个平台、`release.yml` 只发 `linux-x86_64`，macOS/ARM 用户每次
+   `pony update` 都吃 `UnsupportedPlatform`，且没有任何命令会红。发布集合的真值源改为
+   `scripts/cli-platforms.mjs`（本轮 `linux-x86_64` 必需 + `linux-aarch64` / `macos-aarch64` 尽力；
+   `windows-x86_64`、`macos-x86_64` 登记为刻意不发布并附结构性理由）。
+2. **C3 改两段式**：`build-cli`（`strategy.matrix.include`，`continue-on-error: ${{ !matrix.required }}`，
+   只做构建 + core 版本链断言 + 上传 workflow artifact）与 `publish-cli`（单点下载全部 artifact →
+   `node scripts/build-cli-manifest.mjs` 装配清单与 `<asset>.sha256` 旁证 → 一次 `gh release upload --clobber` →
+   收尾断言）。清单装配自此不再长在 YAML 内联 python 里，摘要口径不依赖 runner 的 `sha256sum`/`shasum` 差异；
+   多平台各自上传同一份清单的 `--clobber` 竞态也一并消灭。
+3. **新增机器门禁**：`npm run contract:cli`（`node scripts/check-cli-release-contract.mjs`），插在 `npm run verify`
+   的 `contract:check` 之后。校验 workflow 矩阵 ↔ 真值源 ↔ 客户端 `current_platform()` 词表 ↔ 冻结清单资产名四处；
+   配套回归用例 `tests/cli-release-contract.spec.ts`（16 条，含变异用例）。
+4. **C3-3 产物命名扩为 `pony-tui_<ver>_<platform>`**，`platform` 取发布集合；清单 `platforms` 的每个 key
+   都必须在 release 上真的存在同名资产（收尾断言逐平台校验，防「清单有、资产无」）。
+5. **清单资产名冻结（P1 裁定）**：`pony-cli-latest.json` **不改名** —— 该字面量已硬编码在存量已发布二进制内，
+   改名 = 老客户端静默断更。确有需求时必须同批上传新旧两份清单并保留旧名到覆盖周期结束，且走新 ADR。
+   术语口径：`cli` 指**命令行形态**（交付物是 TUI 二进制 `pony`），与 `ponycli` 那个 bin 无关。
+6. **C3 尾句「`ponycli` 本次不发布」升格为长期事实**，家载体 `crates/pony-agent-core/README.md`
+   「两个二进制入口」表（含 stdout 契约差异与「不拆 crate：cargo 无 per-`[[bin]]` 依赖」一句）。
+7. **验收边界如实登记（本机验不到、靠下一次真实发版）**：`ubuntu-24.04-arm` 与 `macos-latest` 对本仓依赖树的
+   可编译性、以及 `-D warnings` 下 macOS 是否引入平台专属告警，只能在下一个 `v*` tag 的 run 上验收。
+   失败表现是显式且局部的：该平台 job 红但不阻断发版，`publish-cli` 在 stderr 打印缺失平台，
+   用户侧得到 `UnsupportedPlatform` + 清单已有平台清单；必需平台失败则整轮红。

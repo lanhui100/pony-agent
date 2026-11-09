@@ -481,6 +481,8 @@ pub mod protocol;
 #[path = "tui/terminal.rs"]
 mod terminal;
 pub use self::terminal::*;
+#[path = "tui/persistence_status.rs"]
+pub mod persistence_status;
 #[path = "tui/selection.rs"]
 mod selection;
 pub use self::selection::*;
@@ -2095,13 +2097,15 @@ impl TuiState {
         self.end_overlay();
     }
 
+    /// 底面行右槽的思考档位标签：直接输出 provider 契约里的英文档位（`low`/`medium`/`high`/`max`），
+    /// 不再包一层「思考:<中文>」——底面行是常驻窄行，短标签优先（ADR 0078 决策 6 修订）。
     pub fn reasoning_effort_label(&self) -> &'static str {
         match self.reasoning_effort {
-            None => "默认",
-            Some(ProviderReasoningEffort::Low) => "低",
-            Some(ProviderReasoningEffort::Medium) => "中",
-            Some(ProviderReasoningEffort::High) => "高",
-            Some(ProviderReasoningEffort::Max) => "极高",
+            None => "default",
+            Some(ProviderReasoningEffort::Low) => "low",
+            Some(ProviderReasoningEffort::Medium) => "medium",
+            Some(ProviderReasoningEffort::High) => "high",
+            Some(ProviderReasoningEffort::Max) => "max",
         }
     }
 
@@ -4048,9 +4052,9 @@ fn header_metrics_text(state: &TuiState) -> String {
 /// 因为它们紧贴输入动作，且必须在**每一帧**都有渲染点（C7/C18③/C23）。
 fn status_line(state: &TuiState, width: usize) -> Line<'static> {
     let ghost = || Style::default().fg(theme::GHOST);
-    // 右槽：模型身份 —— 沿用 header 原先口径（模型 + 思考强度，不含 provider）。
+    // 右槽：模型身份 —— `model`，有思考强度时补 ` · <英文档位>`（不含 provider，也不加中文前缀）。
     let model_text = match state.reasoning_effort {
-        Some(_) => format!("{} · 思考:{}", state.model, state.reasoning_effort_label()),
+        Some(_) => format!("{} · {}", state.model, state.reasoning_effort_label()),
         None => state.model.clone(),
     };
     // C7/C18③/C23：排队指示器**唯一渲染点**就是本行（每帧都渲染，与 `mode`/`runtime_mode`
@@ -7000,6 +7004,9 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     // 防止全屏 TUI 界面被破坏退化为终端滚屏输出。
     // 日志绑定只在 unix 分支使用（dup2 重定向）；非 unix 目标（Windows CI）不进入该分支。
     let runtime_log_path = tui_runtime_log_path();
+    // 退出提示要如实说明「本次运行有没有保存失败」：记录日志起点，退出时只看新增段。
+    let save_failure_witness =
+        persistence_status::SaveFailureWitness::capture(runtime_log_path.as_deref());
     if let Some(path) = runtime_log_path.as_ref() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -7143,9 +7150,13 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     match result {
         Ok(inner) => {
             // 还原之后再把续接提示交给真实终端：此时备用屏已退出，提示才留在用户屏幕上。
-            // 会话未落库也照常打印——`pony resume <id>` 会以同一 id 继续（不存在的 id 不是错误）。
+            // P0：这条提示**必须与事实一致**（逻辑与顺序敏感性都在 `persistence_status` 里）。
             if let Ok(session_id) = &inner {
-                print_resume_hint(session_id);
+                persistence_status::emit_exit_hint(
+                    session_id,
+                    &save_failure_witness,
+                    runtime_log_path.as_deref(),
+                );
             }
             // wave-tui-session-resilience C8：还原与提示之后进程真正退出，
             // 杜绝「主循环已返回、在飞 provider 线程仍持有 /dev/tty」的残留进程。
@@ -11052,27 +11063,13 @@ pub struct ResumeTarget {
 /// 还没产生任何轮次（未落库），严格校验会让提示变成假承诺。这里改为「存在就恢复历史、
 /// 不存在就以该 id 开新会话」，并在 TUI 内给出可见说明。
 fn resolve_resume_target(requested: Option<&str>) -> Result<ResumeTarget, String> {
-    let all_sessions = SessionStore::new().list_sessions();
-    match requested {
-        // 显式 id 一律接受（可能来自 `.dev-team` 诊断/队友会话）；存在性按全量库判定。
-        Some(id) => Ok(ResumeTarget {
-            session_id: id.to_string(),
-            existed: all_sessions
-                .iter()
-                .any(|session| session.conversation_id == id),
-        }),
-        // 缺省「最近会话」只取主会话：队友子会话有独立入口 `/agents`，不抢默认续接。
-        None => all_sessions
-            .iter()
-            .find(|session| is_main_session_id(&session.conversation_id))
-            .map(|session| ResumeTarget {
-                session_id: session.conversation_id.clone(),
-                existed: true,
-            })
-            .ok_or_else(|| "当前没有可恢复的会话。请先运行 `pony` 开始一个新会话。".to_string()),
-    }
+    // P1 启动提速：这里只做**一次廉价 meta 查询**（单条只读 SELECT），不做整库装载。
+    // 全量装载（日志 fold / 索引投影补全 / 自愈）留给控制面的唯一一次 `SessionStore::new()`；
+    // 否则进 TUI 前会把同一份库完整读两遍（生产库 1.2GB 时这是启动卡顿主因）。
+    let (session_id, existed) =
+        pony_agent_core::agent::session::resolve_resume_target(requested)?;
+    Ok(ResumeTarget { session_id, existed })
 }
-
 // W3b：主会话 id 判定统一走 `pony_agent_core::agent::session::is_main_session_id`
 // （队友/子代理会话只经 `/agents` 进入，不混入 `/resume` 默认列表）。
 
@@ -11401,7 +11398,14 @@ fn main() {
     // Wave-5 P0：可观测性引导（panic hook + OTel provider；失败只降级 warn，不阻塞启动）。
     let _observability = ObservabilityBootstrap::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match parse_cli_action(&args) {
+    let action = parse_cli_action(&args);
+    // ADR 0107 §5 P1 取代 ADR 0106 的「单实例 fail-closed」：
+    // 日常写不再抢 `<db>.lock`，多进程由 SQLite WAL 串行化，第二实例**正常可用**；
+    // `<db>.lock` 现只服务破坏性维护（rebuild / migrate）。因此启动预检退役——若仍保留，
+    // 它会在「另一个进程正在 rebuild」时误拒绝用户启动 TUI。
+    // 退出提示的真实性（只承诺已落库会话）仍由 `persistence_status::session_persistence_evidence`
+    // 在退出路径上保证。
+    match action {
         CliAction::Version => {
             println!("{}", cli_version_string());
             std::process::exit(0);

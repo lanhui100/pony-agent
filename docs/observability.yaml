@@ -37,6 +37,20 @@ reviewed_at: "2026-11-09"
 # （tracing anchor 不变，仍 agent/otel/mod.rs），自身即维度 6 的审计对象（自举）；scripts/audit/* 确定性
 # 节点只产本地回执，无新增网络遥测面；fetch 查询 Tempo/Langfuse 复用 check-langfuse.sh 凭据纪律
 # （只走管道/env，UNKNOWN ≠ PASS）。不新增 applicable 判定，不新增 enforcement_point。
+# 会话库单写者冲突 fail-closed + 启动装载预算（ADR 0106）归属说明：
+# (1) 四维归属不变：tracing / issues 仍 applicable（唯一落点不变 agent/otel/mod.rs、
+#     agent/ponysentry/client.rs），metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、
+#     无 /metrics、pull 模型不成立）。本波无新增网络端点、依赖、指标或 Loki 上送路径。
+# (2) 新增**本地取证面**（非遥测出口）：锁文件 `<db>.lock` 写入持有者 `pid` / 启动时间 / 命令行；
+#     `single_instance_lock_denied` 升级为带 `holder pid=… cmd=… since=…`；
+#     启动期修复新增 `startup_self_heal_skipped: component=…`（index_projection 之外的维护项）与
+#     `startup_repair_commit: reasons=…`；退出证据的快速查询失败走 `persistence_evidence_fallback`。
+#     均为本地 stderr → 运行日志文件的行，不上报、不含消息正文与凭据。
+# (3) 新增一个**本地调参**环境变量 `PONY_STARTUP_SELF_HEAL_BUDGET_MS`（默认 1200ms，`0` = 跳过启动自愈；
+#     非法值回退默认）。它是启动预算旋钮，不是遥测出口，不改变任何上报口径。
+# (4) 行为变更（非遥测）：TUI 在 `HeldByOther` 时 fail-closed 并非零退出；退出提示只在会话确已落库时
+#     承诺 `pony resume <id>`。不改变持久化 schema（锁文件仍是既有 `<db>.lock`，旧实例不解析其内容）。
+# ⇒ 不新增 applicable 判定、不新增 enforcement_point。
 
 dimensions:
   tracing:
@@ -832,6 +846,26 @@ note: >-
       `splash_image_init_has_no_protocol_early_return`、真色表与覆盖率表同序对齐
       `splash_master_rgb_aligns_with_coverage`、母版色相分布 `splash_master_rgb_keeps_master_colors`、
       生成物幂等 `generate_script_check_is_idempotent`。
+
+  【ADR 0105 归属登记（2026-11-09）｜启动页品牌标缩为原尺寸 1/3（Rich 9×10 / Compact 7×8）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**生成脚本的档位常量与重生成的编译期资产**，
+  无新增对外接口、网络 IO、后台任务、LLM 调用、依赖、env 契约或持久化 schema；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （理由与本文档维度声明同源：终端进程随用户启停、无常驻监听地址、无 Service，Prometheus pull 与
+      节点侧日志采集的结构前提不成立）。
+  (2) 本轮 N-A 的结构性理由：变更发生在**启动页一屏静态绘制的尺寸**——`scripts/generate-splash-logo.py`
+      的 `TIERS` 改为 9×10 / 7×8 后重生成 `splash_coverage.rs`（编译期覆盖率表 + 母版真色表）与内嵌位图；
+      `init_splash_image()` 仍是零 I/O 的环境判定（ADR 0080 约束不变），不产生新的遥测事实、
+      不新增指标/日志字段/Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：品牌画字符矩形 26×15 → 9×5，位图 832×960 → 288×320
+      （`splash_coverage.rs` 19074 → 3205 字节、`assets/splash-logo.png` 176332 → 42359 字节）；
+      高度阶梯阈值仍为 28 / 24；`PONY_TUI_SPLASH_IMAGE_PROTOCOL` 契约与协议判定表不变。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——`cargo test --bin pony splash` 的 15 项，
+      其中档位尺寸断言（9×10 / 7×8）、位图尺寸断言（288×320）、
+      `splash_master_rgb_keeps_master_colors` 与 `splash_master_rgb_differs_from_canvas`
+      改为**占比**判据（不再依赖绝对子像素个数），生成物幂等仍由 `generate_script_check_is_idempotent` 把守。
 
   【归属登记（2026-11-08）｜`Ctrl+O` / `/settings` 切换过程可见性后**当帧贴底**（滚动阻尼只服务增量追加）】
   一行结论：四维归属不变，metrics / logs 结构性 N-A —— 只改 TUI 进程内的滚动偏移赋值时机，

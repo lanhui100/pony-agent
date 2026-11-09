@@ -262,27 +262,48 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node scripts/send-wecom-notification.mjs "${{ github.ref_name }}"
 
-  # wave-67：CLI（`pony`）自更新发布 job。契约真值源 .dev-team/contract-matrix-cli-self-update.md C3。
+  # wave-67：CLI（`pony` 二进制）自更新发布。契约真值源
+  # `.dev-team/contract-matrix-cli-self-update.md` C3；多平台矩阵与清单单点装配见 [ADR 0108]
+  # （`docs/decisions/0108-cli-release-platform-matrix.md`）。
   #
-  # 为什么挂在桌面 job 之后：`build-and-release` 内部完成 publish（draft → published），CLI 资产只能在
-  # 发布后用 `gh release upload --clobber` 追加。
+  # 发布平台、「哪个平台必须成功」的唯一真值源是 `scripts/cli-platforms.mjs`；
+  # `node scripts/check-cli-release-contract.mjs`（已接入 `npm run verify`）在本文件矩阵、
+  # 真值源、客户端 `current_platform()` 词表三方不一致时非零退出。新增平台必须同批改两处。
   #
-  # 【已知风险·显式登记】若本 job 失败，发布已发生但缺少 `pony-cli-latest.json`：客户端发现逻辑会
-  # 回落到更旧的“含清单”release（优雅降级），不会把坏版本推给用户；但新 CLI 版本在一段时间内不可见。
-  # 因此本 job 只做“追加资产 + 收尾断言”，任何一步失败都让 job 红，由人补跑，绝不静默。
-  build-cli-linux:
+  # 为什么挂在桌面 job 之后：`build-and-release` 内部完成 publish（draft → published），CLI 资产只能
+  # 在发布后用 `gh release upload --clobber` 追加。
+  #
+  # 【已知风险·显式登记】若 publish-cli 失败，发布已发生但缺少 `pony-cli-latest.json`：客户端发现逻辑
+  # 会回落到更旧的「含清单」release（优雅降级），不会把坏版本推给用户；但新 CLI 版本在一段时间内不可见。
+  # 因此这些 job 只做「构建 + 追加资产 + 收尾断言」，任何一步失败都让 run 红，由人补跑，绝不静默。
+  build-cli:
     needs: build-and-release
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runs_on: ubuntu-latest
+            required: true
+            linux_deps: true
+          - platform: linux-aarch64
+            runs_on: ubuntu-24.04-arm
+            required: false
+            linux_deps: true
+          - platform: macos-aarch64
+            runs_on: macos-latest
+            required: false
+            linux_deps: false
+    runs-on: ${{ matrix.runs_on }}
+    # 必需平台失败 = 整次发版红。边缘平台（首次接入、未经本机验证）失败只让该平台本轮资产缺席，
+    # publish-cli 会在日志里显式列出缺失平台；用户侧得到的是明确的 UnsupportedPlatform + 清单已有平台，
+    # 而不是坏字节。不允许「承诺了但不发」无声通过。
+    continue-on-error: ${{ !matrix.required }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
-
-      # 门禁脚本 `scripts/check-cli-manifest-advances.mjs` 用 node 跑；显式钉版本，不赌 runner 预装。
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
@@ -293,40 +314,85 @@ jobs:
       # CI verify 作业同款依赖（.github/workflows/ci.yml:84）：keyring 的 linux 后端经 libdbus-sys
       # 需要 dbus-1.pc，native-tls 需要 openssl 头文件；缺失时 cargo build 会直接 panic（v0.1.184 首跑实证）。
       - name: Install Linux build deps
+        if: matrix.linux_deps
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libssl-dev pkg-config
 
-      - name: Build pony CLI binary (linux-x86_64)
+      - name: Build pony CLI binary (${{ matrix.platform }})
         run: cargo build --release --bin pony
 
-      # 版本链 fail-closed：CLI 二进制只承载 `pony-agent-core` 的版本（两条版本线：core / tauri-app），
-      # 因此**只与 core Cargo.toml 比对**，不与 package.json 比对。
+      # 版本链 fail-closed：CLI 二进制只承载 `pony-agent-core` 的版本（本仓是 core / tauri-app 两条独立
+      # 版本线），因此**只与 core Cargo.toml 比对**，不与 package.json 比对。
       - name: Assert CLI version matches core version
+        id: ver
         run: |
           set -euo pipefail
           # v0.1.184 二跑实证：`pony --version` 首行可能被日志行（otel::init warn 走 stdout 的 JSON）占位，
           # 因此不能取 head -1，必须按版本号模式提取（仍 fail-closed：提不到就报错退出）。
           ver="$(./target/release/pony --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
           core="$(grep -m1 '^version' crates/pony-agent-core/Cargo.toml | cut -d'"' -f2)"
-          echo "cli_version=$ver core_version=$core"
+          echo "cli_version=$ver core_version=$core platform=${{ matrix.platform }}"
           if [ -z "$ver" ] || [ "$ver" != "$core" ]; then
             echo "::error::CLI 版本 ($ver) 与 crates/pony-agent-core/Cargo.toml ($core) 不一致（core 版本链 fail-closed）"
             exit 1
           fi
-          echo "PONY_CLI_VERSION=$ver" >> "$GITHUB_ENV"
+          # 资产名 = pony-tui_<core 版本>_<平台标识>，由 scripts/cli-platforms.mjs::assetNameFor 定义。
+          mv target/release/pony "pony-tui_${ver}_${{ matrix.platform }}"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
 
-      # 发布侧 fail-closed 门禁（2026-11-08 遗留项）：清单 version 必须**严格大于**上一个已发布清单
-      # 的 version。清单里的 version = 该 tag 的 core 版本，而客户端发现口径是「版本以清单为准」——
-      # 若某次发版只 bump tauri 不 bump core（`release.mjs --target tauri` / `bump-version.ps1
-      # -Target tauri` 都允许），清单 version 与上一版相同，所有机器都会一直判定「已是最新」，本次
-      # CLI 构建永远不会被下载，且客户端侧无任何报错可看（只能靠这里拦）。
+      - name: Upload per-platform CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.platform }}
+          path: pony-tui_${{ steps.ver.outputs.ver }}_${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # 清单只在这里装配并上传：单一实现（scripts/build-cli-manifest.mjs，本机有单测）+ 单点写入。
+  # 矩阵化后若各 build job 自己写清单，会互相 `--clobber` 覆盖同一份 pony-cli-latest.json，
+  # 最终只剩最后一个跑完的平台 —— 这正是 ADR 0108 要消灭的「清单与发布事实错位」。
+  publish-cli:
+    needs: build-cli
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # 门禁与清单脚本都用 node 跑；显式钉版本，不赌 runner 预装。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download per-platform CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: dist-cli
+          merge-multiple: true
+
+      - name: Resolve core version
+        id: core
+        run: |
+          set -euo pipefail
+          core="$(grep -m1 '^version' crates/pony-agent-core/Cargo.toml | cut -d'"' -f2)"
+          if [ -z "$core" ]; then
+            echo "::error::读不到 crates/pony-agent-core/Cargo.toml 的 version"
+            exit 1
+          fi
+          echo "core=$core" >> "$GITHUB_OUTPUT"
+
+      # 发布侧 fail-closed 门禁（ADR 0097）：清单 version 必须**严格大于**上一个已发布清单的 version。
+      # 清单 version = 该 tag 的 core 版本，而 `release.mjs --target tauri` 这类只 bump tauri 的发版会让
+      # 清单版本恒定 ⇒ 所有客户端永远判「已是最新」，本次 CLI 构建永远不会被下载，且客户端侧无报错可看。
       - name: Assert CLI version advances over previous release manifest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${{ github.ref_name }}"
           repo="${{ github.repository }}"
-          cur="$PONY_CLI_VERSION"
+          cur="${{ steps.core.outputs.core }}"
           prev="none"
           # 与客户端发现同一口径回看：published 且非 draft，最多 20 条，取第一个含清单的 release。
           for candidate in $(gh api "repos/$repo/releases?per_page=20" \
@@ -337,67 +403,44 @@ jobs:
             if gh release download "$candidate" --repo "$repo" \
                  --pattern pony-cli-latest.json \
                  --output /tmp/prev-cli-manifest.json --clobber 2>/dev/null; then
-              prev="$(python3 -c 'import json;print(json.load(open("/tmp/prev-cli-manifest.json"))["version"])')"
+              prev="$(node -e 'const fs=require("fs");process.stdout.write(String(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).version))' /tmp/prev-cli-manifest.json)"
               echo "previous manifest: $candidate -> $prev"
               break
             fi
           done
           node scripts/check-cli-manifest-advances.mjs --current "$cur" --previous "$prev"
 
-      # 产物三件套：资产本体 + sha256sum 原生格式摘要 + `pony-cli-latest.json` 清单。
-      - name: Build CLI assets and manifest
+      # 清单本体 + 每平台 `.sha256` 旁证文件都由这一个脚本产出（摘要口径单一实现，
+      # 顺带消灭 GNU `sha256sum` 与 BSD `shasum` 的差异）。必需平台缺制品 ⇒ 非零退出。
+      - name: Assemble CLI manifest
         run: |
           set -euo pipefail
-          ver="$PONY_CLI_VERSION"
-          asset="pony-tui_${ver}_linux-x86_64"
-          cp target/release/pony "$asset"
-          sha="$(sha256sum "$asset" | awk '{print $1}')"
-          size="$(stat -c%s "$asset")"
-          sha256sum "$asset" > "${asset}.sha256"
-          PONY_CLI_ASSET="$asset" PONY_CLI_SHA="$sha" PONY_CLI_SIZE="$size" python3 - <<'PY'
-          import datetime
-          import json
-          import os
-
-          manifest = {
-              "schema": "pony-cli-manifest",
-              "version": os.environ["PONY_CLI_VERSION"],
-              "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime(
-                  "%Y-%m-%dT%H:%M:%SZ"
-              ),
-              "platforms": {
-                  "linux-x86_64": {
-                      "asset": os.environ["PONY_CLI_ASSET"],
-                      "sha256": os.environ["PONY_CLI_SHA"],
-                      "size": int(os.environ["PONY_CLI_SIZE"]),
-                  }
-              },
-          }
-          with open("pony-cli-latest.json", "w", encoding="utf-8") as handle:
-              json.dump(manifest, handle, ensure_ascii=False, indent=2)
-              handle.write("\n")
-          print(json.dumps(manifest, ensure_ascii=False))
-          PY
+          node scripts/build-cli-manifest.mjs \
+            --version "${{ steps.core.outputs.core }}" \
+            --dir dist-cli \
+            --out dist-cli/pony-cli-latest.json
 
       - name: Upload CLI assets to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${{ github.ref_name }}"
-          ver="$PONY_CLI_VERSION"
-          asset="pony-tui_${ver}_linux-x86_64"
-          gh release upload "$tag" "$asset" "${asset}.sha256" "pony-cli-latest.json" --clobber
+          ver="${{ steps.core.outputs.core }}"
+          shopt -s nullglob
+          files=(dist-cli/pony-tui_"${ver}"_*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::dist-cli 里没有任何 CLI 制品（build-cli 全矩阵失败或被跳过）"
+            exit 1
+          fi
+          echo "uploading: ${files[*]} dist-cli/pony-cli-latest.json"
+          gh release upload "$tag" "${files[@]}" dist-cli/pony-cli-latest.json --clobber
 
-      # 收尾断言：清单必须真的挂在该 tag 上，且清单 version == 本轮构建的 core 版本。
+      # 收尾断言：清单必须真的挂在该 tag 上，且清单 version == 本轮 core 版本、清单平台集合 == 实际上传集合。
       - name: Verify CLI manifest on published release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${{ github.ref_name }}"
           repo="${{ github.repository }}"
-          ver="$PONY_CLI_VERSION"
+          ver="${{ steps.core.outputs.core }}"
           names="$(gh api "repos/$repo/releases/tags/$tag" --jq '.assets[].name')"
           echo "assets on $tag:"
           echo "$names"
@@ -406,9 +449,17 @@ jobs:
             exit 1
           }
           gh release download "$tag" --pattern pony-cli-latest.json --output /tmp/pony-cli-latest.json --clobber
-          manifest_ver="$(python3 -c 'import json;print(json.load(open("/tmp/pony-cli-latest.json"))["version"])')"
+          manifest_ver="$(node -e 'const fs=require("fs");process.stdout.write(String(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).version))' /tmp/pony-cli-latest.json)"
           echo "manifest_version=$manifest_ver expected=$ver"
           if [ "$manifest_ver" != "$ver" ]; then
             echo "::error::清单 version ($manifest_ver) 与本轮 CLI 版本 ($ver) 不一致"
             exit 1
           fi
+          # 清单声明的每个平台都必须真的能在该 release 上取到（防「清单里有、资产上没有」：
+          # 客户端会下 404 或误用别的 release 的字节）。
+          for platform in $(node -e 'const fs=require("fs");for(const k of Object.keys(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).platforms))console.log(k)' /tmp/pony-cli-latest.json); do
+            echo "$names" | grep -qx "pony-tui_${ver}_${platform}" || {
+              echo "::error::清单声明了 $platform，但 release 上没有 pony-tui_${ver}_${platform} 资产"
+              exit 1
+            }
+          done

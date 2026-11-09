@@ -7,7 +7,7 @@ Status: implemented
 - 前序：PA-173（钳制不落盘、下界、批量重试）、ADR 0060（turn context 完整性）
 - 触发：用户报告「新的轮次开始，没有成功接入之前轮次的历史」
 
-## 决定
+## Decision
 
 1. **P1 从事件日志重建历史**：`session::history_from_turn_events(events) -> Vec<TurnHistoryMessage>`
    （按 seq 升序，只取 `user/message` 与 `assistant/message`，忽略空文本与其它事件）；

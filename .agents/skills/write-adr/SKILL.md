@@ -1,92 +1,104 @@
 ---
 name: write-adr
-description: 在提交任何非机械改动前使用——包括改变运行时或用户可见行为；引入或修改跨模块契约（接口、事件、持久化格式、配置结构）；推翻或修订既有 ADR 的决定（含 superseded 路由）；改变开发流程、工具链或测试策略；新增一类依赖或外部服务；一次删除跨越多个模块；以及在 proposed/implemented/rejected 之间路由一个决定，或拿不准某次改动是否需要 ADR 时。
+description: 何时用：出现任何非平凡变更（行为变更 / 架构 / 跨文件或跨包契约 / 流程与工具链 / 测试策略 / 磁盘-线-配置格式 / 维护者可能再访的决定，命中任一）需要落决策记录时；或把记录迁移状态（proposed → implemented / rejected / archived）时。纯机械或局部编辑豁免。
 ---
 
-# 编写 Pony Agent ADR
+# write-adr —— 把一次非平凡决策落成 .agents/notes/ 记录
 
-大型变更可能同时需要 OpenSpec 变更（回答"怎么实施"）与本篇 ADR（回答"为什么这样决定"）——两者互补，不互替。
+## 真相源
 
-## 先读契约
+- `.agents/notes/README.md` —— 路径规范、格式契约、触发规则（唯一真源，冲突时以它为准）
+- `.meta/constitution/constitution.md` —— 常载命约第 1 条（决策必须入册且带 Alternatives）
+- ponygo 框架仓库 `maturity-ladder.md` §5 —— L1 判据（status 机械校验的逐项定义）：<https://github.com/lanhui100/ponygo/blob/main/maturity-ladder.md>
 
-编写或更新任何 ADR 前，阅读 [docs/decisions/README.md](../../../docs/decisions/README.md)：状态枚举、六条触发判据的权威定义、记录规范都在那里。本 skill 是流程指引，README 是规范正典；冲突时以 README 为准。
+## 非平凡判定边界（谁判、锁什么、不锁什么）
 
-## 流程
+**判定权在模型，框架只锁"落了 ADR 之后的格式门"。** 框架不设行数/文件数/正则阈值来替你判
+"这次改动重不重要"——阈值只会被绕过（拆小提交、改注释骗 grep），而误判成本不对称：多记一段
+只是一段文字，漏记则是决策史永久缺口。所以：**判定是模型在动手前的一次判断，不是门禁的输入**。
 
-### 1. 确认触发
+| 判为**非平凡**（须写 ADR） | 为什么 |
+|---|---|
+| 破坏公共契约（改退出码语义、改 CLI 旗标、改函数/接口签名、改配置文件格式） | 下游全部消费者失配 |
+| 换核心依赖 / 换运行时 / 换语言或引入新工具链 | 换的是长期维护面 |
+| 改数据模型或协议（schema、序列化格式、线协议、迁移脚本） | 事后回滚成本高 |
+| 改架构分层与并发模型（模块边界、单文件↔多文件、串行↔并行、锁策略） | 影响所有后续改动的地基 |
+| 改门禁与发布语义（加/删门禁、改判据、改 release 与校验和链路） | 门禁是承诺的可验形态，改它即改契约 |
 
-六条判据速查（定义见 README）：行为变更 / 跨模块契约变更 / 推翻既有决定 / 流程·工具·测试策略变更 / 新增依赖类别 / 跨模块删除。
+| 判为**平凡**（豁免，不写） | 为什么 |
+|---|---|
+| 纯格式（缩进、空行、排序、formatter 输出） | 无语义变更 |
+| 纯文案（错别字、注释措辞、README 措辞不改规则） | 不改变承诺 |
+| 纯重命名（局部符号/文件，无外部可见契约变化） | 等价变换 |
+| 依赖 lock 更新（版本浮动的机械同步，不换核心依赖） | 噪声，重复记录会淹没真决策 |
+| 生成物（构建产物、快照、自动生成的索引） | 可再生产 |
 
-- 命中任一 → 进入路由；
-- 纯机械改动（重命名、格式化、局部小修）→ 不写，继续干活；
-- 拿不准 → 写一篇三行 ADR（见第 5 步），不要停下来犹豫。
+**灰区处理**：介于两者之间（"这算改契约吗？"）→ 写；写不出 `## Alternatives considered` 说明
+根本没做决策，那才是唯一该重估的信号（缺备选 = 没权衡，见 `.agents/notes/README.md` 格式契约）。
 
-### 2. 路由到生命周期（四问）
+**框架侧的锁在哪里**：只锁落盘之后——ADR 一旦进了暂存区，`.meta/gates/adr-verify.sh` 会先做
+「暂存字节 = 工作区字节」比对（防"暂存后偷改"，R6），再交给 `.agents/skills/write-adr/verify-note.sh`
+判 1.5–1.8 的机械影子；重命名（`git mv`）同样在覆盖面内（`--diff-filter=ACMR`）。
+也就是说：**漏写 ADR 门禁抓不到（那是判断问题），写坏的 ADR 门禁一定抓得到（那是格式问题）**——
+机制不做自己做不到的事，也不假装做了。
 
-1. 只是执行既有决定的局部小改？→ 不需要新 ADR；
-2. 决定已做出（代码已写或在写）？→ 主目录新建，`Status: implemented`；
-3. 尚需评审或验证才敢动手的 substantial 工作？→ `proposed/`（首篇时创建目录），`Status: proposed`；
-4. 已否决且半年后仍会诱惑人？→ `rejected/`，`Status: rejected — <一行理由>`；不会诱惑人则不留痕。
+## 步骤
 
-时态试金石：implemented 通篇现在时；proposed 将来时；rejected 冻结提案原文，只加 Status 判词。
+1. **判触发**：对照 description 的枚举，命中任一即写。拿不准 → 写（多记成本一段文字，漏记成本永久丢失）。
+   **时序**：决策记录必须**先于对应代码变更、或与代码变更同一提交**——先 ADR 后代码；
+   事后补记是债务，不是常态（时序本身是语义判断、靠 review，用 `git log` 对照 ADR 提交与代码提交校准）。
+2. **写前检索**（必做，不是提示）：落笔前先查旧 ADR 是否覆盖同一决策——
+   用主题词、模块路径、关键符号 `grep -r` 扫 `.agents/notes/` 活动树
+   （proposed/implemented/rejected；archived 只读史不判），按下面判定表处理：
 
-### 3. 章节要求
+   | 检索结果 | 动作 |
+   |---|---|
+   | 无命中 | 直接写（本条即首案） |
+   | 命中相关旧条 | 读全文；新 note 正文链入旧条路径；旧条若被部分取代，链回新条 |
+   | 命中被取代的旧条 | 走 supersession：旧 implemented 条移入 archived/（冻结，原貌不动），或链入说明被哪条取代；**同一提交处理，不 deferred** |
+   | 多阶段提案部分落地 | 落地部分拆条记 implemented，未落地部分留在 proposed（勿让 proposed 整条失准） |
+3. **选 lifecycle**：`proposed/`（未实现）或 `implemented/`（随本次变更落地）。
+4. **选 class**：`feature`（新能力）/ `bug-fix`（修缺陷）/ `simplification`（减复杂度）/ `architecture`（交付源码的结构）/ `process`（代码周围的工具与流程）/ `testing`（测试策略）。都不够 → 考虑在 `notes/classes.local` 登记领域扩展（扩展即一次治理决策，须评审）。
+5. **建文件**：`.agents/notes/{lifecycle}/{class}/$(date +%F)-<topic-title>.md`，topic 用 kebab-case。
+6. **头部**：第一行 `# Agent Note: <title>`，空行，`Status: <与所在目录一致>`。`rejected` 必须带一行理由：`Status: rejected — <为何否决>`（分隔符 `—` / `-` / `:` 任一，且**剥掉分隔符、空白、ASCII 与中文标点**后正文 ≥2 字节；判据 1.7 机械校验：`Status: rejected — 。` 这种「标点充理由」同样 FAIL；`*.zh.md` 豁免）。
+7. **正文**：`## Problem` 开头（先写动机，脱离方案也成立），随后**按 lifecycle 选骨架**（判据 1.8 机械校验标题是否与 lifecycle 匹配，选错即 FAIL：`implemented/` 缺 `## Decision` 即 FAIL，含提案时代标题——英文 `## Proposal`/`## Plan`/`## Migration plan`/`## Acceptance criteria` 或中文 `## 提案`/`## 计划`/`## 迁移计划`/`## 验收标准`/`## 验收`/`## 风险`/`## 待办`——同样 FAIL；判据 1.10 机械校验 `## Alternatives considered` 必须在场）。**围栏感知**：``` 围栏内的 `## 标题` 是示例文本，不算在场（未闭合围栏 → 其后全部视为围栏内）；要证明「真有这一节」，标题写在围栏外：
 
-硬性必备节只有一个：**候选方案**（README 规定，全库唯一强制节）。`背景 / 决策 / 权衡 / 影响` 是推荐内容区，标题名可随内容调整（0008 即以"结果"收尾）——但比较记录本身不可省略。候选方案节纪律：
-
-- 记录真实比较过的选项及落选原因；备选只能记录，不能编造；
-- 单选项利弊 ≠ 候选方案比较——必须能回答"为什么不是那一个"；
-- 存量 ADR（2026-08-22 前）备选失考时，用 `<!-- alternatives-not-recorded -->` 如实标注；此后产生的 ADR 不再接受该标记。
-
-### 4. 取代与更新
-
-- 推翻旧决定 = 新增 ADR + 旧篇 Status 改为 `superseded by NNNN` 并移入 `superseded/` + 两篇互链；**禁止改写旧篇正文来"更新"决定**；
-- implemented ADR 引用的路径、名称等事实随代码变更在同一提交内更新；决定本身不变；
-- 既有 ADR 已覆盖当前决定时，更新它，不新建重复篇目。
-
-### 5. 最小可行 ADR（拿不准时的形态）
-
-```markdown
-# NNNN <标题>
-
-Status: implemented
-
-## 背景
-<一两句>
-
-## 候选方案
-<比较过什么、为何选此>
-
-## 决策
-<一句话结论>
-
-## 影响
-<一条约束或后续动作>
-```
-
-编号取现有最大号加一，四位零填充；取号后先验一次未被占用（`npm run decisions:check` 的 R6），
-撞号的消解规则（谁保留原号、封存引用不回改）见 README「撞号消解」条与 [ADR 0109](../../../docs/decisions/0109-decisions-gate-single-source-and-collision-rule.md)。
+   | lifecycle | 骨架 |
+   |---|---|
+   | `proposed/` | `## Proposal`（将来时）→ `## Alternatives considered` → `## Acceptance criteria` → `## Risks` |
+   | `implemented/` | `## Decision`（现在时，必须在场）→ `## Alternatives considered`（必填）→ `## Consequences`（可选） |
+   | `rejected/` | 提案原文冻结（保留 `## Proposal`），verdict 只写 `Status:` 行（含一行理由） |
+   | `archived/` | 冻结豁免：保持归档时原貌，一字不改（走第 8 步的归档动作） |
+8. **迁移/归档状态 = 四件事**，同一次变更内完成：
+   ① 移动文件到目标 lifecycle（`git mv`；落 `archived/` 时同样用 `git mv` 保血缘）；
+   ② 改 `Status:` 行（`archived/` 下保持原态 `implemented` 或写 `archived`，两种都合规）；
+   ③ 把提案时代标题改写为现在时（proposed → implemented 时；`## Proposal` → `## Decision`，
+   `## Acceptance criteria`/`## Risks` 折叠进 `## Consequences`）；
+   ④ **归档时追加封印**：`bash .meta/gates/archive-verify.sh seal`（append-only，只为**尚未登记**
+   的归档件追加 manifest 行；manifest 是归档件的唯一索引）。漏 ④ → 本地层 A1（暂存区）与远端层 A4（全树）
+   都以「未封印」拒绝提交，CI 不放行。正文**一字不改**（冻结即法律）。
 
 ## 校准样例
 
-**正例 [0008 事件溯源](../../../docs/decisions/0008-event-sourcing-evolution.md)**：三个候选方案各附优缺点与落选原因（如方案 B 输在改动最大、需要事件模型设计与版本契约、与现有代码的衔接成本高），分四阶段且每阶段独立验收，结尾一句"不重写，翻转"可复述；它以"结果"收尾而非"权衡/影响"标题——正是章节名灵活的实例。达到这个程度即合格。
-
-**反例（改造前的 0005 视觉方向）**：决策正文引用"方案 A"，但全库无处定义方案 A/B 是什么——比较发生在会话里，未落进文档。教训：讨论中的比较必须当场沉淀；存量失考只能如实标注，不许事后补造理由。
-
-**取代样例 [0004 → 0003](../../../docs/decisions/superseded/0004-frontend-shell-workbench-direction.md)**：被接替后迁入 `superseded/`、Status 行携带指针、正文一字未动。接替永远开新篇加指针，不改正文。
+- 正例（该写）：把某命令的退出码语义从 0 改为 1 → 行为变更，写 `implemented/feature/…`。
+- 正例（该写）：评审后否决"用 yaml 多字段记版本" → 写 `rejected/process/…`，Status 行带一行理由。
+- 正例（该写）：引入 lefthook 管理本地钩子 → 流程与工具链变更，写 `implemented/process/…`。
+- 反例（豁免）：改 README 错别字、调整测试断言文案 → 纯机械/局部编辑，不写。
+- 反例（豁免）：格式化重排、重命名局部变量 → 无行为/契约/结构/流程变化，不写。
+- 边界（靠 review）：重构归哪个 class？判别器是"可观察行为是否改变"——改变 → feature/bug-fix；只为减复杂度 → simplification（`refactor` 刻意缺席，与之重叠）。
+- 反例（时态错位，判据 1.8）：proposed/ 下用现在时 `## Decision` → 未批准的提案伪装成已落地的决定；proposed 必须用 `## Proposal`，迁移到 implemented 时再改写为现在时。
+- 反例（标点充理由，判据 1.7）：`Status: rejected — 。`（理由只有一个中文句号）→ 剥掉标点后正文为 0 字节，FAIL（`1.7 <path>：rejected 缺一行理由`）；正确写法是写出**为什么**否决（如「与 X 冲突」「成本高于收益」）。
+- 反例（围栏内标题，判据 1.8/1.10）：把 `## Decision` 放进 ```` ```text ```` 示例块 → 围栏内标题不算在场，仍报「缺 ## Decision」；示例代码块里的标题只是**样例**，不是本文档的节。
+- 反例（围栏吞标题，判据 1.8/1.10）：prose 里想引用三反引号时，别让它出现在行首（含缩进行首）——会被当成围栏开启；改为行内引用或加前缀字符。
+- 反例（缺备选节，判据 1.10，硬判据）：只写 `## Problem` + `## Decision` 就收尾、整条没有 `## Alternatives considered` → 决策史只剩结论没有权衡，读者无法判断"为什么不选另一条"，ADR 退化成事后记录；`verify-note.sh` 直接 FAIL（`1.10 <path>：缺 ## Alternatives considered`）。补法：把当时真正比较过的 2–3 个备选各写一行 + 各自落选理由（"没考虑过备选"本身不是备选——说明该决定还不该落条）。
+- 反例（混合 ADR）：把"治理已采纳"（implemented/process）与"架构尚在设计中、零代码"（proposed/architecture）写进同一条 implemented note → 状态轴失真（未实施伪装成已落地）+ class 污染；**多类拆条**（notes/README 触发规则）：已落地的记 implemented，未实施的记 proposed。
+- 反例（文不对题，判据管不到、靠 review）：TUI 定价表单功能（11 个 `.rs` 含大文件重写）携带一篇多协议声明 proposed note——标题与代码无关，ADR 成了"有记录无对应"的伪证据；正确做法是为 TUI 定价单独立条，把多协议提案放到它自己的分支/commit。
+- 正例（对应性）：ADR 的 Problem/Decision 引用它治理的代码路径（`crates/…/src/….rs`）或提交 sha；多阶段提案部分落地时，落地部分拆条或在原文链入 implemented（勿让 proposed 整条失准，如 error-observability 四层中已落地的 `AttemptObserver` 构造器）。
 
 ## 验证与报告
 
-提交前跑一次门禁（判定真源 `scripts/check-decisions.mjs`，pre-commit 调的也是它）：
-
-```sh
-npm run decisions:check
-```
-
-退出码 0 = 通过；1 = 违规并逐条打印规则号（R1 状态行 / R2 目录即状态 / R3 supersede 指向真实编号 /
-R4 索引完整 / R5 索引无悬挂 / R6 编号唯一 / R7 索引不重复）。索引缺行可先 `npm run decisions:fix`
-机械回填，但它只搬 H1 标题、不代写摘要。
-
-门禁只做文本级判定：候选方案是否真的比较过、索引行摘要是否名副其实，仍**靠 review**。
-
-完成后报告：本次新增或更新的篇目、选定状态及理由、出现的边界情况（如是否触发的犹豫点）及处理方式。
+- 跑 **`bash .agents/skills/write-adr/verify-note.sh`**（无参 = 整树；或跟单个相对路径）——机械影子 1.1–1.10（1.1–1.8：路径两轴/文件名/日期/Status（含 rejected 一行理由）/骨架标题（围栏感知）；1.9a：整树文档有家 docs/AGENTS.md 存在；1.10：必含 `## Alternatives considered`，围栏感知）全部通过，exit 0 才算完成；FAIL 项逐条修复重跑。
+- **门绿 ≠ 内容成立**：1.7 理由是否成立、1.8 标题是否真是决定、1.10 备选是否真权衡属**非机械项**（见 `.agents/notes/README.md` 同名小节），由 `governance-review` / `change-review` 抽查。
+- 归档/迁移落 `archived/` 时，再跑 **`bash .meta/gates/archive-verify.sh seal`**（追加封印，append-only）与 **`bash .meta/gates/archive-verify.sh check`**（只读校验：逐条比对归档件哈希，应为 exit 0；报「未封印」/「哈希不符」即欠账）。
+- 再跑 `ponygo status`：决策数 +1、L1 判据全绿、无卫生 WARN。
+- 报告格式：新记录路径 + lifecycle/class + 一句话 Problem + verify-note.sh 的通过输出。

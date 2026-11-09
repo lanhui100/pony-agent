@@ -335,27 +335,44 @@ impl SqliteSessionBackend {
     ///
     /// 注意方向：这里**只补索引独有的投影字段**（`buildContextObservationRef` /
     /// `buildContextObservation`），内容字段一个都不覆盖（trace 内容仍以日志为准）。
-    pub(crate) fn attach_index_trace_projections(
+    /// 预算版（返回值 = 因预算耗尽而**未补投影**的会话数）。
+    ///
+    /// 启动期路径走 [`Self::run_startup_self_heal`]；维护/诊断路径直接传 `None`（不设上限）。
+    pub(crate) fn attach_index_trace_projections_with_deadline(
         &self,
         sessions: &mut HashMap<String, SessionState>,
         targets: &HashSet<String>,
-    ) {
+        deadline: Option<std::time::Instant>,
+    ) -> usize {
         if targets.is_empty() {
-            return;
+            return 0;
         }
+        if Self::self_heal_budget_exhausted(deadline) {
+            eprintln!(
+                "[pony-agent][session] startup_self_heal_skipped: component=trace_projection reason=budget_exhausted targets={} — 本轮跳过索引独有投影补全（下轮启动再补）",
+                targets.len()
+            );
+            return targets.len();
+        }
+        let total = targets.len();
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
                 eprintln!(
                     "[pony-agent][session] trace_projection_skipped: 连接不可用（{error}）"
                 );
-                return;
+                return total;
             }
         };
         let Some(conn) = slot.as_ref() else {
-            return;
+            return total;
         };
+        let mut skipped = 0usize;
         for session_id in targets {
+            if Self::self_heal_budget_exhausted(deadline) {
+                skipped += 1;
+                continue;
+            }
             let Some(session) = sessions.get_mut(session_id.as_str()) else {
                 continue;
             };
@@ -393,6 +410,36 @@ impl SqliteSessionBackend {
                 }
             }
         }
+        if skipped > 0 {
+            eprintln!(
+                "[pony-agent][session] startup_self_heal_skipped: component=trace_projection reason=budget_exhausted skipped={skipped} — 剩余会话本轮跳过投影补全（下轮启动再补）"
+            );
+        }
+        skipped
+    }
+
+    /// 启动期自愈**编排**：先做**必然执行**的索引回填，再按预算做可跳过的维护项。
+    ///
+    /// - 索引投影回填（`fill_index_only_rows_from_index_projection`）**不受预算约束**：
+    ///   它是「日志 fold 降级 ⇒ 仍给出完整索引视图」这条既有契约的落点
+    ///   （`session_read_from_log::fifty_logged_sessions_load_within_budget_and_degrade_keeps_the_index_complete`
+    ///   守着它）。跳过它会把 50+ 会话读成空壳——那不是提速，是读错。
+    /// - 索引独有 trace 投影与事件流重建是**维护动作**：超预算跳过，本轮按索引视图，
+    ///   下轮启动再补。
+    ///
+    /// 维护/诊断路径（`new_read_only`、`rebuild_index` 双读比对）**不得**走这里：它们要的是
+    /// 完整视图，用各自的单步入口并显式传 `None`（不设上限）。
+    pub(crate) fn run_startup_self_heal(
+        &self,
+        sessions: &mut HashMap<String, SessionState>,
+        covered: &HashSet<String>,
+        deadline: Option<std::time::Instant>,
+    ) {
+        self.fill_index_only_rows_from_index_projection(sessions, covered);
+        self.attach_index_trace_projections_with_deadline(sessions, covered, deadline);
+        self.rebuild_history_from_turn_events_when_projection_empty_with_deadline(
+            sessions, deadline,
+        );
     }
 
     /// 索引里「已停写 blob 的轻量行」的会话 id（`instr` 前缀过滤，不整份反序列化）。
@@ -411,6 +458,23 @@ impl SqliteSessionBackend {
             ids.push(row.map_err(|e| format!("read index-only row id: {e}"))?);
         }
         Ok(ids)
+    }
+
+    /// 启动期自愈总预算的唯一真源在 `session::startup_repair`（那里同时被 `SessionStore`
+    /// 的 trace 缓存重建复用；各算一份预算会把「启动自愈上限」变成两倍）。
+    ///
+    /// 语义：自愈（索引投影补全 / observation 投影 / 事件重建）是**维护动作**——跳过它的代价
+    /// 只是「本轮列表里个别会话内容为空」，下一轮启动会再补；而无预算的整库补全会把 TUI 启动
+    /// 卡在「读完整库」上（生产库 1.2GB 时是真实事故面）。
+
+    /// 解析自愈预算为**绝对截止时刻**（进程内首次调用冻结）；`None` = 不设上限。
+    pub(crate) fn startup_self_heal_deadline() -> Option<std::time::Instant> {
+        crate::agent::session::startup_repair::startup_budget_deadline()
+    }
+
+    /// 预算是否已耗尽：`None`（不设上限）永不计时；`0ms` 预算在第一次调用即到期。
+    pub(crate) fn self_heal_budget_exhausted(deadline: Option<std::time::Instant>) -> bool {
+        crate::agent::session::startup_repair::budget_exhausted(deadline)
     }
 
     /// 用**索引自己的 `normalized_*` 投影**补全轻量索引行的内容。
@@ -521,8 +585,20 @@ impl SqliteSessionBackend {
         &self,
         sessions: &mut HashMap<String, SessionState>,
     ) {
+        self.rebuild_history_from_turn_events_when_projection_empty_with_deadline(sessions, None);
+    }
+
+    /// 预算版（返回值 = 因预算耗尽而**未尝试重建**的会话数）。
+    ///
+    /// 这是自愈里最贵的一步（逐会话读事件流 + fold），必须**排在索引投影补全之后**：
+    /// 投影补全超预算时，拿不到血缘/元数据的空壳不值得再花事件 IO 去试。
+    pub(crate) fn rebuild_history_from_turn_events_when_projection_empty_with_deadline(
+        &self,
+        sessions: &mut HashMap<String, SessionState>,
+        deadline: Option<std::time::Instant>,
+    ) -> usize {
         if sessions.is_empty() {
-            return;
+            return 0;
         }
         let empty_ids: Vec<String> = sessions
             .iter()
@@ -530,10 +606,22 @@ impl SqliteSessionBackend {
             .map(|(session_id, _)| session_id.clone())
             .collect();
         if empty_ids.is_empty() {
-            return;
+            return 0;
+        }
+        if Self::self_heal_budget_exhausted(deadline) {
+            eprintln!(
+                "[pony-agent][session] startup_self_heal_skipped: component=history_rebuild reason=budget_exhausted sessions={} — 本轮不做事件重建（下轮启动再补）",
+                empty_ids.len()
+            );
+            return empty_ids.len();
         }
         let mut rebuilt = 0usize;
+        let mut skipped = 0usize;
         for session_id in empty_ids {
+            if Self::self_heal_budget_exhausted(deadline) {
+                skipped += 1;
+                continue;
+            }
             let Some(state) = sessions.get(session_id.as_str()) else {
                 continue;
             };
@@ -612,6 +700,12 @@ impl SqliteSessionBackend {
                 "[pony-agent][session] history_rebuilt_from_turn_events: {rebuilt} 个投影空会话由事件日志重建历史"
             );
         }
+        if skipped > 0 {
+            eprintln!(
+                "[pony-agent][session] startup_self_heal_skipped: component=history_rebuild reason=budget_exhausted rebuilt={rebuilt} skipped={skipped} — 剩余空壳本轮不重建（下轮启动再补）"
+            );
+        }
+        skipped
     }
 }
 
@@ -1654,5 +1748,119 @@ impl SqliteSessionBackend {
         )
         .map_err(|e| format!("append legacy hook records: {e}"))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod startup_self_heal_budget_tests {
+    //! P1 启动提速：自愈预算的**行为**断言（不是实现细节）。
+    //!
+    //! 口径：预算耗尽只降级「本轮视图」，一行都不写回；持久化语义不受影响。
+
+    use super::*;
+    use crate::agent::session::SeparateTraceTableMode;
+
+    fn backend(tag: &str) -> SqliteSessionBackend {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let db_path = std::env::temp_dir().join(format!(
+            "pony-heal-budget-{tag}-{}-{unique}.db",
+            std::process::id()
+        ));
+        SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::DualWrite)
+    }
+
+    fn empty_history_session(id: &str) -> SessionState {
+        serde_json::from_value(serde_json::json!({
+            "conversationId": id,
+            "title": "标题",
+            "summary": "",
+            "history": [],
+            "turnCount": 3,
+            "lastReferencedFile": null,
+            "updatedAtMs": 10,
+        }))
+        .expect("minimal session state")
+    }
+
+    fn expired() -> Option<std::time::Instant> {
+        // 用一个必然已经到期的 deadline 驱动「预算耗尽」路径。
+        Some(std::time::Instant::now())
+    }
+
+    // 注：**没有**「预算耗尽跳过索引回填」的用例——索引回填是「fold 降级仍给出完整视图」
+    // 这条契约的落点，不受预算约束。它的守卫是集成测试
+    // `session_read_from_log::fifty_logged_sessions_load_within_budget_and_degrade_keeps_the_index_complete`。
+
+    #[test]
+    fn zero_budget_skips_history_rebuild_without_writing() {
+        let backend = backend("rebuild");
+        let mut sessions: HashMap<String, SessionState> = HashMap::new();
+        sessions.insert("s1".to_string(), empty_history_session("s1"));
+
+        let skipped = backend
+            .rebuild_history_from_turn_events_when_projection_empty_with_deadline(
+                &mut sessions,
+                expired(),
+            );
+
+        assert_eq!(skipped, 1, "预算耗尽必须报告 1 个未重建会话");
+        assert!(
+            sessions["s1"].history.is_empty(),
+            "预算耗尽不得凭空造出消息"
+        );
+    }
+
+    #[test]
+    fn zero_budget_orchestrator_leaves_every_session_untouched() {
+        let backend = backend("orchestrator");
+        let mut sessions: HashMap<String, SessionState> = HashMap::new();
+        sessions.insert("s1".to_string(), empty_history_session("s1"));
+        sessions.insert("s2".to_string(), empty_history_session("s2"));
+        let covered = HashSet::new();
+
+        backend.run_startup_self_heal(&mut sessions, &covered, expired());
+
+        assert_eq!(sessions.len(), 2);
+        for id in ["s1", "s2"] {
+            assert!(
+                sessions[id].history.is_empty(),
+                "自愈编排超预算时不得改动 {id} 的内容"
+            );
+        }
+    }
+
+    #[test]
+    fn unlimited_deadline_never_reports_budget_exhaustion() {
+        assert!(!SqliteSessionBackend::self_heal_budget_exhausted(None));
+        let past = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1))
+            .expect("instant minus 1ms");
+        assert!(
+            SqliteSessionBackend::self_heal_budget_exhausted(Some(past)),
+            "已过去的截止时刻必须判定为耗尽"
+        );
+    }
+
+    #[test]
+    fn default_budget_is_bounded_and_env_override_stays_parseable() {
+        assert_eq!(
+            crate::agent::session::startup_repair::DEFAULT_STARTUP_SELF_HEAL_BUDGET_MS,
+            1200
+        );
+        // 进程级预算只冻结一次：重复取到的是**同一个** deadline（否则 load_store 与
+        // with_backend 各算一份，启动自愈上限会被放大成 N 倍）。
+        let first = SqliteSessionBackend::startup_self_heal_deadline();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let second = SqliteSessionBackend::startup_self_heal_deadline();
+        assert_eq!(first, second, "启动预算必须在进程内只冻结一次");
+        // 0ms ⇒ 调用瞬间即到期（应急/测试用的「全跳过」口径）。
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(0))
+            .expect("deadline");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(SqliteSessionBackend::self_heal_budget_exhausted(Some(deadline)));
     }
 }

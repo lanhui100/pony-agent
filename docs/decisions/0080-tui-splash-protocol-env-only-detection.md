@@ -2,6 +2,9 @@
 
 Status: implemented
 
+> 品牌标布局尺寸（本文第 5 条的 26×15 字符矩形）已由 [0105](0105-tui-splash-logo-scale-third.md)
+> 修订为 9×5；零 I/O 环境判定、图形协议白名单与字符画回退部分仍现行。
+
 ## 背景
 
 [0069](superseded/0069-tui-splash-image-protocol.md) 决定「终端图形协议 + 位图资产 + 字符画回退」，并把协议
