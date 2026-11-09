@@ -460,10 +460,12 @@ fn invalid_json_like_values_are_clamped_not_fatal() {
         floor.1
     );
 
-    // ── Arrange 2：落盘极端值 + 9 项互异候选链（5 默认 + 5 合成 = 10 个 provider 池） ──
+    // ── Arrange 2：落盘极端值 + 9 项互异候选链 ──
+    // 候选必须**真实存在**：默认 5 个 provider 之外再造 9 个合成 provider（synth-0..synth-8），
+    // 否则链上 id 会被 `unknown` 卫生规则丢掉，测不到「超长截断到 8」。
     let sandbox = TempRegistry::new("chain-hygiene");
     let mut view_json = default_view_json();
-    append_synth_providers(&mut view_json, 5);
+    append_synth_providers(&mut view_json, 9);
     let long_chain: Vec<String> = (0..9).map(|index| format!("synth-{index}")).collect();
     assert_eq!(long_chain.len(), 9, "C2-c：超长链必须是 9 项");
     view_json["failoverProviderIds"] = json!(long_chain);

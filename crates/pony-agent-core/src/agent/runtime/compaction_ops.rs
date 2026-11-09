@@ -100,7 +100,12 @@ impl AgentRuntime {
         let selection = self
             .provider_resolver
             .resolve_provider_selection(None, None);
+        // PA-172 §3.5 W1：压缩摘要属同步 `decide_with_tools` 路径 ⇒ 继承同一策略与链
+        // （矩阵 §3.4：该 path 的 provider 就是装链的 manager）。
+        let chain = self.provider_resolver.resolve_failover_chain(&selection);
         ProviderManager::new(selection)
+            .with_policy(self.provider_resolver.upstream_policy())
+            .with_failover(crate::agent::provider::ProviderFailoverChain::new(chain))
     }
 }
 

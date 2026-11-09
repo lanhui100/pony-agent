@@ -899,6 +899,66 @@ pub fn classify_error_class(err: &str) -> &'static str {
     "other"
 }
 
+// ── PA-172 §3.1/§3.2：跨 provider 换手判据与结构化标记（单一码表，禁止第二套关键词表） ──
+
+/// PA-172 §3.2：换手触发判据——**复用既有码表**（G1）。
+///
+/// `true` 当且仅当 [`classify_error_class`] ∈ `{rate_limited, quota, timeout, network, auth}`
+/// **或** [`upstream_code_for_hints`] == [`ErrorCode::UpstreamServerError`]（502/503/504/408 与
+/// 边缘 5xx 520-524/527/530）。`bad_request` / `other` 不换手；HTTP **500 不换手**
+/// （既有码表冻结 500 为 NonRetryable，且它不在 server_error 码内 ⇒ 换 provider 无收益）。
+pub fn failover_eligible(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    if upstream_code_for_hints(&lower) == Some(ErrorCode::UpstreamServerError) {
+        return true;
+    }
+    matches!(
+        classify_error_class(err),
+        "rate_limited" | "quota" | "timeout" | "network" | "auth"
+    )
+}
+
+/// PA-172 §3.1：换手耗尽的结构后缀（可解析，供审计/文案；与 `retry_after=` /
+/// `provider_cooldown_active=` 同族：只落在**头部段**，不受上游正文劫持）。
+pub const FAILOVER_EXHAUSTED_MARKER: &str = "failover_exhausted=";
+
+/// PA-172 F-e：给错误文本追加 `failover_exhausted=<hops>`（幂等）。
+pub fn append_failover_exhausted_marker(err: &str, hops: usize) -> String {
+    if parse_failover_exhausted_marker(err).is_some() {
+        return err.to_string();
+    }
+    match err.find("响应正文") {
+        Some(index) => {
+            let (head, body) = err.split_at(index);
+            format!(
+                "{}；{FAILOVER_EXHAUSTED_MARKER}{hops}；{body}",
+                head.trim_end_matches('；')
+            )
+        }
+        None => format!("{err}；{FAILOVER_EXHAUSTED_MARKER}{hops}"),
+    }
+}
+
+/// PA-172 F-e：解析换手跳数（**只读头部段**：正文段不参与，禁止正文伪造标记）。
+pub fn parse_failover_exhausted_marker(err: &str) -> Option<usize> {
+    let head_end = err.find("响应正文").unwrap_or(err.len());
+    let head = &err[..head_end];
+    let index = head.find(FAILOVER_EXHAUSTED_MARKER)?;
+    let digits: String = head[index + FAILOVER_EXHAUSTED_MARKER.len()..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse::<usize>().ok()
+}
+
+/// PA-172 §3.3 F-c：**逐 attempt** 的有效超时 = `min(policy.requestTimeoutMs, remaining)`。
+///
+/// 换手预算是逐 attempt 的 deadline（不是"换手前查一次"的闸门）：每次候选 attempt 前重算
+/// `remaining`，本函数是唯一的取值出口（禁止在编排里另写 `min`）。
+pub fn failover_attempt_timeout_ms(policy_timeout_ms: u64, remaining_ms: u64) -> u64 {
+    policy_timeout_ms.min(remaining_ms)
+}
+
 /// 当前 UTC 时刻（时, 分）：`rate_limit_window_ms` 的注入点（纯函数便于真值表测试）。
 pub fn utc_now_hm() -> (u8, u8) {
     let secs = std::time::SystemTime::now()
@@ -949,6 +1009,32 @@ pub fn rate_limit_recovery_hint(err: &str) -> Option<String> {
     }
     let lower = err.to_ascii_lowercase();
     utc_reset_hint(&lower).map(|(hour, minute)| format!("预计 {hour:02}:{minute:02} UTC 恢复"))
+}
+
+/// PA-172 §5（遗留 #6）：时间敏感的恢复提示——以**真实 now** 计算剩余窗口。
+///
+/// 与 [`rate_limit_recovery_hint`] 的分工：
+/// - `Retry-After` 结构化后缀是**相对秒数**，与 now 无关 ⇒ 两者输出逐字相同；
+/// - UTC 重置时刻是**绝对时刻**，必须由 now 折算成剩余秒数（遗留 #6 的缺陷正是
+///   `now_unix_ms` 被丢弃，文案永远只报绝对时刻、不随当前时刻收敛）。
+///   复位时刻已过（同日 `target <= now`）与 [`rate_limit_window_ms`] 同口径：不跨日回绕，
+///   只报 60s 软窗口。
+pub fn rate_limit_recovery_hint_at(err: &str, now_unix_ms: u64) -> Option<String> {
+    if let Some(secs) = parse_retry_after_marker(err) {
+        return Some(format!("预计 {secs}s 后恢复"));
+    }
+    let lower = err.to_ascii_lowercase();
+    let (hour, minute) = utc_reset_hint(&lower)?;
+    let now_minutes = ((now_unix_ms / 1_000) % 86_400 / 60) as u32;
+    let target = u32::from(hour) * 60 + u32::from(minute);
+    let remaining_s = if target > now_minutes {
+        u64::from(target - now_minutes) * 60
+    } else {
+        60
+    };
+    Some(format!(
+        "预计 {remaining_s}s 后恢复（{hour:02}:{minute:02} UTC）"
+    ))
 }
 
 /// UTC 重置时刻（`06:01 UTC` / `before 06:01 UTC` / `resets at 06:01 UTC`）→ (时, 分)。

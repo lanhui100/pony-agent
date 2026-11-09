@@ -17,7 +17,7 @@ use std::io::Write;
 use pony_agent_core::agent::config::{
     ProviderCapabilityPreset, ProviderModelCapabilities, ProviderModelConfig, ProviderReasoningEffort,
     ProviderRegistryStore, ProviderRegistryView, ProviderSelectionResolver, ResolvedProviderSelection,
-    ThinkingParamPattern,
+    ThinkingParamPattern, UpstreamPolicy,
 };
 use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand, StopTurnCommand,
@@ -28,6 +28,11 @@ use pony_agent_core::agent::metrics_snapshot::{context_ratio_for_window, TurnMet
 use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
 // 显示偏好（/settings 与 Ctrl+O 的唯一真值）：独立文件持久化，与桌面端 settings.json 契约解耦。
 use pony_agent_core::agent::tui_preferences::{TuiPreferences, TuiPreferencesStore};
+// PA-172 §7.1（遗留 #7/#12）：续轮**单循环租约**已抽入库模块 `agent::goal_lease`，
+// 本文件只 `use`（不再本地定义），语义逐字不变。
+use pony_agent_core::agent::goal_lease::{
+    new_goal_round_loop_lease_registry, GoalRoundLoopLease, GoalRoundLoopLeaseRegistry,
+};
 use pony_agent_core::agent::orchestration::{
     inbox_pending_len, is_driving, list_agents, team_task_list, teammate_session_id, TeamTaskItem,
     TeammateStatus,
@@ -275,9 +280,15 @@ pub enum UiEvent {
     /// 为什么必须是事件而不是静默 `break`：旧实现在预算用尽时直接 `break`，界面继续显示
     /// 「进行中 [20/20]」，用户看不到「为什么停了」。`status_line` 即
     /// `goal::GoalRoundStopReason::visible_line()`（含「已停止」+ 具体原因，契约矩阵 §2.3 C1-T4）。
+    ///
+    /// PA-172 §8 B1（遗留 #13）：携带 `session_id`（additive）。轮次线程只知道自己那一轮的会话，
+    /// 而收口时当前会话可能已被切换 ⇒ 事件循环必须能判别「这条停止属于**哪个**会话」：
+    /// `Some(id)` 且 `id != state.session_id` ⇒ **只落日志**（不改状态行、不进消息区）；
+    /// `None` ⇒ 按旧行为（视为当前会话）处理。
     GoalRoundsStopped {
         reason: pony_agent_core::agent::goal::GoalRoundStopReason,
         status_line: String,
+        session_id: Option<String>,
     },
     /// 波次 43：本轮被宿主控制请求挂起（ask_user / approval），主循环据此拉取待决请求。
     TurnSuspended { run_id: Option<String> },
@@ -1625,6 +1636,9 @@ impl TuiState {
         self.task_board_state = None;
         self.goal_state = None;
         self.goal_banner_since = None;
+        // PA-172 §8 B2（遗留 #10）：续轮停止原因同属会话作用域 —— 不清会让新会话的横幅
+        // 继续显示「已停止（…）」，把一个已经切走的会话的结论挂到新会话头上。
+        self.goal_rounds_stopped = None;
         self.pending_request = None;
         self.scroll_offset = 0;
         self.max_scroll_offset = 0;
@@ -2929,6 +2943,24 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
             thinking_param_pattern: ThinkingParamPattern::None,
         }
     }
+
+    /// PA-172 §3.5 W1（生产注入闭环）：上游时限/重试策略**必须**由注册表真实提供。
+    ///
+    /// 不覆写 ⇒ trait 默认实现恒返回 [`UpstreamPolicy::default`]，生产装配出的
+    /// `ProviderManager` 永远拿默认值、用户配置静默失效。这里逐字转发内部
+    /// `ProviderRegistryStore`（配置面真值源），不在此处做任何二次解释/兜底。
+    fn upstream_policy(&self) -> UpstreamPolicy {
+        self.registry.upstream_policy()
+    }
+
+    /// PA-172 §3.5 W1：故障转移候选链同样必须转发注册表 —— 不覆写 ⇒ 链恒空 ⇒
+    /// 换手在生产**永久不触发**（矩阵 F5/W1 审查 A/BLOCKING-7）。
+    fn resolve_failover_chain(
+        &self,
+        primary: &ResolvedProviderSelection,
+    ) -> Vec<ResolvedProviderSelection> {
+        self.registry.resolve_failover_chain(primary)
+    }
 }
 
 struct TuiTurnSink {
@@ -2974,29 +3006,58 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// C10 / PA-172 §8 B3（遗留 #8）：**按会话分区**的轮次线程在飞注册表（派发闸门第 4 判据的真值）。
+///
+/// 元素 = 当前有轮次线程活着的 `session_id`。单 bool 的旧实现有跨会话误清风险：A 会话的
+/// 轮次线程提前 `return` 会把**全局**标志置 false，于是 B 会话明明在飞却被判「空闲」，
+/// 排队消息被误派发（两个会话的轮交错）。
+pub type TurnLoopInFlightRegistry = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+
 /// C10：轮次线程存活标志的 RAII 守卫（派发闸门的第 4 判据的真值）。
 ///
 /// 契约修订（2026-11-06 Lead）：判据是「**本会话是否真有一个轮次线程活着**」，
 /// 不是「有没有 armed goal」——goal armed 但续轮没在跑时，只看 goal 存在会让排队消息
 /// 永不自动派发（用户感知为卡住）。
 ///
-/// 不变量：`Drop` 在**正常返回与 panic 展开**两条路径上都会执行 ⇒ 标志绝不会永真
+/// PA-172 §8 B3：按 `session_id` 分区（`HashSet`）替代单 bool —— `Drop` **只释放本会话**，
+/// 跨会话互不影响；读取点语义为「当前会话是否在飞」。
+///
+/// 不变量：`Drop` 在**正常返回与 panic 展开**两条路径上都会执行 ⇒ 本会话条目绝不会永驻
 /// （与 C11 的轮次线程 panic 兜底同一条不变量）。
 struct TurnLoopInFlightGuard {
-    flag: Arc<AtomicBool>,
+    registry: TurnLoopInFlightRegistry,
+    session_id: String,
 }
 
 impl TurnLoopInFlightGuard {
-    /// 进入轮次线程即刻置位；返回的 guard 生命周期 = 线程体（含 goal 续轮循环）生命周期。
-    fn enter(flag: Arc<AtomicBool>) -> Self {
-        flag.store(true, Ordering::SeqCst);
-        Self { flag }
+    /// 进入轮次线程即刻置位（插入本会话 id）；返回的 guard 生命周期 = 线程体
+    /// （含 goal 续轮循环）生命周期。锚点：**必须先算出 `session_id` 再 enter**
+    /// （旧实现把 enter 放在 session_id 计算之前）。
+    fn enter(registry: TurnLoopInFlightRegistry, session_id: &str) -> Self {
+        registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session_id.to_string());
+        Self {
+            registry,
+            session_id: session_id.to_string(),
+        }
+    }
+
+    /// 本守卫所属会话 id（日志/断言用；不参与派发判据）。
+    #[allow(dead_code)]
+    fn session_id(&self) -> &str {
+        &self.session_id
     }
 }
 
 impl Drop for TurnLoopInFlightGuard {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
+        // 只释放**本会话**：绝不清另一会话的在飞语义。
+        self.registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.session_id);
     }
 }
 
@@ -3840,7 +3901,11 @@ pub fn goal_banner_phase(state: &TuiState) -> Option<(bool, u64)> {
 }
 
 /// Goal 横幅拆成「加重的 Goal 标签」+「正文」两段，避免整行同一灰度。
-fn goal_banner_parts(goal: &TuiGoal) -> (String, String) {
+///
+/// PA-172 §8 B2（遗留 #10）：本函数是 `TuiState::goal_rounds_stopped` 的**读取点**——
+/// armed goal 仍在、但自动续轮已停时，横幅必须说明「已停止（`visible_line`）」，否则用户
+/// 只看到轮数停在原处（`goal_rounds_stopped` 在此之前是只写不读的遗留字段）。
+fn goal_banner_parts(state: &TuiState, goal: &TuiGoal) -> (String, String) {
     let rounds = match goal.max_rounds {
         Some(max) => format!("{}/{}", goal.round_count, max),
         None => format!("{}", goal.round_count),
@@ -3851,10 +3916,16 @@ fn goal_banner_parts(goal: &TuiGoal) -> (String, String) {
         GoalPhase::Blocked => "已阻塞",
         GoalPhase::Paused => "已暂停",
     };
+    // PA-172 §8 B2：已停止的自动续轮必须与「进行中 [n/m]」共存可见（否则横幅在说谎）。
+    let stopped = state
+        .goal_rounds_stopped
+        .as_ref()
+        .map(|reason| format!(" · 已停止（{}）", reason.visible_line()))
+        .unwrap_or_default();
     (
         "Goal".to_string(),
         format!(
-            " · {} [{rounds}] ({phase})",
+            " · {} [{rounds}] ({phase}){stopped}",
             goal.objective.trim().replace('\n', " ")
         ),
     )
@@ -4043,7 +4114,7 @@ fn status_line(state: &TuiState, width: usize) -> Line<'static> {
     // 且 Goal 相位**左对齐**成横幅，不与右对齐的模型身份混在同一排版里。
     if matches!(goal_banner_phase(state), Some((true, _))) {
         if let Some(goal) = state.goal_state.as_ref() {
-            let (tag, body) = goal_banner_parts(goal);
+            let (tag, body) = goal_banner_parts(state, goal);
             let used = RAIL;
             let budget = width.saturating_sub(used).max(12);
             // 「Goal」标记固定完整显示（最多 4 列），正文按剩余宽度省略。
@@ -8135,6 +8206,22 @@ pub fn session_has_pending_host_requests(
     )
 }
 
+/// PA-172 §8 B5：待作答宿主请求的**分量计数** `(asks, approvals)`。
+///
+/// 让位判定仍是 [`goal_rounds_must_yield_to_pending_requests`]（真值不变）；本函数只为
+/// `goal_rounds_yield_pending_requests` 日志提供 `pending_requests` 字段（原先让位是静默 break）。
+pub fn session_pending_host_request_count(
+    control_plane: &HostControlPlane,
+    session_id: &str,
+) -> (usize, usize) {
+    let asks = control_plane.list_pending_asks(Some(session_id));
+    let approvals = control_plane.list_pending_approvals(session_id);
+    (
+        asks.as_array().map_or(0, Vec::len),
+        approvals.as_array().map_or(0, Vec::len),
+    )
+}
+
 /// 契约 F-G①/F-G3（ADR 0092）+ PA-171 C1/C2：goal 自动续轮主循环。
 ///
 /// 停止判据（判定顺序冻结于 `.dev-team/contract-matrix-pa171.md` §2.3 C1-T3）：
@@ -8184,10 +8271,29 @@ fn run_goal_rounds(
     loop {
         let Some(active_goal) = pony_agent_core::agent::goal::active_goal_for_session(session_id)
         else {
+            // PA-172 §8 B5（遗留 #23）：旧实现是**裸 break** —— 用户只看到横幅停在原轮数，
+            // 不知道「为什么不再续轮」。无进行中的目标是一个可见停止原因
+            // （additive `NoActiveGoal`，不由 `goal_round_stop_reason` 三值真值表产出）。
+            report_goal_rounds_stopped(
+                sink,
+                session_id,
+                GoalRoundStopReason::NoActiveGoal,
+                failures,
+                0,
+                0,
+            );
             break;
         };
         // 既有 F-G3 让位：有待作答 Ask/审批时必须先让人回答（状态由既有面板承担，不新增变体）。
         if session_has_pending_host_requests(turn_control_plane, session_id) {
+            // PA-172 §8 B5：让位语义**不变**（不新增变体，可见原因仍由 Ask/审批面板承担），
+            // 但原先这里是静默 break ⇒ 补结构化日志（矩阵 G5：不得静默跳过）。
+            let (pending_asks, pending_approvals) =
+                session_pending_host_request_count(turn_control_plane, session_id);
+            log_goal_rounds_yield_pending_requests(
+                session_id,
+                pending_asks.saturating_add(pending_approvals),
+            );
             break;
         }
         let stop_reason = goal_round_stop_reason(
@@ -8257,6 +8363,9 @@ fn run_goal_rounds(
                             "goal_round_advance_failed",
                             None,
                             &[
+                                // PA-172 §8 B6：`stage` 值域封闭（`after_turn` / `planner`）；
+                                // 本处属「本轮成功后推进预算」⇒ `after_turn`。
+                                ("stage", serde_json::json!("after_turn")),
                                 ("session_id", serde_json::json!(session_id)),
                                 ("goal_id", serde_json::json!(&active_goal.id)),
                                 ("error", serde_json::json!(error)),
@@ -8265,10 +8374,9 @@ fn run_goal_rounds(
                         report_goal_rounds_stopped(
                             sink,
                             session_id,
-                            GoalRoundStopReason::BudgetExhausted {
-                                rounds_started: active_goal.rounds_started,
-                                max_rounds: active_goal.max_goal_rounds,
-                            },
+                            // PA-172 §8 B4（遗留 #9）：落盘失败**不是**「预算用尽」（预算其实没用完），
+                            // 旧实现复用 `BudgetExhausted` 文案 ⇒ 用户看到错误的停止原因。
+                            GoalRoundStopReason::BudgetPersistFailed,
                             failures,
                             active_goal.rounds_started,
                             active_goal.max_goal_rounds,
@@ -8321,53 +8429,9 @@ fn run_goal_rounds(
     }
 }
 
-/// PA-171 C1-T2：续轮循环的**单循环租约**（`Arc<AtomicBool>` 的 compare-exchange）。
-///
-/// 为什么需要：每个用户提交都会各起一个轮次线程（`F14`），两个线程各自的 `run_goal_rounds`
-/// 叠加成「2×8=16 轮」，正是 429 被重放的放大面。租约保证同一时刻只有一个续轮循环。
-/// 租约**按 `session_id` 分区**（NFR `concurrency_lock` 与 ADR 0103：按会话互斥，跨会话互不阻塞）：
-/// 同会话只允许一个续轮循环（消除 16=2×8 叠加），切换会话后 B 的续轮不会被 A 卡住。
-/// RAII：`Drop` 必释（正常返回 / panic 展开 / 提前 `return` 三条路径）。
-type GoalRoundLoopLeaseRegistry = Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
-
-struct GoalRoundLoopLease {
-    registry: GoalRoundLoopLeaseRegistry,
-    session_id: String,
-}
-
-impl GoalRoundLoopLease {
-    fn try_acquire(registry: &GoalRoundLoopLeaseRegistry, session_id: &str) -> Option<Self> {
-        let acquired = {
-            let mut held = registry
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            held.insert(session_id.to_string())
-        };
-        if acquired {
-            return Some(Self {
-                registry: Arc::clone(registry),
-                session_id: session_id.to_string(),
-            });
-        }
-        pony_agent_core::agent::otel::log::log_json_with_fields(
-            "warn",
-            "goal_rounds_loop_already_owned",
-            None,
-            &[("session_id", serde_json::json!(session_id))],
-        );
-        None
-    }
-}
-
-impl Drop for GoalRoundLoopLease {
-    fn drop(&mut self) {
-        let mut held = self
-            .registry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        held.remove(&self.session_id);
-    }
-}
+// PA-172 §7.1（遗留 #7/#12）：`GoalRoundLoopLease` / `GoalRoundLoopLeaseRegistry` 与
+// `new_goal_round_loop_lease_registry` 已抽入库模块 `agent::goal_lease`（文件顶部 `use`），
+// 本处不再保留本地定义（旧 doc 首句「`Arc<AtomicBool>` 的 compare-exchange」为陈旧注释）。
 
 /// PA-171 C1/C2：把续轮停止原因回写 TUI（状态行 + 消息区），**不得静默 break**。
 ///
@@ -8392,6 +8456,8 @@ fn report_goal_rounds_stopped(
     let _ = sink.tx.send(UiEvent::GoalRoundsStopped {
         reason,
         status_line,
+        // B1：带上本循环所属会话 ⇒ 事件循环可判别跨会话上报（只记日志，不污染当前会话 UI）。
+        session_id: Some(session_id.to_string()),
     });
 }
 
@@ -8426,6 +8492,9 @@ fn goal_round_stop_reason_tag(
         GoalRoundStopReason::TurnSuspended => "turn_suspended",
         GoalRoundStopReason::TurnUnclassified => "turn_unclassified",
         GoalRoundStopReason::LoopAlreadyOwned => "loop_already_owned",
+        // PA-172 §8 B4/B5：additive 两变体的日志 reason tag（pa171-a1 扩容）。
+        GoalRoundStopReason::BudgetPersistFailed => "budget_persist_failed",
+        GoalRoundStopReason::NoActiveGoal => "no_active_goal",
     }
 }
 
@@ -8455,6 +8524,22 @@ fn log_goal_rounds_stopped(
     );
 }
 
+/// PA-172 §8 B5（遗留 #23）：续轮为待作答宿主请求**让位**的结构化日志。
+///
+/// 让位语义本身不变（不新增停止变体；用户可见原因由既有 Ask/审批面板承担），但原先该
+/// `break` 是静默的 ⇒ 补一条可审计留痕。字段：`session_id` / `pending_requests`（Ask + 审批总数）。
+fn log_goal_rounds_yield_pending_requests(session_id: &str, pending_requests: usize) {
+    pony_agent_core::agent::otel::log::log_json_with_fields(
+        "info",
+        "goal_rounds_yield_pending_requests",
+        None,
+        &[
+            ("session_id", serde_json::json!(session_id)),
+            ("pending_requests", serde_json::json!(pending_requests)),
+        ],
+    );
+}
+
 fn tui_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut state: TuiState,
@@ -8471,12 +8556,16 @@ fn tui_event_loop(
     // PA-171 C1-T2：goal 续轮**单循环租约**（与 cancel token 同级持有，跨轮次线程共享）。
     // 每个用户提交各起一个轮次线程（F14），两个线程各自的续轮循环会叠加成「2×8=16 轮」——
     // 租约保证同一时刻只有一个续轮循环真正推进 goal 轮。
+    // 注册表的构造也走库侧唯一入口（`agent::goal_lease::new_goal_round_loop_lease_registry`），
+    // 避免 bin 与 lib 各写一遍 `Arc::new(Mutex::new(HashSet::new()))`。
     let goal_round_loop_lease: GoalRoundLoopLeaseRegistry =
+        new_goal_round_loop_lease_registry();
+    // C10 / PA-172 §8 B3：轮次线程在飞注册表（派发闸门第 4 判据）。轮次线程进入时插入本会话
+    // id、线程体结束（含 panic 展开）时由 `TurnLoopInFlightGuard::drop` **只**移除本会话；
+    // 判据是「**本会话**有没有在飞轮次线程」而非「有没有 armed goal」，避免 armed-but-idle
+    // 的会话把排队消息永久卡住；分区后 A 会话的提前 return 不再误清 B 会话的在飞语义。
+    let turn_loop_in_flight: TurnLoopInFlightRegistry =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    // C10：轮次线程存活标志（派发闸门第 4 判据）。轮次线程进入时置位、线程体结束（含 panic
-    // 展开）时由 `TurnLoopInFlightGuard::drop` 复位；判据是「有没有在飞轮次线程」而非
-    // 「有没有 armed goal」，避免 armed-but-idle 的会话把排队消息永久卡住。
-    let turn_loop_in_flight: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // 键盘与鼠标事件轮询线程。
     // 契约 F-F：`NO_COLOR` 的进程级环境变量**只在单线程启动期改一次**（run_tui / demo 入口开头）。
@@ -9872,6 +9961,15 @@ fn tui_event_loop(
                                     close_pending_request_overlay(&mut state);
                                     state.reset_session_scope();
                                     state.session_id = new_session_id();
+                                    // PA-172 §5 R2（遗留 #4）：**仅此处**（显式 /clear）复位进程级
+                                    // provider 冷却表 —— 清空 + `provider_cooldown_reset` 日志。
+                                    //
+                                    // 位置是契约（审查 A/BLOCKING-9）：**不得**挂进
+                                    // `reset_session_scope` 函数体 —— 该函数另有 5 个会话切换调用点
+                                    //（启动 resume / 队友切换 / 返回主会话 / 选择器 resume），那会把
+                                    // 别会话正在冷却的 provider 重新点燃。
+                                    let _cleared_cooldowns =
+                                        pony_agent_core::agent::provider::reset_global_cooldowns();
                                     let _ = sync_pending_control_request(&mut state, &control_plane);
                                     state.set_status_notice("上下文已清空");
                                     continue;
@@ -10032,8 +10130,9 @@ fn tui_event_loop(
                                 let lease_for_rounds = Arc::clone(&goal_round_loop_lease);
 
                                 let inflight_for_rounds = Arc::clone(&inflight_turns);
-                                // C10：把「轮次线程存活标志」带进线程，进入即置位、线程体（首轮 +
-                                // goal 续轮循环）结束时复位；panic 展开同样会复位（RAII）。
+                                // C10 / PA-172 §8 B3：把「轮次线程在飞注册表」带进线程，进入即插入
+                                // 本会话、线程体（首轮 + goal 续轮循环）结束时移除；panic 展开同样
+                                // 会移除（RAII）。
                                 let turn_loop_in_flight_for_thread = Arc::clone(&turn_loop_in_flight);
                                 // C11：轮次线程 panic 兜底 —— 轮次体（首轮 + goal 续轮循环）整体在
                                 // `catch_unwind` 内执行，panic 时补发 `StreamFailed` 终态，
@@ -10041,17 +10140,20 @@ fn tui_event_loop(
                                 let tx_turn = tx.clone();
                                 let turn_thread = std::thread::spawn(move || {
                                   let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                                    let _in_flight_guard = TurnLoopInFlightGuard::enter(
-                                        turn_loop_in_flight_for_thread,
-                                    );
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                                     // 首轮 guard 在主事件分支创建并 move 到这里；本轮调用返回即回收，
                                     // 不得跨 goal 续轮驻留。
                                     let initial_turn_sink_guard = _turn_sink_guard;
+                                    // PA-172 §8 B3：**先**解析本线程所属会话，再 enter 在飞守卫
+                                    //（旧实现 enter 在 session_id 计算之前 ⇒ 守卫不知道自己在哪个会话）。
                                     let session_id = turn_input
                                         .session_id
                                         .clone()
                                         .unwrap_or_else(|| "default".to_string());
+                                    let _in_flight_guard = TurnLoopInFlightGuard::enter(
+                                        turn_loop_in_flight_for_thread,
+                                        &session_id,
+                                    );
                                     let cmd = StartTurnStreamCommand {
                                         turn_id: turn_id_str,
                                         input: turn_input.clone(),
@@ -10515,11 +10617,18 @@ fn tui_event_loop(
                     let resume_run_for_turn = resume_run_id.clone();
                     let turn_thread = std::thread::spawn(move || {
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                            let _in_flight_guard =
-                                TurnLoopInFlightGuard::enter(turn_loop_in_flight_for_thread);
                             let _guard =
                                 pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                             let _turn_sink_guard = resume_sink_guard;
+                            // PA-172 §8 B3：先取本线程所属会话，再 enter 在飞守卫（按会话分区）。
+                            let session_id = turn_input
+                                .session_id
+                                .clone()
+                                .unwrap_or_else(|| "default".to_string());
+                            let _in_flight_guard = TurnLoopInFlightGuard::enter(
+                                turn_loop_in_flight_for_thread,
+                                &session_id,
+                            );
                             let cmd = StartTurnStreamCommand {
                                 turn_id: turn_id_str,
                                 input: turn_input,
@@ -10611,11 +10720,18 @@ fn tui_event_loop(
                     let tx_turn = tx.clone();
                     let turn_thread = std::thread::spawn(move || {
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                            let _in_flight_guard =
-                                TurnLoopInFlightGuard::enter(turn_loop_in_flight_for_thread);
                             let _guard =
                                 pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                             let _turn_sink_guard = resume_sink_guard;
+                            // PA-172 §8 B3：先取本线程所属会话，再 enter 在飞守卫（按会话分区）。
+                            let session_id = turn_input
+                                .session_id
+                                .clone()
+                                .unwrap_or_else(|| "default".to_string());
+                            let _in_flight_guard = TurnLoopInFlightGuard::enter(
+                                turn_loop_in_flight_for_thread,
+                                &session_id,
+                            );
                             let cmd = StartTurnStreamCommand {
                                 turn_id: turn_id_str,
                                 input: turn_input,
@@ -10660,7 +10776,25 @@ fn tui_event_loop(
                     state.set_goal(goal);
                 }
                 // PA-171 C1/C2：续轮停止可见化（旧实现静默 break，横幅仍显示「进行中」）。
-                UiEvent::GoalRoundsStopped { reason, status_line } => {
+                UiEvent::GoalRoundsStopped {
+                    reason,
+                    status_line,
+                    session_id,
+                } => {
+                    // PA-172 §8 B1（遗留 #13）：跨会话的停止上报**不得**污染当前会话的 UI。
+                    //
+                    // 场景：轮次线程收口时用户已切走会话（`/resume`、队友切换、返回主会话），
+                    // 旧实现照样改写 status_text 并往消息区塞一条 System 消息 ⇒ 新会话里出现
+                    // 「别的会话为什么停了」。判据：`Some(id)` 且 `id != state.session_id`。
+                    //
+                    // 「只落日志」已由生产侧 [`report_goal_rounds_stopped`] → [`log_goal_rounds_stopped`]
+                    // 完成（携带该会话 id 的 `goal_rounds_stopped` 事件，字段集冻结）；此处刻意不重复
+                    // 发射同一事件名，避免同一停止在审计面上出现两条互相干扰的记录。
+                    if let Some(other_session) = session_id.as_deref() {
+                        if other_session != state.session_id {
+                            continue;
+                        }
+                    }
                     state.status_text = status_line.clone();
                     state.goal_rounds_stopped = Some(reason);
                     // 走消息区（历史留痕）：状态行会被下一轮进度短语覆盖，停止原因的结论必须留存。
@@ -10699,8 +10833,12 @@ fn tui_event_loop(
             let ui_idle = is_ui_idle_for_dispatch(&state);
             // C10（契约修订 2026-11-06）：判据是「有没有**在飞轮次线程**」，不是「有没有 armed goal」
             // —— goal armed 但续轮没在跑时，只看 goal 存在会让排队消息永不自动派发（用户感知卡住）。
-            // 标志由轮次线程内的 `TurnLoopInFlightGuard` 维护（正常结束与 panic 展开都会复位）。
-            let turn_in_flight = turn_loop_in_flight.load(Ordering::SeqCst);
+            // PA-172 §8 B3：注册表已按 `session_id` 分区 ⇒ 这里读的是「**当前会话**是否在飞」，
+            // 另一会话的在飞线程不再让本会话的排队消息卡住（反之亦然）。
+            let turn_in_flight = turn_loop_in_flight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&state.session_id);
             let is_streaming = state.is_streaming;
             // C24：闩活性 = 时间窗未过期（`now < deadline`），不再依赖「收到 InputKey 就清」。
             let dispatch_pending = queue_dispatch_latch_active(queue_dispatch_deadline);

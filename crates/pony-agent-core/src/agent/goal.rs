@@ -443,6 +443,17 @@ pub enum GoalRoundStopReason {
     /// PA-171 C1-T2：**同一会话**已有另一个续轮循环持租约（NFR `concurrency_lock` 声明按会话
     /// 互斥）。本线程不推进任何 goal 轮，但必须可见（不得静默 return）。
     LoopAlreadyOwned,
+    /// PA-172 §8 B4（遗留 #9）：本轮成功但**预算推进落盘失败** ⇒ 停止自动续轮。
+    ///
+    /// additive 第 8 变体，由 TUI 侧在 `advance_goal_round_for_outcome` 返回 `Err` 时构造；
+    /// [`goal_round_stop_reason`] 三值真值表**不产出**它。语义与 [`Self::BudgetExhausted`]
+    /// 正交：这里预算**没用完**，是「记不住」⇒ 不得复用「预算已用尽」文案。
+    BudgetPersistFailed,
+    /// PA-172 §8 B5（遗留 #23）：续轮循环发现**当前会话已无进行中的目标** ⇒ 无轮可续。
+    ///
+    /// additive 第 9 变体，由 TUI 侧构造（原先该路径是裸 `break`，用户看不到原因）；
+    /// [`goal_round_stop_reason`] 三值真值表**不产出**它。
+    NoActiveGoal,
 }
 
 impl GoalRoundStopReason {
@@ -470,6 +481,12 @@ impl GoalRoundStopReason {
             Self::LoopAlreadyOwned => {
                 "goal 续轮已停止（本会话已有续轮循环在运行，本线程让位）".to_string()
             }
+            // PA-172 §8 B4：逐字冻结（契约矩阵 §8 / pa171-a1）——预算推进落盘失败 ≠ 预算用尽。
+            Self::BudgetPersistFailed => {
+                "goal 续轮已停止（本轮预算推进落盘失败，已暂停自动续轮）".to_string()
+            }
+            // PA-172 §8 B5：逐字冻结——无进行中的目标，无轮可续。
+            Self::NoActiveGoal => "goal 续轮已停止（当前会话无进行中的目标）".to_string(),
         }
     }
 }

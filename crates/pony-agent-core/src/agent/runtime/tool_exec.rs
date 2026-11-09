@@ -14,7 +14,12 @@ impl AgentRuntime {
             selection.reasoning_effort = None;
         }
 
+        // PA-172 §3.5 W1：装配策略与换手链（旧 `ProviderManager::new` 语义冻结为
+        // policy=default + 空链 ⇒ 未配置时行为零变更；此处把配置面真正接到生产路径）。
+        let chain = self.provider_resolver.resolve_failover_chain(&selection);
         ProviderManager::new(selection)
+            .with_policy(self.provider_resolver.upstream_policy())
+            .with_failover(crate::agent::provider::ProviderFailoverChain::new(chain))
     }
 
     pub(crate) fn resolve_tool_call(

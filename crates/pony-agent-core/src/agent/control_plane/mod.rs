@@ -695,7 +695,10 @@ pub enum TurnStreamOutcome {
 /// `WaitUser ⇒ Suspended` / `Pause`（用户停止被折成 Pause）`⇒ Cancelled`），
 /// 其余（`Continue`/`Complete`/无 run 事实）回落终态 phase 判定。
 /// 未知 phase（含将来新增的相位）一律 `Unknown`：宁可让续轮停止，也不把不确定当成功。
-fn turn_stream_outcome_from_terminal(
+///
+/// PA-172 §7.2：提升为 `pub` 使归约真值表（决策五臂 × phase 五臂）可被集成测试逐行锚定；
+/// 签名与语义**未变**（提升可见性不构成行为变更）。
+pub fn turn_stream_outcome_from_terminal(
     phase: &str,
     error: Option<String>,
     decision: Option<GraphDecisionKind>,
@@ -1946,7 +1949,22 @@ impl HostControlPlane {
 
             let updated_goal = match crate::agent::goal::advance_goal_round(&active_goal.id) {
                 Ok(goal) => goal,
-                Err(_) => return Ok(response),
+                Err(error) => {
+                    // PA-172 §8 B6（遗留 #21）：静默吞掉预算推进失败 ⇒ 补结构化 warn。
+                    // **行为不变**：仍返回 `Ok(response)`（不得改调度语义），只是消除静默。
+                    crate::agent::otel::log::log_json_with_fields(
+                        "warn",
+                        "goal_round_advance_failed",
+                        None,
+                        &[
+                            ("stage", serde_json::json!("after_turn")),
+                            ("session_id", serde_json::json!(session_id)),
+                            ("goal_id", serde_json::json!(&active_goal.id)),
+                            ("error", serde_json::json!(error)),
+                        ],
+                    );
+                    return Ok(response);
+                }
             };
 
             consecutive_continues += 1;
@@ -2755,7 +2773,22 @@ impl HostControlPlane {
 
             let updated_goal = match crate::agent::goal::advance_goal_round(&active_goal.id) {
                 Ok(goal) => goal,
-                Err(_) => return Ok(response),
+                Err(error) => {
+                    // PA-172 §8 B6（遗留 #21）：静默吞掉预算推进失败 ⇒ 补结构化 warn。
+                    // **行为不变**：仍返回 `Ok(response)`（不得改调度语义），只是消除静默。
+                    crate::agent::otel::log::log_json_with_fields(
+                        "warn",
+                        "goal_round_advance_failed",
+                        None,
+                        &[
+                            ("stage", serde_json::json!("planner")),
+                            ("session_id", serde_json::json!(session_id)),
+                            ("goal_id", serde_json::json!(&active_goal.id)),
+                            ("error", serde_json::json!(error)),
+                        ],
+                    );
+                    return Ok(response);
+                }
             };
 
             consecutive_continues += 1;

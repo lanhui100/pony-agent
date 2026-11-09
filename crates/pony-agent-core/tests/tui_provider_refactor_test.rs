@@ -23,6 +23,9 @@ fn test_provider_registry_delete_and_secret_cleanup() {
 
     // 初始注册表注入两个 provider: ponyllm 和 custom-a
     let mut view = ProviderRegistryView {
+        // PA-172 §2.2 additive 字段（编译衍生补齐；本夹具不测策略面）。
+        upstream_policy: Default::default(),
+        failover_provider_ids: Vec::new(),
         selected_provider_id: Some("ponyllm".to_string()),
         providers: vec![
             ProviderConfigView {

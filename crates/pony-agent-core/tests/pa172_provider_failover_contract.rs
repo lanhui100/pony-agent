@@ -528,9 +528,12 @@ fn failover_not_triggered_for_bad_request() {
         "§3.2：`bad_request` 不在触发类封闭值域内 ⇒ 备 provider 必须 0 次 HTTP，实际 {} 次",
         secondary.request_count()
     );
+    // F-e 已冻结「返回的是既有重试编排处理后的**结构化错误文本**（不承诺原始状态行）」，
+    // 故这里只要求错误仍能辨识为上游 400 语义（`invalid_request_error` / `bad request` / `400`）。
+    let lower = error.to_lowercase();
     assert!(
-        error.contains("400") || error.to_lowercase().contains("bad request"),
-        "§3.2：不换手时必须原样上抛主 provider 的 400 错误，实际：{error}"
+        error.contains("400") || lower.contains("bad request") || lower.contains("invalid_request"),
+        "§3.2：不换手时必须上抛主 provider 的 400 语义错误（结构化文本），实际：{error}"
     );
 }
 

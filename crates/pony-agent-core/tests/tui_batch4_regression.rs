@@ -118,6 +118,9 @@ fn empty_provider(id: &str) -> ProviderConfigView {
 
 fn registry_view(provider_ids: &[&str]) -> ProviderRegistryView {
     ProviderRegistryView {
+        // PA-172 §2.2 additive 字段（编译衍生补齐；本夹具不测策略面）。
+        upstream_policy: Default::default(),
+        failover_provider_ids: Vec::new(),
         providers: provider_ids
             .iter()
             .map(|id| empty_provider(id))

@@ -169,6 +169,8 @@ fn assert_outcome(
     decision: Option<GraphDecisionKind>,
     expected: TurnStreamOutcome,
 ) {
+    // 失败信息用的决策文本必须在**移动进被测函数之前**取好（`decision` 会被 move）。
+    let decision_debug = format!("{decision:?}");
     let actual = turn_stream_outcome_from_terminal(
         phase,
         error.map(str::to_string),
@@ -176,7 +178,7 @@ fn assert_outcome(
     );
     assert_eq!(
         actual, expected,
-        "§7.2 真值表（{label}）：phase={phase:?} error={error:?} decision={decision:?} ⇒ 期望 {expected:?}，实际 {actual:?}"
+        "§7.2 真值表（{label}）：phase={phase:?} error={error:?} decision={decision_debug} ⇒ 期望 {expected:?}，实际 {actual:?}"
     );
 }
 

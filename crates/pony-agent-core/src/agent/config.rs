@@ -11,6 +11,190 @@ const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
 const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 const DEFAULT_MODERN_MAX_OUTPUT_TOKENS: u32 = 64000;
 
+// ── PA-172 §2：上游调用策略（超时/重试/退避）配置面 ──────────────────────────────
+//
+// 默认值 = PA-171 交付后（基线 `458b952e`）的硬编码真值，逐字节等价（矩阵 G2）：
+// 45s 同步总超时（`provider/mod.rs` 两处内联字面量）、5 次决策尝试、30s 退避预算。
+
+/// 同步请求单次 attempt 的总超时（毫秒）。默认 45s（基线内联 `Duration::from_secs(45)`）。
+pub const UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT: u64 = 45_000;
+/// 决策/跟进单跳的最大尝试次数（含首次）。默认 5（基线 `PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS`）。
+pub const UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT: u32 = 5;
+/// 单跳短退避的 sleep 预算（毫秒）。默认 30s（基线 `BackoffConfig::total_budget_ms`）。
+pub const UPSTREAM_RETRY_BUDGET_MS_DEFAULT: u64 = 30_000;
+/// `requestTimeoutMs` 下界：低于 1s 对真实上游无意义。
+pub const UPSTREAM_REQUEST_TIMEOUT_MS_MIN: u64 = 1_000;
+/// `requestTimeoutMs` 上界。
+pub const UPSTREAM_REQUEST_TIMEOUT_MS_MAX: u64 = 300_000;
+/// `decisionMaxAttempts` 下界：至少尝试一次。
+pub const UPSTREAM_DECISION_MAX_ATTEMPTS_MIN: u32 = 1;
+/// `decisionMaxAttempts` 上界。
+pub const UPSTREAM_DECISION_MAX_ATTEMPTS_MAX: u32 = 10;
+/// `retryBudgetMs` 下界。v2-4：由 0 上调到 1000 —— 0 预算与 `RetryBudget::is_exhausted`
+/// 的 `>=` 判据语义冲突（0 会让"从未尝试"直接判耗尽），边界收紧以消歧义。
+pub const UPSTREAM_RETRY_BUDGET_MS_MIN: u64 = 1_000;
+/// `retryBudgetMs` 上界。
+pub const UPSTREAM_RETRY_BUDGET_MS_MAX: u64 = 300_000;
+/// PA-172 §2.3 C2-c：显式候选链的长度上限（超出截断并 `warn failover_candidate_ignored`）。
+pub const FAILOVER_CHAIN_MAX_LEN: usize = 8;
+
+fn default_request_timeout_ms() -> u64 {
+    UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT
+}
+
+fn default_decision_max_attempts() -> u32 {
+    UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT
+}
+
+fn default_retry_budget_ms() -> u64 {
+    UPSTREAM_RETRY_BUDGET_MS_DEFAULT
+}
+
+/// 逐字段**容错**反序列化（矩阵 §2.1 审查 B/BLOCKING-1）。
+///
+/// `#[serde(default)]` 只补缺字段、接不住**类型错**；而 `providers.json` 是整体 `from_str`
+/// ⇒ 一句 `"retryBudgetMs":"30s"` 会让整文件解析失败并回落 `default_registry()`，把用户
+/// 全部 provider 配置顶替。故每个新增字段各自容错：`number` / 数字字符串 / `null` /
+/// 其它 ⇒ 回落默认值并落 warn，**绝不**让新增字段的畸形拖垮既有配置。
+/// `u64` 容错的公共实现：解析失败/类型不符 ⇒ `fallback`（**逐字段各自的默认值**，
+/// 不得串用其它字段的默认值 —— 否则 `retryBudgetMs:"30s"` 会错落成 45000）。
+fn parse_u64_lenient(value: &serde_json::Value, field: &str, fallback: u64) -> u64 {
+    let parsed = match value {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_f64().filter(|float| *float >= 0.0).map(|float| float as u64)),
+        serde_json::Value::String(text) => text.trim().parse::<u64>().ok(),
+        _ => None,
+    };
+    parsed.unwrap_or_else(|| {
+        warn_upstream_policy_invalid_value(field, value);
+        fallback
+    })
+}
+
+fn de_request_timeout_ms_lenient<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    Ok(parse_u64_lenient(
+        &value,
+        "requestTimeoutMs",
+        default_request_timeout_ms(),
+    ))
+}
+
+fn de_retry_budget_ms_lenient<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    Ok(parse_u64_lenient(
+        &value,
+        "retryBudgetMs",
+        default_retry_budget_ms(),
+    ))
+}
+
+fn de_u32_lenient<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    Ok(match &value {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .map(|value| value.min(u64::from(u32::MAX)) as u32)
+            .unwrap_or_else(|| {
+                warn_upstream_policy_invalid_value("u32", &value);
+                default_decision_max_attempts()
+            }),
+        serde_json::Value::String(text) => text.trim().parse::<u32>().unwrap_or_else(|_| {
+            warn_upstream_policy_invalid_value("u32", &value);
+            default_decision_max_attempts()
+        }),
+        _ => {
+            warn_upstream_policy_invalid_value("u32", &value);
+            default_decision_max_attempts()
+        }
+    })
+}
+
+/// `failoverProviderIds` 容错：非数组 ⇒ 空链；含非字符串项 ⇒ **逐项丢弃**（其余保序生效）。
+fn de_vec_string_lenient<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    let Some(items) = value.as_array() else {
+        warn_failover_candidate_ignored("<non-array>", "unknown");
+        return Ok(Vec::new());
+    };
+    let mut kept = Vec::with_capacity(items.len());
+    for item in items {
+        match item.as_str() {
+            Some(text) if !text.trim().is_empty() => kept.push(text.trim().to_string()),
+            _ => {
+                let rendered: String = item.to_string().chars().take(40).collect();
+                warn_failover_candidate_ignored(&rendered, "unknown");
+            }
+        }
+    }
+    Ok(kept)
+}
+
+fn warn_upstream_policy_invalid_value(expected: &str, provided: &serde_json::Value) {
+    crate::agent::otel::log::log_json_with_fields(
+        "warn",
+        "upstream_policy_invalid_value",
+        None,
+        &[
+            ("field", serde_json::json!(expected)),
+            ("provided", serde_json::json!(provided)),
+        ],
+    );
+}
+
+/// 策略段整体容错：非对象 / 段内类型全错 ⇒ 回落默认值（C2-a 非致命）。
+fn de_upstream_policy_lenient<'de, D>(deserializer: D) -> Result<UpstreamPolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<UpstreamPolicy>(value.clone()).unwrap_or_else(|_| {
+        warn_upstream_policy_invalid_value("upstreamPolicy", &value);
+        UpstreamPolicy::default()
+    }))
+}
+
+/// 存储层策略段整体容错（同 [`de_upstream_policy_lenient`]）。
+fn de_upstream_policy_storage_lenient<'de, D>(
+    deserializer: D,
+) -> Result<UpstreamPolicyStorage, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    Ok(
+        serde_json::from_value::<UpstreamPolicyStorage>(value.clone()).unwrap_or_else(|_| {
+            warn_upstream_policy_invalid_value("upstream_policy", &value);
+            UpstreamPolicyStorage::default()
+        }),
+    )
+}
+
+fn warn_failover_candidate_ignored(provider_id: &str, reason: &str) {
+    crate::agent::otel::log::log_json_with_fields(
+        "warn",
+        "failover_candidate_ignored",
+        None,
+        &[
+            ("provider_id", serde_json::json!(provider_id)),
+            ("reason", serde_json::json!(reason)),
+        ],
+    );
+}
+
 struct CapabilityCatalogEntry {
     protocol: Option<&'static str>,
     patterns: &'static [&'static str],
@@ -180,9 +364,206 @@ pub struct ProviderConfigView {
     pub selected_model_id: Option<String>,
 }
 
+/// PA-172 §2.1：上游调用策略（超时 / 决策尝试次数 / 退避预算）。
+///
+/// 视图层命名（`providers.json` 的 `upstream_policy` 段在存储层用
+/// [`UpstreamPolicyStorage`] 的 snake_case，视图层/Tauri 命令用本类型的 camelCase）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpstreamPolicy {
+    #[serde(
+        default = "default_request_timeout_ms",
+        deserialize_with = "de_request_timeout_ms_lenient"
+    )]
+    pub request_timeout_ms: u64,
+    #[serde(
+        default = "default_decision_max_attempts",
+        deserialize_with = "de_u32_lenient"
+    )]
+    pub decision_max_attempts: u32,
+    #[serde(
+        default = "default_retry_budget_ms",
+        deserialize_with = "de_retry_budget_ms_lenient"
+    )]
+    pub retry_budget_ms: u64,
+}
+
+impl Default for UpstreamPolicy {
+    fn default() -> Self {
+        Self {
+            request_timeout_ms: default_request_timeout_ms(),
+            decision_max_attempts: default_decision_max_attempts(),
+            retry_budget_ms: default_retry_budget_ms(),
+        }
+    }
+}
+
+impl UpstreamPolicy {
+    /// 越界钳到边界（fail-safe，矩阵 §2.3）；返回 `(钳制后, 被钳制字段名列表)`。
+    ///
+    /// 空列表 ⇒ 未发生钳制。字段名用于 `upstream_policy_clamped` 结构化日志与测试断言。
+    pub fn clamped(self) -> (Self, Vec<&'static str>) {
+        let mut fields = Vec::new();
+        let request_timeout_ms =
+            if self.request_timeout_ms < UPSTREAM_REQUEST_TIMEOUT_MS_MIN {
+                fields.push("request_timeout_ms");
+                UPSTREAM_REQUEST_TIMEOUT_MS_MIN
+            } else if self.request_timeout_ms > UPSTREAM_REQUEST_TIMEOUT_MS_MAX {
+                fields.push("request_timeout_ms");
+                UPSTREAM_REQUEST_TIMEOUT_MS_MAX
+            } else {
+                self.request_timeout_ms
+            };
+        let decision_max_attempts =
+            if self.decision_max_attempts < UPSTREAM_DECISION_MAX_ATTEMPTS_MIN {
+                fields.push("decision_max_attempts");
+                UPSTREAM_DECISION_MAX_ATTEMPTS_MIN
+            } else if self.decision_max_attempts > UPSTREAM_DECISION_MAX_ATTEMPTS_MAX {
+                fields.push("decision_max_attempts");
+                UPSTREAM_DECISION_MAX_ATTEMPTS_MAX
+            } else {
+                self.decision_max_attempts
+            };
+        let retry_budget_ms = if self.retry_budget_ms < UPSTREAM_RETRY_BUDGET_MS_MIN {
+            fields.push("retry_budget_ms");
+            UPSTREAM_RETRY_BUDGET_MS_MIN
+        } else if self.retry_budget_ms > UPSTREAM_RETRY_BUDGET_MS_MAX {
+            fields.push("retry_budget_ms");
+            UPSTREAM_RETRY_BUDGET_MS_MAX
+        } else {
+            self.retry_budget_ms
+        };
+        (
+            Self {
+                request_timeout_ms,
+                decision_max_attempts,
+                retry_budget_ms,
+            },
+            fields,
+        )
+    }
+
+    /// 是否与基线默认值逐项相等（G2「未配置时行为零变更」的判据）。
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 钳制并落 `upstream_policy_clamped`（字段级一次事件；C2-b 可见性要求，禁止静默）。
+fn clamp_upstream_policy_logging(policy: UpstreamPolicy) -> UpstreamPolicy {
+    let (clamped, fields) = policy.clone().clamped();
+    if fields.is_empty() {
+        return clamped;
+    }
+    let provided = [
+        ("request_timeout_ms", policy.request_timeout_ms as i128),
+        ("decision_max_attempts", policy.decision_max_attempts as i128),
+        ("retry_budget_ms", policy.retry_budget_ms as i128),
+    ];
+    let clamped_to = [
+        ("request_timeout_ms", clamped.request_timeout_ms as i128),
+        ("decision_max_attempts", clamped.decision_max_attempts as i128),
+        ("retry_budget_ms", clamped.retry_budget_ms as i128),
+    ];
+    let bounds = [
+        (
+            "request_timeout_ms",
+            format!(
+                "[{UPSTREAM_REQUEST_TIMEOUT_MS_MIN}, {UPSTREAM_REQUEST_TIMEOUT_MS_MAX}]"
+            ),
+        ),
+        (
+            "decision_max_attempts",
+            format!(
+                "[{UPSTREAM_DECISION_MAX_ATTEMPTS_MIN}, {UPSTREAM_DECISION_MAX_ATTEMPTS_MAX}]"
+            ),
+        ),
+        (
+            "retry_budget_ms",
+            format!("[{UPSTREAM_RETRY_BUDGET_MS_MIN}, {UPSTREAM_RETRY_BUDGET_MS_MAX}]"),
+        ),
+    ];
+    for field in fields {
+        let provided_value = provided
+            .iter()
+            .find(|(name, _)| *name == field)
+            .map(|(_, value)| *value)
+            .unwrap_or_default();
+        let clamped_value = clamped_to
+            .iter()
+            .find(|(name, _)| *name == field)
+            .map(|(_, value)| *value)
+            .unwrap_or_default();
+        let bound = bounds
+            .iter()
+            .find(|(name, _)| *name == field)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        crate::agent::otel::log::log_json_with_fields(
+            "warn",
+            "upstream_policy_clamped",
+            None,
+            &[
+                ("field", serde_json::json!(field)),
+                ("provided", serde_json::json!(provided_value)),
+                ("clamped_to", serde_json::json!(clamped_value)),
+                ("bound", serde_json::json!(bound)),
+            ],
+        );
+    }
+    clamped
+}
+
+/// PA-172 §2.2：`providers.json` **存储层**的策略段（snake_case；视图层见 [`UpstreamPolicy`]）。
+///
+/// 分层命名（D69-17）：存储文件既有键全是 snake_case（`base_url` / `selected_provider_id`），
+/// 新增键禁止把视图层 camelCase 直接写进存储文件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+struct UpstreamPolicyStorage {
+    #[serde(
+        default = "default_request_timeout_ms",
+        deserialize_with = "de_request_timeout_ms_lenient"
+    )]
+    request_timeout_ms: u64,
+    #[serde(
+        default = "default_decision_max_attempts",
+        deserialize_with = "de_u32_lenient"
+    )]
+    decision_max_attempts: u32,
+    #[serde(
+        default = "default_retry_budget_ms",
+        deserialize_with = "de_retry_budget_ms_lenient"
+    )]
+    retry_budget_ms: u64,
+}
+
+impl From<UpstreamPolicy> for UpstreamPolicyStorage {
+    fn from(policy: UpstreamPolicy) -> Self {
+        Self {
+            request_timeout_ms: policy.request_timeout_ms,
+            decision_max_attempts: policy.decision_max_attempts,
+            retry_budget_ms: policy.retry_budget_ms,
+        }
+    }
+}
+
+impl From<UpstreamPolicyStorage> for UpstreamPolicy {
+    fn from(storage: UpstreamPolicyStorage) -> Self {
+        Self {
+            request_timeout_ms: storage.request_timeout_ms,
+            decision_max_attempts: storage.decision_max_attempts,
+            retry_budget_ms: storage.retry_budget_ms,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderRegistryView {
+    #[serde(default, deserialize_with = "de_upstream_policy_lenient")]
+    pub upstream_policy: UpstreamPolicy,
+    #[serde(default, deserialize_with = "de_vec_string_lenient")]
+    pub failover_provider_ids: Vec<String>,
     pub providers: Vec<ProviderConfigView>,
     pub selected_provider_id: Option<String>,
 }
@@ -210,6 +591,11 @@ struct ProviderConfigStorage {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct ProviderRegistryStorage {
+    /// PA-172 §2.2：存储层 snake_case（视图层 camelCase）。
+    #[serde(default, deserialize_with = "de_upstream_policy_storage_lenient")]
+    upstream_policy: UpstreamPolicyStorage,
+    #[serde(default, deserialize_with = "de_vec_string_lenient")]
+    failover_provider_ids: Vec<String>,
     providers: Vec<ProviderConfigStorage>,
     selected_provider_id: Option<String>,
 }
@@ -271,6 +657,21 @@ pub trait ProviderSelectionResolver: Send + Sync {
         provider_id: Option<&str>,
         model_id: Option<&str>,
     ) -> ResolvedProviderSelection;
+
+    /// PA-172 wave-69 additive（**必须带默认实现** ⇒ 13 个既有实现零改动）：
+    /// 上游调用策略。默认 = 基线硬编码真值（G2：未配置时行为零变更）。
+    fn upstream_policy(&self) -> UpstreamPolicy {
+        UpstreamPolicy::default()
+    }
+
+    /// PA-172 wave-69 additive：有序显式候选链。默认空链 ⇒ 关闭换手。
+    fn resolve_failover_chain(
+        &self,
+        primary: &ResolvedProviderSelection,
+    ) -> Vec<ResolvedProviderSelection> {
+        let _ = primary;
+        Vec::new()
+    }
 }
 
 pub struct ProviderRegistryStore {
@@ -515,10 +916,62 @@ impl ProviderSelectionResolver for ProviderRegistryStore {
     ) -> ResolvedProviderSelection {
         self.resolve_selection(provider_id, model_id)
     }
+
+    /// PA-172 §2：读存储层策略段（`normalize_storage` 已钳制，故此处只需透传）。
+    fn upstream_policy(&self) -> UpstreamPolicy {
+        UpstreamPolicy::from(self.load_storage().upstream_policy)
+    }
+
+    /// PA-172 §2.3 C2-c：候选链卫生——未知 id / 重复（含与主 provider 同身份）/ 自身
+    /// 一律忽略并 `warn failover_candidate_ignored`；链长上限 8（超出截断并 warn）。
+    fn resolve_failover_chain(
+        &self,
+        primary: &ResolvedProviderSelection,
+    ) -> Vec<ResolvedProviderSelection> {
+        let storage = self.load_storage();
+        let known_ids: Vec<String> = storage
+            .providers
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect();
+        let mut chain: Vec<ResolvedProviderSelection> = Vec::new();
+        let mut identities: Vec<(String, String)> = vec![(
+            primary.provider_name.clone(),
+            primary.base_url.clone(),
+        )];
+        for provider_id in storage.failover_provider_ids {
+            if !known_ids.iter().any(|known| *known == provider_id) {
+                warn_failover_candidate_ignored(&provider_id, "unknown");
+                continue;
+            }
+            let selection = self.resolve_selection(Some(provider_id.as_str()), None);
+            let identity = (selection.provider_name.clone(), selection.base_url.clone());
+            if identity
+                == (primary.provider_name.clone(), primary.base_url.clone())
+            {
+                warn_failover_candidate_ignored(&provider_id, "self");
+                continue;
+            }
+            if identities.contains(&identity) {
+                warn_failover_candidate_ignored(&provider_id, "duplicate");
+                continue;
+            }
+            if chain.len() >= FAILOVER_CHAIN_MAX_LEN {
+                warn_failover_candidate_ignored(&provider_id, "truncated");
+                break;
+            }
+            identities.push(identity);
+            chain.push(selection);
+        }
+        chain
+    }
 }
 
 fn storage_from_view(view: ProviderRegistryView) -> ProviderRegistryStorage {
     ProviderRegistryStorage {
+        // PA-172 §2.2：视图层 camelCase → 存储层 snake_case（全透传，round-trip 不丢）。
+        upstream_policy: UpstreamPolicyStorage::from(view.upstream_policy),
+        failover_provider_ids: view.failover_provider_ids,
         providers: view
             .providers
             .into_iter()
@@ -609,6 +1062,8 @@ fn build_view_from_storage(
     secret_store: &dyn SecretStore,
 ) -> ProviderRegistryView {
     ProviderRegistryView {
+        upstream_policy: UpstreamPolicy::from(storage.upstream_policy),
+        failover_provider_ids: storage.failover_provider_ids,
         selected_provider_id: storage.selected_provider_id.clone(),
         providers: storage
             .providers
@@ -732,6 +1187,8 @@ fn read_persistent_env_var(name: &str) -> Option<String> {
 
 fn default_registry() -> ProviderRegistryStorage {
     ProviderRegistryStorage {
+        upstream_policy: UpstreamPolicyStorage::default(),
+        failover_provider_ids: Vec::new(),
         selected_provider_id: Some("provider-ppx".to_string()),
         providers: default_provider_templates(),
     }
@@ -845,6 +1302,11 @@ fn resolve_model_protocol(
 }
 
 fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistryStorage {
+    // PA-172 §2.3：策略段越界钳制（C2-a 非致命 + C2-b 落 `upstream_policy_clamped`）。
+    // 钳制在**唯一归一入口**做 ⇒ 落盘与读回都看到同一份合法值；候选链只做透传，卫生
+    // （未知/重复/自身/超长）在 `resolve_failover_chain` 解析时判定。
+    let policy = UpstreamPolicy::from(storage.upstream_policy);
+    storage.upstream_policy = UpstreamPolicyStorage::from(clamp_upstream_policy_logging(policy));
     if storage.providers.is_empty() {
         return default_registry();
     }
@@ -1828,6 +2290,8 @@ mod tests {
     #[test]
     fn default_deepseek_template_includes_distinct_v4_pro_model() {
         let storage = normalize_storage(ProviderRegistryStorage {
+            upstream_policy: UpstreamPolicyStorage::default(),
+            failover_provider_ids: Vec::new(),
             providers: Vec::new(),
             selected_provider_id: Some("provider-deepseek".to_string()),
         });
@@ -1851,6 +2315,8 @@ mod tests {
         assert!(pro.capabilities.supports_reasoning);
 
         let migrated = normalize_storage(ProviderRegistryStorage {
+            upstream_policy: UpstreamPolicyStorage::default(),
+            failover_provider_ids: Vec::new(),
             providers: vec![ProviderConfigStorage {
                 id: "provider-deepseek".to_string(),
                 name: "deepseek".to_string(),
@@ -1896,6 +2362,8 @@ mod tests {
             .any(|model| model.model == "deepseek-v4-pro"));
 
         let prefixed_existing = normalize_storage(ProviderRegistryStorage {
+            upstream_policy: UpstreamPolicyStorage::default(),
+            failover_provider_ids: Vec::new(),
             providers: vec![ProviderConfigStorage {
                 id: "provider-deepseek".to_string(),
                 name: "deepseek".to_string(),
@@ -1963,6 +2431,8 @@ mod tests {
     #[test]
     fn normalize_storage_deduplicates_model_values_within_provider() {
         let normalized = normalize_storage(ProviderRegistryStorage {
+            upstream_policy: UpstreamPolicyStorage::default(),
+            failover_provider_ids: Vec::new(),
             providers: vec![ProviderConfigStorage {
                 id: "provider-openai".to_string(),
                 name: "openai".to_string(),
@@ -2143,6 +2613,8 @@ mod tests {
         let root = temp_registry_root("resolve-selection");
         let path = root.join("providers.json");
         let storage = ProviderRegistryStorage {
+            upstream_policy: UpstreamPolicyStorage::default(),
+            failover_provider_ids: Vec::new(),
             providers: vec![ProviderConfigStorage {
                 id: "multi-protocol".to_string(),
                 name: "multi".to_string(),
@@ -2267,6 +2739,8 @@ mod tests {
         // 但显式 x-api-key auth 来自未启用 endpoint 不应生效 → Auto。
         // （本用例中 anthropic 走的是模型覆盖路径；这里补一个无覆盖且 endpoint 关闭的路径。）
         let disabled_endpoint_storage = ProviderRegistryStorage {
+            upstream_policy: UpstreamPolicyStorage::default(),
+            failover_provider_ids: Vec::new(),
             providers: vec![ProviderConfigStorage {
                 id: "closed-shop".to_string(),
                 name: "closed".to_string(),
@@ -2410,3 +2884,4 @@ mod tests {
         assert!(custom_caps.supports_image_input);
     }
 }
+

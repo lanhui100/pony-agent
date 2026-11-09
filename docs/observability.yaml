@@ -4,7 +4,15 @@
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
 service: pony-agent
 kind: desktop
-reviewed_at: "2026-11-08"
+reviewed_at: "2026-11-09"
+# PA-172（ADR 0104 / wave-69）归属说明：上游调用时限与重试配置化 + 跨 provider 有界故障转移。
+# 新增 7 个结构化日志事件（provider_failover_switched / _skipped_cooldown / _exhausted、
+# provider_cooldown_reset、upstream_policy_clamped、upstream_policy_invalid_value、
+# failover_candidate_ignored）——metrics 与 logs 维度仍是**结构性 N-A**（桌面/TUI 无常驻监听地址、
+# 无 /metrics、pull 模型不成立，判定不变），故这些事件只作本地取证面，**不新增 applicable 判定、
+# 不新增 enforcement_point**；错误分类器的家仍在 agent/retry.rs（error_classifier 收口点只覆盖
+# Ask 不可恢复挂起族，未被本波改动）。
+
 # Trace 审核 loop（ADR 0101 / PA-168..170）归属说明：loop 会话复用 ponycli headless 既有 OTel 出口
 # （tracing anchor 不变，仍 agent/otel/mod.rs），自身即维度 6 的审计对象（自举）；scripts/audit/* 确定性
 # 节点只产本地回执，无新增网络遥测面；fetch 查询 Tempo/Langfuse 复用 check-langfuse.sh 凭据纪律

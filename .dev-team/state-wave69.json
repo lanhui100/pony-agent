@@ -42,6 +42,18 @@
   {
    "id": "D69-18",
    "text": "参与换手的入口封闭清单 5 行（决策同步/决策流式/followup 单发同步/followup 流式/followup 批量同步 :1350），压缩摘要与同步轮 plan_turn 不参与（deferred）。"
+  },
+  {
+   "id": "D69-17",
+   "text": "providers.json 存储层 snake_case（upstream_policy / failover_provider_ids），视图层 camelCase（upstreamPolicy / failoverProviderIds）；矩阵 §2.2 已按实测改写（测试 Agent 实报存储层用 base_url/selected_provider_id）。"
+  },
+  {
+   "id": "D69-19",
+   "text": "6 个新日志事件与被忽略字段告警为 non-machine（进程级日志单例不可隔离 sink），靠 review 判读；换手行为由 loopback mock 物理 HTTP 计数锚定，不依赖日志断言。"
+  },
+  {
+   "id": "D69-20",
+   "text": "流程偏差（如实登记）：test-agent 无法 claim task-3（仍 blockedBy task-2 未完成），由 Lead set_dependencies→claim→complete 收口，实际交付与收据均由 test-agent 产出。"
   }
  ],
  "tasks": [

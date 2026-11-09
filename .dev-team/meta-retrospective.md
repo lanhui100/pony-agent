@@ -360,3 +360,60 @@ Lead 侧信息下发控制有效：`.dev-team/plan-ask-resume.md` 是唯一真�
 3. **共享工作区协议**：多会话下 `state.json` 强制"每波一文件"，并写死"禁 `git add .`"；提交前审计加"文件归属 lane"校验。
 4. **ADR 发号**：并行会话争号已发生一次，建议由 Lead 统一发号或落预留号账本。
 5. **豁免配额机器化**：`eprintln` 配额、stub 纯度等"靠描述"的基准应改脚本统计（本轮 NFR note 与实际计数出现 1 行措辞张力）。
+
+---
+
+# wave-69 元复盘（PA-172 + PA-171 遗留收口，2026-11-09）
+
+## 1. 通信拓扑与信噪比
+
+本轮 4 名常驻（Lead / Protocol / Test / Executor×2）+ 审查全部下沉 Subagent（计划 2 轮 ×2、合入 3 路），
+名册峰值 5/8，符合容量保守引理。零套话 JSON 协议在 5 份审查收据上全部经 `dev-review-lint.py` Exit 0。
+
+**实测信噪比问题**：①Protocol Agent 首次任务把上下文烧在"读→想→再读"，产出 0 文件（42K 字符耗尽），
+Lead 用一条「只写一个文件、禁派 subagent、分两步落盘」的重派即完成 —— 说明**任务粒度**
+（"写矩阵+写 NFR+写 amendment"三件套）超过了单次可交付上限；②计划审查两次均出现「审查期间被审文件被并发改写」
+（round2-A 明确登记 md5 不一致），根因是 Lead 在审查飞行中继续修订契约 —— 属**自伤型噪声**；
+③重复命令：baseline 因 `target/` 污染先跑出 4 个假红，重跑同一命令 2 次（有新增信息，未计入风暴）。
+
+## 2. 门禁穿透与误杀率
+
+- **真拦截**：计划审查 round1 抓出 10 条 BLOCKING，其中 3 条是**会真实伤人**的：配置类型错导致整个
+  `providers.json` 回落默认（用户 provider 全丢）、词表"冻结"无机器锁（加 `server_error` 两句测试仍绿）、
+  `FAILOVER_BUDGET_MS=120s` 封不住单跳 232.5s 的上界。round2 又抓出**换手会重放协议专属
+  `accumulated_messages`**（跨协议必 400）——该条直接把换手面收窄到 `decide_with_tools`，是本轮最大价值的否决。
+- **误杀/超纲**：0 条（未出现把上游已知局限判 BLOCKING 的情况；审查员均给可复现只读命令）。
+- **门禁穿透（漏检）2 处，均由 Lead 自查补上**：①`pa171_lease_anchor_contract.rs` 冻结文件自身 E0382
+  （测试缺陷，红相阶段未被发现，因为红相只看"编译失败"不看"失败原因是不是签名缺失"）；②`src-tauri/tests`
+  7 处字面量缺字段（跨 crate 编译面未被 `-p pony-agent-core` 覆盖）。
+- **审查预算**：计划审查用满 `波次×2`（round1 2 路 + round2 2 路，其中 round2-B 上下文耗尽无收据）；
+  round2-A 仍 FAIL 后按 skill 规定**降级为机器核验 + Lead 裁决**，并在 PA-171 卡与账本如实登记「未取得第三轮 PASS」。
+- **NFR-DEGRADED 欠账**：0。
+
+## 3. 分工契约与隔离有效性
+
+- 写域正交有效：t-w-provider（provider/config/retry/errors/tool_exec/compaction_ops）与
+  t-w-core（tui/cli/control_plane/goal/goal_lease/mod.rs/前端类型）零交集，两路并行无互相覆盖。
+- **编译衍生豁免被真实使用**：`ProviderRegistryView` 新增两字段打破了 2 个既有测试字面量 + 1 个 example +
+  7 处 src-tauri 测试字面量，全部以「纯字段填充、零逻辑改动」补齐并登记。这是该豁免第一次在跨 crate 面生效，
+  说明它需要一条**显式判据**（本轮新增了「`--all-targets` + `--manifest-path src-tauri/Cargo.toml` 双向 check」）。
+- **契约收敛的代价**：v1→v2→v3 三轮修订使 38 条冻结用例中有 3 条被 TEST-DEFECT 豁免修改
+  （夹具计数错、断言过严、移动后借用），全部只改测试实现不改语义；但这也暴露「先冻结、后收窄契约」
+  的顺序成本 —— 正确顺序应是**先完成方案审查 PASS 再冻结测试**。
+
+## 4. 元协议迭代建议（对 dev-team skill）
+
+1. **加一条机械门禁：冻结测试必须能"编译通过但断言失败"或"编译红且错误仅为缺失符号"**。
+   本轮 `pa171_lease_anchor_contract` 的红相是「E0382 借用错误」——红相纯度判为有效红（exit 101），
+   但根因是测试缺陷。建议在 `dev-red-purity.py` 增加规则：编译红必须至少含 1 个 `E0432/E0599/E0603/E0425`
+   级"缺失符号"错误，否则判 TEST-DEFECT 而非有效红。
+2. **加一条"审查期间冻结被审文档"纪律**：审查收据必须锁定 md5 且 Lead 在审查飞行中不得改文件；
+   若改，必须重跑审查（本轮两次踩到，第二次直接导致 round2 的复核基线漂移）。
+3. **探索者委派契约补一条"多输出物拆分阈值"**：单次委派要求 ≥2 个大文件（矩阵 + NFR + amendment）时，
+   必须拆成 2 次委派，否则模型会在读阶段耗尽上下文（本轮 Protocol Agent 实测）。
+4. **构建槽位纪律应进 skill 的通用检查清单**：共享工作区 + 多 checkout 共享 `target/` 会产生
+   "陈旧 rlib 假红"（本轮 4 个 test target 全中，`E0599` 指向已存在的 enum 变体）。建议 skill 在
+   「基线回归先决」条目里强制要求：`cargo test --target-dir <项目策略槽位>`，并把"裸 cargo 假红"列为已知陷阱。
+5. **任务板上 `blocked_by` 与"工作已完成"解耦**：本轮 test-agent 完成了红相却无法 claim task-3
+   （仍被 task-2 阻塞），Lead 只能 `set_dependencies [] → claim → complete` 代劳。建议 skill 明确：
+   前置任务未完成但本任务交付已就绪时，允许 owner 在 `owner` 字段声明并直接置 `completed`（记录偏差）。

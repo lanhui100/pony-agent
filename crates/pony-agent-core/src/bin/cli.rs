@@ -14,8 +14,8 @@
 //!   权限档位默认 `read_only`（fail-closed）。
 
 use pony_agent_core::agent::config::{
-    ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
-    ThinkingParamPattern,
+    ProviderModelCapabilities, ProviderRegistryStore, ProviderSelectionResolver,
+    ResolvedProviderSelection, ThinkingParamPattern, UpstreamPolicy,
 };
 use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand,
@@ -301,6 +301,10 @@ struct DynamicProviderResolver {
     gateway_url: String,
     api_key: Option<String>,
     model: String,
+    /// PA-172 §3.5 W1：配置面真值源（上游时限/重试策略 + 故障转移候选链的唯一来源）。
+    /// 选择算法本身仍走 gateway 兜底分支（`resolve_provider_selection` 未改）；
+    /// 本字段只服务 `upstream_policy()` / `resolve_failover_chain()` 的转发。
+    registry: ProviderRegistryStore,
 }
 
 impl ProviderSelectionResolver for DynamicProviderResolver {
@@ -337,6 +341,23 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
             },
             thinking_param_pattern: ThinkingParamPattern::None,
         }
+    }
+
+    /// PA-172 §3.5 W1（生产注入闭环，无头形态）：上游时限/重试策略必须由注册表真实提供。
+    ///
+    /// 不覆写 ⇒ trait 默认实现恒返回 [`UpstreamPolicy::default`]，CLI 出来的
+    /// `ProviderManager` 永远拿默认值、用户的 `upstreamPolicy` 配置静默失效。
+    fn upstream_policy(&self) -> UpstreamPolicy {
+        self.registry.upstream_policy()
+    }
+
+    /// PA-172 §3.5 W1：换手候选链同样转发注册表 —— 不覆写 ⇒ 链恒空 ⇒
+    /// 故障转移在 CLI 形态**永久不触发**（矩阵 W1 判据：两个 bin 都要命中）。
+    fn resolve_failover_chain(
+        &self,
+        primary: &ResolvedProviderSelection,
+    ) -> Vec<ResolvedProviderSelection> {
+        self.registry.resolve_failover_chain(primary)
     }
 }
 
@@ -973,6 +994,8 @@ fn build_control_plane(args: &CliArgs) -> (HostControlPlane, PathBuf) {
         gateway_url: args.gateway_url.clone(),
         api_key: args.api_key.clone(),
         model: args.model.clone(),
+        // 与 TUI 同一真值源（`~/.config/pony-agent/providers.json`）；只读转发，不写回。
+        registry: ProviderRegistryStore::new(),
     };
 
     let runtime_builder = AgentRuntimeBuilder::new()

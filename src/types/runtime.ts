@@ -825,6 +825,13 @@ export type TurnTraceRecord = {
   sessionSummary?: string | null;
   fallbackReason?: string | null;
   error?: string | null;
+  /**
+   * PA-172 §6 T2：失败归类（wire 对齐 Rust `TurnTraceRecord.error_class`，
+   * `#[serde(default, skip_serializing_if = "Option::is_none")]` ⇒ 键缺席 = 非失败轮）。
+   * 取值封闭集 `timeout|rate_limited|quota|network|auth|bad_request|other`，
+   * 唯一来源 `agent::retry::classify_error_class`（禁止前端再建第二套分类）。
+   */
+  errorClass?: string;
   inputTokens?: number | null;
   cacheHitInputTokens?: number | null;
   reasoningTokens?: number | null;
@@ -1193,6 +1200,13 @@ export type TurnStreamEvent = {
   text?: string | null;
   reasoningContent?: string | null;
   error?: string | null;
+  /**
+   * PA-172 §6 T2：失败归类（wire 对齐 Rust `TurnStreamEvent.error_class`，camelCase `errorClass`，
+   * `#[serde(default, skip_serializing_if = "Option::is_none")]` ⇒ 非失败事件键缺席）。
+   * 取值封闭集 `timeout|rate_limited|quota|network|auth|bad_request|other`，
+   * 唯一来源 `agent::retry::classify_error_class`（审计机判据，禁止第二套关键词表）。
+   */
+  errorClass?: string;
   providerRequestedName?: string | null;
   providerName?: string | null;
   providerProtocol?: string | null;

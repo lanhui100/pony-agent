@@ -95,6 +95,15 @@ pub fn rate_limited_error_summary(error: &str) -> String {
     }
 }
 
+/// PA-172 §5（遗留 #6）：注入 `now` 的版本——恢复提示按**真实 now** 折算剩余窗口
+/// （`retry::rate_limit_recovery_hint_at`，唯一解析点；与冷却窗口同源）。
+pub fn rate_limited_error_summary_at(error: &str, now_unix_ms: u64) -> String {
+    match pony_agent_core::agent::retry::rate_limit_recovery_hint_at(error, now_unix_ms) {
+        Some(hint) => format!("{ERROR_SUMMARY_RATE_LIMITED}，{hint}。"),
+        None => ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW.to_string(),
+    }
+}
+
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -176,7 +185,6 @@ pub fn user_facing_error_summary(error: &str) -> String {
 /// {`rate_limited`,`quota`}）→ `is_transient_provider_error` → 通用文案。
 /// 限流分支必须早于 transient：否则 429 会被折叠成「重试已用尽」（历史缺陷 F13）。
 pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String {
-    let _ = now_unix_ms;
     // L3-B BLOCKING：auth 只认**头部段**（`；响应正文` 之前）的词边界判据，禁止裸
     // `contains` 扫全文——`429 … 耗时=4031ms` / `… 耗时=401ms` / 正文含 "api key"
     // 都会被裸 contains 误判成凭据错误（真因是限流/配额）。
@@ -187,7 +195,9 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String {
         pony_agent_core::agent::retry::classify_error_class(error),
         "rate_limited" | "quota"
     ) {
-        return rate_limited_error_summary(error);
+        // PA-172 §5（遗留 #6）：`now` 是**真参数**——恢复提示按真实时刻折算剩余窗口
+        // （历史缺陷：形参被 `let _ = now_unix_ms;` 丢弃，文案不随时刻收敛）。
+        return rate_limited_error_summary_at(error, now_unix_ms);
     }
     if is_transient_provider_error(error) {
         ERROR_SUMMARY_TRANSIENT.to_string()

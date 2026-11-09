@@ -97,14 +97,22 @@ pub trait ProviderSelectionResolver {
 
 ### 2.2 wire schema（`providers.json` 顶层，additive）
 
+**两层命名（D69-17，依据实测）**：`providers.json` **存储层是 snake_case**（`base_url` / `api_key_env_var` /
+`selected_provider_id` …），`ProviderConfigView` / `ProviderRegistryView` 是 `rename_all="camelCase"` 的**视图层**。
+新增键必须分层命名，禁止把视图层 camelCase 直接写进存储文件：
+
 ```json
 {
-  "upstreamPolicy": { "requestTimeoutMs": 45000, "decisionMaxAttempts": 5, "retryBudgetMs": 30000 },
-  "failoverProviderIds": ["kimi", "deepseek"],
+  "upstream_policy": { "request_timeout_ms": 45000, "decision_max_attempts": 5, "retry_budget_ms": 30000 },
+  "failover_provider_ids": ["kimi", "deepseek"],
   "providers": [ ... ],
-  "selectedProviderId": "..."
+  "selected_provider_id": "..."
 }
 ```
+
+视图层（Tauri command / 前端 `src/types/provider.ts`）暴露 `upstreamPolicy`（`requestTimeoutMs` /
+`decisionMaxAttempts` / `retryBudgetMs`）与 `failoverProviderIds`。**旧文件无这两键必须仍可加载**（全 `#[serde(default)]`）。
+round-trip 判据：snake_case 落盘 → 读回 → 视图 camelCase 值不变。
 
 ### 2.3 钳制真值表（封闭，测试逐行锚定）
 
@@ -183,6 +191,15 @@ pub fn reset_global_cooldowns() -> usize;
 `pa172_legacy_closure_contract.rs::error_class_wordlist_is_locked` 对 5xx 样本断言返回值恒 ∈ 7 值集且永不为
 `"server_error"`（否则「不得加 server_error」只是文档约定；pa171 冻结真值表 0 个 5xx 用例锁不住它）。
 
+**M3（per-attempt 钳制可锚点化，审查 v2-a/BLOCKING-1）**：`min(requestTimeoutMs, remaining)` 无法用
+`FAILOVER_BUDGET_MS` const 注入测试（矩阵不提供注入缝），故把钳制抽成**纯函数**以便机判：
+```rust,ignore
+// retry.rs（或在 provider 内 pub(crate)）
+pub fn failover_attempt_timeout_ms(policy_timeout_ms: u64, remaining_ms: u64) -> u64; // == min(两者)
+```
+锚点：`pa172_budget_anchor_contract.rs` 对 `(45000, 120000)=45000`、`(45000, 3000)=3000`、`(1000, 0)=0` 三例断言。
+**另登记 non-machine**：`FAILOVER_BUDGET_MS` 真实 120s 预算下的端到端行为（无注入缝）⇒ 靠 review。
+
 **M2（HTTP 500 边界，如实登记）**：既有码表（`retry.rs:334/339`）把 **HTTP 500 冻结为 NonRetryable**，
 `UpstreamServerError` 只覆盖 502/503/504/408/520-524/527/530 ⇒ **500 不触发换手**（对 500 换 provider 无收益）。
 
@@ -190,9 +207,9 @@ pub fn reset_global_cooldowns() -> usize;
 
 | 编号 | 规则 |
 |---|---|
-| F-a | 最多 `MAX_FAILOVER_HOPS = 2` 次换手（即候选链最多尝试 3 个 provider：主 + 2） |
+| F-a | 最多 `MAX_FAILOVER_HOPS = 2` 次换手（即候选链最多尝试 3 个 provider：主 + 2）。**合法放大的上界**：用户显式配置 `decisionMaxAttempts=10`/`requestTimeoutMs=300000` 时，`worst_sync` 可到 `3127500ms`（≈52min）——属用户显式配置后果，契约只保证"按配置有界"，不承诺 352.5s 恒成立 |
 | F-b | 每条候选换手前查冷却：`ProviderCooldownRegistry` 命中 ⇒ **跳过、0 次 HTTP**，落 `provider_failover_skipped_cooldown` |
-| F-c | 换手预算 `FAILOVER_BUDGET_MS = 120_000`，**从第一次换手起计时**，且为**逐 attempt deadline**（per-attempt 超时 = min(requestTimeoutMs, remaining)；remaining≤0 ⇒ 立即 exhausted）。契约上界 `worst_sync = 352.5s`（默认值） |
+| F-c | 换手预算 `FAILOVER_BUDGET_MS = 120_000`（**const，不提供测试注入缝**；测试用 `with_policy(request_timeout_ms=1000, decision_max_attempts=1)` + 慢 mock 验证 per-attempt deadline 生效），**从第一次换手起计时**，且为**逐 attempt deadline**（per-attempt 超时 = min(requestTimeoutMs, remaining)；remaining≤0 ⇒ 立即 exhausted）。契约上界 `worst_sync = 352.5s`（默认值） |
 | F-d | 每条候选使用**独立的** `RetryBudget`。**位置冻结**：hop 循环必须在 `retry_provider_scoped_with_report`（`:4867`）**调用之外**，每候选各调用一次（budget 在函数内创建 `:4896`；把换手塞进协议 match 闭包 `:922` 会让 3 个 provider 共用同一 budget 与 5 次上限 ⇒ F-d 静默失效） |
 | F-e | 全链耗尽 ⇒ 返回**最后一次失败的结构化错误**（既有 `extract_provider_error_detail`（`:4940`）处理后的文本，**不承诺**原始响应 body——既有重试编排早已截断/换头，审查 A/ADVISORY）+ `append_failover_exhausted_marker(err, hops)`，并落 `provider_failover_exhausted` |
 | F-f | 成功换手 ⇒ 落 `provider_failover_switched`；**不新增 wire 字段**，成功轮归因语义不变 |
@@ -204,9 +221,9 @@ pub fn reset_global_cooldowns() -> usize;
 | 入口 | 参与 | 说明 |
 |---|---|---|
 | `decide_with_tools`（`:897`，决策同步） | **是** | 无增量面；hop 循环在 `retry_provider_timeout("decision")` 外层 |
-| `continue_with_tool_result`（`:1050`，followup 单发同步） | **是** | OpenAI 分支吞错成 `Ok(local_fallback)`（F12）⇒ 该分支天然不换手（known limitation）；Anthropic 分支（`:1126` 裸调）参与 |
-| `continue_with_tool_results`（`:1350`，批量 followup 同步） | **是** | 无增量面 |
-| 压缩摘要 `decide_with_tools`（`turn_prep.rs:66`） | **是（继承同一 manager 链）** | 审查 A/BLOCKING-8：该 path 的 provider 就是 §3.5 装链的 manager，标「否」与实现矛盾 ⇒ 参与（同步入口，安全） |
+| `continue_with_tool_result`（`:1050`，followup 单发同步） | **否**（v3 收窄） | 换手会重放**协议专属**的 `accumulated_messages`（`:4287/:5220/:5444/:5464` 在 HTTP 前写回）⇒ 跨协议候选必 400、同协议重复追加同一 `tool_call_id` 的 assistant+tool_result 对 ⇒ 把可重试超时变成硬失败并污染 transcript（审查 v2-a/BLOCKING-4）。deferred（前置：消息快照回滚语义） |
+| `continue_with_tool_results`（`:1350`，批量 followup 同步） | **否**（v3 收窄） | 同上（同一 `accumulated_messages` 语义） |
+| 压缩摘要 `decide_with_tools`（`turn_prep.rs:66`） | **是（继承同一 manager 链）** | 走 decision 方法本体，无 accumulated-messages 语义 ⇒ 安全（审查 A/BLOCKING-8 纠正） |
 | `decide_with_tools_stream_bounded`（`:974`，决策流式） | **否** | F27：无流式总 deadline ⇒ 换手会把最坏 wall-clock 放大到 30min 级；deferred（需先立流式总 deadline） |
 | `continue_with_tool_result_stream_bounded`（`:1169`，followup 流式） | **否** | 同上；该入口 OpenAI 两分支已发 delta 后重发同步请求并吞成 `Ok`（`:1275-1321`），F-g 不可判定 |
 | 同步轮 `plan_turn`（`turn_prep.rs:204/216`） | 否 | deferred（见 §10） |
@@ -240,6 +257,10 @@ ProviderManager::new(selection)
 | 4 | `provider_cooldown_reset` | info | `cleared_entries` | `reset_global_cooldowns()` |
 | 5 | `upstream_policy_clamped` | warn | `field` / `provided` / `clamped_to` / `bound`（单字段一次事件） | C2-b |
 | 6 | `failover_candidate_ignored` | warn | `provider_id` / `reason`（`unknown|duplicate|self|truncated`） | C2-c |
+| 7 | `upstream_policy_invalid_value` | warn | `field` / `provided` | C2-a（字段类型错回落默认时；**实施后补登记**：C2 要求「类型错回落默认 + warn」，需与 `upstream_policy_clamped`（值越界）区分） |
+
+> **日志面非机判声明（D69-19）**：6 个新事件与「被忽略字段」告警走进程级日志单例，**测试不可隔离 sink** ⇒
+> 均为 `non-machine（靠 review）`；换手行为本身由**物理 HTTP 计数**锚定（loopback mock），不依赖日志断言。
 
 禁止夹带响应正文/密钥；`trace_id` 由 `log_json_with_fields` 自动带。**不新增 enforcement_point**（仍属 tracing 维度）。
 
@@ -344,7 +365,7 @@ pub fn turn_stream_outcome_from_terminal(terminal: /* 既有入参 */) -> TurnSt
 | 10 | `goal_rounds_stopped` 只写不读、未清 | B2 | bin/tui.rs | 复位后为 None + 读取点存在（单测/审查） | closed | planned |
 | 11 | 租约与五臂归约缺可执行用例 | §7 | `tests/pa171_lease_anchor_contract.rs` | 用例全绿（红相先红） | closed | planned |
 | 12 | 租约类型 doc 陈旧 | §7.1 | agent/goal_lease.rs | doc 首句含 `HashSet`/按会话（review） | closed | planned |
-| 13 | `GoalRoundsStopped` 无 session_id | B1 | bin/tui.rs | 变体字段 + 跨会话不污染（可触达则用例，否则部分闭合并登记） | closed | planned |
+| 13 | `GoalRoundsStopped` 无 session_id | B1 | bin/tui.rs | 变体 `session_id` 字段契约 + 跨会话构造（均机判）；事件循环「不改状态行」的行为面 `non-machine（靠 review）` | closed（部分） | planned |
 | 14 | a2 计划复审由 Lead 定点复核替代 | 本波 2 路独立 Subagent 计划审查 + 修订后 round2 复审 | `.dev-team/review-plan-wave69-v2-*.json` | `dev-review-lint.py` Exit 0 + verdict=**PASS** | **pending_review_pass** | planned |
 
 > **状态语义（审查 B 指出并已修正）**：`contract_status` 只表示"契约层是否已定义闭合判据"；`impl_status` 一律 `planned`，
@@ -355,13 +376,25 @@ pub fn turn_stream_outcome_from_terminal(terminal: /* 既有入参 */) -> TurnSt
 
 1. **矩阵作者 = Lead**（非 Protocol Agent）：Protocol Agent 首次尝试耗尽上下文未产出，Lead 按"规划产物允许 Lead 落盘"直接接管；NFR 基准仍由 Protocol Agent 产出并过 lint。**非独立撰写，如实登记**。
 2. **基线编译环境陷阱**（F26）：所有门禁命令必须带 `--target-dir target-test` / `--target-dir target-check`；裸 `cargo test` 会链接到其它 checkout 的陈旧 rlib 产出假红。此陷阱写入账本与任务卡断点指引。
-3. **同步轮 `plan_turn`（`turn_prep.rs:204/216`）不参与换手**；**压缩摘要路径（`turn_prep.rs:66`）参与**（同一 manager 链，见 §3.4，审查 A/BLOCKING-8 纠正）。⇒ 换手覆盖面 = 4 个同步入口 + 1 个压缩摘要路径；流式与 `plan_turn` 未见覆盖，登记 **deferred**。
+3. **同步轮 `plan_turn`（`turn_prep.rs:204/216`）不参与换手**；**压缩摘要路径（`turn_prep.rs:66`）参与**（同一 manager 链，见 §3.4，审查 A/BLOCKING-8 纠正）。⇒ 换手覆盖面（v3 收窄后）= **仅 `decide_with_tools` 一个同步决策入口**及其压缩摘要调用路径（`turn_prep.rs:66` 走同一方法）；两个 followup 同步入口因 `accumulated_messages` 语义被排除（§3.4），流式与 `plan_turn` 也未覆盖 ⇒ 均登记 **deferred**。
 4. **OpenAI followup 吞错**（F12）：该分支失败被转成本地兜底 `Ok`，外层无 Err ⇒ 换手不触发。**不改**该语义（属既有行为），登记 known limitation。
 5. **成本/遥测口径**：一手换手会发出 2 次 HTTP 而只记 1 条 `InitialRequest`（`turn_stream.rs:2862-2876`），可能低估成本。登记 deferred。
 6. **流式入口不参与换手**（F27/§3.4）：流式无总 deadline，换手会把最坏 wall-clock 放大到 30min 级 ⇒ 本波只覆盖同步入口。已知限制，非目标裁剪，登记 deferred（需先立"流式总 deadline"）。
 7. **HTTP 500 不触发换手**（M2）：既有码表冻结 500 为 NonRetryable；本波不破该契约。
 8. **"最后一次错误"不是原始 body**（F-e）：既有 `extract_provider_error_detail` 已截断/换头，契约只承诺该结构化文本 + `failover_exhausted=` 标记。
-9. **`retryBudgetMs` 下界抬到 1000**（审查 B/ADVISORY）：0 预算语义与 `RetryBudget::is_exhausted` 的 `>=` 判据冲突，收紧边界消歧义。
+9. **timeout/auth/network 类失败不进入冷却（无跨轮记忆）**：`enter_cooldown` 沿用 PA-171 的触发集（仅 `rate_limited|quota`）。
+   ⇒ 主 provider **持续**超时时，下一轮仍会先付一次主 provider 的重试预算（默认 `45s×5 + 7.5s`），再吃 120s 换手预算；
+   最坏每轮 ≈352.5s，直到 PA-171 的「连续 2 轮失败即停」兜底。**契约如实登记此代价**；跨轮候选记忆（sticky primary）登记 deferred。
+10. **生产注入只覆盖桌面 TUI 装配**：`DynamicProviderResolver`（`bin/tui.rs` + `bin/cli.rs`）覆写两个新 trait 方法；
+   `FixedSelectionResolver`（`subagent_runtime.rs`，子代理继承宿主选择）与其它静态 resolver 保持默认空链 ⇒
+   子代理/静态选择路径不换手（deferred，理由：子代理沿用宿主选择即可，换手属宿主职责）。
+11. **装链时"不换手"路径的错误文本与未装链不同**（实施偏差，如实登记）：为满足冻结用例
+    `failover_not_triggered_for_bad_request`（要求 `bad_request` 原样上抛含 `400`），**配置了候选链**时
+    不换手路径返回原始编排错误文本；**未配置链**（默认）时仍返回 `extract_provider_error_detail` 处理文本
+    ⇒ **默认路径 G2 零变更**，差异只在"用户显式配置了换手"之后出现。耗尽路径仍为最后候选结构化详情 + `failover_exhausted=`。
+12. **日志事件实为 7 个**（实施偏差）：实施新增第 7 个 `upstream_policy_invalid_value`（字段类型错），见 §4 表第 7 行；
+    原 6 个事件名/字段未变。
+13. **`retryBudgetMs` 下界抬到 1000**（审查 B/ADVISORY）：0 预算语义与 `RetryBudget::is_exhausted` 的 `>=` 判据冲突，收紧边界消歧义。
 10. **`dev-stub-lint.py` 不适用 Rust**（沿用 PA-171 矩阵 §8 偏差声明 1）：本波不以其作为门禁，编译门禁 + 矩阵冻结签名替代。
 
 ## 12. 收据（本矩阵的机器凭证）

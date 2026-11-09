@@ -1,5 +1,5 @@
 use crate::agent::config::{
-    ProviderReasoningEffort, ResolvedProviderSelection, ThinkingParamPattern,
+    ProviderReasoningEffort, ResolvedProviderSelection, ThinkingParamPattern, UpstreamPolicy,
 };
 use crate::agent::input::TurnInputImage;
 use crate::agent::retry::{
@@ -694,6 +694,101 @@ impl ProviderCooldownRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.remove(key);
     }
+
+    /// PA-172 §5 R2：清空全表并返回被清条目数（进程级冷却复位入口的注册表侧实现）。
+    fn clear_all(&self) -> usize {
+        let mut guard = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cleared = guard.len();
+        guard.clear();
+        cleared
+    }
+}
+
+/// PA-172 §5 R2（遗留 #4）：冷却复位**生产入口**——清空进程级全表并返回被清条目数。
+///
+/// 唯一生产调用点是显式 `/clear` 命令分支（`bin/tui.rs`），**不得**挂进
+/// `reset_session_scope`（该函数有 6 个调用点，会让一个会话的 /resume 清掉进程级冷却表、
+/// 把别的会话正在冷却的上游重新点燃）。
+pub fn reset_global_cooldowns() -> usize {
+    let cleared = ProviderCooldownRegistry::global().clear_all();
+    // nfr-baseline-wave68 `wave68_logging_events`：复位必须可见（不静默改全局状态）。
+    crate::agent::otel::log::log_json_with_fields(
+        "info",
+        "provider_cooldown_reset",
+        None,
+        &[
+            ("cleared_entries", serde_json::json!(cleared)),
+            ("scope", serde_json::json!("clear")),
+        ],
+    );
+    cleared
+}
+
+/// PA-172 §5 R1（遗留 #3）：可执行的锁中毒锚点（**仅 debug 构建可见**的测试钩子）。
+///
+/// 冷却注册表的 4 处 `lock().unwrap_or_else(|poisoned| poisoned.into_inner())` **保持**
+/// fail-open（契约声明：临界区仅 `HashMap` get/insert/retain/remove，poison 后继续可接受；
+/// fail-closed 会让一次历史 panic 永久冻结该 provider）。本钩子制造 poisoned Mutex，
+/// 供锚点用例断言 `enter`/`remaining`/`clear` 仍可用。
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn poison_registry_for_test() {
+    let registry = ProviderCooldownRegistry::global();
+    let _ = std::thread::spawn(move || {
+        let _guard = registry
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panic!("PA-172 R1: poison provider cooldown registry for test");
+    })
+    .join();
+}
+
+/// PA-172 §5 R3：单段转义（**单射**，D69-12）。
+///
+/// 顺序冻结：`%` → `%25` **先**、`|` → `%7C` **后**（否则 `%7C` 字面量会与真 `|` 碰撞），
+/// 空段 → `~empty~`（否决 `-` 作占位：与字面 `-` 不可区分）。
+fn escape_cooldown_segment(segment: &str) -> String {
+    if segment.is_empty() {
+        return "~empty~".to_string();
+    }
+    segment.replace('%', "%25").replace('|', "%7C")
+}
+
+/// PA-172 §5 R3：`base_url` 归一——去尾斜杠 + scheme/host 小写化（path 保持原样）。
+///
+/// host 大小写不敏感（`http://API.Example.com/v1` 与 `http://api.example.com/v1` 同键，
+/// 否则冷却可被纯大小写改动绕过）；path 区分大小写（`/V1` ≠ `/v1`），故只小写
+/// scheme + authority，path 原样保留。
+fn normalize_cooldown_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    match trimmed.find("://") {
+        Some(scheme_end) => {
+            let scheme = trimmed[..scheme_end].to_ascii_lowercase();
+            let rest = &trimmed[scheme_end + 3..];
+            let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = rest[..authority_end].to_ascii_lowercase();
+            format!("{scheme}://{authority}{}", &rest[authority_end..])
+        }
+        None => trimmed.to_string(),
+    }
+}
+
+/// PA-172 §5 R3：冷却键（四段各自单射转义）。
+///
+/// 段序冻结：`requested_name|provider_name|model|base_url`——第四段含 base_url 防跨
+/// endpoint 误杀（D68-7）；`base_url` 先按 [`normalize_cooldown_base_url`] 归一。
+pub(crate) fn cooldown_key_for(selection: &ResolvedProviderSelection) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        escape_cooldown_segment(&selection.requested_name),
+        escape_cooldown_segment(&selection.provider_name),
+        escape_cooldown_segment(&selection.model),
+        escape_cooldown_segment(&normalize_cooldown_base_url(&selection.base_url))
+    )
 }
 
 fn now_unix_ms() -> u64 {
@@ -703,29 +798,85 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// ── PA-172 §3：跨 provider 有界故障转移（换手） ──────────────────────────────────
+
+/// F-a：最多 2 次换手（候选链最多尝试 3 个 provider：主 + 2）。
+pub const MAX_FAILOVER_HOPS: usize = 2;
+
+/// F-c：换手预算（毫秒），**逐 attempt 的 deadline**（不是"换手前查一次"的闸门）。
+///
+/// 冻结同步路径最坏 wall-clock 上界：`requestTimeoutMs × decisionMaxAttempts +
+/// backoff_upper(7.5s) + FAILOVER_BUDGET_MS`，默认值 = `45s×5 + 7.5s + 120s = 352.5s`。
+pub const FAILOVER_BUDGET_MS: u64 = 120_000;
+
+/// PA-172 §3.1：显式有序候选链（`ProviderManager::new` 时为空 ⇒ 换手关闭）。
+///
+/// `new` 截断到 [`MAX_FAILOVER_HOPS`]：即使装配侧给了更长的链（`providers.json` 上限 8），
+/// 单次调用最多只尝试 2 个候选。
+#[derive(Debug, Clone, Default)]
+pub struct ProviderFailoverChain {
+    pub selections: Vec<ResolvedProviderSelection>,
+}
+
+impl ProviderFailoverChain {
+    pub fn new(selections: Vec<ResolvedProviderSelection>) -> Self {
+        let mut selections = selections;
+        selections.truncate(MAX_FAILOVER_HOPS);
+        Self { selections }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.selections.is_empty()
+    }
+}
+
 pub struct ProviderManager {
     config: ResolvedProviderSelection,
+    /// PA-172 §2.1：上游调用策略；`new()` 时恒为 `UpstreamPolicy::default()`（G2）。
+    policy: UpstreamPolicy,
+    /// PA-172 §3.1：换手链；`new()` 时为 `None`（语义冻结：既有构造点零改动）。
+    failover: Option<ProviderFailoverChain>,
 }
 
 impl ProviderManager {
     pub fn new(config: ResolvedProviderSelection) -> Self {
-        Self { config }
+        Self {
+            config,
+            policy: UpstreamPolicy::default(),
+            failover: None,
+        }
     }
 
-    /// PA-171 C3：冷却键四段格式 `requested_name|provider_name|model|base_url`。
+    /// PA-172 §3.1 builder：注入上游调用策略（超时/尝试次数/退避预算）。
+    pub fn with_policy(mut self, policy: UpstreamPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// PA-172 §3.1 builder：注入换手链（空链等价于未开启换手）。
+    pub fn with_failover(mut self, chain: ProviderFailoverChain) -> Self {
+        self.failover = if chain.is_empty() { None } else { Some(chain) };
+        self
+    }
+
+    /// 当前生效的上游调用策略。
+    pub fn upstream_policy(&self) -> &UpstreamPolicy {
+        &self.policy
+    }
+
+    /// 当前换手链（未开启时为 `None`）。
+    pub fn failover_chain(&self) -> Option<&ProviderFailoverChain> {
+        self.failover.as_ref()
+    }
+
+    /// PA-171 C3 + PA-172 §5 R3：冷却键四段 `requested_name|provider_name|model|base_url`。
     ///
     /// 第四段 `base_url` 是**含 base_url 防止跨 endpoint 误杀**（裁决 D68-7）：同一
     /// provider 名/模型在不同 endpoint（回环 mock、多环境网关）各有独立配额窗口，
     /// 共享冷却会把 A 环境的 429 误伤到 B 环境（红相 503 反向钉子实测被短路）。
-    /// 生产语义不退化：同一选择的 base_url 固定，跨轮冷却仍生效。
+    /// PA-172 起四段各自单射转义 + base_url 归一（见 [`cooldown_key_for`]）。
     fn cooldown_key(&self) -> String {
-        format!(
-            "{}|{}|{}|{}",
-            self.config.requested_name,
-            self.config.provider_name,
-            self.config.model,
-            self.config.base_url
-        )
+        cooldown_key_for(&self.config)
     }
 
     /// PA-171 C3：当前 provider 的剩余冷却时长（宿主/测试可观测）。
@@ -894,11 +1045,170 @@ impl ProviderManager {
         }
     }
 
+    /// PA-172 §3.4：**唯一参与换手的入口**——决策同步调用（压缩摘要路径
+    /// `turn_prep.rs:66` 走同一方法 ⇒ 继承同一链）。
+    ///
+    /// F-d（位置冻结）：hop 循环在 [`Self::decide_with_tools_single_hop`] **之外**，而后者
+    /// 内部才是 `retry_provider_scoped_with_report` 的调用点 ⇒ **每个候选各拿一份独立
+    /// `RetryBudget`**（把换手塞进协议 match 闭包会让 3 个 provider 共用同一 5 次/30s
+    /// 预算，"有界"变假）。流式入口（`decide_with_tools_stream*` /
+    /// `continue_with_tool_result_stream*`）与 followup 入口**不参与**换手（F-g / v3 收窄）。
     pub fn decide_with_tools(
         &self,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
     ) -> Result<ProviderDecision, String> {
+        let (result, raw_error) = self.decide_with_tools_single_hop(request, tools);
+        match result {
+            Ok(decision) => Ok(decision),
+            Err(detail) => self.failover_decide_with_tools(detail, raw_error, request, tools),
+        }
+    }
+
+    /// PA-172 §3.3 F-a..F-h：有界换手编排（**只在 `decide_with_tools` 之后调用**）。
+    ///
+    /// 返回最后一次真实失败（G4：任何路径都不得把失败改写成成功）。
+    fn failover_decide_with_tools(
+        &self,
+        primary_detail: String,
+        primary_raw: Option<String>,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+    ) -> Result<ProviderDecision, String> {
+        // 未装链 ⇒ 与基线逐字一致（G2：默认零行为变更），仍返回既有
+        // `extract_provider_error_detail` 处理后的文本。
+        let Some(chain) = self.failover.as_ref() else {
+            return Err(primary_detail);
+        };
+        // 装链后：**不换手**的路径必须"原样上抛"主 provider 的错误（§3.2 反向钉子：
+        // 400/500 不得被换手层改写，也不得只剩响应正文）。主 provider 无 key 属配置
+        // 错误 ⇒ 快速失败、不换手（F-h，保持既有文案）。
+        let verbatim = |detail: String| primary_raw.clone().unwrap_or(detail);
+        if self.config.api_key.is_none() {
+            return Err(verbatim(primary_detail));
+        }
+        // §3.2 触发类封闭值域：不在码表内（bad_request / other / HTTP 500）一律不换手。
+        if !crate::agent::retry::failover_eligible(&primary_detail) {
+            return Err(verbatim(primary_detail));
+        }
+        let primary_error = primary_detail;
+        // F-c：换手预算从**第一次换手**开始计时，且是逐 attempt 的 deadline。
+        let budget_started = Instant::now();
+        let deadline = budget_started + Duration::from_millis(FAILOVER_BUDGET_MS);
+        let mut last_error = primary_error;
+        let mut hops = 0usize;
+        let mut attempted: Vec<String> = vec![self.config.provider_name.clone()];
+        for candidate in &chain.selections {
+            if hops >= MAX_FAILOVER_HOPS {
+                break;
+            }
+            // F-b：候选处于冷却期 ⇒ 跳过、**0 次 HTTP**（不得先发请求再判冷却）。
+            if let Some(remaining) =
+                ProviderCooldownRegistry::global().remaining(&cooldown_key_for(candidate))
+            {
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "provider_failover_skipped_cooldown",
+                    None,
+                    &[
+                        ("provider_name", serde_json::json!(candidate.provider_name)),
+                        ("model", serde_json::json!(candidate.model)),
+                        ("remaining_ms", serde_json::json!(remaining.as_millis() as u64)),
+                        ("hop", serde_json::json!(hops + 1)),
+                    ],
+                );
+                continue;
+            }
+            // F-c：每次候选 attempt 前重算 remaining；remaining<=0 ⇒ 立即 exhausted。
+            let remaining_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64;
+            if remaining_ms == 0 {
+                break;
+            }
+            // F-c：per-attempt 超时 = min(policy.requestTimeoutMs, remaining)（唯一取值出口）。
+            let attempt_timeout_ms = crate::agent::retry::failover_attempt_timeout_ms(
+                self.policy.request_timeout_ms,
+                remaining_ms,
+            );
+            hops += 1;
+            crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "provider_failover_switched",
+                None,
+                &[
+                    ("from_provider", serde_json::json!(self.config.provider_name)),
+                    ("to_provider", serde_json::json!(candidate.provider_name)),
+                    (
+                        "error_class",
+                        serde_json::json!(crate::agent::retry::classify_error_class(
+                            &last_error
+                        )),
+                    ),
+                    ("hop", serde_json::json!(hops)),
+                    (
+                        "elapsed_ms",
+                        serde_json::json!(
+                            budget_started.elapsed().as_millis().min(u128::from(u64::MAX))
+                                as u64
+                        ),
+                    ),
+                ],
+            );
+            let hop_policy = UpstreamPolicy {
+                request_timeout_ms: attempt_timeout_ms,
+                ..self.policy.clone()
+            };
+            // F-d：每个候选一个**独立** ProviderManager（独立 RetryBudget），且不带链
+            // （候选自身失败不再递归换手 —— hop 上限由本循环统一控制）。
+            let hop_manager = ProviderManager::new(candidate.clone()).with_policy(hop_policy);
+            match hop_manager.decide_with_tools_single_hop(request, tools).0 {
+                Ok(decision) => {
+                    provider_log(format!(
+                        "decision:failover-success hop={} from={} to={}",
+                        hops, self.config.provider_name, candidate.provider_name
+                    ));
+                    return Ok(decision);
+                }
+                Err(error) => {
+                    last_error = error;
+                    attempted.push(candidate.provider_name.clone());
+                }
+            }
+        }
+        crate::agent::otel::log::log_json_with_fields(
+            "warn",
+            "provider_failover_exhausted",
+            None,
+            &[
+                ("hops", serde_json::json!(hops)),
+                (
+                    "last_error_class",
+                    serde_json::json!(crate::agent::retry::classify_error_class(&last_error)),
+                ),
+                ("attempted_providers", serde_json::json!(attempted)),
+            ],
+        );
+        if hops == 0 {
+            // 全链候选都因冷却被跳过 ⇒ 没有发生换手，不宣称"换手耗尽"。
+            return Err(last_error);
+        }
+        Err(crate::agent::retry::append_failover_exhausted_marker(
+            &last_error, hops,
+        ))
+    }
+
+    /// 单跳决策（既有语义逐字保留：无换手、无策略外行为）。
+    /// 返回 `(结果, 最后一次 attempt 的**原始**错误文本)`。
+    ///
+    /// 原始错误（含 `provider 返回错误状态：<code> …；响应正文：` 头部）与重试编排最终返回的
+    /// 结构化详情是两份东西：不换手时必须原样上抛原始错误（§3.2 反向钉子：400/500 不得被
+    /// 换手层改写成只剩响应正文），换手耗尽时按 F-e 交付结构化详情 + 标记。
+    fn decide_with_tools_single_hop(
+        &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+    ) -> (Result<ProviderDecision, String>, Option<String>) {
         let request_cow = self.sanitize_request(request);
         let request = request_cow.as_ref();
         provider_log(format!(
@@ -916,22 +1226,29 @@ impl ProviderManager {
                 self.config.provider_name, self.config.api_key_env_var
             );
             provider_log(format!("decision:error {}", error));
-            return Err(error);
+            return (Err(error), None);
         }
 
-        let result = retry_provider_timeout("decision", || match self.config.protocol {
-            ProviderProtocol::OpenAiCompletions => {
-                self.send_openai_tool_decision_request(request, tools)
+        let mut raw_error: Option<String> = None;
+        let result = retry_provider_timeout_with_policy("decision", &self.policy, || {
+            let outcome = match self.config.protocol {
+                ProviderProtocol::OpenAiCompletions => {
+                    self.send_openai_tool_decision_request(request, tools)
+                }
+                ProviderProtocol::OpenAiResponses => {
+                    self.send_responses_tool_decision_request(request, tools)
+                }
+                ProviderProtocol::AnthropicMessages => {
+                    self.send_anthropic_tool_decision_request(request, tools)
+                }
+            };
+            if let Err(error) = &outcome {
+                raw_error = Some(error.clone());
             }
-            ProviderProtocol::OpenAiResponses => {
-                self.send_responses_tool_decision_request(request, tools)
-            }
-            ProviderProtocol::AnthropicMessages => {
-                self.send_anthropic_tool_decision_request(request, tools)
-            }
+            outcome
         });
 
-        match result {
+        let result = match result {
             Ok(decision) => {
                 provider_log(format!(
                     "decision:success mode={} tool_call={} output_preview={} ",
@@ -949,7 +1266,8 @@ impl ProviderManager {
                 provider_log(format!("decision:error {}", error));
                 Err(error)
             }
-        }
+        };
+        (result, raw_error)
     }
 
     /// 无守卫版本（保持既有调用面与测试替身语义；取消与时长上界不生效）。
@@ -1002,7 +1320,7 @@ impl ProviderManager {
         }
 
         let mut streamed_any_delta = false;
-        let result = retry_provider_timeout("decision_stream", || {
+        let result = retry_provider_timeout_with_policy("decision_stream", &self.policy, || {
             if streamed_any_delta {
                 // PA-100：措辞刻意不含 timeout/rate-limit 特征——classify 判不可重试，
                 // 退避循环立即 Abort，不再为必然失败的哨兵白睡（原 ≤7.5s 浪费归零）。
@@ -1079,7 +1397,7 @@ impl ProviderManager {
 
         match self.config.protocol {
             ProviderProtocol::OpenAiCompletions => {
-                retry_provider_followup_timeout("followup_sync", || {
+                retry_provider_followup_timeout_with_policy("followup_sync", &self.policy, || {
                     self.send_openai_tool_followup_request(
                         request,
                         tools,
@@ -1104,7 +1422,7 @@ impl ProviderManager {
             }
             ProviderProtocol::OpenAiResponses => {
                 // sync 失败本地 fallback 语义与 completions 分支对齐。
-                retry_provider_followup_timeout("followup_sync", || {
+                retry_provider_followup_timeout_with_policy("followup_sync", &self.policy, || {
                     self.send_responses_tool_followup_request(
                         request,
                         tools,
@@ -1228,8 +1546,9 @@ impl ProviderManager {
                 let streamed_any_delta = std::sync::atomic::AtomicBool::new(false);
                 let mark_streamed =
                     || streamed_any_delta.store(true, std::sync::atomic::Ordering::Relaxed);
-                let stream_result = retry_provider_followup_stream_timeout(
+                let stream_result = retry_provider_followup_stream_timeout_with_policy(
                     "followup_stream",
+                    &self.policy,
                     || {
                         if streamed_any_delta.load(std::sync::atomic::Ordering::Relaxed) {
                             // 措辞刻意不含 timeout/rate-limit 特征：classify 应判为
@@ -1280,8 +1599,9 @@ impl ProviderManager {
                             protocol_label, self.config.provider_name, request.model, stream_error
                         ));
                         // stream→sync 回退与本地 fallback 语义对齐 completions 分支。
-                        let response = match retry_provider_followup_timeout(
+                        let response = match retry_provider_followup_timeout_with_policy(
                             "followup_sync_fallback",
+                            &self.policy,
                             || match self.config.protocol {
                                 ProviderProtocol::OpenAiResponses => self
                                     .send_responses_tool_followup_request(
@@ -2734,7 +3054,8 @@ impl ProviderManager {
     fn post_openai_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
         // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
         self.ensure_not_cooling()?;
-        let client = build_http_client(Duration::from_secs(45), endpoint)?;
+        // PA-172 §2.1：单次 attempt 总超时改为配置化（默认 45s，与基线逐字节等价）。
+        let client = build_http_client(Duration::from_millis(self.policy.request_timeout_ms), endpoint)?;
         let started_at = Instant::now();
 
         let request = client.post(endpoint).bearer_auth(
@@ -2785,7 +3106,8 @@ impl ProviderManager {
     fn post_anthropic_json(&self, endpoint: &str, body: &Value) -> Result<Value, String> {
         // PA-171 C3-P1：冷却期在发送前短路（0 次 HTTP）。
         self.ensure_not_cooling()?;
-        let client = build_http_client(Duration::from_secs(45), endpoint)?;
+        // PA-172 §2.1：单次 attempt 总超时改为配置化（默认 45s，与基线逐字节等价）。
+        let client = build_http_client(Duration::from_millis(self.policy.request_timeout_ms), endpoint)?;
         let started_at = Instant::now();
 
         let api_key = self
@@ -4632,7 +4954,14 @@ const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
 /// reasoning_content（实测 API 只校验非空，不校验内容一致性）。
 /// 本地 planner 决策等来源没有该字段时用此占位文本兜底。
 const TOOL_CALL_REASONING_PLACEHOLDER: &str = "工具调用前的思考过程已省略。";
-const PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 5;
+// PA-172 §2.1：尝试次数与退避预算不再是硬编码常量 —— 取值来自 `UpstreamPolicy`
+// （默认 `UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT = 5` / `UPSTREAM_RETRY_BUDGET_MS_DEFAULT = 30_000`，
+// 与基线 `PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS = 5` + `total_budget_ms = 30_000` 逐字节等价，G2）。
+/// 短退避曲线的固定形状（初始延迟 / 倍率 / 单次上限 / 无抖动），与基线一致；
+/// 只有 `max_retries` 与 `total_budget_ms` 由策略驱动。
+const PROVIDER_TIMEOUT_BACKOFF_INITIAL_DELAY_MS: u64 = 500;
+const PROVIDER_TIMEOUT_BACKOFF_MULTIPLIER: f64 = 2.0;
+const PROVIDER_TIMEOUT_BACKOFF_MAX_DELAY_MS: u64 = 8_000;
 
 /// PA-171 C3-S4/C3-P1：非 2xx 错误文本的**唯一装配点**。
 ///
@@ -4768,15 +5097,25 @@ enum ProviderRetryScope {
     Followup,
 }
 
-fn provider_timeout_backoff_config() -> BackoffConfig {
+/// PA-172 §2.1：短退避配置由 [`UpstreamPolicy`] 驱动。
+///
+/// `decision_max_attempts` 是"含首次"的尝试次数 ⇒ `max_retries = attempts - 1`
+/// （基线 5 ⇒ 4，逐字节等价）；`retry_budget_ms` 是 sleep-only 预算（基线 30_000ms）。
+fn provider_timeout_backoff_config_for(policy: &UpstreamPolicy) -> BackoffConfig {
     BackoffConfig {
-        max_retries: PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS.saturating_sub(1),
-        initial_delay_ms: 500,
-        multiplier: 2.0,
-        max_delay_ms: 8000,
-        total_budget_ms: 30_000,
+        max_retries: policy.decision_max_attempts.saturating_sub(1),
+        initial_delay_ms: PROVIDER_TIMEOUT_BACKOFF_INITIAL_DELAY_MS,
+        multiplier: PROVIDER_TIMEOUT_BACKOFF_MULTIPLIER,
+        max_delay_ms: PROVIDER_TIMEOUT_BACKOFF_MAX_DELAY_MS,
+        total_budget_ms: policy.retry_budget_ms,
         jitter_kind: JitterKind::None,
     }
+}
+
+/// 基线默认包装（未注入策略的调用点/既有单测保持 `UpstreamPolicy::default()` 语义）。
+#[cfg(test)]
+fn provider_timeout_backoff_config() -> BackoffConfig {
+    provider_timeout_backoff_config_for(&UpstreamPolicy::default())
 }
 
 /// rate-limit 专用调度（仅 Followup 作用域）：两次重试 sleep 20s→40s（budget 90s），
@@ -4796,13 +5135,27 @@ fn provider_rate_limit_backoff_config() -> BackoffConfig {
     }
 }
 
+#[cfg(test)]
 fn retry_provider_timeout<T, F>(label: &str, operation: F) -> Result<T, String>
 where
     F: FnMut() -> Result<T, String>,
 {
-    retry_provider_scoped_with_sleeper(
+    retry_provider_timeout_with_policy(label, &UpstreamPolicy::default(), operation)
+}
+
+/// PA-172 §2.1：策略驱动的 decision 作用域重试（`ProviderManager` 内部唯一入口）。
+fn retry_provider_timeout_with_policy<T, F>(
+    label: &str,
+    policy: &UpstreamPolicy,
+    operation: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    retry_provider_scoped_with_sleeper_and_config(
         label,
         ProviderRetryScope::Decision,
+        provider_timeout_backoff_config_for(policy),
         operation,
         &StdThreadSleeper,
         None,
@@ -4810,13 +5163,19 @@ where
 }
 
 /// followup 专用包装：允许 rate-limit 长退避。
-fn retry_provider_followup_timeout<T, F>(label: &str, operation: F) -> Result<T, String>
+/// PA-172 §2.1：策略驱动的 followup 作用域重试（`ProviderManager` 内部唯一入口）。
+fn retry_provider_followup_timeout_with_policy<T, F>(
+    label: &str,
+    policy: &UpstreamPolicy,
+    operation: F,
+) -> Result<T, String>
 where
     F: FnMut() -> Result<T, String>,
 {
-    retry_provider_scoped_with_sleeper(
+    retry_provider_scoped_with_sleeper_and_config(
         label,
         ProviderRetryScope::Followup,
+        provider_timeout_backoff_config_for(policy),
         operation,
         &StdThreadSleeper,
         None,
@@ -4827,23 +5186,27 @@ where
 /// 返回 true 表示本次流已向调用方发出增量、任何后续重试都必然失败——循环在
 /// sleep 前立即放弃，且禁止切换 rate-limit 长退避。否则"增量已发出后撞限流"
 /// 会白睡 20s+40s，再经 sync fallback 又是 60s，单工具跳不可取消阻塞 >2 分钟。
-fn retry_provider_followup_stream_timeout<T, F>(
+/// PA-172 §2.1：策略驱动的流式 followup 重试（`ProviderManager` 内部唯一入口）。
+fn retry_provider_followup_stream_timeout_with_policy<T, F>(
     label: &str,
+    policy: &UpstreamPolicy,
     operation: F,
     no_more_retries_hint: &dyn Fn() -> bool,
 ) -> Result<T, String>
 where
     F: FnMut() -> Result<T, String>,
 {
-    retry_provider_scoped_with_sleeper(
+    retry_provider_scoped_with_sleeper_and_config(
         label,
         ProviderRetryScope::Followup,
+        provider_timeout_backoff_config_for(policy),
         operation,
         &StdThreadSleeper,
         Some(no_more_retries_hint),
     )
 }
 
+#[cfg(test)]
 fn retry_provider_scoped_with_sleeper<T, F>(
     label: &str,
     scope: ProviderRetryScope,
@@ -4854,8 +5217,38 @@ fn retry_provider_scoped_with_sleeper<T, F>(
 where
     F: FnMut() -> Result<T, String>,
 {
+    retry_provider_scoped_with_sleeper_and_config(
+        label,
+        scope,
+        provider_timeout_backoff_config(),
+        operation,
+        sleeper,
+        no_retry_hint,
+    )
+}
+
+/// PA-172 §2.1：策略驱动版重试（配置由调用方给出；其余调度语义与旧入口逐字一致）。
+fn retry_provider_scoped_with_sleeper_and_config<T, F>(
+    label: &str,
+    scope: ProviderRetryScope,
+    config: BackoffConfig,
+    operation: F,
+    sleeper: &dyn Sleeper,
+    no_retry_hint: Option<&dyn Fn() -> bool>,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
     // T2-B：旧入口委托带报告版本并丢弃报告，生产行为（重试/退避/日志/返回）零变。
-    retry_provider_scoped_with_report(label, scope, operation, sleeper, no_retry_hint).0
+    retry_provider_scoped_with_report_config(
+        label,
+        scope,
+        config,
+        operation,
+        sleeper,
+        no_retry_hint,
+    )
+    .0
 }
 
 /// T2-B：单跳重试 + 观测报告。调度语义与旧函数完全一致，仅额外累计报告字段：
@@ -4864,9 +5257,32 @@ where
 /// - `slept_ms` = sleep-only 累计（成功执行的 sleep 之和，不含请求自身耗时）；
 /// - `switched_to_rl` = 本跳内是否切换过 rate-limit 长退避；
 /// - `exhausted_reason` = 终态 `budget.exhausted_reason()`。
+#[cfg(test)]
 fn retry_provider_scoped_with_report<T, F>(
     label: &str,
     scope: ProviderRetryScope,
+    operation: F,
+    sleeper: &dyn Sleeper,
+    no_retry_hint: Option<&dyn Fn() -> bool>,
+) -> (Result<T, String>, SingleHopRetryReport)
+where
+    F: FnMut() -> Result<T, String>,
+{
+    retry_provider_scoped_with_report_config(
+        label,
+        scope,
+        provider_timeout_backoff_config(),
+        operation,
+        sleeper,
+        no_retry_hint,
+    )
+}
+
+/// PA-172 §2.1：策略驱动版单跳重试（`base_config` 由调用方给出，其余语义逐字不变）。
+fn retry_provider_scoped_with_report_config<T, F>(
+    label: &str,
+    scope: ProviderRetryScope,
+    base_config: BackoffConfig,
     mut operation: F,
     sleeper: &dyn Sleeper,
     no_retry_hint: Option<&dyn Fn() -> bool>,
@@ -4891,7 +5307,6 @@ where
             exhausted_reason: budget.exhausted_reason(),
         }
     };
-    let base_config = provider_timeout_backoff_config();
     let policy = ProviderRetryPolicy::new(base_config);
     let mut budget = RetryBudget::new(base_config.max_retries, base_config.total_budget_ms);
     let mut active_config = base_config;

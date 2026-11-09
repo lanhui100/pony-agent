@@ -149,6 +149,8 @@ fn main() {
     // ---- providers.json（用应用自身 API 写入，保证 schema 正确；子代理运行时读同一份）----
     let store = ProviderRegistryStore::with_path(cfg.join("pony-agent").join("providers.json"));
     let view = ProviderRegistryView {
+        upstream_policy: Default::default(),
+        failover_provider_ids: Vec::new(),
         providers: vec![ProviderConfigView {
             id: "mock".to_string(),
             name: "Mock".to_string(),

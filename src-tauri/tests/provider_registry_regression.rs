@@ -73,6 +73,8 @@ fn save_view_normalizes_ids_env_var_and_legacy_reasoning_fields() {
     std::env::remove_var("ACME_ROUTER_API_KEY");
     let saved = store
         .save_view(ProviderRegistryView {
+            upstream_policy: Default::default(),
+            failover_provider_ids: Vec::new(),
             selected_provider_id: Some("missing-provider".to_string()),
             providers: vec![ProviderConfigView {
                 id: "".to_string(),
@@ -155,6 +157,8 @@ fn save_and_reload_keep_custom_only_registry_without_default_reinsertion() {
     std::env::remove_var("PPX_API_KEY");
     store
         .save_view(ProviderRegistryView {
+            upstream_policy: Default::default(),
+            failover_provider_ids: Vec::new(),
             selected_provider_id: Some("ppx".to_string()),
             providers: vec![ProviderConfigView {
                 id: "ppx".to_string(),
@@ -248,6 +252,8 @@ fn resolve_selection_falls_back_to_env_when_secret_store_is_empty() {
 
     store
         .save_view_without_env_sync(ProviderRegistryView {
+            upstream_policy: Default::default(),
+            failover_provider_ids: Vec::new(),
             selected_provider_id: Some("legacy-provider".to_string()),
             providers: vec![ProviderConfigView {
                 id: "legacy-provider".to_string(),
@@ -299,6 +305,8 @@ fn resolve_selection_falls_back_to_selected_provider_and_model() {
     std::env::remove_var("BETA_API_KEY");
     store
         .save_view(ProviderRegistryView {
+            upstream_policy: Default::default(),
+            failover_provider_ids: Vec::new(),
             selected_provider_id: Some("beta-provider".to_string()),
             providers: vec![
                 ProviderConfigView {
@@ -410,6 +418,8 @@ fn save_view_without_env_sync_keeps_key_out_of_runtime_resolution() {
 
     store
         .save_view_without_env_sync(ProviderRegistryView {
+            upstream_policy: Default::default(),
+            failover_provider_ids: Vec::new(),
             selected_provider_id: Some("provider-no-sync".to_string()),
             providers: vec![ProviderConfigView {
                 id: "provider-no-sync".to_string(),
@@ -464,6 +474,8 @@ fn removing_provider_clears_persisted_secret() {
 
     store
         .save_view(ProviderRegistryView {
+            upstream_policy: Default::default(),
+            failover_provider_ids: Vec::new(),
             selected_provider_id: Some("provider-to-remove".to_string()),
             providers: vec![ProviderConfigView {
                 id: "provider-to-remove".to_string(),
@@ -501,6 +513,8 @@ fn removing_provider_clears_persisted_secret() {
 
     store
         .save_view(ProviderRegistryView {
+            upstream_policy: Default::default(),
+            failover_provider_ids: Vec::new(),
             selected_provider_id: None,
             providers: vec![],
         })

@@ -2,7 +2,7 @@
 
 ## 状态
 
-- **状态**: **已实施（wave-68 / a1 已合入主干）**，收尾项见文末「遗留与后续」
+- **状态**: **已实施（wave-68 / a1 已合入主干）**；**遗留 13 条已由 wave-69（PA-172 波次）逐条收口**，见文末「遗留与后续 · 收口状态」
 - **优先级**: P1
 - **Complexity**: B（跨 tui / control_plane / goal / provider / retry / turn_flow 多模块 + LLM 调用面）
 - **创建日期**: 2026-11-09
@@ -134,3 +134,30 @@ PY
    契约变更必须走契约演进门禁，不得就地改。
 3. 若要继续收遗留项：从 §遗留与后续 第 1 条起，按 dev-team 新建波次（勿复用 wave-68 账本）。
 4. 唤起词：**「继续 PA-171」**。
+
+## 遗留与后续 · 收口状态（wave-69，2026-11-09）
+
+> 契约：`.dev-team/contract-matrix-pa172.md` §10（含 `contract_status` / `impl_status` 双列）；
+> 账本：`.dev-team/state-wave69.json`；收据：`.dev-team/evidence-wave69/`。
+
+| # | 遗留项 | wave-69 处置 | 状态 |
+|---|---|---|---|
+| 1 | 跨 provider 故障转移 + 45s/5 次配置化 | 新卡 **PA-172** + ADR 0104（仅同步 `decide_with_tools` 入口，流式 deferred） | 已闭合 |
+| 2 | `errorClass` 未进 TS 契约/前端类型 | 快照 38→39 键 + `src/types/runtime.ts` 两处类型 + `contract:check` 红→绿双向锚定 | 已闭合 |
+| 3 | 冷却 4 处 `into_inner()` fail-open | 显式契约声明 + `poison_registry_for_test()` 锚点 | 已闭合（声明式） |
+| 4 | `clear_cooldown`/`cooldown_remaining` 零生产调用点 | `reset_global_cooldowns()` + `/clear` 分支调用（`tui.rs:9972`） | 已闭合 |
+| 5 | 冷却键未转义/未归一 | 单射转义（`%`→`%25` 先、`|`→`%7C`、空段→`~empty~`）+ 去尾斜杠 + scheme/host 小写 | 已闭合 |
+| 6 | `now_unix_ms` 死参 | `rate_limit_recovery_hint_at` + `_at` 真正消费 now | 已闭合 |
+| 7 | 租约进程级单 bool | 见 #12（wave-68-a2 已分区；本轮抽库改写 doc） | 已闭合 |
+| 8 | `turn_loop_in_flight` 单 bool | 按 `session_id` 分区 + RAII（3 处 enter 重排） | 已闭合（双会话行为面 non-machine） |
+| 9 | 落盘失败复用 `BudgetExhausted` 文案 | 新增 `BudgetPersistFailed` 变体（逐字文案冻结） | 已闭合 |
+| 10 | `goal_rounds_stopped` 只写不读/未清 | `reset_session_scope` 清空 + 横幅读取点派生「已停止（原因）」 | 已闭合 |
+| 11 | 租约/五臂归约缺可执行用例 | 抽库到 `agent/goal_lease.rs` + `pa171_lease_anchor_contract`（6 例含并发竞态、10 例归约真值表） | 已闭合 |
+| 12 | 租约类型 doc 陈旧 | 抽库时改写为 `Arc<Mutex<HashSet<String>>>` 按会话分区 | 已闭合 |
+| 13 | `GoalRoundsStopped` 无 session_id | 事件增 `session_id`，跨会话只记日志不改 UI | 已闭合（行为面 non-machine） |
+| 14 | a2 计划复审由 Lead 定点替代 | 本波改为 **2 路独立 Subagent 计划审查**；round1 两路 FAIL（10 BLOCKING）→ 契约 v2/v3 修订 → round2-A 仍 FAIL（5 BLOCKING）→ 再修订并登记为「审查预算已用满，转机器核验 + Lead 裁决」 | 已闭合（制度缺口），**不伪称复审 PASS** |
+
+**过程如实登记**：wave-69 计划审查共 2 轮（round2-B 因上下文耗尽未产出收据）；
+round2-A 的 5 条 BLOCKING 在 v3 中以「收窄换手入口到 `decide_with_tools`、NFR 文本纠正、登记
+timeout 不冷却与生产注入范围、per-attempt 钳制抽纯函数」处置，并全部写入契约矩阵 §11 偏差与
+NFR `wave69_known_limitations`；**未取得第三轮 PASS 收据**（超出 `波次×2` 审查预算，按 skill 规定降级为机器核验）。
