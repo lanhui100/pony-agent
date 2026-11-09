@@ -1,0 +1,65 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewed_commit": "4aaff13a",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "d6c3016d-ce82-4c58-8460-66f376d18e48",
+    "fresh_context": true
+  },
+  "executed_by": "d6c3016d-ce82-4c58-8460-66f376d18e48",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/config.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/tests/pa173_upstream_policy_guard_contract.rs",
+    "crates/pony-agent-core/tests/pa172_upstream_policy_config_contract.rs",
+    "docs/decisions/0104-provider-failover-and-upstream-policy.md",
+    "docs/observability.yaml",
+    ".agents/notes/implemented/bug-fix/2026-11-09-pa173-upstream-policy-timeout-guard.md"
+  ],
+  "blocking_adjudication": {
+    "B1": "FIXED",
+    "B2": "ACCEPTED",
+    "B3": "PRE-EXISTING"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 5186,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "batch worst case = attempts x per-attempt timeout + sleep budget (5x45s+7.5s ~ 232s, ~390s at attempts=10), no aggregate deadline, uncancellable",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa173_upstream_policy_guard_contract.rs",
+      "line": 791,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "4aaff13a edits the frozen pa173 test again (+51/-0, strengthening only); same pattern as 3a715341, no assertion removed",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/config.rs",
+      "line": 946,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "store.load_view().upstream_policy shows disk value while store.upstream_policy() shows clamped value; no UI surface for the effective value",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 5413,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "retry.rs decides on elapsed_ms only, then sleeps: floor budget 5000ms can sleep 7500ms",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 1435,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "1:1 followup still duplicates transcript on retry and degrades exhaustion error via or_else(local_tool_followup_fallback_response) — pre-existing, registered as follow-up",
+      "severity": "ADVISORY"
+    }
+  ]
+}
