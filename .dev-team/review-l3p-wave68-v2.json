@@ -1,0 +1,103 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "d212d3fc-42af-4bbc-9091-baf2694b5b97",
+    "fresh_context": true
+  },
+  "executed_by": "d212d3fc-42af-4bbc-9091-baf2694b5b97",
+  "reviewed_commit": "12a155b5",
+  "attestation": {
+    "self_signed": false,
+    "independent_of_executor": true,
+    "note": "fresh-context subagent，非实现者；只读 /tmp/pa171-union.diff（d9425a70..HEAD 的 11 文件）与 gates.md / nfr-baseline-wave68.json / pa171-red-receipt.json / contract-matrix-pa171.md；未读任何 .dev-team/review-*.json 历史文件"
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/goal.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/retry.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/agent/session/types.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/errors.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 757,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'log_json_with_fields\\|tracing::' crates/pony-agent-core/src/agent/provider/mod.rs; echo \"structured_log_hits_exit=$?\"; sed -n '742,771p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "severity": "BLOCKING",
+      "detail": "NFR 基准 wave68_logging_events 声明 provider_cooldown_entered / provider_cooldown_short_circuit 两个结构化事件（字段 trace_id/provider_name/model/error_class/retry_after_s/until_unix_ms/remaining_ms，evidence 指向 4 个 HTTP 出口），实测 enter_cooldown(757-771) 与 ensure_not_cooling(742-754) 无任何日志调用，整个 provider/mod.rs 对 log_json_with_fields/tracing 零命中。而同一 NFR 把 metrics 登记为结构性 N-A 并写明『冷却期内结构化日志是唯一可观测面』⇒ 声明的唯一可观测面不存在：最长 6h 的 provider 冻结除用户错误文案外无任何机器可取证痕迹（既无 event 名也无 trace_id）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8308,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '8303,8313p' crates/pony-agent-core/src/bin/tui.rs; grep -n 'log_json_with_fields' crates/pony-agent-core/src/bin/tui.rs; grep -n 'eprintln!' crates/pony-agent-core/src/bin/tui.rs | head -3",
+      "severity": "ADVISORY",
+      "detail": "NFR 把 goal_rounds_stopped 登记为结构化事件（trace_id/session_id/reason/consecutive_failures/rounds_started/max_rounds，evidence tui.rs:8127-8179），实现是纯文本 eprintln + UiEvent（8308-8312），无 JSON 字段、无 trace_id ⇒ 与声明不符（用户可见面 G7 满足，审计字段面不满足）。同一文件唯一的结构化调用（8278 goal_rounds_loop_already_owned）又传 trace_id=None，与 logging.trace_id_required=true 冲突。NFR 的 logging_eprintln_exempt_note 亦称『本波次不新增生产 eprintln』，但新增行含 4 处 eprintln（control_plane/mod.rs:896、tui.rs:8235/8253/8308），与该 note 自相矛盾（其 scope 只覆盖 lock-poison 诊断）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 1374,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'goal_rounds_stopped' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY",
+      "detail": "TuiState.goal_rounds_stopped 只写不读：写入点 9876（复位）与 10521（置位），全仓无任何读取点（无渲染、无导出、无日志消费）。注释声明的『为什么不再自动续轮的权威留痕』因此不成立，留痕实际只存在于 status_text 与一条 System 消息里；字段本身是死状态。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 9933,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '9925,9936p' crates/pony-agent-core/src/bin/tui.rs; grep -n 'start_turn_stream_checked\\|StreamFailed' crates/pony-agent-core/src/bin/tui.rs | head -6",
+      "severity": "ADVISORY",
+      "detail": "首轮门把 checked 入口的 Err 整段丢弃：只做 matches! 判 Completed，Err(error) 的字符串既无结构化日志也无 eprintln、也未转成 UiEvent::StreamFailed（对照 run_goal_rounds 的 Err 分支 8253 有 eprintln；ask_resume_commands 注释明写『TUI 收到 Err 即投递 UiEvent::StreamFailed，避免 is_streaming 永真』）。execute_graph_run_stream_step 失败时该轮已执行过且不重跑，本路径即成为新的静默吞错点；矩阵 U1（is_streaming 可能永真）被本波次新入口暴露却未处理。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 721,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '721,733p' crates/pony-agent-core/src/agent/provider/mod.rs; sed -n '305p' .dev-team/contract-matrix-pa171.md; grep -c 'D68' .dev-team/contract-matrix-pa171.md",
+      "severity": "ADVISORY",
+      "detail": "cooldown_key 实现为四段 requested_name|provider_name|model|base_url，契约矩阵:305 冻结的是三段 requested_name|provider_name|model。代码以『裁决 D68-7』为依据，但矩阵中 D68 零命中（该裁决不可取证）。语义后果是冷却按 endpoint 分裂：同一 provider/model 多 endpoint（多环境网关、回环 mock）时 A 端点的 429 不再冷却 B 端点；跨轮冷却只在 base_url 完全一致时生效。需 Lead 要么在矩阵登记 D68-7，要么回到三段键（不判 BLOCKING：私有函数、无 wire 语义，且该改动不放大调用量）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 695,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '688,706p' crates/pony-agent-core/src/agent/control_plane/mod.rs; sed -n '218,226p' .dev-team/contract-matrix-pa171.md",
+      "severity": "ADVISORY",
+      "detail": "矩阵 C1-A1 冻结表要求以『GraphRunTurnResponse.decision.kind（Fail/Cancel/WaitUser）+ turn phase』联合派生 outcome（矩阵:221/224），实现 turn_stream_outcome_from_terminal 只消费终态事件 phase，完全不看 decision.kind（start_turn_stream_checked 只持有 recording 快照，2210-2223）。若出现 decision=Fail/Cancel 而终态 phase=completed 的路径，归约会给出 Completed ⇒ 续轮继续，与 C1『一次 429 收敛为一次可见失败、不被重放』目标相反。代码注释自称『契约矩阵 §3.1 冻结表』却与表内容不符（表里 decision 是并列判据）；红相只压 phase/纯函数，无 decision 侧判据覆盖。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 742,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'clear_cooldown\\|cooldown_remaining' crates/pony-agent-core/src crates/pony-agent-core/tests; sed -n '646,660p' crates/pony-agent-core/src/agent/provider/mod.rs",
+      "severity": "ADVISORY",
+      "detail": "冷却没有任何复位通道：clear_cooldown / cooldown_remaining 除 provider/mod.rs 自身定义外零调用点（tests 也没有），TUI/CLI 无命令、无 env 开关；注册表是进程级 OnceLock ⇒ 一次误判（异常 Retry-After 头部，或非限流错误的正文里出现 quota/allowance 措辞）最长把该 provider 冻结 6h，唯一恢复手段是重启进程。另 remaining() 用 SystemTime（非单调）算剩余：clamp 只约束登记窗口长度，不约束观测剩余，系统时钟回拨可使剩余冷却超过 6h 名义上限。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/errors.rs",
+      "line": 178,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '176,182p' crates/pony-agent-core/src/bin/tui/errors.rs; grep -rn 'user_facing_error_summary_at' crates/pony-agent-core/src crates/pony-agent-core/tests",
+      "severity": "ADVISORY",
+      "detail": "user_facing_error_summary_at 的 now_unix_ms 形参用 `let _ = now_unix_ms;` 直接丢弃（178-179），但文档注释声称『时钟可注入，避免测试等待真实窗口』（矩阵 G5 亦要求 now 作为入参）。恢复时间实际来自 rate_limit_recovery_hint（不需要 now），唯一调用者是 170 的 wrapper，无任何测试注入时钟 ⇒ 注入缝是空壳 + 文档误导；同时 errors.rs:89-95 复制了第二份 now_unix_ms（retry::utc_now_hm 之外的第二处时钟实现）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/types.rs",
+      "line": 209,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '88,92p' crates/pony-agent-core/tests/ts_contract_snapshot.rs; grep -n 'errorClass' crates/pony-agent-core/tests/ts_contract_snapshot.rs; echo \"errorClass_hits_exit=$?\"",
+      "severity": "ADVISORY",
+      "detail": "additive 本身成立（Option + serde(default) + skip_serializing_if，无改名/删除/重编号；providerSource/providerMode/fallbackReason 的值变化只影响失败轮，而旧读取端此前恒读 null），但新 wire 键 errorClass 未进 TS 契约快照：样例把 error_class 写成 None（ts_contract_snapshot.rs:90），序列化后键缺席，errorClass 全文件 0 命中 —— 与该文件对 metrics 的既有约定（『必须给值，否则快照漏键』）相反。结果：新键名/存在性只被 red 测试单点锁住，契约快照门禁不覆盖（旧读取端不破，但新键无门禁）。"
+    }
+  ]
+}

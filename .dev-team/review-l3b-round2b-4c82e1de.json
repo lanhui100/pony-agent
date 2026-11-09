@@ -1,0 +1,88 @@
+{
+  "schema_version": 2,
+  "id": "l3b-pa171-wave68",
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "4c82e1de-7ac7-4232-add0-46adb30fbadd",
+    "fresh_context": true
+  },
+  "executed_by": "4c82e1de-7ac7-4232-add0-46adb30fbadd",
+  "reviewed_commit": "1f5610d6add44680c12c6965149f2eb9b6b39fca",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/retry.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/bin/tui/errors.rs",
+    "crates/pony-agent-core/src/agent/runtime/types.rs",
+    "crates/pony-agent-core/src/agent/session/types.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/errors.rs",
+      "line": 181,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /tmp/pa171probe && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --quiet 2>/dev/null | grep -E '^(H|J) '",
+      "note": "auth 分支（errors.rs:181-188）排在限流分支（189-195）之前，且用**未剥离的原始 contains** 判 '401'/'403'/'api key'；错误文本恒含 `耗时={elapsed_ms}ms` 与上游响应正文（不可信文本）。实测：`429 ... rate limit exceeded for org 4012` ⇒ 摘要=「凭据不可用，请检查提供商配置。」；`429 ... quota exceeded for this api key` ⇒ 同为「凭据不可用」。即 C5 的限流文案在这一类 429 报文下不可达，用户被误导去换 key（真实原因是配额耗尽）——与 C5「缺陷面：429 被伪装」同型。修法：auth 判定改走 `retry::classify_error_class(error)=='auth'`（已有 hint 边界判定），或先 `strip_endpoint_fragments` 并剔除 `耗时=`/正文片段。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/types.rs",
+      "line": 209,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'error_class: None' crates/pony-agent-core/tests/ts_contract_snapshot.rs && node scripts/check-ts-contract.mjs | grep TurnStreamEvent && grep -c errorClass src/types/runtime.ts || true",
+      "note": "新 wire 键 errorClass 未进契约快照：tests/ts_contract_snapshot.rs:90 把夹具填成 `error_class: None`，而该文件自述「所有 skip_serializing_if = Option::is_none 字段都必须填 Some，否则键会从线缆上消失、快照漏键」。结果 docs/contracts/ts-contract.snapshot.json 的 TurnStreamEvent 只有 38 键（无 errorClass），src/types/runtime.ts 也 0 处声明，`node scripts/check-ts-contract.mjs` 仍打印「Rust 38 键 / TS 38 键 OK」（exit 0）。而 turn:failed 事件实际恒带该键（探针 to_value 已证）⇒ 漂移门禁对新字段完全失明，前端 TS 侧也拿不到声明。修法：夹具填 Some + 快照重生 + TS 补声明，让门禁真实覆盖。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/retry.rs",
+      "line": 814,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /tmp/pa171probe && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --quiet 2>/dev/null | grep -E '^(A|B) |^\\[Q1\\]'",
+      "note": "同一报文两套判定结论不同：`upstream_code_for_hints` 先判限流表（retry.rs:592-601）⇒ 429+quota 落 UpstreamRateLimited/TransientRetryable；`classify_error_class` 先判 quota 表（retry.rs:814-822）⇒ 同一报文 errorClass='quota'，与 retry.rs:324-326 自述「429+quota 混合报文仍按限流处理」相反。冷却与文案行为不受影响（两类都进冷却集合、都走限流文案），但落盘审计字段与重试层决策互相矛盾，削弱「唯一判据」的可审计性。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/retry.rs",
+      "line": 597,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /tmp/pa171probe && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --quiet 2>/dev/null | grep -E '^L '",
+      "note": "quota 表插在 5xx 表之前（retry.rs:597-601），且对整段正文做子串匹配：503 + 正文含 'quota'/'allowance'/'billing window' 由「可重试 5xx（TransientRetryable → 短退避重试）」变成 NonRetryable(UpstreamQuota) 并登记冷却窗口，属行为反转（对瞬时 5xx 提前放弃 + 冷却 provider）。建议 quota 判定以状态段（4xx/429）为前置条件，5xx 优先保留既有语义。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 721,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /tmp/pa171probe && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --quiet 2>/dev/null | grep '\\[Q2\\] 键碰撞'",
+      "note": "冷却键用 '|' 拼接四段自由文本（requested_name|provider_name|model|base_url）且不转义：实测两个不同 selection（requested='a|b',provider='c' 与 requested='a',provider='b|c'）命中同一条冷却记录、互相短路；base_url 含 '|' 时同理可与相邻字段换位构造碰撞 ⇒ 跨 endpoint/provider 误冷却（隔离性丢失）。容量与锁安全无缺陷：灌 200 键后仅存活 63-64 条（COOLDOWN_REGISTRY_CAPACITY=64），无键爆炸/内存增长路径；锁内只有 get/insert/retain/remove，不跨网络/block_on/sleep。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/retry.rs",
+      "line": 791,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /tmp/pa171probe && CARGO_TARGET_DIR=/home/dm/pony-agent/target cargo run --quiet 2>/dev/null | grep '\\[Q-注入\\]'",
+      "note": "`append_retry_after_marker` 的幂等判据是「全文已含 retry_after= 则不追加」，而 base 文本里含**上游可控正文**。实测：头部 Retry-After=30s + 正文 'retry_after=21600' ⇒ 解析出 21600s、窗口 21600000ms，再被 enter_cooldown 的 clamp(1_000, 6h) 抬到 6h 硬冷却（provider/mod.rs:757-772）。即上游正文可覆盖真实头值（可用性 DoS，上限 6h）。建议结构化后缀只认「头部/受控拼接位置」，或对正文先剥离该标记。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 737,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'clear_cooldown\\|cooldown_remaining\\|ProviderCooldownRegistry' --include=*.rs crates/ src-tauri/ | grep -v 'src/agent/provider/mod.rs' || echo 'NO EXTERNAL CALL SITES'",
+      "note": "`clear_cooldown` / `cooldown_remaining` 全仓零调用点（注释却称「恢复开关/测试复位」）。叠加上述误判路径（4xx/5xx 正文含 quota + Retry-After 头）可产生最长 6h 的假阳性冷却，进程内无任何恢复入口，只能重启客户端。建议把恢复入口接到 provider 切换 / 设置重载，或在文档中明确「不可解除」。"
+    }
+  ],
+  "answers": {
+    "q1_classification_drift": "存在两处漂移（finding 3/4）：同一 429+quota 报文 `classify`=UpstreamRateLimited 而 `errorClass`='quota'；quota 表位于 5xx 表之前使 503+quota 反转成 NonRetryable。三函数真值表由 /tmp/pa171probe 打印（A/B/C…M 共 13 例）。",
+    "q2_registry": "锁只包 get/insert/retain/remove，无跨网络持锁（provider/mod.rs:646-698）；容量 64 + 过期淘汰，200 键压测后仍 63-64 条，无增长路径；键拼接不转义 ⇒ 可构造碰撞（finding 5）；clear_cooldown 无外部输入可达（零调用点），故不会被用户输入误触发绕过限流，但也无恢复入口（finding 7）。",
+    "q3_fail_open": "不存在显式失败分支：四处锁获取均是 `lock().unwrap_or_else(|p| p.into_inner())`（provider/mod.rs:650/665/674/694）⇒ poison 被吞掉后按表判断，命中则拒绝、无条目则放行（ensure_not_cooling 742-746 是 allow-by-default）。因此**不是 fail-closed 结构**；正常 poison 场景下已登记冷却仍被执行，仅「panic 发生在 retain 中途」这类不可达情形才可能掉条目。属 Availability 优先的合理取舍，不构成安全漏洞。",
+    "q4_serde": "additive 成立：runtime/types.rs 结构级 rename_all=camelCase ⇒ 线缆键 errorClass；skip_serializing_if=is_none ⇒ 非失败事件键缺席；#[serde(default)] ⇒ 旧报文（无该键）与含未知键报文均可反序列化（探针实测 ok；sse_adapter.rs:189/284 夹具同步填 None 可编译）。唯一缺口是快照/TS 未覆盖（finding 2），不是 wire 破坏。",
+    "q5_secrets": "新文案不泄漏正文：rate_limited_error_summary（errors.rs:92-97）只消费 rate_limit_recovery_hint 的秒数/UTC 时刻；实测含 api_key/org id 的正文只输出「预计 30s 后恢复」，无密钥/URL/org 片段。残余风险是正文里的 retry_after= 能影响冷却时长（finding 6），但不进文案。",
+    "q6_truth_table": "401/403→auth 正确（不会被误判为限流）；反向存在误判：429 正文含 401/403 数字或 'api key' ⇒ 判 auth（finding 1，BLOCKING）。普通 500→generic/transient 正常；500/503 正文含 quota ⇒ 吞成「上游限流/配额受限」且降为非重试（实为服务端错误）。"
+  }
+}

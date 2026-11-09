@@ -1,0 +1,76 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "NFR external_call_timeout_ms=3000（wave59 新增 IO：结果封套落盘 / sink flush）",
+    "NFR logging.format=json + trace_id",
+    "NFR resource_release（v4 声明式）+ forbidden_claims",
+    "NFR concurrency_lock: sink 缓冲 / seq 生成 / envelope 原子写 / --result-json 同路径并发",
+    "config/self-check: --help 文档 / 非法值 exit 2 / stderr 可读",
+    "contract compat: 删除 run_headless|max_turns|allow_tools|decide(); 新增 failure_reason|Suspended|TurnStatus lowercase"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 751,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && timeout 4 /home/dm/pony-agent/target/debug/ponycli --output-format jsonl --timeout-secs 1 -p 'say hi' -g http://127.0.0.1:1 --key k -m mock-alpha 2>/dev/null | (sleep 9; cat >/dev/null); echo rc=${PIPESTATUS[0]}",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 725,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && sed -n '711,731p' crates/pony-agent-core/src/bin/cli.rs  # 结果封套落盘走阻塞 std::fs::write/rename，全函数无任何读写时限；NFR external_call_timeout_scope 明列「结果封套落盘」，无 >3000ms 的可复现慢盘环境故记 ADVISORY",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 758,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && /home/dm/pony-agent/target/debug/ponycli --output-format jsonl -p 'say hi' -g http://127.0.0.1:1 --key k -m mock-alpha 2>/tmp/e.stderr | head -c 200 | wc -c  # stdout 应写 135115B，实际仅 200B；进程照常按 turn 码退出，stderr（8805B）无任何写失败诊断（let _ = writeln!/flush 吞掉 EPIPE）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 499,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && grep -c 'wave59_jsonl_sink_finish_releases_buffer_once' .dev-team/nfr-baseline-wave59.json  # 输出 0（第 538 行的 wave59_sse_sink_finish_releases_buffer_once 同为 0）；baseline 实际键是 wave59_sink_buffer_released_by_process_exit_only，语义相反",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/headless.rs",
+      "line": 369,
+      "rule": "LEAK",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && grep -c '1024' crates/pony-agent-core/src/agent/headless.rs  # 0：push_line 的 Vec<String> 无容量上限，与 resource_release 的 bounded_queue/max_queue_capacity_1024 不符；真实 turn 仅 9 事件，无法造 >1024 复现故记 ADVISORY",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli.rs",
+      "line": 711,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /tmp && rm -f c.json && for i in 1 2; do /home/dm/pony-agent/target/debug/ponycli --output-format jsonl -p x$i -g http://127.0.0.1:1 --key k -m mock-alpha --result-json /tmp/c.json >/dev/null 2>&1 & done; wait; python3 -c 'import json;d=json.load(open(\"/tmp/c.json\"));print(d[\"status\"],d[\"exit_code\"])'  # 两进程同路径并发：契约 C3/NFR 均未定义语义，实测无锁 last-writer-wins（tmp 名含 pid），无损坏无残留",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "tests/acceptance/wave59/headless-cli-e2e.sh",
+      "line": 40,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/wt/pony-wave59 && bash tests/acceptance/wave59/headless-cli-e2e.sh >/dev/null 2>&1; git status --porcelain | wc -l  # 31：28 个已提交收据被脚本重写，复跑验收即污染工作区 diff（须 git checkout -- tests/acceptance/wave59/receipts 复原）",
+      "severity": "ADVISORY"
+    }
+  ],
+  "reviewed_commit": "9706859",
+  "attestation": {
+    "self_signed": false,
+    "transcribed_verbatim_by_lead": true,
+    "note": "Lead 仅补充机器校验所需元数据；verdict/audited_scopes/findings 为审查者原文，未改写"
+  },
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "980b1d64-9f47-4adb-8cea-0d861439959f",
+    "fresh_context": true,
+    "perspective": "L3-P production six-questions"
+  },
+  "executed_by": "980b1d64-9f47-4adb-8cea-0d861439959f",
+  "schema_version": 2
+}

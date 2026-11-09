@@ -73,5 +73,26 @@
       "exit": 0,
       "evidence": "96 passed / 0 failed（tui_batch2_regression）+ 98 passed / 0 failed（tui_session_resilience_acceptance）：既有验收基线未被本次新增测试破坏（本卡验收 #2 的红相前置状态）"
     }
-  ]
+  ],
+  "adversarial_l3b": {
+    "added_by": "lead (L3-B findings)，test-agent 补测，2026-11-09",
+    "file": "crates/pony-agent-core/tests/pa171_error_copy_adversarial.rs",
+    "commands": [
+      {
+        "cmd": "cargo test -p pony-agent-core --test pa171_error_copy_adversarial 2>&1 | tail -40",
+        "exit": 101,
+        "result": "87 passed / 2 failed（A1、A3），A2 反向钉子通过",
+        "failures": [
+          "adversarial_auth_branch_must_not_swallow_rate_limit_errors：`耗时=4031ms` 的 429 配额耗尽被折叠为「凭据不可用，请检查提供商配置。」（auth 裸 contains(\"403\") 先于限流分类）",
+          "adversarial_retry_after_marker_must_not_be_hijacked_by_response_body：`append_retry_after_marker(base,60)` 被正文 `retry_after=999999` 幂等短路，`rate_limit_window_ms` 返回 Some(999999000)，`rate_limit_recovery_hint` 返回「预计 999999s 后恢复」"
+        ]
+      }
+    ],
+    "assertion_names": [
+      "adversarial_auth_branch_must_not_swallow_rate_limit_errors",
+      "adversarial_real_auth_error_still_maps_to_auth_copy",
+      "adversarial_retry_after_marker_must_not_be_hijacked_by_response_body"
+    ],
+    "ownership": "executor-beta 修复（t-w2 写域 retry.rs / tui/errors.rs / provider/mod.rs）；本文件冻结，beta 只读"
+  }
 }
