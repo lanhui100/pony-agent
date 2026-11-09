@@ -1,6 +1,6 @@
 # ADR 0102：为日志格式补齐事件载体（provider transcript / 长期记忆 / history_state_evidence）
 
-Status: proposed
+Status: implemented
 
 ## 背景：一条由阶段 2-D 引入的潜在数据丢失路径
 
@@ -40,6 +40,21 @@ ADR 0099 阶段 2-D 让「有日志的会话」只写轻量索引行（`sessions
    旧读方遇未知命令按既有契约 **fail loud**（`FoldError`），不静默跳过。
 6. **迁移联动**：`log_migrate::synthesize_log_events` 补上这两类命令后，
    副本上 `mismatched` 应从 51 降到接近 0；届时重跑 dry-run 作为验收。
+
+## 实施结果（2026-11-09，commit `8795d467`）
+
+- 两个载体落地：`AppendProviderTranscript`（追加）/ `UpdateSessionMemory`（记忆三项整份替换 + evidence 追加）；
+  语义差异写进命令 doc、`Folder::apply` 臂 doc、索引写入函数 doc 三处。
+- `canonical_commands` 同步补齐 ⇒ `rebuild-index` 不再丢这些字段。
+- 写路径只在原命令批里追加两条命令；日志先行语义不变（日志不可用 ⇒ `Failed` 且 db+wal sha256 未变）。
+- **真实库 dry-run：`mismatched 50 → 0`、`migrated 50`**；apply 后 **140/140 会话全部转正**，
+  二次 dry-run `migrated=0 skipped_has_log=140`（幂等），`sessions` 行数 140 未增删。
+- 新套件 `session_event_carriers` 6/6；回归 8 套全绿；`--lib` 1404；`cargo check` 0 warning；
+  `check-declaration` PASS。
+
+### 遗留风险（已在实施中确认）
+旧版本二进制读到含新命令的日志会 `FoldError::UnknownCommand` **fail loud**。
+本地单机同版本读写无影响；**混版本部署（桌面旧版读新版日志）必须在发布说明中点名**。
 
 ## 验收
 
