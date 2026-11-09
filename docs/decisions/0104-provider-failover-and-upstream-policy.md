@@ -161,8 +161,14 @@ ADR 0103（PA-171）把"一次上游限流"收敛为一次可见失败，但明�
 2. **下界上调**：`requestTimeoutMs` 1000 → **15000**（实测最小同步请求 1.76s、网关 p50 2.2s、
    模型 p50 4.67s、p99 36s ⇒ 1s 下界物理不可达）；`decisionMaxAttempts` 1 → **2**
    （下界 1 = 合法的「零重试」，与本文 §2 的「越界不致命」目的相反）；
-   `retryBudgetMs` 1000 → **5000**（2 次尝试的 500ms 退避需要 ≥1.5s，留 3× 余量）。
+   `retryBudgetMs` 1000 → **5000**（`retryBudgetMs` 是 **sleep-only** 预算：2 次尝试=1 次 500ms
+   退避，5 次尝试=500+1000+2000+4000=7.5s；5s 下界覆盖「下界 attempts 组合」的前 4 次退避，
+   高 attempts 组合仍由用户显式配置决定，不做隐式截断）。
    默认值 45000 / 5 / 30000 不变，未配置时行为仍零变更。
+   **已接受的代价（L3-P 审查 §1）**：同步路径**无跨 attempt 总 deadline**（`attempt_deadline`
+   只由换手注入，且换手仅 decision 路径），故批量最坏墙钟 = `attempts × requestTimeoutMs` +
+   sleep 预算（默认 5×45s+7.5s ≈ 232s，PA-173 之前为 ≤45s）。与 1:1 followup 的既有语义一致
+   （同一 helper、同一乘法），本卡不引入新的取消通道；跨 attempt 总 deadline 单列后续卡。
 3. **批量 followup 补齐重试**：`send_openai_tool_followup_batch_request`（多工具批量）此前
    完全无重试层，而 1:1 followup 有；现按同一 `retry_provider_followup_timeout_with_policy`
    包装，label = `followup_sync_batch`，`max_retries = decision_max_attempts - 1`。修复前

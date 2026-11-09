@@ -547,8 +547,9 @@ struct UpstreamPolicyStorage {
 
 /// ⚠ 手写而非 `derive(Default)`（L3-A/L3-P B1）：`#[serde(default)]` 对**缺键**走的是
 /// 字段类型的 `Default::default()`，**不会**调用 `deserialize_with` 的 lenient 回落 ⇒ 派生
-/// 的全 0 默认会让所有既有 `providers.json`（无 `upstream_policy` 键）在 `normalize_storage`
-/// 里被钳成 1000ms/1 次/1000ms（G2 崩）。故默认值必须与 §2.1 三个常量同源。
+/// 的全 0 默认会让所有既有 `providers.json`（无 `upstream_policy` 键）在**解析后**落到全 0，
+/// 若再经边界钳制（PA-173 D1 后钳制只发生在 `ProviderRegistryStore::upstream_policy()` 生效
+/// 策略解析处）就会被抬成下界 15000ms/2 次/5000ms（G2 崩）。故默认值必须与 §2.1 三个常量同源。
 impl Default for UpstreamPolicyStorage {
     fn default() -> Self {
         Self {

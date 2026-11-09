@@ -1768,8 +1768,14 @@ impl ProviderManager {
         // 与 1:1 同构）**——调用方拿到 Err 后不应再把该转录当作干净 base 复用。
         // 1:1 路径（`openai_messages_with_tool_result` 同族）的同类重复追加仍是
         // **既有缺陷**，登记后续卡，本卡不改其行为。
+        //
+        // 错误保真（本卡新增）：重试内核耗尽时返回 `extract_provider_error_detail`（只留
+        // 「响应正文：」后 400 字，空正文 ⇒ 空串）。批量路径此前不经过重试壳、直接返回完整
+        // 错误，加壳后不得让错误退化，故逐次记录**最后一次尝试的原始错误**并在收口处替换
+        // 降级结果（绝不返回空串）。1:1 路径的同类降级是既有问题，本卡不动。
         let base_messages = accumulated_messages.clone();
-        match self.config.protocol {
+        let mut last_provider_error: Option<String> = None;
+        let outcome = match self.config.protocol {
             ProviderProtocol::OpenAiCompletions => retry_provider_followup_timeout_with_policy(
                 "followup_sync_batch",
                 &self.policy,
@@ -1783,6 +1789,10 @@ impl ProviderManager {
                         calls,
                         results,
                     )
+                    .map_err(|error| {
+                        last_provider_error = Some(error.clone());
+                        error
+                    })
                 },
             ),
             ProviderProtocol::OpenAiResponses => retry_provider_followup_timeout_with_policy(
@@ -1798,6 +1808,10 @@ impl ProviderManager {
                         calls,
                         results,
                     )
+                    .map_err(|error| {
+                        last_provider_error = Some(error.clone());
+                        error
+                    })
                 },
             ),
             ProviderProtocol::AnthropicMessages => retry_provider_followup_timeout_with_policy(
@@ -1813,9 +1827,15 @@ impl ProviderManager {
                         calls,
                         results,
                     )
+                    .map_err(|error| {
+                        last_provider_error = Some(error.clone());
+                        error
+                    })
                 },
             ),
-        }
+        };
+        // 耗尽时退回最后一次尝试的**原始**错误（含状态码/耗时/正文）。
+        outcome.map_err(|degraded| last_provider_error.unwrap_or(degraded))
     }
 
     /// D2：批量工具结果 followup（流式入口）。分派顺序与同步入口逐字一致。

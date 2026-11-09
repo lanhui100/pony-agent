@@ -668,6 +668,17 @@ fn transient_503_reply() -> MockReply {
     }
 }
 
+/// 网关常见形态：**空正文**的 503/502（`Content-Length: 0`）。
+/// 用于证明耗尽错误在空正文下也不得降级成空串。
+fn empty_body_503_reply() -> MockReply {
+    MockReply {
+        status: 503,
+        reason: "Service Unavailable",
+        body: "",
+        content_type: "application/json",
+    }
+}
+
 fn ok_reply() -> MockReply {
     MockReply {
         status: 200,
@@ -863,6 +874,13 @@ fn d3_batch_followup_retry_is_bounded_by_decision_max_attempts() {
             !error.trim().is_empty(),
             "PA-173 D3：失败必须带可见原因（禁止空错误），attempts={attempts}"
         );
+        // 契约修订 v3：耗尽错误**不得**被降级成「只剩响应正文」——
+        // 原始错误的状态码必须保留（否则用户只看到 JSON 正文，看不到 503/耗时）。
+        assert!(
+            error.contains("503"),
+            "PA-173 D3-v3：耗尽错误必须保留原始状态码 `503`（禁止降级为纯响应正文），\
+             attempts={attempts}，实际错误：{error}"
+        );
         assert_eq!(
             hits, expected_hits,
             "PA-173 D3：decision_max_attempts={attempts} ⇒ 必须恰好 {expected_hits} 次真实 HTTP\
@@ -870,3 +888,36 @@ fn d3_batch_followup_retry_is_bounded_by_decision_max_attempts() {
         );
     }
 }
+
+/// D3-v3（契约修订，缺陷锚点）：**空正文**的上游失败（网关常见 502/504/503 空体）
+/// 耗尽后**不得**返回空错误串。
+///
+/// 缺陷机制：耗尽时返回 `extract_provider_error_detail(...)`，只取「响应正文：」之后
+/// 的预览；空正文 ⇒ 预览为 `""` ⇒ 调用方拿到 `Err("")`，UI 只能显示空白/通用文案，
+/// 真实失败原因（状态码、耗时、endpoint）全部丢失。
+#[test]
+fn d3_batch_failure_never_returns_empty_error_on_empty_body() {
+    // ── Arrange：恒「空正文 503」。 ─────────────────────────────────────────────
+    let mock = MockProvider::script(vec![empty_body_503_reply()]);
+    let attempts = 2;
+
+    // ── Act ────────────────────────────────────────────────────────────────────
+    let result = drive_batch_followup(&mock, "pa173-batch-empty-body", attempts);
+    let hits = mock.request_count();
+
+    // ── Assert ─────────────────────────────────────────────────────────────────
+    let error = result.expect_err("PA-173 D3-v3：恒 503（空正文）必须返回 Err，禁止伪造成功");
+    assert_eq!(
+        hits, 2,
+        "PA-173 D3-v3：前置事实——空正文 503 同样要重试（attempts=2 ⇒ 2 次真实 HTTP），实际 {hits} 次"
+    );
+    assert!(
+        !error.trim().is_empty(),
+        "PA-173 D3-v3：空正文下错误串**不得**为空（必须至少保留状态码/耗时等本地事实），实际：{error:?}"
+    );
+    assert!(
+        error.contains("503"),
+        "PA-173 D3-v3：空正文下错误串必须保留原始状态码 `503`，实际：{error:?}"
+    );
+}
+
