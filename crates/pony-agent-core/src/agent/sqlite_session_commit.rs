@@ -787,17 +787,29 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 ///
 /// - 成功 ⇒ 调用方才允许写 SQLite 索引；
 /// - 失败 ⇒ 调用方整批判 `Failed`，**SQLite 一行都不改**（真源不允许「部分成功」）；
-/// - 降级只读实例（阶段 0 E5：抢不到单实例锁）**不写日志**——它本来就不可能提交
-///   SQLite，真源与索引必须一起不动，否则回放会把只读实例的意图当成事实。
+/// - 降级只读实例（阶段 0 E5：抢不到单实例锁）**同样写日志**（ADR 0107 §5 P0 日志先行）：
+///   索引写不了不等于本轮历史不存在。真源（每会话单写者）不依赖单实例锁——锁只保护
+///   **索引**的排他写，故只读实例追加 JSONL 是安全的；索引侧失败由调用方判
+///   `LogPersisted`（索引滞后），日志失败仍是 `Failed`。
 pub(crate) fn append_session_log_to_file(
     backend: &super::SqliteSessionBackend,
     commands: &[crate::agent::session::PersistCommand],
 ) -> Result<(), String> {
-    use crate::agent::session::SessionBackend;
-    if backend.is_read_only() {
-        return Ok(());
-    }
     backend.session_log_sink.append_commands(commands)
+}
+
+/// ADR 0107 §5 P0（失败域隔离）：把**日志已落盘之后**的索引失败归一为 `LogPersisted`。
+///
+/// `Succeeded` / `Unsupported` / `StaleEpoch` 原样透传（语义不变）；只有 `Failed` 在
+/// 「日志先行已成功」的上下文里才等价于「索引滞后」（可恢复，不是历史丢失）。
+pub(crate) fn index_failure_after_log(
+    outcome: crate::agent::session::PersistCommandOutcome,
+) -> crate::agent::session::PersistCommandOutcome {
+    use crate::agent::session::PersistCommandOutcome;
+    match outcome {
+        PersistCommandOutcome::Failed => PersistCommandOutcome::LogPersisted,
+        other => other,
+    }
 }
 
 /// `RemoveSession` 的日志目录清理：**只在 SQLite 提交成功之后**执行。

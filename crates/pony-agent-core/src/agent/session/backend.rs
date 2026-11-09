@@ -251,7 +251,32 @@ pub enum PersistCommandOutcome {
     Unsupported,
     /// 旧 epoch 命令被拒绝（materialize barrier 后）。
     StaleEpoch,
+    /// ADR 0107 §5 P0（日志先行 + 失败域隔离）：命令**已写入会话日志**（真源 +
+    /// `fsync`），但索引（SQLite）未应用——索引滞后可恢复，**不等于本轮历史丢失**。
+    ///
+    /// 只有「日志写成功 + 索引写失败（含 busy 重试耗尽 / begin tx 不可写 / 只读降级）」
+    /// 才返回它；日志写失败仍是 [`PersistCommandOutcome::Failed`]（fail-loud，SQLite 一行不改）。
+    ///
+    /// 调用方契约（`SessionStore::append_turn_fallible` 等）：必须提交内存 live 状态 +
+    /// 打一条含 `session_id` / `outcome` 的结构化「索引滞后」告警，**禁止**把它当作失败
+    /// 回滚内存，也**不要**再走索引侧单行落盘（索引由后续写入 / 重建补齐）。
+    LogPersisted,
     Failed,
+}
+
+/// ADR 0107 §5 P0：`LogPersisted`（日志已落盘、索引未应用）的结构化告警。
+///
+/// 含 `session_id` 与 `outcome`，可直接 grep 断言。返回 `true` 表示**索引未应用**：
+/// 调用方必须提交内存 live 状态并**跳过**索引侧单行落盘（索引滞后由后续写入 / 重建补齐）。
+pub fn report_index_deferred(session_id: &str, outcome: &PersistCommandOutcome) -> bool {
+    if !matches!(outcome, PersistCommandOutcome::LogPersisted) {
+        return false;
+    }
+    eprintln!(
+        "[pony-agent][session] index_deferred: session={session_id} outcome={outcome:?} \
+         （会话日志已落盘、SQLite 索引滞后：本轮历史提交内存 live 状态，索引由后续写入/重建补齐）"
+    );
+    true
 }
 
 impl PersistCommand {

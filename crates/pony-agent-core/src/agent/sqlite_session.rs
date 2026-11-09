@@ -2732,8 +2732,9 @@ impl SessionBackend for SqliteSessionBackend {
         // ADR 0099 阶段 0（E5）：降级只读实例在每次写入口重试一次 flock（非阻塞），
         // 持锁进程退出后自动恢复可写（query_only 本身不可逆）。
         self.try_recover_instance_lock();
-        // ADR 0099 阶段 1-B（真源优先）：先把命令流追加进会话日志（含 fsync），成功后才写
-        // SQLite 索引。日志写失败 ⇒ 整批 `Failed`，**SQLite 一行都不改**（无静默成功）。
+        // ADR 0099 阶段 1-B + ADR 0107 §5 P0（日志先行）：先把命令流追加进会话日志（含 fsync，
+        // 只读降级实例同样写）；日志写失败 ⇒ `Failed`（SQLite 一行不改）；日志已落盘后的索引
+        // 失败 ⇒ `LogPersisted`（索引滞后，不是历史丢失）。
         if let Err(error) = commit::append_session_log_to_file(self, &commands) {
             eprintln!("[pony-agent][session] 会话日志（真源）写入失败，SQLite 索引未改动：{error}");
             return PersistCommandOutcome::Failed;
@@ -2752,7 +2753,7 @@ impl SessionBackend for SqliteSessionBackend {
                     Ok(slot) => slot,
                     Err(error) => {
                         eprintln!("[pony-agent][session] SQLite open error: {error}");
-                        return PersistCommandOutcome::Failed;
+                        return PersistCommandOutcome::LogPersisted;
                     }
                 };
                 let conn = slot.as_ref().expect("connection initialized");
@@ -2764,7 +2765,8 @@ impl SessionBackend for SqliteSessionBackend {
                     // ADR 0099 阶段 1-B：SQLite 提交成功后才删 `RemoveSession` 的日志目录
                     // （先删索引行、再删目录，不留「索引已删但日志还在」的半态）。
                     commit::delete_session_logs_after_commit(self, &commands, &outcome);
-                    return outcome;
+                    // ADR 0107 §5 P0：日志已落盘 ⇒ 索引侧失败退化为「索引滞后」（`LogPersisted`）。
+                    return commit::index_failure_after_log(outcome);
                 }
                 commit::BatchAttempt::Busy(message) => {
                     // NFR `retry.max_attempts=3`：最多 3 次尝试（attempt 0..=2）。
@@ -2773,7 +2775,7 @@ impl SessionBackend for SqliteSessionBackend {
                             "[pony-agent][session] SQLite batch command busy 重试耗尽（attempt={attempt}，共 {}ms）：{message}",
                             started.elapsed().as_millis()
                         );
-                        return PersistCommandOutcome::Failed;
+                        return PersistCommandOutcome::LogPersisted;
                     }
                     let backoff = commit::busy_backoff_ms(attempt);
                     eprintln!(
