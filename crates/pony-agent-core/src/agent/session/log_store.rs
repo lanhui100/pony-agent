@@ -205,6 +205,50 @@ struct HeaderLine<'a> {
     cwd: &'a str,
     #[serde(rename = "createdAt")]
     created_at: i64,
+    /// 迁移来源自描述（ADR 0099 阶段 3-B）。**正常写入路径不写**（`skip_serializing_if`），
+    /// 只有「从 blob 合成的日志」才带 ⇒ 合成流永不伪装成原始过程流。
+    #[serde(default, rename = "source", skip_serializing_if = "Option::is_none")]
+    source: Option<&'a SessionLogSource>,
+}
+
+/// 会话日志的**来源自描述**（日志 header 的可选 `source` 字段）。
+///
+/// 契约（ADR 0099 阶段 3-B / 方案 A）：
+/// - 只有「从存量 blob 合成的日志」写它，`kind = "migrated-from-blob"`；
+/// - 正常写入路径（`SessionLogSink`）**不写**该字段（保持 `None`）——合成流不得伪装成
+///   原始过程流，读方/审计方据此可区分「真实过程事件」与「按状态反推的事件」；
+/// - 字段可选且向后兼容：旧读方（含本仓 `classify_header_line`）遇到未知键**忽略**，
+///   四态分类不变。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLogSource {
+    /// 来源类型；目前只有 `migrated-from-blob`。
+    pub kind: String,
+    /// 合成时刻（Unix 毫秒）。
+    #[serde(default)]
+    pub migrated_at_ms: Option<i64>,
+    /// 合成方应用版本。
+    #[serde(default)]
+    pub app_version: Option<String>,
+}
+
+impl SessionLogSource {
+    /// `source.kind` 的唯一取值：由存量 blob 合成。
+    pub const KIND_MIGRATED_FROM_BLOB: &'static str = "migrated-from-blob";
+
+    /// 「从 blob 迁移」来源标记。
+    pub fn migrated_from_blob(app_version: impl Into<String>, migrated_at_ms: i64) -> Self {
+        Self {
+            kind: Self::KIND_MIGRATED_FROM_BLOB.to_string(),
+            migrated_at_ms: Some(migrated_at_ms),
+            app_version: Some(app_version.into()),
+        }
+    }
+
+    /// 是否是从 blob 合成的日志。
+    pub fn is_migrated_from_blob(&self) -> bool {
+        self.kind == Self::KIND_MIGRATED_FROM_BLOB
+    }
 }
 
 /// 读取指定文件的 header 并分类。
@@ -218,6 +262,56 @@ pub fn read_header(path: &Path) -> Result<HeaderClass, LogStoreError> {
         .read_line(&mut line)
         .map_err(|e| io_err(format!("read header of `{}`", path.display()), e))?;
     Ok(classify_header_line(&line))
+}
+
+/// 读日志 header 里的**来源自描述**（`source` 字段）。
+///
+/// 与 [`read_header`] 互补而不是替代：`SessionLogHeader` 只承载「会话身份 + 格式版本」
+/// 这层必需信息（加字段会破坏仓库内其它模块的结构体字面量构造），来源标记是**可选元数据**，
+/// 由本函数单独读出 ⇒ 旧读方零影响、四态分类不变（`read_header` 仍按 version 四态判定）。
+///
+/// - 文件缺失 / IO 失败 ⇒ `Err`；
+/// - header 可读但无 `source` 键（正常写入路径 / 旧文件）⇒ `Ok(None)`；
+/// - `source` 存在但结构坏 ⇒ `Ok(None)`＋不静默：调用方若要强判可用
+///   [`read_header_source_strict`]。
+pub fn read_header_source(path: &Path) -> Result<Option<SessionLogSource>, LogStoreError> {
+    let file = File::open(path).map_err(|e| io_err(format!("open `{}`", path.display()), e))?;
+    let mut line = String::new();
+    BufReader::new(file)
+        .read_line(&mut line)
+        .map_err(|e| io_err(format!("read header of `{}`", path.display()), e))?;
+    Ok(source_from_header_line(&line))
+}
+
+/// 与 [`read_header_source`] 同源，但 `source` 结构坏时返回 `Err`（审计/排查入口用）。
+pub fn read_header_source_strict(path: &Path) -> Result<Option<SessionLogSource>, LogStoreError> {
+    let file = File::open(path).map_err(|e| io_err(format!("open `{}`", path.display()), e))?;
+    let mut line = String::new();
+    BufReader::new(file)
+        .read_line(&mut line)
+        .map_err(|e| io_err(format!("read header of `{}`", path.display()), e))?;
+    let value: serde_json::Value =
+        serde_json::from_str(line.trim()).map_err(|e| LogStoreError::Serialize {
+            reason: format!("header is not valid JSON: {e}"),
+        })?;
+    match value.get("source") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(raw) => serde_json::from_value(raw.clone())
+            .map(Some)
+            .map_err(|e| LogStoreError::Serialize {
+                reason: format!("header `source` is malformed: {e}"),
+            }),
+    }
+}
+
+/// 从 header 首行文本里取 `source`（坏 JSON / 坏结构 ⇒ `None`）。
+fn source_from_header_line(line: &str) -> Option<SessionLogSource> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let raw = value.get("source")?;
+    if raw.is_null() {
+        return None;
+    }
+    serde_json::from_value(raw.clone()).ok()
 }
 
 /// 把首行文本分类为四态之一。
@@ -337,6 +431,9 @@ pub struct SessionLogMeta {
     pub cwd: String,
     /// 创建时间，Unix 毫秒。
     pub created_at: i64,
+    /// 迁移来源自描述（只有「从 blob 合成」的日志才写；正常写入为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SessionLogSource>,
 }
 
 impl SessionLogMeta {
@@ -346,7 +443,20 @@ impl SessionLogMeta {
             session_id: session_id.into(),
             cwd: cwd.into(),
             created_at: now_ms(),
+            source: None,
         }
+    }
+
+    /// 附上「从 blob 迁移」来源标记（header 会写 `source` 字段）。
+    pub fn with_source(mut self, source: SessionLogSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// 指定 `created_at`（迁移时用会话自身的 `updated_at_ms` 作近似）。
+    pub fn with_created_at(mut self, created_at: i64) -> Self {
+        self.created_at = created_at;
+        self
     }
 
     fn from_header(header: &SessionLogHeader) -> Self {
@@ -354,6 +464,7 @@ impl SessionLogMeta {
             session_id: header.session_id.clone(),
             cwd: header.cwd.clone(),
             created_at: header.created_at,
+            source: None,
         }
     }
 }
@@ -736,6 +847,7 @@ impl SessionLogStore {
                 id: session_id,
                 cwd: &meta.cwd,
                 created_at: meta.created_at,
+                source: meta.source.as_ref(),
             };
             let line = serde_json::to_string(&header).map_err(|e| LogStoreError::Serialize {
                 reason: e.to_string(),

@@ -10,6 +10,8 @@ mod log_sink;
 pub(crate) mod fold;
 // ADR 0099 阶段 3-A：会话目录包（`manifest.json` + `events.jsonl` + `attachments/`）导出/导入。
 pub mod bundle;
+// ADR 0099 阶段 3-B：存量会话日志回填（grandfather 转正，方案 A）。
+pub mod log_migrate;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -22,9 +24,16 @@ pub mod workspace_snapshot;
 
 // ADR 0099 阶段 1-A：仅 additive 导出。
 pub use log_store::{
-    encode_session_id_segment, normalize_cwd_segment, read_header, HeaderClass, LogReader,
-    LogStoreError, LogWriter, NewSessionLogEvent, SessionLogEvent, SessionLogHeader, SessionLogMeta,
+    encode_session_id_segment, normalize_cwd_segment, read_header, read_header_source,
+    read_header_source_strict, HeaderClass, LogReader, LogStoreError, LogWriter,
+    NewSessionLogEvent, SessionLogEvent, SessionLogHeader, SessionLogMeta, SessionLogSource,
     SessionLogStore, SESSION_LOG_FILE_NAME, SESSION_LOG_FORMAT_VERSION,
+};
+
+// ADR 0099 阶段 3-B：additive 导出（迁移器 / 报告 / 比对豁免清单）。
+pub use log_migrate::{
+    migrate_grandfathered_sessions, migrated_session_ids, synthesize_log_events, MigrateOptions,
+    MigrateReport, MIGRATION_PARITY_EXEMPTIONS,
 };
 
 // ADR 0099 阶段 1-B：additive 导出（`sqlite_session` 接线与验收测试共用同一路径解析）。

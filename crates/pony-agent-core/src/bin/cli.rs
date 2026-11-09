@@ -1041,6 +1041,9 @@ fn print_usage(format: OutputFormat) {
     human!(format, "  ponycli sessions export <session-id> --out <path> [--db <path>] [--format dir|tar]");
     human!(format, "                             Bundle = manifest.json + events.jsonl + attachments/;");
     human!(format, "                             `tar` is uncompressed ustar (single file, no zstd yet)");
+    human!(format, "  ponycli sessions migrate-logs [--dry-run] [--db <path>] [--force]");
+    human!(format, "                             Grandfather→log backfill (synthesized streams are");
+    human!(format, "                             tagged source.kind=migrated-from-blob; blob kept for rollback)");
     human!(format, "  ponycli sessions import <path> [--db <path>] [--dry-run] [--force]");
     human!(format, "                             Import writes ONLY the session log + attachments:");
     human!(format, "                             SQLite index is rebuilt by `sessions rebuild-index`.");
@@ -1290,6 +1293,86 @@ fn run_maintenance_subcommand_if_requested() -> Option<i32> {
         .or_else(run_sessions_rebuild_index_if_requested)
         .or_else(run_sessions_export_if_requested)
         .or_else(run_sessions_import_if_requested)
+        .or_else(run_sessions_migrate_logs_if_requested)
+}
+
+/// `ponycli sessions migrate-logs [--dry-run] [--db <path>] [--force]`
+///
+/// ADR 0099 阶段 3-B（方案 A）：把**只有索引 blob、没有日志**的存量会话（grandfather）
+/// 转正为日志真源 —— 从 blob 状态合成事件流，写临时目录、`fold` 回来**逐字段比对**，
+/// 一致才原子发布到正式日志路径。
+///
+/// 三条用户可见承诺（帮助文本与输出都写明）：
+/// - **迁移后保留 blob 作回滚面**（不删 `sessions` 行；出问题删日志目录即回到老读路径）；
+/// - 合成日志已在 header 标记 `source.kind = "migrated-from-blob"`，**不是原始过程流**；
+/// - 不一致的会话**不落盘、不改原数据**，只在报告里列出。
+///
+/// 退出码：`0` 全部成功或无事可做 / `2` 参数或库非法 / `5` 存在 mismatched 或 failed。
+fn run_sessions_migrate_logs_if_requested() -> Option<i32> {
+    use pony_agent_core::agent::session::{migrate_grandfathered_sessions, MigrateOptions};
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("sessions")
+        || args.get(2).map(String::as_str) != Some("migrate-logs")
+    {
+        return None;
+    }
+    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    let force = args.iter().any(|arg| arg == "--force");
+    let db_path = flag_value(&args, "--db")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(pony_agent_core::agent::sqlite_session::default_sqlite_path);
+    if let Err(error) = validate_backfill_db(&db_path) {
+        eprintln!("[ponycli] sessions migrate-logs 参数错误：{error}");
+        return Some(2);
+    }
+    // 预演必须零写入：`mode=ro` + `query_only`，不建表、不迁移、不改 journal_mode。
+    let backend = if dry_run {
+        pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_read_only(db_path.clone())
+    } else {
+        pony_agent_core::agent::sqlite_session::SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            pony_agent_core::agent::session::SeparateTraceTableMode::WriteSeparate,
+        )
+    };
+    let log_root = pony_agent_core::agent::session::session_log_root_for_db(&db_path);
+    match migrate_grandfathered_sessions(&backend, MigrateOptions { dry_run, force }) {
+        Ok(report) => {
+            println!("db: {}", db_path.display());
+            println!("log-root: {}", log_root.display());
+            println!(
+                "mode: {}",
+                if dry_run {
+                    "dry-run（只合成+校验，零写入）"
+                } else {
+                    "apply（写合成日志；**保留 blob 作回滚面**）"
+                }
+            );
+            println!("summary: {}", report.summary_line());
+            println!("scanned: {}", report.scanned);
+            println!("migrated({}): {:?}", report.migrated.len(), report.migrated);
+            println!("skipped_has_log: {}", report.skipped_has_log);
+            println!("remigrated({}): {:?}", report.remigrated.len(), report.remigrated);
+            println!("mismatched({}):", report.mismatched.len());
+            for (session_id, reason) in &report.mismatched {
+                println!("  - {session_id}: {reason}");
+            }
+            println!("failed({}):", report.failed.len());
+            for (session_id, reason) in &report.failed {
+                println!("  - {session_id}: {reason}");
+            }
+            println!(
+                "note: 合成日志 header 标记 source.kind = \"migrated-from-blob\"（不是原始过程流）；blob 行保留作回滚面"
+            );
+            println!(
+                "note: 索引不受影响；这些会话此后「删掉索引行仍可读」由日志真源保证"
+            );
+            Some(report.exit_code())
+        }
+        Err(error) => {
+            eprintln!("[ponycli] sessions migrate-logs 失败：{error}");
+            Some(1)
+        }
+    }
 }
 
 /// `ponycli sessions export <session-id> --out <path> [--db <path>] [--format dir|tar]`
