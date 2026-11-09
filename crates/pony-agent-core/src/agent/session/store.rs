@@ -640,6 +640,13 @@ impl SessionStore {
                 });
             }
             let outcome = self.backend.persist_commands_batch(commands);
+            // ADR 0107 §5 P1 / D4：同一会话正被另一个进程写 ⇒ 可识别的会话级冲突，
+            // 不是数据损坏、也不影响本进程写其它会话。
+            if matches!(outcome, PersistCommandOutcome::WriterBusy) {
+                return Err(SessionError::SessionWriterBusy {
+                    session_id: session_key.clone(),
+                });
+            }
             if matches!(outcome, PersistCommandOutcome::Failed | PersistCommandOutcome::StaleEpoch) {
                 return Err(SessionError::BackendFailure(format!(
                     "append_turn batch persist failed: {outcome:?}"

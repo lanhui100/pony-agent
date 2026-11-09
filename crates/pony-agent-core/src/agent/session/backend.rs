@@ -261,6 +261,12 @@ pub enum PersistCommandOutcome {
     /// 打一条含 `session_id` / `outcome` 的结构化「索引滞后」告警，**禁止**把它当作失败
     /// 回滚内存，也**不要**再走索引侧单行落盘（索引由后续写入 / 重建补齐）。
     LogPersisted,
+    /// ADR 0107 §5 P1：**同一会话正被另一个进程写**（会话日志 `flock` 冲突）。
+    ///
+    /// 与 [`PersistCommandOutcome::Failed`] 的区别：这不是数据损坏、也不是索引故障，
+    /// 而是「会话级单写者」的正常拒绝——调用方必须映射成可识别的
+    /// `SessionError::SessionWriterBusy` 并让用户看到"该会话在别处被占用"。
+    WriterBusy,
     Failed,
 }
 

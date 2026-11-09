@@ -851,6 +851,10 @@ pub enum SessionError {
     StaleVersion { expected: u64, actual: u64 },
     StorageCorruption(String),
     InvalidOperation(String),
+    /// ADR 0107 §5 P1：同一会话正被另一个进程写（会话日志单写者冲突）。
+    ///
+    /// 这是**会话级**拒绝：本进程仍可继续写其它会话，用户应看到"该会话在别处被占用"。
+    SessionWriterBusy { session_id: String },
 }
 
 impl std::fmt::Display for SessionError {
@@ -864,6 +868,10 @@ impl std::fmt::Display for SessionError {
             }
             Self::StorageCorruption(msg) => write!(f, "Storage corruption: {msg}"),
             Self::InvalidOperation(msg) => write!(f, "Invalid operation: {msg}"),
+            Self::SessionWriterBusy { session_id } => write!(
+                f,
+                "session_writer_busy: session `{session_id}` is being written by another process"
+            ),
         }
     }
 }

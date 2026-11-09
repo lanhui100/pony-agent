@@ -241,7 +241,11 @@ fn expected_turn(user: &str, assistant: &str) -> Vec<(String, String)> {
 // C1：只读降级后端仍必须写会话日志（日志先行）
 // ---------------------------------------------------------------------------
 
+// ADR 0107 §5 P1 退役：P1 取消了「抢不到库级锁 ⇒ 整库降级只读」这一状态，
+// 本用例的前提（存在锁降级实例）不再成立。日志先行的**实质**由 C2/C4 与 P1 的
+// D1/D3/D5 共同覆盖；保留用例体作为历史证据，`#[ignore]` 明确标注退役原因。
 #[test]
+#[ignore = "P1 retired: lock-degraded read-only state no longer exists (ADR 0107 §5 P1)"]
 fn c1_read_only_backend_still_writes_session_log() {
     let fixture = Fixture::new("c1");
     let session_id = "p0_c1_read_only";
@@ -602,7 +606,10 @@ fn c5_maintenance_handle_stays_zero_write() {
 // C6：锁降级实例的日志 writer 必须**按批释放** flock（R3）
 // ---------------------------------------------------------------------------
 
+// ADR 0107 §5 P1 退役：降级实例不存在 ⇒ 「降级实例按批释放锁」失去对象。
+// 会话级单写者与跨进程写者行为改由 P1 的 D3/D4 覆盖。
 #[test]
+#[ignore = "P1 retired: degraded instance no longer exists (ADR 0107 §5 P1)"]
 fn c6_degraded_instance_releases_session_log_lock_after_batch() {
     let fixture = Fixture::new("c6");
     let session_id = "p0_c6_lock_handoff";
@@ -673,17 +680,17 @@ fn c7_remove_session_only_batch_never_claims_log_persisted() {
     let fixture = Fixture::new("c7");
     let session_id = "p0_c7_remove_only";
 
-    // —— Arrange ——：锁降级实例（索引必失败）+ 一批**完全无日志字节**的命令。
+    // —— Arrange ——：一批**完全无日志字节**的命令。
     // `RemoveSession` 按既有语义不进日志（删除由 `delete_session` 在索引提交后承担）
     // ⇒ 日志层 `grouped.is_empty()` ⇒ 零写入。
-    { let writable = fixture.backend(); let _ = writable.load_store(); }
-    let lock_holder = LockHolder::acquire(&fixture.lock_path());
-    let degraded = fixture.backend();
-    let _ = degraded.load_store();
-    assert!(degraded.is_read_only(), "前置：必须锁降级只读（索引必失败）");
+    //
+    // ADR 0107 §5 P1：不再用「锁降级实例」构造（该状态已取消）；R5 的实质是
+    // 「日志层没写字节 ⇒ 不得自称 LogPersisted」，用可写实例同样可判（索引成功 ⇒ Succeeded）。
+    let writable = fixture.backend();
+    let _ = writable.load_store();
 
     // —— Act ——
-    let outcome = degraded.persist_commands_batch(vec![PersistCommand::RemoveSession {
+    let outcome = writable.persist_commands_batch(vec![PersistCommand::RemoveSession {
         epoch: 1,
         session_id: session_id.to_string(),
     }]);
@@ -698,7 +705,6 @@ fn c7_remove_session_only_batch_never_claims_log_persisted() {
         !fixture.log_path(session_id).is_file(),
         "`RemoveSession` 不进日志：不得产出 session.jsonl"
     );
-    drop(lock_holder);
 }
 
 // ---------------------------------------------------------------------------

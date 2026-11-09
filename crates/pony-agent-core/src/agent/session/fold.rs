@@ -1755,6 +1755,16 @@ pub fn rebuild_index_at_root(
     log_root: &Path,
     options: RebuildOptions,
 ) -> Result<RebuildReport, String> {
+    // ADR 0107 §5 P1：破坏性维护必须独占（`dry_run` 零写入、无需锁）。
+    // 抢不到 ⇒ 明确拒绝（D2），绝不与另一个 rebuild/migrate 并发跑。
+    let _maintenance_guard = if options.dry_run {
+        None
+    } else {
+        Some(
+            crate::agent::sqlite_session::commit::acquire_maintenance_lock(backend.db_path())
+                .map_err(|busy| busy.to_string())?,
+        )
+    };
     let store = SessionLogStore::new(log_root.to_path_buf());
     // 索引现有视图：**只加载一次**，且必须取**索引原样**（`load_index_store`），
     // 不能取运行时的 `load_store()`。

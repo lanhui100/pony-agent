@@ -190,18 +190,22 @@ fn d3_two_processes_write_different_sessions() {
     // 父进程**保持** store 存活（持有库级锁），子进程在此期间写另一个会话。
     let mut local = open_instance(&dir);
     write_turn_here(&mut local, "p1_d3_local", "本地问", "本地答");
-    // 自证：父进程确实持有库级锁（同进程另开 OFD 抢锁必须 WouldBlock）。
+    // 自证（P1 语义）：日常写入**不得**留下库级独占锁——库级锁只属于破坏性维护。
+    // P0 时代此处断言的是"父进程持锁"，P1 明确推翻：日常写若仍持库级锁，
+    // 第二个进程就会被挡成只读（正是本次要修的病根）。
     {
         let lock_path = std::path::PathBuf::from(format!("{}.lock", db_path(&dir).display()));
-        let probe = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .expect("open lock probe");
-        assert!(
-            probe.try_lock().is_err(),
-            "前置不成立：父进程写入后并未持有库级锁，D3 无法证明跨进程并发"
-        );
+        if lock_path.exists() {
+            let probe = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("open lock probe");
+            assert!(
+                probe.try_lock().is_ok(),
+                "P1 违约：日常写入后仍持有库级独占锁（`<db>.lock`），第二进程会被降级只读"
+            );
+        }
     }
 
     let child = spawn_helper(
