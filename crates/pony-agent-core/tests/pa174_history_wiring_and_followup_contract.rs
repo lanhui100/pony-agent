@@ -9,7 +9,7 @@
 //!   的 `to_chat_role` 把它映射成 `"system"`；`openai_request_messages`（:4784）**不做还原**
 //!   ⇒ 走 openai-completions 的 provider 收到的历史是「一串 system 消息，内容带前缀」。
 //!   Anthropic 路径（:4570-4610）会剥前缀并产出 `role: assistant`，两条协议行为已分叉。
-//! - **F1 1:1 followup**：包装 `retry_provider_followup_timeout_with_policy("followup_sync",…)`
+//! - **F1 1:1 followup**：包装 `retry_provider_followup_timeout_with_policy_deadline("followup_sync",…)`（当时无 deadline）
 //!   （:1435/:1460）无 pristine-base 重置（构造器每次尝试回写 `*accumulated_messages`），
 //!   Anthropic 1:1 臂（:1483）**完全没有重试壳**；耗尽时重试内核返回
 //!   `extract_provider_error_detail`（:5097，空正文 ⇒ `""`）。
@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use pony_agent_core::agent::config::{
     aggregate_sync_call_budget_ms, upstream_policy_report, ProviderModelCapabilities,
-    ProviderSelectionResolver, ResolvedProviderSelection, ThinkingParamPattern, UpstreamPolicy,
+    ResolvedProviderSelection, ThinkingParamPattern, UpstreamPolicy,
     UPSTREAM_AGGREGATE_DEADLINE_MS_MAX,
 };
 use pony_agent_core::agent::provider::{
@@ -52,7 +52,7 @@ use pony_agent_core::agent::context::{
     TurnContextBuilder,
 };
 use pony_agent_core::agent::session::{
-    history_from_turn_events, SessionBackend, SessionSnapshot, TurnHistoryMessage,
+    history_from_turn_events, SessionBackend, SessionSnapshot,
 };
 use pony_agent_core::agent::sqlite_session::SqliteSessionBackend;
 use pony_agent_core::agent::tools::{ToolCall, ToolDefinition, ToolResult};

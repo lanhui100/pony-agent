@@ -5499,20 +5499,10 @@ where
     )
 }
 
-/// followup 专用包装：允许 rate-limit 长退避。
-/// PA-172 §2.1：策略驱动的 followup 作用域重试（`ProviderManager` 内部唯一入口）。
-fn retry_provider_followup_timeout_with_policy<T, F>(
-    label: &str,
-    policy: &UpstreamPolicy,
-    operation: F,
-) -> Result<T, String>
-where
-    F: FnMut() -> Result<T, String>,
-{
-    retry_provider_followup_timeout_with_policy_deadline(label, policy, None, operation)
-}
-
-/// PA-174 F2：followup 作用域的 deadline 版包装（`deadline=None` 等价既有包装）。
+/// PA-174 F2：followup 作用域的 deadline 版包装（`deadline=None` 等价 PA-172 的无 deadline 语义）。
+///
+/// 无 deadline 的旧包装 `retry_provider_followup_timeout_with_policy` 已随 PA-174 的
+/// 「所有同步入口都必须带聚合预算」收口而删除（调用点全部改为传 `deadline`）。
 fn retry_provider_followup_timeout_with_policy_deadline<T, F>(
     label: &str,
     policy: &UpstreamPolicy,
