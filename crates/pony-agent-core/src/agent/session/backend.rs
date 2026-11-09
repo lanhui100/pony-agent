@@ -278,11 +278,24 @@ pub fn report_index_deferred(session_id: &str, outcome: &PersistCommandOutcome) 
     if !matches!(outcome, PersistCommandOutcome::LogPersisted) {
         return false;
     }
+    INDEX_DEFERRED_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     eprintln!(
-        "[pony-agent][session] index_deferred: session={session_id} outcome={outcome:?} \
-         （会话日志已落盘、SQLite 索引滞后：本轮历史提交内存 live 状态，索引由后续写入/重建补齐）"
+        "[pony-agent][session] index_deferred: session={session_id} outcome={outcome:?} total={} \
+         （会话日志已落盘、SQLite 索引滞后：本轮历史提交内存 live 状态，索引由后续写入/重建补齐）",
+        index_deferred_total()
     );
     true
+}
+
+/// ADR 0107 §5 P1：进程级「索引滞后」累计次数（可机读，供诊断/测试断言）。
+///
+/// 语义：会话日志已落盘、但 SQLite 索引未应用的**提交次数**。它是「索引新鲜度」的
+/// 最简可观测信号——非零即说明本进程至少有一轮历史只存在于日志里（可重建、未丢）。
+static INDEX_DEFERRED_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 读取累计的「索引滞后」次数（进程级，只增不减）。
+pub fn index_deferred_total() -> u64 {
+    INDEX_DEFERRED_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl PersistCommand {
@@ -523,4 +536,29 @@ pub trait SessionBackend: Send + Sync {
         SessionBackendMutationResult::Unsupported
     }
     fn attachment_root(&self) -> Option<PathBuf>;
+}
+
+#[cfg(test)]
+mod index_deferred_tests {
+    use super::*;
+
+    /// ADR 0107 §5 P1：`index_deferred` 必须可机读（不只靠 grep 日志行）。
+    #[test]
+    fn index_deferred_counter_tracks_log_persisted_only() {
+        let before = index_deferred_total();
+        assert!(
+            !report_index_deferred("s-index-deferred", &PersistCommandOutcome::Succeeded),
+            "非 LogPersisted 不得计入索引滞后"
+        );
+        assert_eq!(index_deferred_total(), before, "非 LogPersisted 不得改变计数");
+        assert!(
+            report_index_deferred("s-index-deferred", &PersistCommandOutcome::LogPersisted),
+            "LogPersisted 必须报告索引未应用"
+        );
+        assert_eq!(
+            index_deferred_total(),
+            before + 1,
+            "LogPersisted 必须让计数 +1"
+        );
+    }
 }
