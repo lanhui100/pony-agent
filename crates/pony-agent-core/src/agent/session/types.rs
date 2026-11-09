@@ -754,6 +754,12 @@ pub struct TurnTraceRecord {
     pub session_summary: Option<String>,
     pub fallback_reason: Option<String>,
     pub error: Option<String>,
+    /// PA-171 C4：失败归类（camelCase `errorClass`；取值 `timeout|rate_limited|quota|network|auth|
+    /// bad_request|other`，唯一来源 [`crate::agent::retry::classify_error_class`]）。
+    ///
+    /// additive：`None` ⇒ 键缺席（旧读取端不读即行为不变）；失败轮恒有值，是审计机的落盘判据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
     pub input_tokens: Option<u64>,
     pub cache_hit_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,

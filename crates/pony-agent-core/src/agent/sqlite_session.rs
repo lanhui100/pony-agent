@@ -3488,6 +3488,8 @@ mod tests {
 
     fn trace(turn_id: &str, title: &str, updated_at: u64) -> TurnTraceRecord {
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: turn_id.to_string(),
             session_id: Some("s1".to_string()),
             event_id: None,

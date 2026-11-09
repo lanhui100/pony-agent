@@ -1,6 +1,8 @@
 // turn_persist: 轮次结果落库、附件保存、失败 trace 构建与 checkpoint 更新。
 // 由 runtime/mod.rs 的 AgentRuntime 巨型 impl 拆分而来，行为与结构保持一致。
 use super::*;
+// PA-171 C4：失败轮归因（`runtime/mod.rs` 的 glob 未覆盖新增旁路，故在此显式引入）。
+use crate::agent::turn_flow::{emit_stream_failed_attributed, FailedTurnAttribution};
 
 /// Wave-7 B001/B003：构造一条账本记录（纯函数，可单测）。
 ///
@@ -228,6 +230,10 @@ impl AgentRuntime {
         session_summary: Option<String>,
         error: Option<String>,
     ) {
+        // PA-171 C4-S3：失败轮落盘同样带归类（唯一来源 `retry::classify_error_class`）。
+        let error_class = error
+            .as_deref()
+            .map(|text| crate::agent::retry::classify_error_class(text).to_string());
         let trace_timeline = build_persisted_trace_timeline_with_provider_calls(
             user_message,
             phase,
@@ -300,6 +306,7 @@ impl AgentRuntime {
                     session_summary,
                     fallback_reason,
                     error,
+                    error_class,
                     input_tokens,
                     cache_hit_input_tokens,
                     reasoning_tokens,
@@ -458,6 +465,104 @@ impl AgentRuntime {
         // B017：本轮失败前已产出的 assistant 正文（`None`/全空白 ⇒ 事件正文回落既有占位文案）。
         partial_text: Option<String>,
     ) {
+        // PA-171 C4-S1：归因按「本轮 provider 元数据 + 错误文本」派生（矩阵 §4.2 冻结取值），
+        // 三字段**不再写 None**；落盘（checkpoint + trace record）与 wire 事件同源同值。
+        self.fail_stream_turn_with_hook_dispatch_impl(
+            sink,
+            control,
+            session_id,
+            turn_id,
+            user_message,
+            provider_meta,
+            build_context_observation,
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            first_token_latency_ms,
+            turn_duration_ms,
+            completed_hops,
+            error,
+            partial_text,
+            None,
+        );
+    }
+
+    /// PA-171 C4：带**触发方标签**的失败派发（`fallback_reason` 记录触发阶段）。
+    ///
+    /// 仅 provider 类失败使用：首跳 decision 失败 ⇒ `provider_decision_failed`；
+    /// 工具 followup 的模型调用失败 ⇒ `provider_followup_failed`。其它失败（工具/钩子/附件）
+    /// 走不带标签的同名入口，`fallback_reason` 保留矩阵冻结值 `turn_failed_no_fallback`。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fail_stream_turn_with_hook_dispatch_tagged(
+        &self,
+        sink: &impl TurnEventSink,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        completed_hops: usize,
+        error: String,
+        partial_text: Option<String>,
+        trigger: &'static str,
+    ) {
+        self.fail_stream_turn_with_hook_dispatch_impl(
+            sink,
+            control,
+            session_id,
+            turn_id,
+            user_message,
+            provider_meta,
+            build_context_observation,
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            first_token_latency_ms,
+            turn_duration_ms,
+            completed_hops,
+            error,
+            partial_text,
+            Some(trigger),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fail_stream_turn_with_hook_dispatch_impl(
+        &self,
+        sink: &impl TurnEventSink,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        completed_hops: usize,
+        error: String,
+        partial_text: Option<String>,
+        trigger: Option<&'static str>,
+    ) {
+        let attribution = match trigger {
+            Some(trigger) => FailedTurnAttribution {
+                fallback_reason: Some(trigger.to_string()),
+                ..FailedTurnAttribution::from_failure(provider_meta, &error)
+            },
+            None => FailedTurnAttribution::from_failure(provider_meta, &error),
+        };
         self.update_execution_checkpoint(
             control,
             turn_id,
@@ -467,9 +572,9 @@ impl AgentRuntime {
             None,
             &trace_steps,
             &tool_activities,
-            None,
-            None,
-            None,
+            attribution.provider_source.as_deref(),
+            attribution.provider_mode.as_deref(),
+            attribution.fallback_reason.as_deref(),
             Some("failed"),
             Some(&error),
         );
@@ -484,12 +589,12 @@ impl AgentRuntime {
             provider_call_records.clone(),
             hook_trace_records.clone(),
             provider_meta,
-            None,
-            None,
+            attribution.provider_source.clone(),
+            attribution.provider_mode.clone(),
             build_context_observation.clone(),
             None,
             None,
-            None,
+            attribution.fallback_reason.clone(),
             None,
             None,
             None,
@@ -500,7 +605,7 @@ impl AgentRuntime {
             None,
             Some(error.clone()),
         );
-        emit_stream_failed(
+        emit_stream_failed_attributed(
             sink,
             turn_id.to_string(),
             provider_meta,
@@ -517,6 +622,7 @@ impl AgentRuntime {
             // B017：调用方（`handle_stream_tool_turn` 等）把「本轮已产出正文」透传进来，
             // 失败事件因此不再只剩占位文案；`None` 时仍是既有 `This turn failed.`（兼容锁）。
             partial_text,
+            attribution,
         );
     }
 
@@ -628,6 +734,9 @@ impl AgentRuntime {
         error: String,
     ) {
         let error_message = error;
+        // PA-171 C4-S3：失败轮落盘归类（与 wire 事件同源同值）。
+        let error_class =
+            Some(crate::agent::retry::classify_error_class(error_message.as_str()).to_string());
         let assistant_message = error_message.clone();
         let trace_timeline = build_persisted_trace_timeline_with_provider_calls(
             user_message,
@@ -695,6 +804,7 @@ impl AgentRuntime {
                     session_summary: Some(error_message.clone()),
                     fallback_reason,
                     error: Some(error_message),
+                    error_class,
                     input_tokens: None,
                     cache_hit_input_tokens: None,
                     reasoning_tokens: None,
@@ -745,6 +855,8 @@ impl AgentRuntime {
         } else {
             trace_steps
         };
+        // PA-171 C4-S3：watchdog 失败落盘同样带归类（唯一来源 `classify_error_class`）。
+        let error_class = Some(crate::agent::retry::classify_error_class(error.as_str()).to_string());
         let trace_timeline = build_persisted_trace_timeline(
             user_message,
             "failed",
@@ -809,6 +921,7 @@ impl AgentRuntime {
                     session_summary: Some(error.clone()),
                     fallback_reason: None,
                     error: Some(error.clone()),
+                    error_class,
                     input_tokens: None,
                     cache_hit_input_tokens: None,
                     reasoning_tokens: None,

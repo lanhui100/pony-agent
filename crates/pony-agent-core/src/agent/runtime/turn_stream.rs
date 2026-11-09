@@ -1,4 +1,6 @@
 use super::*;
+// PA-171 C4：失败轮归因载体与带归因的派发旁路（`runtime/mod.rs` 的 glob 未覆盖新增符号）。
+use crate::agent::turn_flow::emit_stream_failed_attributed;
 
 /// wave-64 R2：流式决策因用户停止而中断、取消终态已在 fallback 之前派发时的控制流哨兵。
 ///
@@ -68,6 +70,55 @@ impl AgentRuntime {
             completed_hops,
             error,
             partial_text,
+        );
+    }
+
+    /// PA-171 C4：带**触发方标签**的过闸门失败派发（仅 provider 类失败使用）。
+    ///
+    /// 与 [`Self::fail_stream_turn_gated_dispatch`] 逐字等价，只多一个 `trigger`
+    /// （写入 `fallback_reason`，使失败可归因到「首跳 decision」还是「工具 followup」）。
+    #[allow(clippy::too_many_arguments)]
+    fn fail_stream_turn_gated_dispatch_tagged(
+        &self,
+        sink: &impl TurnEventSink,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        completed_hops: usize,
+        error: String,
+        partial_text: Option<String>,
+        trigger: &'static str,
+    ) {
+        if !claim_failed_terminal(control, turn_id) {
+            return;
+        }
+        self.fail_stream_turn_with_hook_dispatch_tagged(
+            sink,
+            control,
+            session_id,
+            turn_id,
+            user_message,
+            provider_meta,
+            build_context_observation,
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            first_token_latency_ms,
+            turn_duration_ms,
+            completed_hops,
+            error,
+            partial_text,
+            trigger,
         );
     }
 
@@ -1172,7 +1223,9 @@ impl AgentRuntime {
                 &response.provider_mode,
                 response.fallback_reason.as_deref(),
             ) {
-                self.fail_stream_turn_gated_dispatch(
+                // PA-171 C4：工具 followup 的**模型调用**失败 ⇒ 触发方 `provider_followup_failed`
+                // （`fallback_reason` 记录触发阶段；provider_source/mode 仍取本轮真实来源）。
+                self.fail_stream_turn_gated_dispatch_tagged(
                     sink,
                     control,
                     input.session_id.as_deref(),
@@ -1190,6 +1243,7 @@ impl AgentRuntime {
                     error,
                     // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                     Some(accumulated_turn_text.clone()),
+                    "provider_followup_failed",
                 );
                 return;
             }
@@ -2871,7 +2925,16 @@ impl AgentRuntime {
                 None,
                 Some(error.clone()),
             );
-            emit_stream_failed(
+            // PA-171 C4：首跳 decision 失败 ⇒ 触发方 `provider_decision_failed`；
+            // 归因三字段落真实值（provider_source 含真实 provider 名），并附 `error_class`。
+            let decision_failure_attribution = crate::agent::turn_flow::FailedTurnAttribution {
+                fallback_reason: Some("provider_decision_failed".to_string()),
+                ..crate::agent::turn_flow::FailedTurnAttribution::from_failure(
+                    Some(&provider_meta),
+                    &error,
+                )
+            };
+            emit_stream_failed_attributed(
                 sink,
                 turn_id,
                 Some(&provider_meta),
@@ -2887,6 +2950,7 @@ impl AgentRuntime {
                 input.session_id.clone(),
                 // P0-3：工具选择分派即失败，`stream_text_chunks` 尚未调用 ⇒ 没有任何已渲染正文。
                 None,
+                decision_failure_attribution,
             );
             otel_turn_scope.set_phase("failed");
             return;
@@ -3100,6 +3164,8 @@ impl AgentRuntime {
                     None,
                     Some(error.clone()),
                 );
+                // PA-171 C4：附件保存失败（首跳回复已渲染）走 14 参冻结入口，
+                // 归因由 `FailedTurnAttribution::from_failure` 派生（三字段非 None + error_class）。
                 emit_stream_failed(
                     sink,
                     turn_id,

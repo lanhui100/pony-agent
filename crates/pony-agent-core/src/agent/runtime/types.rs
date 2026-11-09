@@ -200,6 +200,13 @@ pub struct TurnStreamEvent {
     /// 旧消费者不读即行为不变（wire additive）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<crate::agent::metrics_snapshot::TurnMetricsSnapshot>,
+    /// PA-171 C4：失败归类（wire `errorClass`；取值 `timeout|rate_limited|quota|network|auth|
+    /// bad_request|other`，唯一来源 [`crate::agent::retry::classify_error_class`]）。
+    ///
+    /// 语义：`turn:failed` 恒有值（审计机唯一判据，禁止第二套关键词表）；非失败事件 `None`
+    /// ⇒ 键缺席（additive，旧消费者不读即行为不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
 }
 
 

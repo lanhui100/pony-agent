@@ -670,6 +670,38 @@ pub struct GraphRunTurnResponse {
     pub turn_result: TurnResult,
 }
 
+/// PA-171 C1：宿主流式轮的**终态归约**（供 goal 续轮循环判定「上一轮是否失败」）。
+///
+/// 与 `Result<(), String>` 的区别是语义层的：`Result::Err` 表示「该轮执行过但收口失败」，
+/// 而一次上游 429 的轮次是「**执行成功 + `failed` 终态**」—— 只有本归约能区分两者。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnStreamOutcome {
+    /// 该轮正常收口（含 graph 决策为 `Continue`、run 仍想续轮的情形）。
+    Completed,
+    /// 该轮以 `failed` 终态收口（上游超时/限流/工具失败等）。
+    Failed { error: Option<String> },
+    /// 该轮被取消（用户停止 / watchdog / graph 决策 `Cancel`）。
+    Cancelled,
+    /// 该轮挂在宿主控制请求上（Ask / 审批待作答）。
+    Suspended,
+    /// 旧无 run 事实的兜底路径（无法归约）；调用方必须按「不确定」处理，不得当作成功。
+    Unknown,
+}
+
+/// PA-171 C1-A1：把 `RecordingTurnEventSink` 采到的终态 `(phase, error)` 归约为
+/// [`TurnStreamOutcome`]（契约矩阵 §3.1 冻结表，phase 取自终态事件而非 graph 决策）。
+///
+/// 未知 phase（含将来新增的相位）一律 `Unknown`：宁可让续轮停止，也不把不确定当成功。
+fn turn_stream_outcome_from_terminal(phase: &str, error: Option<String>) -> TurnStreamOutcome {
+    match phase.trim().to_ascii_lowercase().as_str() {
+        "completed" => TurnStreamOutcome::Completed,
+        "failed" => TurnStreamOutcome::Failed { error },
+        "cancelled" | "canceled" => TurnStreamOutcome::Cancelled,
+        "suspended" => TurnStreamOutcome::Suspended,
+        _ => TurnStreamOutcome::Unknown,
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphRunControlResponse {
@@ -745,6 +777,9 @@ struct RecordedTurnTerminal {
     provider_call_records: Option<Vec<crate::agent::telemetry::ProviderCallCacheRecord>>,
     hook_trace_records: Option<Vec<crate::agent::hooks::HookTraceRecord>>,
     session_summary: Option<String>,
+    /// PA-171 C1-A2：终态事件的 `error` 原文（`TurnResult` 无 error 字段，故在此单独采集，
+    /// 供宿主把轮次归约为 `TurnStreamOutcome::Failed { error }`；不回写 `TurnResult`）。
+    error: Option<String>,
 }
 
 struct RecordingTurnEventSink<'a, S> {
@@ -849,6 +884,20 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         terminal.provider_call_records = payload.provider_call_records.clone();
         terminal.hook_trace_records = payload.hook_trace_records.clone();
         terminal.session_summary = payload.session_summary.clone();
+        // PA-171 C1-A2：失败轮的 error 原文（成功/取消轮为 `None`）。
+        terminal.error = payload.error.clone();
+    }
+
+    /// PA-171 C1-A1：终态快照 `(phase, error)`，供宿主归约为 [`TurnStreamOutcome`]。
+    ///
+    /// `None` ⇒ 本轮**没有可采终态**（视为 `Unknown`，绝不当成功）。
+    fn recorded_terminal_outcome(&self) -> Option<(String, Option<String>)> {
+        let terminal = self.terminal.lock().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        let phase = terminal.phase.clone()?;
+        Some((phase, terminal.error.clone()))
     }
 
     fn terminal_trace_annotation(
@@ -2143,6 +2192,34 @@ impl HostControlPlane {
         // 本入口签名不变（无返回值）：错误由 ask-aware 实现自己落结构化日志；需要拿到 Result 的
         // 宿主（TUI 续轮）走 `continue_ask_resume_turn_stream`。
         let _ = self.start_ask_aware_turn_stream(sink, command);
+    }
+
+    /// PA-171 C1：**可观测终态**的宿主流式轮入口（`start_turn_stream` 的检查版）。
+    ///
+    /// 为什么必须另立入口：`start_turn_stream` 返回 `()`，续轮循环因此只能数「开了几轮」，
+    /// 无法判定上一轮成败 —— 一次上游 429（每轮首个模型调用即失败）会被重放成 16 轮。
+    ///
+    /// 且**只拿 `Result` 不够**：429 轮是「执行成功 + `failed` 终态」（`execute_graph_run_stream_step`
+    /// 返回 `Ok`），故本入口用 [`RecordingTurnEventSink`] 包住宿主 sink 采集该轮终态
+    /// （`turn:completed|failed|cancelled|suspended` 的 phase/error；契约矩阵 §3.1 C1-A1/A3），
+    /// 再归约为 [`TurnStreamOutcome`]。
+    ///
+    /// 失败语义与 `start_ask_aware_turn_stream` 逐字一致：`Err` = 该轮**已执行过**但单步收口失败
+    /// （调用方不得重跑，只补终态）；`Ok(Unknown)` = 没有可采终态（含旧无 run 事实兜底路径），
+    /// 调用方**不得**当作成功。
+    pub fn start_turn_stream_checked<S: TurnEventSink>(
+        &self,
+        sink: &S,
+        command: StartTurnStreamCommand,
+    ) -> Result<TurnStreamOutcome, String> {
+        let recording = RecordingTurnEventSink::new(sink);
+        match self.start_ask_aware_turn_stream(&recording, command) {
+            Ok(()) => Ok(match recording.recorded_terminal_outcome() {
+                Some((phase, error)) => turn_stream_outcome_from_terminal(&phase, error),
+                None => TurnStreamOutcome::Unknown,
+            }),
+            Err(error) => Err(error),
+        }
     }
 
     /// wave-60 C2：注册某 turn 的**即时事件出口**（宿主角色的唯一注入点）。
@@ -4257,6 +4334,7 @@ mod tests {
                 step: None,
                 stop_reason: None,
                 metrics: None,
+                error_class: None,
             },
         );
 
@@ -4442,6 +4520,8 @@ mod tests {
             runtime.record_turn_trace_for_test(
                 Some("session-hook-view"),
                 crate::agent::session::TurnTraceRecord {
+                    // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+                    error_class: None,
                     turn_id: "turn-hook-view".to_string(),
                     session_id: Some("session-hook-view".to_string()),
                     event_id: Some("turn-hook-view:1".to_string()),
@@ -4540,6 +4620,8 @@ mod tests {
             runtime.record_turn_trace_for_test(
                 Some("session-terminal-evidence"),
                 crate::agent::session::TurnTraceRecord {
+                    // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+                    error_class: None,
                     turn_id: "turn-failed-evidence".to_string(),
                     session_id: Some("session-terminal-evidence".to_string()),
                     event_id: Some("turn-failed-evidence:4".to_string()),
@@ -4643,6 +4725,8 @@ mod tests {
             runtime.record_turn_trace_for_test(
                 Some("session-terminal-evidence"),
                 crate::agent::session::TurnTraceRecord {
+                    // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+                    error_class: None,
                     turn_id: "turn-cancelled-evidence".to_string(),
                     session_id: Some("session-terminal-evidence".to_string()),
                     event_id: Some("turn-cancelled-evidence:5".to_string()),

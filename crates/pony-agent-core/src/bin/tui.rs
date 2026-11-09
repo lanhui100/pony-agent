@@ -270,6 +270,15 @@ pub enum UiEvent {
     TaskBoardUpdated(Vec<TuiTask>),
     /// Goal 状态更新通知
     GoalUpdated(TuiGoal),
+    /// PA-171 C1/C2：goal 自动续轮**停止**（取消 / 连续失败止损 / 预算用尽 / 自动续轮次数用尽）。
+    ///
+    /// 为什么必须是事件而不是静默 `break`：旧实现在预算用尽时直接 `break`，界面继续显示
+    /// 「进行中 [20/20]」，用户看不到「为什么停了」。`status_line` 即
+    /// `goal::GoalRoundStopReason::visible_line()`（含「已停止」+ 具体原因，契约矩阵 §2.3 C1-T4）。
+    GoalRoundsStopped {
+        reason: pony_agent_core::agent::goal::GoalRoundStopReason,
+        status_line: String,
+    },
     /// 波次 43：本轮被宿主控制请求挂起（ask_user / approval），主循环据此拉取待决请求。
     TurnSuspended { run_id: Option<String> },
     /// wave-60 §C2/C9：停止请求已受理（**不是**终态）⇒ 进入「正在停止…」。
@@ -1358,6 +1367,11 @@ pub struct TuiState {
     pub plan_state: Option<PlanState>,
     pub task_board_state: Option<TaskBoardState>,
     pub goal_state: Option<TuiGoal>,
+    /// PA-171 C1-T4：本会话最近一次「goal 续轮停止」的结构化原因（`None` = 未停止）。
+    ///
+    /// 与 `status_text`（瞬时文案）互补：状态行会被下一轮进度短语覆盖，本字段是
+    /// 「为什么不再自动续轮」的权威留痕，复位点与 `goal_round_cancel.reset()` 同处。
+    pub goal_rounds_stopped: Option<pony_agent_core::agent::goal::GoalRoundStopReason>,
     /// 波次 43：当前处于待决状态的宿主控制请求（真实 `list_pending_asks` 快照）。
     /// `None` = 没有待决请求；`Some` 时对话框提交/拒绝会回写控制面。
     pub pending_request: Option<PendingUiRequest>,
@@ -1476,6 +1490,7 @@ impl Default for TuiState {
             plan_state: None,
             task_board_state: None,
             goal_state: None,
+            goal_rounds_stopped: None,
             pending_request: None,
             goal_banner_since: None,
             mode_stack: Vec::new(),
@@ -8120,9 +8135,15 @@ pub fn session_has_pending_host_requests(
     )
 }
 
-/// 契约 F-G①/F-G3（ADR 0092）：goal 自动续轮主循环。
+/// 契约 F-G①/F-G3（ADR 0092）+ PA-171 C1/C2：goal 自动续轮主循环。
 ///
-/// 停止判据：Esc 取消 / 连续轮次预算 / 仍有待作答宿主请求（让位给人）。
+/// 停止判据（判定顺序冻结于 `.dev-team/contract-matrix-pa171.md` §2.3 C1-T3）：
+/// - **C1**：同一循环内连续 [`pony_agent_core::agent::goal::MAX_CONSECUTIVE_GOAL_ROUND_FAILURES`]
+///   轮以 `failed` 终态结束（一次上游 429 不再被重放成 16 轮）；
+/// - **C2**：`rounds_started` 用满 `max_goal_rounds`（且**失败轮不推进预算**）；
+/// - 既有 F-G 判据：Esc 取消 / 每线程 8 轮上限（⇒ `AutoContinueBudget`）/ 仍有待作答宿主请求。
+///
+/// 停止必须**可见**（`UiEvent::GoalRoundsStopped` → 状态行 + 消息区），绝不静默 `break`。
 /// 独立成函数，避免继续把 `tui_event_loop` 撑大（规模门禁是只许降不许升的棘轮）。
 fn run_goal_rounds(
     turn_control_plane: &Arc<HostControlPlane>,
@@ -8131,32 +8152,53 @@ fn run_goal_rounds(
     session_id: &str,
     cancel: &GoalRoundCancelToken,
     current_turn: &std::sync::Mutex<Option<String>>,
+    loop_lease: &Arc<AtomicBool>,
 ) {
+    use pony_agent_core::agent::goal::{
+        advance_goal_round_for_outcome, build_goal_round_message, goal_round_stop_reason,
+        GoalRoundOutcome, GoalRoundStopReason,
+    };
+
+    // C1-T2：单循环所有权。抢不到租约 ⇒ 另一个轮次线程正在推进 goal 轮，本线程直接返回
+    // （幂等让位，不新增轮次），这正是「16 = 2×8」多循环叠加的正面消除点。
+    let Some(_lease) = GoalRoundLoopLease::try_acquire(loop_lease, session_id) else {
+        return;
+    };
+
     let mut consecutive: u32 = 0;
-    while !should_abort_goal_rounds(
-        cancel.is_cancelled(),
-        consecutive,
-        pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
-    ) && !session_has_pending_host_requests(turn_control_plane, session_id)
-    {
-        let active_goal = match pony_agent_core::agent::goal::active_goal_for_session(session_id) {
-            Some(g) => g,
-            None => break,
+    // C1：连续失败计数（本循环局部，随循环消亡；旧实现只数「开了几轮」）。
+    let mut failures: u32 = 0;
+    loop {
+        let Some(active_goal) = pony_agent_core::agent::goal::active_goal_for_session(session_id)
+        else {
+            break;
         };
-        if active_goal.rounds_started >= active_goal.max_goal_rounds {
+        // 既有 F-G3 让位：有待作答 Ask/审批时必须先让人回答（状态由既有面板承担，不新增变体）。
+        if session_has_pending_host_requests(turn_control_plane, session_id) {
             break;
         }
-        let updated_goal = match pony_agent_core::agent::goal::advance_goal_round(&active_goal.id) {
-            Ok(g) => g,
-            Err(_) => break,
-        };
-        consecutive += 1;
-        let round = updated_goal.rounds_started;
-        let msg = pony_agent_core::agent::goal::build_goal_round_message(
-            &updated_goal.objective,
-            round,
-            updated_goal.max_goal_rounds,
-        );
+        let stop_reason = goal_round_stop_reason(
+            cancel.is_cancelled(),
+            failures,
+            active_goal.rounds_started,
+            active_goal.max_goal_rounds,
+        )
+        .or_else(|| {
+            should_abort_goal_rounds(
+                cancel.is_cancelled(),
+                consecutive,
+                pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
+            )
+            .then_some(GoalRoundStopReason::AutoContinueBudget)
+        });
+        if let Some(reason) = stop_reason {
+            report_goal_rounds_stopped(sink, reason);
+            break;
+        }
+        // C2-S2：轮次号 = 只读快照派生（`rounds_started + 1`）；预算只在**本轮成功后**推进。
+        let round = active_goal.rounds_started.saturating_add(1);
+        let msg =
+            build_goal_round_message(&active_goal.objective, round, active_goal.max_goal_rounds);
         let next_turn_id = format!("turn-goal-{round}-{}", uuid::Uuid::new_v4());
         // 契约 F-G②：先注册 sink，再回写本轮 turn_id；续轮与首轮同一停止生命周期。
         let _next_turn_sink_guard =
@@ -8168,14 +8210,106 @@ fn run_goal_rounds(
         next_input.message = msg;
         next_input.display_message = Some(format!(
             "[goal round {round}] 推进目标：{}",
-            updated_goal.objective
+            active_goal.objective
         ));
         let next_cmd = StartTurnStreamCommand {
             turn_id: next_turn_id,
             input: next_input,
         };
-        turn_control_plane.start_turn_stream(sink.as_ref(), next_cmd);
+        consecutive += 1;
+        // C1 真值：只拿 `Result` 不够 —— 429 轮是「执行成功 + failed 终态」，
+        // 故走检查版入口拿终态归约；`Err` = 该轮已执行过但收口失败（不重跑，按失败轮计）。
+        match turn_control_plane.start_turn_stream_checked(sink.as_ref(), next_cmd) {
+            Ok(pony_agent_core::agent::control_plane::TurnStreamOutcome::Completed) => {
+                failures = 0;
+                // C2：只有成功轮推进 `rounds_started`。
+                match advance_goal_round_for_outcome(&active_goal.id, GoalRoundOutcome::Succeeded) {
+                    Ok(updated) => {
+                        // 投影同步：本轮预算变化立即反映到横幅（终态事件的刷新早于本行）。
+                        let _ = sink
+                            .tx
+                            .send(UiEvent::GoalUpdated(tui_goal_from_goal(&updated)));
+                    }
+                    Err(error) => {
+                        // 预算推进失败 ⇒ 停（不得让"轮次已跑完但预算没记"静默演变成无限续轮）。
+                        eprintln!("[pony-tui] goal_round_advance_failed: {error}");
+                        report_goal_rounds_stopped(
+                            sink,
+                            GoalRoundStopReason::BudgetExhausted {
+                                rounds_started: active_goal.rounds_started,
+                                max_rounds: active_goal.max_goal_rounds,
+                            },
+                        );
+                        break;
+                    }
+                }
+            }
+            // C2：失败轮**不推进预算**，只累计连续失败。
+            Ok(pony_agent_core::agent::control_plane::TurnStreamOutcome::Failed { .. }) => {
+                failures = failures.saturating_add(1);
+            }
+            // 取消 / 挂起 / 无可采终态：本轮不成功，停止续轮（不烧预算、不计失败）。
+            Ok(_) => break,
+            // 该轮已执行过但收口失败：不重跑，按失败轮计（不烧预算）。
+            Err(error) => {
+                eprintln!("[pony-tui] goal_round_turn_failed: {error}");
+                failures = failures.saturating_add(1);
+            }
+        }
     }
+}
+
+/// PA-171 C1-T2：续轮循环的**单循环租约**（`Arc<AtomicBool>` 的 compare-exchange）。
+///
+/// 为什么需要：每个用户提交都会各起一个轮次线程（`F14`），两个线程各自的 `run_goal_rounds`
+/// 叠加成「2×8=16 轮」，正是 429 被重放的放大面。租约保证同一时刻只有一个续轮循环。
+/// RAII：`Drop` 必释（正常返回 / panic 展开 / 提前 `return` 三条路径）。
+struct GoalRoundLoopLease {
+    flag: Arc<AtomicBool>,
+}
+
+impl GoalRoundLoopLease {
+    fn try_acquire(flag: &Arc<AtomicBool>, session_id: &str) -> Option<Self> {
+        match flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => Some(Self {
+                flag: Arc::clone(flag),
+            }),
+            Err(_) => {
+                pony_agent_core::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "goal_rounds_loop_already_owned",
+                    None,
+                    &[
+                        ("session_id", serde_json::json!(session_id)),
+                        ("lease", serde_json::json!("goal_round_loop")),
+                    ],
+                );
+                None
+            }
+        }
+    }
+}
+
+impl Drop for GoalRoundLoopLease {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
+/// PA-171 C1/C2：把续轮停止原因回写 TUI（状态行 + 消息区），**不得静默 break**。
+///
+/// 所有停止原因都回写（含 Esc 取消）：`visible_line()` 的「用户取消」措辞比既有
+/// 「已停止」更具体，且 `TuiState::goal_rounds_stopped` 需要结构化留痕（C1-T4）。
+fn report_goal_rounds_stopped(
+    sink: &TuiTurnSink,
+    reason: pony_agent_core::agent::goal::GoalRoundStopReason,
+) {
+    let status_line = reason.visible_line();
+    eprintln!("[pony-tui] goal_rounds_stopped: {status_line} reason={reason:?}");
+    let _ = sink.tx.send(UiEvent::GoalRoundsStopped {
+        reason,
+        status_line,
+    });
 }
 
 fn tui_event_loop(
@@ -8191,6 +8325,10 @@ fn tui_event_loop(
         Arc::new(std::sync::Mutex::new(Vec::new()));
     // 契约 F-G：goal 自动续轮的取消令牌（Esc 置位；新一轮用户消息提交时重置）。
     let goal_round_cancel = GoalRoundCancelToken::new();
+    // PA-171 C1-T2：goal 续轮**单循环租约**（与 cancel token 同级持有，跨轮次线程共享）。
+    // 每个用户提交各起一个轮次线程（F14），两个线程各自的续轮循环会叠加成「2×8=16 轮」——
+    // 租约保证同一时刻只有一个续轮循环真正推进 goal 轮。
+    let goal_round_loop_lease: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     // C10：轮次线程存活标志（派发闸门第 4 判据）。轮次线程进入时置位、线程体结束（含 panic
     // 展开）时由 `TurnLoopInFlightGuard::drop` 复位；判据是「有没有在飞轮次线程」而非
     // 「有没有 armed goal」，避免 armed-but-idle 的会话把排队消息永久卡住。
@@ -9734,6 +9872,8 @@ fn tui_event_loop(
                                 state.streaming_turn_id = Some(turn_id_str.clone());
                                 // 契约 F-G④：新一轮用户消息 = 新的取消周期，重置 Esc 令牌。
                                 goal_round_cancel.reset();
+                                // PA-171 C1-T4：同一复位点清空上一轮的「续轮停止」留痕。
+                                state.goal_rounds_stopped = None;
 
                                 let mdl_id = state.model.clone();
                                 // wave-38 R1.4：唯一发送点改用 build_turn_input（携带
@@ -9744,6 +9884,8 @@ fn tui_event_loop(
                                 // 使 Esc 能取消「下一轮」并把 stop_turn 打到**当前**轮。
                                 let cancel_for_rounds = goal_round_cancel.clone();
                                 let current_turn_for_rounds = Arc::clone(&current_turn_id);
+                                // PA-171 C1-T2：单循环所有权租约（同一时刻只允许一个续轮循环）。
+                                let lease_for_rounds = Arc::clone(&goal_round_loop_lease);
 
                                 let inflight_for_rounds = Arc::clone(&inflight_turns);
                                 // C10：把「轮次线程存活标志」带进线程，进入即置位、线程体（首轮 +
@@ -9776,10 +9918,24 @@ fn tui_event_loop(
                                     // `TuiTurnSink::emit` → `UiEvent::TurnStarted`）在主循环复位
                                     // `live_metrics` 与 legacy `turn_usage`/`turn_cache_hit_tokens`，
                                     // 故上一轮快照不会泄漏到本轮，无需在此手工复位。
-                                    turn_control_plane.start_turn_stream(sink.as_ref(), cmd);
+                                    //
+                                    // PA-171 C1-T1「首轮门」：首轮也走检查版入口，**只有本轮真正
+                                    // 成功收口**才进入自动续轮——一次上游 429 因此收敛为一次可见失败，
+                                    // 而不是被续轮循环重放。
+                                    let first_outcome = turn_control_plane
+                                        .start_turn_stream_checked(sink.as_ref(), cmd);
                                     drop(initial_turn_sink_guard);
 
-                                    // 契约 F-G①/F-G3（ADR 0092）：Esc / 轮次预算 / 待作答宿主请求，任一即停止续轮。
+                                    let first_completed = matches!(
+                                        first_outcome,
+                                        Ok(pony_agent_core::agent::control_plane::TurnStreamOutcome::Completed)
+                                    );
+                                    if !first_completed {
+                                        return;
+                                    }
+
+                                    // 契约 F-G①/F-G3（ADR 0092）+ PA-171 C1/C2：Esc / 连续失败 /
+                                    // 轮次预算 / 待作答宿主请求，任一即停止续轮（并回写可见原因）。
                                     run_goal_rounds(
                                         &turn_control_plane,
                                         &sink,
@@ -9787,6 +9943,7 @@ fn tui_event_loop(
                                         &session_id,
                                         &cancel_for_rounds,
                                         &current_turn_for_rounds,
+                                        &lease_for_rounds,
                                     );
 
                                   }));
@@ -10357,6 +10514,23 @@ fn tui_event_loop(
                 }
                 UiEvent::GoalUpdated(goal) => {
                     state.set_goal(goal);
+                }
+                // PA-171 C1/C2：续轮停止可见化（旧实现静默 break，横幅仍显示「进行中」）。
+                UiEvent::GoalRoundsStopped { reason, status_line } => {
+                    state.status_text = status_line.clone();
+                    state.goal_rounds_stopped = Some(reason);
+                    // 走消息区（历史留痕）：状态行会被下一轮进度短语覆盖，停止原因的结论必须留存。
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: status_line,
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                    // 本轮已收口（续轮循环是轮次线程的最后一段），刷新 goal 投影让横幅显示真实轮数。
+                    if let Some(goal_data) =
+                        pony_agent_core::agent::goal::active_goal_for_session(&state.session_id)
+                    {
+                        state.set_goal(tui_goal_from_goal(&goal_data));
+                    }
                 }
                 UiEvent::TurnSuspended { .. } => {
                     state.is_streaming = false;

@@ -396,6 +396,122 @@ pub fn advance_goal_round(goal_id: &str) -> Result<GoalData, String> {
     Ok(updated)
 }
 
+/// PA-171 C1：同一续轮循环内**连续失败**的止损阈值（任务卡冻结为 2 轮）。
+///
+/// 旧实现只判「开了几轮」（`should_abort_goal_rounds` 的 8 轮上限）而**不看上一轮成败**，
+/// 一次上游 429（每轮首个模型调用即失败）会被重放成 16 轮（2 个轮次线程 × 8），
+/// 20 轮预算 74 秒烧光。
+pub const MAX_CONSECUTIVE_GOAL_ROUND_FAILURES: u32 = 2;
+
+/// PA-171 C1/C2：单轮 goal 续轮的终态归约。
+///
+/// 只有 [`GoalRoundOutcome::Succeeded`] 消耗轮次预算（C2：失败不烧预算）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalRoundOutcome {
+    Succeeded,
+    Failed,
+}
+
+/// PA-171 C1/C2：续轮循环的停止原因（`Some` ⇒ 停止新增 goal 轮，且**必须告知用户**）。
+///
+/// 契约矩阵 §2.2 C1-S3/C1-S4：前三变体由 [`goal_round_stop_reason`] 产出；
+/// [`Self::AutoContinueBudget`] 是 additive 第四变体，由 TUI 侧在
+/// `should_abort_goal_rounds`（每线程 8 轮自动续轮预算）命中时构造——该判据语义**不变**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalRoundStopReason {
+    /// 用户按 Esc 取消（最高优先级，不得被失败计数掩盖）。
+    Cancelled,
+    /// 连续失败达到 [`MAX_CONSECUTIVE_GOAL_ROUND_FAILURES`]（上游限流/超时的放大面）。
+    ConsecutiveFailures { failures: u32 },
+    /// `rounds_started` 用满 `max_goal_rounds`。
+    BudgetExhausted {
+        rounds_started: u32,
+        max_rounds: u32,
+    },
+    /// 每线程自动续轮次数用尽（既有 F-G 契约的 8 轮预算；不静默 break）。
+    AutoContinueBudget,
+}
+
+impl GoalRoundStopReason {
+    /// 停止原因的 **TUI 可见状态行**（C1/C2：不得静默 break，也不得仍显示「进行中」）。
+    ///
+    /// 文案逐字冻结于 `.dev-team/contract-matrix-pa171.md` §2.2 C1-S3（红相只锁关键词，
+    /// 此处逐字取值以消除歧义）。
+    pub fn visible_line(&self) -> String {
+        match self {
+            Self::Cancelled => "goal 续轮已停止（用户取消）".to_string(),
+            Self::ConsecutiveFailures { failures } => {
+                format!("goal 续轮已停止（连续 {failures} 轮失败）")
+            }
+            Self::BudgetExhausted {
+                rounds_started,
+                max_rounds,
+            } => format!(
+                "goal 续轮已停止（目标轮次预算已用尽：{rounds_started}/{max_rounds}）"
+            ),
+            Self::AutoContinueBudget => "goal 续轮已停止（自动续轮次数用尽）".to_string(),
+        }
+    }
+}
+
+/// PA-171 C1/C2：续轮循环的**轮次边界判定**（纯函数，可单测）。
+///
+/// 判定顺序（冻结真值表）：`cancelled` → 连续失败 ≥ 阈值 → 预算用满 → 继续（`None`）。
+/// 调用方必须在**开新一轮之前**判定（`Some` 即停止并回报 `visible_line()`）。
+pub fn goal_round_stop_reason(
+    cancelled: bool,
+    consecutive_failures: u32,
+    rounds_started: u32,
+    max_rounds: u32,
+) -> Option<GoalRoundStopReason> {
+    if cancelled {
+        return Some(GoalRoundStopReason::Cancelled);
+    }
+    if consecutive_failures >= MAX_CONSECUTIVE_GOAL_ROUND_FAILURES {
+        return Some(GoalRoundStopReason::ConsecutiveFailures {
+            failures: consecutive_failures,
+        });
+    }
+    if rounds_started >= max_rounds {
+        return Some(GoalRoundStopReason::BudgetExhausted {
+            rounds_started,
+            max_rounds,
+        });
+    }
+    None
+}
+
+/// PA-171 C2：按**本轮终态**推进轮次预算——只有成功轮 `rounds_started += 1`。
+///
+/// 失败轮**绝不写盘**（只回读当前快照），从而保证「一次限流」不会烧掉后续轮次预算；
+/// 与 [`advance_goal_round`] 相比，本函数是续轮循环唯一应使用的入口。
+pub fn advance_goal_round_for_outcome(
+    goal_id: &str,
+    outcome: GoalRoundOutcome,
+) -> Result<GoalData, String> {
+    match outcome {
+        GoalRoundOutcome::Succeeded => advance_goal_round(goal_id),
+        GoalRoundOutcome::Failed => goal_snapshot(goal_id),
+    }
+}
+
+/// 只读回读某 goal 的当前快照（不推进预算、不落盘）；不存在 ⇒ `Err`。
+fn goal_snapshot(goal_id: &str) -> Result<GoalData, String> {
+    let target = goal_id.trim();
+    if target.is_empty() {
+        return Err("Goal ID cannot be empty".to_string());
+    }
+
+    let mut guard = goal_store_guard();
+    ensure_goal_store_loaded(&mut guard);
+    let goals = guard.as_ref().expect("goal store must be loaded");
+    goals
+        .values()
+        .find(|goal| goal.id == target)
+        .cloned()
+        .ok_or_else(|| format!("No goal found for goal id `{target}`"))
+}
+
 fn resolve_session(session_id: Option<String>) -> String {
     session_id
         .map(|s| s.trim().to_string())

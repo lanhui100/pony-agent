@@ -4564,6 +4564,7 @@ fn turn_stream_event_step_serde_roundtrip() {
         step: Some(2),
         stop_reason: None,
         metrics: None,
+        error_class: None,
     };
     let json = serde_json::to_string(&payload).expect("serialize");
     assert!(json.contains(r#""step":2"#), "step serializes: {json}");

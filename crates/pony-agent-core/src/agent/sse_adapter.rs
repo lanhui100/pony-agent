@@ -186,6 +186,7 @@ mod tests {
             step: None,
             stop_reason: None,
             metrics: None,
+            error_class: None,
         };
 
         let frame = format_sse_event("turn:delta", &payload).expect("serialization should succeed");
@@ -280,6 +281,7 @@ mod tests {
             step: None,
             stop_reason: None,
             metrics: None,
+            error_class: None,
         };
 
         // Emit twice

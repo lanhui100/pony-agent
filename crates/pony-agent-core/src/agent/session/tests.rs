@@ -3251,6 +3251,8 @@ fn file_backend_roundtrip_restores_turn_trace_history() {
     store.record_turn_trace(
         Some("trace-persisted"),
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: "turn-1".to_string(),
             session_id: Some("trace-persisted".to_string()),
             event_id: Some("turn-1:4".to_string()),
@@ -3467,6 +3469,8 @@ fn file_backend_roundtrip_restores_runtime_generated_multi_boundary_hook_traces(
     store.record_turn_trace(
         Some("trace-multi-hook"),
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: "turn-multi-hook".to_string(),
             session_id: Some("trace-multi-hook".to_string()),
             event_id: Some("turn-multi-hook:11".to_string()),
@@ -3572,6 +3576,8 @@ fn file_backend_roundtrip_restores_terminal_event_annotation_after_trace_update(
     store.record_turn_trace(
         Some("trace-annotated"),
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: "turn-annotated".to_string(),
             session_id: Some("trace-annotated".to_string()),
             event_id: None,
@@ -3718,6 +3724,8 @@ fn append_turn_trace_hook_records_updates_existing_trace_and_roundtrips() {
     store.record_turn_trace(
         Some("trace-append-hook"),
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: "turn-append-hook".to_string(),
             session_id: Some("trace-append-hook".to_string()),
             event_id: Some("turn-append-hook:3".to_string()),
@@ -3953,6 +3961,8 @@ fn file_backend_roundtrip_restores_checkpoint_persist_evidence() {
     store.record_turn_trace(
         Some("trace-checkpoint-boundary"),
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: "turn-checkpoint-boundary".to_string(),
             session_id: Some("trace-checkpoint-boundary".to_string()),
             event_id: Some("turn-checkpoint-boundary:9".to_string()),
@@ -4099,6 +4109,8 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
     store.record_turn_trace(
         Some("trace-failed-terminal"),
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: "turn-failed-terminal".to_string(),
             session_id: Some("trace-failed-terminal".to_string()),
             event_id: Some("turn-failed-terminal:8".to_string()),
@@ -4265,6 +4277,8 @@ fn file_backend_roundtrip_persists_failed_turn_into_visible_history() {
         "请继续排查 session 跳转问题",
         "hook blocked finalize",
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: "turn-failed-visible-history".to_string(),
             session_id: Some("failed-visible-history".to_string()),
             event_id: None,
@@ -4366,6 +4380,8 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
     store.record_turn_trace(
         Some("trace-cancelled-terminal"),
         TurnTraceRecord {
+            // PA-171 C4：失败轮归类（本处非失败轮用例 ⇒ 键缺席）。
+            error_class: None,
             turn_id: "turn-cancelled-terminal".to_string(),
             session_id: Some("trace-cancelled-terminal".to_string()),
             event_id: Some("turn-cancelled-terminal:6".to_string()),

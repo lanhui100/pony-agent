@@ -529,6 +529,44 @@ fn truncate_failed_partial_text(text: &str) -> String {
     truncated
 }
 
+/// PA-171 C4：失败轮归因载体（`provider_source` / `provider_mode` / `fallback_reason` +
+/// 审计字段 `error_class`）。
+///
+/// 缺陷面：历史实现把三字段硬编码为 `None`，失败轮在 trace 里完全不可归因（只能看到 "failed"）。
+/// 语义约束（契约矩阵 §4.2 C4-S1/S2）：**不改**失败语义（事件名 `turn:failed`、`kind="failed"`、
+/// `error` 原样、`text` 仍走 [`build_failed_turn_text`]、PonySentry 上报保留）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FailedTurnAttribution {
+    pub provider_source: Option<String>,
+    pub provider_mode: Option<String>,
+    pub fallback_reason: Option<String>,
+    /// 失败归类（唯一来源 [`crate::agent::retry::classify_error_class`]，禁止第二套码表）。
+    pub error_class: Option<String>,
+}
+
+impl FailedTurnAttribution {
+    /// 由「本轮 provider 元数据 + 原始错误文本」派生默认归因（契约矩阵 §4.2 C4-S1 冻结取值）：
+    ///
+    /// - `provider_source = provider_attempt_failed:{requested_name}`（必须含真实 provider 名）；
+    /// - `provider_mode = "failed"`（与失败 `TurnResult` 同值，非占位词）；
+    /// - `fallback_reason = "turn_failed_no_fallback"`（本卡无跨 provider 备用链，**未发生降级**
+    ///   必须可判）；
+    /// - `error_class = classify_error_class(error)`（**永远有值**，审计机唯一判据）。
+    ///
+    /// `provider_meta = None`（连 provider 都没解析出来）⇒ 三字段保持 `None`（不编造来源），
+    /// `error_class` 仍然有值。
+    pub fn from_failure(provider_meta: Option<&ProviderEventMeta>, error: &str) -> Self {
+        let provider_source = provider_meta
+            .map(|meta| format!("provider_attempt_failed:{}", meta.requested_name));
+        Self {
+            provider_source,
+            provider_mode: provider_meta.map(|_| "failed".to_string()),
+            fallback_reason: provider_meta.map(|_| "turn_failed_no_fallback".to_string()),
+            error_class: Some(crate::agent::retry::classify_error_class(error).to_string()),
+        }
+    }
+}
+
 pub fn emit_stream_failed(
     sink: &impl TurnEventSink,
     turn_id: String,
@@ -547,6 +585,50 @@ pub fn emit_stream_failed(
     // `None`/全空白 ⇒ 回落既有 `"This turn failed."`（兼容锁，防历史断言破）。
     partial_text: Option<String>,
 ) -> TurnEventEnvelope {
+    // PA-171 C4：14 参签名**冻结**（既有测试直接调用），归因走默认派生（不新增形参）。
+    let attribution = FailedTurnAttribution::from_failure(provider_meta, &error);
+    emit_stream_failed_attributed(
+        sink,
+        turn_id,
+        provider_meta,
+        trace_steps,
+        tool_activities,
+        first_token_latency_ms,
+        turn_duration_ms,
+        build_context_observation,
+        trace_timeline,
+        provider_call_records,
+        hook_trace_records,
+        error,
+        session_id,
+        partial_text,
+        attribution,
+    )
+}
+
+/// PA-171 C4：带**显式归因**的失败轮派发旁路（`emit_stream_failed` 的超集，参数顺序不变）。
+///
+/// 两个生产调用点用它在 `fallback_reason` 里记录**触发方**（首跳 decision / 工具 followup），
+/// 使失败可归因到具体阶段；`emit_stream_failed` 用 [`FailedTurnAttribution::from_failure`]
+/// 的默认归因转调本函数。
+#[allow(clippy::too_many_arguments)]
+pub fn emit_stream_failed_attributed(
+    sink: &impl TurnEventSink,
+    turn_id: String,
+    provider_meta: Option<&ProviderEventMeta>,
+    trace_steps: Vec<TurnTraceStep>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    build_context_observation: Option<BuildContextObservation>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
+    error: String,
+    session_id: Option<String>,
+    partial_text: Option<String>,
+    attribution: FailedTurnAttribution,
+) -> TurnEventEnvelope {
     // Wave-5 P0：CLI/TUI 形态的 turn 失败上报（开关默认关；桌面端由前端 `TurnExecutionFailed`
     // 上报，故用进程级开关隔离，避免重复）。旁路上报：内部吞错，绝不改变轮次返回。
     crate::agent::ponysentry::capture_turn_failure(
@@ -554,6 +636,11 @@ pub fn emit_stream_failed(
         &error,
         provider_meta.map(|meta| meta.model.as_str()),
     );
+    // PA-171 C4-S1：归因三字段落真实值；`error_class` 恒有值（调用方未给则按错误文本派生）。
+    let error_class = attribution
+        .error_class
+        .clone()
+        .or_else(|| Some(crate::agent::retry::classify_error_class(&error).to_string()));
     emit_event(
         sink,
         "turn:failed",
@@ -578,9 +665,9 @@ pub fn emit_stream_failed(
             provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
             provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
             provider_model: provider_meta.map(|meta| meta.model.clone()),
-            provider_source: None,
-            provider_mode: None,
-            fallback_reason: None,
+            provider_source: attribution.provider_source,
+            provider_mode: attribution.provider_mode,
+            fallback_reason: attribution.fallback_reason,
             build_context_observation,
             input_tokens: None,
             cache_hit_input_tokens: None,
@@ -598,6 +685,7 @@ pub fn emit_stream_failed(
             step: None,
             stop_reason: None,
             metrics: None,
+            error_class,
         },
     )
 }
@@ -670,6 +758,7 @@ pub fn emit_stream_cancelled(
                     .to_string()
             })),
             metrics: None,
+            error_class: None,
         },
     );
 }
@@ -728,6 +817,7 @@ pub fn emit_stream_stop_requested(
             step: None,
             stop_reason: Some(stop_reason.as_str().to_string()),
             metrics: None,
+            error_class: None,
         },
     )
 }
@@ -786,6 +876,7 @@ pub fn emit_supervisor_cancelled(
             step: None,
             stop_reason: Some(stop_reason.as_str().to_string()),
             metrics: None,
+            error_class: None,
         },
     );
 }
@@ -991,6 +1082,9 @@ pub fn emit_stream_event_with_step(
             step,
             stop_reason: None,
             metrics,
+            // PA-171 C4：归因字段只由 `emit_stream_failed_attributed` 填写（本泛用入口
+            // 从不出 `turn:failed`：其 `error` 恒为 None），故此处键缺席。
+            error_class: None,
         },
     )
 }
@@ -1788,6 +1882,7 @@ mod tests {
             step: None,
             stop_reason: None,
             metrics: None,
+            error_class: None,
         }
     }
 
