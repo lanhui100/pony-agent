@@ -140,7 +140,7 @@ impl Drop for Fixture {
 }
 
 /// C1/C6：用 **std 文件锁**（不是 backend 的进程内 `LOCK_REGISTRY`）占住 `<db>.lock`，
-/// 等价于「另一个进程持有单实例锁」⇒ 新建 backend 首次 `connection()` 抢锁必失败、降级只读。
+/// 等价于「另一个进程持有库级锁」⇒ 仅供**已退役**的 C1/C6 使用（P1 后日常写不再抢库级锁）。
 ///
 /// 为什么不能用 `new_read_only` 当降级实例：那是**维护句柄**（`storage_read_only=true`，
 /// `--dry-run`/诊断），按 R4/E8 必须零写入、连日志都不写；锁降级实例

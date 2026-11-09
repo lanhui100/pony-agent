@@ -661,9 +661,14 @@ impl SqliteSessionBackend {
             return Ok(());
         }
 
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| format!("begin tx: {e}"))?;
+        // **BEGIN IMMEDIATE**（不是默认的 DEFERRED）：迁移一开始就拿写锁，
+        // 让并发的第二个进程在 `busy_timeout` 内排队，而不是「先读后写」升级事务时
+        // 撞 `database is locked` 被吞。仓内既有写事务同款写法（见 `sqlite_session_commit.rs`）。
+        let tx = rusqlite::Transaction::new_unchecked(
+            conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|e| format!("begin immediate tx: {e}"))?;
         // 事务内二次确认（另一个进程可能刚迁移完并提交）。
         if Self::legacy_migration_done(&tx, MIGRATION_MARKER) {
             return Ok(());
