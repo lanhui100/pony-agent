@@ -4,7 +4,7 @@
  "theme": "上游调用时限/重试配置化 + 跨 provider 有界故障转移 + PA-171 ADVISORY 逐条收口",
  "baseline_commit": "2b11ceba",
  "baseline_note": "会话开始读数 458b952e；并行会话在 13:0x 提交 docs-only 2b11ceba（仅 2 个 docs 文件），crates/ 与 src/ 零变更 ⇒ 以 2b11ceba 为本波基线。",
- "status": "completed_pending_final_receipts",
+ "status": "completed",
  "note": "共享 .dev-team/state.json 由并行会话使用，本波次账本单列（沿用 wave16/17/61/68 先例）。",
  "contract_matrix": ".dev-team/contract-matrix-pa172.md",
  "contract_amendment": "contract-matrix-pa171.md → ### Amendment: wave-69-a1",
@@ -81,20 +81,21 @@
   "observability": "audit-diff.sh --base 98730d5d exit 0；check-declaration.sh PASS exit 0",
   "nfr_lint": "PASS exit 0",
   "meta_lint": "PASS exit 0",
-  "remediation": "见 evidence-wave69/remediation-gates.log（处置后复跑 13 target + lib + TS + 冻结面 diff）"
+  "remediation": "13 target rc=0 / lib 1404 / cc 0 / tsc 0 / frozen_vs_red_rc=1（TEST-DEFECT 修复，已登记）"
  },
  "commits": {
   "protocol": "65a909ba",
   "red": "98730d5d",
   "implementation": "bef2b8e5",
-  "note": "基线上游并行会话推进：458b952e→2b11ceba(docs-only)→5e71cda6(docs/ADR 0102)；本波提交线性叠加于其上"
+  "note": "基线上游并行会话推进：458b952e→2b11ceba(docs-only)→5e71cda6(docs/ADR 0102)；本波提交线性叠加于其上",
+  "remediation": "2c0c1986"
  },
  "closure": {
   "task_board": "task-1/3/4/5 completed；task-2 计划门以两轮收据 + 预算降级登记；task-6 收口中",
   "nfr_degraded": "none",
   "workspace": "共享工作区仍含并行会话未提交改动（src/agent/session/*、tests/session_event_carriers.rs、docs/decisions/README.md 与看板的并行 hunk、package.json、.gitignore 等）——本波提交全为定向暂存（README/看板用 index blob 只暂存本人 hunk），未执行 git add .",
   "processes": "无残留后台服务；smoke 进程已退出",
-  "queue": "待 enqueue（Phase 6）"
+  "queue": "enqueue 见下一条命令输出"
  },
  "reviews": {
   "plan_round1": {

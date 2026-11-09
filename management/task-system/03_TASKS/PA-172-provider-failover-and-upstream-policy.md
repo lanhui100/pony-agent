@@ -108,3 +108,21 @@ PA-171 把"一次上游限流"收敛成"一次可见失败"，但**没有**解�
 **已知限制（如实登记，见契约矩阵 §11）**：流式无总 deadline ⇒ 不换手；followup 的 `accumulated_messages`
 语义 ⇒ 不换手（deferred）；timeout/auth/network 不进入冷却 ⇒ 主 provider 持续超时时每轮仍先付其重试预算
 （由 PA-171「连续 2 轮失败即停」兜底）；`plan_turn` 同步轮与子代理/静态 resolver 不换手（deferred）。
+
+## 审查收据与整改（wave-69，如实登记）
+
+| 阶段 | 收据 | 结论 |
+| :-- | :-- | :-- |
+| 计划审查 round1 | `.dev-team/review-plan-wave69-a.json` / `-b.json`（均 `dev-review-lint` Exit 0） | **FAIL**（11 / 5 BLOCKING）→ 契约 v2 修订 |
+| 计划审查 round2 | `review-plan-wave69-v2-a.json`（Exit 0）/ round2-B 上下文耗尽无收据 | **FAIL**（5 BLOCKING）→ 契约 v3 收窄（换手仅 `decide_with_tools`、M3 纯函数锚点、NFR 文本纠正） |
+| 合入审查（四路） | `review-l3a-wave69.json` / `review-l3b-wave69.json` / `review-l3p-wave69.json` / `review-l3-join-wave69.json`（均 Exit 0） | **FAIL**（3 / 2 / 3 / 3 BLOCKING）→ 整改提交 `2c0c1986` |
+| 整改后复跑 | `.dev-team/evidence-wave69/remediation-gates.log` | 13 target 全 rc=0 + `--lib` 1404 + contract:check/vue-tsc 0 |
+
+**四路合入审查的 BLOCKING 与处置**：
+1. `UpstreamPolicyStorage` 派生 `Default`=0 ⇒ 缺键时策略被钳成 1000/1/1000（G2 崩）→ 手写 `Default`=45000/5/30000，实测旧文件/全新安装/`providers:[]` 均正确且零 clamped 日志。
+2. 换手预算只在 hop 边界计算 ⇒ 单跳仍可吃 5×45s，总最坏 ≈465s > 契约 352.5s → 新增 `attempt_deadline`，**每次 attempt** 前经唯一出口 `failover_attempt_timeout_ms` 重算（机判 799→499ms 递减、过期 0 次 HTTP）。
+3. 换手触发判定喂"正文预览"（丢状态码）⇒ HTTP 500 是否换手由上游正文决定 → 改喂原始错误（含状态行）。
+4. 冻结断言被不必要放宽（`invalid_request` 析取）→ 已回退原两子句。
+5. `hops==0`（全链冷却跳过）不发 exhausted、不加标记（事件与标记同真同假）。
+
+**未做**：整改后**未再跑第五路独立审查**（超出 `波次×2` 审查预算），以整改门禁复跑 + 账本登记替代；"冻结面零改动"仅在**断言强度**意义成立（`pa171_lease_anchor_contract` 有 1 处 TEST-DEFECT 编译修复，见矩阵 §11-12）。
