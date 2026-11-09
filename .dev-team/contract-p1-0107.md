@@ -65,3 +65,12 @@
 - 跨进程并发写索引由 SQLite WAL 串行化；**不得**再引入任何"进程级全局写锁"。
 - 会话级单写者由 `SessionLogStore::open_write` 的 flock 保证（已存在，不改）。
 - P0 契约（C1–C9 / R1–R6）全部保持不回归。
+
+## 已知风险与处置（P1 引入的新并发面）
+
+| 风险 | 说明 | 处置 |
+|---|---|---|
+| R-A 旧 JSON 迁移 TOCTOU | `migrate_from_json` 是「先 `SELECT COUNT(*)` 再导入」，两个进程同时首次启动可能重复执行迁移 | 迁移本身按主键覆盖、幂等；重复执行只多花时间。**要求**：迁移入口也取维护锁（与 rebuild 同级），或改为 `INSERT OR IGNORE` + 迁移完成标记 |
+| R-B 并发首建表 | 多进程首次 `ensure_schema` | 已有 `busy_timeout=5000` + `CREATE TABLE IF NOT EXISTS`，后到者等待后成功；需在绿相日志里留一条双进程首启证据 |
+| R-C WAL 检查点竞争 | 多进程写时 `wal_autocheckpoint` 并发 | SQLite 自身串行化 checkpoint；若出现 `SQLITE_BUSY` 由既有 3 次退避兜底 |
+| R-D 会话写冲突可观测性 | 同会话第二写者 | 必须返回 `SessionError::SessionWriterBusy` 且日志含 `session_writer_busy`（D4 断言） |
