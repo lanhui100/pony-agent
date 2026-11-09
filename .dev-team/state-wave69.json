@@ -1,0 +1,62 @@
+{
+ "wave": 69,
+ "task": "PA-172 + PA-171 遗留收口",
+ "theme": "上游调用时限/重试配置化 + 跨 provider 有界故障转移 + PA-171 ADVISORY 逐条收口",
+ "baseline_commit": "2b11ceba",
+ "baseline_note": "会话开始读数 458b952e；并行会话在 13:0x 提交 docs-only 2b11ceba（仅 2 个 docs 文件），crates/ 与 src/ 零变更 ⇒ 以 2b11ceba 为本波基线。",
+ "status": "in_progress",
+ "note": "共享 .dev-team/state.json 由并行会话使用，本波次账本单列（沿用 wave16/17/61/68 先例）。",
+ "contract_matrix": ".dev-team/contract-matrix-pa172.md",
+ "contract_amendment": "contract-matrix-pa171.md → ### Amendment: wave-69-a1",
+ "nfr_baseline": ".dev-team/nfr-baseline-wave69.json",
+ "evidence_dir": ".dev-team/evidence-wave69/",
+ "decisions": [
+  {
+   "id": "D69-T1",
+   "text": "构建槽位纪律（实测陷阱）：直接 `cargo test` 走默认 target/ 会链接到其它 checkout 共享的陈旧 rlib（缺 LoopAlreadyOwned），产生 4 个 test target 假红（E0599）。本波所有门禁一律带 `--target-dir target-test`（测试）/ `--target-dir target-check`（check）。证据：baseline 实测 tui_batch2_regression 默认槽位 E0599 vs target-test 96 passed。"
+  },
+  {
+   "id": "D69-12",
+   "text": "冷却键段转义改为单射：`%`→`%25` 先、`|`→`%7C` 后、空段→`~empty~`；base_url 去尾斜杠。否决 `-` 作空段占位（与字面 `-` 不可区分，NFR 审查已指出非单射）。大小写不归一（base_url 路径区分大小写）。"
+  },
+  {
+   "id": "D69-13",
+   "text": "遗留 #14 关闭方式：wave-68 的「Lead 定点复核替代 a2 计划复审」属历史时点事实，不可追溯补齐；但缺口（把 Lead 复核当独立审查）由本波 2 路独立 Subagent 计划审查（review-plan-wave69-a/-b.json，schema v2 + dev-review-lint Exit 0）从制度上关闭。登记为 closed_with_note，不伪称 wave-68 收据已独立。"
+  },
+  {
+   "id": "D69-14",
+   "text": "写域扩容（防『编排面交付但未接线』重演）：t-w-provider 增 `runtime/tool_exec.rs`、`runtime/compaction_ops.rs`；NFR 审查指出未接线风险后由 Lead 裁决扩域，非静默。"
+  },
+  {
+   "id": "D69-15",
+   "text": "冻结测试实为 5 个文件（含 pa171_error_copy_adversarial.rs），全部只读；红相文件 `pa171_*.rs` 由 t-red 之外的执行者触碰即 FAIL。"
+  },
+  {
+   "id": "D69-16",
+   "text": "冷却复位生产调用点唯一入口 = bin/tui.rs::reset_session_scope(:1606)（/clear、/resume 等会话重置都经它，避免逐命令分支接线）；矩阵 §5 R2 与本条同源。"
+  },
+  {
+   "id": "D69-17",
+   "text": "矩阵术语统一：流式换手安全判据写 'streamed_any_delta == false'（复用既有代码标识 provider/mod.rs:1013-1020），不使用自造 emitted_deltas。"
+  },
+  {
+   "id": "D69-18",
+   "text": "参与换手的入口封闭清单 5 行（决策同步/决策流式/followup 单发同步/followup 流式/followup 批量同步 :1350），压缩摘要与同步轮 plan_turn 不参与（deferred）。"
+  }
+ ],
+ "tasks": [
+  "task-1 protocol-agent（NFR 已交付；矩阵改由 Lead 撰写并登记偏差）",
+  "task-2 plan review（2 路 Subagent）",
+  "task-3 t-red 红相冻结",
+  "task-4 t-w-provider",
+  "task-5 t-w-core",
+  "task-6 Join Barrier + 收口"
+ ],
+ "deviations": [
+  "契约矩阵由 Lead 撰写（Protocol Agent 首次尝试耗尽上下文未产出）；非独立撰写，如实登记。",
+  "NFR 基准由 Protocol Agent 撰写并通过 dev-nfr-lint Exit 0。"
+ ],
+ "gates": {},
+ "commits": {},
+ "closure": {}
+}

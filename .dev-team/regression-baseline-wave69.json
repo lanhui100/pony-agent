@@ -1,0 +1,57 @@
+{
+ "wave": "69",
+ "task": "PA-172 + PA-171 遗留收口",
+ "baseline_commit": "2b11ceba",
+ "target_dir": "target-test",
+ "captured_at": "2026-11-09T13:0x+08:00",
+ "note": "共享 target/ 槽位被其它 checkout 污染 ⇒ 全部使用仓库策略槽位 target-test；裸 cargo test 的假红证据见 evidence-wave69/baseline-*。",
+ "targets": [
+  {
+   "target": "pa171_goal_round_failure_contract",
+   "passed": 7,
+   "failed": 0
+  },
+  {
+   "target": "pa171_provider_rate_limit_cooldown_contract",
+   "passed": 5,
+   "failed": 0
+  },
+  {
+   "target": "pa171_failed_turn_attribution_contract",
+   "passed": 3,
+   "failed": 0
+  },
+  {
+   "target": "pa171_error_copy_contract",
+   "passed": 89,
+   "failed": 0
+  },
+  {
+   "target": "pa171_error_copy_adversarial",
+   "passed": 89,
+   "failed": 0
+  },
+  {
+   "target": "tui_batch2_regression",
+   "passed": 96,
+   "failed": 0
+  },
+  {
+   "target": "tui_session_resilience_acceptance",
+   "passed": 98,
+   "failed": 0
+  },
+  {
+   "target": "ts_contract_snapshot",
+   "passed": 1,
+   "failed": 0
+  }
+ ],
+ "lib_passed": 1404,
+ "frozen_tests_untouched": true,
+ "trap_evidence": {
+  "command": "cargo test -p pony-agent-core --test tui_batch2_regression",
+  "symptom": "E0599 no variant LoopAlreadyOwned for enum GoalRoundStopReason（链接到陈旧 rlib libpony_agent_core-6f4f8d58a831bb58.rlib）",
+  "with_target_test": "96 passed"
+ }
+}

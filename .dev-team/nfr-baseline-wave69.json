@@ -1,0 +1,528 @@
+{
+  "wave": "69",
+  "task": "PA-172",
+  "theme": "provider 上游策略配置化 + 跨 provider 故障转移（failover）+ PA-171 遗留 #3~#14 收口",
+  "baseline_commit": "458b952e",
+  "baseline_ref": ".dev-team/nfr-baseline-wave68.json",
+  "contract": ".dev-team/contract-matrix-pa172.md",
+  "contract_note": "契约矩阵由 Lead 亲自落盘（Lead 裁决：规划产物允许 Lead 写）；本 NFR 是同一波次的数值真值源，矩阵/NFR/代码三处必须同源。",
+  "claim_policy": "本文件只声明**目标基准**与冻结常量，不声称任何实现已通过。所有 wave69_* 实现面的 machine_verified 一律为 false，直到本波次门禁真实跑绿并由 Lead 在收据中登记。",
+  "external_call_timeout_ms": 3000,
+  "external_call_timeout_scope": "单次外部（网络）往返预算的通用上限；provider 该轮次的同步/流式出口属登记例外，见 external_call_timeout_exceptions。",
+  "retry": {
+    "max_attempts": 5,
+    "max_attempts_note": "仅供旧消费者与门禁 schema（dev-nfr-lint 要求该键存在）。wave-69 真值：Decision 作用域尝试次数改为**可配置** decisionMaxAttempts（默认 5、边界 [1,10]、越界钳制），Followup 限流长退避仍为 3 次（不变）。禁止用本字段推导任何『全局重试次数』。",
+    "decision_rate_limited_max_attempts": 1,
+    "decision_rate_limited_note": "PA-171 C3-P2 冻结：限流/配额（rate_limited|quota）在 Decision 作用域首次失败即 Abort（0 次退避 sleep、1 次 HTTP），wave-69 不改。",
+    "decision_other_transient_max_attempts": 5,
+    "decision_other_transient_note": "timeout / server_error / network 保留既有短退避重试；wave-69 起次数由 upstreamPolicy.decisionMaxAttempts 驱动（默认 5 ⇒ 行为逐字不变）。",
+    "decision_timeout_backoff": {
+      "initial_delay_ms": 500,
+      "multiplier": 2.0,
+      "max_delay_ms": 8000,
+      "total_budget_ms": 30000,
+      "jitter_kind": "none",
+      "applies_to": "timeout / server_error / network（不含 rate_limited|quota）",
+      "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:4769-4779（provider_timeout_backoff_config）",
+      "wave69_change": "退避曲线**不变**；仅 max_retries 来源由常量 PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS(5) 改为 upstreamPolicy.decisionMaxAttempts（默认值相同，故默认路径行为逐字不变）",
+      "frozen": true
+    },
+    "followup_rate_limit": {
+      "max_attempts": 3,
+      "initial_delay_ms": 20000,
+      "multiplier": 2.0,
+      "max_delay_ms": 40000,
+      "total_budget_ms": 90000,
+      "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:4788-4796（provider_rate_limit_backoff_config）",
+      "wave69_change": "无代码改动（本轮冻结）",
+      "frozen": true
+    },
+    "non_rate_limit_transient_retry_preserved": true,
+    "non_rate_limit_transient_retry_evidence": "crates/pony-agent-core/tests/pa171_provider_rate_limit_cooldown_contract.rs:318-343（503 ⇒ >=2 次 HTTP）",
+    "non_rate_limit_transient_retry_wave69_note": "failover 与既有重试**不互斥**：单 hop 内仍走既有重试；换手发生在 hop 之间（§wave69_failover）",
+    "wave69_configurable": {
+      "config_surface": "providers.json 顶层 `upstreamPolicy`（additive；缺省 = 保持今天行为逐字不变）",
+      "config_truth_source": "crates/pony-agent-core/src/agent/config.rs:191-215（ProviderConfigStorage / ProviderRegistryStorage，本轮增字段）、:165-188（View/RegistryView）、:384-400（选择算法单值三级回落）",
+      "request_timeout_ms_default": 45000,
+      "request_timeout_ms_bounds": [1000, 300000],
+      "request_timeout_ms_applies_to": "provider 同步 HTTP 出口总时限（build_http_client(Duration::from_secs(45)) 的两处内联字面量）",
+      "request_timeout_ms_evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:2737、:2788（两处内联 45s）、:3097-3101（.timeout(timeout)）；provider 目录零 env 读取",
+      "decision_max_attempts_default": 5,
+      "decision_max_attempts_bounds": [1, 10],
+      "decision_max_attempts_evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:4635（const PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 5）、:4773（max_retries = 常量-1）",
+      "retry_budget_ms_default": 30000,
+      "retry_budget_ms_bounds": [1000, 300000],
+      "retry_budget_ms_bounds_note": "下界由 0 抬到 1000（审查 B/ADVISORY，矩阵 §11.9）：0 预算语义与 RetryBudget::is_exhausted 的 `>=` 判据冲突，收紧边界消歧义",
+      "retry_budget_ms_scope": "sleep-only 预算（既有 RetryBudget 语义不变；不含单次请求自身耗时）",
+      "out_of_range_behavior": "clamp",
+      "out_of_range_log_event": "upstream_policy_clamped",
+      "out_of_range_log_fields": ["trace_id", "field", "provided", "clamped_to", "bound"],
+      "out_of_range_never_fatal": true,
+      "out_of_range_reason": "不 fail 整个配置：手改 providers.json 越界值不得让所有 provider 断掉（D69-2）",
+      "unparsable_field_behavior": "字段级回退默认值 + warn（不得整文件落入 backup_invalid_registry_file 分支）",
+      "config_backup_evidence": "crates/pony-agent-core/src/agent/config.rs:498-508（坏文件备份，既有行为不变）",
+      "frozen": true
+    }
+  },
+  "wave69_config_tolerance": {
+    "rule": "per_field_tolerant_deserialization",
+    "detail": "`upstreamPolicy` 与 `failoverProviderIds` 的每个字段独立容错反序列化：number / 数字字符串 / null / 其它类型 ⇒ 各自回退默认值并落 warn upstream_policy_clamped（bound 字段标注该回退来源）",
+    "forbidden": "禁止让新字段畸形导致 `providers.json` 整体回落 `default_registry()`",
+    "why": "config.rs:498-508 的 load_storage 是**整体** serde_json::from_str + backup_invalid_registry_file：任一新字段类型错误会让整份 provider 配置被备份并重置为默认，等于清空用户全部 provider（D69-2『不 fail 整个配置』的硬前提）",
+    "evidence": "crates/pony-agent-core/src/agent/config.rs:498-508（load_storage 整体 from_str ⇒ 失败即 backup + default_registry）、:191-215（存储结构）",
+    "acceptance": "畸形 upstreamPolicy（如 requestTimeoutMs: \"abc\" / null / {}）⇒ 加载成功、其余 provider 原样保留、仅该字段取默认 + 一条 warn",
+    "machine_verified": false,
+    "planned_anchors": [
+      "tests/pa172_upstream_policy_config_contract.rs：requestTimeoutMs=\"abc\" ⇒ 45000 且 provider 列表不减",
+      "failoverProviderIds 为字符串而非数组 ⇒ 空链 + warn（不整文件重置）"
+    ]
+  },
+  "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "lock_acquisition_timeout_ms": 2000,
+  "deadlock_watchdog_timeout_ms": 5000,
+  "lock_forbidden_calls": [
+    "resolve_graph_run_for_retrieval",
+    "load_graph_run",
+    "load_execution_checkpoint",
+    "load_active_graph_run_for_session",
+    "http_request",
+    "block_on",
+    "sleep",
+    "channel_send_blocking",
+    "turn_execution"
+  ],
+  "wave69_locks": {
+    "provider_cooldown_registry": {
+      "kind": "std::sync::Mutex<HashMap<..>> behind OnceLock",
+      "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:639-645（OnceLock::global）、:633-635（条目类型）",
+      "critical_section": "仅 get / insert / retain / remove 四个内存操作",
+      "forbidden_under_lock": ["http_request", "block_on", "sleep", "channel_send_blocking"],
+      "poison_recovery": "fail-open：lock().unwrap_or_else(|e| e.into_inner())",
+      "poison_recovery_declared": "explicit",
+      "poison_recovery_reason": "临界区只做内存 map 操作，中毒时数据不可能半写；fail-closed 会让一次历史 panic 永久冻结该 provider，而当时没有任何复位入口（D69-6 #3）",
+      "poison_recovery_anchor": "planned: 锁中毒注入后仍可读写（poison 注入 → remaining()/enter() 仍返回值，不得 panic/Err）",
+      "poison_into_inner_sites": 4,
+      "poison_into_inner_evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:650 / :665 / :674 / :694（恰 4 处）",
+      "no_await_across_lock": true,
+      "hard_cap_entries": 64,
+      "capacity_constants_evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:615（COOLDOWN_DEFAULT_MS）/ :617（COOLDOWN_MAX_MS 6h）/ :619（COOLDOWN_REGISTRY_CAPACITY 64）"
+    },
+    "goal_round_loop_lease": {
+      "kind": "Arc<std::sync::Mutex<std::collections::HashSet<String>>>（按 session_id 分区）",
+      "type_alias": "type GoalRoundLoopLeaseRegistry = Arc<std::sync::Mutex<HashSet<String>>>",
+      "home_wave69": "crates/pony-agent-core/src/agent/goal_lease.rs（lib 新模块，从 bin/tui.rs 抽出，语义不变）",
+      "purpose": "同一会话同一时刻只允许一个 goal 续轮循环（消除 2×8=16 叠加），跨会话互不阻塞",
+      "critical_section": "仅 HashSet::insert（抢租约）/ HashSet::remove（RAII Drop 释放）两个内存操作",
+      "forbidden_under_lock": ["http_request", "block_on", "sleep", "channel_send_blocking", "turn_execution"],
+      "poison_recovery": "lock().unwrap_or_else(|e| e.into_inner())",
+      "no_await_across_lock": true,
+      "not_acquired_behavior": "可见上报 GoalRoundStopReason::LoopAlreadyOwned + warn 结构化日志 goal_rounds_loop_already_owned（不得静默 return）",
+      "evidence": "crates/pony-agent-core/src/bin/tui.rs:8331-8336（类型）、:8339-8359（try_acquire）、:8362-8370（Drop）、:8164（唯一获取点）、:8170-8178（可见上报）、:8474-8475（注册表构造）、:10032/:10083-10091（线程传参与调用）",
+      "testing_anchor": "planned: tests/pa171_lease_anchor_contract.rs（按会话分区 / 同会话二次抢租返回 None / Drop 释放含 panic 展开 / 两会话并发互不阻塞），由 task-3 冻结",
+      "testing_anchor_previous_state": "none（wave-68-a3 实测 tests/ 全目录 0 命中；PA-171 遗留 #11）",
+      "adr": "ADR 0103（按会话互斥）"
+    },
+    "turn_loop_in_flight": {
+      "kind": "Arc<std::sync::Mutex<HashSet<String>>>（wave-69 起按 session_id 分区；此前为 Arc<AtomicBool> 单 bool）",
+      "type_alias": "type TurnLoopInFlightRegistry = Arc<std::sync::Mutex<HashSet<String>>>",
+      "purpose": "派发闸门第 4 判据『本会话是否真有轮次线程活着』；单 bool 会让一个会话的线程退出清掉另一会话的在飞语义",
+      "critical_section": "仅 HashSet::insert（guard 进入）/ HashSet::remove（guard Drop）",
+      "forbidden_under_lock": ["http_request", "block_on", "sleep", "channel_send_blocking", "turn_execution"],
+      "poison_recovery": "lock().unwrap_or_else(|e| e.into_inner())",
+      "no_await_across_lock": true,
+      "release_scope": "Drop 只释放本会话条目（不得清空整表）",
+      "evidence": "crates/pony-agent-core/src/bin/tui.rs:8479（单 bool 定义）、:2985-3001（guard enter/Drop）、:10037/:10044-10046/:10518-10519/:10614-10615（三处传参）、:10703（唯一读取点）",
+      "testing_anchor": "planned: 两会话分别 enter ⇒ 均可见在飞；drop 其一 ⇒ 另一会话仍可见（由 task-3 冻结）"
+    },
+    "goal_store": {
+      "kind": "进程级 Mutex（既有，不变）",
+      "evidence": "crates/pony-agent-core/src/agent/goal.rs:361-397",
+      "change": "无语义改动（advance_goal_round 的 CAS/持久化语义冻结）"
+    }
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "logging_scope": "new_structured_logging_surface_only",
+  "logging_legacy_eprintln_exempt": true,
+  "logging_debt_ref": "PA-119",
+  "logging_compliance_claimed": false,
+  "wave69_logging_events": [
+    {
+      "event": "upstream_policy_clamped",
+      "level": "warn",
+      "fields": ["trace_id", "field", "provided", "clamped_to", "bound"],
+      "semantics": "越界配置值被钳制到边界（不 fail 整个配置）",
+      "machine_verified": false
+    },
+    {
+      "event": "failover_candidate_ignored",
+      "level": "warn",
+      "fields": ["trace_id", "provider_id", "reason"],
+      "closed_reason_values": ["unknown", "duplicate", "self", "truncated"],
+      "semantics": "failoverProviderIds 中未知/重复/与主 provider 同 (provider_name, base_url)/超链长被截断的候选被忽略",
+      "machine_verified": false
+    },
+    {
+      "event": "provider_failover_switched",
+      "level": "warn",
+      "fields": ["trace_id", "from_provider", "to_provider", "error_class", "hop", "elapsed_ms"],
+      "semantics": "一次真实换手（已发起对候选的 HTTP 尝试）",
+      "machine_verified": false
+    },
+    {
+      "event": "provider_failover_skipped_cooldown",
+      "level": "warn",
+      "fields": ["trace_id", "provider_name", "model", "remaining_ms", "hop"],
+      "semantics": "候选处于冷却期 ⇒ 跳过且 0 次 HTTP",
+      "machine_verified": false
+    },
+    {
+      "event": "provider_failover_exhausted",
+      "level": "warn",
+      "fields": ["trace_id", "hops", "last_error_class", "attempted_providers"],
+      "semantics": "候选链耗尽，返回最后一次错误原文 + 结构后缀（禁止伪造成功）",
+      "machine_verified": false
+    },
+    {
+      "event": "provider_cooldown_reset",
+      "level": "info",
+      "fields": ["trace_id", "scope", "cleared_entries"],
+      "scope_fixed_value": "clear",
+      "semantics": "复位入口被调用（reset_global_cooldowns，仅显式 /clear 分支）；reset 只承诺『清空调用时刻的条目集合』",
+      "machine_verified": false
+    },
+    {
+      "event": "goal_rounds_yield_pending_requests",
+      "level": "info",
+      "fields": ["trace_id", "session_id", "pending_requests"],
+      "semantics": "续轮循环因仍有待作答 Ask/审批而让位（B5）；不新增 GoalRoundStopReason 变体，状态行由既有 Ask/审批面板承担",
+      "machine_verified": false
+    },
+    {
+      "event": "goal_round_advance_failed",
+      "level": "warn",
+      "fields": ["trace_id", "session_id", "goal_id", "stage", "error"],
+      "closed_stage_values": ["after_turn", "planner"],
+      "semantics": "预算推进失败被吞的静默面消除（B6）：control_plane/mod.rs:1947（after_turn）与 :2756（planner）；行为不变（仍 return Ok），仅补日志",
+      "machine_verified": false
+    }
+  ],
+  "wave69_failover": {
+    "enabled_condition": "providers.json 顶层 failoverProviderIds 非空且经过滤后仍有候选",
+    "disabled_condition": "缺省/空链 ⇒ 不进入 failover，行为与 wave-68 逐字不变（0 次额外 HTTP、0 次额外日志）",
+    "max_hops": 2,
+    "max_hops_note": "hop = 真实发起的换手次数（被冷却跳过不消耗 hop）；实际发起 HTTP 的 provider 数 ≤ 1 + max_hops = 3",
+    "candidate_chain_max_len": 8,
+    "candidate_chain_max_len_note": "failoverProviderIds 原始链长上限 8，超出截断并 warn failover_candidate_ignored(reason=truncated)；ProviderFailoverChain::new 再截断到 MAX_FAILOVER_HOPS",
+    "per_candidate_retry_budget": "fresh",
+    "per_candidate_retry_budget_note": "每条候选使用**独立的** RetryBudget（不得与主 provider 摊薄；逐候选重建 5 次/30s）；跨候选总时长由 per-attempt deadline（failover_budget_ms）约束，见 hop_loop_location",
+    "no_switch_on_missing_api_key": true,
+    "no_switch_on_missing_api_key_note": "主 provider 无 key（api_key.is_none()）属配置错误，快速失败且**不换手**，保持既有错误文案（矩阵 F-h）",
+    "failover_budget_ms": 120000,
+    "failover_budget_clock_start": "从第一次换手起计时",
+    "failover_budget_kind": "per_attempt_deadline",
+    "failover_budget_semantics": "FAILOVER_BUDGET_MS 是**逐 attempt 的 deadline**（不是『换手前查一次』的闸门）：每次候选 attempt 前重算 remaining，per-attempt 超时 = min(requestTimeoutMs, remaining)；remaining<=0 ⇒ 立即 exhausted 并返回最后一次失败的结构化错误 + 标记",
+    "worst_sync_ms": 352500,
+    "worst_sync_derivation": "worst_sync = requestTimeoutMs × decisionMaxAttempts + backoff_upper(7500) + FAILOVER_BUDGET_MS = 45000×5 + 7500 + 120000 = 352500ms（默认值）",
+    "worst_sync_note": "该值**作为契约上界**，禁止在文档/文案中宣称更小；改变默认值时须同步重算本字段",
+    "hop_loop_location": "hop 循环必须在 `retry_provider_scoped_with_report`（crates/pony-agent-core/src/agent/provider/mod.rs:4867）**调用之外**，每候选各调用一次（RetryBudget 在函数内 :4896 创建）；把换手塞进协议 match 闭包（:922）会让 3 个 provider 共用同一 budget 与 5 次上限 ⇒ per_candidate_retry_budget 静默失效",
+    "failover_trigger_classes": ["rate_limited", "quota", "timeout", "network", "auth", "server_error"],
+    "failover_trigger_evidence": {
+      "predicate": "crates/pony-agent-core/src/agent/retry.rs::failover_eligible(err) -> bool（换手触发唯一判据，禁止第二套关键词表）",
+      "classifier": "crates/pony-agent-core/src/agent/retry.rs:875-901（classify_error_class，封闭 7 值：timeout|rate_limited|quota|network|auth|bad_request|other）",
+      "server_error_derivation": "server_error 由 retry::upstream_code_for_hints（retry.rs:576-611）判 === Some(ErrorCode::UpstreamServerError)，**不得**往 classify_error_class 的值域加 server_error —— 该词表被 PA-171 冻结测试锁死",
+      "server_error_scope": "仅 502/503/504/408/520-524/527/530（retry.rs:334/339 码表）；**HTTP 500 既有冻结为 NonRetryable ⇒ 不触发换手**（对 500 换 provider 无收益，矩阵 M2）",
+      "wordlist_lock_anchor": "tests/pa172_legacy_closure_contract.rs::error_class_wordlist_is_locked（5xx 样本返回值恒 ∈ 7 值集且永不为 \"server_error\"）",
+      "non_trigger_classes": ["bad_request", "other"]
+    },
+    "cooldown_candidate": {
+      "behavior": "skip",
+      "http_attempts": 0,
+      "consumes_hop": false,
+      "log_event": "provider_failover_skipped_cooldown",
+      "cooldown_key": "{requested_name}|{provider_name}|{model}|{base_url}"
+    },
+    "stream_safety": {
+      "rule": "**流式入口不参与换手**（矩阵 F27/F-g）",
+      "reason": "SingleHopRetryReport（retry.rs:260-266）不携带 streamed 信息、streamed_any_delta 是入口内局部量（provider/mod.rs:1004 / :1228）⇒『已发 delta』在换手层不可判定；且流式无总 deadline，单跳最坏 ≈907s（180s read-idle × 5 attempt + 7.5s backoff），换手会把最坏 wall-clock 放大到 30min 级",
+      "stream_single_hop_worst_ms": 907500,
+      "stream_single_hop_worst_derivation": "180s(read-idle) × 5 + 7500ms(backoff) = 907500ms",
+      "on_stream_failure": "按既有语义上抛，**0 次额外 HTTP**、不加 failover 后缀",
+      "existing_counter_evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:1004/:1006（决策流式局部 bool）、:1228/:1234/:1273（followup 流式 AtomicBool + no_retry_hint）",
+      "sentinel_text_frozen": "stream already emitted delta; auto-retry forbidden",
+      "sentinel_note": "该哨兵措辞刻意不含 timeout/rate-limit 特征（PA-100），故 classify ⇒ other ⇒ 天然不重试；禁止改写该文案",
+      "deferred_upgrade_path": "若将来立『流式总 deadline』，再把 streamed 信息提升到换手层并开放流式换手（deferred，不在本波闭包）"
+    },
+    "participating_entries": [
+      {"entry": "decide_with_tools", "evidence": "provider/mod.rs:897", "mode": "sync", "note": "hop 循环在 retry_provider_timeout(\"decision\") 外层"},
+      {"entry": "continue_with_tool_result", "evidence": "provider/mod.rs:1050", "mode": "sync", "note": "OpenAI 分支吞错成 Ok(local_fallback) ⇒ 该分支天然不换手（known limitation）；Anthropic 分支（:1126 裸调）参与"},
+      {"entry": "continue_with_tool_results", "evidence": "provider/mod.rs:1350", "mode": "sync", "note": "批量 followup 同步，无增量面"},
+      {"entry": "压缩摘要 decide_with_tools", "evidence": "agent/runtime/turn_prep.rs:66", "mode": "sync", "note": "继承同一 manager 链（该 path 的 provider 即 §3.5 装链的 manager）"}
+    ],
+    "excluded_entries": [
+      {"entry": "decide_with_tools_stream_bounded", "evidence": "provider/mod.rs:974", "mode": "stream", "reason": "无流式总 deadline ⇒ 单跳最坏 ≈907s，换手放大到 30min 级；deferred（需先立流式总 deadline）"},
+      {"entry": "continue_with_tool_result_stream_bounded", "evidence": "provider/mod.rs:1169", "mode": "stream", "reason": "同上；且该入口 OpenAI 两分支已发 delta 后重发同步请求并吞成 Ok（:1275-1321）⇒ F-g 的 streamed 判据不可判定"},
+      {"entry": "同步轮 plan_turn", "evidence": "agent/runtime/turn_prep.rs:204/216", "mode": "sync", "reason": "deferred（矩阵 §10/§11.3，不在本波闭包）"}
+    ],
+    "transport_note": "HTTP 出口（post_openai_json / post_anthropic_json / post_*_stream_response）与 RecoveryPipeline（recovery.rs:97-101，生产未接线）均不持有候选链上下文，不参与换手",
+    "exhausted_error_suffix": {
+      "format": "；failover_exhausted=true；failover_hops={hops}",
+      "markers": ["failover_exhausted="],
+      "api": "pub const FAILOVER_EXHAUSTED_MARKER: &str = \"failover_exhausted=\"; pub fn append_failover_exhausted_marker(err: &str, hops: usize) -> String; pub fn parse_failover_exhausted_marker(err: &str) -> Option<usize>",
+      "attempted_providers_carrier": "只在 provider_failover_exhausted 日志事件的 attempted_providers[] 字段里（不重复写进错误文本）",
+      "placement": "head segment（`；响应正文` 之前），沿用 retry_after / cooldown_active 标记的防劫持纪律",
+      "idempotent": true,
+      "preserves_original_error": true
+    },
+    "production_wiring": {
+      "status": "planned",
+      "intended_point": "crates/pony-agent-core/src/agent/runtime/tool_exec.rs:7-20（AgentRuntime::resolve_provider 唯一生产构造点）与 runtime/compaction_ops.rs:99-105",
+      "write_scope": "runtime/tool_exec.rs 与 runtime/compaction_ops.rs 已并入 t-w-provider 写域（D69-14，矩阵 §9）",
+      "additional_closure": "bin/tui.rs 的 DynamicProviderResolver（:3405 注入点）必须覆写 upstream_policy() 与 resolve_failover_chain() 并转发给 ProviderRegistryStore；否则默认 trait 方法令 policy=default、链恒空 ⇒ 换手在生产永不触发（判据：grep -n \"fn resolve_failover_chain\" crates/pony-agent-core/src/bin/tui.rs 必须命中）",
+      "known_risk": "未接线 ⇒ 不得声称 failover 生效"
+    },
+    "machine_verified": false,
+    "planned_anchors": [
+      "tests/pa172_provider_failover_contract.rs：双 loopback mock（主 429 → 备 200，断言两侧 HTTP 计数）",
+      "全链耗尽：返回最后一次失败的结构化错误 + 可解析 failover_exhausted= 标记（不承诺原始 body）",
+      "冷却候选跳过：候选 mock 收到 0 次请求",
+      "hop 上限：最多 3 个 provider 各 1 次",
+      "per-attempt deadline：remaining<=0 后不再发起候选请求",
+      "流式入口：0 次额外 HTTP（排除清单的机械判据）",
+      "HTTP 500：不换手（M2 边界）"
+    ]
+  },
+  "wave69_cooldown": {
+    "reset_entrypoint_wired": true,
+    "reset_entrypoint": "crates/pony-agent-core/src/agent/provider/mod.rs::reset_global_cooldowns() -> usize",
+    "reset_caller": "crates/pony-agent-core/src/bin/tui.rs **仅显式 `/clear` 命令分支**（`:9873` 附近，命中后 state.reset_session_scope() 的那一处）",
+    "reset_caller_forbidden": "**不得**挂在 `reset_session_scope` 函数体内（该函数有 6 个调用点 :7021/:7754/:7861/:8882/:8884/:9873，覆盖启动 resume / 队友切换 / 返回主会话 / 选择器 resume ⇒ 一个会话的 /resume 会清掉进程级冷却表，把别会话正在冷却的 provider 重新点燃；矩阵 R2 / D69-16）",
+    "reset_log_event": "provider_cooldown_reset",
+    "reset_returns": "被清空的条目数",
+    "cooldown_remaining_read_point": "provider_failover_skipped_cooldown 路径消费 cooldown_remaining ⇒ 必须有 ≥1 生产调用点（禁止再留『零调用点』）",
+    "reset_supersedes": "wave-68-a1 的 ADVISORY a1-5（clear_cooldown/cooldown_remaining 零生产调用点 ⇒ 复位只能靠进程重启）",
+    "key_segments": ["requested_name", "provider_name", "model", "base_url"],
+    "key_segment_count": 4,
+    "key_format": "{requested_name}|{provider_name}|{model}|{base_url}",
+    "key_segment_escaping": {
+      "injective": true,
+      "decision": "D69-12（Lead 裁决：必须单射；否决 `-` 作空段占位）",
+      "order": "1) '%' -> \"%25\" 先  2) '|' -> \"%7C\" 后  3) 空串 -> \"~empty~\"",
+      "percent": "% -> %25（必须先于 | 转义，否则字面 %7C 会与真 | 碰撞）",
+      "pipe": "| -> %7C",
+      "empty_segment": "-> ~empty~",
+      "base_url_normalization": "先去尾斜杠（trim_end_matches('/')）+ scheme/host 小写化；**path 保持原样**（区分大小写）；归一后为空 ⇒ 空段规则（~empty~）",
+      "base_url_normalization_rule": "host 大小写不敏感：`http://API.Example.com/v1` 与 `http://api.example.com/v1` **必须同键**（否则冷却可被纯大小写改动绕过，审查 B）；`http://a/v1` 与 `http://a/v1/` 同键",
+      "helper": "fn escape_cooldown_segment(s: &str) -> String（段内唯一转义点；禁止在调用点另行拼键）",
+      "injectivity_note": "已裁决为单射（D69-12）：`%`→`%25` 先行保证 `%7C` 字面量不与真 `|` 同键；`-` 不再作占位故与字面 `-` 可区分。**已知残留边界**：字面段值恰为 `~empty~` 时与空段同键（要完全消除需再转义 `~`→`%7E`）；该残留只影响冷却粒度（粒度变严，不产生跨 provider 的 HTTP 误发），已登记不擅自扩大转义面"
+    },
+    "key_decision": "D68-7（四段，保留）+ D69-6 #5（段内转义/归一，additive）",
+    "default_window_ms": 60000,
+    "max_window_ms": 21600000,
+    "clamp_min_ms": 1000,
+    "registry_max_entries": 64,
+    "reset_zero_callsite_evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:732（cooldown_remaining）、:737（clear_cooldown）——wave-68 为零生产调用点，仅测试 :9009-9010；wave-69 由 reset_global_cooldowns 提供生产复位面",
+    "machine_verified": false,
+    "planned_anchors": [
+      "tests/pa172_cooldown_legacy_contract.rs：键归一真值表（含 `|` 的两个不同选择不得碰撞；`http://a/v1` 与 `http://a/v1/` 同 key；`http://API.Example.com/v1` 与 `http://api.example.com/v1` 同 key；path 大小写保持原样）",
+      "poison_registry_for_test()（#[cfg(debug_assertions)]）注入锁中毒后 enter/remaining/clear 仍可用（fail-open 机械锚点）",
+      "reset_global_cooldowns() 返回条目数且清空全表",
+      "rate_limit_recovery_hint_at(err, now) 真实消费 now（两种文案：已知恢复时刻 / 未知）"
+    ]
+  },
+  "wave69_legacy_closure": {
+    "source": "management/task-system/03_TASKS/PA-171-goal-round-failure-resilience.md:108-127（§遗留与后续 1~14）",
+    "status_vocabulary": ["closed", "closed_with_declaration", "closed_with_note", "pending_review_pass", "deferred"],
+    "status_meaning": "closed = 契约层闭合且有可执行判据（红相锚点冻结于本波 task-3）；closed_with_declaration = 以显式声明（而非代码行为变更）闭合；closed_with_note = 无法追溯补齐的历史时点事项，以制度性证据从制度上关闭；pending_review_pass = 需 round2 独立审查 PASS 才可改 closed；deferred = 本轮不闭合。**contract_status 只表示契约层是否已定义闭合判据；impl_status 一律 planned，禁止读成『已实现』。**",
+    "items": [
+      {"n": 3, "summary": "冷却注册表 4 处 into_inner 为 fail-open，需显式声明或改 fail-closed", "status": "closed_with_declaration", "action": "显式声明 fail-open（临界区仅内存 map；fail-closed 会让一次历史 panic 永久冻结该 provider，且当时无复位入口）+ 新增机械锚点（poison 注入后仍可读写）", "owner_task": "task-4", "implementation": "planned"},
+      {"n": 4, "summary": "clear_cooldown / cooldown_remaining 零生产调用点 ⇒ 复位只能靠进程重启", "status": "closed", "action": "新增 reset_global_cooldowns() -> usize + provider_cooldown_reset 日志，由 TUI /clear 调用", "owner_task": "task-4（provider 侧）+ task-5（tui 接线）", "implementation": "planned"},
+      {"n": 5, "summary": "冷却键 a|b|c|d 未转义/未归一（| 可碰撞、尾斜杠变体可绕过）", "status": "closed", "action": "段内单射转义（`%`→`%25` 先、`|`→`%7C` 后、空段→`~empty~`，D69-12）+ base_url 去尾斜杠归一；四段结构与 D68-7 不变", "owner_task": "task-4", "implementation": "planned"},
+      {"n": 6, "summary": "bin/tui/errors.rs 的 now_unix_ms 为死参（无法据此算剩余窗口）", "status": "closed", "action": "新增 retry::rate_limit_recovery_hint_at(err, now_unix_ms)，user_facing_error_summary_at 真正消费 now（删除 let _ = now_unix_ms）", "owner_task": "task-4", "implementation": "planned"},
+      {"n": 7, "summary": "GoalRoundLoopLease 是进程级单 bool（多会话并发续轮互相阻塞）", "status": "closed", "action": "代码已由 wave-68-a2 改为按 session_id 分区；本轮只做**文档表征**：抽到 lib agent/goal_lease.rs 并改写 doc 首句（原写 Arc<AtomicBool> compare-exchange，陈旧）", "owner_task": "task-5", "implementation": "planned", "judgement": "non-machine（靠 review）：doc 首句与实际类型一致", "note": "wave-68-a2 已解决行为面；本轮闭合文档面"},
+      {"n": 8, "summary": "turn_loop_in_flight 为单 bool，线程提前 return 可清掉另一线程的在飞语义", "status": "closed", "action": "改为按 session_id 分区（Arc<Mutex<HashSet<String>>>），Drop 只释放本会话；读取点 :10703 语义改为『当前会话是否在飞』", "owner_task": "task-5", "implementation": "planned", "judgement": "可经 bin-as-module（#[path = \"../src/bin/tui.rs\"] mod tui;）触达则补双会话用例；不可触达 ⇒ non-machine（靠 review），**禁止**为测试把内部类型改成 pub", "note": "矩阵 B3"},
+      {"n": 9, "summary": "续轮预算推进落盘失败分支复用 BudgetExhausted 文案（真实原因是持久化失败）", "status": "closed", "action": "新增 additive 变体 GoalRoundStopReason::BudgetPersistFailed + 逐字 visible_line（含『已停止』『持久化失败』，不含『进行中』，不与 BudgetExhausted 混淆）", "owner_task": "task-5", "implementation": "planned"},
+      {"n": 10, "summary": "TuiState.goal_rounds_stopped 只写不读、reset_session_scope 未清（跨会话残留）", "status": "closed", "action": "reset_session_scope 清空 + 新增读取点（goal 横幅停止态文案派生函数）", "owner_task": "task-5", "implementation": "planned"},
+      {"n": 11, "summary": "租约与 start_turn_stream_checked 五臂归约缺可执行用例（--list 0 命中）", "status": "closed", "action": "新增 tests/pa171_lease_anchor_contract.rs：租约四锚点（按会话分区/同会话二次 None/Drop 含 panic/两会话并发）+ turn_stream_outcome_from_terminal 提为可测公共面（5 决策臂 × 5 phase 臂封闭真值表）", "owner_task": "task-3（冻结锚点）+ task-5（提公共面）", "implementation": "planned"},
+      {"n": 12, "summary": "GoalRoundLoopLease 类型 doc 首句仍写 Arc<AtomicBool> compare-exchange（注释陈旧）", "status": "closed", "action": "随 #7 抽库在同一新文件内改写 doc 首句为 Mutex<HashSet<String>> 按会话分区", "owner_task": "task-5", "implementation": "planned"},
+      {"n": 13, "summary": "UiEvent::GoalRoundsStopped 只带 reason/status_line，不带 session_id ⇒ 非当前会话的停轮上报可污染当前会话消息区", "status": "closed", "action": "增 session_id: Option<String>（additive）；非当前会话的停止上报只记日志，不进消息区/状态行", "owner_task": "task-5", "implementation": "planned"},
+      {"n": 14, "summary": "wave-68 a2 的计划复审由 Lead 定点复核替代（Subagent 未产出），如实登记为 Lead 复核而非独立审查收据", "status": "pending_review_pass", "action": "本波 2 路独立 Subagent 计划审查 + 修订后 round2 复审（review-plan-wave69-v2-*.json）", "judgement": "dev-review-lint.py Exit 0 + verdict=PASS（round1 两路均 FAIL，故 round2 PASS 前保持 pending）", "note": "wave-68 的 Lead 定点复核不可追溯为独立审查；缺口由 wave-69 的 review-plan-wave69-a/-b.json（schema v2 + dev-review-lint Exit 0）制度性关闭", "owner_task": "task-2", "implementation": "n/a（制度性闭合，无代码面）"}
+    ],
+    "closed_count": 10,
+    "closed_with_declaration_count": 1,
+    "closed_with_note_count": 1,
+    "pending_review_pass_count": 1,
+    "deferred_count": 0,
+    "deferred_items": [],
+    "count_note": "条目总数 12（#3~#14）。`closed_with_note` 与 `pending_review_pass` 指同一条目 #14 的两个面（制度性关闭说明已写、状态待 round2 PASS）⇒ 分类计数之和 13 > 条目数 12 属已知重叠，**禁止**据此推导条目数或宣称全部闭合。",
+    "status_vocabulary_note": "新增 `pending_review_pass`：#14 在 round2 审查 PASS 前不得记为 closed。"
+  },
+  "resource_release": [
+    "bounded_queue",
+    "max_queue_capacity_1024",
+    "fire_and_forget",
+    "worker_thread_shutdown",
+    "wave68_provider_cooldown_registry_hard_cap_entries_64",
+    "wave68_provider_cooldown_entries_evicted_when_expired_on_access",
+    "wave68_provider_cooldown_no_background_thread_no_timer",
+    "wave68_provider_cooldown_max_window_clamped_6h",
+    "wave69_provider_cooldown_reset_entrypoint_drops_all_entries",
+    "wave69_failover_no_new_thread_no_timer_no_background_task",
+    "wave69_failover_bounded_hops_2_and_per_attempt_deadline_120000ms_worst_sync_352500ms",
+    "wave69_failover_candidate_chain_read_only_from_config_no_leaked_handle",
+    "wave69_goal_round_lease_module_home_is_lib_raii_drop_releases_session_entry",
+    "wave69_turn_loop_in_flight_per_session_entry_removed_on_guard_drop",
+    "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
+    "wave9_job_handle_close_on_terminate_success",
+    "wave9_suspended_process_resume_fail_closed_cleanup",
+    "adr0065_swap_tool_surface_atomic_never_descriptor_visible_without_handler",
+    "adr0066_mcp_child_process_reaped_on_drop_source_replace_and_timeout",
+    "adr0067_plugin_call_deadline_comes_from_budget_ledger_then_kill_process_group",
+    "adr0067_plugin_host_drop_reaps_child_process_group_and_orphans",
+    "adr0067_hooks_child_env_whitelist_cwd_bounded_and_process_group_kill",
+    "adr0068_contract_schema_files_declare_version_and_breaking_additive_change"
+  ],
+  "resource_release_notes": {
+    "provider_cooldown_registry": "进程内 HashMap，条目上限 64，访问时淘汰过期项；无句柄/无线程/无定时器/无文件；wave-69 新增全表清空入口（返回条目数）",
+    "failover": "纯同步编排；只为每个候选构造一个短生命周期的 reqwest Client（沿用既有 build_http_client 语义），无后台任务、无定时器、无监听端口",
+    "goal_round_loop": "循环退出不新增线程；租约条目随 Drop 释放；在飞标志按会话条目随 guard Drop 释放"
+  },
+  "auto_continue_max": 8,
+  "goal_store_atomic_write": true,
+  "goal_round_failure_stop": {
+    "max_consecutive_failures": 2,
+    "constant": "agent::goal::MAX_CONSECUTIVE_GOAL_ROUND_FAILURES",
+    "code_line": "crates/pony-agent-core/src/agent/goal.rs:404",
+    "failed_round_consumes_round_budget": false,
+    "visible_stop_line_required": true,
+    "single_loop_owner_required": true,
+    "visible_stop_reason_variants": [
+      "Cancelled",
+      "ConsecutiveFailures",
+      "BudgetExhausted",
+      "AutoContinueBudget",
+      "TurnSuspended",
+      "TurnUnclassified",
+      "LoopAlreadyOwned",
+      "BudgetPersistFailed",
+      "NoActiveGoal"
+    ],
+    "visible_stop_reason_variant_count": 9,
+    "wave69_change": "今日 7 变体 → 本波 **+2（additive）= 9**：`BudgetPersistFailed`（#9/B4，文案 `goal 续轮已停止（本轮预算推进落盘失败，已暂停自动续轮）`）与 `NoActiveGoal`（#23/B5，文案 `goal 续轮已停止（当前会话无进行中的目标）`）。两者**不得**由 `goal_round_stop_reason`（三值真值表）产出；其余 7 变体文案与判定真值表不变。",
+    "goal_rounds_stopped_reason_tags_closed": ["cancelled", "consecutive_failures", "budget_exhausted", "auto_continue_budget", "turn_suspended", "turn_unclassified", "loop_already_owned", "budget_persist_failed", "no_active_goal"]
+  },
+  "observability": {
+    "exporter_flush_timeout_ms": 3000,
+    "log_file_max_bytes": 524288,
+    "setting_precedence": ["settings", "env", "default"],
+    "cost_precision_decimals": 6,
+    "cost_budget_semantics": "soft_warn",
+    "wave69_ownership": {
+      "metrics": "结构性 N-A（docs/observability.yaml:45-56，无常驻监听地址/无 /metrics），wave-69 不改变该判定 ⇒ failover/冷却/复位**唯一**可观测面是结构化 JSON 日志（带 trace_id）；禁止为让巡检变绿而伪造 /metrics",
+      "tracing": "失败轮 errorClass/归因字段沿用 wave-68 归属（docs/observability.yaml:14-40）",
+      "error_classifier": "唯一家仍为 crates/pony-agent-core/src/agent/retry.rs::classify_error_class；failover 触发类不得另立第二套分类器",
+      "closed_by": "Lead 收口阶段（Protocol 只读 docs/observability.yaml）"
+    }
+  },
+  "external_call_timeout_exceptions": [
+    {
+      "surface": "provider 同步 HTTP 出口（post_openai_json / post_anthropic_json）",
+      "code": "crates/pony-agent-core/src/agent/provider/mod.rs:2737、:2788（build_http_client(Duration::from_secs(45))）、:3097-3101（.timeout(timeout)）",
+      "semantics": "整请求总时限，wave-69 起由 providers.json 顶层 upstreamPolicy.requestTimeoutMs 驱动：默认 45000ms、边界 [1000,300000]、越界钳制 + warn upstream_policy_clamped",
+      "why_not_base": "3000ms 会截断长推理/长上下文请求；该面是既有例外（wave-68 已登记），wave-69 只把它从内联字面量改为可配置，未降低任何默认值",
+      "guarantee": "缺省配置下行为逐字不变（45000ms）；配置只在显式写入 providers.json 时改变取值",
+      "known_gap_ref": "PA-172（本波次主线）",
+      "registered_at": "2026-11-09 wave-68",
+      "updated_at": "2026-11-09 wave-69"
+    },
+    {
+      "surface": "provider 流式 HTTP 出口（post_openai_stream_response / post_anthropic_stream_response）",
+      "code": "crates/pony-agent-core/src/agent/provider/mod.rs:2306-2311、:2358-2363（build_streaming_http_client 15s connect / 180s read-idle）、:3129-3137（流式 client 构造）",
+      "semantics": "connect_timeout=15s + read/idle timeout=180s，无总 deadline",
+      "why_not_base": "流式总时长由模型生成长度决定，套 3s 会截断长推理；本轮**不改**该面（requestTimeoutMs 只作用于同步出口）",
+      "guarantee": "本波不改流式超时；仅新增『已发增量禁止换手』准入规则（不新增 HTTP 面）",
+      "known_gap_ref": "既有例外（wave-56 已闭环总时长上界 seam ProviderStreamGuard）",
+      "registered_at": "2026-11-09 wave-68",
+      "updated_at": "2026-11-09 wave-69"
+    },
+    {
+      "surface": "provider 跨候选 failover 链（wave-69 新增编排面）",
+      "code": "crates/pony-agent-core/src/agent/provider/mod.rs（failover 编排，planned）",
+      "semantics": "单个逻辑调用最多 1+2=3 个 provider 各 1 次尝试（每次受 requestTimeoutMs 约束），总 wall-clock 上限 failover_budget_ms=120000（从第一次换手起计时）",
+      "why_not_base": "failover 是有意的额外外部调用面（D69-4），用 hop 上限 + 总预算双重封顶；缺省空链时 0 次额外 HTTP",
+      "guarantee": "冷却中候选 0 次 HTTP；已发增量禁止换手；超预算即停止并返回最后一次错误原文 + 可解析后缀（禁止伪造成功）",
+      "known_gap_ref": "装配写域已并入 t-w-provider（D69-14，含 runtime/tool_exec.rs、runtime/compaction_ops.rs）；剩余闭环条件 = bin/tui.rs 的 DynamicProviderResolver 覆写两个新 trait 方法（t-w-core，见 wave69_failover.production_wiring.additional_closure）",
+      "registered_at": "2026-11-09 wave-69",
+      "updated_at": "2026-11-09 wave-69"
+    }
+  ],
+  "wave69_ts_contract": {
+    "snapshot_file": "docs/contracts/ts-contract.snapshot.json",
+    "snapshot_current_state": "TurnStreamEvent.serdeKeys 共 38 键，不含 errorClass；快照 types 只含 TurnInput/TurnMetricsSnapshot/TurnResult/TurnStreamEvent（无 TurnTraceRecord）",
+    "fixture_change": "crates/pony-agent-core/tests/ts_contract_snapshot.rs:90 由 error_class: None 改为 Some(\"rate_limited\") 并 UPDATE_CONTRACT_SNAPSHOT=1 重生成",
+    "frontend_types": ["src/types/runtime.ts:1179（TurnStreamEvent）", "src/types/runtime.ts:795（TurnTraceRecord）", "src/types/runtime.ts:283（TraceTimelineEntry，本轮不改）"],
+    "gate_script": "scripts/check-ts-contract.mjs（只查『Rust 有 / TS 无』单方向）",
+    "red_green_direction_frozen": "前端未加 errorClass ⇒ 门禁 Exit 1（红）；前端加上后 ⇒ Exit 0（绿）",
+    "turn_trace_record_gap": "TurnTraceRecord 不在快照 types 内 ⇒ 其 errorClass 无机器门禁；判据降级为 grep/类型检查 + review（如需机器门禁需 t-red 扩快照类型清单）",
+    "machine_verified": false
+  },
+  "wave69_lead_rulings_vs_analysis": {
+    "note": "登记 Lead 数值裁决与本文件取证的差异点，便于 Lead 复核；本文件取值**一律服从 Lead 裁决**。",
+    "items": [
+      {
+        "topic": "failover_trigger_classes 中的 server_error",
+        "lead_ruling": "触发类含 server_error，由 retry::upstream_code_for_hints 判定，不得改 classify_error_class 值域",
+        "conflict": "classify_error_class（retry.rs:875-901）封闭 7 值不含 server_error；PA-171 冻结测试锁死该值域",
+        "resolution": "本文件按 Lead 裁决：server_error 走 upstream_code_for_hints 旁路判据，classify_error_class 值域逐字不动"
+      },
+      {
+        "topic": "failover_budget_ms 的语义",
+        "lead_ruling": "120000ms，从第一次换手起计时，且为**逐 attempt deadline**（per-attempt 超时 = min(requestTimeoutMs, remaining)；remaining<=0 ⇒ 立即 exhausted）",
+        "conflict": "原表述『跨 provider 总 wall-clock 预算 / 预算先于最坏值触发即早停』**不成立**：单候选内部仍可跑满 decisionMaxAttempts 次 × requestTimeoutMs，故总时长上界不是 120s",
+        "resolution": "采用 per-attempt deadline 语义；契约上界改写为 worst_sync_ms=352500（=45000×5+7500+120000），并在 worst_sync_note 明确禁止宣称更小。旧『早停』表述已删除"
+      },
+      {
+        "topic": "server_error 的判定面",
+        "lead_ruling": "server_error 保留在触发类封闭集，但由 upstream_code_for_hints 判定，且**仅 502/503/504/408/520-524/527/530**；HTTP 500 既有冻结 NonRetryable ⇒ 不换手",
+        "conflict": "最初写法把 server_error 当成与 classify_error_class 并列的第 6 个 class，未限定状态码子集",
+        "resolution": "已按矩阵 M2 补 server_error_scope；classify_error_class 值域仍逐字不动，另加词表机器锁锚点（error_class_wordlist_is_locked）"
+      },
+      {
+        "topic": "PA-171 冻结测试文件计数",
+        "lead_ruling": "tests/pa171_*.rs 四个冻结文件只读",
+        "conflict": "实测 tests/ 下有 5 个：pa171_goal_round_failure_contract / pa171_provider_rate_limit_cooldown_contract / pa171_failed_turn_attribution_contract / pa171_error_copy_contract / pa171_error_copy_adversarial",
+        "resolution": "按超集执行：5 个全部只读（不改变任何断言语义）"
+      },
+      {
+        "topic": "冷却键段内转义的单射性",
+        "lead_ruling": "D69-12：必须单射 —— `%`→`%25` 先、`|`→`%7C` 后、空段→`~empty~`、base_url 去尾斜杠",
+        "conflict": "原 D69-6 #5 的 `-` 占位方案非单射（字面 `-` 与空段同键；字面 `%7C` 与 `|` 同键）",
+        "resolution": "已按 D69-12 裁定为单射；唯一残留边界为『字面段值恰为 `~empty~`』（只影响冷却粒度，不产生跨 provider 的 HTTP 误发），已登记不擅自扩大转义面"
+      }
+    ]
+  },
+  "logging_eprintln_exempt_note": "本波次不新增生产 eprintln；新增可观测面一律走既有结构化日志（otel::log::log_json_with_fields）+ trace_id。JSON+trace_id 全量收敛仍属 PA-119 债务",
+  "wave69_platform_notes": {
+    "no_new_thread": true,
+    "no_new_timer": true,
+    "no_new_listen_socket": true,
+    "new_external_call_surface": "failover 链（受限：hop ≤ 2、per-attempt deadline 120000ms、缺省关闭）；同步路径契约上界 worst_sync_ms=352500（禁止宣称更小）；静默面其余为纯内存/纯配置",
+    "frozen_surfaces_not_to_touch": [
+      "tests/pa171_*.rs（5 个文件；Lead 说 4 个，实测 tests/ 下有 5 个：另有 pa171_error_copy_adversarial.rs）",
+      "ProviderRetryPolicy::classify / decide",
+      "RetryBudget 既有语义",
+      "ERROR_SUMMARY_TRANSIENT 逐字文案",
+      "emit_stream_failed 14 参签名",
+      "advance_goal_round 的 CAS/持久化语义",
+      "contract-matrix-pa171.md §2–§5 冻结断言",
+      "classify_error_class 的 7 值封闭值域（不得加 server_error）"
+    ],
+    "baseline_note": "本文件所有 path:line 以 HEAD 458b952e 为准（wave-68 基线 d9425a70 的行号已漂移）"
+  }
+}

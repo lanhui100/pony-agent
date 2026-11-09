@@ -637,3 +637,42 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String;
 - `python3 ~/.agents/skills/dev-team/scripts/dev-stub-lint.py crates/pony-agent-core`
   → **Exit 1**，14 条命中全在 `tests/fixtures/plugin/echo-plugin.py`（预置插件夹具 + Python-only 工具）；
   见 §8 偏差声明 1：**不构成纯度证据，不作为本波次门禁，也未伪造成"通过"**。
+
+---
+
+### Amendment: wave-69-a1（2026-11-09，PA-171 遗留收口 · 由 PA-172 波次承载）
+
+> 本 amendment 只**追加**登记，不改写 §2–§5 任何冻结断言文字。权威矩阵：`.dev-team/contract-matrix-pa172.md`。
+
+1. **a1-1 §2.2 C1-S3 `visible_line()` 变体表扩容**（additive，**七变体 → 九变体**；实测今日 `goal.rs:421-446` 为 7 个：Cancelled/ConsecutiveFailures/BudgetExhausted/AutoContinueBudget/TurnSuspended/TurnUnclassified/LoopAlreadyOwned）：
+   | 变体 | `visible_line()` | 性质 |
+   |---|---|---|
+   | `BudgetPersistFailed` | `goal 续轮已停止（本轮预算推进落盘失败，已暂停自动续轮）` | wave-69 新增（遗留 #9：不再复用 `BudgetExhausted` 文案） |
+   | `NoActiveGoal` | `goal 续轮已停止（当前会话无进行中的目标）` | wave-69 新增（遗留 #20：`tui.rs:8187` 裸 break 补可见原因） |
+   两变体**不由** `goal_round_stop_reason` 产出（其三值真值表 C1-S1 不变），由 TUI 侧构造。
+2. **a1-2 §6.1 结构化日志事件封闭集扩容**（metrics/logs 仍为结构性 N-A）：
+   `provider_failover_switched`、`provider_failover_skipped_cooldown`、`provider_failover_exhausted`、
+   `provider_cooldown_reset`、`upstream_policy_clamped`、`failover_candidate_ignored`、
+   `goal_rounds_yield_pending_requests`、`goal_round_advance_failed`（字段清单见新矩阵 §4/§8）。
+   `goal_rounds_stopped` 的 `reason` 枚举扩为含 `budget_persist_failed` / `no_active_goal`。
+3. **a1-3 §3.3 C3-P4 poison 策略显式化（遗留 #3）**：4 处 `into_inner()`（`provider/mod.rs:650/665/674/694`）
+   **保持 fail-open 并升格为契约声明**——理由：临界区仅 `HashMap` 内存操作；fail-closed 会让一次历史 panic
+   永久冻结该 provider。新增 poison 机械锚点（见新矩阵 §5 R1）。
+4. **a1-4 `clear_cooldown`/`cooldown_remaining` 零生产调用点（遗留 #4）→ 已接线**：新增
+   `reset_global_cooldowns() -> usize`（`provider/mod.rs`，清空全表 + `provider_cooldown_reset` 日志），
+   生产调用点 = **仅显式 `/clear` 命令分支**（`bin/tui.rs` 中 `/clear` 命中后调用 `reset_session_scope()` 的那一处，约 `:9873`）；
+   **不得**挂在 `reset_session_scope` 函数体内（该函数另有 5 个会话切换调用点，会清掉别的会话正在生效的进程级冷却）。a1-5 的「复位只能靠进程重启」结论**作废**。
+5. **a1-5 冷却键（遗留 #5，⚠ 本条目旧表述已被 D69-12 接替）**：~~`|`→`%7C`、空段→`-`~~ —— 该规则**非单射**（字面 `%7C`/`-` 会碰撞），
+   **作废**。现行冻结口径（D69-12）：段内转义按 `%`→`%25` 先、`|`→`%7C` 后、空段→`~empty~`，且 `base_url` 先**去尾斜杠 + scheme/host 小写化**（path 保持原样）。
+   键语义仍是「每个 endpoint 一份窗口」（D68-7 不变），统一入口 `cooldown_key_for(&ResolvedProviderSelection)`。
+6. **a1-6 §2.3 C1-T2 租约（遗留 #7/#12）**：`GoalRoundLoopLease` 从 `bin/tui.rs` 抽到 lib 模块
+   `agent/goal_lease.rs`，类型与语义逐字不变（`Arc<Mutex<HashSet<String>>>` 按 `session_id` 分区、RAII Drop），
+   **零机械测试锚**的缺口关闭（新增 `tests/pa171_lease_anchor_contract.rs`）。
+7. **a1-7 `start_turn_stream_checked` 五臂归约（遗留 #11）**：`turn_stream_outcome_from_terminal`
+   提升为 `pub`，5 决策臂 × 5 phase 臂真值表由集成测试锚定（新矩阵 §7.2）。
+8. **a1-8 §2.3 C1-T4 事件（遗留 #13）**：`UiEvent::GoalRoundsStopped` 增 `session_id: Option<String>`；
+   非当前会话的停止上报只落日志、不改状态行/消息区。
+9. **a1-9 `TuiState.goal_rounds_stopped`（遗留 #10）**：`reset_session_scope` 必须清空，且必须有读取点；
+   `turn_loop_in_flight` 由单 bool 改按 `session_id` 分区（遗留 #8）。
+10. **a1-10 TS 契约（遗留 #2）**：`errorClass` 进 `docs/contracts/ts-contract.snapshot.json`（38 → 39 键）与
+    `src/types/runtime.ts` 两处类型；`scripts/check-ts-contract.mjs` 红绿方向冻结。
