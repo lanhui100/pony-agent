@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
@@ -17,7 +17,7 @@ use super::session::{
 // ADR 0099 阶段 0：提交边界实作（CAS / 单实例锁 / busy 判定 / 孤儿回填 / 规范化 trace 源）
 // 独立成文件——`sqlite_session.rs` 已计入 file-size 基线条目，净值不得增长。
 #[path = "sqlite_session_commit.rs"]
-mod commit;
+pub(crate) mod commit;
 
 pub use commit::is_busy_error;
 
@@ -209,11 +209,8 @@ pub struct SqliteSessionBackend {
     legacy_json_path: Option<PathBuf>,
     /// Lazily opened, then reused for the lifetime of the backend.
     connection: Mutex<Option<Connection>>,
-    /// ADR 0099 阶段 0（E5）：`sessions.db.lock` 的独占 guard——持到 backend drop 才释放
-    /// （进程内登记表用 Weak 记账，故这里必须把 Arc 存住）。
-    instance_lock: Mutex<Option<std::sync::Arc<std::fs::File>>>,
-    /// ADR 0099 阶段 0（E5）：抢不到单实例锁 ⇒ 降级只读（连接 `query_only=ON`）。
-    read_only: std::sync::atomic::AtomicBool,
+    /// ADR 0107 §5 P1：日常写路径不再持有库级独占锁；库级独占只在**破坏性维护**
+    /// （rebuild / migrate / VACUUM）期间由 `maintenance_lock` 持有。
     /// ADR 0099 阶段 0（E8）：维护入口的**存储级只读**——以 `mode=ro` 打开，不建表、不迁移、
     /// 不改 `journal_mode`（否则打开即改库文件头，`--dry-run` 就不是零写入了）。
     storage_read_only: bool,
@@ -235,6 +232,11 @@ impl SqliteSessionBackend {
     /// ADR 0107 P0.2：构造期**存储级只读**（维护 / `--dry-run` / 诊断句柄，E8 零写入）。
     pub fn storage_read_only(&self) -> bool {
         self.storage_read_only
+    }
+
+    /// ADR 0107 §5 P1：会话库路径（维护锁 / 诊断用）。
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
     }
 
     pub fn new_with_trace_mode(db_path: PathBuf, trace_mode: SeparateTraceTableMode) -> Self {
@@ -268,8 +270,6 @@ impl SqliteSessionBackend {
             session_log_sink,
             legacy_json_path,
             connection: Mutex::new(None),
-            instance_lock: Mutex::new(None),
-            read_only: std::sync::atomic::AtomicBool::new(storage_read_only),
             storage_read_only,
         }
     }
@@ -295,34 +295,32 @@ impl SqliteSessionBackend {
                 *slot = Some(conn);
                 return Ok(slot);
             }
-            // ADR 0099 阶段 0（E5）：单实例独占锁。抢不到 ⇒ 明确降级只读
-            // （`query_only` + 结构化日志），不 panic、不静默继续写。
-            let lock_guard = commit::acquire_single_instance_lock(&self.db_path)?;
-            let read_only = lock_guard.is_none();
-            if let Ok(mut held) = self.instance_lock.lock() {
-                *held = lock_guard;
-            }
-            self.read_only
-                .store(read_only, std::sync::atomic::Ordering::SeqCst);
+            // ADR 0107 §5 P1：**日常写路径不再抢库级单实例锁**。
+            //
+            // 旧的 E5 行为是「抢不到 `<db>.lock` ⇒ 整库降级只读」，它把「多窗口 /
+            // 多智能体」直接变成「第二个实例不能用」，且降级实例连 schema 都建不了
+            // （`no such table: store_metadata`）。P1 改为依赖 SQLite 自身的多进程
+            // 串行化：WAL + `busy_timeout` + 短事务 + BUSY 重试（`persist_commands_batch`
+            // 已有 3 次退避）。库级独占只保留给**破坏性维护**（rebuild / migrate /
+            // VACUUM），由 `maintenance_lock` 提供。
+            //
+            // `busy_timeout` 是**本地写锁等待**，不属 NFR `external_call_timeout_ms=3000`
+            // 的外部调用域（无网络 IO、失败可恢复）；压到 3000 会让慢盘 / 备份进程占锁
+            // 变成用户可见的"保存失败"，故保持 5000ms。
             let conn = Connection::open(&self.db_path).map_err(|e| format!("open db: {e}"))?;
-            if read_only {
-                // 降级只读：**不刷 `journal_mode`/`synchronous`**（会改库文件头），
-                // 也不建表/迁移；只把连接钉成 query_only。
-                conn.execute_batch("PRAGMA query_only=ON;").ok();
-            } else {
-                // `busy_timeout` 是**本地写锁等待**，不属 NFR `external_call_timeout_ms=3000`
-                // 的外部调用域（无网络 IO、失败可恢复）；压到 3000 会让慢盘 / 备份进程占锁
-                // 变成用户可见的"保存失败"，故保持 5000ms。
-                conn.execute_batch(
-                    "PRAGMA journal_mode=WAL;
-                     PRAGMA synchronous=NORMAL;
-                     PRAGMA busy_timeout=5000;
-                     PRAGMA wal_autocheckpoint=256;",
-                )
-                .map_err(|e| format!("pragma: {e}"))?;
-                self.ensure_schema(&conn)?;
-                self.migrate_from_json(&conn)?;
-            }
+            // ADR 0107 §5 P1 / L3-v3 LOW：**`busy_timeout` 必须先设**。
+            // `PRAGMA journal_mode=WAL` 本身要拿写锁；多进程同时冷启时，若此时还没设
+            // `busy_timeout`，就会直接返回 `database is locked`（响亮失败但不丢数据）。
+            // 先把等待预算钉上，后面所有 pragma / 建表 / 迁移都在预算内排队。
+            conn.execute_batch(
+                "PRAGMA busy_timeout=5000;
+                 PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 PRAGMA wal_autocheckpoint=256;",
+            )
+            .map_err(|e| format!("pragma: {e}"))?;
+            self.ensure_schema(&conn)?;
+            self.migrate_from_json(&conn)?;
             *slot = Some(conn);
         }
         Ok(slot)
@@ -644,16 +642,48 @@ impl SqliteSessionBackend {
 
     /// One-time migration from the legacy JSON file to SQLite.
     /// Runs automatically when the SQLite DB is empty and a JSON file exists.
+    /// 旧 JSON → SQLite 一次性迁移。
+    ///
+    /// ADR 0107 §5 P1（契约 R-A）：去掉库级全局锁后，**多个进程可能同时冷启**，
+    /// 而旧实现是「先 `SELECT COUNT(*)` 再整库写入」的 TOCTOU：
+    /// 二次迁移会把并发进程刚写的数据覆盖回 legacy 快照（实测可丢 `workspaces`）。
+    ///
+    /// 现改为**单事务内的幂等迁移**：
+    /// 1. `BEGIN IMMEDIATE` 先拿写锁（多进程只有一个能进来，其余等 `busy_timeout`）；
+    /// 2. 事务内检查 `store_metadata['legacy_json.migrated']` 完成标记；
+    /// 3. 未迁移且索引为空 ⇒ 在同一事务内整库写入 + 写完成标记 + 提交（原子）。
+    ///
+    /// 标记存在即跳过：即使 legacy 文件还在，也不会二次覆盖已有数据。
     fn migrate_from_json(&self, conn: &Connection) -> Result<(), String> {
+        const MIGRATION_MARKER: &str = "legacy_json.migrated";
         let Some(json_path) = &self.legacy_json_path else {
             return Ok(());
         };
 
-        // Check if DB already has data
-        let session_count: i64 = conn
+        // 快路径：标记已存在 ⇒ 无需事务（避免每次启动都抢写锁）。
+        if Self::legacy_migration_done(conn, MIGRATION_MARKER) {
+            return Ok(());
+        }
+
+        // **BEGIN IMMEDIATE**（不是默认的 DEFERRED）：迁移一开始就拿写锁，
+        // 让并发的第二个进程在 `busy_timeout` 内排队，而不是「先读后写」升级事务时
+        // 撞 `database is locked` 被吞。仓内既有写事务同款写法（见 `sqlite_session_commit.rs`）。
+        let tx = rusqlite::Transaction::new_unchecked(
+            conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(|e| format!("begin immediate tx: {e}"))?;
+        // 事务内二次确认（另一个进程可能刚迁移完并提交）。
+        if Self::legacy_migration_done(&tx, MIGRATION_MARKER) {
+            return Ok(());
+        }
+        let session_count: i64 = tx
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .unwrap_or(0);
         if session_count > 0 {
+            // 索引已有数据但无标记（历史库）：补标记，避免以后重复迁移。
+            Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
             return Ok(());
         }
 
@@ -664,16 +694,42 @@ impl SqliteSessionBackend {
 
         let legacy = FileSessionBackend::new(json_path.clone());
         let Some(store) = legacy.load_store() else {
+            Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
             return Ok(());
         };
 
-        self.write_full_store(conn, &store)?;
+        // ADR 0099 阶段 0：落盘主体迁至 `sqlite_session_commit.rs`；
+        // 本入口保持 `save_store` 的**无版本守门**旧语义（空墓碑集 = 不跳过任何会话）。
+        self.write_store_tx(&tx, &store, &std::collections::HashSet::new())?;
+        Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
+        tx.commit().map_err(|e| format!("commit: {e}"))?;
 
         eprintln!(
             "[pony-agent][session] migration complete: {} sessions",
             store.sessions.len()
         );
         Ok(())
+    }
+
+    /// 旧 JSON 迁移完成标记是否已存在。
+    fn legacy_migration_done(conn: &Connection, marker: &str) -> bool {
+        conn.query_row(
+            "SELECT value FROM store_metadata WHERE key = ?1",
+            [marker],
+            |row| row.get::<_, String>(0),
+        )
+        .is_ok()
+    }
+
+    /// 写入迁移完成标记（幂等）。
+    fn mark_legacy_migrated(conn: &Connection, marker: &str) -> Result<(), String> {
+        conn.execute(
+            "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
+            rusqlite::params![marker, "1"],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("write migration marker: {e}"))
     }
 
     fn write_full_store(&self, conn: &Connection, store: &PersistedStore) -> Result<(), String> {
@@ -2652,6 +2708,43 @@ impl SqliteSessionBackend {
     }
 }
 
+impl SqliteSessionBackend {
+    /// ADR 0107 §5 P1：`BEGIN IMMEDIATE` + BUSY 有界退避（3 次，50/100/200ms）。
+    ///
+    /// 只对 `SQLITE_BUSY`/`SQLITE_LOCKED` 重试；其他错误立即返回（不掩盖真实故障）。
+    fn begin_immediate_with_busy_retry(
+        conn: &Connection,
+    ) -> Result<rusqlite::Transaction<'_>, String> {
+        let mut attempt = 0u32;
+        loop {
+            match rusqlite::Transaction::new_unchecked(
+                conn,
+                rusqlite::TransactionBehavior::Immediate,
+            ) {
+                Ok(tx) => return Ok(tx),
+                Err(error) => {
+                    let busy = matches!(
+                        &error,
+                        rusqlite::Error::SqliteFailure(inner, _)
+                            if matches!(
+                                inner.code,
+                                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                            )
+                    );
+                    if !busy || attempt >= 2 {
+                        return Err(error.to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        50u64 << attempt,
+                    ));
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+}
+
 impl SessionBackend for SqliteSessionBackend {
     /// ADR 0099 阶段 0（E2/E4）：**单一提交边界**（唯一整包提交入口）。
     /// 实作在 `sqlite_session_commit.rs`（单事务 + 逐会话 CAS + 墓碑跳过 + 版本自增）。
@@ -2673,7 +2766,9 @@ impl SessionBackend for SqliteSessionBackend {
 
     /// ADR 0099 阶段 0（E5）：抢不到单实例锁 ⇒ 本后端为降级只读。
     fn is_read_only(&self) -> bool {
-        self.read_only.load(std::sync::atomic::Ordering::SeqCst)
+        // ADR 0107 §5 P1：只读**只剩维护/诊断句柄**这一种语义（`new_read_only` /
+        // `--dry-run`）。日常实例永远可写，不再因抢不到库级锁而整库降级。
+        self.storage_read_only
     }
 
     /// PA-095：事件 schema 版本校验（trait 入口）。
@@ -2731,7 +2826,6 @@ impl SessionBackend for SqliteSessionBackend {
             return PersistCommandOutcome::Succeeded;
         }
         // ADR 0099 E5：降级只读实例每次写入口重试一次 flock（非阻塞），持锁进程退出后自动恢复可写。
-        self.try_recover_instance_lock();
         // ADR 0107 P0.3：写日志前 epoch 预检（fail-closed：读不到 epoch ⇒ 不写日志、整批 Failed）。
         if let Err(rejection) = commit::precheck_stale_epoch(self, &commands) {
             return commit::refuse_epoch_precheck(rejection);
@@ -2814,7 +2908,6 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn save_store(&self, store: &PersistedStore) -> Result<(), String> {
-        self.try_recover_instance_lock();
         // Borrow the pooled connection; never panic the caller on a write error
         // — the turn loop must stay alive even if persistence hiccups. 但失败必须**返回**给
         // 调用方（T2-3）：此前只 eprintln 后返回 `()`，调用方无从得知会话根本没落盘。
@@ -2860,7 +2953,11 @@ impl SessionBackend for SqliteSessionBackend {
             }
         };
         let conn = slot.as_ref().expect("connection initialized");
-        let tx = match conn.unchecked_transaction() {
+        // ADR 0107 §5 P1：多进程可写之后，`upsert_session` 也可能与另一个进程的写事务
+        // 撞车。旧实现是 DEFERRED 事务 + **无重试**（有全局锁时不会并发，故从未暴露）：
+        // 现在必须 `BEGIN IMMEDIATE`（一开始就拿写锁，避免读→写升级时 `database is locked`）
+        // 并对 BUSY 做与 `persist_commands_batch` 同口径的有界退避重试。
+        let tx = match Self::begin_immediate_with_busy_retry(conn) {
             Ok(tx) => tx,
             Err(e) => {
                 eprintln!("[pony-agent][session] SQLite upsert begin tx error: {e}");

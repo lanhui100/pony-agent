@@ -1,0 +1,104 @@
+# wave-p1-0107 交付说明（ADR 0107 P1：多进程写者）
+
+分支 `wave/p1-session-lease`（worktree `/home/dm/pony-agent-worktrees/wave-p1-0107`），基线 = P0 分支 HEAD `e043f32f`
+提交链：`7c8faeb1`（契约+风险登记）→ `bed8701c`（红相锚定）→ `9352ef19`（实施）
+
+## 一、行为契约（D1–D5）
+
+| ID | 契约 | 实现 |
+|---|---|---|
+| D1 | 另一进程持库级锁时，普通写入**不再降级只读** | `sqlite_session.rs::connection()` 删除 `acquire_single_instance_lock` 与 `query_only` 降级分支；统一 WAL + `busy_timeout=5000` + `ensure_schema` |
+| D2 | 维护锁被占时，维护入口**显式拒绝** | 新增 `commit::acquire_maintenance_lock` → `MaintenanceBusy`；`fold.rs::rebuild_index_at_root` 非 `dry_run` 先取锁 |
+| D3 | 两进程写**不同**会话都成功且进索引 | 多进程 WAL 串行写；不再有进程级全局写锁 |
+| D4 | 两进程写**同一**会话：后者显式失败且可识别 | 日志层 `LogStoreError::Locked` → `PersistCommandOutcome::WriterBusy` → `SessionError::SessionWriterBusy { session_id }`，日志行 `session_writer_busy` |
+| D5 | 日常写路径不依赖库级实例锁 | `try_recover_instance_lock` 删除；`is_read_only()` 收窄为 `storage_read_only` |
+
+## 二、物理收据（`9352ef19`）
+
+| 门禁 | 结果 |
+|---|---|
+| `p1_multiprocess_writers`（D1–D5） | **5 passed** / exit 0（红相基线为 D1/D3/D4/D5 FAIL） |
+| `p0_log_first_durability` | 7 passed / **2 ignored**（C1/C6 按 P1 语义退役，见下）/ exit 0 |
+| `cargo test --lib` | **1408 passed** / exit 0 |
+| `session_log_wiring` + `session_read_from_log` + `session_log_store` + `session_event_carriers` + `pa174…` | 全绿 / exit 0 |
+| `cargo check --all-targets` | exit 0，0 warning |
+
+原文：`.dev-team/red-phase-p1-0107.log`、`.dev-team/green-phase-p1-0107.log`。
+
+**F1 整改收据（`da0ae234`）**：3 进程并发冷启同一 legacy JSON + 空库 ⇒
+`concurrent sessions in index = 3 (expect 3)`、`migration marker = 1 (expect 1)`；
+G1–G6 全 exit 0（p1 5 passed / p0 7 passed+2 ignored / lib 1408 passed / 会话套件全绿 / check 0 warning）。
+
+## 三、P0 测试的退役与改写（显式登记）
+
+- **C1 退役**（`#[ignore]` + 原因）：P1 取消了「锁降级只读」状态，该用例的前提不复存在；
+  日志先行的实质由 C2/C4 与 P1 的 D1/D3/D5 覆盖。
+- **C6 退役**：降级实例不存在 ⇒「降级实例按批释放锁」失去对象；会话级单写者由 D3/D4 覆盖。
+- **C7 改写构造**：不再用降级实例制造"索引必失败"，改用可写实例验证 R5 实质
+  （零字节批不得自称 `LogPersisted`）；断言强度不变。
+- C2/C3/C4/C5/C8/C9 **原样保留并全绿**（P0 的日志先行、失败域隔离、stale-epoch 预检/回滚不回归）。
+
+## 四、已知风险（P1 引入的新并发面）
+
+| 风险 | 现状 | 处置 |
+|---|---|---|
+| R-A 旧 JSON 迁移 TOCTOU | **已修复（F1）**：改为单事务幂等迁移（`BEGIN IMMEDIATE` + `store_metadata['legacy_json.migrated']` 标记 + 事务内二次确认），3 进程冷启实测无覆盖、标记恰 1 次 | 已闭环，见 G6 |
+| R-B 并发首建表 | `CREATE TABLE IF NOT EXISTS` + `busy_timeout` 已可承载 | 绿相未出现失败；需长稳观察 |
+| R-C WAL 检查点竞争 | SQLite 自身串行化 | BUSY 由既有 3 次退避兜底 |
+| R-D 同会话冲突提示 | 已类型化 + 结构化日志 | TUI/桌面侧文案待接（P2） |
+
+## 五、合并顺序
+
+```
+cd /home/dm/pony-agent
+git merge --no-ff wave/p0-0107-log-first   # 先 P0
+git merge --no-ff wave/p1-session-lease    # 再 P1
+```
+主工作区有他人未提交改动（`sqlite_session.rs` / `sqlite_session_commit.rs` / `store.rs` 同文件），合并前需先处理。
+
+## 六、二次整改（L3 v2 复核 FAIL 后）
+
+| 发现 | 修复 | 收据 |
+|---|---|---|
+| F1 MAJOR：声称 `BEGIN IMMEDIATE` 实为 DEFERRED | 迁移事务改 `Transaction::new_unchecked(conn, Immediate)` | 6 进程冷启探针：3 会话全保留、标记恰 1 次 |
+| 并发冷启 `database is locked` 被吞 | `upsert_session` 也改 `BEGIN IMMEDIATE` + BUSY 三次退避（50/100/200ms） | 探针 **6/6 无 `database is locked`** |
+| F3 残留过期文档 | P0 测试辅助注释改为「库级锁仅供已退役 C1/C6」 | — |
+| 契约锁名不一致 | 契约改为「沿用 `<db>.lock`」（实现更优：不新增文件、兼容旧进程） | 提交 `4778b589` |
+
+**最终门禁（独立 target `/tmp/p1-own-target`，排除共享 target 假绿）**：G1 5 passed、G2 7 passed+2 ignored、
+G3 lib **1408 passed**、G4 会话套件全绿、G5 check 0 warning，全部 exit 0。
+
+## 七、分支状态
+
+`wave/p1-session-lease` 最新提交 `2393e95e`；工作区干净。
+合并顺序：先 `wave/p0-0107-log-first`（`e043f32f`），再本分支。
+
+## 八、终审状态（诚实登记）
+
+- L3 v3 终审 subagent **两次启动均静默失败**（未产出 `/tmp/diag/review-p1-0107-v3.json`），故**无第三方终审结论**。
+- 替代证据（Lead 自查，可复算）：
+  - 代码核实：`migrate_from_json` 事务为 `TransactionBehavior::Immediate`（`sqlite_session.rs:666-670`）；
+    `upsert_session` 经 `begin_immediate_with_busy_retry`（`:2712-2743`），仅对
+    `DatabaseBusy|DatabaseLocked` 重试且有界（`attempt >= 2` 即返回 `Err`，不吞异常）。
+  - 并发冷启探针（3 进程 × 6 轮）：`concurrent sessions in index = 3`、`migration marker = 1`，
+    **0 次 `database is locked`**（修复前 6 轮中出现 1 次）。
+  - 独立 target（`/tmp/p1-own-target`）全门禁：G1 5 passed / G2 7 passed+2 ignored /
+    G3 lib 1408 passed / G4 会话套件全绿 / G5 check 0 warning，全部 exit 0。
+- 结论：**P1 已达可合并状态**。
+
+### 终审结果（补录）
+
+L3 v3 终审在收尾后返回：**verdict = PASS（可合入）**。
+- C1：两处写事务均 `TransactionBehavior::Immediate`；重试仅 BUSY/LOCKED、上限 3 次、非 BUSY 原样报错。
+- C2：60+ 次并发冷启动（5/4/8 进程 × 300~1200 legacy）零「报成功却失败」，sid 全落索引，marker 恒为 1。
+- C3：p1 5 passed、p0 7 passed+2 ignored、lib 1408 passed（独立 target），EXIT=0。
+- C4：重试有界、无吞错分支；upsert 失败回退 `commit_store`，不静默。
+- 唯一 LOW：`journal_mode=WAL` 早于 `busy_timeout`（既有潜伏，非本 diff 引入）→ **已修**（`e5f7dcce`：先设 `busy_timeout=5000` 再设 WAL），修后 lib 1409 / p0 7+2 / p1 5+2 全绿。
+
+## 九、目标 ④ 可观测（已补）
+
+- `index_deferred` 从「仅日志行」升级为**可机读计数**：`backend::index_deferred_total()`
+  （进程级 atomic，只统计 `LogPersisted`），日志行同时带 `total=`。
+- 单测：`index_deferred_counter_tracks_log_persisted_only`（`backend.rs` 末尾）。
+- 未做：`projection_lag`（按会话的索引滞后时长/条数指标）——需要正式 metrics 出口与
+  `docs/observability.yaml` 四维归属变更，留给 P1.1，避免在止血波次里夹带观测面重构。

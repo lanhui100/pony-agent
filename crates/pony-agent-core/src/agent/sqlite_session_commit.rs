@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -637,34 +637,41 @@ impl SqliteSessionBackend {
 }
 
 // ---------------------------------------------------------------------------
-// E5：单实例文件锁（`<db>.lock`，跨进程独占；同进程多实例共享）
+// ADR 0107 §5 P1：**维护锁**（`<db>.lock`，跨进程独占）
 // ---------------------------------------------------------------------------
+//
+// 语义与旧 E5 单实例锁的区别：
+// - 旧语义：日常写路径也抢它，抢不到 ⇒ 整库降级只读（多窗口不可用）；
+// - 新语义：**只有破坏性维护**（rebuild-index / migrate / VACUUM / 全库回填）才抢它，
+//   抢不到 ⇒ 明确拒绝（fail-closed），绝不并发执行；日常写完全不受它影响，交给
+//   SQLite 的 WAL + busy_timeout 做多进程串行化。
 
-/// 进程内锁登记表：`flock` 按 open file description 记账，同进程重复 `open` 会自锁，
-/// 故同一 db 路径在本进程内共享同一把锁（一个进程 = 一个 writer 实例语义）。
-///
-/// 用 `Weak` 持有：锁的存活由 `SqliteSessionBackend` 侧持有的 `Arc` 决定（backend drop
-/// ⇒ 锁释放 ⇒ 登记项自然失效），登记表因此**有界**（每条 acquire 顺带 prune 死项）。
-static LOCK_REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<std::fs::File>>>> = OnceLock::new();
+/// 维护锁抢不到时的错误（D2：必须显式失败）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceBusy {
+    pub lock_path: PathBuf,
+}
 
-/// E5 / NFR `concurrency_lock`：尝试独占 `<db>.lock`。
-///
-/// - `Ok(Some(guard))`：已持有（本进程），调用方必须把 `guard` 存住直到 backend drop；
-/// - `Ok(None)`：其他进程独占（或锁文件不可独占）⇒ 调用方**必须**明确降级只读
-///   （`PRAGMA query_only=ON` + 结构化日志），不得忙等、不得 panic，也不得继续写；
-/// - `Err`：连锁文件都建不出来（路径不可写）⇒ 同样按降级处理由调用方决定。
-pub(crate) fn acquire_single_instance_lock(
-    db_path: &Path,
-) -> Result<Option<Arc<std::fs::File>>, String> {
-    let registry = LOCK_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = db_path.to_path_buf();
-    let mut held = registry
-        .lock()
-        .map_err(|error| format!("lock registry poisoned: {error}"))?;
-    held.retain(|_, weak| weak.strong_count() > 0);
-    if let Some(existing) = held.get(&key).and_then(Weak::upgrade) {
-        return Ok(Some(existing));
+impl std::fmt::Display for MaintenanceBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "maintenance_lock_busy: {} 已被其他进程持有（rebuild/migrate 不得并发执行）",
+            self.lock_path.display()
+        )
     }
+}
+
+impl std::error::Error for MaintenanceBusy {}
+
+/// 维护锁 guard：Drop 即释放（持有期间独占 `<db>.lock`）。
+#[derive(Debug)]
+pub struct MaintenanceGuard {
+    _file: Arc<std::fs::File>,
+}
+
+/// 尝试取维护锁（非阻塞）。抢不到 ⇒ [`MaintenanceBusy`]；调用方必须放弃本次维护。
+pub fn acquire_maintenance_lock(db_path: &Path) -> Result<MaintenanceGuard, MaintenanceBusy> {
     let lock_path = PathBuf::from(format!("{}.lock", db_path.display()));
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -672,63 +679,18 @@ pub(crate) fn acquire_single_instance_lock(
         .write(true)
         .truncate(false)
         .open(&lock_path)
-        .map_err(|error| format!("open lock file {}: {error}", lock_path.display()))?;
+        .map_err(|_| MaintenanceBusy {
+            lock_path: lock_path.clone(),
+        })?;
     if try_lock_exclusive(&file) {
-        let guard = Arc::new(file);
-        held.insert(key, Arc::downgrade(&guard));
-        return Ok(Some(guard));
+        return Ok(MaintenanceGuard { _file: Arc::new(file) });
     }
     eprintln!(
-        "[pony-agent][session] single_instance_lock_denied: {} 已被其他进程独占；\
-         本实例降级只读（不并发写、不静默覆盖）",
+        "[pony-agent][session] maintenance_lock_denied: {} 已被其他进程持有；\
+         本次维护操作拒绝执行（不并发 rebuild/migrate）",
         lock_path.display()
     );
-    Ok(None)
-}
-
-/// 尝试非阻塞独占锁。返回 `true` = 已持有；`false` = 抢不到（含非 EWOULDBLOCK 的异常
-/// 错误——一律降级只读并落日志，硬失败会让用户连"只读看历史"都做不到）。
-impl SqliteSessionBackend {
-    /// E5：降级只读后**重新尝试**拿实例锁（非阻塞一次）。成功 ⇒ 恢复可写。
-    ///
-    /// `PRAGMA query_only` 本身不可逆，因此恢复必须显式 `OFF`——否则持锁进程退出后本实例
-    /// 会永久只读（BLOCKING-6 的第二个洞）。
-    pub(crate) fn try_recover_instance_lock(&self) {
-        if !self.read_only.load(std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-        let guard = match acquire_single_instance_lock(&self.db_path) {
-            Ok(Some(guard)) => guard,
-            _ => return,
-        };
-        {
-            let Ok(mut held) = self.instance_lock.lock() else {
-                return;
-            };
-            *held = Some(guard);
-        }
-        self.read_only
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        // 连接锁单独取，避免与 `connection()` 的锁顺序交叉。
-        if let Ok(slot) = self.connection.lock() {
-            if let Some(conn) = slot.as_ref() {
-                match conn.execute_batch("PRAGMA query_only=OFF;") {
-                    Ok(()) => eprintln!(
-                        "[pony-agent][session] single_instance_lock_recovered：{} 已恢复可写",
-                        self.db_path.display()
-                    ),
-                    Err(error) => {
-                        self.read_only
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                        eprintln!(
-                            "[pony-agent][session] single_instance_lock_recover_failed：{} 仍只读：{error}",
-                            self.db_path.display()
-                        );
-                    }
-                }
-            }
-        }
-    }
+    Err(MaintenanceBusy { lock_path })
 }
 
 #[cfg(unix)]
@@ -741,7 +703,7 @@ fn try_lock_exclusive(file: &std::fs::File) -> bool {
     let error = std::io::Error::last_os_error();
     if !matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK) {
         eprintln!(
-            "[pony-agent][session] single_instance_lock_error：flock 异常，按抢不到处理并降级只读：{error}"
+            "[pony-agent][session] maintenance_lock_error：flock 异常，按抢不到处理并拒绝维护：{error}"
         );
     }
     false
@@ -766,7 +728,7 @@ fn try_lock_exclusive(file: &std::fs::File) -> bool {
     let error = std::io::Error::last_os_error();
     if error.raw_os_error() != Some(ERROR_LOCK_VIOLATION as i32) {
         eprintln!(
-            "[pony-agent][session] single_instance_lock_error：LockFileEx 异常，按抢不到处理并降级只读：{error}"
+            "[pony-agent][session] maintenance_lock_error：LockFileEx 异常，按抢不到处理并拒绝维护：{error}"
         );
     }
     false
@@ -795,24 +757,18 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 ///   写任何字节，调用方**不得**把随之而来的索引失败判成 `LogPersisted`（R5）；
 /// - **维护句柄**（`new_read_only`：`--dry-run` / 诊断 / 测试夹具，E8 零写入）⇒ `Ok(false)`
 ///   且连日志都不写（R4）；
-/// - **锁降级实例**（抢不到 `sessions.db.lock`，`is_read_only() && !storage_read_only()`）
-///   同样写日志（ADR 0107 §5 P0 日志先行），但 writer 按批开/放（R3）——不长期持有 flock。
+/// - ADR 0107 §5 P1：**不存在**「锁降级实例」这一状态（日常实例恒可写），故这里只保留
+///   长命 writer 缓存（[`SessionLogSink::append_commands`]）；「按批释放 flock」的
+///   `append_commands_releasing` 退化为仅测试用的原语。
 pub(crate) fn append_session_log_to_file(
     backend: &super::SqliteSessionBackend,
     commands: &[crate::agent::session::PersistCommand],
 ) -> Result<(bool, Vec<(String, u64)>, Vec<(String, u64)>), String> {
-    use crate::agent::session::SessionBackend;
     // R4 / E8：维护句柄零写入（连日志也不写——否则 `--dry-run` 会产出 session.jsonl）。
     if backend.storage_read_only {
         return Ok((false, Vec::new(), Vec::new()));
     }
-    // R3：锁降级实例按批开/放 writer（append 完立刻 drop ⇒ 释放 flock），
-    // 否则主可写实例写同一会话会被挡成 `Locked`（可写实例零回归被破坏）。
-    let receipt = if backend.is_read_only() {
-        backend.session_log_sink.append_commands_releasing(commands)?
-    } else {
-        backend.session_log_sink.append_commands(commands)?
-    };
+    let receipt = backend.session_log_sink.append_commands(commands)?;
     Ok((receipt.written, receipt.restored, receipt.post_append_len))
 }
 
@@ -922,8 +878,26 @@ pub(crate) fn refuse_epoch_precheck(
 
 /// 日志（真源）写入失败：统一打印并整批判 `Failed`（SQLite 一行都不改）。
 pub(crate) fn log_write_failure(error: String) -> crate::agent::session::PersistCommandOutcome {
+    use crate::agent::session::PersistCommandOutcome;
+    // ADR 0107 §5 P1 / D4：会话日志 flock 冲突 ≠ 数据损坏 ≠ 索引故障。
+    // 这是「同一会话正被另一个进程写」的正常拒绝，必须可被上层识别并提示用户。
+    if is_session_writer_busy(&error) {
+        eprintln!(
+            "[pony-agent][session] session_writer_busy: 同一会话正被另一个进程写，本次写入拒绝（不影响其它会话）：{error}"
+        );
+        return PersistCommandOutcome::WriterBusy;
+    }
     eprintln!("[pony-agent][session] 会话日志（真源）写入失败，SQLite 索引未改动：{error}");
-    crate::agent::session::PersistCommandOutcome::Failed
+    PersistCommandOutcome::Failed
+}
+
+/// 会话日志写者冲突判定：`LogStoreError::Locked` 的文本由 `Display` 产生，含
+/// `locked by another writer` / `Locked` 两种历史形态，两者都算「会话被占用」。
+pub(crate) fn is_session_writer_busy(error: &str) -> bool {
+    // 只认 `LogStoreError::Locked` 的精确 Display 文本（`log_store.rs`）：
+    // 过宽的 "locked" 会把 SQLite 的 `database is locked` 也吞进来，那是 BUSY 重试域，
+    // 不是会话写者冲突。
+    error.contains("session log is locked by another writer")
 }
 
 /// ADR 0107 §5 P0（失败域隔离）：把**日志已落盘之后**的索引失败归一为 `LogPersisted`。
@@ -1112,7 +1086,6 @@ impl SqliteSessionBackend {
     /// （网络 / HTTP / 跨进程 RPC）。SQLite 的 `busy_timeout` 是**本地写锁等待**——无网络
     /// IO、失败可恢复；压到 3000 会让"慢盘 / 备份进程占锁"变成用户可见的保存失败。
     pub(crate) fn commit_boundary_stage0(&self, store: &PersistedStore) -> CommitOutcome {
-        self.try_recover_instance_lock();
         const LOCK_WAIT_BUDGET_MS: u64 = 5000;
         let started = std::time::Instant::now();
         let mut attempt = 0u32;
@@ -1406,6 +1379,14 @@ impl SqliteSessionBackend {
     }
 
     fn backfill_orphans(&self, dry_run: bool) -> Result<BackfillReport, String> {
+        // ADR 0107 §5 P1：全库回填属于破坏性维护，非 dry-run 必须独占 `<db>.lock`。
+        let _maintenance_guard = if dry_run {
+            None
+        } else {
+            Some(
+                acquire_maintenance_lock(self.db_path()).map_err(|busy| busy.to_string())?,
+            )
+        };
         let slot = self.connection()?;
         let conn = slot
             .as_ref()
@@ -1512,7 +1493,6 @@ impl SqliteSessionBackend {
 
     /// 用 fold 结果**覆盖**某会话的索引行（单事务）。
     pub(crate) fn rebuild_folded_session_index(&self, state: &SessionState) -> Result<(), String> {
-        self.try_recover_instance_lock();
         let slot = self.connection()?;
         let conn = slot
             .as_ref()
