@@ -1,8 +1,8 @@
 # ADR 0107：会话级写者租约与日志优先持久化（多窗口/多智能体并发，预留远程 agent）
 
-Status: proposed（草案，待评审）
+Status: implemented
 
-> 与既有决策的关系：**递进而非推翻**。ADR 0099 确立「每会话 append-only JSONL 是真源、SQLite 是可重建索引」；ADR 0106 确立「单写者冲突 fail-closed、提示真实、启动有预算」，消除「静默丢数据」。但 0106 把并发单元钉在**库级**，使「桌面端 + TUI + CLI + 多智能体」无法同时可写——本篇把并发单元从**库**降到**会话**，并保留 0106 的 fail-closed 防线（粒度变细）。
+> 与既有决策的关系：**递进而非推翻 ADR 0099，取代 ADR 0106 的锁语义**（见 §5 P1 与「实施记录」）。ADR 0099 确立「每会话 append-only JSONL 是真源、SQLite 是可重建索引」；ADR 0106 确立「单写者冲突 fail-closed、提示真实、启动有预算」，消除「静默丢数据」。但 0106 把并发单元钉在**库级**，使「桌面端 + TUI + CLI + 多智能体」无法同时可写——本篇把并发单元从**库**降到**会话**，并保留 0106 的 fail-closed 防线（粒度变细）。
 
 ## 1. 背景
 
@@ -102,3 +102,19 @@ B 的接口抽象保留了未来演进到 C 的路径，无需现在付出 C 的
   后端抽象入 `session/backend.rs`（`SessionBackend` 拆分）。
 - 风险：多进程写 SQLite 需保证短事务、避免长 VACUUM 占锁；网络文件系统（NFS）上仍禁止 WAL 共享
   （远程场景走 API 而非共享文件，已规避）。
+
+## 实施记录（2026-11-10 合入 main）
+
+- **P0 已落地**：只读降级仍写会话日志；`LogPersisted`（日志已落盘、索引滞后）不再回滚内存历史；
+  stale-epoch 类型化 + 写日志前 fail-closed 预检 + 事务拒收时持锁回滚本批字节。
+- **P1 已落地**：日常写不再抢 `<db>.lock`（改由 WAL + `busy_timeout` 串行化）；`<db>.lock`
+  收敛为维护锁（`acquire_maintenance_lock`）；同会话并发写返回 `SessionError::SessionWriterBusy`；
+  旧 JSON 迁移改为单事务幂等（`BEGIN IMMEDIATE` + 完成标记）；`upsert_session` 加 `BEGIN IMMEDIATE`
+  与 BUSY 有界重试；`index_deferred` 提供可机读计数。
+- **取代 ADR 0106 的锁语义**：退役 `enforce_startup_permission` 启动预检（P1 后不再有「第二实例
+  必须拒绝启动」），删除 `agent/instance_lock.rs`；保留 0106 的启动预算 / `startup_meta` /
+  退出提示真实性等无关能力。
+- **同时修复 0106 带入的启动预算缺陷**：预算 deadline 原为进程级 `OnceLock` 冻结 ⇒ 长驻进程
+  后续装载永久跳过历史重建（＝「新一轮没有历史」）。改为每次 `load_store` 重起算。
+- 验收：`--lib` 1421 passed；`p0` 7+2 ignored；`p1` 5+2 ignored；`pa174` 13 passed；
+  `session_row_heal` 2 passed（长期 pre-existing 失败一并消失）；`tui_persistence_truthfulness` 95 passed。

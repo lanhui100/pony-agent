@@ -51,10 +51,10 @@
 
 - [0021 Agent 运行时统一错误码注册表：上游与协议不匹配可扩展治理](proposed/0021-unified-error-code-registry.md)
 - [0074 Ask 控制请求：会话持久化 + 生命周期收口（墙钟 TTL 退出产品语义）](proposed/0074-ask-persistence-lifecycle.md)
-- [0107 会话级写者租约与日志优先持久化（多窗口/多智能体并发，预留远程 agent）](proposed/0107-session-scoped-writer-lease-and-log-first-durability.md)
 
 ### 活跃
 
+- [0107 会话级写者租约与日志优先持久化（多窗口/多智能体并发，预留远程 agent）](0107-session-scoped-writer-lease-and-log-first-durability.md)
 - [0001 双轨重构：保留 Hermes 作为参考实现](0001-dual-track-rebuild-with-hermes-reference.md)
 - [0002 优先使用 Tauri UI 作为运行时测试界面](0002-tauri-ui-over-tui.md)
 - [0003 前端使用 Vue 3 + Pinia，暂不上 vue-router](0003-frontend-stack-vue-pinia-no-router.md)
@@ -144,7 +144,6 @@
 - [0103 goal 续轮失败止损、失败轮不烧预算与上游限流冷却](0103-goal-round-failure-and-rate-limit-cooldown.md)
 - [0104 上游调用时限/重试配置化与跨 provider 有界故障转移](0104-provider-failover-and-upstream-policy.md)
 - [0105 TUI 启动页品牌标缩为原尺寸 1/3（Rich 9×10 / Compact 7×8）](0105-tui-splash-logo-scale-third.md)
-- [0106 会话库单写者冲突 fail-closed、退出提示真实性与启动装载预算](0106-session-store-single-writer-fail-closed-and-startup-budget.md)
 - [0108 CLI 发布平台矩阵、清单单点装配与词表对齐门禁](0108-cli-release-platform-matrix.md)
 - [0109 决策记录门禁单一判据与撞号消解规则](0109-decisions-gate-single-source-and-collision-rule.md)
 - [0110 wave-35 测试套件修复：全量挂起真死锁、plan 草稿门禁自锁死与读前写契约漂移](0110-wave35-suite-remediation.md)
@@ -159,6 +158,7 @@
 
 ### 已接替
 
+- [0106 会话库单写者冲突 fail-closed、退出提示真实性与启动装载预算](superseded/0106-session-store-single-writer-fail-closed-and-startup-budget.md) —— 被 [0107](0107-session-scoped-writer-lease-and-log-first-durability.md) 取代锁语义（启动预算/退出提示能力保留）
 - [0024 PonySentry Agent Trace 上报契约与生命周期状态机](superseded/0024-ponysentry-agent-trace-ingest.md) —— 被 [0047](0047-agent-trace-otel-langfuse-migration.md) 接替（服务端 Trace 能力下线，改走 OTel → Langfuse）
 
 - [0004 前端工作台先采用原生 TypeScript + Vite 壳层](superseded/0004-frontend-shell-workbench-direction.md) —— 被 [0003](0003-frontend-stack-vue-pinia-no-router.md) 接替

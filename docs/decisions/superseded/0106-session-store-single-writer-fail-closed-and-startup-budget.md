@@ -1,6 +1,11 @@
 # ADR 0106：会话库单写者冲突 fail-closed、退出提示真实性、启动装载预算
 
-Status: implemented
+Status: superseded by 0107
+
+> **接替范围**：本文的「单写者 fail-closed / 第二实例拒绝启动」锁语义由
+> [ADR 0107](0107-session-scoped-writer-lease-and-log-first-durability.md) §5 P1 取代（改为多进程可写 +
+> `<db>.lock` 仅服务维护）；本文的**启动预算、`startup_meta` 轻量解析、退出提示真实性**等能力仍有效并被保留。
+> 另：本文引入的进程级预算 `OnceLock` 缺陷（长驻进程后续装载永久跳过历史重建）已在 0107 实施中修复。
 
 ## 背景
 
