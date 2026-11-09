@@ -51,3 +51,16 @@
 - `Failed` 仍表示「日志未落地（或日志写失败）」；不得把日志失败映射成 `LogPersisted`。
 - `SessionBackend::persist_commands_batch` 的默认实现（File/Memory）不变。
 - `store.rs` 在 `LogPersisted` 分支必须打一条含 `session_id`/`outcome` 的结构化日志（可 grep 断言）。
+
+## P0.1 整改（L3 反审 FAIL 后追加，2026-11-09）
+
+复核证据：`/tmp/diag/review-p0-0107.json`（FAIL：3 BLOCKING + 3 ADVISORY）。以下为整改契约，**优先于上文未覆盖处**：
+
+| ID | 问题 | 修复契约 | 验收 |
+|---|---|---|---|
+| R1 | `apply_persist_command_tx` 的 stale-epoch 拒绝返回 `Err(String)` → 被 `index_failure_after_log` 吞成 `LogPersisted`（内存误前进） | 让 apply 层返回**类型化**结果：stale-epoch ⇒ `PersistCommandOutcome::StaleEpoch`；其余应用错误 ⇒ `Failed`。`index_failure_after_log` 只改判 `Failed`，`StaleEpoch` 必须透传 | `persist_command_writes_normalized_tables_and_checks_epoch` 绿（old epoch → `StaleEpoch`/非 Ok），且 `store.rs:645` 对 `StaleEpoch` 仍 `Err` 不入内存 |
+| R2 | 门禁漏跑 `--lib`，2 条断言红 | ① 修复 R1 后 epoch 用例应自然转绿；② `flush_events_rolls_back_on_injected_failure` 的 outcome 断言按新语义从 `Failed` 改为 `LogPersisted`（并保留其"事务回滚无残留"断言），在 `.dev-team/green-phase-p0-0107.log` 显式登记「已声明的语义变更」 | `cargo test --lib` exit 0（1405 passed） |
+| R3 | 降级实例 `LogWriter` 长期缓存并持 flock ⇒ 主可写实例写同一会话 `Locked → Failed → 整轮回滚`（破坏"可写实例零回归"） | 降级实例（`is_read_only() && !storage_read_only()`）改走**按批开/放** writer（append 后立即释放 flock）；可写实例保持缓存 writer 不变 | 新增用例：降级实例 append 一次后释放 flock（主实例随后同会话 append 成功）；现有并发/日志套件不回归 |
+| R4 | `new_read_only`（`--dry-run`/诊断/测试夹具）在删除短路后会真写 `session.jsonl`，破坏 E8「零写入」 | 短路**只对 `storage_read_only` 保留**（维护句柄不写日志）；锁降级实例仍写日志 | `session_log_wiring.rs:196` 等维护句柄用例不出现日志写入；`--dry-run` 路径零写入 |
+| R5 | `append_commands` 在 `grouped.is_empty()` 时 `Ok(())`（零字节）仍被判 `LogPersisted` | 日志层返回"是否实际写入"；零写入时不得判 `LogPersisted`（应 `Failed`） | 构造 `RemoveSession`-only 批：outcome 不得为 `LogPersisted` |
+| R6 | `append_failed_turn_fallible` 未打 `index_deferred` 告警，executor 声称的 `persist_session_and_trace_change` 覆盖对 `ReplaceAll` 不可达 | 在 `append_failed_turn_fallible` 的索引失败路径补同一告警（不改落盘顺序/返回值） | grep 可得告警；行为零变更 |
