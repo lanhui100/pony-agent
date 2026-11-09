@@ -1,0 +1,25 @@
+{
+ "wave": 68,
+ "task": "PA-171",
+ "captured_at": "2026-11-09T11:03:21",
+ "baseline_commit": "d9425a70",
+ "commands": [
+  {
+   "cmd": "cargo check -p pony-agent-core --all-targets",
+   "exit": 0,
+   "note": "Finished dev profile in 1m46s"
+  },
+  {
+   "cmd": "cargo test -p pony-agent-core --test tui_batch2_regression",
+   "exit": 0,
+   "note": "96 passed; 0 failed"
+  },
+  {
+   "cmd": "cargo test -p pony-agent-core --test tui_session_resilience_acceptance",
+   "exit": 0,
+   "note": "98 passed; 0 failed"
+  }
+ ],
+ "env_note": "cleared http_proxy/https_proxy/all_proxy/HTTP_PROXY/HTTPS_PROXY/ALL_PROXY",
+ "log": "/tmp/pa171-baseline.log"
+}

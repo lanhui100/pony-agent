@@ -1,0 +1,77 @@
+{
+  "wave": 68,
+  "task": "task-1 / t-red (PA-171)",
+  "owner": "test-agent",
+  "red": true,
+  "receipt_date": "2026-11-09",
+  "commands": [
+    {
+      "cmd": "cargo test -p pony-agent-core --test pa171_goal_round_failure_contract 2>&1 | tail -40",
+      "exit": 101,
+      "status": "RED(compile) 签名未落地",
+      "evidence": "error[E0432]: unresolved imports: advance_goal_round_for_outcome / goal_round_stop_reason / GoalRoundOutcome / GoalRoundStopReason / MAX_CONSECUTIVE_GOAL_ROUND_FAILURES（agent::goal 尚无这些符号）"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test pa171_provider_rate_limit_cooldown_contract 2>&1 | tail -40",
+      "exit": 101,
+      "status": "RED(assert)",
+      "evidence": "3 failed / 2 passed：C3 限流单次调用实测 5 次 HTTP、耗时 7.949641671s（500ms→8s 短退避指纹）；冷却窗口内第二次调用仍打满 5 次；6 条限流文本中 'You've reached your 5-hour usage limit' 与 'out of its allowance' 漏判"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test pa171_failed_turn_attribution_contract 2>&1 | tail -40",
+      "exit": 101,
+      "status": "RED(assert)",
+      "evidence": "0 passed / 3 failed：失败事件 JSON 中 providerSource=null / providerMode=null / fallbackReason=null，且无 errorClass 键"
+    },
+    {
+      "cmd": "cargo test -p pony-agent-core --test pa171_error_copy_contract 2>&1 | tail -40",
+      "exit": 101,
+      "status": "RED(assert)",
+      "evidence": "88 passed / 1 failed：429+exceeded_current_quota_error 的 user_facing_error_summary 仍为「上游服务暂时不可用，重试已用尽。」"
+    }
+  ],
+  "files": [
+    "crates/pony-agent-core/tests/pa171_goal_round_failure_contract.rs",
+    "crates/pony-agent-core/tests/pa171_provider_rate_limit_cooldown_contract.rs",
+    "crates/pony-agent-core/tests/pa171_failed_turn_attribution_contract.rs",
+    "crates/pony-agent-core/tests/pa171_error_copy_contract.rs"
+  ],
+  "write_scope_respected": "仅新增 crates/pony-agent-core/tests/pa171_*.rs；未改 src/，无 git 写操作",
+  "assumed_contract_surface": {
+    "note": ".dev-team/contract-matrix-pa171.md 尚未生成（tasks 见 .dev-team/state.json，wave=68 仍为 wave=68 的 t-red 阶段）；以下为红相锚定的最小可测面，若 Lead 发布矩阵时改名/改签名，只允许同步调用点，断言语义不得放宽",
+    "agent::goal": [
+      "pub const MAX_CONSECUTIVE_GOAL_ROUND_FAILURES: u32 = 2;",
+      "#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum GoalRoundOutcome { Succeeded, Failed }",
+      "#[derive(Debug, Clone, PartialEq, Eq)] pub enum GoalRoundStopReason { Cancelled, ConsecutiveFailures { failures: u32 }, BudgetExhausted { rounds_started: u32, max_rounds: u32 } }",
+      "pub fn goal_round_stop_reason(cancelled: bool, consecutive_failures: u32, rounds_started: u32, max_rounds: u32) -> Option<GoalRoundStopReason>",
+      "pub fn advance_goal_round_for_outcome(goal_id: &str, outcome: GoalRoundOutcome) -> Result<GoalData, String>",
+      "impl GoalRoundStopReason { pub fn visible_line(&self) -> String }"
+    ],
+    "unchanged_signatures_relied_on": [
+      "turn_flow::emit_stream_failed(...14 参数，含 partial_text)->TurnEventEnvelope（若为 error_class 新增形参，需 Lead 裁决后同步唯一调用点 emit_failed）",
+      "bin/tui::user_facing_error_summary(&str)->String（经 pub use self::errors::* 暴露）",
+      "retry::is_rate_limit_error(&str)->bool",
+      "provider::ProviderManager::decide_with_tools(&ProviderRequest,&[ToolDefinition])->Result<ProviderDecision,String>"
+    ],
+    "new_wire_field": "TurnStreamEvent 新增 error_class（serde camelCase 下 errorClass）；断言同时接受两种拼写"
+  },
+  "red_evidence_type": {
+    "runtime_assertion_red": [
+      "C3",
+      "C4",
+      "C5"
+    ],
+    "compile_red_signature_not_landed": [
+      "C1",
+      "C2"
+    ]
+  },
+  "notes": "红相 4 个测试二分文件全部非零退出（exit=101）。C3/C4/C5 为**断言不成立**型红：C3 用 127.0.0.1 随机端口 mock provider 物理计数 HTTP（1 次 vs 实测 5 次，7.95s），C4 读 turn:failed 的 wire JSON（三字段 null、无 errorClass），C5 直接调 tui 纯函数（折叠成「重试已用尽」）。C1/C2 为**编译期**红（E0432 未解析导入），即『签名未落地』：契约矩阵 .dev-team/contract-matrix-pa171.md 尚未生成，本文件已按任务卡语义锚定最小可测面（见 assumed_contract_surface），签名落地后必须直接绿、不得改断言迁就实现。全部用例真实断言，无 #[ignore]/skip；未联网（仅 loopback mock）；goal store 用临时 sidecar + env 兜底清理，无脏数据。 另：`cargo check -p pony-agent-core --all-targets` 在 red 阶段会因 C1/C2 文件的 E0432 编译期红而失败 —— 这是『签名未落地』的预期代价；t-w1 落地 assumed_contract_surface 后应同时转绿。",
+  "baseline_green_commands": [
+    {
+      "cmd": "cargo test -p pony-agent-core --test tui_batch2_regression --test tui_session_resilience_acceptance 2>&1 | grep -E '^test result'",
+      "exit": 0,
+      "evidence": "96 passed / 0 failed（tui_batch2_regression）+ 98 passed / 0 failed（tui_session_resilience_acceptance）：既有验收基线未被本次新增测试破坏（本卡验收 #2 的红相前置状态）"
+    }
+  ]
+}
