@@ -1754,32 +1754,67 @@ impl ProviderManager {
             return Err(error);
         }
 
+        // PA-173 D3：批量 followup 必须与 1:1 路径**同等重试**（复用同一
+        // `provider_timeout_backoff_config_for` 退避；label 用 `followup_sync_batch`，与 1:1
+        // 的 `followup_sync` 不冲突）。预算耗尽后原始错误原样上抛，不做本地 fallback
+        // （批量路径无 fallback helper，契约也不新增）。
+        //
+        // 转录去重（本卡新增，非 1:1 照抄）：批量构造器在**每次尝试内**写回
+        // `accumulated_messages`（`openai_followup_messages_for_tool_results` /
+        // `anthropic_followup_messages_for_tool_results`）。若重试沿用上次写回结果作 base，
+        // 上游会收到重复 tool_use/tool_result——这是加壳后**新引入**的回归，故每次尝试前
+        // 都把 `accumulated_messages` 重置为进入批量 dispatch 时的 pristine 快照：
+        // 成功 = base + 恰好 1 次追加；**失败 = 停在最后一次尝试写入后的转录（无回滚，
+        // 与 1:1 同构）**——调用方拿到 Err 后不应再把该转录当作干净 base 复用。
+        // 1:1 路径（`openai_messages_with_tool_result` 同族）的同类重复追加仍是
+        // **既有缺陷**，登记后续卡，本卡不改其行为。
+        let base_messages = accumulated_messages.clone();
         match self.config.protocol {
-            ProviderProtocol::OpenAiCompletions => self.send_openai_tool_followup_batch_request(
-                request,
-                tools,
-                accumulated_messages,
-                assistant_message,
-                calls,
-                results,
+            ProviderProtocol::OpenAiCompletions => retry_provider_followup_timeout_with_policy(
+                "followup_sync_batch",
+                &self.policy,
+                || {
+                    *accumulated_messages = base_messages.clone();
+                    self.send_openai_tool_followup_batch_request(
+                        request,
+                        tools,
+                        accumulated_messages,
+                        assistant_message,
+                        calls,
+                        results,
+                    )
+                },
             ),
-            ProviderProtocol::OpenAiResponses => self.send_responses_tool_followup_batch_request(
-                request,
-                tools,
-                accumulated_messages,
-                assistant_message,
-                calls,
-                results,
+            ProviderProtocol::OpenAiResponses => retry_provider_followup_timeout_with_policy(
+                "followup_sync_batch",
+                &self.policy,
+                || {
+                    *accumulated_messages = base_messages.clone();
+                    self.send_responses_tool_followup_batch_request(
+                        request,
+                        tools,
+                        accumulated_messages,
+                        assistant_message,
+                        calls,
+                        results,
+                    )
+                },
             ),
-            ProviderProtocol::AnthropicMessages => self
-                .send_anthropic_tool_followup_batch_request(
-                    request,
-                    tools,
-                    accumulated_messages,
-                    assistant_message,
-                    calls,
-                    results,
-                ),
+            ProviderProtocol::AnthropicMessages => retry_provider_followup_timeout_with_policy(
+                "followup_sync_batch",
+                &self.policy,
+                || {
+                    *accumulated_messages = base_messages.clone();
+                    self.send_anthropic_tool_followup_batch_request(
+                        request,
+                        tools,
+                        accumulated_messages,
+                        assistant_message,
+                        calls,
+                        results,
+                    )
+                },
+            ),
         }
     }
 

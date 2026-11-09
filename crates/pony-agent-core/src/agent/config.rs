@@ -22,17 +22,25 @@ pub const UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT: u64 = 45_000;
 pub const UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT: u32 = 5;
 /// 单跳短退避的 sleep 预算（毫秒）。默认 30s（基线 `BackoffConfig::total_budget_ms`）。
 pub const UPSTREAM_RETRY_BUDGET_MS_DEFAULT: u64 = 30_000;
-/// `requestTimeoutMs` 下界：低于 1s 对真实上游无意义。
-pub const UPSTREAM_REQUEST_TIMEOUT_MS_MIN: u64 = 1_000;
+/// `requestTimeoutMs` 下界：PA-173 D2 由 1000 上调到 **15000**。
+///
+/// 依据（实测）：最小同步请求 1.76s、网关 p50 2.2s、模型 p50 4.67s ⇒ 1s 下界**物理上不可达**，
+/// 任何真实上游都会在钳到 1000 的值上必然超时，故下界抬到 15s（仍远低于 45s 默认）。
+pub const UPSTREAM_REQUEST_TIMEOUT_MS_MIN: u64 = 15_000;
 /// `requestTimeoutMs` 上界。
 pub const UPSTREAM_REQUEST_TIMEOUT_MS_MAX: u64 = 300_000;
-/// `decisionMaxAttempts` 下界：至少尝试一次。
-pub const UPSTREAM_DECISION_MAX_ATTEMPTS_MIN: u32 = 1;
+/// `decisionMaxAttempts` 下界：PA-173 D2 由 1 上调到 **2**。
+///
+/// 1 = 「合法零重试」（一次失败即放弃），与「重试预算」配置面语义相悖；抬到 2 保证下界至少
+/// 含一次重试，同时默认值 5 与上界 10 不变。
+pub const UPSTREAM_DECISION_MAX_ATTEMPTS_MIN: u32 = 2;
 /// `decisionMaxAttempts` 上界。
 pub const UPSTREAM_DECISION_MAX_ATTEMPTS_MAX: u32 = 10;
 /// `retryBudgetMs` 下界。v2-4：由 0 上调到 1000 —— 0 预算与 `RetryBudget::is_exhausted`
 /// 的 `>=` 判据语义冲突（0 会让"从未尝试"直接判耗尽），边界收紧以消歧义。
-pub const UPSTREAM_RETRY_BUDGET_MS_MIN: u64 = 1_000;
+/// PA-173 D2：再上调到 **5000** —— 实测模型 p50 4.67s ⇒ 1s 预算内不足一次真实退避，
+/// 下界物理不可达；抬到 5s 后下界与实测时延同量级（默认 30s / 上界 300s 不变）。
+pub const UPSTREAM_RETRY_BUDGET_MS_MIN: u64 = 5_000;
 /// `retryBudgetMs` 上界。
 pub const UPSTREAM_RETRY_BUDGET_MS_MAX: u64 = 300_000;
 /// PA-172 §2.3 C2-c：显式候选链的长度上限（超出截断并 `warn failover_candidate_ignored`）。
@@ -931,9 +939,11 @@ impl ProviderSelectionResolver for ProviderRegistryStore {
         self.resolve_selection(provider_id, model_id)
     }
 
-    /// PA-172 §2：读存储层策略段（`normalize_storage` 已钳制，故此处只需透传）。
+    /// PA-172 §2：读存储层策略段。PA-173 D1：钳制**只在此处**（生效策略）发生，并继续落
+    /// `upstream_policy_clamped` 结构化 warn（provided / clamped_to / bound）；存储与
+    /// `load_view` / `save_view*` 一律按原值往返，钳制结果绝不落盘。
     fn upstream_policy(&self) -> UpstreamPolicy {
-        UpstreamPolicy::from(self.load_storage().upstream_policy)
+        clamp_upstream_policy_logging(UpstreamPolicy::from(self.load_storage().upstream_policy))
     }
 
     /// PA-172 §2.3 C2-c：候选链卫生——未知 id / 重复（含与主 provider 同身份）/ 自身
@@ -1316,11 +1326,11 @@ fn resolve_model_protocol(
 }
 
 fn normalize_storage(mut storage: ProviderRegistryStorage) -> ProviderRegistryStorage {
-    // PA-172 §2.3：策略段越界钳制（C2-a 非致命 + C2-b 落 `upstream_policy_clamped`）。
-    // 钳制在**唯一归一入口**做 ⇒ 落盘与读回都看到同一份合法值；候选链只做透传，卫生
-    // （未知/重复/自身/超长）在 `resolve_failover_chain` 解析时判定。
-    let policy = UpstreamPolicy::from(storage.upstream_policy);
-    storage.upstream_policy = UpstreamPolicyStorage::from(clamp_upstream_policy_logging(policy));
+    // PA-173 D1：**禁止**在此处钳制策略段 —— `normalize_storage` 同时是读写往返的归一入口，
+    // 在这里钳制等于把钳制结果写回磁盘（历史事故：0/0/0 被永久改写成合法值）。
+    // 钳制只发生在「生效策略」解析处 `ProviderRegistryStore::upstream_policy()`，
+    // 存储往返保持原值逐字不动。候选链只做透传，卫生（未知/重复/自身/超长）在
+    // `resolve_failover_chain` 解析时判定。
     if storage.providers.is_empty() {
         return default_registry();
     }

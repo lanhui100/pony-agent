@@ -1,0 +1,11 @@
+# PA-173 回归基线（干净 HEAD worktree：/tmp/pa173-baseline @ 7d15a0f8，无他 lane 未提交改动）
+# 命令：cargo test -p pony-agent-core --test pa172_upstream_policy_config_contract \
+#        --test pa172_provider_failover_contract --test pa171_error_copy_contract --test pa172_budget_anchor_contract
+# 结果：EXIT=0
+#   pa172_upstream_policy_config_contract : 8 passed; 0 failed
+#   pa172_provider_failover_contract      : 89 passed; 0 failed
+#   pa171_error_copy_contract             : 6 passed; 0 failed  (11 tests / 3.84s)
+#   pa172_budget_anchor_contract          : 11 passed; 0 failed
+# 说明：共享工作区同期另有 splash lane 未提交改动（splash.rs / splash_coverage.rs / splash-logo.png /
+#       splash_gradient_tests.rs），会使含 `#[path="../src/bin/tui.rs"]` 的 test binary 出现 4 红；
+#       该 4 红与本卡无关，故基线一律以干净 worktree 为准。

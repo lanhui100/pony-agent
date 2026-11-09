@@ -18,6 +18,11 @@
 //!   （`crates/pony-agent-core/src/bin/tui/errors.rs:76`），文案与实际行为脱节。
 //!   目标：`max_retries = policy.decision_max_attempts - 1`，退避沿用
 //!   `provider_timeout_backoff_config_for`，日志 scope 名 `followup_sync_batch`。
+//! - **D3-v2 重试不得污染转录**（契约修订，Lead 裁决）：批量构造器在**每次尝试内**就把
+//!   `assistant + N 条 tool_result` 写回 `accumulated_messages`（`provider/mod.rs:5904`
+//!   同族），在外面加壳重试会让第 2 次尝试带着「已追加过的转录」发出 ⇒ 上游收到重复的
+//!   tool_result / tool_use id（400 或上下文污染）。冻结行为：每次尝试都从 pristine base
+//!   重建（第 N 次请求 messages 条数 == 第 1 次），成功后转录只追加 1 次。
 //!
 //! 判据口径（只锁可观察行为，不锁实现）：
 //! 1. D1 的唯一证据是**落盘字节的语义值**（策略段三元组）与**生效策略**的分离；
@@ -427,10 +432,13 @@ struct MockReply {
 
 /// 按剧本应答的 mock provider：第 N 个请求取第 N 条应答，超出后**重复最后一条**。
 /// `requests` 统计真实到达的 HTTP 请求数——D3 的「同等重试」只能靠它证明。
+/// `message_counts` 记录每次真实请求**请求体**里 `messages` 数组的条数（D3-v2「重试不得
+/// 污染转录」的唯一证据面：不读被测进程内部变量，只读线上真实字节）。
 struct MockProvider {
     base_url: String,
     addr: String,
     requests: Arc<AtomicUsize>,
+    message_counts: Arc<std::sync::Mutex<Vec<usize>>>,
     shutdown: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -445,8 +453,10 @@ impl MockProvider {
             .expect("PA-173：mock provider 必须能取本地地址")
             .port();
         let requests = Arc::new(AtomicUsize::new(0));
+        let message_counts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let requests_for_thread = Arc::clone(&requests);
+        let message_counts_for_thread = Arc::clone(&message_counts);
         let shutdown_for_thread = Arc::clone(&shutdown);
 
         let handle = std::thread::spawn(move || {
@@ -455,12 +465,29 @@ impl MockProvider {
                     return;
                 };
                 // 读完请求（含 body）再应答，避免客户端写一半就被 close。
-                let _ = read_http_request(&mut stream);
+                let body = read_http_request(&mut stream);
                 // 唤醒用的空连接（Drop 里发起）不得计入真实请求数。
                 if shutdown_for_thread.load(Ordering::SeqCst) {
                     return;
                 }
                 let index = requests_for_thread.fetch_add(1, Ordering::SeqCst);
+                // 捕获真实请求体的 `messages` 条数（畸形/空体不记账，避免计数器与应答错位）。
+                if let Ok(payload) = serde_json::from_str::<Value>(&body) {
+                    if let Some(messages) = payload.get("messages").and_then(Value::as_array) {
+                        message_counts_for_thread
+                            .lock()
+                            .expect("PA-173：mock 请求体捕获锁不得中毒")
+                            .push(messages.len());
+                    }
+                }
+                debug_assert_eq!(
+                    message_counts_for_thread
+                        .lock()
+                        .expect("PA-173：mock 请求体捕获锁不得中毒")
+                        .len(),
+                    index + 1,
+                    "PA-173：真实请求计数与请求体捕获必须一一对应"
+                );
                 let reply = &replies[index.min(replies.len() - 1)];
                 let mut head = format!(
                     "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -479,6 +506,7 @@ impl MockProvider {
             base_url: format!("http://127.0.0.1:{port}/v1"),
             addr: format!("127.0.0.1:{port}"),
             requests,
+            message_counts,
             shutdown,
             handle: Some(handle),
         }
@@ -486,6 +514,14 @@ impl MockProvider {
 
     fn request_count(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
+    }
+
+    /// 每次真实请求的 `messages` 条数（按到达顺序）。
+    fn message_counts(&self) -> Vec<usize> {
+        self.message_counts
+            .lock()
+            .expect("PA-173：mock 请求体捕获锁不得中毒")
+            .clone()
     }
 
     fn selection(&self, provider_name: &str) -> ResolvedProviderSelection {
@@ -641,12 +677,16 @@ fn ok_reply() -> MockReply {
     }
 }
 
-/// 驱动**批量**（N=2）同步 followup 公开入口。
-fn drive_batch_followup(
+/// 驱动**批量**（N=2）同步 followup 公开入口，并返回调用方可见的转录
+/// `accumulated_messages`（D3-v2「重试不得污染转录」的断言口径）。
+fn drive_batch_followup_with_transcript(
     mock: &MockProvider,
     provider_name: &str,
     decision_max_attempts: u32,
-) -> Result<pony_agent_core::agent::provider::ProviderResponse, String> {
+) -> (
+    Result<pony_agent_core::agent::provider::ProviderResponse, String>,
+    Vec<Value>,
+) {
     let manager = ProviderManager::new(mock.selection(provider_name)).with_policy(UpstreamPolicy {
         decision_max_attempts,
         ..UpstreamPolicy::default()
@@ -655,14 +695,24 @@ fn drive_batch_followup(
     let tools = tool_definitions();
     let (calls, results) = batch_calls_and_results();
     let mut accumulated_messages: Vec<Value> = Vec::new();
-    manager.continue_with_tool_results(
+    let result = manager.continue_with_tool_results(
         &request,
         &tools,
         &mut accumulated_messages,
         None,
         &calls,
         &results,
-    )
+    );
+    (result, accumulated_messages)
+}
+
+/// 驱动**批量**（N=2）同步 followup 公开入口（只关心结果面）。
+fn drive_batch_followup(
+    mock: &MockProvider,
+    provider_name: &str,
+    decision_max_attempts: u32,
+) -> Result<pony_agent_core::agent::provider::ProviderResponse, String> {
+    drive_batch_followup_with_transcript(mock, provider_name, decision_max_attempts).0
 }
 
 // ── D3：批量 followup 必须带重试 ────────────────────────────────────────────────
@@ -722,6 +772,74 @@ fn d3_batch_followup_retries_transient_failure_then_succeeds() {
     assert!(
         !response.tool_calls.is_empty(),
         "PA-173 D3：重试成功后必须保留整批 tool_calls（不得因重试丢字段）"
+    );
+}
+
+/// D3-v2（契约修订，缺陷锚点）：批量重试**不得污染转录**。
+///
+/// 缺陷机制：批量构造器在**每次尝试内**就把「assistant + N 条 tool_result」写回
+/// `accumulated_messages`（`provider/mod.rs:5904` 同族：`*accumulated_messages = messages`）。
+/// 直接在外面加壳重试 ⇒ 第 2 次尝试的 base 已是「追加过的转录」，上游收到**重复的
+/// tool_result / tool_use id**（可能 400 或污染上下文）——这是加重试后的新回归。
+///
+/// 冻结行为（口径 = mock 端捕获的**真实请求体**，不断言内部变量）：
+/// 1. 每次尝试必须从 pristine base 重建 ⇒ 第 N 次请求与第 1 次请求的 `messages` 条数**相等**；
+/// 2. 成功返回后 `accumulated_messages` 恰好 = base + **1 次**追加（不得为 N 次追加）。
+///
+/// 夹具基数：pristine base = 1 条 user；每次尝试追加 1 assistant + 2 tool ⇒ 每次请求 4 条。
+#[test]
+fn d3_batch_retry_does_not_duplicate_transcript() {
+    // ── Arrange ────────────────────────────────────────────────────────────────
+    let mock = MockProvider::script(vec![transient_503_reply(), ok_reply()]);
+    let attempts = 2;
+    const PRISTINE_BASE: usize = 1;
+    const ONE_APPEND: usize = 1 + 2; // 1 assistant + N(=2) tool_result
+    let expected_messages = PRISTINE_BASE + ONE_APPEND;
+
+    // ── Act ────────────────────────────────────────────────────────────────────
+    let (result, transcript) =
+        drive_batch_followup_with_transcript(&mock, "pa173-batch-transcript", attempts);
+    let counts = mock.message_counts();
+
+    // ── Assert ─────────────────────────────────────────────────────────────────
+    // A1：必须先有 2 次真实请求，否则「第 N 次 vs 第 1 次」无从比较。
+    assert_eq!(
+        counts.len(),
+        2,
+        "PA-173 D3-v2：transient 失败后必须重发 1 次（共 2 次真实请求），\
+         否则无法验证转录是否被污染，实际各次 messages 条数={counts:?}"
+    );
+    // A2：重试请求必须与首次请求携带**相同条数**（从 pristine base 重建，不得单调增长）。
+    assert_eq!(
+        counts[1], counts[0],
+        "PA-173 D3-v2：重试不得污染转录——第 2 次请求 messages 必须与第 1 次相同\
+         （第 1 次 {} 条 / 第 2 次 {} 条；相等 = 每次 attempt 都从 pristine base 重建）",
+        counts[0], counts[1]
+    );
+    assert_eq!(
+        counts[0], expected_messages,
+        "PA-173 D3-v2：第 1 次请求 messages 必须 = base({PRISTINE_BASE}) + 1 assistant + 2 tool\
+         = {expected_messages}，实际 {}",
+        counts[0]
+    );
+
+    // A3：请求确实成功，且调用方可见转录**只追加一次**（不得为 N 次追加 = {expected_messages}
+    // + 3 = 7 条）。
+    let response = result.expect(
+        "PA-173 D3-v2：首次 503 后第二次 200 必须返回 Ok（重试成功是转录断言的前提）",
+    );
+    assert_eq!(
+        response.output_text, "pa173-batch-ok",
+        "PA-173 D3-v2：重试成功后必须返回真实产出，实际 {:?}",
+        response.output_text
+    );
+    let duplicated = expected_messages + ONE_APPEND;
+    assert_eq!(
+        transcript.len(),
+        expected_messages,
+        "PA-173 D3-v2：成功返回后 `accumulated_messages` 必须恰好 = base + 1 次追加\
+         （{expected_messages} 条），实际 {} 条（若为 {duplicated} 条 ⇒ 每次都追加，转录被重复污染）",
+        transcript.len()
     );
 }
 

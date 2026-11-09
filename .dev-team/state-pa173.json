@@ -1,0 +1,25 @@
+{
+  "wave": "pa173",
+  "tier": "B",
+  "classification_basis": "跨模块(config.rs+provider/mod.rs) + LLM 网络调用/重试路径 + 接口数阈值命中 ⇒ 强制 B 级",
+  "baseline_commit": "7d15a0f8",
+  "red_commit": "1697d296",
+  "members": {
+    "lead": "assembly/contract/docs/git",
+    "test-agent": "tests/pa173_*.rs + pa172 授权迁移",
+    "executor-config": "src/agent/config.rs (D1+D2)",
+    "executor-provider": "src/agent/provider/mod.rs (D3)"
+  },
+  "write_scopes": {
+    "test-agent": ["crates/pony-agent-core/tests"],
+    "executor-config": ["crates/pony-agent-core/src/agent/config.rs"],
+    "executor-provider": ["crates/pony-agent-core/src/agent/provider/mod.rs"],
+    "lead": ["docs/observability.yaml", ".agents/notes", ".dev-team"]
+  },
+  "nfr": {
+    "external_call_timeout_ms": {"value": 45000, "note": "policy request_timeout_ms 默认；下界抬到 15000"},
+    "retry": {"attempts_default": 5, "attempts_floor": 2, "backoff_ms": [500, 8000], "budget_floor_ms": 5000},
+    "logging": {"format": "json", "events": ["upstream_policy_clamped", "upstream_policy_invalid_value"]}
+  },
+  "observability": {"applicable_diff": "涉及 LLM 调用路径 ⇒ 需 audit-diff.sh / check-declaration.sh"}
+}

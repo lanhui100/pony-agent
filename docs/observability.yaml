@@ -13,6 +13,16 @@ reviewed_at: "2026-11-09"
 # 不新增 enforcement_point**；错误分类器的家仍在 agent/retry.rs（error_classifier 收口点只覆盖
 # Ask 不可恢复挂起族，未被本波改动）。
 
+# PA-173（ADR 0104「PA-173 修订」）归属说明：上游策略三处缺陷修复。
+# (1) 钳制语义迁移：`upstream_policy_clamped` 事件的**发射点**从 normalize_storage（读写共用）
+#     移到生效策略解析 `ProviderRegistryStore::upstream_policy()`（配置面读取），事件名/字段
+#     （field/provided/clamped_to/bound）不变 ⇒ **无新增事件、无 schema 变更**；
+# (2) 三个下界上调（15000 / 2 / 5000）：纯常量，不产生遥测面；
+# (3) 批量 followup 补齐重试：复用既有 `provider_log` 的 `{label}:attempt=N/M failed class=…`
+#     行，label = `followup_sync_batch` —— 属**本地日志行**，非结构化事件、不做上报，
+#     metrics/logs 维度仍是结构性 N-A（桌面进程无常驻监听地址、无 /metrics）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point，tracing 收口点仍是 agent/otel/mod.rs。
+
 # Trace 审核 loop（ADR 0101 / PA-168..170）归属说明：loop 会话复用 ponycli headless 既有 OTel 出口
 # （tracing anchor 不变，仍 agent/otel/mod.rs），自身即维度 6 的审计对象（自举）；scripts/audit/* 确定性
 # 节点只产本地回执，无新增网络遥测面；fetch 查询 Tempo/Langfuse 复用 check-langfuse.sh 凭据纪律

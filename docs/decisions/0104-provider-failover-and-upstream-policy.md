@@ -29,9 +29,12 @@ ADR 0103（PA-171）把"一次上游限流"收敛为一次可见失败，但明�
    缺省值 = 今天的真实值（45000 / 5 / 30000 / 空链）⇒ 未配置时行为零变更；
    配置面必须能被读写 round-trip（前端保存不得丢字段）。
 
-2. **越界钳制而非报错**（fail-safe）：`requestTimeoutMs ∈ [1000, 300000]`、
-   `decisionMaxAttempts ∈ [1, 10]`、`retryBudgetMs ∈ [1000, 300000]`；越界钳到边界并落
+2. **越界钳制而非报错**（fail-safe）：`requestTimeoutMs ∈ [15000, 300000]`、
+   `decisionMaxAttempts ∈ [2, 10]`、`retryBudgetMs ∈ [5000, 300000]`（下界由 PA-173 上调，
+   见文末「PA-173 修订」）；越界钳到边界并落
    `warn` 结构化日志 `upstream_policy_clamped`（字段 `field`/`provided`/`clamped_to`/`bound`）。
+   **钳制只作用于「生效策略」解析（`ProviderRegistryStore::upstream_policy()`），不写盘**：
+   `load_view` / `save_view` 一律按原值往返，磁盘保留用户写入的原值。
    未知/重复/等于自身的候选 id 忽略并 `warn` `failover_candidate_ignored`。
    理由：配置文件是用户可手改面，一处越界不该让整个 provider 面失效（fail-closed 会让
    TUI 直接无法发起任何模型调用）。
@@ -41,7 +44,7 @@ ADR 0103（PA-171）把"一次上游限流"收敛为一次可见失败，但明�
    一律**逐字段容错反序列化**（接受 number/数字字符串/null/其它 ⇒ 回落默认 + warn），
    新增字段的任何畸形都不得使既有 provider 配置整体失效。
    `retryBudgetMs` 下界从 0 抬到 1000：0 预算与既有 `RetryBudget::is_exhausted` 的 `>=` 判据
-   （`retry.rs:224`）语义冲突，边界收紧以消歧义。
+   （`retry.rs:224`）语义冲突，边界收紧以消歧义。（该下界已由 PA-173 再上调到 5000，见文末。）
 
 3. **有界故障转移（换手，仅同步入口）**：当一次**同步**模型调用失败、且
    `failover_eligible(err)`（= `classify_error_class` ∈ `{rate_limited, quota, timeout, network, auth}`
@@ -143,3 +146,31 @@ ADR 0103（PA-171）把"一次上游限流"收敛为一次可见失败，但明�
 - 回归：`cargo check --all-targets`、PA-171 四个冻结测试、`--lib` 全量、
   `tui_batch2_regression` / `tui_session_resilience_acceptance`、`npm run typecheck`。
 - 观测门禁：`audit-diff.sh --base <基线>` 与 `check-declaration.sh` 双 Exit 0。
+
+## PA-173 修订（2026-11-09）
+
+现场事故：TUI 连续多轮 `elapsed=1001ms` 超时 + 「重试已用尽」，`providers.json` 的
+`upstreamPolicy` 被钉在 `{1000, 1, 1000}` 三个下界上。诊断结论：上游健康（网关 2571/2585 = 200、
+0 个 5xx、p50 2.2s），失败由**配置面三条缺陷叠加**造成。据此修订本 ADR 三处：
+
+1. **钳制不落盘**（本文 §2 修订）：`normalize_storage` 不再回写 `upstream_policy`；
+   钳制只发生在 `ProviderRegistryStore::upstream_policy()`（生效策略解析），并保留
+   `upstream_policy_clamped` warn。理由：钳制值落盘 = 把「一次越界输入」永久固化成
+   「用户意图」，且三个下界当时刚好构成不可用的组合（1s 超时 + 零重试），事故即由此产生。
+   `ProviderManager::with_policy` 保持不钳制（冻结测试直接构造策略值）。
+2. **下界上调**：`requestTimeoutMs` 1000 → **15000**（实测最小同步请求 1.76s、网关 p50 2.2s、
+   模型 p50 4.67s、p99 36s ⇒ 1s 下界物理不可达）；`decisionMaxAttempts` 1 → **2**
+   （下界 1 = 合法的「零重试」，与本文 §2 的「越界不致命」目的相反）；
+   `retryBudgetMs` 1000 → **5000**（2 次尝试的 500ms 退避需要 ≥1.5s，留 3× 余量）。
+   默认值 45000 / 5 / 30000 不变，未配置时行为仍零变更。
+3. **批量 followup 补齐重试**：`send_openai_tool_followup_batch_request`（多工具批量）此前
+   完全无重试层，而 1:1 followup 有；现按同一 `retry_provider_followup_timeout_with_policy`
+   包装，label = `followup_sync_batch`，`max_retries = decision_max_attempts - 1`。修复前
+   批量路径首跳失败即终态，UI 仍显示「重试已用尽」——文案与事实相反。
+
+**不改文案**：批量路径补齐重试后「重试已用尽」恢复为事实描述；attempts 下界 2 保证任何
+合法配置至少发生一次重试。（尝试次数在文案生产点不可得，见 PA-173 决策记录。）
+
+新增/迁移冻结验收：`tests/pa173_upstream_policy_guard_contract.rs`（D1 磁盘原值 + 生效钳制、
+D2 下界、D3 批量重试与有界重试）、`tests/pa172_upstream_policy_config_contract.rs`（三处下界断言
++ 极端值语义改为「读取路径钳制、磁盘保原值」）。
