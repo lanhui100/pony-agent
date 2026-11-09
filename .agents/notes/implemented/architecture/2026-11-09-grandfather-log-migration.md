@@ -114,6 +114,28 @@ Status: implemented
 
 结论：**在 1、2 修好之前不对真实库执行 apply** —— 否则会给真实会话造出重复日志与错误的工作区归属。
 
+### 三个缺陷的修复状态（2026-11-09，commit `9d6541e0`）
+
+| 缺陷 | 修法 | 验证 |
+| :--- | :--- | :--- |
+| D1 跨 cwd 判「没日志」 | `SessionLogStore::find_log_path/find_session_meta` 跨分组按 id 查；`session_has_log` 改用它 | 用例 9：外部分组写日志的会话 `has_session_log=true`，2-D 写路径产出 `__index_only` 轻量行 |
+| D2 产物写进进程 cwd | `resolve_session_cwd`：workspace 注册表 root → 该 id 既有分组 → 进程 cwd，降级逐条记 `cwd_fallback` | 用例 11：可解析者落对应分组；死 workspace id 计入 fallback |
+| D3 计数漂移 | 进写循环前一次性快照源状态 + 注册表 | 用例 12：同一快照两次 dry-run 计数完全一致 |
+
+真实库**副本** apply 实证：迁移前 `--home-dm-pony-agent--`(2) + `--…crates-pony-agent-core--`(1)；
+apply 后 **无 `--tmp--` 分组**、原有分组 `diff -r` 字节一致、`skipped_has_log=3`、
+`sessions` 行 139 条未增删。
+
+### 两个遗留的**外观**问题（功能无影响，已记录）
+
+1. `default` 工作区 `rootPath=/home/dm/pony_agent`（下划线）与仓库 `/home/dm/pony-agent`（连字符）
+   是两个不同字符串 ⇒ 未盖章会话（`workspace_id=None`）被归属到 `--home-dm-pony_agent--`（56 个），
+   与既有 `--home-dm-pony-agent--` 分成两组。功能无影响（D1 已按 id 跨分组查找），但目录观感分裂。
+   根因是注册表数据（`/home/dm/pony_agent` 目录本身是历史遗留），**建议单独清理注册表**，不在迁移里改。
+2. 从**非应用常态 cwd**（如 `/tmp`）运行迁移时，唯一一个「workspace id 在注册表里不存在」的会话
+   会落 `--tmp--`，已计入 `cwd_fallback`（不静默）。
+   **操作建议：从应用常态 cwd（如仓库根）执行迁移**，分组最干净。
+
 ## Alternatives considered
 
 1. **方案 A 合成日志 + 自证一致** —— 采纳。可审计（header 标记）、可回滚（保 blob）、可幂等，
