@@ -2596,6 +2596,10 @@ impl SqliteSessionBackend {
                 if session.conversation_id != id {
                     session.conversation_id = id.clone();
                 }
+                // 轻量行不读 legacy trace 表：真源是日志/规范化投影（逐会话扫 205MB 表是启动主项）。
+                if commit::is_index_only_row(&data) {
+                    return Some((id, session));
+                }
                 let table_traces = self.read_session_traces(conn, &id).ok()?;
                 session.turn_trace_history = self.merge_trace_history(&session, table_traces.clone());
                 // PA-088/PA-090：节点 materialize——按 refs 从**全量表**恢复节点 trace。
@@ -2806,9 +2810,7 @@ impl SessionBackend for SqliteSessionBackend {
         );
         // 日志没给出的轻量行 + observation 投影都从索引补回（补全不读日志）。
         let covered: std::collections::HashSet<String> = outcome.folded.iter().cloned().collect();
-        self.fill_index_only_rows_from_index_projection(&mut store.sessions, &covered);
-        self.attach_index_trace_projections(&mut store.sessions, &covered);
-        self.rebuild_history_from_turn_events_when_projection_empty(&mut store.sessions);
+        self.run_startup_self_heal(&mut store.sessions, &covered, Self::startup_self_heal_deadline());
         Some(store)
     }
 

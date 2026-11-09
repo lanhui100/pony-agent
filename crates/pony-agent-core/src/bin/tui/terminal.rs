@@ -219,14 +219,82 @@ pub fn terminal_recovery_hint_line() -> String {
     "终端按键异常时可执行 `reset` 复位；应急：printf '\\033[<1u\\033[=0u\\033[>4;0m'".to_string()
 }
 
+/// 退出提示要如实说明的「持久化事实」——由调用点（`run_tui`）采集，本模块只做纯文案。
+///
+/// 真实事故：只读实例（抢不到 `sessions.db.lock`）每轮提交都失败，旧实现照样打印
+/// `pony resume <id>`；退出后用户照做只会得到「会话尚无历史记录」——那条提示是假承诺。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistenceEvidence {
+    /// 该 id 在会话库里真的有可恢复历史。
+    Persisted,
+    /// 库里没有该 id：本次会话没落库（典型：并发第二实例只读 / 提交边界持续失败）。
+    NotPersisted,
+}
+
 /// ADR 0075 C9：续接提示块 —— 续接行恒在，**仅当**还原不完整时才追加手工恢复命令。
+///
+/// 语义等值于「已落库且没有保存失败」的历史行为（老调用点/老测试保持逐字不变）。
 pub fn resume_hint_block(session_id: &str, restore_incomplete: bool) -> String {
-    let mut block = resume_hint_line(session_id);
-    if restore_incomplete {
-        block.push('\n');
-        block.push_str(&terminal_recovery_hint_line());
+    resume_hint_block_with_evidence(
+        session_id,
+        restore_incomplete,
+        PersistenceEvidence::Persisted,
+        false,
+        "",
+    )
+}
+
+/// 退出提示块（带持久化事实）：**只有真的已落库**才给 `pony resume <id>` 承诺。
+///
+/// - `Persisted`：续接行照常；若运行期发生过保存失败，紧跟着如实说明「数据可能丢失」；
+/// - `NotPersisted`：不给续接命令（那条提示本来就会失效），改为明确说明未落库 + 日志位置；
+/// - `restore_incomplete`：终端自救命令恒排在最后（它和会话内容无关）。
+///
+/// 纯字符串函数：数据采集全部由调用点完成（本模块不碰 IO），因此可直接单测。
+pub fn resume_hint_block_with_evidence(
+    session_id: &str,
+    restore_incomplete: bool,
+    evidence: PersistenceEvidence,
+    save_failure_observed: bool,
+    runtime_log_display: &str,
+) -> String {
+    let log_pointer = runtime_log_display.trim();
+    let mut lines: Vec<String> = Vec::new();
+    match evidence {
+        PersistenceEvidence::Persisted => {
+            lines.push(resume_hint_line(session_id));
+            if save_failure_observed {
+                lines.push(if log_pointer.is_empty() {
+                    "注意：本次运行期间发生过保存失败，最近的内容可能未完整落库（数据可能丢失）。"
+                        .to_string()
+                } else {
+                    format!(
+                        "注意：本次运行期间发生过保存失败，最近的内容可能未完整落库（数据可能丢失）；详见 {log_pointer}"
+                    )
+                });
+            }
+        }
+        PersistenceEvidence::NotPersisted => {
+            lines.push(format!(
+                "本次会话没有可恢复历史：{session_id} 在会话库里没有可用记录（未落库或历史为空），无法续接。"
+            ));
+            if save_failure_observed {
+                lines.push(
+                    "本次运行期间发生过保存失败：你输入的内容可能已经丢失（数据可能丢失）。"
+                        .to_string(),
+                );
+            }
+            lines.push(if log_pointer.is_empty() {
+                "原因与退出信息见 pony TUI 运行日志。".to_string()
+            } else {
+                format!("原因与退出信息见 {log_pointer}")
+            });
+        }
     }
-    block
+    if restore_incomplete {
+        lines.push(terminal_recovery_hint_line());
+    }
+    lines.join("\n")
 }
 
 /// ADR 0075 C10：读取「最近一次还原是否不完整」（幂等，默认 false）。
@@ -239,10 +307,32 @@ pub fn terminal_restore_incomplete() -> bool {
 /// 调用时机：**终端还原之后**。提前写会落进备用屏，用户退出后根本看不到。
 /// ADR 0075：还原不完整时在续接行后追加手工恢复命令，给出可自行执行的自救路径。
 pub fn print_resume_hint(session_id: &str) {
-    let block = resume_hint_block(session_id, terminal_restore_incomplete());
-    let line = format!("\n{block}\n");
+    print_resume_hint_with_evidence(session_id, PersistenceEvidence::Persisted, false, "");
+}
+
+/// 退出提示（带持久化事实）：调用点必须先**确认**该 id 真的落库，再决定给不给续接承诺。
+///
+/// 写入通道与 [`write_hint_block`] 同源；`print_resume_hint` 是它的「无失败、已落库」特例。
+pub fn print_resume_hint_with_evidence(
+    session_id: &str,
+    evidence: PersistenceEvidence,
+    save_failure_observed: bool,
+    runtime_log_display: &str,
+) {
+    let block = resume_hint_block_with_evidence(
+        session_id,
+        terminal_restore_incomplete(),
+        evidence,
+        save_failure_observed,
+        runtime_log_display,
+    );
+    write_hint_block(&block);
+}
+
+fn write_hint_block(block: &str) {
+    let text = format!("\n{block}\n");
     let _ = io::stdout().flush();
-    if let Err(error) = write_restore_bytes(line.as_bytes()) {
+    if let Err(error) = write_restore_bytes(text.as_bytes()) {
         eprintln!("[pony-tui] 退出提示写入失败：{error}");
     }
 }

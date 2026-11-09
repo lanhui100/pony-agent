@@ -51,6 +51,7 @@
 
 - [0021 Agent 运行时统一错误码注册表：上游与协议不匹配可扩展治理](proposed/0021-unified-error-code-registry.md)
 - [0074 Ask 控制请求：会话持久化 + 生命周期收口（墙钟 TTL 退出产品语义）](proposed/0074-ask-persistence-lifecycle.md)
+- [0107 会话级写者租约与日志优先持久化（多窗口/多智能体并发，预留远程 agent）](proposed/0107-session-scoped-writer-lease-and-log-first-durability.md)
 
 ### 活跃
 
@@ -135,13 +136,16 @@
 - [0095 `pony update` 控制面改用空闲读超时 + 30s 总预算，body 读取纳入重试](0095-cli-update-control-plane-timeout.md)
 - [0096 TUI 状态行 min-dwell + 轮内工具活动聚合（折叠态「生成中」不再吞掉过程信息）](0096-tui-status-line-min-dwell-and-tool-activity.md)
 - [0097 `pony update` 同号不同内容不得谎报「已是最新」，发布侧清单版本必须严格递增](0097-cli-update-same-version-content-mismatch.md)
-- [0098 TUI 启动页品牌标改用母版真色派生表 + 位图优先（含 halfblocks）](0098-tui-splash-master-truecolor-bitmap-first.md) —— 其中档位尺寸（Rich 26×30 / Compact 20×22、位图 832×960）已被 [0105) 修订为原 1/3（9×10 / 7×8、位图 288×320）；真色表与位图优先部分仍现行
+- [0098 TUI 启动页品牌标改用母版真色派生表 + 位图优先（含 halfblocks）](0098-tui-splash-master-truecolor-bitmap-first.md) —— 其中档位尺寸（Rich 26×30 / Compact 20×22、位图 832×960）已被 [0105](0105-tui-splash-logo-scale-third.md) 修订为原 1/3（9×10 / 7×8、位图 288×320）；真色表与位图优先部分仍现行
 - [0099 会话存储改为「事件溯真源 + 单写者 + 墓碑删除」四阶段重构](0099-session-storage-event-sourced-refactor.md)
 - [0100 TUI 模型面板：优选行参与统一导航与分区间 1 行间距](0100-tui-model-panel-preferred-selectable-and-section-gap.md)
 - [0101 Trace 审核 Loop：用户唤起 + 持久状态机 + 确定性骨架 + 单一审批门](0101-trace-audit-loop-automation.md)
 - [0102 为日志格式补齐事件载体（provider transcript / 长期记忆 / history_state_evidence）](0102-session-log-event-carriers-for-transcript-and-memory.md)
 - [0103 goal 续轮失败止损、失败轮不烧预算与上游限流冷却](0103-goal-round-failure-and-rate-limit-cooldown.md)
 - [0104 上游调用时限/重试配置化与跨 provider 有界故障转移](0104-provider-failover-and-upstream-policy.md)
+- [0105 TUI 启动页品牌标缩为原尺寸 1/3（Rich 9×10 / Compact 7×8）](0105-tui-splash-logo-scale-third.md)
+- [0106 会话库单写者冲突 fail-closed、退出提示真实性与启动装载预算](0106-session-store-single-writer-fail-closed-and-startup-budget.md)
+- [0108 CLI 发布平台矩阵、清单单点装配与词表对齐门禁](0108-cli-release-platform-matrix.md)
 - [0109 决策记录门禁单一判据与撞号消解规则](0109-decisions-gate-single-source-and-collision-rule.md)
 - [0110 wave-35 测试套件修复：全量挂起真死锁、plan 草稿门禁自锁死与读前写契约漂移](0110-wave35-suite-remediation.md)
 - [0111 密钥门 64-hex 规则：snake_case 摘要键与结构化摘要槽的误报收口](0111-secret-gate-snake-case-digest-keys.md)

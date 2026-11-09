@@ -41,6 +41,10 @@ Status: implemented
    `.sha256` + 清单 → `gh release upload --clobber` → 收尾用 API 断言清单真的在 release 上。
    本仓是**两条独立版本线**（core / tauri-app，实测 0.1.156 vs 0.1.183，`version:check` 分两条各自 PASS），
    所以 CLI 只认 core 版本，`--pin <ver>` 也指 core 版本（按清单版本扫 release，而不是按 tag）。
+   *（事实指针：本条描述的 CI 形态已于 2026-11-09 由 [ADR 0108](0108-cli-release-platform-matrix.md) 修订为
+   `build-cli` 平台矩阵（`linux-x86_64` 必需 + `linux-aarch64` / `macos-aarch64` 尽力，真值源
+   `scripts/cli-platforms.mjs`）+ `publish-cli` 单点装配清单（`scripts/build-cli-manifest.mjs`）；
+   `platforms` 不再只有 `linux-x86_64` 一项。清单 schema、sha256 强制、core 版本链三条决定不变。）*
 4. **完整性只信 sha256**：清单里的 `sha256` 必填，长度必须 64 位 hex；下载走流式写盘并在结束时校验
    sha256 + 字节数。校验失败 ⇒ 立即中止且**不触碰原二进制**。没有「跳过校验」开关——宁可失败也不装来路不明的字节。
 5. **重定向手动逐跳**：仓库既有约定是禁止 reqwest 自动跟随重定向（`agent/web_access.rs` 决策 8，≤5 跳、逐跳校验）。
@@ -88,6 +92,8 @@ Status: implemented
 - **CI 面**：`release.yml` 新增 ubuntu job（`needs: build-and-release`）。桌面 job 先发布、CLI job 后补传资产：
   若 CLI job 失败，会出现「本次 release 没有 CLI 清单」，此时客户端会自然落到更旧的含清单 release（不会装坏版本），
   属**优雅降级**而非隐蔽故障——job 里显式打印该风险。
+  *（事实指针：该 ubuntu job 现由 [ADR 0108](0108-cli-release-platform-matrix.md) 的 `build-cli` 矩阵 +
+  `publish-cli` 单点装配承接；降级口径不变，且新增「必需平台缺制品 ⇒ publish-cli 红」这条闸。）*
 - **NFR**：制品下载对 `external_call_timeout_ms=3000` 是**显式例外**（28MB 不可能 3s 下完）：控制面仍 5s +
   1 次重试，制品下载单独预算 300s（上限 1800s，非法回退 300）、连接 10s、体积上限 128MiB、**不重试**
   （避免半包累积），落在 `.dev-team/nfr-baseline-wave67.json` 的 `download_budget`。

@@ -7,7 +7,7 @@ Status: implemented
 - 前序：PA-172（`docs/decisions/0104-...`，本卡修订其边界与钳制语义）
 - 现场事故：TUI 会话 `pa_01a1ba70` 于 15:34 连续两轮 `elapsed=1001ms` 超时 + 「上游服务暂时不可用，重试已用尽。」
 
-## 决定
+## Decision
 
 1. **钳制不落盘**：`normalize_storage` 不再回写 `upstream_policy`；钳制只发生在生效策略解析
    `ProviderRegistryStore::upstream_policy()`，并保留 `upstream_policy_clamped` warn（field/provided/clamped_to/bound）。

@@ -9,7 +9,7 @@ Status: implemented
   同为「续轮不看上一轮停在何处」导致的空转；本篇补的是「续轮不看上一轮成败」这另一半）
 - 波次：wave-68（红相 `e8c460ab`、契约 `e1227763`）
 
-## 决定
+## Decision
 
 1. 轮次 outcome 上浮到宿主：`start_turn_stream_checked -> Result<TurnStreamOutcome, String>`，
    `start_turn_stream` 签名冻结并内部转调（"执行成功"≠"轮次成功"）。

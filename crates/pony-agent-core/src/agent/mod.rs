@@ -27,6 +27,7 @@ pub mod hook_commands;
 pub mod hooks;
 pub mod image_artifact;
 pub mod input;
+pub mod instance_lock;
 pub mod instruction_touch;
 pub mod jobs;
 pub mod lsp;

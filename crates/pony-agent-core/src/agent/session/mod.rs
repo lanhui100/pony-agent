@@ -15,6 +15,10 @@ mod history;
 // ADR 0099 阶段 3-B：存量会话日志回填（grandfather 转正，方案 A）。
 pub mod log_migrate;
 mod store;
+// 启动装载期的有界修复（空壳会话派生字段保护 + trace 投影缓存预算）。
+pub(crate) mod startup_repair;
+// P1 启动提速：`pony resume` 目标解析的廉价 meta 查询（单条只读 SELECT，不做整库装载）。
+pub mod startup_meta;
 #[cfg(test)]
 mod tests;
 // ADR 0092 回归：goal 续轮文案识别（单独成文件，避免撑大已触棘轮的 `tests.rs`）。
@@ -79,6 +83,10 @@ pub use file_backend::FileSessionBackend;
 pub use id::{
     classify_session_id, is_canonical_session_id, is_main_session_id, new_session_id,
     new_session_id_unless, SessionIdKind, MAX_UNIQUE_ATTEMPTS, SESSION_ID_PREFIX,
+};
+pub use startup_meta::{
+    load_session_meta_rows, resolve_from_meta_rows, resolve_resume_target, SessionMetaRow,
+    NO_RESUMABLE_SESSION_MESSAGE,
 };
 pub use store::{
     build_missing_run_control_audit_summary, interrupted_turn_checkpoint_text,
