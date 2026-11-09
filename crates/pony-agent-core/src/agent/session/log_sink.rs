@@ -77,6 +77,21 @@ pub fn session_log_path_for_db(db_path: &Path, session_id: &str) -> Option<PathB
         .ok()
 }
 
+/// 一次日志追加的回执（ADR 0107 P0.3）。
+///
+/// - `written`：本批是否**实际写入字节**（R5：零写入批不得被判 `LogPersisted`）；
+/// - `restored`：每会话**追加前**的已提交长度——供「事务拒 stale-epoch 后回滚本批日志」
+///   精确截断（一次批通常只涉及一个会话）。
+#[derive(Debug, Default, Clone)]
+pub struct LogAppendReceipt {
+    pub written: bool,
+    /// 每会话**追加前**长度（回滚要截回的目标）。
+    pub restored: Vec<(String, u64)>,
+    /// 每会话**追加后**长度（与 `restored` 同序）。回滚前用它做偏移校验：
+    /// 文件若在「append 完成 → 回滚」之间被别人追加过，长度不等 ⇒ 放弃截断（绝不猜）。
+    pub post_append_len: Vec<(String, u64)>,
+}
+
 /// 会话日志写入端：一个 `SqliteSessionBackend` 持有一个实例。
 #[derive(Debug)]
 pub struct SessionLogSink {
@@ -143,8 +158,32 @@ impl SessionLogSink {
     /// - `PublishMetadata` 无会话归属 ⇒ 不进日志（全局元数据，日志按会话分文件）；
     /// - `RemoveSession` ⇒ 不进日志：删除语义由 [`Self::delete_session`] 在 SQLite 提交后
     ///   执行（把事件写进正要被删掉的文件没有意义）；
-    /// - 任一会话失败即整体 `Err`：调用方必须把整个批次判失败，不得部分成功。
-    pub fn append_commands(&self, commands: &[PersistCommand]) -> Result<(), String> {
+    /// - 任一会话失败即整体 `Err`：调用方必须把整个批次判失败，不得部分成功；
+    /// - 返回 [`LogAppendReceipt`]：`written` = 是否实际写入字节（P0.1 / R5：零写入批不得被判
+    ///   `LogPersisted`）；`restored` = 每会话追加前长度（P0.3：供 stale-epoch 回滚截断）。
+    pub fn append_commands(&self, commands: &[PersistCommand]) -> Result<LogAppendReceipt, String> {
+        self.append_commands_with(commands, false)
+    }
+
+    /// ADR 0107 P0.1 / R3：**锁降级实例**按批开/放 writer——append 完立即 `drop`
+    /// （释放文件级独占锁），不长期缓存句柄。
+    ///
+    /// 为什么必须区分：降级实例若长期持有同一会话的 writer 句柄，主（可写）实例写该会话会
+    /// 被挡成 `Locked → append 失败 → 整批 Failed → 整轮回滚`，破坏「可写实例零回归」。
+    /// 可写实例仍走 [`Self::append_commands`]（长命缓存句柄，避免每批重开重扫）。
+    pub fn append_commands_releasing(
+        &self,
+        commands: &[PersistCommand],
+    ) -> Result<LogAppendReceipt, String> {
+        self.append_commands_with(commands, true)
+    }
+
+    /// 公共实现：`release` = 按批开/放 writer（不复用缓存句柄）。
+    fn append_commands_with(
+        &self,
+        commands: &[PersistCommand],
+        release: bool,
+    ) -> Result<LogAppendReceipt, String> {
         let mut grouped: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
         for command in commands {
             if matches!(command, PersistCommand::RemoveSession { .. }) {
@@ -158,14 +197,32 @@ impl SessionLogSink {
             grouped.entry(session_id).or_default().push(value);
         }
         if grouped.is_empty() {
-            return Ok(());
+            return Ok(LogAppendReceipt::default());
         }
         let mut writers = self
             .writers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let ts = now_ms();
+        let mut receipt = LogAppendReceipt::default();
         for (session_id, values) in grouped {
+            if release {
+                // 先丢弃可能存在的缓存句柄（释放锁），再按批开/放。
+                writers.remove(session_id);
+                let meta = SessionLogMeta::new(session_id, self.cwd.clone());
+                let mut writer = self.open_writer(session_id, &meta)?;
+                // 追加前长度：回滚时按它 set_len（含 header / 已提交命令）。
+                let pre_append_len = writer.committed_len();
+                writer
+                    .append_commands(ts, &values)
+                    .map_err(|error| format!("append session log for `{session_id}`: {error}"))?;
+                receipt.restored.push((session_id.to_string(), pre_append_len));
+                receipt
+                    .post_append_len
+                    .push((session_id.to_string(), writer.committed_len()));
+                drop(writer); // 立即释放 flock（不缓存）
+                continue;
+            }
             if !writers.contains_key(session_id) {
                 let meta = SessionLogMeta::new(session_id, self.cwd.clone());
                 let writer = self.open_writer(session_id, &meta)?;
@@ -174,13 +231,74 @@ impl SessionLogSink {
             let writer = writers
                 .get_mut(session_id)
                 .expect("writer inserted in the same iteration");
+            let pre_append_len = writer.committed_len();
             if let Err(error) = writer.append_commands(ts, &values) {
                 // 写失败即丢弃缓存句柄（下次重新拿锁 + 重扫撕裂尾行），并整体失败。
                 writers.remove(session_id);
                 return Err(format!("append session log for `{session_id}`: {error}"));
             }
+            receipt.restored.push((session_id.to_string(), pre_append_len));
+            receipt
+                .post_append_len
+                .push((session_id.to_string(), writer.committed_len()));
         }
-        Ok(())
+        receipt.written = true;
+        Ok(receipt)
+    }
+
+    /// ADR 0107 P0.3：回滚一批**已写入**的日志（stale-epoch 批不得留在真源里）。
+    ///
+    /// 对每个 `(session_id, pre_append_len)`：先丢弃缓存 writer，再走 [`Self::open_writer`]
+    /// **重新取得该会话的日志独占锁**（`try_lock_exclusive`），持锁后调用
+    /// [`LogWriter::rollback_to`]（`set_len` + `sync_all` + 重扫校正 `committed_len`/`next_seq`）。
+    /// 抢不到锁 ⇒ 打 `stale_epoch_log_rollback_failed` 并跳过（不重试、绝不无锁截断）。
+    /// 回滚句柄不缓存：drop 即释放 flock，后续 append 重新 open + scan。
+    pub fn rollback(&self, restored: &[(String, u64)], post_append_len: &[(String, u64)]) {
+        let expected_by_session: HashMap<&str, u64> = post_append_len
+            .iter()
+            .map(|(session_id, len)| (session_id.as_str(), *len))
+            .collect();
+        for (session_id, pre_append_len) in restored {
+            // 先丢弃缓存 writer（否则自己会挡自己的锁），再**走 open_writer 重新抢独占锁**：
+            // 截断必须在持锁前提下做——无锁 `set_len` 会截掉并发写者（另一降级实例）的字节。
+            if let Ok(mut writers) = self.writers.lock() {
+                writers.remove(session_id.as_str());
+            }
+            let meta = SessionLogMeta::new(session_id, self.cwd.clone());
+            let mut writer = match self.open_writer(session_id, &meta) {
+                Ok(writer) => writer,
+                Err(error) => {
+                    eprintln!(
+                        "[pony-agent][session] stale_epoch_log_rollback_failed: session={session_id}（抢不到日志独占锁，未截断）：{error}"
+                    );
+                    continue;
+                }
+            };
+            let Some(expected) = expected_by_session.get(session_id.as_str()).copied() else {
+                eprintln!(
+                    "[pony-agent][session] stale_epoch_log_rollback_skipped: session={session_id} expected=? actual=?（回执缺 post_append_len，不猜、不截断）"
+                );
+                continue;
+            };
+            match writer.rollback_to(*pre_append_len, expected) {
+                Ok(()) => {}
+                Err(LogStoreError::RollbackStaleOffset { expected, actual }) => {
+                    eprintln!(
+                        "[pony-agent][session] stale_epoch_log_rollback_skipped: session={session_id} expected={expected} actual={actual}（追加后文件又变长，偏移已过期；不猜、不截断，stale 批残留在日志中）"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[pony-agent][session] stale_epoch_log_rollback_failed: session={session_id} path={} pre_append_len={pre_append_len}：{error}",
+                        writer.path().display()
+                    );
+                    continue;
+                }
+            }
+            // 不缓存该句柄：drop ⇒ 释放 flock，后续 append 重新 open + scan（seq 以重扫为准）。
+            drop(writer);
+        }
     }
 
     /// 删除某会话的整个日志目录（已在 SQLite 提交之后调用；幂等）。
@@ -266,13 +384,254 @@ mod tests {
             key: "k".to_string(),
             value: "v".to_string(),
         };
-        sink.append_commands(&[command]).expect("no-op append");
+        // R5：零写入批必须回报 `written=false`（否则上层会把索引失败误判成 `LogPersisted`）。
+        let receipt = sink.append_commands(&[command]).expect("no-op append");
+        assert!(!receipt.written, "无会话归属的命令 ⇒ 零字节写入");
+        assert!(receipt.restored.is_empty(), "零写入批不得记录回滚目标");
+        assert!(receipt.post_append_len.is_empty(), "零写入批不得记录追加后长度");
         assert!(
             !sink.root().exists(),
             "no session-scoped command ⇒ 不创建任何日志目录"
         );
         // 幂等：从未存在过的会话删除不报错。
         sink.delete_session("pa_never").expect("idempotent delete");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn append_message_command(session_id: &str, content: &str, ordinal: usize) -> PersistCommand {
+        PersistCommand::AppendMessage {
+            epoch: 1,
+            session_id: session_id.to_string(),
+            message: crate::agent::session::TurnHistoryMessage {
+                role: "user".to_string(),
+                content: content.to_string(),
+                ..Default::default()
+            },
+            ordinal,
+        }
+    }
+
+    /// ADR 0107 P0.3：事务拒 stale-epoch 后，按回执把本批日志**回滚**——文件长度回到追加前、
+    /// 后续 append 的 seq 连续、fold 读出的历史不含被回滚消息。
+    #[test]
+    fn rollback_removes_the_stale_batch_from_the_log() {
+        let dir = temp_dir("rollback");
+        let sink = SessionLogSink::for_db(&dir.join("sessions.db"));
+        let session_id = "pa_rb";
+
+        let first = sink
+            .append_commands(&[append_message_command(session_id, "第一问", 0)])
+            .expect("first append");
+        assert!(first.written, "第一批必须写入字节");
+        let path = sink.log_path(session_id).expect("log path");
+        let len_after_first = std::fs::metadata(&path).expect("metadata").len();
+        assert!(len_after_first > 0);
+
+        // 第二批模拟「事务拒 stale-epoch」：先写进日志，随后按回执回滚。
+        let stale = sink
+            .append_commands(&[append_message_command(session_id, "被拒消息", 1)])
+            .expect("stale append");
+        assert!(stale.written, "第二批确实写过字节（否则回滚无从谈起）");
+        assert_eq!(stale.restored.len(), 1, "回执必须记录一个会话的回滚目标");
+        assert_eq!(stale.restored[0].0, session_id);
+        assert_eq!(
+            stale.restored[0].1, len_after_first,
+            "回执里的 pre_append_len 必须是追加前的已提交长度"
+        );
+        assert!(
+            std::fs::metadata(&path).expect("metadata").len() > len_after_first,
+            "回滚前文件必须已变长（否则本用例证明不了回滚）"
+        );
+
+        assert_eq!(
+            stale.post_append_len.len(),
+            1,
+            "回执必须记录一个会话的追加后长度（偏移校验用）"
+        );
+        sink.rollback(&stale.restored, &stale.post_append_len);
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            len_after_first,
+            "rollback 必须把日志截回追加前长度"
+        );
+
+        // 回滚后继续 append：seq 连续（无空洞/重复），fold 读出的历史不含被回滚消息。
+        let third = sink
+            .append_commands(&[append_message_command(session_id, "回滚后的新消息", 2)])
+            .expect("append after rollback");
+        assert!(third.written);
+
+        let raw = std::fs::read_to_string(&path).expect("read log");
+        let mut seqs: Vec<u64> = Vec::new();
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).expect("log line is json");
+            if let Some(seq) = value.get("seq").and_then(Value::as_u64) {
+                seqs.push(seq);
+            }
+        }
+        assert!(!seqs.is_empty(), "回滚后日志必须还有命令行");
+        for pair in seqs.windows(2) {
+            assert_eq!(pair[1], pair[0] + 1, "回滚后 seq 必须连续：{seqs:?}");
+        }
+        assert!(!raw.contains("被拒消息"), "被回滚的消息不得残留在日志里");
+
+        let mut sessions = HashMap::new();
+        crate::agent::session::fold::merge_log_truth_into_sessions(sink.root(), &mut sessions);
+        let history: Vec<String> = sessions
+            .get(session_id)
+            .expect("folded session")
+            .history
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect();
+        assert!(
+            history.iter().any(|content| content == "第一问"),
+            "fold 必须保留第一批消息：{history:?}"
+        );
+        assert!(
+            history.iter().any(|content| content == "回滚后的新消息"),
+            "fold 必须包含回滚后的新消息：{history:?}"
+        );
+        assert!(
+            !history.iter().any(|content| content.contains("被拒消息")),
+            "fold 不得读回被回滚的消息：{history:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0107 P0.5：回滚偏移过期时**必须跳过**——「append 完成 → 回滚」之间别人追加了字节，
+    /// 此时按旧偏移 `set_len` 会截掉他人写入，并让对方 writer 的 `committed_len` 指向文件外。
+    #[test]
+    fn rollback_is_skipped_when_the_file_grew_after_append() {
+        let dir = temp_dir("rollback-stale-offset");
+        let sink = SessionLogSink::for_db(&dir.join("sessions.db"));
+        let session_id = "pa_rb_stale_offset";
+
+        // 用 releasing 路径（append 完即释放 flock），模拟降级实例：窗口内别人可以追加。
+        sink.append_commands_releasing(&[append_message_command(session_id, "偏移-第一问", 0)])
+            .expect("first append");
+        let stale = sink
+            .append_commands_releasing(&[append_message_command(session_id, "偏移-被拒消息", 1)])
+            .expect("stale append");
+        assert!(stale.written);
+        assert_eq!(stale.post_append_len.len(), 1);
+        assert_eq!(stale.post_append_len[0].0, session_id);
+        let post_len = stale.post_append_len[0].1;
+
+        // 另一句柄在「append 完成 → 回滚」窗口里追加了字节。
+        let other = SessionLogStore::new(sink.root());
+        let meta = SessionLogMeta::new(session_id, current_log_cwd());
+        {
+            let mut writer = other.open_write(session_id, &meta).expect("other writer");
+            writer
+                .append_commands(
+                    now_ms(),
+                    &[command_to_value(&append_message_command(session_id, "偏移-他人字节", 2))
+                        .expect("encode")],
+                )
+                .expect("other append");
+        }
+        let path = sink.log_path(session_id).expect("log path");
+        let len_with_foreign = std::fs::metadata(&path).expect("metadata").len();
+        assert!(
+            len_with_foreign > post_len,
+            "前置：他人追加后文件必须长于回执的 post_append_len（{len_with_foreign} vs {post_len}）"
+        );
+        let before = std::fs::read(&path).expect("read log");
+
+        // 回滚：偏移已过期 ⇒ 必须跳过（不猜、不截断）。
+        sink.rollback(&stale.restored, &stale.post_append_len);
+
+        let after = std::fs::read(&path).expect("read log");
+        assert_eq!(
+            before, after,
+            "偏移过期时回滚必须跳过：绝不截掉他人字节（{} → {} 字节）",
+            before.len(),
+            after.len()
+        );
+        assert!(
+            String::from_utf8_lossy(&after).contains("偏移-他人字节"),
+            "他人写入的字节必须完整保留"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR 0107 P0.3：回滚必须**持该会话日志独占锁**（绝不无锁 `set_len`）。
+    ///
+    /// 同进程两个 `LogStore` 句柄 = 两个独立 open file description ⇒ flock 相互生效，
+    /// 正好可以验证锁语义：写者持锁期间，另一个句柄 `open_write` 必须拿到 `Locked`；
+    /// 回滚结束后长度/seq 一致，另一句柄也能正常接手写入（seq 连续）。
+    #[test]
+    fn rollback_takes_the_session_log_exclusive_lock() {
+        let dir = temp_dir("rollback-lock");
+        let db = dir.join("sessions.db");
+        let sink = SessionLogSink::for_db(&db);
+        let session_id = "pa_rb_lock";
+
+        sink.append_commands(&[append_message_command(session_id, "锁语义-第一问", 0)])
+            .expect("first append");
+        let len_after_first = sink
+            .log_path(session_id)
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+            .expect("log metadata");
+
+        let stale = sink
+            .append_commands(&[append_message_command(session_id, "锁语义-被拒消息", 1)])
+            .expect("stale append");
+        assert!(stale.written);
+
+        // ① 锁语义：另一个句柄（不同 open file description）拿不到同一会话的写者。
+        let other_store = SessionLogStore::new(sink.root());
+        let meta = SessionLogMeta::new(session_id, current_log_cwd());
+        match other_store.open_write(session_id, &meta) {
+            Err(LogStoreError::Locked { .. }) => {}
+            other => panic!(
+                "flock 未生效：写者持锁期间另一句柄必须 Locked，实际 {other:?}"
+            ),
+        }
+
+        // ② 回滚（内部重新抢锁 + 偏移校验 + set_len + 重扫）。
+        sink.rollback(&stale.restored, &stale.post_append_len);
+        let path = sink.log_path(session_id).expect("log path");
+        assert_eq!(
+            std::fs::metadata(&path).expect("metadata").len(),
+            len_after_first,
+            "回滚后文件长度必须回到追加前"
+        );
+
+        // ③ 回滚句柄已释放锁 ⇒ 另一句柄能接手写入，且 seq 与被截断前缀连续。
+        let mut other_writer = other_store
+            .open_write(session_id, &meta)
+            .expect("rollback 后必须能重新取得写者（锁已释放）");
+        assert_eq!(
+            other_writer.committed_len(),
+            len_after_first,
+            "重新 open 时 committed_len 必须与回滚后的文件长度一致"
+        );
+        let seqs = other_writer
+            .append_commands(now_ms(), &[command_to_value(&append_message_command(session_id, "锁语义-接手消息", 2)).expect("encode")])
+            .expect("append after rollback");
+        assert_eq!(seqs.len(), 1);
+        drop(other_writer);
+
+        let raw = std::fs::read_to_string(&path).expect("read log");
+        let seq_numbers: Vec<u64> = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|value| value.get("seq").and_then(Value::as_u64))
+            .collect();
+        for pair in seq_numbers.windows(2) {
+            assert_eq!(pair[1], pair[0] + 1, "seq 必须连续：{seq_numbers:?}");
+        }
+        assert!(
+            !raw.contains("锁语义-被拒消息"),
+            "被回滚的消息不得残留在日志里"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

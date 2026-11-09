@@ -232,6 +232,11 @@ impl SqliteSessionBackend {
         Self::build(db_path, SeparateTraceTableMode::Off, true)
     }
 
+    /// ADR 0107 P0.2：构造期**存储级只读**（维护 / `--dry-run` / 诊断句柄，E8 零写入）。
+    pub fn storage_read_only(&self) -> bool {
+        self.storage_read_only
+    }
+
     pub fn new_with_trace_mode(db_path: PathBuf, trace_mode: SeparateTraceTableMode) -> Self {
         Self::build(db_path, trace_mode, false)
     }
@@ -1127,7 +1132,7 @@ impl SqliteSessionBackend {
         &self,
         tx: &rusqlite::Transaction<'_>,
         command: &PersistCommand,
-    ) -> Result<(), String> {
+    ) -> Result<(), commit::ApplyFailure> {
         let epoch = command.epoch();
         let current_epoch: i64 = tx
             .query_row(
@@ -1138,7 +1143,7 @@ impl SqliteSessionBackend {
             .map(|raw| raw.parse::<i64>().unwrap_or(0))
             .unwrap_or(0);
         if epoch < current_epoch as u64 {
-            return Err(format!("stale epoch: {epoch} < {current_epoch}"));
+            return Err(commit::ApplyFailure::stale_epoch(epoch, current_epoch));
         }
 
         // 确保 normalized_sessions 行存在（FK 依赖）：命令可能来自未回填的会话
@@ -2713,36 +2718,31 @@ impl SessionBackend for SqliteSessionBackend {
         rows.filter_map(|row| row.ok()).collect()
     }
 
-    /// PA-089 阶段 3：规范化双写命令——统一事务写 blob（旧 sessions 表）+ normalized_* 表。
-    /// 迁移 barrier：epoch 检查（旧 epoch 命令拒绝）。
+    /// PA-089 阶段 3：规范化双写命令（单事务写 blob + normalized_*；stale-epoch 由预检/事务双拒）。
     fn persist_command(&self, command: PersistCommand) -> PersistCommandOutcome {
         self.persist_commands_batch(vec![command])
     }
 
     /// 批量规范化持久化命令（单个 `BEGIN IMMEDIATE` 事务原子提交，附带 busy 退避重试）。
-    ///
-    /// 这里必须是 **IMMEDIATE** 而不是 rusqlite 默认的 DEFERRED：本事务的第一批语句就是写操作，
-    /// DEFERRED 事务会先取共享锁、写时才尝试升级为写锁 —— 两个并发写事务都在升级点等待对方，
-    /// 直接落进 `SQLITE_BUSY`（SQLite 不对此做死锁回退）。IMMEDIATE 在事务开始就取写锁，
-    /// 把冲突收敛到事务入口，由下面的 busy 退避重试吸收。
+    /// 必须 IMMEDIATE：DEFERRED 会在「读→写升级」点对撞成 `SQLITE_BUSY`（SQLite 不做死锁回退），
+    /// 冲突因此收敛到事务入口、由 busy 退避吸收。
     fn persist_commands_batch(&self, commands: Vec<PersistCommand>) -> PersistCommandOutcome {
         if commands.is_empty() {
             return PersistCommandOutcome::Succeeded;
         }
-        // ADR 0099 阶段 0（E5）：降级只读实例在每次写入口重试一次 flock（非阻塞），
-        // 持锁进程退出后自动恢复可写（query_only 本身不可逆）。
+        // ADR 0099 E5：降级只读实例每次写入口重试一次 flock（非阻塞），持锁进程退出后自动恢复可写。
         self.try_recover_instance_lock();
-        // ADR 0099 阶段 1-B（真源优先）：先把命令流追加进会话日志（含 fsync），成功后才写
-        // SQLite 索引。日志写失败 ⇒ 整批 `Failed`，**SQLite 一行都不改**（无静默成功）。
-        if let Err(error) = commit::append_session_log_to_file(self, &commands) {
-            eprintln!("[pony-agent][session] 会话日志（真源）写入失败，SQLite 索引未改动：{error}");
-            return PersistCommandOutcome::Failed;
+        // ADR 0107 P0.3：写日志前 epoch 预检（fail-closed：读不到 epoch ⇒ 不写日志、整批 Failed）。
+        if let Err(rejection) = commit::precheck_stale_epoch(self, &commands) {
+            return commit::refuse_epoch_precheck(rejection);
         }
-        // NFR（契约 §4 结构性理由）：`external_call_timeout_ms=3000` 只约束**外部调用**
-        // （网络/HTTP/跨进程 RPC）。SQLite 的 `busy_timeout` 是**本地写锁等待**，不在其域内
-        // ——无网络 IO、失败可恢复；压到 3000 会把"慢盘 / 备份进程占锁"变成用户可见的保存
-        // 失败。故单次尝试的本地锁等待预算 = 5000ms，重试上限 3 次（backoff 50→200ms）。
-        // 另一条硬约束保留：每次尝试单独取连接，**失败即释放连接 Mutex 再 sleep**。
+        // ADR 0107 §5 P0 + P0.1（R3/R4/R5）：日志先行；`log_written` = 本批**实际写入字节**，
+        // 零写入批与维护句柄（`storage_read_only`）不得把索引失败判成 `LogPersisted`。
+        let (log_written, log_restored, log_post) = match commit::append_session_log_to_file(self, &commands) {
+            Ok(receipt) => receipt,
+            Err(error) => return commit::log_write_failure(error),
+        };
+        // NFR：`busy_timeout` 是本地写锁等待（非外部调用）⇒ 单次预算 5000ms、重试上限 3 次。
         const LOCK_WAIT_BUDGET_MS: u64 = 5000;
         let started = std::time::Instant::now();
         let mut attempt = 0u32;
@@ -2752,7 +2752,7 @@ impl SessionBackend for SqliteSessionBackend {
                     Ok(slot) => slot,
                     Err(error) => {
                         eprintln!("[pony-agent][session] SQLite open error: {error}");
-                        return PersistCommandOutcome::Failed;
+                        return commit::index_failure_after_log(PersistCommandOutcome::Failed, log_written);
                     }
                 };
                 let conn = slot.as_ref().expect("connection initialized");
@@ -2764,7 +2764,10 @@ impl SessionBackend for SqliteSessionBackend {
                     // ADR 0099 阶段 1-B：SQLite 提交成功后才删 `RemoveSession` 的日志目录
                     // （先删索引行、再删目录，不留「索引已删但日志还在」的半态）。
                     commit::delete_session_logs_after_commit(self, &commands, &outcome);
-                    return outcome;
+                    // ADR 0107 P0.3：事务拒 stale-epoch ⇒ 回滚本批已写日志（真源不留被拒命令）。
+                    commit::rollback_stale_batch_log(self, log_written, &log_restored, &log_post, &outcome);
+                    // ADR 0107 §5 P0：日志已落盘 ⇒ 索引侧失败退化为「索引滞后」（`LogPersisted`）。
+                    return commit::index_failure_after_log(outcome, log_written);
                 }
                 commit::BatchAttempt::Busy(message) => {
                     // NFR `retry.max_attempts=3`：最多 3 次尝试（attempt 0..=2）。
@@ -2773,7 +2776,7 @@ impl SessionBackend for SqliteSessionBackend {
                             "[pony-agent][session] SQLite batch command busy 重试耗尽（attempt={attempt}，共 {}ms）：{message}",
                             started.elapsed().as_millis()
                         );
-                        return PersistCommandOutcome::Failed;
+                        return commit::index_failure_after_log(PersistCommandOutcome::Failed, log_written);
                     }
                     let backoff = commit::busy_backoff_ms(attempt);
                     eprintln!(
@@ -2786,11 +2789,9 @@ impl SessionBackend for SqliteSessionBackend {
             }
         }
     }
-
     /// **运行时读路径**（ADR 0099 D1 / 2-B / 2-D）：**日志为真源**。
     /// 1. 索引原样视图（无日志的存量会话由它 grandfather）；2. 叠加日志 fold：有日志的会话**日志无条件为准**（2-D 已删除 `updated_at_ms` 定序）；
-    /// 3. 折叠超预算 / 日志不可读 / fold 失败 ⇒ 回落索引侧 `normalized_*` 投影；
-    ///    只读句柄不合并日志但同样做投影补全（补全**不读日志** ⇒ 独立观察者语义不变）；
+    /// 3. 折叠超预算 / 日志不可读 / fold 失败 ⇒ 回落索引侧 `normalized_*` 投影（只读句柄同样补全，补全**不读日志**）；
     /// 4. PA-174 P1：投影侧全空的会话由 durable `turn_events` 重建历史（不留空壳）。
     fn load_store(&self) -> Option<PersistedStore> {
         let mut store = self.load_index_store()?;
@@ -4733,10 +4734,11 @@ mod tests {
             },
             ordinal: 1,
         });
+        // ADR 0107 P0.1 / R2② 已声明语义变更：旧 epoch 被拒 ≠ 索引故障 ⇒ StaleEpoch（仍 Err）。
         assert_eq!(
             outcome,
-            PersistCommandOutcome::Failed,
-            "old epoch should fail"
+            PersistCommandOutcome::StaleEpoch,
+            "old epoch should be rejected as StaleEpoch"
         );
 
         let outcome = backend.persist_command(PersistCommand::AppendMessage {
@@ -5076,7 +5078,8 @@ mod tests {
             .lock()
             .expect("inject lock")
             .take();
-        assert_eq!(outcome, PersistCommandOutcome::Failed, "injected failure");
+        // ADR 0107 P0.1 / R2② 已声明语义变更：日志已先行落盘 ⇒ 注入的**索引**失败为 `LogPersisted`
+        assert_eq!(outcome, PersistCommandOutcome::LogPersisted, "injected index failure");
 
         // 事务回滚：事件行与计数器均无残留
         let conn = backend.connection().expect("connection");

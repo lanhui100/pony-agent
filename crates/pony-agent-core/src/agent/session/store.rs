@@ -1,7 +1,7 @@
 use super::backend::{
     PersistCommand, PersistCommandOutcome, SeparateTraceTableMode, SessionBackend,
     SessionBackendMutationResult, SessionMetaPatch, SessionTraceMutation, TraceMigrationState,
-    TraceTerminalPatch,
+    TraceTerminalPatch, report_index_deferred,
 };
 #[cfg(test)]
 use super::file_backend::MemorySessionBackend;
@@ -543,7 +543,6 @@ impl SessionStore {
         let mut appended_user: Option<TurnHistoryMessage>;
         let mut appended_assistant: Option<TurnHistoryMessage>;
         let meta_patch: Option<SessionMetaPatch>;
-
         // 两阶段暂存提交（Staging Commit）：在克隆状态上计算新 turn，持久化成功后才提交到 live
         let before_state = self.ensure_session(&session_key).clone();
         let mut staged_session = before_state.clone();
@@ -565,12 +564,10 @@ impl SessionStore {
                 reasoning_content: assistant_reasoning,
                 ..Default::default()
             });
-
             if staged_session.history.len() > DEFAULT_HISTORY_LIMIT {
                 let keep_from = staged_session.history.len() - DEFAULT_HISTORY_LIMIT;
                 staged_session.history.drain(..keep_from);
             }
-
             if let Some(messages) = provider_native_transcript {
                 staged_session.provider_native_transcript.extend(messages);
             }
@@ -598,12 +595,10 @@ impl SessionStore {
 
         let latest_node = staged_session.history_nodes.last().cloned();
         let latest_cursor = staged_session.history_cursor.clone();
-
         // 增量批事务持久化（消除写放大）
         if self.backend.supports_turn_events() {
             let mut commands = Vec::new();
-            // ADR 0102：transcript / 记忆原只有 blob 载体（2-D 后即丢）⇒ 并入本批命令流；
-            // 日志先行不变（日志失败 ⇒ 整批 Failed，SQLite 零改动）。
+            // ADR 0102：transcript / 记忆并入本批命令流（日志先行不变：日志失败 ⇒ 整批 Failed）。
             super::fold::append_transcript_command(&mut commands, &session_key, &transcript_delta);
             super::fold::append_memory_command_if_changed(&mut commands, &session_key, &before_state, &staged_session);
             for (ordinal, message) in [
@@ -644,19 +639,21 @@ impl SessionStore {
                     branch: branch.clone(),
                 });
             }
-
             let outcome = self.backend.persist_commands_batch(commands);
             if matches!(outcome, PersistCommandOutcome::Failed | PersistCommandOutcome::StaleEpoch) {
                 return Err(SessionError::BackendFailure(format!(
                     "append_turn batch persist failed: {outcome:?}"
                 )));
             }
-            self.save_session_state_to_backend(&session_key, &staged_session);
+            // ADR 0107 §5 P0：`LogPersisted`（日志已落盘、索引滞后）⇒ 提交内存 live，跳过索引单行落盘。
+            if !report_index_deferred(&session_key, &outcome) {
+                self.save_session_state_to_backend(&session_key, &staged_session);
+            }
         } else {
             self.save_session_state_to_backend(&session_key, &staged_session);
         }
 
-        // 持久化成功，原子写入主内存并更新快照
+        // 提交到 live 主内存（`LogPersisted` 时索引滞后，但日志是真源 ⇒ 重启可重建）
         self.sessions.insert(session_key.clone(), staged_session);
         self.refresh_attachment_catalog();
         Ok(self.snapshot_for_session(&session_key))
@@ -728,14 +725,13 @@ impl SessionStore {
                 None,
             );
         }
-
         self.sessions.insert(session_key.clone(), staged_session.clone());
         let mutation = SessionTraceMutation::ReplaceAll {
             traces: staged_session.turn_trace_history.clone(),
         };
         self.save_session_state_to_backend(&session_key, &staged_session);
+        // ADR 0107 P0.1 / R6：索引失败（含 `LogPersisted`）在此打 `index_deferred` 告警。
         self.persist_session_and_trace_change(&session_key, mutation);
-
         Ok(self.snapshot_for_session(&session_key))
     }
 
@@ -2595,15 +2591,19 @@ impl SessionStore {
                 if matches!(outcome, PersistCommandOutcome::Succeeded) {
                     return;
                 }
-                // 命令失败 → 回退全量路径（不丢数据）
+                // ADR 0107 §5 P0：`LogPersisted` 告警（日志已落盘、索引滞后）；仍回退全量路径。
+                report_index_deferred(session_id, &outcome);
             }
             // 2-D：`ReplaceAll` 走日志命令流（以前只写 blob ⇒ 停写后图状态会丢）。
-            if matches!(mutation, SessionTraceMutation::ReplaceAll { .. })
-                && super::fold::persist_graph_projection_commands(
+            if matches!(mutation, SessionTraceMutation::ReplaceAll { .. }) {
+                let outcome = super::fold::persist_graph_projection_commands(
                     self.backend.as_ref(), session_id, session, &effective_mutation,
-                )
-            {
-                return;
+                );
+                if matches!(outcome, PersistCommandOutcome::Succeeded) {
+                    return;
+                }
+                // ADR 0107 P0.1 / R6：`ReplaceAll`（失败轮 replace-all 亦经此）的索引失败同样告警。
+                report_index_deferred(session_id, &outcome);
             }
         }
         let result = if session_is_persistable(session) {

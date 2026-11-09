@@ -86,6 +86,10 @@ pub enum LogStoreError {
     Io { context: String, source: std::io::Error },
     /// 事件序列化失败。
     Serialize { reason: String },
+    /// 回滚目标偏移已过期：文件在「append 完成 → 回滚」之间被别人追加过字节
+    /// （`expected` = 回执记录的追加后长度，`actual` = 抢到锁后看到的长度）。
+    /// 语义：**不猜、不截断**（否则会截掉他人字节），调用方按可观测残留处理。
+    RollbackStaleOffset { expected: u64, actual: u64 },
 }
 
 impl std::fmt::Display for LogStoreError {
@@ -117,6 +121,10 @@ impl std::fmt::Display for LogStoreError {
             }
             Self::Io { context, source } => write!(f, "{context}: {source}"),
             Self::Serialize { reason } => write!(f, "failed to encode session log event: {reason}"),
+            Self::RollbackStaleOffset { expected, actual } => write!(
+                f,
+                "rollback offset is stale: expected file length {expected}, actual {actual}"
+            ),
         }
     }
 }
@@ -1007,6 +1015,7 @@ fn finish_writer(path: &Path, session_id: &str, mut file: File) -> Result<LogWri
     Ok(LogWriter {
         path: path.to_path_buf(),
         file,
+        session_id: session_id.to_string(),
         committed_len: committed,
         next_seq: last_seq.map(|seq| seq + 1).unwrap_or(0),
     })
@@ -1035,6 +1044,8 @@ struct CommandEnvelope<'a> {
 pub struct LogWriter {
     path: PathBuf,
     file: File,
+    /// 会话 id（`rollback_to` 重扫已提交尾部时做 header 校验）。
+    session_id: String,
     committed_len: u64,
     next_seq: u64,
 }
@@ -1061,6 +1072,48 @@ impl LogWriter {
         seqs.pop().ok_or_else(|| LogStoreError::Serialize {
             reason: "append produced no seq".to_string(),
         })
+    }
+
+    /// ADR 0107 P0.3：把**已提交前缀截断回 `len`**，用于回滚被事务拒收（stale-epoch）的批次。
+    ///
+    /// 前置：调用方已持有本会话日志的**独占锁**（本类型即锁持有者）——绝不允许无锁 `set_len`，
+    /// 否则会截掉并发写者（另一降级实例）刚写入的字节。
+    ///
+    /// 截断后**重新扫描已提交尾部**校正 `committed_len` / `next_seq`：保证后续 append 的
+    /// `seq` 从被截断前缀之后继续、无空洞无重复。
+    pub fn rollback_to(&mut self, len: u64, expected_len: u64) -> Result<(), LogStoreError> {
+        // 偏移校验（ADR 0107 P0.5）：文件长度必须仍是回执记录的「追加后长度」。
+        // 不等 ⇒ 期间有人追加过字节，`len` 会截掉对方的写入 ⇒ 拒绝，交调用方按残留处理。
+        let actual = self
+            .file
+            .metadata()
+            .map_err(|e| io_err(format!("stat `{}` before rollback", self.path.display()), e))?
+            .len();
+        if actual != expected_len {
+            return Err(LogStoreError::RollbackStaleOffset {
+                expected: expected_len,
+                actual,
+            });
+        }
+        if len > self.committed_len {
+            return Err(LogStoreError::Serialize {
+                reason: format!(
+                    "rollback target {len} is beyond committed length {} of `{}`",
+                    self.committed_len,
+                    self.path.display()
+                ),
+            });
+        }
+        self.file
+            .set_len(len)
+            .map_err(|e| io_err(format!("truncate `{}` for rollback", self.path.display()), e))?;
+        self.file
+            .sync_all()
+            .map_err(|e| io_err(format!("fsync rollback truncation of `{}`", self.path.display()), e))?;
+        let (committed, last_seq) = scan_committed_tail(&mut self.file, &self.session_id)?;
+        self.committed_len = committed;
+        self.next_seq = last_seq.map(|seq| seq + 1).unwrap_or(0);
+        Ok(())
     }
 
     /// 追加一批事件（一次 `write_all` + 一次 `fsync`），返回分配的 `seq` 列表。

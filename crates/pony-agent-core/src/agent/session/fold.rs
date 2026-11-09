@@ -1994,13 +1994,16 @@ pub(crate) fn append_memory_command_if_changed(
 /// 以前只写 blob + trace 表。停写 blob 之后，图状态若仍不落日志，重启会读回旧分支、
 /// trace 变空 —— 那不是「SQLite 退为索引」，而是真数据丢失。故这些路径改走命令流。
 ///
-/// 返回 `true` = 命令流已提交（调用方不必再走整包路径）；`false` = 回退全量写（不丢数据）。
+/// 返回批次的 [`super::backend::PersistCommandOutcome`]（ADR 0107 P0.1 / R6）：
+/// `Succeeded` = 命令流已提交（调用方不必再走整包路径）；其它 = 回退全量写（不丢数据）。
+/// 透出 outcome 而不是 `bool`，是为了让调用方区分 `LogPersisted`（日志已落盘、索引滞后，
+/// 可告警）与 `Failed`/`StaleEpoch`（真失败）。
 pub(crate) fn persist_graph_projection_commands(
     backend: &dyn SessionBackend,
     session_id: &str,
     session: &SessionState,
     mutation: &super::backend::SessionTraceMutation,
-) -> bool {
+) -> super::backend::PersistCommandOutcome {
     const EPOCH: u64 = 1;
     let traces = match mutation {
         super::backend::SessionTraceMutation::ReplaceAll { traces } => traces.as_slice(),
@@ -2035,10 +2038,7 @@ pub(crate) fn persist_graph_projection_commands(
         session_id: session_id.to_string(),
         cursor: session.history_cursor.clone(),
     });
-    matches!(
-        backend.persist_commands_batch(commands),
-        super::backend::PersistCommandOutcome::Succeeded
-    )
+    backend.persist_commands_batch(commands)
 }
 
 /// 会话级元数据的**真源追加**（ADR 0099 阶段 2-D）。
