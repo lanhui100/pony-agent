@@ -81,60 +81,37 @@ Status: implemented
 修复方向已立提案：[ADR 0102（proposed）](../../../docs/decisions/proposed/0102-session-log-event-carriers-for-transcript-and-memory.md)。
 完成后 50 例可迁、140 个全部转正。
 
-### 真实库尚未应用
+### 真实库已应用（2026-11-09，应用退出后）
 
-应用正在运行且持有 `sessions.db.lock`（实测 PID 3969145 的交互式 `pony`，`/dev/pts/7`）。
-写操作须避开运行实例，**待退出后**在真实库执行 apply；回滚面 = 删除对应日志目录（blob 未改动）。
+用户关闭 TUI、锁释放后，在**真实库**执行（从仓库根运行）：
 
-## 实测发现的三个缺陷（2026-11-09，阻断真实库 apply）
+| 步骤 | 结果 |
+| :--- | :--- |
+| 迁移前 | 日志 4 个（`--home-dm-pony-agent--` 3 + `--…crates-pony-agent-core--` 1） |
+| dry-run | `scanned=140 migrated=86 skipped_has_log=4 mismatched=50 cwd_fallback=1 failed=0` |
+| apply | 同上；生成 **86** 个会话日志，总计 **90** 个 |
+| 迁移后分组 | `--home-dm-pony-agent--`(31) / `--home-dm-pony_agent--`(56) / `--…crates-pony-agent-core--`(1) / `--home-dm-ponyllm--`(1) / `--tmp-pa-approval-demo--`(1)；**无 `--tmp--`** |
+| 幂等复核 | 第二次 dry-run：`migrated=0 skipped_has_log=90` —— 幂等成立 |
+| 索引未动 | `sessions` 行数 140 → 140（未增未删、blob 未改，回滚面完好） |
 
-在一致性快照上做「先只读观察、再 apply、再观察」的对照实验，暴露三处需要先修的问题。
+**转正率 90/140**；其余 50 个因日志格式缺载体被如实拒绝（见上文）。
 
-**实验**：快照日志根原有 2 个分组 `--home-dm-pony-agent--`(3) 与
-`--home-dm-pony-agent-crates-pony-agent-core--`(1)；从 `/tmp` 运行 apply 后，
-新增出 **`--tmp--`(88)**，且 `skipped_has_log=0`。
+### 应用后发现的一处待办：34 个会话「日志 vs 索引视图」不一致
 
-1. **`session_has_log` 用进程 cwd，而不是会话自己的 cwd**（阻断级）
-   `log_sink::log_path` → `store.log_path(id, &self.cwd)`，`self.cwd` 是构造时的工作目录。
-   于是「会话在 A 工作区创建、在 B 工作区打开」时判定为「没有日志」。
-   后果：① 迁移看不到已有日志 ⇒ 在另一个 cwd 组**重复生成**一份；
-   ② 阶段 2-D 的写路径会把这类会话当成 grandfather，继续写整包 blob（瘦身失效，且日志与 blob 双副本可能分叉）。
-   **修法**：日志路径的 cwd 段应取**会话自身 cwd**（日志 header 里就存了 `cwd`），
-   或按 id 跨分组查找；判定不要再依赖进程 cwd。
+在真实库上跑 `ponycli sessions rebuild-index --dry-run` → `mismatched=34`（占 90 个有日志会话的 38%）。
 
-2. **迁移产物的 cwd 分组用运行时的进程 cwd**（阻断级）
-   同源问题：迁移把 88 个会话写进 `--tmp--`，与它们原本的工作区归属不符。
-   日志头里登记的是进程 cwd，等于给会话伪造了一个归属。
+抽查确认**不是日志侧缺数据**，而是**索引视图仍是旧的、且 `normalized_*` 投影不完整**：
+三个应用自己写的既有日志对比结果——
 
-3. **迁移过程中的状态读取口径会随已写日志漂移**（中）
-   `migrate_grandfather` 在循环里对每个会话调 `load_store()`，而 `load_store()` 会合并
-   **刚刚写好的日志**；因此先迁移的会话会改变后续会话的读取结果，计数出现漂移
-   （同一快照上 dry-run 50 / apply 52；早前热库副本更明显）。
-   **修法**：进入写循环前**一次性快照全部源状态**，之后只读该快照。
-
-结论：**在 1、2 修好之前不对真实库执行 apply** —— 否则会给真实会话造出重复日志与错误的工作区归属。
-
-### 三个缺陷的修复状态（2026-11-09，commit `9d6541e0`）
-
-| 缺陷 | 修法 | 验证 |
-| :--- | :--- | :--- |
-| D1 跨 cwd 判「没日志」 | `SessionLogStore::find_log_path/find_session_meta` 跨分组按 id 查；`session_has_log` 改用它 | 用例 9：外部分组写日志的会话 `has_session_log=true`，2-D 写路径产出 `__index_only` 轻量行 |
-| D2 产物写进进程 cwd | `resolve_session_cwd`：workspace 注册表 root → 该 id 既有分组 → 进程 cwd，降级逐条记 `cwd_fallback` | 用例 11：可解析者落对应分组；死 workspace id 计入 fallback |
-| D3 计数漂移 | 进写循环前一次性快照源状态 + 注册表 | 用例 12：同一快照两次 dry-run 计数完全一致 |
-
-真实库**副本** apply 实证：迁移前 `--home-dm-pony-agent--`(2) + `--…crates-pony-agent-core--`(1)；
-apply 后 **无 `--tmp--` 分组**、原有分组 `diff -r` 字节一致、`skipped_has_log=3`、
-`sessions` 行 139 条未增删。
-
-### 两个遗留的**外观**问题（功能无影响，已记录）
-
-1. `default` 工作区 `rootPath=/home/dm/pony_agent`（下划线）与仓库 `/home/dm/pony-agent`（连字符）
-   是两个不同字符串 ⇒ 未盖章会话（`workspace_id=None`）被归属到 `--home-dm-pony_agent--`（56 个），
-   与既有 `--home-dm-pony-agent--` 分成两组。功能无影响（D1 已按 id 跨分组查找），但目录观感分裂。
-   根因是注册表数据（`/home/dm/pony_agent` 目录本身是历史遗留），**建议单独清理注册表**，不在迁移里改。
-2. 从**非应用常态 cwd**（如 `/tmp`）运行迁移时，唯一一个「workspace id 在注册表里不存在」的会话
-   会落 `--tmp--`，已计入 `cwd_fallback`（不静默）。
-   **操作建议：从应用常态 cwd（如仓库根）执行迁移**，分组最干净。
+```
+pa_01a1bdad…  blob: hist=0 nodes=0 | log: msgs=4 traces=2 nodes=2
+pa_01a1bdfc…  blob: hist=0 nodes=0 | log: msgs=6 traces=3 nodes=3
+pa_01a1ba70…  blob: hist=0 nodes=0 | log: msgs=0 traces=1 nodes=0
+```
+blob 早已是轻量索引行（2-D 所致），真实内容在日志里。因此这 34 条的正解是
+**`rebuild-index` 用日志回填索引**（日志是真源，索引是派生），而不是修日志。
+建议在确认无并发放写后执行一次 `ponycli sessions rebuild-index --db …`，
+并以 `mismatched=0` 作为验收。
 
 ## Alternatives considered
 

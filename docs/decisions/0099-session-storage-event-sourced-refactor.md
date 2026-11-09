@@ -243,8 +243,13 @@ Status: accepted
 （`index_only_row_payload` 全 `Vec::new()`），日志又未承载 ⇒ 一旦产生 provider transcript，
 重启即丢。今日未丢属侥幸（实测 49 个有 transcript 的会话中 0 个有日志）。
 
-**未完成**：① 真实库 apply（应用正在运行、`sessions.db.lock` 被持）；② 事件载体补全（需独立 ADR
-与 `backend.rs` 契约变更），完成后 51 例可迁、136 个全部转正。
+**真实库已应用（2026-11-09）**：应用退出后执行，`migrated=86 skipped_has_log=4 mismatched=50`，
+共 90 个会话日志、无 `--tmp--` 分组、二次 dry-run `migrated=0/skipped=90`（幂等）、
+`sessions` 行数 140 未增删（blob 未改，回滚面完好）。**转正率 90/140。**
+
+**未完成**：① 事件载体补全（需独立 ADR 与 `backend.rs` 契约变更），完成后剩余 50 例可迁；
+② `rebuild-index --dry-run` 在真实库报 `mismatched=34`——抽查确认是**索引视图陈旧**而非日志缺数据
+（blob 已是轻量行、真实内容在日志），正解是执行 `rebuild-index` 用日志回填索引，以 `mismatched=0` 验收。
 
 决策记录：[.agents/notes/implemented/architecture/2026-11-09-grandfather-log-migration.md](../../.agents/notes/implemented/architecture/2026-11-09-grandfather-log-migration.md)
 
