@@ -14,10 +14,10 @@ fn master_rgb_at(cols: usize, rows: usize, rgb: &[u8], x: usize, y: usize) -> [u
 /// 这是「单一真值源 = 官方母版重采样」的编译期 + 运行期双重锚点。
 #[test]
 fn splash_coverage_tables_match_declared_dims() {
-    assert_eq!(splash_coverage::RICH_COLS, 26, "Rich 档列数");
-    assert_eq!(splash_coverage::RICH_ROWS, 30, "Rich 档子像素行数");
-    assert_eq!(splash_coverage::COMPACT_COLS, 20, "Compact 档列数");
-    assert_eq!(splash_coverage::COMPACT_ROWS, 22, "Compact 档子像素行数");
+    assert_eq!(splash_coverage::RICH_COLS, 9, "Rich 档列数");
+    assert_eq!(splash_coverage::RICH_ROWS, 10, "Rich 档子像素行数");
+    assert_eq!(splash_coverage::COMPACT_COLS, 7, "Compact 档列数");
+    assert_eq!(splash_coverage::COMPACT_ROWS, 8, "Compact 档子像素行数");
 
     assert_eq!(
         splash_coverage::RICH_COVERAGE.len(),
@@ -66,9 +66,9 @@ fn splash_coverage_tables_match_declared_dims() {
 
 #[test]
 fn splash_logo_asset_decodes_for_image_protocol() {
-    // 位图由同一 master 生成，铺满 Rich 档字符矩形（26×15 格 × 8×16 像素 × 4 超采样）。
+    // 位图由同一 master 生成，铺满 Rich 档字符矩形（9×5 格 × 8×16 像素 × 4 超采样）。
     let img = image::load_from_memory(SPLASH_LOGO_PNG).expect("内嵌品牌标必须可解码");
-    assert_eq!((img.width(), img.height()), (832, 960));
+    assert_eq!((img.width(), img.height()), (288, 320));
 }
 
 #[test]
@@ -241,7 +241,11 @@ fn splash_master_rgb_table_keeps_master_colors() {
             }
         }
     }
-    assert!(covered > 200, "Rich 档有效子像素过少：{covered}");
+    assert!(
+        covered * 100 / (cols * rows) >= 20,
+        "Rich 档有效子像素过少：{covered} / {}（ADR 0105 缩小后按占比判定）",
+        cols * rows
+    );
     let ratio = chromatic as f64 / covered as f64;
     assert!(
         ratio >= 0.9,
@@ -326,11 +330,13 @@ fn splash_master_rgb_differs_from_canvas() {
         ),
     ] {
         let mut distinct = 0usize;
+        let mut covered = 0usize;
         for y in 0..rows {
             for x in 0..cols {
                 if cov[y * cols + x] < 128 {
                     continue;
                 }
+                covered += 1;
                 let color = master_rgb_at(cols, rows, rgb, x, y);
                 let delta: i32 = color
                     .iter()
@@ -343,8 +349,8 @@ fn splash_master_rgb_differs_from_canvas() {
             }
         }
         assert!(
-            distinct >= 100,
-            "与画布色几乎无差别的子像素过多（仅 {distinct} 个有效色）"
+            distinct * 100 / covered >= 90,
+            "与画布色几乎无差别的子像素过多（仅 {distinct}/{covered} 个有效色）"
         );
     }
 }

@@ -6,7 +6,7 @@ Status: implemented
 契约修订：`.dev-team/contract-matrix-wave18.md` §AMEND-6（正文 §4.2 原文保留并加修订指针）；
 上游冻结基线：同文件 §4.2/§4.3（`wave18-r4`）。
 
-## 决定
+## Decision
 
 1. `BENIGN_RE` 的 `\bhash\b` → `(?<![a-z0-9])hash(?![a-z0-9])`；词表追加 `frozen_expected`、`冻结值`、`现值`。
 2. 新增豁免 5「结构化摘要槽」：`hexLineFacts` 预计算 `digestSlots`（JSON/对象成员值起始下标 → 键名），

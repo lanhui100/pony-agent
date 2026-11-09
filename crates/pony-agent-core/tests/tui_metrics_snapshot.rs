@@ -2,7 +2,7 @@
 //!
 //! 行位置契约（ADR 0078，implemented）：数值指标簇 `metrics_segments`
 //! （`↑in ↓out · 缓存 x% · 上下文 y% · ≈t/s · 首token`）锚定 **header 行（row 0）右槽**；
-//! 底面最后一行只剩右对齐模型身份（`model [· 思考:<档位>]`，不含 provider）。
+//! 底面最后一行只剩右对齐模型身份（`model [· <英文档位>]`，不含 provider，也不带「思考:」前缀）。
 //! 旧「最后一行 = cwd + 指标」判据随 ADR 0078 §影响 作废，本文件断言一律取 header 行。
 //!
 //! 契约源（只读）：`.dev-team/contract-matrix-metrics-snapshot.md` §1 I6 / I7，§0「两端消费约束」。
@@ -275,4 +275,35 @@ fn c4_speed_segment_renders_basis_prefix() {
         legacy_row.contains("120 t/s"),
         "向后兼容：basis 缺席的旧快照仍必须显示速度 120 t/s，实际：{legacy_row:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// C5：底面行思考档位用英文短标签，不加「思考:」前缀（ADR 0078 §决策 6 修订）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c5_bottom_row_reasoning_effort_label_is_plain_english() {
+    use pony_agent_core::agent::config::ProviderReasoningEffort;
+
+    let cases = [
+        (ProviderReasoningEffort::Low, "low"),
+        (ProviderReasoningEffort::Medium, "medium"),
+        (ProviderReasoningEffort::High, "high"),
+        (ProviderReasoningEffort::Max, "max"),
+    ];
+    for (effort, english) in cases {
+        let mut state = tui::TuiState::default();
+        state.model = "fixture-model".to_string();
+        state.reasoning_effort = Some(effort);
+        let bottom = bottom_row(&mut state);
+        let expected = format!("fixture-model · {english}");
+        assert!(
+            bottom.trim_end().ends_with(&expected),
+            "底面行必须是 `model · <英文档位>`（{expected}），实际：{bottom:?}"
+        );
+        assert!(
+            !bottom.contains("思考"),
+            "底面行不得再出现「思考:」中文前缀，实际：{bottom:?}"
+        );
+    }
 }

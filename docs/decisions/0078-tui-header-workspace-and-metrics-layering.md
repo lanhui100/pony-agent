@@ -50,7 +50,8 @@ Status: implemented
 5. **`TuiState::default()` 不读 env**：`home_dir: None`（工作区显示裸文件夹名），沿用 `model_preferences` /
    `tui_preferences` 的「Default 可复现、不做 IO」约定，避免 `default()` 依赖宿主环境。
 6. **底面行单一职责**：composer 下方最后一行 = 左槽（一次性提示 > 计划模式横幅 > 排队反馈，按既有优先级）
-   + 右槽（模型身份：`model`，有思考强度时 `model · 思考:<档位>`；**不含 provider**）。
+   + 右槽（模型身份：`model`，有思考强度时 `model · <英文档位>`（`low`/`medium`/`high`/`max`，
+   无「思考:」前缀与中文映射）；**不含 provider**；2026-11-09 修订，原口径为 `model · 思考:<中文档位>`）。
    工作区路径全屏**只在 header 出现一次**。
 7. **底面行生命周期契约**：浮层态（`/sessions` 等）按 ADR 0042 §决策 3 收起 composer 与底面行，
    此时最后一行必须是**空画布行**（不得残留 cwd 或模型身份）；关闭浮层后模型身份必须逐字恢复。

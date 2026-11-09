@@ -96,14 +96,13 @@ fn resume_recovers_session_from_normalized_rows_when_legacy_row_is_missing() {
     append_message(&backend, "s-rec", 0, "user", "第一问");
     append_message(&backend, "s-rec", 1, "assistant", "第一答");
 
-    // 前提：legacy phase 的加载只读 `sessions` 表 ⇒ 该会话"不存在"（列表里看不到）。
-    assert!(
-        SessionStore::with_backend(Box::new(open_backend(&db)))
-            .list_sessions()
-            .iter()
-            .all(|overview| overview.conversation_id != "s-rec"),
-        "前提：只有规范化行时 legacy 表里没有这条会话（用户现场 existed=false）"
-    );
+    // 前提：legacy 索引表里没有这条会话（用户现场 existed=false），本用例用「只走
+    // `persist_command(AppendMessage)`（真实事件路径）产生日志 + 规范化行」构造该状态。
+    //
+    // 注（ADR 0099 后的读口径）：运行时 `load_store` 以**日志为真源**，日志 fold 会把他注入
+    // 视图，因此「legacy 行缺失 ⇒ 列表里看不到」这条旧可观测量已不存在，也不再有公开 API
+    // 能读到索引原样视图（`PersistedStore.sessions` 非公开）。这里保留后半段的契约断言：
+    // 规范化行能重建、store 能自愈进内存、且自愈后重启仍可见。
 
     // 修复点 1：按 id 从规范化表重建单会话。
     let recovered = backend
@@ -113,13 +112,6 @@ fn resume_recovers_session_from_normalized_rows_when_legacy_row_is_missing() {
 
     // 修复点 2：store 层自愈（进内存 + 回写 legacy 行），hydrate 才有历史可读。
     let mut store = SessionStore::with_backend(Box::new(open_backend(&db)));
-    assert!(
-        store
-            .list_sessions()
-            .iter()
-            .all(|overview| overview.conversation_id != "s-rec"),
-        "前提：索引行丢失 ⇒ 启动列表里看不到它"
-    );
     assert!(
         store.recover_session_from_normalized("s-rec"),
         "ADR 0094：existed=false 时必须先尝试按 id 重建，而不是直接开新会话"

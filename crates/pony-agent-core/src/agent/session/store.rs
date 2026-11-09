@@ -271,23 +271,26 @@ impl SessionStore {
         let mcp_source_snapshots = persisted.mcp_source_snapshots;
         let skill_source_snapshots = persisted.skill_source_snapshots;
         let mut should_save = false;
+        // 为什么本次启动需要回写（可归因日志的原因位；空 = 不需要写）。
+        let mut repair_reasons: Vec<&'static str> = Vec::new();
         // Workspace 注册表：加载 + 默认工作区引导（三级树安装期行为：Windows
         // Documents\pony_agent / Unix ~/pony_agent，缺失即自动创建并登记；
         // 既有 default 登记永不静默迁移）。
         let mut workspaces = persisted.workspaces;
         if crate::agent::workspace::bootstrap_default_workspace(&mut workspaces) {
+            repair_reasons.push("workspace_bootstrap");
             should_save = true;
         }
         for session in sessions.values_mut() {
-            // 续轮提示判定口径上线后，历史里被污染成续轮文案的标题/轮次会被
-            // 重算为真实值；检出差异即回写，避免每次启动重算。
-            let previous_title = session.title.clone();
-            let previous_turn_count = session.turn_count;
-            refresh_session_metadata(session, false);
-            if session.title != previous_title || session.turn_count != previous_turn_count {
+            // 空壳会话（轻量索引行 / 自愈被预算跳过）**不得**重算派生字段：内容不在索引里，
+            // 重算会把 title 打回默认、turn_count 打回 0，再随启动回写永久降级（见
+            // `startup_repair` 模块文档不变量 1）。续轮提示污染的标题仍只在有内容时重算。
+            if crate::agent::session::startup_repair::refresh_metadata_if_content_present(session) {
+                repair_reasons.push("session_metadata");
                 should_save = true;
             }
             if ensure_history_graph(session) {
+                repair_reasons.push("history_graph");
                 should_save = true;
             }
             if session.updated_at_ms == 0 {
@@ -300,50 +303,27 @@ impl SessionStore {
                 should_save = true;
             }
         }
-        // PA-094：trace 表降级为投影缓存——加载时若 trace 缓存为空但事件流存在，
-        // 从事件全量折叠重建（事件权威，清表可重建，spec 1a）。
-        // 审核 P1：折叠全量（不按 active branch 过滤，避免多分支 trace 丢失）；
-        // 折叠结果为空时不置 should_save（避免每次启动全量 refold + 全量 save）。
-        // 审核 P1-3：重建结果回写 trace 表（AppendTrace，sequence=终态 seq 作水位）
-        // ——否则被清过缓存的会话每次启动都全量重折叠，"投影缓存"定位失效。
-        for session in sessions.values_mut() {
-            if session.turn_trace_history.is_empty() {
-                let events = backend.load_turn_events(&session.conversation_id, None);
-                if !events.is_empty() {
-                    let traces = fold_session_traces_all(&events);
-                    if !traces.is_empty() {
-                        for (order, trace) in traces.iter().enumerate() {
-                            let mut cache_trace = trace.clone();
-                            cache_trace.sequence =
-                                Some(events.last().map(|(seq, _, _)| *seq).unwrap_or(0));
-                            // 投影缓存回写失败不得静默（只影响缓存重建，但必须可排障）。
-                            let outcome = backend.persist_command(PersistCommand::AppendTrace {
-                                epoch: 1,
-                                session_id: session.conversation_id.clone(),
-                                trace: cache_trace,
-                                trace_order: order,
-                            });
-                            if matches!(outcome, PersistCommandOutcome::Failed) {
-                                eprintln!(
-                                    "[pony-agent][session] trace 投影缓存回写失败（session={} order={order}）：事件流可重建，但本次启动缓存不完整",
-                                    session.conversation_id
-                                );
-                            }
-                        }
-                        session.turn_trace_history = traces;
-                        should_save = true;
-                    }
-                }
-            }
+        // PA-094：trace 表是投影缓存——缓存空但事件流存在时重建（事件权威，清表可重建）。
+        // P1 启动提速：重建**逐会话**回写（AppendTrace），不再因为「缓存重建过」就整包提交；
+        // 且与日志 fold 共用同一条启动预算 deadline（超预算 ⇒ 本轮跳过，下轮启动再补）。
+        if crate::agent::session::startup_repair::refold_missing_trace_cache(
+            backend.as_ref(),
+            &mut sessions,
+            crate::agent::session::startup_repair::startup_budget_deadline(),
+        ) {
+            repair_reasons.push("trace_cache_refold_failed");
+            should_save = true;
         }
         let rebuilt_assets = rebuild_attachment_assets_from_sessions(&sessions, &attachment_assets);
         let rebuilt_index = rebuild_session_attachment_index(&sessions);
         if attachment_assets != rebuilt_assets {
             attachment_assets = rebuilt_assets;
+            repair_reasons.push("attachment_assets");
             should_save = true;
         }
         if session_attachment_index != rebuilt_index {
             session_attachment_index = rebuilt_index;
+            repair_reasons.push("attachment_index");
             should_save = true;
         }
         // PA-095：启动时事件 schema 版本校验——不匹配 fail loud（强提示），
@@ -377,7 +357,20 @@ impl SessionStore {
             versions: std::sync::Mutex::new(persisted.versions),
         };
         if should_save {
-            store.save_to_backend();
+            // **启动期不写盘**（P1 启动提速 / 实测 2.0–2.3s 的常数开销）。
+            //
+            // 这些修复全是**派生量**：`history_nodes/branches/cursor`、标题/轮次/摘要、
+            // 附件索引都能在任何一次真实写入或下一次启动时重新算出来。启动时把它们整包提交，
+            // 代价是「每启动一次写一遍全库」，收益只是「下次启动不用再算」——在一万轮级别的
+            // 真实库上这笔账是亏的（写放大 ADR 0099 G1 的余数）。
+            //
+            // 因此这里只记录**为什么**需要修复（可归因），把落盘交给第一次真实写入：
+            // 用户一旦发消息，snapshot 路径就会把该会话（以及全局注册表）按既有语义写下去。
+            eprintln!(
+                "[pony-agent][session] startup_repair_deferred: reasons={} sessions={} — 派生修复留在内存，交给首次真实写入落盘",
+                repair_reasons.join(","),
+                store.sessions.len()
+            );
         }
         store
     }
@@ -3685,7 +3678,9 @@ pub(super) fn fold_session_views(
 /// PA-094（审核 P1）：全量折叠 trace（不带分支过滤）——trace 缓存重建专用。
 /// 事件权威：缓存是投影缓存，`record_turn_trace` 写入所有 turn 的 trace，
 /// 清表重建必须还原全集（按 active branch 过滤会丢失其他分支的 trace）。
-fn fold_session_traces_all(
+///
+/// 可见性：`pub(super)` 供 `startup_repair` 的预算化重建复用（同一实现，不许复制第二份）。
+pub(super) fn fold_session_traces_all(
     events: &[(u64, String, crate::agent::turn_event::TurnEvent)],
 ) -> Vec<TurnTraceRecord> {
     use crate::agent::projection::{fold_all, MetricsProjectionState, TraceProjectionState};

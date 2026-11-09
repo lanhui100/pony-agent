@@ -71,10 +71,16 @@ const LOOPBACK_ALLOWED_HOSTS: [&str; 4] = ["127.0.0.1", "localhost", "::1", "[::
 
 /// 当前平台的发布标识。
 ///
-/// 取值集合与发布侧一致：`linux-x86_64` / `linux-aarch64` / `macos-x86_64` /
-/// `macos-aarch64` / `windows-x86_64`。
+/// 这里是**协议词表**（客户端认识的标识集合），不是「本轮已发布集合」：5 项
+/// `linux-x86_64` / `linux-aarch64` / `macos-x86_64` / `macos-aarch64` / `windows-x86_64`。
+/// 真正发布哪些平台由发布侧唯一真值源 `scripts/cli-platforms.mjs` 决定（ADR 0108；
+/// 其中 `windows-x86_64` 与 `macos-x86_64` 登记为刻意不发布，理由写在该文件里）。
 ///
-/// 失败条件：目标三元组不在上述集合内（不支持的 OS/架构）⇒ 返回 `None`，调用方须映射为
+/// 两侧对齐是机器门禁：`node scripts/check-cli-release-contract.mjs` 在「发布的平台不在本词表」时
+/// 非零退出（那种制品永远无人选中）。清单里没有本平台时，`plan_update` 返回
+/// `UnsupportedPlatform` 并在错误串里列出清单已有的平台。
+///
+/// 失败条件：本机 OS/ARCH 不在上述词表内（如 freebsd、riscv）⇒ 返回 `None`，调用方须映射为
 /// `UpdateError::UnsupportedPlatform`，不得猜测近似平台。
 pub fn current_platform() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
