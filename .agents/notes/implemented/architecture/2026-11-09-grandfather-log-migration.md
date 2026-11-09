@@ -141,6 +141,40 @@ trace 在独立表里）。迁移的 `session_parity_issues` 知道这条豁免�
 **下一步（已作为 task-13 提出）**：给 `rebuild-index` 增加 `--explain <session-id>`，
 逐字段打印差异（字段名 / fold 值摘要 / 索引值摘要），先定性再决定是否 apply。
 
+### `rebuild-index` 比较器修复与 `--explain`（2026-11-09，commit `8adc47ad`）
+
+**先纠正前一段的诊断**：那 49 个 `mismatched` 的根因**不是 trace 面**，而是 **`workspace_id`**
+（日志无载体、fold 侧恒为 `None`）；trace 面本来已被 `merge_trace_history` 按 `legacy_blob` 约定合回索引视图。
+
+修法与结果：
+
+| 项 | 内容 |
+| :--- | :--- |
+| 唯一字段清单 | `session_parity_differences()` |
+| 唯一豁免清单 | `LOG_UNCARRIED_STATE_FIELDS = ["workspace_id", "last_commit_watermark"]` |
+| 派生使用者 | `rebuild-index` 的 `mismatched`、迁移比对、`--explain`；`MIGRATION_PARITY_EXEMPTIONS` 退化为别名（有测试断言两侧相等） |
+| 语义归一 | 比对 trace 前剔除 `buildContextObservation` **载荷**（保留 ref）—— PA-095 外置投影会造成永久假阳性；ref 漂移仍算差异 |
+| 新命令 | `ponycli sessions rebuild-index --explain <id>`：逐字段摘要（条数 + 首条前 80 字符 + 首处差异字段名），被豁免字段单独 `ignored` 行，无差异打印 `no difference`，与 `--dry-run` 互斥，只读 |
+| 真实验证 | 一致性快照上 `mismatched 49 → 4` |
+
+**残留 4 例是真差异，未豁免**（rebuild 会抹掉它们，`mismatched` 拦得对）：
+
+1. 2 例（`pa_01a1ba70…` / `pa_01a1be18…`）：日志里**没有** `update_session_meta` / `update_branch` /
+   `update_cursor` 命令（只有 trace / transcript 类），fold 侧因此缺 title/branches/cursor。
+2. 2 例（`pa_01a1bdad…` / `pa_01a1bdfc…`）：`legacy_blob` / `dual_write` 会话的 trace **终态注解**
+   （`emittedAtMs` / `eventId` / `eventType` / `eventVersion`）与 **hook 记录**只写索引表、不进日志。
+
+⇒ 后续任务：让 `annotate_turn_trace_terminal_event` / `append_hook_records` 在非 authoritative 会话上也发
+`UpdateTraceTerminal` / `AppendHookRecords`；并让「只写 trace」的会话补发 meta/cursor/branch 命令。
+补齐后 `rebuild-index` 的 `mismatched` 才有望真正归零。
+
+### 一条独立缺陷线索（值得单独开卡）
+
+新增用例并进既有 `session_fold_rebuild.rs` 时，会抬高该测试二进制的进程内并发，**偶发触发既有单实例
+flock 竞态**（`single_instance_lock_denied` → `attempt to write a readonly database`，6 轮里红 2 轮，
+失败的总是既有用例）。搬到独立测试二进制后 6/6 轮稳定。属 `acquire_single_instance_lock` 在高并发下的
+降级行为问题，**本次未改**。
+
 ## Alternatives considered
 
 1. **方案 A 合成日志 + 自证一致** —— 采纳。可审计（header 标记）、可回滚（保 blob）、可幂等，
