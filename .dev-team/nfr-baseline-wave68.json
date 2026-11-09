@@ -1,0 +1,179 @@
+{
+  "wave": "68",
+  "task": "PA-171",
+  "baseline_commit": "d9425a70",
+  "baseline_ref": ".dev-team/nfr-baseline.json",
+  "contract": ".dev-team/contract-matrix-pa171.md",
+  "external_call_timeout_ms": 3000,
+  "external_call_timeout_scope": "单次外部（网络）往返预算；本波次不新增任何外部调用面（冷却判定为纯内存）",
+  "retry": {
+    "max_attempts": 1,
+    "backoff_cap_ms": 1000,
+    "backoff_ms": 500,
+    "wave68_change": "C3：Decision 作用域命中 rate_limited|quota ⇒ 首次失败即 Abort（max_attempts=1，禁 500ms→8s 短退避 ×5）",
+    "provider_decision_rate_limit_max_attempts": 1,
+    "provider_decision_other_transient_max_attempts": 5,
+    "provider_decision_timeout_backoff": {
+      "initial_delay_ms": 500,
+      "multiplier": 2.0,
+      "max_delay_ms": 8000,
+      "total_budget_ms": 30000,
+      "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:4505-4514",
+      "frozen": true
+    },
+    "provider_followup_rate_limit_max_attempts": 3,
+    "provider_followup_rate_limit_backoff": {
+      "initial_delay_ms": 20000,
+      "max_delay_ms": 40000,
+      "total_budget_ms": 90000,
+      "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:4516-4531",
+      "wave68_change": "无代码改动；仅 is_rate_limit_error 码表追加 usage limit / allowance 后覆盖面扩大",
+      "frozen": true
+    },
+    "non_rate_limit_transient_retry_preserved": true,
+    "non_rate_limit_transient_retry_evidence": "tests/pa171_provider_rate_limit_cooldown_contract.rs:318-343（503 ⇒ >=2 次 HTTP）",
+    "timeout_budget_note": "外部 45s 同步 POST 超时属既有例外，见 external_call_timeout_exceptions；本波次不改（PA-172 候选）"
+  },
+  "concurrency_lock": "mutex",
+  "lock_scope_bounded": true,
+  "lock_reentrancy_forbidden": true,
+  "lock_acquisition_timeout_ms": 2000,
+  "deadlock_watchdog_timeout_ms": 5000,
+  "lock_forbidden_calls": [
+    "resolve_graph_run_for_retrieval",
+    "load_graph_run",
+    "load_execution_checkpoint",
+    "load_active_graph_run_for_session"
+  ],
+  "wave68_locks": {
+    "provider_cooldown_registry": {
+      "kind": "std::sync::Mutex<HashMap<..>> behind OnceLock",
+      "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:612-619（ProviderManager 每轮新建，故冷却必须是进程级注册表）",
+      "critical_section": "仅 get / insert / evict 三个内存操作",
+      "forbidden_under_lock": ["http_request", "block_on", "sleep", "channel_send_blocking"],
+      "poison_recovery": "lock().unwrap_or_else(|e| e.into_inner())",
+      "no_await_across_lock": true
+    },
+    "goal_round_loop_lease": {
+      "kind": "Arc<AtomicBool> compare_exchange(SeqCst) + RAII drop",
+      "purpose": "同一会话同一时刻只允许一个 goal 续轮循环（消除 2×8 叠加）",
+      "evidence": "crates/pony-agent-core/src/bin/tui.rs:9756-9790（每用户提交起一个轮次线程）"
+    },
+    "goal_store": {
+      "kind": "进程级 Mutex（既有，不变）",
+      "evidence": "crates/pony-agent-core/src/agent/goal.rs:361-397",
+      "change": "无语义改动；失败轮不再调用 advance_goal_round"
+    }
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "trace_id_required": true,
+    "trace_id_field": "trace_id"
+  },
+  "logging_scope": "new_structured_logging_surface_only",
+  "logging_legacy_eprintln_exempt": true,
+  "logging_debt_ref": "PA-119",
+  "logging_eprintln_exempt_scope": "existing_style_non_json_lock_poison_recovery_diagnostics",
+  "logging_eprintln_exempt_covers_new_lines": 5,
+  "logging_compliance_claimed": false,
+  "wave68_logging_events": [
+    {
+      "event": "provider_cooldown_entered",
+      "fields": ["trace_id", "provider_name", "model", "error_class", "retry_after_s", "until_unix_ms"],
+      "evidence": "crates/pony-agent-core/src/agent/provider/mod.rs:2106-2145 / 2150-2199 / 2520-2559 / 2561-2600"
+    },
+    {
+      "event": "provider_cooldown_short_circuit",
+      "fields": ["trace_id", "provider_name", "model", "remaining_ms"],
+      "note": "冷却期内 0 次 HTTP，结构化日志是唯一可观测面（metrics 为结构性 N-A，见 docs/observability.yaml:45-56）"
+    },
+    {
+      "event": "goal_rounds_stopped",
+      "fields": ["trace_id", "session_id", "reason", "consecutive_failures", "rounds_started", "max_rounds"],
+      "evidence": "crates/pony-agent-core/src/bin/tui.rs:8127-8179（原为静默 break）"
+    },
+    {
+      "event": "goal_rounds_loop_already_owned",
+      "fields": ["trace_id", "session_id"],
+      "note": "warn 级；表示本线程只跑首轮，不参与续轮"
+    }
+  ],
+  "resource_release": [
+    "bounded_queue",
+    "max_queue_capacity_1024",
+    "fire_and_forget",
+    "worker_thread_shutdown",
+    "wave68_provider_cooldown_registry_hard_cap_entries_64",
+    "wave68_provider_cooldown_entries_evicted_when_expired_on_access",
+    "wave68_provider_cooldown_no_background_thread_no_timer",
+    "wave68_provider_cooldown_max_window_clamped_6h",
+    "wave68_goal_round_lease_released_by_raii_drop_including_panic",
+    "wave68_goal_round_loop_breaks_without_spawning_new_turn_thread",
+    "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
+    "wave9_job_handle_close_on_terminate_success",
+    "wave9_suspended_process_resume_fail_closed_cleanup",
+    "adr0065_swap_tool_surface_atomic_never_descriptor_visible_without_handler",
+    "adr0066_mcp_child_process_reaped_on_drop_source_replace_and_timeout",
+    "adr0067_plugin_call_deadline_comes_from_budget_ledger_then_kill_process_group",
+    "adr0067_plugin_host_drop_reaps_child_process_group_and_orphans",
+    "adr0067_hooks_child_env_whitelist_cwd_bounded_and_process_group_kill",
+    "adr0068_contract_schema_files_declare_version_and_breaking_additive_change"
+  ],
+  "resource_release_notes": {
+    "provider_cooldown_registry": "进程内 HashMap，条目上限 64，访问时淘汰过期项；无句柄/无线程/无定时器/无文件",
+    "goal_round_loop": "循环退出不新增线程；已起的轮次线程由既有 inflight_turns 收敛（tui.rs:8181-8190）"
+  },
+  "auto_continue_max": 8,
+  "goal_store_atomic_write": true,
+  "goal_round_failure_stop": {
+    "max_consecutive_failures": 2,
+    "constant": "agent::goal::MAX_CONSECUTIVE_GOAL_ROUND_FAILURES",
+    "evidence": "crates/pony-agent-core/tests/pa171_goal_round_failure_contract.rs:16-39,117-123",
+    "failed_round_consumes_round_budget": false,
+    "visible_stop_line_required": true,
+    "single_loop_owner_required": true
+  },
+  "observability": {
+    "exporter_flush_timeout_ms": 3000,
+    "log_file_max_bytes": 524288,
+    "setting_precedence": ["settings", "env", "default"],
+    "cost_precision_decimals": 6,
+    "cost_budget_semantics": "soft_warn",
+    "wave68_failure_semantics_owner": {
+      "tracing": "docs/observability.yaml:14-40（anchor agent/otel/mod.rs）",
+      "metrics": "docs/observability.yaml:45-56（结构性 N-A，理由不变：无常驻 /metrics）",
+      "error_classifier": "本波次唯一家在 agent/retry.rs::classify_error_class；不得并入 runtime/turn_control.rs anchor（docs/observability.yaml:78-91）",
+      "closed_by": "Lead 收口阶段（Protocol 只读该文件）"
+    }
+  },
+  "external_call_timeout_exceptions": [
+    {
+      "surface": "provider 同步 HTTP 出口（post_openai_json / post_anthropic_json）",
+      "code": "crates/pony-agent-core/src/agent/provider/mod.rs:2521,2562 build_http_client(Duration::from_secs(45))",
+      "semantics": "整请求总时限 45s（含连接+首字节+读全量）",
+      "why_not_base": "既有实现，属任务卡 §非目标「45s 硬编码改配置化（PA-172 候选）」；本波次不改为 3000 会截断长推理/长上下文请求，且改动超出 PA-171 因果闭包",
+      "guarantee": "本波次不新增该超时面；C3 反而**减少**调用次数（限流/配额类 Decision 作用域首次失败即 Abort，冷却窗口内 0 次 HTTP），缩短最坏 wall-clock",
+      "known_gap_ref": "PA-172 候选（重试框架/超时配置化）",
+      "registered_at": "2026-11-09 wave-68",
+      "updated_at": "2026-11-09 wave-68"
+    },
+    {
+      "surface": "provider 流式 HTTP 出口（post_openai_stream_response / post_anthropic_stream_response）",
+      "code": "crates/pony-agent-core/src/agent/provider/mod.rs:2106-2116,2150-2160 build_streaming_http_client(connect 15s, read idle 180s)",
+      "semantics": "connect_timeout=15s + read/idle timeout=180s，无总 deadline",
+      "why_not_base": "沿用 wave-55/56 既有例外（流式总时长由模型生成长度决定，套 3s 会截断长推理）",
+      "guarantee": "本波次不改流式超时；仅在发送前增加冷却短路（不发起 HTTP 时立即 Err）",
+      "known_gap_ref": "既有例外（wave-56 已闭环总时长上界 seam ProviderStreamGuard）",
+      "registered_at": "2026-11-09 wave-68",
+      "updated_at": "2026-11-09 wave-68"
+    }
+  ],
+  "logging_eprintln_exempt_note": "本波次不新增生产 eprintln；新增可观测面一律走既有结构化日志（otel::log::log_json_with_fields）+ trace_id。JSON+trace_id 全量收敛仍属 PA-119 债务",
+  "wave68_platform_notes": {
+    "stub_purity_gate": "dev-stub-lint.py 仅支持 Python AST（.py/.ts/.js）；实跑本仓 Exit 1 的 14 条命中全部落在 tests/fixtures/plugin/echo-plugin.py（预置插件运行夹具，非空桩），对 .rs 只会空过 ⇒ 不构成纯度证据。本波次以「契约矩阵冻结签名 + cargo check -p pony-agent-core --all-targets Exit 0」替代（如实登记，未伪造通过）",
+    "no_new_external_call": true,
+    "no_new_thread": true,
+    "no_new_timer": true
+  }
+}
