@@ -64,3 +64,38 @@ Status: implemented
 - 门禁：`cargo check -p pony-agent-core --all-targets` 0；`audit-diff` 0；`version:check` PASSED。
 - 现场证据留档：`.dev-team/pa174-f4-evidence.txt`（125 条请求 / 75 条带标记 / 单条最多 12 条）。
 - 已知遗留（未在本卡修）：TUI 状态行不展示 provider 生效值；重建仅在装载时进行（无后台自愈）。
+
+## 审查整改（`5dc1053f`）
+
+三路对抗审查在 `e927dc39` 报 2 BLOCKING + 多条 ADVISORY，逐条核验后按此收口：
+
+- **B1（BLOCKING，两路独立命中）**：重建丢弃 `branch_id` ⇒ 回退/fork 会话被重建成「全分支并集」（被放弃轮次复活），
+  且 `refresh_session_metadata` 会把并集写回索引。修法：装载侧从 `historyCursor.activeBranchId` +
+  `historyBranches`/`historyNodes` 取活动血缘，消息折叠复用既有 `projection::fold_all_with_branches`；
+  血缘元数据缺失或 activeBranch 不在表中 ⇒ **不重建**并落 `history_rebuild_skipped`（reason=…），绝不取并集。
+- **B2（BLOCKING）**：聚合预算耗尽返回合成 `failover budget exhausted` ⇒ 覆盖最后一次真实 provider 错误、
+  且不可重试/不满足 `failover_eligible` ⇒ 配了候选链也永不换手。修法：逐次记录真实错误，
+  耗尽时返回该真实错误（仅「零次 HTTP」才用合成文案），保持既有分类仍可换手。
+- **A2**：stream→sync 回退路径无聚合 deadline ⇒ 按同一 `with_aggregate_sync_deadline` 接入（流式 attempt 预算不变）。
+- **A3**：`config effective` 增 `aggregate_budget_ms` / `per_attempt_effective_timeout_ms`，避免
+  「合法 300000 配置看起来无上限」的自相矛盾。
+
+**已知证据强度限制（如实登记）**：`b2_aggregate_exhaustion_keeps_real_error_and_allows_failover`
+在当前架构下**无判别力**——聚合窗口（~100ms 量级）会被 attempt 上限吸收，耗尽分支无法稳定复现，
+故它只作「不得回归」的守门断言，不宣称红相。其余 12 条断言均有行为红相或编译红 + stub 可满足性反证。
+
+## 终审后的遗留清单（已登记，未在本卡修）
+
+- `last_provider_error` 槽位**未按调用清零**：同一 builder 复用（共享 Arc）时，若某次调用零次 HTTP
+  尝试（如 `request_timeout_ms: 0`）会返回**上一次调用**的真实错误而非合成文案（审查给的反例）。
+- 无候选链时终态错误改为返回**未截断**的 provider 正文（原先经 `preview_text(240/400)` 截断）⇒
+  极端情况下日志/调用方载荷显著变大（审查给出 1MiB body 反例）。
+- `history.rs` 对**空文本**消息（附件-only 用户轮、纯工具调用 assistant 轮）静默丢弃，无日志/指标。
+- 重建在读 `turn_events` 失败时降级为「保持空历史」，只留散文式 eprintln，无结构化事件/trace_id
+  （同期既有约定见 `sqlite_session.rs:584-596` 的 `capture_governance_fault`）。
+- `refresh_session_metadata` 会把重建结果写回索引 ⇒ 分支血缘修复前的错误并集若已落盘需另行清理
+  （本卡只保证此后不再产生）。
+- Anthropic 1:1 臂补齐重试后继承 20s+40s 限流长退避（60s）且无本地兜底，而 OpenAI 两臂返回
+  `Ok(local fallback)`；arms 在 429 场景下**结果不对称**（无冻结断言约束 Anthropic 1:1 调用次数）。
+- 启动期成本：每个「折叠历史为空」的会话一次全量日志解码，142 会话 × 单会话 13098 行 ≈ 1.86M 行
+  反序列化（有界但无批量/上限）。
