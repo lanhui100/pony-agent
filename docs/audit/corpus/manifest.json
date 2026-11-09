@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "constraints": {
+    "write_access": "none",
+    "replay_isolation": "scratch-worktree",
+    "min_sessions_per_arm": 3
+  },
+  "aggregate_sha256": "879597eb3594eb365bdbe033f7fbcd8353380e359170267f8d3e621255b8300a",
+  "aggregate_method": "sha256sum of concatenated tasks/*.md in lexicographic filename order",
+  "tasks": [
+    {
+      "id": "t01-list-summarize",
+      "path": "tasks/t01-list-summarize.md",
+      "sha256": "aea153e098ed04e4119cfab3f292c7c59cffe787c1880cd1b1729eeeb852274c"
+    },
+    {
+      "id": "t02-read-explain",
+      "path": "tasks/t02-read-explain.md",
+      "sha256": "f3c29640220302d060a6c46c8b57b5718abc921042f6077480213c4f0fcdb0b7"
+    },
+    {
+      "id": "t03-search-locate",
+      "path": "tasks/t03-search-locate.md",
+      "sha256": "94506acb19140a0211f23b881be18ceab39790e4ffc7236480024589d02c2694"
+    }
+  ]
+}

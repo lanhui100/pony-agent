@@ -22,14 +22,21 @@
   说明：现状唯一 SDK 是同进程 Rust crate，三宿主编译期直连 core，仓外调用方无法驱动。提供 JSON-RPC over stdio + 薄客户端（`crates/pony-agent-sdk` / `packages/pony-sdk`），覆盖并发会话隔离、流式订阅、审批回调、事件队列有界背压、崩溃传播；同时是 PA-110 跨进程 subagent 委派的地基。任务卡：`03_TASKS/PA-166-cross-process-sdk.md`。
 - `PA-167` Headless 工具级授权与交互应答缺口（P2，Complexity C）— wave-59 撤销项承接
   说明：PA-164 契约 v3/v4 裁定撤销 `--allow-tools` 与 `--max-turns`，理由是**宿主无接线口**（策略求值器由 runtime 内部注册 `governed_executor.rs:463-469`；跳数上限 `runtime/limits.rs:76` 为 `pub(super)`），声明即静默谎报。本卡补齐 5 项：可注入 `ToolPolicyEvaluator`、无头审批应答协议（fail-closed 默认 deny）、`turn:suspended` 增 `control_reason`、公开 `max_tool_hops`、`host_control_available` 可注入（当前 `runtime/mod.rs:316` 硬编码 true，使 `interaction_unavailable` 逃生口不可达）。需与 PA-165 ACP 的 `session/request_permission` 对齐，避免两套应答机制。任务卡：`03_TASKS/PA-167-headless-authorization-gaps.md`。
+
+- **Trace 审核 Loop 三部曲（2026-11-08，ADR 0101 已批准）**：用户唤起 + 持久状态机（`docs/audit/loop-state.json`）+ 确定性脚本骨架 + 单一审批门；中期持续机制（七维度队列 6→1/3→2→5→7→4，走完转 patrol 回归巡检），非一次性任务、不依赖定时器。三卡**串行依赖**：
+- `PA-168` P0 测量地基与维度 6 首轮（P1，Complexity B）
+  说明：loop-state + corpus（≥3 只读任务，hash 冻结）+ skill 唤起入口（`.agents/skills/trace-audit-loop/`）+ 维度 6（上报链路自检）断言立法与首个完整 round（人工驱动各阶段）。维度 6 未过不得自动化其上。任务卡：`03_TASKS/PA-168-trace-audit-loop-p0.md`。
+- `PA-169` P1 确定性节点脚本化（P1，Complexity B，**依赖 PA-168**）— **已完成**
+  说明：`scripts/audit/` replay（scratch worktree 双臂 ×≥3 会话）/ fetch（UNKNOWN=3）/ assertions / ratchet / build-install / verdict；审计臂归因键经 ADR 0068 通道确认。验收：维度 6 完整 round 机械判 pass。任务卡：`03_TASKS/PA-169-trace-audit-loop-p1.md`。
+  结果：`lib.sh` / `state.py`（CAS+lease+freeze）/ `replay.sh` / `fetch.sh` / `assertions/dim6.sh` / `ratchet.sh`+`ratchet_add.py` / `freeze-check.sh`+`scope_check.py` / `build-install.sh` / `verdict.sh` / `selftest.sh` 落地，自测 26/26；**r1-dim6 verdict PASS（exit=0）**，dim6 入棘轮（首个通过维度），未修基线臂复现 REGRESSION exit=1（回执 009–020）。队列已推进 `r2-dim1`（维度 1 时延结构）。
+- `PA-170` P2 一次唤起整轮推进 + patrol（P2，Complexity B，**依赖 PA-169**）
+  说明：单次唤起机械推进至下一停点（含 headless 单命令形态）；队列耗尽转 patrol 巡检、回归自动开新轮。验收：连续 3 次唤起零未批准实施、零假 PASS。定时器为可选演进不列验收。任务卡：`03_TASKS/PA-170-trace-audit-loop-p2.md`。
 - `PA-171` TUI 连环错误根因修复：goal 续轮失败止损 / provider 限流冷却 / 失败轮归因（P1，Complexity B，**独立于 PA-168~170 队列**）
   说明：TUI 会话 `pa_01a1ba70` 于 2026-11-09 10:29–10:30 出现 16 连败（`goal-8..goal-20` 每轮首调即 429）。根因三层：①上游单 provider 45s 超时 + Kimi 5h 配额 429，无备用链/无冷却/`Retry-After` 死码；②`run_goal_rounds` 不读轮次成败（`start_turn_stream` 丢弃 Result）、失败轮照烧 `rounds_started`、多轮次线程各持一份 8 轮预算 ⇒ 16=2×8；③失败轮 trace 三字段硬编码 null + TUI 把 429 折叠成"重试已用尽"。契约 C1–C6 见任务卡，wave-68 三写域并行（tui/control_plane/goal · provider/retry/errors · turn_flow/turn_stream/turn_persist）。任务卡：`03_TASKS/PA-171-goal-round-failure-resilience.md`。
   结果：wave-68 已合入主干（红相 `e8c460ab` → a2 `f97b3fdb`）。C1–C5 冻结测试 + 对抗测试全绿（7/3/5/89/89），`--lib` 1404、tui 96/98、`cargo check --all-targets` Exit 0；L3 复审 A/B/P 均 PASS；观测门禁 Exit 0。**遗留 13 条已由 wave-69/PA-172 逐条收口**（见 PA-171 卡「遗留与后续 · 收口状态」）。
 - `PA-172` 跨 provider 自动故障转移 + 上游调用时限/重试配置化（P1，Complexity B，**承接 PA-171 遗留第 1 条**）
   说明：PA-171 之后仍缺「一次上游失败能否换一条上游」与「45s/5 次/30s 为何硬编码」。本卡在 `providers.json` 增 `upstream_policy`（可配 45s/5 次/30s，默认不变）与 `failover_provider_ids`（有序候选链），实现**有界**换手：仅 `decide_with_tools` 同步决策入口、hop ≤ 2、逐 attempt deadline 120s、冷却候选 0 次 HTTP、全链耗尽返回最后错误 + `failover_exhausted=` 标记。ADR 0104。任务卡：`03_TASKS/PA-172-provider-failover-and-upstream-policy.md`。
   结果：wave-69 落地（协议 `65a909ba` · 红相 `98730d5d`）。新冻结验收 11/8/6 + 租约锚点 6 + 遗留收口 99 全绿；PA-171 五个冻结文件零改动；`--lib` 1404、tui 96/98、`check --all-targets` Exit 0、TS 契约 39/39 键、`vue-tsc` Exit 0、观测双门禁 Exit 0。**如实登记局限**：流式无总 deadline ⇒ 不换手；followup 的 `accumulated_messages` 语义 ⇒ 不换手；timeout 类不进入冷却（无跨轮 sticky）⇒ 主 provider 持续超时时每轮仍先付其重试预算。详见契约矩阵 `.dev-team/contract-matrix-pa172.md` §11。
-- `PA-171` TUI 连环错误根因修复：goal 续轮失败止损 / provider 限流冷却 / 失败轮归因（P1，Complexity B，**独立于 PA-168~170 队列**）
-  说明：TUI 会话 `pa_01a1ba70` 于 2026-11-09 10:29–10:30 出现 16 连败（`goal-8..goal-20` 每轮首调即 429）。根因三层：①上游单 provider 45s 超时 + Kimi 5h 配额 429，无备用链/无冷却/`Retry-After` 死码；②`run_goal_rounds` 不读轮次成败（`start_turn_stream` 丢弃 Result）、失败轮照烧 `rounds_started`、多轮次线程各持一份 8 轮预算 ⇒ 16=2×8；③失败轮 trace 三字段硬编码 null + TUI 把 429 折叠成"重试已用尽"。契约 C1–C6 见任务卡，wave-68 三写域（tui/control_plane/goal · provider/retry/errors · turn_flow/turn_stream/turn_persist）。任务卡：`03_TASKS/PA-171-goal-round-failure-resilience.md`。
 
 - `PA-119` pony-agent-core 结构化日志迁移（P2，Complexity C）
   说明：`crates/pony-agent-core` 目前无 tracing/log 依赖，诊断输出统一为裸 `eprintln!`（`history_commands.rs` 实测 12 处），不满足 `.dev-team/nfr-baseline.json` 的 `logging{format:json,trace_id_required}`。本次 PA-118 死锁修复按「最小闭包」原则**未**引入日志框架，改以显式豁免落盘（`logging_legacy_eprintln_exempt=true` + `logging_debt_ref="PA-119"`，见 `.dev-team/contract-matrix-deadlock.md` §3.1）。**到期条款：PA-119 完成时必须重跑 PA-118 波次的 L3-P 五问并关闭该豁免**（将 `logging_legacy_eprintln_exempt` 置 false 并重过 `nfr-lint.py --self-test`）。

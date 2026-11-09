@@ -1,0 +1,18 @@
+{
+ "schema": 1,
+ "note": "trace 审核 loop 棘轮集（ADR 0101 / ADR 0090 纪律）：只增不减。条目只能由 scripts/audit/verdict.sh 在 pass 后写入（ratchet_add.py）；替换已登记维度的断言脚本路径 = 拒绝。",
+ "entries": [
+  {
+   "dimension": "1",
+   "script": "scripts/audit/assertions/dim1.sh",
+   "first_pass_round": "r2-dim1",
+   "last_pass_round": "r2-dim1"
+  },
+  {
+   "dimension": "6",
+   "script": "scripts/audit/assertions/dim6.sh",
+   "first_pass_round": "r1-dim6",
+   "last_pass_round": "r1-dim6"
+  }
+ ]
+}

@@ -1,0 +1,211 @@
+{
+ "schema": 1,
+ "dimension": 1,
+ "collected_from": "langfuse",
+ "sessions": [
+  {
+   "tag": "fault-provider-a0/s1-t01-list-summarize",
+   "arm": "fault-provider-a0",
+   "session_id": "pa_01a1be05-485e-7f71-ae94-75ba66a049d0",
+   "trace_id": "16a0b3c09daef1cd6228731dba6e9d6c",
+   "environment": "audit-fault-provider-a0",
+   "trace_release": "0.1.158",
+   "trace_version": "0.1.158",
+   "trace_total_cost": 0,
+   "service_name": "desktop-client",
+   "client_service_name": "pony-agent-dev",
+   "deployment_environment": "audit-fault-provider-a0",
+   "root_attributes": {
+    "langfuse.session.id": "pa_01a1be05-485e-7f71-ae94-75ba66a049d0",
+    "langfuse.trace.name": "pony-agent#turn-0@916825",
+    "gen_ai.operation.name": "agent.turn",
+    "agent.turn.id": "turn-a8ea8d15-9624-4273-be3b-86e231916825",
+    "agent.turn.sequence": "0",
+    "langfuse.release": "0.1.158",
+    "agent.turn.phase": "completed",
+    "agent.turn.speed.tokens_per_second": "40.88929337580446",
+    "agent.turn.speed.basis": "end_to_end",
+    "agent.turn.duration_ms": "15760",
+    "agent.turn.calls": "1",
+    "gen_ai.usage.input_tokens": "5934",
+    "gen_ai.usage.output_tokens": "629",
+    "pony.trace.route": "genai"
+   },
+   "turn_duration_ms": 15760.0,
+   "turn_latency_ms": 15760.0,
+   "turn_calls_attr": 1.0,
+   "llm_call_count": 1,
+   "tool_call_count": 1,
+   "llm_total_ms": 15383.0,
+   "llm_ttft_total_ms": 0,
+   "llm_generation_total_ms": 15383.0,
+   "tool_total_ms": 0.0,
+   "unattributed_ms": 377.0,
+   "unattributed_ratio": 0.0239,
+   "llm_share": 0.9761,
+   "ttft_share_of_llm": 0.0,
+   "ttft_missing_calls": 1,
+   "tool_zero_duration": 1,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 15383.0,
+     "ttft_ms": null,
+     "generation_ms": 15383.0,
+     "input_tokens": 5934.0,
+     "output_tokens": 629.0,
+     "latency_s": 15.383,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": "stream"
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "fault-provider-a0/s2-t01-list-summarize",
+   "arm": "fault-provider-a0",
+   "session_id": "pa_01a1be05-88d3-7612-a0ab-7b05a78e2e70",
+   "trace_id": "369391d80e4af75b75574bdc93d441f8",
+   "environment": "audit-fault-provider-a0",
+   "trace_release": "0.1.158",
+   "trace_version": "0.1.158",
+   "trace_total_cost": 0,
+   "service_name": "desktop-client",
+   "client_service_name": "pony-agent-dev",
+   "deployment_environment": "audit-fault-provider-a0",
+   "root_attributes": {
+    "langfuse.session.id": "pa_01a1be05-88d3-7612-a0ab-7b05a78e2e70",
+    "langfuse.trace.name": "pony-agent#turn-0@7f5833",
+    "gen_ai.operation.name": "agent.turn",
+    "agent.turn.id": "turn-e000dcb3-3eaa-4518-a751-4db6fa7f5833",
+    "agent.turn.sequence": "0",
+    "langfuse.release": "0.1.158",
+    "agent.turn.phase": "completed",
+    "agent.turn.speed.tokens_per_second": "40.79118028534371",
+    "agent.turn.speed.basis": "end_to_end",
+    "agent.turn.duration_ms": "15813",
+    "agent.turn.calls": "1",
+    "gen_ai.usage.input_tokens": "5934",
+    "gen_ai.usage.output_tokens": "629",
+    "pony.trace.route": "genai"
+   },
+   "turn_duration_ms": 15813.0,
+   "turn_latency_ms": 15813.0,
+   "turn_calls_attr": 1.0,
+   "llm_call_count": 1,
+   "tool_call_count": 1,
+   "llm_total_ms": 15420.0,
+   "llm_ttft_total_ms": 0,
+   "llm_generation_total_ms": 15420.0,
+   "tool_total_ms": 0.0,
+   "unattributed_ms": 393.0,
+   "unattributed_ratio": 0.0249,
+   "llm_share": 0.9751,
+   "ttft_share_of_llm": 0.0,
+   "ttft_missing_calls": 1,
+   "tool_zero_duration": 1,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 15420.0,
+     "ttft_ms": null,
+     "generation_ms": 15420.0,
+     "input_tokens": 5934.0,
+     "output_tokens": 629.0,
+     "latency_s": 15.42,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": "stream"
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "fault-provider-a0/s3-t01-list-summarize",
+   "arm": "fault-provider-a0",
+   "session_id": "pa_01a1be05-c9d5-7951-a915-dcef2f968422",
+   "trace_id": "bf01eb86b46fb00a2543e8d606cd26a2",
+   "environment": "audit-fault-provider-a0",
+   "trace_release": "0.1.158",
+   "trace_version": "0.1.158",
+   "trace_total_cost": 0,
+   "service_name": "desktop-client",
+   "client_service_name": "pony-agent-dev",
+   "deployment_environment": "audit-fault-provider-a0",
+   "root_attributes": {
+    "langfuse.session.id": "pa_01a1be05-c9d5-7951-a915-dcef2f968422",
+    "langfuse.trace.name": "pony-agent#turn-0@1dac3a",
+    "gen_ai.operation.name": "agent.turn",
+    "agent.turn.id": "turn-52f5df38-5de7-4e62-8e10-a17e781dac3a",
+    "agent.turn.sequence": "0",
+    "langfuse.release": "0.1.158",
+    "agent.turn.phase": "completed",
+    "agent.turn.speed.tokens_per_second": "40.868039763498146",
+    "agent.turn.speed.basis": "end_to_end",
+    "agent.turn.duration_ms": "15780",
+    "agent.turn.calls": "1",
+    "gen_ai.usage.input_tokens": "5934",
+    "gen_ai.usage.output_tokens": "629",
+    "pony.trace.route": "genai"
+   },
+   "turn_duration_ms": 15780.0,
+   "turn_latency_ms": 15780.0,
+   "turn_calls_attr": 1.0,
+   "llm_call_count": 1,
+   "tool_call_count": 1,
+   "llm_total_ms": 15391.0,
+   "llm_ttft_total_ms": 0,
+   "llm_generation_total_ms": 15391.0,
+   "tool_total_ms": 0.0,
+   "unattributed_ms": 389.0,
+   "unattributed_ratio": 0.0247,
+   "llm_share": 0.9753,
+   "ttft_share_of_llm": 0.0,
+   "ttft_missing_calls": 1,
+   "tool_zero_duration": 1,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 15391.0,
+     "ttft_ms": null,
+     "generation_ms": 15391.0,
+     "input_tokens": 5934.0,
+     "output_tokens": 629.0,
+     "latency_s": 15.391,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": "stream"
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  }
+ ]
+}

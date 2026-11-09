@@ -1,0 +1,95 @@
+{
+ "schema": 1,
+ "dimension": 1,
+ "collected_from": "langfuse",
+ "sessions": [
+  {
+   "tag": "fault-timeout-a0/s1-t01-list-summarize",
+   "arm": "fault-timeout-a0",
+   "session_id": "pa_01a1be07-3be6-7bd2-9479-5465ba74a442",
+   "trace_id": "52c67b0c2afb405d254b11497947a291",
+   "environment": "audit-fault-timeout-a0",
+   "trace_release": "0.1.158",
+   "trace_version": "0.1.158",
+   "trace_total_cost": 0,
+   "service_name": "desktop-client",
+   "client_service_name": "pony-agent-dev",
+   "deployment_environment": "audit-fault-timeout-a0",
+   "root_attributes": {},
+   "turn_duration_ms": null,
+   "turn_latency_ms": 0.0,
+   "turn_calls_attr": null,
+   "llm_call_count": 0,
+   "tool_call_count": 1,
+   "llm_total_ms": 0,
+   "llm_ttft_total_ms": 0,
+   "llm_generation_total_ms": 0,
+   "tool_total_ms": 0.0,
+   "unattributed_ms": 0.0,
+   "unattributed_ratio": null,
+   "llm_share": null,
+   "ttft_share_of_llm": null,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 1,
+   "tool_error_count": 0,
+   "calls": [],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "fault-timeout-a0/s2-t01-list-summarize",
+   "session_id": "pa_01a1be07-475a-7940-a0c1-405a7e2f8141",
+   "arm": "fault-timeout-a0",
+   "missing": true
+  },
+  {
+   "tag": "fault-timeout-a0/s3-t01-list-summarize",
+   "arm": "fault-timeout-a0",
+   "session_id": "pa_01a1be07-5837-74b2-8dd6-90b2eb16d3f1",
+   "trace_id": "9daf7eb1767bda40425b929b2caed55a",
+   "environment": "audit-fault-timeout-a0",
+   "trace_release": "0.1.158",
+   "trace_version": "0.1.158",
+   "trace_total_cost": 0,
+   "service_name": "desktop-client",
+   "client_service_name": "pony-agent-dev",
+   "deployment_environment": "audit-fault-timeout-a0",
+   "root_attributes": {},
+   "turn_duration_ms": null,
+   "turn_latency_ms": 0.0,
+   "turn_calls_attr": null,
+   "llm_call_count": 0,
+   "tool_call_count": 1,
+   "llm_total_ms": 0,
+   "llm_ttft_total_ms": 0,
+   "llm_generation_total_ms": 0,
+   "tool_total_ms": 0.0,
+   "unattributed_ms": 0.0,
+   "unattributed_ratio": null,
+   "llm_share": null,
+   "ttft_share_of_llm": null,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 1,
+   "tool_error_count": 0,
+   "calls": [],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  }
+ ]
+}

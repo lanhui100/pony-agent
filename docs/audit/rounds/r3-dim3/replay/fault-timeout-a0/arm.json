@@ -1,0 +1,13 @@
+{
+ "schema": "pony.audit.arm.v1",
+ "arm": "baseline",
+ "slug": "fault-timeout-a0",
+ "commit": "d9425a70ba3f36d8ab5ca0124c567093f3fd6788",
+ "worktree": "/tmp/audit-r3-fault-timeout-a0",
+ "sessions": 3,
+ "tasks": [
+  "t01-list-summarize"
+ ],
+ "created_unix": 1794189518,
+ "exit_all_zero": false
+}

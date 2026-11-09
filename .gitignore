@@ -80,3 +80,12 @@ tsconfig.tsbuildinfo
 tools/tui-audit/bin/
 
 .pony-agent/
+
+# Trace 审核 loop 重放取证产物（ADR 0101 / PA-169）：每臂每会话的 *.jsonl 是 10–40 MiB 级
+# 原始事件流，可由 `scripts/audit/replay.sh` 重放再生，**绝不入库**（实测单轮 238 MiB）。
+# 同目录的 arm.json / sessions.tsv / *.result.json / *.stderr 必须跟踪：回执（receipts/*.json）
+# 的 artifact 字段指向这些不可变路径，且 dim1 的 L2 断言真值取自 stderr 的 usage 行——
+# 不入库则回执悬挂、断言不可复验（合计约 7.5 MiB）。
+# 若不忽略 *.jsonl：`audit-diff.sh` 对每个 >2 MiB 的未跟踪文件发 WARN ⇒ verdict=WARN ⇒ exit 1，
+# 连带打红 wave47-ob2 与 v10 基线冻结门禁（实测 96 条 WARN）。
+docs/audit/rounds/*/replay/**/*.jsonl

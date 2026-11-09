@@ -138,6 +138,7 @@
 - [0098 TUI 启动页品牌标改用母版真色派生表 + 位图优先（含 halfblocks）](0098-tui-splash-master-truecolor-bitmap-first.md) —— 其中档位尺寸（Rich 26×30 / Compact 20×22、位图 832×960）已被 [0105) 修订为原 1/3（9×10 / 7×8、位图 288×320）；真色表与位图优先部分仍现行
 - [0099 会话存储改为「事件溯真源 + 单写者 + 墓碑删除」四阶段重构](0099-session-storage-event-sourced-refactor.md)
 - [0100 TUI 模型面板：优选行参与统一导航与分区间 1 行间距](0100-tui-model-panel-preferred-selectable-and-section-gap.md)
+- [0101 Trace 审核 Loop：用户唤起 + 持久状态机 + 确定性骨架 + 单一审批门](0101-trace-audit-loop-automation.md)
 - [0102 为日志格式补齐事件载体（provider transcript / 长期记忆 / history_state_evidence）](0102-session-log-event-carriers-for-transcript-and-memory.md)
 - [0103 goal 续轮失败止损、失败轮不烧预算与上游限流冷却](0103-goal-round-failure-and-rate-limit-cooldown.md)
 - [0104 上游调用时限/重试配置化与跨 provider 有界故障转移](0104-provider-failover-and-upstream-policy.md)

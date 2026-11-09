@@ -1,0 +1,179 @@
+{
+  "schema": 1,
+  "mode": "queue",
+  "dimension_queue": [
+    6,
+    1,
+    3,
+    2,
+    5,
+    7,
+    4
+  ],
+  "passed_dimensions": [
+    6,
+    1
+  ],
+  "current": {
+    "dimension": 3,
+    "round": "r3-dim3",
+    "phase": "await_approval",
+    "attempt": 0,
+    "baseline_commit": "d9425a70ba3f36d8ab5ca0124c567093f3fd6788",
+    "impl_base_commit": "d9425a70ba3f36d8ab5ca0124c567093f3fd6788",
+    "candidate_commit": "",
+    "corpus_hash": "",
+    "corpus_hash_frozen": false,
+    "assertion_hashes": {},
+    "proposal_path": "docs/audit/rounds/r3-dim3/proposals/r3-dim3.md",
+    "approval": {},
+    "evidence_sessions": [
+      "nominal-a0:9@d9425a70",
+      "fault-provider-a0:3@d9425a70",
+      "fault-timeout-a0:3@d9425a70"
+    ],
+    "receipts_dir": "docs/audit/rounds/r3-dim3/receipts",
+    "write_scope": [
+      "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+      "crates/pony-agent-core/src/agent/headless.rs",
+      "crates/pony-agent-core/src/bin/cli.rs",
+      "crates/pony-agent-core/tests/",
+      "docs/observability.yaml"
+    ],
+    "corpus_task_hashes": {}
+  },
+  "lease": {
+    "session_id": null,
+    "expires_unix": 0,
+    "released_by": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+    "released_reason": "到达 await_approval 停点"
+  },
+  "history": [
+    {
+      "at_unix": 1794139736,
+      "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+      "transition": "collect+audit -> await_approval",
+      "evidence": "receipts 003(.pa01a1bae5) / 007-audit-recheck.pa01a1bae5",
+      "assert_exit": 1
+    },
+    {
+      "at_unix": 1794140942,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "await_approval -> implement -> build -> verify",
+      "evidence": "receipts/009-approval.pa01a1ba70.json + candidate commit 6b77f939",
+      "note": "F1/F2/F3 最小闭包已实施；定向单测绿（otel 32 passed / 黑盒 6 passed / cli 1 passed）；candidate 臂重放进行中"
+    },
+    {
+      "at_unix": 1794142728,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "verify -> ratchet",
+      "note": "verdict PASS exit=0（回执 018）；dim6 已入棘轮（docs/audit/ratchet.json）。下一维度 = 队列首位 1（时延结构）"
+    },
+    {
+      "at_unix": 1794142734,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "ratchet -> r2-dim1 collect",
+      "note": "dim6 通过并入棘轮；队列推进到维度 1"
+    },
+    {
+      "at_unix": 1794144718,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "collect -> await_approval",
+      "note": "r2-dim1 提案待批准：await_approval（F1/F3/F4）"
+    },
+    {
+      "at_unix": 1794146437,
+      "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+      "transition": "await_approval -> build",
+      "note": "implement 完成：F1/F3/F4 最小闭包已提交 e51c076d（impl_base=1bca9458，r1-dim6 修复已先行落主线）"
+    },
+    {
+      "at_unix": 1794147208,
+      "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+      "transition": "build -> verify",
+      "note": "build 完成：verify 因既有 size 门禁红相未全绿（回执 007 如实记录），release 二进制经 --skip-verify 构建并安装成功"
+    },
+    {
+      "at_unix": 1794152455,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "verify -> await_approval",
+      "note": "r2-dim1 attempt1 verdict FAIL（回执 009）：F3/F4 达成，F1 预算不足致 L1/L2/L4 未达标；attempt2 提案待批准（推荐方案 A）"
+    },
+    {
+      "at_unix": 1794184784,
+      "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+      "transition": "await_approval -> implement",
+      "note": "attempt2 方案A已实施：EXIT_FLUSH_BUDGET_MS=3000、关闭档位=100、桌面端复用core常量、文档同步、不变量单测；arm-tag传播+L3空集UNKNOWN+3条自测。自测34/34、otel 44单测、cargo check 全绿。发现提案外阻断F5/F6，待用户裁定是否扩提案再跑 build/verify"
+    },
+    {
+      "at_unix": 1794186934,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "implement -> verify",
+      "note": "attempt2 实施完成：方案A（退出flush预算3000/关闭档位100/桌面端复用core常量）+ F5（导出有界重试2次+失败可见性）+ F7（批量transport=buffered）；candidate=d9425a70"
+    },
+    {
+      "at_unix": 1794186947,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "patch",
+      "note": "登记 candidate_commit=d9425a70 与批准记录（方案A + F5 + F7）"
+    },
+    {
+      "at_unix": 1794186984,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "verify -> await_approval",
+      "note": "attempt2 四条断言全绿（L1 0/9、L2 0/23、L3 0/23、L4 0/9），但写域检查判 src-tauri/src/lib.rs 越界 → 需批准补遗提案后方可 verdict"
+    },
+    {
+      "at_unix": 1794187981,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "await_approval -> verdict",
+      "note": "补遗提案已批准：F5+F7+写域扩展 src-tauri/src/lib.rs；实施已在 d9425a70 完成，直接进入 verdict"
+    },
+    {
+      "at_unix": 1794188345,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "verdict -> await_approval",
+      "note": "F8 定位：ratchet.sh/verdict.sh 统一透传 --arm-tag，dim6.sh 不认 ⇒ 棘轮判 MISSING ⇒ verdict 恒 UNKNOWN。已修 dim6.sh（仅参数解析）+ selftest 契约断言；需批准重冻结 scripts_assertions_dim6.sh"
+    },
+    {
+      "at_unix": 1794189085,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "await_approval -> verdict",
+      "note": "F8 补遗已批准并重冻结：仅 dim6.sh 哈希变化，freeze-check=0、selftest=42/42；进入 verdict，只认脚本退出码（回执 014）"
+    },
+    {
+      "at_unix": 1794189185,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "verdict -> ratchet",
+      "note": "r2-dim1 verdict PASS exit=0（回执 015）：L1/L2/L3/L4 全绿，dim6 无回归，dim1 已入棘轮；进入轮次归档与队列推进"
+    },
+    {
+      "at_unix": 1794189230,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "ratchet -> collect",
+      "note": "r2-dim1 已 PASS 并归档（回执 015/016），passed_dimensions=[6,1]；推进 r3-dim3（失败语义）collect"
+    },
+    {
+      "at_unix": 1794189777,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "collect -> audit",
+      "note": "r3-dim3 collect 完成（回执 001）：15 会话三侧对拍；provider fallback 3/3 被报成功，timeout 0/3 根终态可判定；进入根因分析"
+    },
+    {
+      "at_unix": 1794192146,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "audit -> propose",
+      "note": "r3-dim3 根因已定位（F1 blocker/F2 major/F3 minor），提案已写：docs/audit/rounds/r3-dim3/proposals/r3-dim3.md（4 条冻结阈值 + 写域 6 项）"
+    },
+    {
+      "at_unix": 1794192157,
+      "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+      "transition": "propose -> await_approval",
+      "note": "r3-dim3 提案待批准：docs/audit/rounds/r3-dim3/proposals/r3-dim3.md（D1 降级保真/D2 超时终态可判定/D3 三侧无矛盾/D4 控制组不误报，阈值均为 0 违规；写域 6 项）"
+    }
+  ],
+  "next_action": "r3-dim3 提案待批准：docs/audit/rounds/r3-dim3/proposals/r3-dim3.md（D1 降级保真/D2 超时终态可判定/D3 三侧无矛盾/D4 控制组不误报，阈值均为 0 违规；写域 6 项）",
+  "candidate_commit": "",
+  "approval": {}
+}

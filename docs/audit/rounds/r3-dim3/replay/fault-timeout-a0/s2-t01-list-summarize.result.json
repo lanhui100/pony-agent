@@ -1,0 +1,20 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1be07-475a-7940-a0c1-405a7e2f8141",
+  "turn_id": "turn-90bb3ea1-c7ec-4371-9de7-67d4f9bd7d0b",
+  "status": "timeout",
+  "exit_code": 7,
+  "final_text": "",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 1000,
+  "failure_reason": null
+}

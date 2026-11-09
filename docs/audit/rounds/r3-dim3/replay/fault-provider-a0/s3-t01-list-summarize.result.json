@@ -1,0 +1,20 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1be05-c9d5-7951-a915-dcef2f968422",
+  "turn_id": "turn-52f5df38-5de7-4e62-8e10-a17e781dac3a",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "工具 `Read` 已执行完成，但 provider 在整合工具结果时失败。\n失败原因：调用 provider 失败：error sending request for url (http://127.0.0.1:9/v1/chat/completions)；type=connect+request；elapsed=0ms；url=http://127.0.0.1:9/v1/chat/completions；source=client error (Connect)\n\n本地兜底摘要：workspace_gather_context 已聚合 2 个上下文子调用，整体状态为 ok。\n\n结果预览：\n{\\n  \"abortedCount\": 0,\\n  \"completedCount\": 2,\\n  \"errorCount\": 0,\\n  \"meta\": {\\n    \"mode\": \"directory\",\\n    \"path\": \"docs/audit/corpus\",\\n    \"query\": null\\n  },\\n  \"ok\": true,\\n  \"partialCount\": 0,\\n  \"permissionSummary\": {\\n    \"childDecisions\": [\\n      {\\n        \"decisionSource\": \"child_execution_observed\",\\n        \"verdict\": \"allow\"\\n      },\\n      {\\n        \"decisionSource\": \"child_execution_observed\",\\n        \"verdict\": \"allow\"\\n      }\\n    ],\\n    \"hostMediated\": false,\\n    \"requiresApproval\": false,\\n    \"scopes\": [\\n      \"workspace_read\"\\n    ]\\n  },\\n  \"plan\": {\\n    \"continueOnError\": true,\\n    \"kind\": \"workspace_gather_context\",\\n    \"parallel\": true,\\n    \"steps\": [\\n      {\\n        \"arguments\": {\\n          \"description\": \"gather 内部子调用\",\\n          \"path\": \"docs/audit/corpus\"\\n        },\\n        \"name\": \"workspace_path_info\",\\n        \"summary\": \"第 1 个子调用：`workspace_path_info`。\"\\n      },\\n      {\\n        \"arguments\": {\\n          \"description\": \"gather 内部子调用\",\\n          \"limit\": 40,\\n          \"path\": \"docs/audit/corpus\"\\n        },\\n        \"name\": \"workspace_list_files\",\\n        \"summary\": \"第 2 个子调用：`workspace_list_files`。\"\\n      }\\n    ],\\n    \"summary\": \"围绕目录 `docs/audit/corpus` 聚合元信息与目录列表。\"\\n  },\\n  \"plannedCount\": 2,\\n  \"results\": [\\n    {\\n      \"aggregateStatus\": \"ok\",\\n      \"arguments\": {\\n        \"description\": \"gather 内部子调用\",\\n        \"path\": \"docs/audit/corpus\"\\n      },\\n      \"canonicalTool\": \"workspace_path_info\",\\n      \"durationMs\": 0,\\n      \"error\": null,\\n      \"index\": 0,\\n      \"ok\": true,\\n      \"output\": {\\n        \"absolutePath\": \"/tmp/audit-r3-fault-provider-a0/docs/audit/corpus\",\\n        \"childCount\": 2,\\n        \"isReadableTextHint\": false,\\n        \"kind\": \"directory\",\\n        \"modifiedUnixSeconds\": 1794189379,\\n        \"path\": \"docs/audit/corpus\",\\n        \"sizeBytes\": 4096\\n      },\\n      \"status\": \"ok\",\\n      \"tool\": \"workspace_path_info\"\\n    },\\n    {\\n      \"aggregateStatus\": \"ok\",\\n      \"arguments\": {\\n        \"description\": \"gather 内部子调用\",\\n        \"limit\": 40,\\n        \"path\": \"docs/audit/corpus\"\\n      },\\n      \"canonicalTool\": \"workspace_list_files\",\\n      \"durationMs\": 0,\\n      ...(+449 chars)",
+  "usage": {
+    "input_tokens": 5934,
+    "output_tokens": 629
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 15540,
+  "failure_reason": null
+}

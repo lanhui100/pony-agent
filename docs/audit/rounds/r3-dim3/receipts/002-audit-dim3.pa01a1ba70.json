@@ -1,0 +1,67 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "002-audit-dim3.pa01a1ba70",
+ "phase": "audit",
+ "node": "agent",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794191900,
+ "scope": "失败语义根因分析：provider 回退被抹成成功 / headless 超时 trace 侧不可判定 / 超时封套无原因；并落地 dim3 断言脚本（红相实测）+ 节点自测",
+ "commands": [
+  {
+   "command": "python3 - <<'PY' 逐行解析 fault-provider-a0/*.jsonl 的 eventType / fallbackReason / type",
+   "exit_code": 0,
+   "detail": "3/3 会话 turn.completed 携带 fallbackReason=provider_followup_failed:… 与 providerMode=fallback；终态事件本身是「成功」语汇"
+  },
+  {
+   "command": "python3 - 读取 metrics.dim3.json 的 fault-* 会话三侧字段",
+   "exit_code": 0,
+   "detail": "provider 臂 root outcome=<absent>；timeout 臂 root_attributes={} ×2 + trace 缺失 ×1，封套 failure_reason=null ×3"
+  },
+  {
+   "command": "grep -rn 'provider_followup_failed|headless.timeout|mark_active_turn_error' crates/pony-agent-core/src",
+   "exit_code": 0,
+   "detail": "回退产生点 provider/mod.rs:4776；累积点 turn_sync.rs:41/427/513/553；错误登记仅 otel/mod.rs:2971/3057 两处；宿主超时只在 cli.rs:603-614/725-731 发事件标记，无 OTel 出口"
+  },
+  {
+   "command": "bash scripts/audit/assertions/dim3.sh --arm-dir docs/audit/rounds/r3-dim3/replay/fault-provider-a0 --expected-cwd /tmp/audit-r3-fault-provider-a0 --metrics docs/audit/rounds/r3-dim3/metrics.dim3.json",
+   "exit_code": 1,
+   "detail": "红相成立：A1 violations=3（回退三会话 trace.outcome=None / 无 fallback_reason / 封套无 degraded_reason）、A2 violations=3（超时封套无原因 + trace 无终态，s2 整条缺失）、A3=0、A4=0"
+  },
+  {
+   "command": "bash scripts/audit/selftest.sh",
+   "exit_code": 0,
+   "detail": "pass=49 fail=0（新增 dim3 绿相/三条红相/两条参数校验；--arm-tag 契约对 dim3.sh 同样成立）"
+  },
+  {
+   "command": "python3 scripts/audit/state.py --state docs/audit/loop-state.json get --path current.baseline_commit 与 git log -1",
+   "exit_code": 0,
+   "detail": "基线 d9425a70ba3f36d8ab5ca0124c567093f3fd6788 即 HEAD；工作区无源码改动（仅审计产物未跟踪）"
+  }
+ ],
+ "artifacts": [
+  "docs/audit/rounds/r3-dim3/root-cause.md",
+  "scripts/audit/assertions/dim3.sh",
+  "scripts/audit/selftest.sh",
+  "scripts/audit/state.py"
+ ],
+ "findings": [
+  {"id": "F1", "severity": "blocker", "title": "provider 回退被三侧终态抹成纯成功",
+   "sites": ["agent/provider/mod.rs:4776", "agent/runtime/turn_sync.rs:41", "agent/otel/mod.rs:2353-2402", "agent/otel/mod.rs:2971/3057", "bin/cli.rs:545-572/753-772"],
+   "evidence": ["fault-provider-a0 3/3 会话 provider_fallback=true 且 outcome=<absent>"]},
+  {"id": "F2", "severity": "major", "title": "headless 超时 trace 侧不可判定（根 span 永不结束，宿主无 OTel 出口）",
+   "sites": ["bin/cli.rs:603-614", "bin/cli.rs:725-731", "agent/otel/mod.rs:2348-2410"],
+   "evidence": ["fault-timeout-a0 root_terminal=0/3；s2 整条 trace 缺失"]},
+  {"id": "F3", "severity": "minor", "title": "超时封套 failure_reason=null",
+   "sites": ["bin/cli.rs:735-739/766"],
+   "evidence": ["fault-timeout-a0 3/3 failure_reason=null 而 status=timeout"]}
+ ],
+ "non_findings": [
+  "nominal 4/9 outcome=<absent> 为 by design（otel/mod.rs:3302），不计缺陷",
+  "A3 三侧无矛盾当前 0 冲突（provider 臂三侧一致地错，检测不到；由 A1 承接）",
+  "A4 控制组 0 误报，r1-dim6 F3 的 degraded 口径正确"
+ ],
+ "unknowns": [
+  "宿主 span 能否以「未结束的根 span」为父落进同一 trace：需单会话探针证实，否则退化为独立 host trace + 同 session 归属（不改阈值）",
+  "超时后 worker 仍存活，宿主 span 与 worker span 顺序不确定；A2 只要求至少一个终态可判定"
+ ]
+}

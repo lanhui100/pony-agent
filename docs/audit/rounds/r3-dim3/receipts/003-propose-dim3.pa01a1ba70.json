@@ -1,0 +1,34 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "003-propose-dim3.pa01a1ba70",
+ "phase": "propose",
+ "node": "agent",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794192146,
+ "scope": "r3-dim3 提案落盘并声明冻结阈值/写域/回滚；状态机 audit → propose → await_approval",
+ "commands": [
+  {"command": "bash scripts/audit/assertions/dim3.sh --arm-dir … --metrics docs/audit/rounds/r3-dim3/metrics.dim3.json",
+   "exit_code": 1, "detail": "红相：A1=3 A2=3 A3=0 A4=0"},
+  {"command": "bash scripts/audit/selftest.sh", "exit_code": 0, "detail": "pass=49 fail=0"},
+  {"command": "python3 scripts/audit/state.py transition --to propose --patch current.write_scope=[6 项]",
+   "exit_code": 0, "detail": "写域落状态机；phase=propose"}
+ ],
+ "artifacts": [
+  "docs/audit/rounds/r3-dim3/proposals/r3-dim3.md",
+  "docs/audit/rounds/r3-dim3/root-cause.md",
+  "scripts/audit/assertions/dim3.sh"
+ ],
+ "frozen_on_approval": {
+  "assertions": ["scripts_assertions_dim3.sh", "scripts_collect_dim3.py"],
+  "note": "dim3.sh 与 collect_dim3.py 已加入 state.py JUDGING_FILES 冻结集；批准时必须跑 state.py freeze，否则 check-freeze 报 assertion_hashes 为空（exit=2）"
+ },
+ "write_scope": [
+  "crates/pony-agent-core/src/agent/otel/mod.rs",
+  "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+  "crates/pony-agent-core/src/agent/headless.rs",
+  "crates/pony-agent-core/src/bin/cli.rs",
+  "crates/pony-agent-core/tests/",
+  "docs/observability.yaml"
+ ],
+ "awaiting": "用户批准 proposals/r3-dim3.md（F1 blocker / F2 major / F3 minor）"
+}

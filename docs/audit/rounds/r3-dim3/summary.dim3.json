@@ -1,0 +1,66 @@
+{
+  "nominal-a0": {
+    "sessions": 9,
+    "trace_missing": 0,
+    "root_terminal_present": 9,
+    "phase": {
+      "completed": 9
+    },
+    "outcome": {
+      "<absent>": 4,
+      "degraded": 5
+    },
+    "result_status": {
+      "completed": 9
+    },
+    "result_exit_code": {
+      "0": 9
+    },
+    "result_failure_reason_null": 9,
+    "provider_fallback": 0,
+    "timeout_markers": 0,
+    "runtime_terminal_events": 9
+  },
+  "fault-provider-a0": {
+    "sessions": 3,
+    "trace_missing": 0,
+    "root_terminal_present": 3,
+    "phase": {
+      "completed": 3
+    },
+    "outcome": {
+      "<absent>": 3
+    },
+    "result_status": {
+      "completed": 3
+    },
+    "result_exit_code": {
+      "0": 3
+    },
+    "result_failure_reason_null": 3,
+    "provider_fallback": 3,
+    "timeout_markers": 0,
+    "runtime_terminal_events": 3
+  },
+  "fault-timeout-a0": {
+    "sessions": 3,
+    "trace_missing": 1,
+    "root_terminal_present": 0,
+    "phase": {
+      "<absent>": 3
+    },
+    "outcome": {
+      "<absent>": 3
+    },
+    "result_status": {
+      "timeout": 3
+    },
+    "result_exit_code": {
+      "7": 3
+    },
+    "result_failure_reason_null": 3,
+    "provider_fallback": 0,
+    "timeout_markers": 3,
+    "runtime_terminal_events": 0
+  }
+}

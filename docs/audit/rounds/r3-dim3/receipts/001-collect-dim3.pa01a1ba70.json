@@ -1,0 +1,58 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "001-collect-dim3.pa01a1ba70",
+ "phase": "collect",
+ "node": "script",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794189538,
+ "scope": "失败语义三侧对拍：Langfuse 根 span、headless result、JSONL 终态事件；15 会话（nominal 9 / provider-followup 故障 3 / timeout 故障 3）",
+ "commands": [
+  {
+   "command": "复用 r2-dim1 candidate-a3 九会话（arm.commit=d9425a70，与 r3 基线 d9425a70ba3f… 相同）",
+   "exit_code": 0,
+   "detail": "nominal 9：4 成功 + 5 工具失败降级；result 全部 completed/exit=0；根 phase=completed"
+  },
+  {
+   "command": "ROUND=r3-dim3 PONY_AUDIT_GATEWAY=http://127.0.0.1:9/v1 bash scripts/audit/replay.sh --arm baseline --commit d9425a70ba3f… --sessions 3 --label fault-provider-a0 --tasks t01-list-summarize",
+   "exit_code": 0,
+   "detail": "3/3 provider followup 失败后走本地摘要，但 replay/result 均报 exit=0/completed；事件流 fallbackReason=provider_followup_failed"
+  },
+  {
+   "command": "python3 scripts/audit/collect_dim1.py --arm fault-provider-a0=… --out …/metrics.dim1.fault-provider-a0.json",
+   "exit_code": 0,
+   "detail": "3/3 trace 可得，但 outcome/degraded/failed_reason 全缺；终态假象在 trace 侧同样成立"
+  },
+  {
+   "command": "ROUND=r3-dim3 PONY_AUDIT_TIMEOUT_SECS=1 bash scripts/audit/replay.sh --arm baseline --commit d9425a70ba3f… --sessions 3 --label fault-timeout-a0 --tasks t01-list-summarize",
+   "exit_code": 1,
+   "detail": "预期故障臂红：3/3 result=timeout/exit=7、headless:timeout=1、runtime 终态事件=0"
+  },
+  {
+   "command": "python3 scripts/audit/collect_dim1.py --arm fault-timeout-a0=… --out …/metrics.dim1.fault-timeout-a0.json",
+   "exit_code": 1,
+   "detail": "s2 无 trace；s1/s3 仅有 tool 子 observation，root_attributes={}，无 phase/outcome；0/3 根终态可判定"
+  },
+  {
+   "command": "python3 scripts/audit/collect_dim3.py --arm nominal-a0=… --arm fault-provider-a0=… --arm fault-timeout-a0=… --out …/metrics.dim3.json",
+   "exit_code": 1,
+   "detail": "collected=15 evidence_incomplete=1（timeout s2 trace 缺失）；缺失证据未被折算成 PASS"
+  },
+  {
+   "command": "summary.dim3.json 分组计数与已知事实断言",
+   "exit_code": 0,
+   "detail": "nominal outcome absent=4/degraded=5；provider fallback=3 且 outcome 全缺；timeout root_terminal=0/3、exit7=3/3"
+  }
+ ],
+ "artifacts": [
+  "docs/audit/rounds/r3-dim3/metrics.dim3.json",
+  "docs/audit/rounds/r3-dim3/summary.dim3.json",
+  "docs/audit/rounds/r3-dim3/replay/fault-provider-a0",
+  "docs/audit/rounds/r3-dim3/replay/fault-timeout-a0",
+  "scripts/audit/collect_dim3.py"
+ ],
+ "evidence_examples": [
+  {"kind": "provider_fallback", "session_id": "pa_01a1be05-485e-7f71-ae94-75ba66a049d0", "trace_id": "16a0b3c09daef1cd6228731dba6e9d6c"},
+  {"kind": "timeout", "session_id": "pa_01a1be07-3be6-7bd2-9479-5465ba74a442", "trace_id": "52c67b0c2afb405d254b11497947a291"},
+  {"kind": "degraded_control", "session_id": "pa_01a1bdda-c2cf-7263-a3a6-c1f2eb5654d4", "trace_id": "da636f8d10781dc95d407b46ce420620"}
+ ]
+}

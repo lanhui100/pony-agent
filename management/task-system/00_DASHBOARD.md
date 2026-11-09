@@ -19,6 +19,8 @@
 
 ## 当前进行中
 
+- **Trace 审核 Loop（ADR 0101，2026-11-08 批准启动）**：PA-168（P0）进行中——loop-state/corpus/skill 入口已落盘，维度 6（上报链路自检）首轮 collect 已起步；PA-169/170 串行待前置。唤起方式：任意会话说「继续 trace 审核」（skill `trace-audit-loop`）。
+
 - **PA-104 ~ PA-111 核心工具拓展包（PA-104持久终端PTY、PA-105后台作业、PA-106原子补丁、PA-107语言服务器LSP、PA-108模糊检索与Git差异、PA-109长程自驱目标、PA-110智能体协作编排、PA-111成果物声明）（据各任务卡实际阶段记录：8 张卡均处 `Phase 1`，未进入 Review）**
   > **事实更正（wave-18，2026-10-16）**：原表述“已全部实现，进入 Review”与任务卡状态记录不符。按 `03_TASKS/PA-104..PA-111-*.md` §2 状态记录据实陈述：PA-104 为 `Phase 1 契约冻结与空桩初始化`，PA-105 ~ PA-111 均为 `Phase 1 契约冻结与红相验证`，负责人均为 Team Lead，无任何卡登记 Review 阶段。其中 **PA-110 仍处 Phase 1 契约冻结**，且其 **AC-01（`subagent` 隔离子会话）与 AC-04（`MAX_SUBAGENT_DEPTH ≤ 2` 递归深度防护）在代码中不存在**（全仓**代码**（`*.rs`/`*.ts`）`grep -rn "MAX_SUBAGENT_DEPTH" --include=*.rs --include=*.ts` **零命中**；非代码命中仅见于**本行自身**、`03_TASKS/PA-110-agent-teams-and-subagent-tools.md:26` 的任务卡 AC 文案，以及 `.dev-team/` 下的审查与契约档案（这些档案因引用本标识符而自命中）；`crates/pony-agent-core/src/agent/orchestration.rs` 无隔离子会话实现）。
   依托 Phase 0 系统架构蓝图（`docs/architecture/system-design.md`），历经 8 个阶段独立测试分权与红相锚定，全部 30 项黑盒测试全绿通过，工作区编译与前端 614/614 测试全绿，元复盘报告已归档（`02_REVIEWS/2026-10-04-pa104-pa111-meta-audit.md`）。
