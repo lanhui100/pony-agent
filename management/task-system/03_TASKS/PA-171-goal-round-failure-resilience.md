@@ -7,7 +7,7 @@
 - **Complexity**: B（跨 tui / control_plane / goal / provider / retry / turn_flow 多模块 + LLM 调用面）
 - **创建日期**: 2026-11-09
 - **诊断来源**: TUI 会话 `pa_01a1ba70-a314-7712-adf2-4bf675a96f99`（trace 维度审核 / trace 审核 loop），前段 `pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d`
-- **决策依据**: ADR 0102（本卡同提交落盘）、ADR 0092（同类「续轮无让位」教训）
+- **决策依据**: ADR 0103（本卡同提交落盘）、ADR 0092（同类「续轮无让位」教训）
 
 ## 需求背景（诊断结论，已取证）
 
@@ -87,5 +87,5 @@ PY
 
 1. 读本卡 → 读 `.dev-team/state.json` 的 `waves[wave=68]`（含 `baseline_commit` / `protocol_commit` / `red_commit` / 各分支 `status`）。
 2. 红相未锚定：从 `t-red` 继续（Test Agent + `test-expert`）；已锚定：按分支状态续跑对应 Executor。
-3. 语义真值源：本卡 §交付契约（C1–C6）与 ADR 0102；契约变更必须走契约演进门禁，不得就地改。
+3. 语义真值源：本卡 §交付契约（C1–C6）与 ADR 0103；契约变更必须走契约演进门禁，不得就地改。
 4. 唤起词：**「继续 PA-171」**。

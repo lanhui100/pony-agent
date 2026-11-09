@@ -1,4 +1,4 @@
-# ADR 0102：goal 续轮失败止损、失败轮不烧预算与上游限流冷却
+# ADR 0103：goal 续轮失败止损、失败轮不烧预算与上游限流冷却
 
 Status: implemented
 

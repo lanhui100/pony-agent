@@ -982,7 +982,7 @@ note: >-
       `llm_request_mode_labels_and_attributes_stay_in_sync`（四键出口一致性）。
       端到端裁决由 `scripts/audit/assertions/dim1.sh` 退出码承担。
 
-  【归属登记（2026-11-09）｜PA-171 / ADR 0102：失败语义归因 additive 字段】
+  【归属登记（2026-11-09）｜PA-171 / ADR 0103：失败语义归因 additive 字段】
   一行结论：tracing 维度 applicable 与 anchor 均不变（仍 `agent/otel/mod.rs`），不新增 metrics / logs / issues 面，
   也不新增 enforcement_point；变更只是把失败轮的归因字段从「硬编码缺席」改为「有值」，让维度 3（失败语义）可机判。
   (1) additive 属性：失败事件与落盘 `TurnTraceRecord` 增 `errorClass`

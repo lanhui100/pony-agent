@@ -4,7 +4,7 @@ Status: implemented
 
 
 - 日期：2026-11-09
-- 关联：ADR 0102 / 任务卡 `management/task-system/03_TASKS/PA-171-goal-round-failure-resilience.md`
+- 关联：ADR 0103 / 任务卡 `management/task-system/03_TASKS/PA-171-goal-round-failure-resilience.md`
 - 前序同类缺陷：`.agents/notes/implemented/bug-fix/2026-11-07-ask-self-lock-goal-rounds.md`（ADR 0092，
   同为「续轮不看上一轮停在何处」导致的空转；本篇补的是「续轮不看上一轮成败」这另一半）
 - 波次：wave-68（红相 `e8c460ab`、契约 `e1227763`）
@@ -23,7 +23,7 @@ Status: implemented
 
 ## 为什么
 
-- 现场 16 连败不是单点故障，而是三条缺陷叠加（见 ADR 0102 背景）：无失败感知的续轮循环 +
+- 现场 16 连败不是单点故障，而是三条缺陷叠加（见 ADR 0103 背景）：无失败感知的续轮循环 +
   派发即计费的轮次预算 + 多线程各自持有 8 轮局部预算（16 = 2×8）+ 失败不可归因。
 - 只加退避只能减少撞墙次数，不能阻止"预算被失败轮烧光"与"用户看到满屏错误"；
   必须在**宿主续轮判定**和**预算写点**两处同时收口，且让失败在 trace/界面可读。
