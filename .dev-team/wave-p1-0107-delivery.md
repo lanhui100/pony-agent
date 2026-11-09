@@ -84,7 +84,16 @@ G3 lib **1408 passed**、G4 会话套件全绿、G5 check 0 warning，全部 exi
     **0 次 `database is locked`**（修复前 6 轮中出现 1 次）。
   - 独立 target（`/tmp/p1-own-target`）全门禁：G1 5 passed / G2 7 passed+2 ignored /
     G3 lib 1408 passed / G4 会话套件全绿 / G5 check 0 warning，全部 exit 0。
-- 结论：**P1 已达可合并状态**；建议合并前补一次第三方终审（或由维护者按上述收据抽查）。
+- 结论：**P1 已达可合并状态**。
+
+### 终审结果（补录）
+
+L3 v3 终审在收尾后返回：**verdict = PASS（可合入）**。
+- C1：两处写事务均 `TransactionBehavior::Immediate`；重试仅 BUSY/LOCKED、上限 3 次、非 BUSY 原样报错。
+- C2：60+ 次并发冷启动（5/4/8 进程 × 300~1200 legacy）零「报成功却失败」，sid 全落索引，marker 恒为 1。
+- C3：p1 5 passed、p0 7 passed+2 ignored、lib 1408 passed（独立 target），EXIT=0。
+- C4：重试有界、无吞错分支；upsert 失败回退 `commit_store`，不静默。
+- 唯一 LOW：`journal_mode=WAL` 早于 `busy_timeout`（既有潜伏，非本 diff 引入）→ **已修**（`e5f7dcce`：先设 `busy_timeout=5000` 再设 WAL），修后 lib 1409 / p0 7+2 / p1 5+2 全绿。
 
 ## 九、目标 ④ 可观测（已补）
 
