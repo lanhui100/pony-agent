@@ -768,6 +768,17 @@ fn build_input_from_provider_messages(request: &ProviderRequest) -> Vec<Value> {
         .iter()
         .enumerate()
         .map(|(index, message)| {
+            // PA-174 F4/裁决 1：历史 assistant 轮被 `context.rs` 降级成 `Developer` + 前缀文本；
+            // 与 openai-completions / anthropic 两条路径**同一还原**（剥前缀 ⇒ assistant，
+            // 顺序不变）。不带前缀的 Developer / System 仍由 `to_chat_role` 发成 system。
+            // Responses wire 的 assistant 历史项内容类型是 `output_text`（与
+            // `chat_messages_to_responses_input` 的 assistant 分支同形），不能发 `input_text`。
+            if let Some(reply) = history_assistant_reply(message) {
+                return json!({
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": reply }]
+                });
+            }
             let include_images = !request.images.is_empty() && Some(index) == last_user_index;
             let mut content = Vec::new();
             if !message.content.trim().is_empty() || !include_images {

@@ -830,16 +830,25 @@ impl ProviderFailoverChain {
     }
 }
 
+/// PA-174 F2：`Clone` 的唯一用途是给**同步入口**派生一份带「跨 attempt 总 deadline」的
+/// 执行体（见 [`ProviderManager::with_aggregate_sync_deadline`]）——入口方法是 `&self`，
+/// 而 deadline 是 `attempt_deadline` 字段，故按值派生一份执行体，不改调用面。
+#[derive(Clone)]
 pub struct ProviderManager {
     config: ResolvedProviderSelection,
     /// PA-172 §2.1：上游调用策略；`new()` 时恒为 `UpstreamPolicy::default()`（G2）。
     policy: UpstreamPolicy,
     /// PA-172 §3.1：换手链；`new()` 时为 `None`（语义冻结：既有构造点零改动）。
     failover: Option<ProviderFailoverChain>,
-    /// PA-172 §3.3 F-c（L3-A/L3-P B2）：换手预算的**绝对截止时刻**。只有换手候选的
-    /// manager 会带它 ⇒ 每次 attempt 的 HTTP 超时都在发请求前按 `min(policy, remaining)`
-    /// 重算（逐 attempt deadline），而不是每次 hop 只算一次。
+    /// PA-172 §3.3 F-c（L3-A/L3-P B2）：**绝对截止时刻**。换手候选带的是
+    /// `FAILOVER_BUDGET_MS` 预算（PA-174 F2 起，同步入口另派生一份
+    /// `aggregate_sync_call_budget_ms` 预算）⇒ 每次 attempt 的 HTTP 超时都在发请求前按
+    /// `min(policy, remaining)` 重算（逐 attempt deadline），而不是每次 hop 只算一次。
     attempt_deadline: Option<Instant>,
+    /// PA-174 F2：同步入口的**退避上限**（同一聚合 deadline）。`None` ⇒ 退避不截断，
+    /// 与既有调度逐字一致。换手候选只带 `attempt_deadline`、不带本字段 ⇒
+    /// `FAILOVER_BUDGET_MS` 的既有行为零改动。
+    sleep_deadline: Option<Instant>,
 }
 
 impl ProviderManager {
@@ -849,6 +858,7 @@ impl ProviderManager {
             policy: UpstreamPolicy::default(),
             failover: None,
             attempt_deadline: None,
+            sleep_deadline: None,
         }
     }
 
@@ -856,6 +866,31 @@ impl ProviderManager {
     fn with_attempt_deadline(mut self, deadline: Instant) -> Self {
         self.attempt_deadline = Some(deadline);
         self
+    }
+
+    /// PA-174 F2：给**同步调用入口**派生一份带「跨 attempt 总 deadline」的执行体。
+    ///
+    /// 预算 = [`crate::agent::config::aggregate_sync_call_budget_ms`]（
+    /// `min(timeout × attempts + retry_budget, 180s)`）：此前每次 attempt 各自吃满
+    /// `request_timeout_ms`，重试次数由策略决定 ⇒ 同步调用总墙钟无跨 attempt 上界。
+    ///
+    /// 语义约束（不得扩大）：
+    /// - 已带 deadline 的 manager（换手候选，`FAILOVER_BUDGET_MS`）**原样返回** ⇒ 换手预算与
+    ///   换手语义零改动；
+    /// - deadline 只收紧**每次 attempt 的 HTTP 超时**（`effective_attempt_timeout_ms`），
+    ///   剩余为 0 时走既有「不可重试 Abort」错误，不新增重试/换手机制。
+    fn with_aggregate_sync_deadline(&self) -> Self {
+        if self.attempt_deadline.is_some() {
+            return self.clone();
+        }
+        let budget_ms = crate::agent::config::aggregate_sync_call_budget_ms(&self.policy);
+        let deadline = Instant::now() + Duration::from_millis(budget_ms);
+        let mut executor = self.clone();
+        executor.attempt_deadline = Some(deadline);
+        // 同一 deadline 同时收敛退避：否则最后一段退避（最长 8s）会越过 deadline，
+        // 总墙钟被拖长一整段 backoff（PA-174 F2 的 Test Agent 物理收据即此）。
+        executor.sleep_deadline = Some(deadline);
+        executor
     }
 
     /// PA-172 §3.3 F-c：本次 attempt 的请求超时（毫秒）。
@@ -1092,7 +1127,11 @@ impl ProviderManager {
         request: &ProviderRequest,
         tools: &[ToolDefinition],
     ) -> Result<ProviderDecision, String> {
-        let (result, raw_error) = self.decide_with_tools_single_hop(request, tools);
+        // PA-174 F2：同步决策注入跨 attempt 总 deadline（`aggregate_sync_call_budget_ms`）。
+        // 换手候选自带 `FAILOVER_BUDGET_MS` deadline，`with_aggregate_sync_deadline`
+        // 对已带 deadline 的实例原样返回 ⇒ 换手语义与既有预算零改动。
+        let executor = self.with_aggregate_sync_deadline();
+        let (result, raw_error) = executor.decide_with_tools_single_hop(request, tools);
         match result {
             Ok(decision) => Ok(decision),
             Err(detail) => self.failover_decide_with_tools(detail, raw_error, request, tools),
@@ -1265,23 +1304,28 @@ impl ProviderManager {
         }
 
         let mut raw_error: Option<String> = None;
-        let result = retry_provider_timeout_with_policy("decision", &self.policy, || {
-            let outcome = match self.config.protocol {
-                ProviderProtocol::OpenAiCompletions => {
-                    self.send_openai_tool_decision_request(request, tools)
+        let result = retry_provider_timeout_with_policy_deadline(
+            "decision",
+            &self.policy,
+            self.sleep_deadline,
+            || {
+                let outcome = match self.config.protocol {
+                    ProviderProtocol::OpenAiCompletions => {
+                        self.send_openai_tool_decision_request(request, tools)
+                    }
+                    ProviderProtocol::OpenAiResponses => {
+                        self.send_responses_tool_decision_request(request, tools)
+                    }
+                    ProviderProtocol::AnthropicMessages => {
+                        self.send_anthropic_tool_decision_request(request, tools)
+                    }
+                };
+                if let Err(error) = &outcome {
+                    raw_error = Some(error.clone());
                 }
-                ProviderProtocol::OpenAiResponses => {
-                    self.send_responses_tool_decision_request(request, tools)
-                }
-                ProviderProtocol::AnthropicMessages => {
-                    self.send_anthropic_tool_decision_request(request, tools)
-                }
-            };
-            if let Err(error) = &outcome {
-                raw_error = Some(error.clone());
-            }
-            outcome
-        });
+                outcome
+            },
+        );
 
         let result = match result {
             Ok(decision) => {
@@ -1409,6 +1453,9 @@ impl ProviderManager {
         tool_call: &ToolCall,
         tool_result: &ToolResult,
     ) -> Result<ProviderResponse, String> {
+        // PA-174 F2：同步（1:1）followup 注入跨 attempt 总 deadline；协议分支内的所有
+        // 真实请求都经 `executor` 发出（日志/策略仍读 `self`，取值逐字相同）。
+        let executor = self.with_aggregate_sync_deadline();
         let request_cow = self.sanitize_request(request);
         let request = request_cow.as_ref();
         provider_log(format!(
@@ -1430,18 +1477,36 @@ impl ProviderManager {
             return Err(error);
         }
 
+        // PA-174 F1：1:1 与批量同构的两条约束——(1) 每次 attempt 从进入本入口时的
+        // pristine base 重建转录（构造器每次尝试都回写 `*accumulated_messages`，
+        // 不重置 ⇒ 重试把 assistant + tool 再追加一遍）；(2) 重试内核耗尽时返回
+        // `extract_provider_error_detail`（只剩响应正文、空正文 ⇒ 空串），故逐次记录原始
+        // 错误并在收口处替换降级结果。成功 = base + 恰好 1 次追加。
+        let base_messages = accumulated_messages.clone();
         match self.config.protocol {
             ProviderProtocol::OpenAiCompletions => {
-                retry_provider_followup_timeout_with_policy("followup_sync", &self.policy, || {
-                    self.send_openai_tool_followup_request(
-                        request,
-                        tools,
-                        accumulated_messages,
-                        assistant_message,
-                        tool_call,
-                        tool_result,
-                    )
-                })
+                let mut last_provider_error: Option<String> = None;
+                retry_provider_followup_timeout_with_policy_deadline(
+                    "followup_sync",
+                    &self.policy,
+                    executor.sleep_deadline,
+                    || {
+                        *accumulated_messages = base_messages.clone();
+                        executor.send_openai_tool_followup_request(
+                            request,
+                            tools,
+                            accumulated_messages,
+                            assistant_message,
+                            tool_call,
+                            tool_result,
+                        )
+                        .map_err(|error| {
+                            last_provider_error = Some(error.clone());
+                            error
+                        })
+                    },
+                )
+                .map_err(|degraded| last_provider_error.unwrap_or(degraded))
                 .or_else(|error| {
                     provider_log(format!(
                         "followup:local-fallback protocol=openai provider={} model={} reason={}",
@@ -1457,16 +1522,28 @@ impl ProviderManager {
             }
             ProviderProtocol::OpenAiResponses => {
                 // sync 失败本地 fallback 语义与 completions 分支对齐。
-                retry_provider_followup_timeout_with_policy("followup_sync", &self.policy, || {
-                    self.send_responses_tool_followup_request(
-                        request,
-                        tools,
-                        accumulated_messages,
-                        assistant_message,
-                        tool_call,
-                        tool_result,
-                    )
-                })
+                let mut last_provider_error: Option<String> = None;
+                retry_provider_followup_timeout_with_policy_deadline(
+                    "followup_sync",
+                    &self.policy,
+                    executor.sleep_deadline,
+                    || {
+                        *accumulated_messages = base_messages.clone();
+                        executor.send_responses_tool_followup_request(
+                            request,
+                            tools,
+                            accumulated_messages,
+                            assistant_message,
+                            tool_call,
+                            tool_result,
+                        )
+                        .map_err(|error| {
+                            last_provider_error = Some(error.clone());
+                            error
+                        })
+                    },
+                )
+                .map_err(|degraded| last_provider_error.unwrap_or(degraded))
                 .or_else(|error| {
                     provider_log(format!(
                         "followup:local-fallback protocol=openai-responses provider={} model={} reason={}",
@@ -1480,14 +1557,32 @@ impl ProviderManager {
                     ))
                 })
             }
-            ProviderProtocol::AnthropicMessages => self.send_anthropic_tool_followup_request(
-                request,
-                tools,
-                accumulated_messages,
-                assistant_message,
-                tool_call,
-                tool_result,
-            ),
+            // PA-174 F1-b/F1-c：Anthropic 1:1 臂此前**无重试壳**（单次 5xx 即终态），
+            // 与 OpenAI 臂行为分叉；此臂没有本地 fallback，耗尽后必须原样上抛原始错误。
+            ProviderProtocol::AnthropicMessages => {
+                let mut last_provider_error: Option<String> = None;
+                retry_provider_followup_timeout_with_policy_deadline(
+                    "followup_sync",
+                    &self.policy,
+                    executor.sleep_deadline,
+                    || {
+                        *accumulated_messages = base_messages.clone();
+                        executor.send_anthropic_tool_followup_request(
+                            request,
+                            tools,
+                            accumulated_messages,
+                            assistant_message,
+                            tool_call,
+                            tool_result,
+                        )
+                        .map_err(|error| {
+                            last_provider_error = Some(error.clone());
+                            error
+                        })
+                    },
+                )
+                .map_err(|degraded| last_provider_error.unwrap_or(degraded))
+            }
         }
     }
 
@@ -1735,6 +1830,9 @@ impl ProviderManager {
         }
 
         // 3) N>1：批量回填。
+        // PA-174 F2：同步批量 followup 同样注入跨 attempt 总 deadline（所有真实请求经
+        // `executor` 发出）；N=1 分支已委派 1:1 入口，其自身注入同一预算。
+        let executor = self.with_aggregate_sync_deadline();
         let request_cow = self.sanitize_request(request);
         let request = request_cow.as_ref();
         provider_log(format!(
@@ -1776,12 +1874,13 @@ impl ProviderManager {
         let base_messages = accumulated_messages.clone();
         let mut last_provider_error: Option<String> = None;
         let outcome = match self.config.protocol {
-            ProviderProtocol::OpenAiCompletions => retry_provider_followup_timeout_with_policy(
+            ProviderProtocol::OpenAiCompletions => retry_provider_followup_timeout_with_policy_deadline(
                 "followup_sync_batch",
                 &self.policy,
+                executor.sleep_deadline,
                 || {
                     *accumulated_messages = base_messages.clone();
-                    self.send_openai_tool_followup_batch_request(
+                    executor.send_openai_tool_followup_batch_request(
                         request,
                         tools,
                         accumulated_messages,
@@ -1795,12 +1894,13 @@ impl ProviderManager {
                     })
                 },
             ),
-            ProviderProtocol::OpenAiResponses => retry_provider_followup_timeout_with_policy(
+            ProviderProtocol::OpenAiResponses => retry_provider_followup_timeout_with_policy_deadline(
                 "followup_sync_batch",
                 &self.policy,
+                executor.sleep_deadline,
                 || {
                     *accumulated_messages = base_messages.clone();
-                    self.send_responses_tool_followup_batch_request(
+                    executor.send_responses_tool_followup_batch_request(
                         request,
                         tools,
                         accumulated_messages,
@@ -1814,12 +1914,13 @@ impl ProviderManager {
                     })
                 },
             ),
-            ProviderProtocol::AnthropicMessages => retry_provider_followup_timeout_with_policy(
+            ProviderProtocol::AnthropicMessages => retry_provider_followup_timeout_with_policy_deadline(
                 "followup_sync_batch",
                 &self.policy,
+                executor.sleep_deadline,
                 || {
                     *accumulated_messages = base_messages.clone();
-                    self.send_anthropic_tool_followup_batch_request(
+                    executor.send_anthropic_tool_followup_batch_request(
                         request,
                         tools,
                         accumulated_messages,
@@ -4805,12 +4906,35 @@ fn openai_request_messages(request: &ProviderRequest) -> Vec<Value> {
         .iter()
         .enumerate()
         .map(|(index, message)| {
+            // PA-174 F4：历史 assistant 轮在 `context.rs` 侧被降级成 `Developer` + 文本
+            // 前缀；Anthropic 路径早已剥前缀还原成 `assistant`（见 `anthropic_chat_messages`），
+            // OpenAI 路径此前不还原 ⇒ 历史退化成「一串 system 消息」。此处做**同一还原**，
+            // 顺序不变；不带该前缀的 Developer / System 仍按 system 发送。
+            if let Some(reply) = history_assistant_reply(message) {
+                return json!({
+                    "role": "assistant",
+                    "content": reply
+                });
+            }
             json!({
                 "role": to_chat_role(&message.role),
                 "content": openai_message_content(message.content.as_str(), is_last_user_with_images(index, last_user_index, &request.images), &request.images)
             })
         })
         .collect::<Vec<_>>()
+}
+
+/// PA-174 F4：历史 assistant 轮的降级形态是 `ProviderRole::Developer` + 前缀文本
+/// （`context.rs` 的 `to_provider_history_message`）；返回**去前缀正文**，非该形态返回 None。
+///
+/// 前缀字面量与 Anthropic 路径（`anthropic_chat_messages`）的剥离点保持一致——两条协议
+/// 必须还原出同一条 assistant 历史，否则同一份历史在 openai-completions / anthropic 下
+/// 会走两套语义。
+fn history_assistant_reply(message: &ProviderMessage) -> Option<&str> {
+    if !matches!(message.role, ProviderRole::Developer) {
+        return None;
+    }
+    message.content.strip_prefix("Previous assistant reply: ")
 }
 
 fn is_last_user_with_images(
@@ -5262,6 +5386,52 @@ where
     )
 }
 
+/// PA-174 F2：把单次退避 sleep 夹到**注入的聚合 deadline** 剩余预算内。
+///
+/// 背景：聚合 deadline 若只参与「每次 attempt 的 HTTP 超时」，最后一段退避（最长 8s）仍会
+/// 整段睡过 deadline，同步调用总墙钟被拖长（Test Agent 实测 8600ms 预算 → 11.77s 墙钟）。
+/// 截断到 `min(delay, remaining)` 后，下一次 attempt 在发请求前即命中既有
+/// 「剩余=0 ⇒ 不可重试 Abort」路径收尾。
+///
+/// `deadline == None` ⇒ 与 [`StdThreadSleeper`] **逐字等价**（既有调用点零变化）。
+struct DeadlineSleeper {
+    deadline: Option<Instant>,
+}
+
+impl Sleeper for DeadlineSleeper {
+    fn sleep(
+        &self,
+        duration: Duration,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(), crate::agent::retry::Cancelled> {
+        let bounded = match self.deadline {
+            Some(deadline) => duration.min(deadline.saturating_duration_since(Instant::now())),
+            None => duration,
+        };
+        StdThreadSleeper.sleep(bounded, cancelled)
+    }
+}
+
+/// PA-174 F2：decision 作用域的 deadline 版包装（`deadline=None` 等价既有包装）。
+fn retry_provider_timeout_with_policy_deadline<T, F>(
+    label: &str,
+    policy: &UpstreamPolicy,
+    deadline: Option<Instant>,
+    operation: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    retry_provider_scoped_with_sleeper_and_config(
+        label,
+        ProviderRetryScope::Decision,
+        provider_timeout_backoff_config_for(policy),
+        operation,
+        &DeadlineSleeper { deadline },
+        None,
+    )
+}
+
 /// followup 专用包装：允许 rate-limit 长退避。
 /// PA-172 §2.1：策略驱动的 followup 作用域重试（`ProviderManager` 内部唯一入口）。
 fn retry_provider_followup_timeout_with_policy<T, F>(
@@ -5272,12 +5442,25 @@ fn retry_provider_followup_timeout_with_policy<T, F>(
 where
     F: FnMut() -> Result<T, String>,
 {
+    retry_provider_followup_timeout_with_policy_deadline(label, policy, None, operation)
+}
+
+/// PA-174 F2：followup 作用域的 deadline 版包装（`deadline=None` 等价既有包装）。
+fn retry_provider_followup_timeout_with_policy_deadline<T, F>(
+    label: &str,
+    policy: &UpstreamPolicy,
+    deadline: Option<Instant>,
+    operation: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
     retry_provider_scoped_with_sleeper_and_config(
         label,
         ProviderRetryScope::Followup,
         provider_timeout_backoff_config_for(policy),
         operation,
-        &StdThreadSleeper,
+        &DeadlineSleeper { deadline },
         None,
     )
 }

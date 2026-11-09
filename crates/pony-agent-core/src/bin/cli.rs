@@ -1346,13 +1346,44 @@ fn run_sessions_rebuild_index_if_requested() -> Option<i32> {
 /// 会话维护子命令的统一入口（`main` 里只留一行拦截，避免主函数继续膨胀）。
 ///
 /// 顺序即优先级，互斥（命令行只能命中其中一个），返回值 = 进程退出码：
-/// `backfill`（阶段 0）、`rebuild-index`（阶段 2-A）、`export` / `import`（阶段 3-A）。
+/// `backfill`（阶段 0）、`rebuild-index`（阶段 2-A）、`export` / `import`（阶段 3-A）、
+/// `migrate-logs`（阶段 3-B）、`config effective`（PA-174 F3 生效策略观测）。
 fn run_maintenance_subcommand_if_requested() -> Option<i32> {
     run_sessions_backfill_if_requested()
         .or_else(run_sessions_rebuild_index_if_requested)
         .or_else(run_sessions_export_if_requested)
         .or_else(run_sessions_import_if_requested)
         .or_else(run_sessions_migrate_logs_if_requested)
+        .or_else(run_config_effective_if_requested)
+}
+
+/// `ponycli config effective`：打印**生效策略**报告（单行 JSON 到 stdout，exit 0）。
+///
+/// PA-174 F3：`load_view()` 给磁盘原值（PA-173 D1 后越界值不再被改写），`upstream_policy()`
+/// 给钳制后的生效值；二者一起由 `upstream_policy_report` 暴露，让「配置被钳制」这件事可见，
+/// 而不是用户永远只看到自己填的零值。报告只含三个策略字段，**不含任何密钥**。
+fn run_config_effective_if_requested() -> Option<i32> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("config")
+        || args.get(2).map(String::as_str) != Some("effective")
+    {
+        return None;
+    }
+    let store = ProviderRegistryStore::new();
+    let disk_policy = store.load_view().upstream_policy;
+    let effective_policy = store.upstream_policy();
+    let report =
+        pony_agent_core::agent::config::upstream_policy_report(&disk_policy, &effective_policy);
+    match serde_json::to_string(&report) {
+        Ok(line) => {
+            println!("{line}");
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("[ponycli] config effective 序列化失败：{error}");
+            Some(1)
+        }
+    }
 }
 
 /// `ponycli sessions migrate-logs [--dry-run] [--db <path>] [--force]`

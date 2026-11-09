@@ -43,6 +43,11 @@ pub const UPSTREAM_DECISION_MAX_ATTEMPTS_MAX: u32 = 10;
 pub const UPSTREAM_RETRY_BUDGET_MS_MIN: u64 = 5_000;
 /// `retryBudgetMs` 上界。
 pub const UPSTREAM_RETRY_BUDGET_MS_MAX: u64 = 300_000;
+/// PA-174 F2：同步调用跨 attempt 的**总 deadline 上限**（180s）。
+///
+/// 「次数 × 单次超时」会线性放大：默认 `45000×5+30000 = 255s` 已远超用户可接受的同步等待；
+/// 故聚合预算必须封顶，见 [`aggregate_sync_call_budget_ms`]。
+pub const UPSTREAM_AGGREGATE_DEADLINE_MS_MAX: u64 = 180_000;
 /// PA-172 §2.3 C2-c：显式候选链的长度上限（超出截断并 `warn failover_candidate_ignored`）。
 pub const FAILOVER_CHAIN_MAX_LEN: usize = 8;
 
@@ -520,6 +525,53 @@ fn clamp_upstream_policy_logging(policy: UpstreamPolicy) -> UpstreamPolicy {
         );
     }
     clamped
+}
+
+/// PA-174 F2：同步决策跨 attempt 的总预算（毫秒）=
+/// `request_timeout_ms × decision_max_attempts + retry_budget_ms`，并按
+/// [`UPSTREAM_AGGREGATE_DEADLINE_MS_MAX`] 封顶（防止「次数 × 单次超时」无界放大）。
+pub fn aggregate_sync_call_budget_ms(policy: &UpstreamPolicy) -> u64 {
+    let attempts_and_timeout = u128::from(policy.request_timeout_ms)
+        .saturating_mul(u128::from(policy.decision_max_attempts));
+    let total = attempts_and_timeout.saturating_add(u128::from(policy.retry_budget_ms));
+    total.min(u128::from(UPSTREAM_AGGREGATE_DEADLINE_MS_MAX)) as u64
+}
+
+/// PA-174 F3：生效策略的**观测出口**（纯函数，CLI `config effective` 的唯一数据源）。
+///
+/// 同时暴露两副面孔，用户才看得出「磁盘上写的是什么」与「请求真正用的是什么」：
+/// - `disk_policy`：磁盘原值（PA-173 D1 后存储往返不再钳制，故可能是越界值）；
+/// - `effective_policy`：`ProviderRegistryStore::upstream_policy()` 钳制后的生效值；
+/// - `clamped_fields`：逐字段列出 disk ≠ effective 的项，顺序固定为
+///   `request_timeout_ms` → `decision_max_attempts` → `retry_budget_ms`；合法配置为 `[]`。
+///
+/// 只含三个策略字段，**不含任何密钥**（可安全打印到 stdout）。
+pub fn upstream_policy_report(
+    raw: &UpstreamPolicy,
+    effective: &UpstreamPolicy,
+) -> serde_json::Value {
+    let mut clamped_fields: Vec<&'static str> = Vec::new();
+    if raw.request_timeout_ms != effective.request_timeout_ms {
+        clamped_fields.push("request_timeout_ms");
+    }
+    if raw.decision_max_attempts != effective.decision_max_attempts {
+        clamped_fields.push("decision_max_attempts");
+    }
+    if raw.retry_budget_ms != effective.retry_budget_ms {
+        clamped_fields.push("retry_budget_ms");
+    }
+    let policy_json = |policy: &UpstreamPolicy| {
+        serde_json::json!({
+            "request_timeout_ms": policy.request_timeout_ms,
+            "decision_max_attempts": policy.decision_max_attempts,
+            "retry_budget_ms": policy.retry_budget_ms,
+        })
+    };
+    serde_json::json!({
+        "disk_policy": policy_json(raw),
+        "effective_policy": policy_json(effective),
+        "clamped_fields": clamped_fields,
+    })
 }
 
 /// PA-172 §2.2：`providers.json` **存储层**的策略段（snake_case；视图层见 [`UpstreamPolicy`]）。

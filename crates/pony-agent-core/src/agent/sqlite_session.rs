@@ -2790,12 +2790,14 @@ impl SessionBackend for SqliteSessionBackend {
     /// **运行时读路径**（ADR 0099 D1 / 2-B / 2-D）：**日志为真源**。
     /// 1. 索引原样视图（无日志的存量会话由它 grandfather）；2. 叠加日志 fold：有日志的会话**日志无条件为准**（2-D 已删除 `updated_at_ms` 定序）；
     /// 3. 折叠超预算 / 日志不可读 / fold 失败 ⇒ 回落索引侧 `normalized_*` 投影；
-    ///    只读句柄不合并日志但同样做投影补全（补全**不读日志** ⇒ 独立观察者语义不变）。
+    ///    只读句柄不合并日志但同样做投影补全（补全**不读日志** ⇒ 独立观察者语义不变）；
+    /// 4. PA-174 P1：投影侧全空的会话由 durable `turn_events` 重建历史（不留空壳）。
     fn load_store(&self) -> Option<PersistedStore> {
         let mut store = self.load_index_store()?;
         if self.storage_read_only {
             let covered = std::collections::HashSet::new();
             self.fill_index_only_rows_from_index_projection(&mut store.sessions, &covered);
+            self.rebuild_history_from_turn_events_when_projection_empty(&mut store.sessions);
             return Some(store);
         }
         let outcome = crate::agent::session::fold::merge_log_truth_into_sessions(
@@ -2806,6 +2808,7 @@ impl SessionBackend for SqliteSessionBackend {
         let covered: std::collections::HashSet<String> = outcome.folded.iter().cloned().collect();
         self.fill_index_only_rows_from_index_projection(&mut store.sessions, &covered);
         self.attach_index_trace_projections(&mut store.sessions, &covered);
+        self.rebuild_history_from_turn_events_when_projection_empty(&mut store.sessions);
         Some(store)
     }
 

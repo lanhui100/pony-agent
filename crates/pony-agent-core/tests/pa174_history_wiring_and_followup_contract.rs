@@ -74,6 +74,7 @@ const HISTORY_PREFIX: &str = "Previous assistant reply: ";
 
 // ── 回环 mock provider（真实请求体捕获：roles / content / 条数） ──────────────────────
 
+#[derive(Clone, Copy)]
 struct MockReply {
     status: u16,
     reason: &'static str,
@@ -120,6 +121,8 @@ impl MockProvider {
                 if shutdown_for_thread.load(Ordering::SeqCst) {
                     return;
                 }
+                // 计数与请求体捕获都在 **accept 时**完成（先于任何延迟）⇒ 「恒不响应」场景下
+                // `request_count()` 仍等于真实尝试数，不受应答延迟/排队影响。
                 let index = requests_for_thread.fetch_add(1, Ordering::SeqCst);
                 if let Ok(payload) = serde_json::from_str::<Value>(&raw) {
                     bodies_for_thread
@@ -127,20 +130,25 @@ impl MockProvider {
                         .expect("PA-174：请求体捕获锁不得中毒")
                         .push(payload);
                 }
-                if !replies[index.min(replies.len() - 1)].delay.is_zero() {
-                    std::thread::sleep(replies[index.min(replies.len() - 1)].delay);
-                }
-                let reply = &replies[index.min(replies.len() - 1)];
-                let mut head = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    reply.status,
-                    reply.reason,
-                    reply.content_type,
-                    reply.body.as_bytes().len()
-                );
-                head.push_str(reply.body);
-                let _ = stream.write_all(head.as_bytes());
-                let _ = stream.flush();
+                let reply = replies[index.min(replies.len() - 1)];
+                // 每连接独立线程：延迟不得阻塞 accept 循环（否则第二次尝试的计数会晚到，
+                // 「恒不响应」用例的请求数会假性偏小）。
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    if !reply.delay.is_zero() {
+                        std::thread::sleep(reply.delay);
+                    }
+                    let mut head = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        reply.status,
+                        reply.reason,
+                        reply.content_type,
+                        reply.body.as_bytes().len()
+                    );
+                    head.push_str(reply.body);
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.flush();
+                });
             }
         });
 
@@ -967,28 +975,32 @@ fn f2_aggregate_sync_call_budget_is_capped_and_computed() {
     );
 }
 
-/// F2 行为面：每次 attempt 延迟 d 且恒 503 时，同步决策的总墙钟必须有**跨 attempt 上界**。
+/// F2 行为面：同步决策必须有**跨 attempt 聚合 deadline**，且必须能区分「有 / 无」。
 ///
-/// 口径刻意宽松（避免 flaky）：`< 5×20ms + 5×5000ms = 25100ms` 且请求数 ≤ 5。
-/// 基线缺陷是「每次 attempt 各自 45s、无跨 attempt 总闸」，此处用 20ms 逐次超时放大
-/// 「次数×单次」的量级差。
+/// 参数选择（为什么这个组合能区分）：
+/// policy = (request_timeout_ms=1000, decision_max_attempts=5, retry_budget_ms=1) ⇒
+/// `aggregate_sync_call_budget_ms = min(1000×5+1, 180000) = 5001ms`。
+/// 逐 attempt 超时合计 5×1000 = 5000ms，退避 500/1000/2000 ⇒ **无聚合 deadline** 时总墙钟
+/// 明显超过 5001ms 且 5 次 attempt 全跑；**有聚合 deadline** 时剩余预算在约第 5 次前耗尽。
+///
+/// 判据只取两端可观察量：真实请求数（accept 计数，不受应答延迟影响）与总墙钟。
 #[test]
 fn f2_sync_call_wall_clock_is_bounded_across_attempts() {
-    // ── Arrange：每次 attempt 都超时（mock 延迟 200ms，policy 单次 20ms）。 ──────────
+    // ── Arrange：mock **恒不响应**（延迟 1500ms > 单次超时 1000ms ⇒ 每次 attempt 必然超时）。 ──
     let mock = MockProvider::script(vec![MockReply {
         status: 503,
         reason: "Service Unavailable",
         body: SERVER_ERROR_BODY,
         content_type: "application/json",
-        delay: Duration::from_millis(200),
+        delay: Duration::from_millis(1_500),
     }]);
     let manager = ProviderManager::new(
         mock.selection("pa174-f2-budget", ProviderProtocol::OpenAiCompletions),
     )
     .with_policy(UpstreamPolicy {
-        request_timeout_ms: 20,
+        request_timeout_ms: 1_000,
         decision_max_attempts: 5,
-        retry_budget_ms: 5_000,
+        retry_budget_ms: 3_600,
     });
     let request = request_probe();
 
@@ -1001,17 +1013,19 @@ fn f2_sync_call_wall_clock_is_bounded_across_attempts() {
     // ── Assert ─────────────────────────────────────────────────────────────────
     assert!(
         result.is_err(),
-        "PA-174 F2 前置：恒 503 必须返回 Err（禁止伪造成功），实际 Ok"
+        "PA-174 F2 前置：恒不响应必须返回 Err（禁止伪造成功），实际 Ok"
     );
+    // A1：聚合 deadline 必须在第 5 次 attempt 之前咬住（严格少于 attempts）。
     assert!(
-        hits <= 5,
-        "PA-174 F2：decision_max_attempts=5 ⇒ 真实尝试数不得超过 5，实际 {hits} 次"
+        hits <= 4,
+        "PA-174 F2：aggregate=8600ms 必须在 attempts=5 全部跑完前耗尽 ⇒ 真实请求数必须 ≤4，\
+         实际 {hits} 次（=5 说明没有跨 attempt 总闸）"
     );
-    let upper_bound = Duration::from_millis(5 * 20 + 5 * 5_000);
+    // A2：墙钟上界（留抖动余量）。
     assert!(
-        elapsed < upper_bound,
-        "PA-174 F2：同步决策必须有跨 attempt 总 deadline，总墙钟必须 < {upper_bound:?}，\
-         实际 {elapsed:?}（{hits} 次尝试）"
+        elapsed < Duration::from_millis(11_000),
+        "PA-174 F2：跨 attempt 总 deadline=8600ms ⇒ 总墙钟必须 < 11000ms，实际 {elapsed:?}\
+         （{hits} 次尝试）"
     );
 }
 

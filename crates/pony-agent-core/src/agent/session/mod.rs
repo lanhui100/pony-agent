@@ -10,6 +10,8 @@ mod log_sink;
 pub(crate) mod fold;
 // ADR 0099 阶段 3-A：会话目录包（`manifest.json` + `events.jsonl` + `attachments/`）导出/导入。
 pub mod bundle;
+// PA-174 P1：投影侧全空时从 durable `turn_events` 重建历史（纯函数）。
+mod history;
 // ADR 0099 阶段 3-B：存量会话日志回填（grandfather 转正，方案 A）。
 pub mod log_migrate;
 mod store;
@@ -61,6 +63,10 @@ pub use usage::{
     turn_usage_totals_from_snapshot, SessionUsageLedger, SessionUsageTotals,
 };
 pub use workspace_snapshot::WorkspaceSnapshotManager;
+
+// PA-174 P1：投影侧全空（`__index_only` + 零 `normalized_*` 行）时，装载侧用它与
+// `turn_events` 重建历史，避免重启后历史为零（空壳）。
+pub use history::history_from_turn_events;
 
 pub use backend::{
     BackfillReport, CommitOutcome, PersistCommand, PersistCommandOutcome, SeparateTraceTableMode,

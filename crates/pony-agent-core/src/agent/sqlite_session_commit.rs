@@ -17,8 +17,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::SqliteSessionBackend;
 use crate::agent::session::{
-    BackfillReport, CommitOutcome, PersistedStore, SessionState, SessionVersion, SessionVersionMap,
-    TraceMigrationState, TurnTraceRecord,
+    BackfillReport, CommitOutcome, PersistedStore, SessionBackend, SessionState, SessionVersion,
+    SessionVersionMap, TraceMigrationState, TurnTraceRecord,
 };
 
 /// ADR 0099 阶段 0 / I5：busy / locked 判定**只看** `rusqlite::ErrorCode`。
@@ -498,6 +498,53 @@ impl SqliteSessionBackend {
         if filled > 0 {
             eprintln!(
                 "[pony-agent][session] index_projection_filled: {filled} 个轻量索引行由 normalized_* 投影补全"
+            );
+        }
+    }
+
+    /// PA-174 P1：**投影侧全空**（`__index_only` 轻量行 + 零 `normalized_*` 行）的会话，
+    /// 历史只能来自 durable `turn_events`——否则装载后 `history: []`，重启即「历史为零」
+    /// （真实事故 `pa_01a1ba70`：`turn_events` 13098 行 / 48 turn 仍在，投影却零消息）。
+    ///
+    /// 口径（PA-174 契约冻结）：
+    /// - 只处理**折叠历史为空**的会话；已有投影内容的会话一字不改；
+    /// - `turn_events` 无消息事件 ⇒ 保持空（不造消息、不伪造成功）；
+    /// - 事件读取复用后端 `load_turn_events`（seq 升序；坏 payload 降级为墓碑；IO 失败
+    ///   contained 空），本函数只做「空壳 → 重建」这一步。
+    pub(crate) fn rebuild_history_from_turn_events_when_projection_empty(
+        &self,
+        sessions: &mut HashMap<String, SessionState>,
+    ) {
+        if sessions.is_empty() {
+            return;
+        }
+        let empty_ids: Vec<String> = sessions
+            .iter()
+            .filter(|(_, state)| state.history.is_empty())
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        if empty_ids.is_empty() {
+            return;
+        }
+        let mut rebuilt = 0usize;
+        for session_id in empty_ids {
+            let events: Vec<crate::agent::turn_event::TurnEvent> = self
+                .load_turn_events(session_id.as_str(), None)
+                .into_iter()
+                .map(|(_seq, _branch_id, event)| event)
+                .collect();
+            let history = crate::agent::session::history_from_turn_events(&events);
+            if history.is_empty() {
+                continue;
+            }
+            if let Some(state) = sessions.get_mut(session_id.as_str()) {
+                state.history = history;
+                rebuilt += 1;
+            }
+        }
+        if rebuilt > 0 {
+            eprintln!(
+                "[pony-agent][session] history_rebuilt_from_turn_events: {rebuilt} 个投影空会话由事件日志重建历史"
             );
         }
     }
