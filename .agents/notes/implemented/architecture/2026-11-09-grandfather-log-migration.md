@@ -1,0 +1,82 @@
+# Agent Note: 存量会话日志回填（grandfather 转正，ADR 0099 迁移）
+
+Status: implemented
+
+> 范围说明：迁移**能力**已交付并验证；真实库 **apply** 待应用退出后执行（写操作需避开运行中实例），
+> 另有 51 个会话待事件载体补全后才能迁移。两项均记录在「真实库实测结果与未完成部分」。
+
+## Problem
+
+阶段 1–2 之后，新会话的真源是日志文件，但**存量会话只有索引 blob、没有日志**。
+实测真实库：139 个索引会话里仅 3~4 个有日志 ⇒ 约 **136 个 grandfather 会话**。
+
+后果：「删了索引不丢数据」这条承诺对这批会话永远不成立，两条读路径长期并存。
+
+## Decision
+
+**方案 A：从既有状态反推事件流，合成日志**（用户批准）。
+
+1. `synthesize_log_events(state) -> Vec<PersistCommand>`：固定顺序
+   `PublishMetadata → UpdateSessionMeta → AppendMessage* → UpdateHistoryNode* → UpdateCursor →
+   UpdateBranch* → AppendTrace*`。
+2. `migrate_grandfathered_sessions`：合成 → 写临时目录 → **fold 回来自证一致**（`session_parity_issues`
+   逐字段）→ 一致才原子 `rename` 发布；不一致 ⇒ `mismatched`，**不落盘、blob 逐字节不变**。
+3. **合成流自证身份**：日志 header 增加可选
+   `"source": {"kind":"migrated-from-blob","migratedAtMs":N,"appVersion":"…"}`；
+   正常写入路径**不写**该字段（`skip_serializing_if`），旧读方零影响，`read_header` 仍归 `Current`。
+4. **保留 blob 作回滚面**：迁移只写日志目录，绝不删/改 `sessions` 行。回滚 = 删日志目录。
+5. **幂等**：已有日志的会话跳过；`--force` 只重跑迁移产物，**永不覆盖原始过程流**。
+6. CLI：`ponycli sessions migrate-logs [--dry-run] [--db] [--force]`，
+   退出码 `0` 成功或无事可做 / `2` 参数或库非法 / `5` 存在 `mismatched` 或 `failed`。
+
+## 关键取舍：宁可拒绝迁移，也不落一份"看起来一致"的坏日志
+
+`mismatched` 不是失败兜底，而是**诚实边界**。反例（测试 [4]，最小可证伪）：
+同一 `turn_id` + 同 `role` 的两条消息会被日志的去重语义（`message_id = {turn_id}-{role}`）
+折叠成一条 —— 这类状态**合成流无法表达**，此时落盘会让「日志为准」的读路径静默少一条消息。
+
+## Verification
+
+```
+[1] pa_3b_legacy_a: 合成流 fold 后与 blob 逐字段一致（history=4 nodes=2 branches=1 traces=1）
+[2] 第一次 migrated=[...]；第二次 mode=apply scanned=2 migrated=0 skipped_has_log=2 mismatched=0 failed=0
+[3] 原始日志 sha256 前后一致（--force 后仍一致）
+[4] mismatched：pa_3b_unfaithful → history.len: fold=5 index=4（不落盘）
+[5] dry-run：日志根 0 项指纹一致，db+wal sha256 一致
+[6] 转正证明：DELETE sessions 行后仍读到 4 条消息 / nodes=2 / traces=1
+[7] 合成 header 带 source；正常写入会话首行**无** source 键
+[8] read_header="current"；bundle events=11 → 新目录 fold 与源逐字段一致
+```
+套件：`session_log_migration` 8 passed；回归 6 套全绿；`--lib` 1396；`cargo check` 0 warning；
+`check-declaration` PASS。
+
+## 真实库实测结果与未完成部分
+
+副本 dry-run：`scanned=139 migrated=86 skipped_has_log=2 mismatched=51 failed=0`。
+
+51 例的根因不是迁移器缺陷，而是**日志格式缺载体**：
+`provider_native_transcript`(50) / `long_term_memory_entries`(1) / `history_state_evidence`
+在 `PersistCommand` 里**没有对应命令**。
+
+这同时暴露了一条**潜在数据丢失路径**（由阶段 2-D 引入）：有日志的会话，索引行把这些字段清空
+（`index_only_row_payload` 全部 `Vec::new()`），而日志又没有承载它们 ⇒ 一旦某会话产生 provider
+transcript，重启后即丢。今日未丢属侥幸——实测 49 个有 transcript 的会话中**0 个有日志**。
+
+修复方向（需单独 ADR 与契约变更）：新增事件载体承载 transcript / 记忆四件套 /
+`history_state_evidence`，改 `backend.rs` + `fold.rs` + `sqlite_session.rs` + `log_command.rs`。
+完成后这 51 例可迁移，136 个全部转正。
+
+真实库**尚未应用迁移**：写操作会碰只读面与运行中实例的并发，实测 `sessions.db.lock` 被持
+（应用正在运行），须退出应用后再执行 apply。
+
+## Alternatives considered
+
+1. **方案 A 合成日志 + 自证一致** —— 采纳。可审计（header 标记）、可回滚（保 blob）、可幂等，
+   且不一致时拒绝落盘而不是掩盖。
+2. **方案 B 不迁移**（老会话永远走 grandfather）—— 否决。「删索引不丢数据」对 136 个会话永远不成立，
+   两条读路径长期并存，成本永久化。
+3. **方案 C 迁完即删 blob** —— 否决。不可回滚，且合成逻辑一旦有缺陷就没有退路。
+4. **把 51 例强行标记为一致并落盘** —— 否决（本质是伪造一致性）。迁移后「日志为准」会让这些会话
+   静默丢 transcript / 记忆，最坏情况比不迁移更糟。
+5. **直接给这些字段开「索引独有投影」继承** —— 否决。与 2-D 的瘦身目标直接冲突（这些字段随轮次增长），
+   等于回退 2-D。正确解法是让日志格式承载它们。

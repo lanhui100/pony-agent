@@ -225,6 +225,29 @@ Status: accepted
 
 **两个已知限制（未隐藏）**：① 压缩（`.tar.zst`）需新增依赖，按约束降级为不压缩，留独立 ADR；② 附件导出目前「规范位置 + 尽力从 SQLite 元数据拷」双源，待附件写入路径迁移到会话目录后收口。
 
+**存量迁移实施状态（2026-11-09，能力已交付，commit `d250a6f5`）**
+
+| 项 | 结果 |
+| :--- | :--- |
+| 合成器 | `synthesize_log_events`：PublishMetadata → UpdateSessionMeta → AppendMessage* → UpdateHistoryNode* → UpdateCursor → UpdateBranch* → AppendTrace* |
+| 自证一致 | 合成 → 暂存写 → fold 回来逐字段比对 → 一致才原子 rename；不一致判 `mismatched`、**不落盘、blob 逐字节不变** |
+| 身份标记 | header 可选 `source.kind = "migrated-from-blob"`（正常写入不写该字段，旧读方零影响） |
+| 回滚面 | **保留 blob**；回滚 = 删日志目录 |
+| CLI | `ponycli sessions migrate-logs [--dry-run] [--db] [--force]`；退出码 0/2/5 |
+| 真实库副本 dry-run | `scanned=139 migrated=86 skipped_has_log=2 mismatched=51 failed=0` |
+
+**51 例 blocked 的根因不是迁移器，而是日志格式缺载体**：`provider_native_transcript`(50) /
+`long_term_memory_entries`(1) / `history_state_evidence` 在 `PersistCommand` 中**没有对应命令**。
+
+⚠️ 这同时是一条**由阶段 2-D 引入的潜在数据丢失路径**：有日志的会话，索引行把上述字段清空
+（`index_only_row_payload` 全 `Vec::new()`），日志又未承载 ⇒ 一旦产生 provider transcript，
+重启即丢。今日未丢属侥幸（实测 49 个有 transcript 的会话中 0 个有日志）。
+
+**未完成**：① 真实库 apply（应用正在运行、`sessions.db.lock` 被持）；② 事件载体补全（需独立 ADR
+与 `backend.rs` 契约变更），完成后 51 例可迁、136 个全部转正。
+
+决策记录：[.agents/notes/implemented/architecture/2026-11-09-grandfather-log-migration.md](../../.agents/notes/implemented/architecture/2026-11-09-grandfather-log-migration.md)
+
 **阶段 3-B 未做**：真正的远程拉取（`GET /v1/sessions/{id}/events?after_seq=`）与写入侧幂等上传。触发条件不变——出现「桌面连远端 Linux agent 并需要拉取会话」的真实需求时再做，届时必须同时补 tracing 与 http_client 的 enforcement_point（已在 observability.yaml 预约）。
 
 ## 验收阈值（阶段 2 起生效）
