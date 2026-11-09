@@ -1362,12 +1362,15 @@ async fn export_frontend_trace_chrome_trace(
     .await?
 }
 
-/// 退出路径的统一 OTel flush 出口（Wave-4 C5 / Wave-4.1 A5）。
+/// 退出路径的统一 OTel flush 出口（Wave-4 C5 / Wave-4.1 A5 / r2-dim1 attempt 2）。
 ///
 /// 契约：
-/// - 有界：单次 flush 预算 [`EXIT_FLUSH_BUDGET_MS`]（1000ms）；与 `otel::shutdown()`
-///   （内部 1000ms 等待档位）合计硬上限 ≤3000ms，满足 NFR
-///   `observability.exporter_flush_timeout_ms` 与 C5 验收判据#1；
+/// - 有界：单次 flush 预算直接复用 core 的 [`pony_agent_core::agent::otel::EXIT_FLUSH_BUDGET_MS`]
+///   （= `EXPORT_TIMEOUT_MS` = 3000ms），**不再**在桌面端另立常量 —— 两份常量各写各的正是
+///   r2-dim1 attempt 1 的缺陷来源：core 侧预算 1000ms < 导出层 3000ms 时，
+///   「退出前 flush」在网络非瞬时下必然超时，等于没加；
+///   配合 `otel::shutdown()`（内部等待档位 0ms，队列已在 flush 中排空）退出总预算 ≤3000ms，
+///   满足 NFR `observability.exporter_flush_timeout_ms` 与 C5 验收判据#1；
 /// - 幂等：`ExitRequested` 与 `Exit` 共享 [`EXIT_FLUSH_DONE`] 短路，重复事件不再叠加预算；
 /// - 未装配（otel 装配失败/非桌面启动路径）时静默跳过；未完成只降级 warn JSON 日志；绝不 panic。
 fn flush_otel_on_exit(stage: &str) {
@@ -1377,7 +1380,9 @@ fn flush_otel_on_exit(stage: &str) {
     if EXIT_FLUSH_DONE.swap(true, Ordering::SeqCst) {
         return;
     }
-    if let Err(message) = pony_agent_core::agent::otel::force_flush(EXIT_FLUSH_BUDGET_MS) {
+    if let Err(message) = pony_agent_core::agent::otel::force_flush(
+        pony_agent_core::agent::otel::EXIT_FLUSH_BUDGET_MS,
+    ) {
         pony_agent_core::agent::otel::log::log_json(
             "warn",
             &format!("退出 flush（{stage}）未在预算内完成：{message}"),
@@ -1385,9 +1390,6 @@ fn flush_otel_on_exit(stage: &str) {
         );
     }
 }
-
-/// 退出 flush 的单次预算（毫秒）：与 `otel::shutdown()` 的 1000ms 档位合计 ≤3000ms。
-const EXIT_FLUSH_BUDGET_MS: u64 = 1_000;
 
 pub fn run() {
     tauri::Builder::default()

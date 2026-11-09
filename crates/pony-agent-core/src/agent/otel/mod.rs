@@ -1034,19 +1034,28 @@ pub fn force_flush(timeout_ms: u64) -> Result<(), String> {
     flush_state(&state, timeout_ms)
 }
 
-/// 退出 flush 预算（毫秒）：与 `shutdown()` 的 1000ms 合计 ≤3000ms（NFR 导出预算）。
-pub const EXIT_FLUSH_BUDGET_MS: u64 = 1_000;
+/// 退出 flush 预算（毫秒）：等于单次导出最坏耗时，占满 NFR 导出预算（r2-dim1 attempt 2）。
+///
+/// 口径推导（attempt 1 实测反证）：导出层单次网络超时 [`EXPORT_TIMEOUT_MS`] = 3000ms，
+/// 而 attempt 1 的预算 1000ms < 3000ms ⇒ 只要队列真有尾批 span 待导出且网络非瞬时，
+/// `flush_state` 的 `recv_timeout(1000)` 必先超时，等于「加了 flush 与没加等价」
+/// （实测 `s1-t02-read-explain` 三行 warn 连发且根 span 整条缺失）。
+/// 预算必须 ≥ 一次导出的最坏耗时才能保证「导出完成」这一语义，故取 3000ms。
+pub const EXIT_FLUSH_BUDGET_MS: u64 = 3_000;
 
 /// 退出 flush 幂等标记（`process::exit` 前的显式调用与 `Drop` 共享短路）。
 static EXIT_FLUSH_DONE: AtomicBool = AtomicBool::new(false);
 
 /// 进程退出路径的有界 flush 出口（CLI / TUI / 桌面端共用，唯一实现）。
 ///
-/// r2-dim1 F1：批量调度周期 `BATCH_SCHEDULED_DELAY_MS`=5000ms 远大于关闭等待上限
+/// r2-dim1 attempt 1：批量调度周期 `BATCH_SCHEDULED_DELAY_MS`=5000ms 远大于关闭等待上限
 /// `SHUTDOWN_TIMEOUT_MS`=1000ms，而单次导出网络超时 3000ms ⇒ 尾批 span 在关闭窗口内
 /// 必然导出未完成，`shutdown()` 走 `mem::forget` 后进程退出（实测 3 会话关闭超时 warn，
-/// 其中 2 个 `agent.turn` 根 span 整条缺失）。契约：有界／幂等／未装配静默跳过／
-/// 失败只降级 warn，绝不 panic，也不阻断退出。
+/// 其中 2 个 `agent.turn` 根 span 整条缺失）。
+/// attempt 2：本函数预算提到 [`EXPORT_TIMEOUT_MS`]（3000ms），并把 `SHUTDOWN_TIMEOUT_MS`
+/// 压到只够线程握手的 100ms —— 预算主体给唯一有收益的一步，退出总预算仍不超过 NFR
+/// `observability.exporter_flush_timeout_ms`（flush 步 3000ms）。
+/// 契约：有界／幂等／未装配静默跳过／失败只降级 warn，绝不 panic，也不阻断退出。
 pub fn flush_on_exit(stage: &str) {
     if config().is_none() || EXIT_FLUSH_DONE.swap(true, Ordering::SeqCst) {
         return;
@@ -3094,12 +3103,34 @@ const RUNTIME_THREAD_NAME: &str = "pony-otel-export";
 const EXPORT_TIMEOUT_MS: u64 = 3_000;
 /// 手动导出的单块 flush 等待上限（每块 ≤3000ms；总耗时随块数线性增长，属用户显式动作）。
 const FORCE_EXPORT_FLUSH_TIMEOUT_MS: u64 = 3_000;
-/// 关闭 provider 时的导出等待上限（Wave-4.1 A5：作为退出总预算 3000ms 的 1000ms 档位）。
+/// 单批导出的最大尝试次数（含首次）。
 ///
-/// 背景：进程退出路径最多经历「ExitRequested flush 1000ms + Exit flush 1000ms（幂等短路后
-/// 通常为 0）+ shutdown 1000ms」，三段合计硬上限 ≤3000ms，满足 NFR
-/// `observability.exporter_flush_timeout_ms` 与契约 C5 验收判据#1（3000ms 内优雅退出）。
-const SHUTDOWN_TIMEOUT_MS: u64 = 1_000;
+/// r2-dim1 attempt 2 / F5：SDK `BatchSpanProcessor` 对导出失败**不重试**
+/// （`export_batch_sync` 先 `split_off(0)` 清空批次再导出，worker 循环对返回值一律 `let _ =`
+/// 忽略）⇒ 一次瞬时网络抖动就永久丢一整批 span，且因本仓未启用 `internal-logs` 特性，
+/// SDK 的 `otel_error!(BatchSpanProcessor.ExportError)` 被编译成空语句，连一行日志都没有。
+/// 实测 `s3-t01-list-summarize`：会话最早 2 次调用的 `llm.chat` span 整批丢失，根 span 聚合
+/// 用量（662 = 186+203+104+169）证明 4 个 span 都生成过，Tempo/Langfuse 双轨都只有后 2 个。
+const EXPORT_MAX_ATTEMPTS: usize = 2;
+/// 两次导出尝试之间的退避（毫秒）。
+///
+/// 取值依据：批量线程在导出期间被独占（队列同时堆积），退避必须远小于一次导出超时
+/// [`EXPORT_TIMEOUT_MS`]，只为错开瞬时故障窗口；长退避会把尾批推出退出预算。
+const EXPORT_RETRY_DELAY_MS: u64 = 200;
+/// 关闭 provider 时的导出等待上限（r2-dim1 attempt 2：预算主体让给前置 flush）。
+///
+/// 为什么不是 0（实现期实测反证，写在提案之外但必须记录）：`shutdown_with_timeout` 内部是
+/// `message_sender.try_send(Shutdown)` + `receiver.recv_timeout(timeout)` —— 导出线程要先收到
+/// 消息、再回信，即使队列已空也需要一次线程往返。取 0 会让 `recv_timeout(0)` **几乎必然**先超时，
+/// 于是每次正常退出都走 `mem::forget` 分支并刷一条「provider 关闭超时」的假 warn，
+/// 比原来的 1000ms 更糟。故保留一个远大于线程往返（实测 µs 级）、远小于预算主体的正向窗口。
+///
+/// 预算分配（NFR 字段 `observability.exporter_flush_timeout_ms` 上限 3000 是 **flush 步**的上限）：
+/// - [`EXIT_FLUSH_BUDGET_MS`] = [`EXPORT_TIMEOUT_MS`] = 3000ms，用满不超额，覆盖一次导出最坏耗时；
+/// - 本常量 100ms 只承担「队列已空时的关闭握手」，成功路径实测 µs 级返回。
+/// 两者是**顺序上限而非求和常态**：flush 成功 ⇒ 队列已空 ⇒ 关闭立即返回，真实退出耗时 ≈ 导出耗时。
+/// 只有「flush 超时 + 关闭超时」同时发生才会累加到 3100ms，而该场景下尾批 span 无论如何都会丢。
+const SHUTDOWN_TIMEOUT_MS: u64 = 100;
 /// 降级日志单条最大字符数（超出截断，避免把超长响应体写进日志面）。
 const WARN_MESSAGE_MAX_CHARS: usize = 512;
 /// BatchSpanProcessor 队列上限（显式有界：队列满即丢，绝不无界堆积）。
@@ -4031,17 +4062,61 @@ impl SpanExporter for RuntimeExporter {
         if exportable.is_empty() {
             return futures_util::future::Either::Left(std::future::ready(Ok(())));
         }
-        let inner_export = self.inner.export(exportable);
         futures_util::future::Either::Right(async move {
-            // 守卫**只在单次 poll 内**存活：不能跨 await 持有 `EnterGuard`（它不是 `Send`，
-            // 会让整个导出 future 失去 `Send`）。因此手动逐次 poll，每次 poll 前进入
-            // runtime 上下文，poll 返回后守卫立即释放。
-            let mut inner_export = std::pin::pin!(inner_export);
-            std::future::poll_fn(move |context| {
-                let _entered = handle.enter();
-                std::future::Future::poll(inner_export.as_mut(), context)
-            })
-            .await
+            // F5：SDK 批量导出对失败不重试且不可见（见 `EXPORT_MAX_ATTEMPTS` 注释）。
+            // 本包装器是唯一的导出出口，因此在这里做**有界**重试 + 逐次失败告警：
+            // - 每次尝试都重新 clone 批次（`SpanData: Clone`），失败不会消耗掉数据；
+            // - 重试次数与退避都是编译期常量，最坏耗时 2×3000+200 < 退出预算之上限的 2 倍，
+            //   且 force_flush 的超时由调用方夹值兜底，不会无限延长退出；
+            // - 最终仍失败才向上返回 Err（SDK 会忽略，但我们已经把失败写进日志面）。
+            let mut attempt = 1usize;
+            loop {
+                let payload = exportable.clone();
+                let inner_export = self.inner.export(payload);
+                // 守卫**只在单次 poll 内**存活：不能跨 await 持有 `EnterGuard`（它不是 `Send`，
+                // 会让整个导出 future 失去 `Send`）。因此手动逐次 poll，每次 poll 前进入
+                // runtime 上下文，poll 返回后守卫立即释放。
+                let mut inner_export = std::pin::pin!(inner_export);
+                let poll_handle = handle.clone();
+                let outcome = std::future::poll_fn(move |context| {
+                    let _entered = poll_handle.enter();
+                    std::future::Future::poll(inner_export.as_mut(), context)
+                })
+                .await;
+                match outcome {
+                    Ok(()) => return Ok(()),
+                    Err(err) if attempt >= EXPORT_MAX_ATTEMPTS => {
+                        degraded_warn(
+                            &format!(
+                                "OTLP 导出失败（{attempt}/{EXPORT_MAX_ATTEMPTS} 次尝试后放弃，本批 {} 个 span 永久丢失）：{err}",
+                                exportable.len()
+                            ),
+                            None,
+                        );
+                        return Err(err);
+                    }
+                    Err(err) => {
+                        degraded_warn(
+                            &format!(
+                                "OTLP 导出第 {attempt}/{EXPORT_MAX_ATTEMPTS} 次尝试失败，{}ms 后重试（本批 {} 个 span）：{err}",
+                                EXPORT_RETRY_DELAY_MS,
+                                exportable.len()
+                            ),
+                            None,
+                        );
+                        // 退避也在导出 runtime 里等待：批量线程本就同步阻塞在本次导出上，
+                        // 用 std sleep 会把 reactor 也一起挂住，故走 runtime 的定时器。
+                        let sleep_handle = handle.clone();
+                        sleep_handle
+                            .spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(EXPORT_RETRY_DELAY_MS)).await;
+                            })
+                            .await
+                            .ok();
+                        attempt += 1;
+                    }
+                }
+            }
         })
     }
 
@@ -4191,6 +4266,67 @@ mod tests {
             Some(AttrValue::Str(text)) => text.clone(),
             other => panic!("属性 `{key}` 必须是字符串，实际 {other:?}"),
         }
+    }
+
+    /// r2-dim1 attempt 2 不变量：退出 flush 预算必须 ≥ 单次导出的最坏耗时。
+    ///
+    /// r2-dim1 attempt 2 / F5：导出失败必须有界重试，且重试不得把**退出阻塞**撑爆。
+    ///
+    /// 缺陷事实：SDK `BatchSpanProcessor` 对导出失败不重试（`export_batch_sync` 先
+    /// `split_off(0)` 清空批次再导出，worker 循环 `let _ =` 忽略返回值），本仓又未启用
+    /// `internal-logs` ⇒ 一次瞬时抖动丢一整批 span 且零日志。实测 `s3-t01-list-summarize`
+    /// 丢最早 2 次调用的 `llm.chat`（根 span 聚合用量 662 证明 4 个 span 都生成过）。
+    ///
+    /// 三条不变量：
+    /// ① 重试次数有界且至少 1 次（无界重试会把导出线程永久占住）；
+    /// ② 退避远小于单次导出超时；
+    /// ③ **退出阻塞**由 `flush_state` 的 `MAX_FLUSH_WAIT_MS` 夹值兜底，与重试次数无关 ——
+    ///    重试发生在批量导出线程里，退出路径只等 `min(预算, 夹值)` 就走，最坏情况是「尾批
+    ///    在后台继续重试，但进程已退出」，不会让退出延迟随 attempts 线性增长。
+    ///    因此断言的是「夹值 ≤ NFR 预算」，而不是「attempts × 超时 ≤ 预算」——后者在
+    ///    「预算 = 单次导出超时」的冻结前提下不可能成立，属错误建模。
+    #[test]
+    fn export_retry_is_bounded_and_exit_blocking_stays_within_budget() {
+        assert!(
+            EXPORT_MAX_ATTEMPTS >= 2,
+            "导出失败必须至少重试一次，否则等于沿用 SDK 的「失败即丢」"
+        );
+        assert!(
+            EXPORT_MAX_ATTEMPTS <= 3,
+            "重试次数必须显式有界且小（当前 {EXPORT_MAX_ATTEMPTS}），否则导出线程会被永久占住"
+        );
+        assert!(
+            EXPORT_RETRY_DELAY_MS < EXPORT_TIMEOUT_MS,
+            "重试退避 {EXPORT_RETRY_DELAY_MS}ms 必须远小于单次导出超时 {EXPORT_TIMEOUT_MS}ms"
+        );
+        // 退出阻塞的硬上限：flush_state 用 min(入参, MAX_FLUSH_WAIT_MS) 等待。
+        assert!(
+            MAX_FLUSH_WAIT_MS <= EXIT_FLUSH_BUDGET_MS,
+            "flush 夹值 {MAX_FLUSH_WAIT_MS}ms 不得超过退出预算 {EXIT_FLUSH_BUDGET_MS}ms，\
+             否则重试会把退出阻塞推出 NFR 预算"
+        );
+    }
+
+    /// 反证来源（attempt 1 实测）：预算 1000ms < `EXPORT_TIMEOUT_MS` 3000ms 时，
+    /// `flush_state` 的 `recv_timeout(1000)` 必先于导出完成而超时 ⇒「退出前 flush」与
+    /// 「不 flush」在网络非瞬时下等价，`s1-t02-read-explain` 的根 span 整条缺失。
+    /// 本用例把「预算 ≥ 导出超时」钉成编译期事实，任何人把它改回 1000 都会红。
+    #[test]
+    fn exit_flush_budget_covers_worst_case_export() {
+        assert!(
+            EXIT_FLUSH_BUDGET_MS >= EXPORT_TIMEOUT_MS,
+            "退出 flush 预算 {EXIT_FLUSH_BUDGET_MS}ms 必须 ≥ 单次导出最坏耗时 {EXPORT_TIMEOUT_MS}ms"
+        );
+        // 关闭档位只承担握手：不得吃掉导出预算，但也不能为 0（recv_timeout(0) 会必然超时，
+        // 使每次正常退出都走 mem::forget 并刷假 warn）。
+        assert!(
+            SHUTDOWN_TIMEOUT_MS > 0,
+            "关闭等待档位必须为正，否则关闭握手必然超时"
+        );
+        assert!(
+            SHUTDOWN_TIMEOUT_MS < EXPORT_TIMEOUT_MS,
+            "关闭档位 {SHUTDOWN_TIMEOUT_MS}ms 不得挤占导出预算 {EXPORT_TIMEOUT_MS}ms"
+        );
     }
 
     /// F5 回归：两个并发 turn 的活动上下文必须各自独立（按 tokio task id 索引，而非栈顶）。

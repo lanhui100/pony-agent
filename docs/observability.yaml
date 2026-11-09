@@ -964,11 +964,18 @@ note: >-
         `agent.turn.calls` 只用于速度分母。
   (4) 退出路径时序变更（非属性契约）：CLI / TUI 的 `ObservabilityBootstrap::drop` 与
       `process::exit` 前的 5 个显式退出点，均在 `otel::shutdown()` 之前增加
-      `otel::force_flush(EXIT_FLUSH_BUDGET_MS=1000)`，与 `src-tauri/src/lib.rs::flush_otel_on_exit`
-      同构（幂等 + 未装配跳过 + 失败只降级 warn）。退出总预算 1000 + 1000 = 2000ms ≤ NFR
-      `observability.exporter_flush_timeout_ms=3000`。动因：`BATCH_SCHEDULED_DELAY_MS=5000` 远大于
-      关闭等待上限 1000ms 且单次导出网络超时 3000ms ⇒ 尾批 span 必然在关闭窗口内导出未完成，
-      `shutdown` 走 `mem::forget` 后进程退出（重放实测 3 会话关闭超时 warn，其中 2 个根 span 缺失）。
+      `otel::force_flush(EXIT_FLUSH_BUDGET_MS)`，桌面端 `src-tauri/src/lib.rs::flush_otel_on_exit`
+      同构（幂等 + 未装配跳过 + 失败只降级 warn），且**直接复用** core 的常量（r2-dim1 attempt 2
+      删掉桌面端那份独立 `EXIT_FLUSH_BUDGET_MS=1000`，避免两处各写各的再次漂移）。
+      预算口径（attempt 2 校正）：`EXIT_FLUSH_BUDGET_MS = EXPORT_TIMEOUT_MS = 3000ms`，
+      `SHUTDOWN_TIMEOUT_MS = 100ms`（只够关闭握手，不承担导出）⇒ flush 步不超过 NFR
+      `observability.exporter_flush_timeout_ms=3000`；成功路径 flush 后队列已空，关闭 µs 级返回，
+      两段是顺序上限而非求和常态。
+      动因（attempt 1 反证）：`BATCH_SCHEDULED_DELAY_MS=5000` 远大于关闭等待窗口且单次导出
+      网络超时 3000ms；当 flush 预算只有 1000ms 时，`recv_timeout(1000)` 必先于导出完成而超时，
+      `shutdown` 走 `mem::forget` 后进程退出 ⇒「加了 flush」与「没加」等价
+      （重放实测 `s1-t02-read-explain` 三行 warn 连发且根 span 整条缺失）。
+      预算 ≥ 一次导出最坏耗时，是「导出完成」这一语义成立的必要条件。
   (5) 收口点：不新增 enforcement_point。行为门机械收口在
       `crates/pony-agent-core/tests/otel_request_transport_test.rs`（2 用例：四键齐备 + 首包事实
       只属流式 + 常量字面量冻结），以及 `crates/pony-agent-core/src/agent/runtime/tests.rs` 的

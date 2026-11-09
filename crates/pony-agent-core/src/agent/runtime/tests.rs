@@ -12666,6 +12666,43 @@ fn d2_batch_tool_results_single_call_delegates_to_one_to_one_entry() {
     );
 }
 
+/// r2-dim1 attempt 2 / F7：整批 followup（N > 1）的 transport 口径必须是 `buffered`。
+///
+/// 缺陷事实：该分支经 `continue_with_tool_results_stream` 内部的同步
+/// `continue_with_tool_results` 发请求（`provider/mod.rs:1278-1288`），但 span 上曾硬编码
+/// `transport=stream`。后果是 L3 判据把批量调用归入「流式首包测量丢包」而非「缓冲本无首包」，
+/// 使「无首包可归因」这项断言部分依赖错标才成立（实测 `s3-t01` 第 3 次调用
+/// 日志 `mode=sync-batch`，其 span 却写 `transport=stream`）。
+#[test]
+fn batch_followup_transport_is_buffered_not_stream() {
+    assert_eq!(
+        crate::agent::turn_flow::batch_followup_transport(),
+        crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED,
+        "N > 1 批量路径走同步 HTTP，不得标成流式"
+    );
+    assert_ne!(
+        crate::agent::turn_flow::batch_followup_transport(),
+        crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM,
+        "硬编码 STREAM 正是 F7 的缺陷本身，必须被本断言钉住"
+    );
+    // 与四键出口同源：批量分支写入的 transport 值必须是 `llm_request_shape_attributes`
+    // 接受的两个合法取值之一（防「另起一套口径」）。
+    let attributes = crate::agent::otel::llm_request_shape_attributes(
+        crate::agent::turn_flow::LlmRequestMode::ToolFollowup.as_str(),
+        2,
+        true,
+        crate::agent::turn_flow::batch_followup_transport(),
+    );
+    assert_eq!(attributes.len(), 4, "四键同生同灭：{attributes:?}");
+    assert_eq!(
+        attributes[3],
+        (
+            "llm.request.transport".to_string(),
+            crate::agent::otel::AttrValue::Str("buffered".to_string())
+        )
+    );
+}
+
 /// ③ 长度不匹配：返回 `Err` 且 mock server **零请求**（同步 + 流式入口各验一次）。
 #[test]
 fn d2_batch_tool_results_length_mismatch_sends_zero_requests() {

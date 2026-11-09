@@ -3287,6 +3287,17 @@ pub fn provider_followup_with_calls(
     result
 }
 
+/// 整批 followup 的传输口径：**恒为** [`crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED`]。
+///
+/// r2-dim1 attempt 2 / F7：本函数对应的分支（`N > 1`）不走 SSE，而是
+/// `ProviderManager::continue_with_tool_results_stream` 内部的同步
+/// `continue_with_tool_results`（`provider/mod.rs:1278-1288`），结果一次性回放为增量。
+/// 抽成纯函数是为了让「批量 ≠ 流式」这条 wire 事实可被无线程/无网络的单测锁定：
+/// 该分支曾硬编码 `STREAM`，导致 L3 把批量调用误判为「流式首包测量丢包」。
+pub fn batch_followup_transport() -> &'static str {
+    crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED
+}
+
 /// D3b（P1-1 / B018）：**整批**工具结果的流式 followup（与 [`provider_followup_with_calls`] 的
 /// 流式对偶，供 `runtime/turn_stream.rs` 批执行后一次性回填）。
 ///
@@ -3339,7 +3350,13 @@ where
     llm_span.record_request_shape(
         request_mode.as_str(),
         request_messages,
-        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM,
+        request_has_system_prefix,
+        // r2-dim1 attempt 2 / F7：N > 1 分支**不是**流式通道。
+        // `continue_with_tool_results_stream` 在 N > 1 时直接走同步 `continue_with_tool_results`
+        // （provider/mod.rs:1278-1288），结果一次性回放为增量；此处曾硬编码 STREAM，
+        // 使批量调用在 wire 上被标成流式、进而被 L3 归入「首包测量丢包」而非「缓冲本无首包」
+        // （实测 s3-t01 第 3 次调用日志 `mode=sync-batch`，其 span 却写 transport=stream）。
+        batch_followup_transport(),
     );
     let start = std::time::Instant::now();
     let result = provider.continue_with_tool_results_stream(
