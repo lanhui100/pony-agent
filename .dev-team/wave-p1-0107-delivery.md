@@ -55,3 +55,20 @@ git merge --no-ff wave/p0-0107-log-first   # 先 P0
 git merge --no-ff wave/p1-session-lease    # 再 P1
 ```
 主工作区有他人未提交改动（`sqlite_session.rs` / `sqlite_session_commit.rs` / `store.rs` 同文件），合并前需先处理。
+
+## 六、二次整改（L3 v2 复核 FAIL 后）
+
+| 发现 | 修复 | 收据 |
+|---|---|---|
+| F1 MAJOR：声称 `BEGIN IMMEDIATE` 实为 DEFERRED | 迁移事务改 `Transaction::new_unchecked(conn, Immediate)` | 6 进程冷启探针：3 会话全保留、标记恰 1 次 |
+| 并发冷启 `database is locked` 被吞 | `upsert_session` 也改 `BEGIN IMMEDIATE` + BUSY 三次退避（50/100/200ms） | 探针 **6/6 无 `database is locked`** |
+| F3 残留过期文档 | P0 测试辅助注释改为「库级锁仅供已退役 C1/C6」 | — |
+| 契约锁名不一致 | 契约改为「沿用 `<db>.lock`」（实现更优：不新增文件、兼容旧进程） | 提交 `4778b589` |
+
+**最终门禁（独立 target `/tmp/p1-own-target`，排除共享 target 假绿）**：G1 5 passed、G2 7 passed+2 ignored、
+G3 lib **1408 passed**、G4 会话套件全绿、G5 check 0 warning，全部 exit 0。
+
+## 七、分支状态
+
+`wave/p1-session-lease` 最新提交 `2393e95e`；工作区干净。
+合并顺序：先 `wave/p0-0107-log-first`（`e043f32f`），再本分支。
