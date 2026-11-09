@@ -2,12 +2,14 @@
 
 ## 状态
 
-- **状态**: 进行中（wave-68，W1 契约冻结中；阶段进度以 `.dev-team/state.json` → `waves[wave=68]` 为准）
+- **状态**: **已实施（wave-68 / a1 已合入主干）**，收尾项见文末「遗留与后续」
 - **优先级**: P1
 - **Complexity**: B（跨 tui / control_plane / goal / provider / retry / turn_flow 多模块 + LLM 调用面）
 - **创建日期**: 2026-11-09
 - **诊断来源**: TUI 会话 `pa_01a1ba70-a314-7712-adf2-4bf675a96f99`（trace 维度审核 / trace 审核 loop），前段 `pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d`
 - **决策依据**: ADR 0103（本卡同提交落盘）、ADR 0092（同类「续轮无让位」教训）
+- **落地提交**: 红相 `e8c460ab` · 契约 `e1227763` · t-w2 `d04d543c` · 文档/ADR `59ec6797`+`1f5610d6` · t-w1+t-w3 `12a155b5` · a1 对抗红相 `414c276e` · a1 修复 `d8f08e8d`
+- **账本与收据**: `.dev-team/state-wave68.json`（决策 D68-1..D68-11）、`contract-matrix-pa171.md`（含 amendment a1）、`nfr-baseline-wave68.json`、`pa171-red-receipt.json`、`regression-baseline-wave68.json`、`review-*-wave68-v*.json`、`evidence-wave68/gates.md`
 
 ## 需求背景（诊断结论，已取证）
 
@@ -83,9 +85,50 @@ PY
 5. 失败轮 trace 三字段非 null 且 `error_class` 与错误文本一致。
 6. `bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --base <基线>` 与 `check-declaration.sh <repo>` Exit 0。
 
+## 落地结果（物理收据，2026-11-09）
+
+| 门禁 | 结果 |
+| :-- | :-- |
+| `cargo check -p pony-agent-core --all-targets` | Exit 0 |
+| `pa171_goal_round_failure_contract`（C1/C2） | 7 passed |
+| `pa171_provider_rate_limit_cooldown_contract`（C3） | 5 passed（loopback mock 计数：限流 1 次 HTTP、冷却期 0 次、503 仍重试） |
+| `pa171_failed_turn_attribution_contract`（C4） | 3 passed |
+| `pa171_error_copy_contract`（C5） | 89 passed |
+| `pa171_error_copy_adversarial`（a1 对抗） | 89 passed（红相 101 → 绿相） |
+| `tui_batch2_regression` / `tui_session_resilience_acceptance` | 96 / 98 passed（零回归） |
+| `cargo test -p pony-agent-core --lib` | 1404 passed |
+| `ts_contract_snapshot` | 1 passed |
+| Tier-1 冒烟 | `ponycli` build Exit 0，`--help` Exit 0 |
+| 观测门禁 | `audit-diff.sh` Exit 0；`check-declaration.sh` PASS |
+
+现场对照：修复后 `run_goal_rounds` 在同一会话内**最多连续 2 轮失败即停并写明原因**；失败轮不推进
+`rounds_started`；限流命中后进入冷却并在冷却期**不发 HTTP**；失败轮 trace 的
+`providerSource/providerMode/fallbackReason/errorClass` 可机判（`pa_01a1ba70` 的 16 连败形态不再可能）。
+
+## 遗留与后续（本轮 ADVISORY，已登记未实施）
+
+1. **跨 provider 自动故障转移 + 45s/5 次/30s 预算配置化** → 建议新开 PA-172（需 `providers.json` 候选链与新 ADR）。
+2. `errorClass` 未进 TS 契约快照门禁（`tests/ts_contract_snapshot.rs` 的 `serdeKeys` 不含该键，前端类型亦未声明）。
+3. 冷却注册表 4 处 `into_inner()` 为 **fail-open**（锁中毒后继续放行），需在契约显式声明或改 fail-closed。
+4. `clear_cooldown` / `cooldown_remaining` 零生产调用点 ⇒ 冷却复位只能靠进程重启（6h 上界兜底）。
+5. 冷却键 `a|b|c|d` 未转义/未归一（`|` 可碰撞、大小写/尾斜杠变体可绕过）。
+6. `bin/tui/errors.rs` 的 `now_unix_ms` 为死参（无法据此算剩余窗口）。
+7. `GoalRoundLoopLease` 是**进程级单 bool**（非按 session 分区）：多会话并发续轮会互相阻塞。
+8. `turn_loop_in_flight` 为单 bool，轮次线程提前 return 时可清掉仍由另一线程持有的在飞语义。
+9. 续轮预算推进落盘失败分支复用 `BudgetExhausted` 文案（真实原因是持久化失败）。
+10. `TuiState.goal_rounds_stopped` 只写不读、`reset_session_scope` 未清（跨会话残留）。
+11. 租约与 `start_turn_stream_checked` 五臂归约缺可执行用例（`--list` 0 命中；L3-A v3 建议下波补锚点）。
+12. `GoalRoundLoopLease` 的类型 doc 首句仍写「`Arc<AtomicBool>` 的 compare-exchange」（a2 已改为
+    `HashSet<String>` 按会话分区）——注释陈旧，非语义问题，随下波一并校正。
+13. a2 的计划复审（`review-plan-wave68-v2.json`）由 Lead 定点复核替代（Subagent 未产出）：
+    证据 = `tui.rs:8331-8372`（分区租约 + Drop 释放）、`tui.rs:8160-8180`（抢不到即可见上报）；
+    **如实登记为 Lead 复核，非独立审查收据**。
+
 ## 断点续跑指引（后续会话入口）
 
-1. 读本卡 → 读 `.dev-team/state.json` 的 `waves[wave=68]`（含 `baseline_commit` / `protocol_commit` / `red_commit` / 各分支 `status`）。
-2. 红相未锚定：从 `t-red` 继续（Test Agent + `test-expert`）；已锚定：按分支状态续跑对应 Executor。
-3. 语义真值源：本卡 §交付契约（C1–C6）与 ADR 0103；契约变更必须走契约演进门禁，不得就地改。
+1. 读本卡 → 读 **`.dev-team/state-wave68.json`**（本波次账本；共享 `.dev-team/state.json` 由并行会话并发使用，
+   故本波次单列，沿用 wave16/17/61 先例），含 `baseline_commit` / 各分支 `status` / `decisions` D68-1..D68-11。
+2. 语义真值源：本卡 §交付契约（C1–C6）+ `.dev-team/contract-matrix-pa171.md`（含 amendment wave-68-a1）+ ADR 0103；
+   契约变更必须走契约演进门禁，不得就地改。
+3. 若要继续收遗留项：从 §遗留与后续 第 1 条起，按 dev-team 新建波次（勿复用 wave-68 账本）。
 4. 唤起词：**「继续 PA-171」**。

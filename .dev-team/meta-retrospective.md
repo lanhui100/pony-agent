@@ -310,3 +310,53 @@ Lead 侧信息下发控制有效：`.dev-team/plan-ask-resume.md` 是唯一真�
 3. **「内部实现」与「可测面」的冲突需显式裁决**：契约里标「内部」的网络编排，如果 bin 侧只能经环境变量驱动，就要么给 pub 可测入口（并在 C1 冻结）、要么明确接受「只能真网络验收」。不要让实施者在最后一刻补 pub 面。
 4. **变异的测试必须做到「删掉判据仍绿」自检**：L3-B 的变异实测（删 MAX_ARTIFACT_BYTES 判断）比任何断言清单都更能证明测试真假，建议把「至少 2 条变异实测」写进 L3 模板的硬要求。
 5. **并行会话的「已提交但 CI 红的空桩」需要一个检测动作**：本波 `-D warnings` 全仓红出在他人已推送到 origin/main 的空桩文件（`team_history.rs`），我们只能登记外部阻塞。建议波次开始时跑一次 `RUSTFLAGS=-D warnings cargo check` 记录基线红/绿，避免把「本来就红」误判成自己引入。
+
+---
+
+# 元复盘 · PA-171 / wave-68（goal 续轮失败止损 / 限流冷却 / 失败轮归因）
+
+> 触发：TUI 会话 `pa_01a1ba70` 在 2026-11-09 10:29–10:30 连续 16 轮失败（429 配额 + 续轮不读成败）。
+> 团队：lead + protocol-agent + test-agent + executor-alpha + executor-beta；L3 审查按需挂载 6 个 Subagent。
+> 提交：红相 `e8c460ab` · 契约 `e1227763` · t-w2 `d04d543c` · t-w1+t-w3 `12a155b5` · a1 `414c276e`/`d8f08e8d` · a2 `f97b3fdb`。
+
+## 1. 通信拓扑与信噪比
+
+- **有效分工**：契约矩阵由 protocol-agent 单一持有（避免两套签名），红相测试由 test-agent 独占（Executor 只读），
+  两 Executor 写域正交（tui/control_plane/goal vs provider/retry/errors），全程零写域冲突。
+- **本轮最大噪声（已定位并修复）**：L3 第一轮三路审查**全部跑偏**——把 `.dev-team/review-l3a.json` 等**历史波次同名文件**
+  当成本波产物，审到了 wave-54/59 的 token-metrics / cli.rs；同时 `git diff <base>..HEAD` 因并行会话提交而混入他 lane 文件。
+  修复动作（当轮生效）：①审查产物一律 wave-scoped（`review-*-wave68-v*.json`）；②待审对象**物化**为
+  `/tmp/pa171-union.diff` 并要求"只审此文件"；③禁止审查员读历史 review JSON。第二轮起三路均命中正确对象，误审率归零。
+- **空转成本**：第一轮误审≈一轮全量审查的 token；另有一次 protocol-agent 因"过度侦察"超时未落盘，被迫二次派工。
+  教训：给 subagent 的产物路径**不得复用历史同名文件**，这是本轮最贵的一条。
+
+## 2. 门禁穿透与误杀率
+
+- **真实拦截**：L3/A+B+P 共抓 3 类真缺陷且都带可跑反例——①`errors.rs` auth 用裸 `contains` 扫全文，429 被写成
+  "凭据不可用"（文案真值契约的直接违反）；②续轮 `Err(_)` 臂把"收口失败"计成失败轮（可伪造"连续 2 轮失败"）；
+  ③冷却只覆盖 Decision、Followup 仍 20s+40s sleep。三类均为**冻结测试覆盖不到的语义面**，证明 L3 非形式。
+- **误杀**：L3-P 首轮把"新增 1 条 eprintln"按"应 0"报张力（实际落在 baseline 豁免配额 1/5），属口径不严；
+  处置为"豁免内不算违规、如实登记"，未为过门禁回退代码。
+- **门禁穿透（最严重）**：**Phase-1 方案对抗审查被跳过**（直接进红相+实施），收尾补跑才补出 BLOCKING
+  "租约是进程级单 bool、与文档声明的按会话不一致"。若按序执行，这一轮返工可省。
+- **机械门禁**：`dev-review-lint.py` 拒绝"自签 PASS"是关键——它逼出 `reviewed_commit/reviewer/attestation` 三件套，
+  使"谁审的、审哪个提交"可机器判定；`adr-verify` 拦下缺 `Status:` 的决策记录一次（当场补齐）。
+
+## 3. 分工契约与隔离有效性
+
+- **测试独立分权有效**：test-agent 把 C1–C5 转成可机判断言（loopback mock 物理计数 5 次 HTTP/7.95s），
+  Executor 全程未改 `tests/`；a1 对抗测试（3 例）先红后绿，红相 exit=101 有回执。
+- **共享工作区是最大结构约束**：与另一条 lane 并行提交同一分支 ⇒ ①`git add .` 会吞并他人改动，全程采用
+  **定向暂存 + hunk 级拼接**（README/BOARD 先还原 HEAD 版、只插入本卡行、暂存后再恢复工作区）；
+  ②`.dev-team/state.json` 被并发改写 ⇒ 本波账本单列 `state-wave68.json`（沿用 wave16/17/61 先例）；
+  ③ADR 编号撞车（对方先占 0102）⇒ 本卡改号 0103 并同步索引/任务卡/决策记录。
+- **契约演化有序**：协议 agent 出 `wave-68-a1`/`a2` 两次 amend（fallbackReason 值域、冷却键四段、NFR retry 分层化），
+  全部"矩阵先行 → 实施对齐"，无实现反向改写契约。
+
+## 4. 元协议迭代建议
+
+1. **审查对象物化 + 命名防撞**：L3 环节先 `git diff` 到固定文件再派审查员；`review-<wave>-<id>.json` 命名写进硬门禁。
+2. **Phase-1 不得后补**：`review-plan*.json` 的 `reviewed_commit` 必须早于首个实现提交（可用 `git merge-base` 机械判定）。
+3. **共享工作区协议**：多会话下 `state.json` 强制"每波一文件"，并写死"禁 `git add .`"；提交前审计加"文件归属 lane"校验。
+4. **ADR 发号**：并行会话争号已发生一次，建议由 Lead 统一发号或落预留号账本。
+5. **豁免配额机器化**：`eprintln` 配额、stub 纯度等"靠描述"的基准应改脚本统计（本轮 NFR note 与实际计数出现 1 行措辞张力）。

@@ -3,7 +3,7 @@
  "task": "PA-171",
  "theme": "TUI 连环错误根因修复（goal 续轮失败止损 / provider 限流冷却 / 失败轮归因）",
  "baseline_commit": "d9425a70",
- "status": "implemented-a1-closed-pending-final-reviews",
+ "status": "completed",
  "note": "共享 .dev-team/state.json 由他会话并发使用，本波次账本单列于本文件（沿用 wave16/17/61 先例），避免格式级整文件改写污染共享账本。",
  "contract_matrix": ".dev-team/contract-matrix-pa171.md",
  "nfr_baseline": ".dev-team/nfr-baseline-wave68.json",
@@ -130,7 +130,8 @@
   "adr_renumber": "1f5610d6",
   "t_w1_t_w3": "12a155b5",
   "a1_test": "414c276e",
-  "a1_fix": "d8f08e8d"
+  "a1_fix": "d8f08e8d",
+  "a2": "f97b3fdb"
  },
  "reviews": {
   "round1": "invalid（三个审查员越界审计 wave-54/59 主题；收据改名 review-l3{a,b,p}-round1-invalid.json）",
@@ -148,7 +149,33 @@
    "l3b": "round2 未回收（将重跑）"
   },
   "round3": {
-   "note": "只审 d8f08e8d delta（/tmp/pa171-a1.diff）：A/B/P 三路 + Phase1 计划对抗补齐"
+   "l3a": {
+    "artifact": ".dev-team/review-l3a-wave68-v3.json",
+    "verdict": "PASS",
+    "findings": "2 ADVISORY"
+   },
+   "l3b": {
+    "artifact": ".dev-team/review-l3b-wave68-v3.json",
+    "verdict": "PASS",
+    "findings": "2 ADVISORY"
+   },
+   "l3p": {
+    "artifact": ".dev-team/review-l3p-wave68-v3.json",
+    "verdict": "PASS",
+    "findings": "6 ADVISORY"
+   },
+   "plan_round1": {
+    "artifact": ".dev-team/review-plan-wave68.json",
+    "verdict": "FAIL",
+    "blocking": "lease 进程级单 bool 与文档按会话不一致"
+   },
+   "plan_round2": "Lead 定点复核（subagents 未产出收据）：tui.rs:8331-8372 分区租约 + Drop；tui.rs:8160-8180 可见上报 ⇒ BLOCKING 关闭（非独立审查）"
   }
+ },
+ "closure": {
+  "task_board": "4/4 completed",
+  "nfr_degraded": "none",
+  "workspace": "dirty by parallel lane (session/log_*), 本波次改动已定向提交",
+  "processes": "无残留后台进程"
  }
 }
