@@ -1,9 +1,17 @@
 # wave-p0-0107 交付说明（ADR 0107 P0 止血 · P0.1 整改版）
 
 分支 `wave/p0-0107-log-first`（worktree `/home/dm/pony-agent-worktrees/wave-p0-0107`，基线 `c4a5bd81`）
-提交链：`6946b8cd`（红相）→ `4604fa77`（v1，**已作废**）→ `5da43513`/`6941882f`（整改契约）→ `929eafef`（P0.1）
+提交链：`6946b8cd`（红相）→ `4604fa77`（v1，**已作废**）→ `5da43513`/`6941882f`（整改契约 v2）→ `929eafef`（P0.1，二次复核判 FAIL）→ `c81f8607`（P0.2）
 
-> ⚠️ v1 被 L3 反审判 FAIL（stale-epoch 被吞成 `LogPersisted`、漏跑 `--lib` 2 条断言红、降级实例长期持 flock 饿死主实例、dry-run 零写入失效、零字节批判错）。本文件描述的是 **P0.1 整改后**的状态。
+> ⚠️ v1 被 L3 反审判 FAIL；P0.1 被二次复核再判 FAIL（p0 测试因 `storage_read_only()` 落在 private `mod commit` 而**根本不编译**、stale-epoch 命令在校验前已写进真源）。本文件描述的是 **P0.2 之后**的状态。
+
+## 零、P0.2 追加修复
+
+| 问题 | 修复 | 凭证 |
+|---|---|---|
+| 验收测试编译失败（2×E0599） | `storage_read_only()` 迁到 `sqlite_session.rs` 公开 `impl SqliteSessionBackend`；`commit` 模块不再定义同名方法 | `--no-run` exit 0；p0 套件 8/8 |
+| 被拒命令污染真源 | 写日志**前** `commit::precheck_stale_epoch` 预检（`epoch < current ⇒ StaleEpoch`、不写日志）+ 事务内校验双检（竞态由后者兜底） | 新用例 `c8_stale_epoch_batch_never_reaches_the_session_log`（日志字节 before==after、无被拒消息） |
+| R3 已知代价（量化） | 降级实例每批重开 writer 会 `scan_committed_tail` 全扫：10MB ≈ 16.8ms、线性 ⇒ 100MB ≈ 168ms/批 | 二次复核实测；P1 改为内存持有 next_seq + 空闲超时释放 |
 
 ## 一、行为契约（P0 目标）
 
