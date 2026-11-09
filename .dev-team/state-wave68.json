@@ -170,12 +170,25 @@
     "blocking": "lease 进程级单 bool 与文档按会话不一致"
    },
    "plan_round2": "Lead 定点复核（subagents 未产出收据）：tui.rs:8331-8372 分区租约 + Drop；tui.rs:8160-8180 可见上报 ⇒ BLOCKING 关闭（非独立审查）"
+  },
+  "plan_round2": {
+   "artifact": ".dev-team/review-plan-wave68-v2.json",
+   "verdict": "PASS",
+   "findings": "8 ADVISORY",
+   "note": "独立 Subagent 收据，BLOCKING 已关闭"
   }
  },
  "closure": {
   "task_board": "4/4 completed",
   "nfr_degraded": "none",
   "workspace": "dirty by parallel lane (session/log_*), 本波次改动已定向提交",
-  "processes": "无残留后台进程"
- }
+  "processes": "无残留后台进程",
+  "observability": "audit-diff --decl-approved Exit 0（D1 声明变更已显式批准）；check-declaration PASS",
+  "queue": "dev-queue.py enqueue OK（pending）"
+ },
+ "contract_amendments": [
+  "wave-68-a1",
+  "wave-68-a2",
+  "wave-68-a3"
+ ]
 }

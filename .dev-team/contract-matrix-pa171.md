@@ -15,6 +15,13 @@ Amendment: wave-68-a2（2026-11-09，Phase-1 计划审查整改）
 > - **a2-3** §4.2 / C4-S5：明确 `fallbackReason` 属**既有字段语义变更（向后兼容但非 additive，`None` → 三字面量）**，C4 不再套用「additive only」；并补优先级真值表示例 E1–E5（含附件保存失败走默认值的例外）。
 > - **a2-4** §2.2 / C1-S3 + 新增 C1-S5：`GoalRoundStopReason` 实际六变体，补 `TurnSuspended` / `TurnUnclassified` 的逐字文案与触发映射（含 **`Ok(Cancelled) = Cancelled`**、`Err(_) ⇒ TurnUnclassified`，不计失败不烧预算）；另加 C1-T3′ 要求**每个非成功 `break` 都带可见原因**。
 
+Amendment: wave-68-a3（2026-11-09，方案复审 round2 整改 · 契约/NFR 与实现对齐）
+
+> - **a3-1** §2.3 / C1-T2 改写为实现真值：租约是 **`Arc<Mutex<HashSet<String>>>` 按 `session_id` 分区**（`tui.rs:8331`、`8339-8345`、`8362-8369`），未抢到时**可见上报** `LoopAlreadyOwned`（`tui.rs:8164-8179`、`:8170-8177`），不再写「`Arc<AtomicBool>` + 静默 return」。
+> - **a3-2** `nfr-baseline-wave68.json` → `wave68_locks.goal_round_loop_lease` 与 a3-1 同构改写（另补 `critical_section` / `forbidden_under_lock` / `poison_recovery` / `no_await_across_lock`）。
+> - **a3-3** `LoopAlreadyOwned` 登记：§2.2 C1-S3 增第七行（逐字文案取 `goal.rs:470-472`）+ NFR `visible_stop_reason_variants` 增该项。
+> - **a3-4** 租约**零机械测试锚**如实登记为遗留缺口（`tests/` 全目录 grep 0 命中），不伪称已有锚点。
+
 > **批准声明（Protocol Agent, 2026-11-09）**：本矩阵**批准** Test Agent 已冻结并锚定的红相面
 > （`crates/pony-agent-core/tests/pa171_goal_round_failure_contract.rs`、
 > `pa171_provider_rate_limit_cooldown_contract.rs`、
@@ -112,7 +119,7 @@ impl GoalRoundStopReason {
   红相 `:154-162` 断言 `failures: 7`）。
 - **C1-S2 阈值来源**：`consecutive_failures >= MAX_CONSECUTIVE_GOAL_ROUND_FAILURES`（`=2`）。
   阈值只允许该常量表达，禁止散落字面量 `2`（红相 `:117-123` 锁常量值）。
-- **C1-S3 `visible_line()` 逐字冻结（wave-68-a2：由三条扩为**六条**，覆盖枚举全部变体；红相只锁
+- **C1-S3 `visible_line()` 逐字冻结（wave-68-a3：由六条扩为**七条**，覆盖枚举全部变体；红相只锁
   `已停止`/原因词/不含 `进行中`/含轮次用量，实现必须逐字取值以消除歧义）**：
   | 变体 | `visible_line()` | 变体性质 |
   |---|---|---|
@@ -122,7 +129,9 @@ impl GoalRoundStopReason {
   | `AutoContinueBudget` | `goal 续轮已停止（自动续轮次数用尽）` | additive（C1-S4） |
   | `TurnSuspended` | `goal 续轮已停止（本轮挂起：等待用户作答/审批）` | additive（C1-S5） |
   | `TurnUnclassified` | `goal 续轮已停止（本轮无可用终态，已暂停自动续轮）` | additive（C1-S5） |
-  实现取证（wave-68-a2 实测）：`crates/pony-agent-core/src/agent/goal.rs:450-468`。
+  | `LoopAlreadyOwned` | `goal 续轮已停止（本会话已有续轮循环在运行，本线程让位）` | additive（C1-T2 租约未抢到） |
+  实现取证（wave-68-a3 实测）：`crates/pony-agent-core/src/agent/goal.rs:453-473`（`visible_line` 全文）、
+  `:445`（`LoopAlreadyOwned` 变体定义）。
 - **C1-S4（additive 变体）**：为保持 F1 的「8 轮自动续轮预算」（`should_abort_goal_rounds`）**既有语义
   不变**，`GoalRoundStopReason` 追加第四个变体 `AutoContinueBudget`。该变体**不由**
   `goal_round_stop_reason` 产出（其入参不含自动续轮计数），由 TUI 侧在
@@ -167,11 +176,21 @@ impl GoalRoundStopReason {
   （`tui.rs:9783-9789`）。`Failed / Cancelled / Suspended / Unknown` 一律不续轮
   （`[DERIVED]`：这是把「一次 429 收敛为一次可见失败」的唯一可靠层；否决该项时 C1 的
   循环内连续失败止损（§2.2 C1-S2）仍满足红相，不影响验收 3）。
-- **C1-T2 单循环所有权**：`run_goal_rounds` 入口以 `Arc<AtomicBool>` 的
-  `compare_exchange(false, true, SeqCst, SeqCst)` 抢租约，抢不到即直接 `return`（并落
-  `warn` 结构化日志 `goal_rounds_loop_already_owned`），保证同一时刻只有一个续轮循环
-  （消除 F14 的 2×8 叠加）。租约随 RAII guard `Drop` 释放；flag 在 `tui_event_loop`
-  （`tui.rs:8181-8193` 附近，与 `goal_round_cancel` 同级）创建并传入轮次线程。
+- **C1-T2 单循环所有权（wave-68-a3：按实现真值改写）**：`run_goal_rounds` 入口以
+  **`type GoalRoundLoopLeaseRegistry = Arc<std::sync::Mutex<std::collections::HashSet<String>>>`**
+  按 **`session_id` 分区**抢租约（`tui.rs:8331`）：`try_acquire` 在锁内 `insert(session_id)`
+  （`tui.rs:8339-8345`）；返回 `None`（该会话已有循环）时**不得静默 return**——必须以
+  `GoalRoundStopReason::LoopAlreadyOwned` 走 `report_goal_rounds_stopped` **可见上报**后返回
+  （`tui.rs:8164-8179`，报告点 `:8170-8177`），并落 `warn` 结构化日志
+  `goal_rounds_loop_already_owned`（`tui.rs:8352-8357`）。租约由 RAII `Drop`
+  `remove(&session_id)` 释放（`tui.rs:8362-8369`，覆盖正常返回 / panic 展开 / 提前 return 三条路径）。
+  按会话分区的理由（`[DERIVED]`，与 NFR `concurrency_lock` 及 ADR 0103 同源）：同会话只允许一个
+  续轮循环（消除 F14 的 2×8 叠加），而切换会话后另一会话的续轮不被本会话卡住。
+  **既有调用点**：registry 在 `tui_event_loop` 内创建（与 `goal_round_cancel` 同级），唯一传入点
+  `tui.rs:8164`。**测试锚现状（如实登记，不伪称已有）**：该租约当前**零机械测试锚**——
+  `crates/pony-agent-core/tests/` 全目录 grep `GoalRoundLoopLease` / `try_acquire` /
+  `LoopAlreadyOwned` / `loop_already_owned` 均 **0 命中**（wave-68-a3 实测），
+  属**遗留缺口**、只能靠代码评审覆盖（本卡不新增测试，后续波次可补直接单测）。
 - **C1-T3 循环体（冻结伪代码）**：
   ```rust,ignore
   let mut consecutive: u32 = 0;        // 既有 8 轮自动续轮预算（语义不变）

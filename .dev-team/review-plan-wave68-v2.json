@@ -1,0 +1,120 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "5f7392e7-cafe-4836-a937-7d82332ad0d7",
+    "fresh_context": true
+  },
+  "executed_by": "5f7392e7-cafe-4836-a937-7d82332ad0d7",
+  "reviewed_commit": "d8f08e8d",
+  "reviewed_delta": "d8f08e8d..f97b3fdb（本轮修复提交 f97b3fdb「fix(wave-68-a2): 续轮租约按会话分区 + 抢租失败可见」；本文件所有 path:line 均按 f97b3fdb 工作树取值）",
+  "attestation": {
+    "self_signed": false,
+    "independent_of_executor": true
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/agent/goal.rs",
+    ".dev-team/contract-matrix-pa171.md",
+    ".dev-team/nfr-baseline-wave68.json",
+    "crates/pony-agent-core/tests/"
+  ],
+  "blocking_status": {
+    "id": "wave68-round1-BLOCKING-lease-scope",
+    "closed": true,
+    "why": "租约注册表已按 session_id 分区（tui.rs:8331 type / :8339-8361 insert by key / :8362-8369 Drop remove by key），抢租失败不再静默（tui.rs:8164-8178 → report_goal_rounds_stopped → GoalRoundsStopped + info 日志 + warn 日志）。同会话单循环未退化：轮次线程在 spawn 时取 turn_input.session_id（tui.rs:10070-10073），同会话两次提交 ⇒ 同一 key ⇒ 第二个循环仍让位；跨会话 key 不同 ⇒ A 持租不阻塞 B。"
+  },
+  "verification": [
+    {
+      "req": "1 按会话互斥 + 同会话仍单循环",
+      "result": "PASS",
+      "evidence": "crates/pony-agent-core/src/bin/tui.rs:8331（Arc<Mutex<HashSet<String>>>）、:8339-8345（键=session_id 的 insert，插入失败即未获得）、:8474-8475（注册表在 tui_event_loop 单实例创建，与 goal_round_cancel 同级）、:10032（每轮次线程 Arc::clone 同一注册表）、:10051-10054（key = build_turn_input 的 session_id，tui.rs:3320 恒为 Some(state.session_id)）；同会话双线程 key 恒等 ⇒ 16=2×8 根治面不退化"
+    },
+    {
+      "req": "2 Drop 全路径释放 / 无残留",
+      "result": "PASS",
+      "evidence": "crates/pony-agent-core/src/bin/tui.rs:8164（let Some(_lease) … else ⇒ 具名绑定活到函数作用域末尾，非 `_` 立即析构）、:8178（提前 return 也先析构）、:8362-8369（Drop 按 key remove）；panic 展开走轮次线程 catch_unwind（tui.rs:10043）之前的正常 unwind ⇒ Drop 必执行。作用域仅覆盖 run_goal_rounds（首轮不持租）。无 mem::forget / Box::leak / 移动进长生命周期容器。"
+    },
+    {
+      "req": "3 抢租失败可见 + NFR 字段",
+      "result": "PASS",
+      "evidence": "状态行 + 消息区：tui.rs:8170-8177 → :8392-8395（UiEvent::GoalRoundsStopped）→ :10663-10672（status_text + System 消息）；结构化日志：:8444-8455（goal_rounds_stopped: trace_id/session_id/reason/consecutive_failures/rounds_started/max_rounds，与 nfr-baseline-wave68.json:wave68_logging_events[goal_rounds_stopped] 逐字一致）+ :8351-8357（goal_rounds_loop_already_owned: trace_id/session_id，与 wave68_logging_events[3] 一致）；trace_id 键由 otel/log.rs:123-131 保证存在"
+    },
+    {
+      "req": "4 无新死锁 / 不误清他人租约",
+      "result": "PASS",
+      "evidence": "注册表 Mutex 只在 tui.rs:8340-8344 与 :8363-8368 两块临界区内持锁（仅 HashSet insert/remove），出块即释放，其后才调 log/active_goal_for_session（goal.rs:297-307 的 goal_store 全局锁）⇒ 无 registry→goal_store/otel 的锁序嵌套、无 await/阻塞调用在锁内。reset_session_scope（tui.rs:1606-1659）不触碰租约（租约不是 TuiState 字段，只是 tui_event_loop 栈局部），会话切换无法清他人 key；全仓 goal_round_loop_lease 仅出现于 tui.rs:8474/10032。"
+    },
+    {
+      "req": "5 上轮 5 条 ADVISORY 复核",
+      "result": "3 条完整成立（matrix C1-T2 / GoalRoundOutcome 过度设计 / 测试覆盖缺口）、1 条收窄为残留（C1-T3 冻结伪代码仍裸 break）、1 条关闭（NFR retry 自相矛盾 + 60s/四段键未登记 ⇒ a2 已分层化并新增 wave68_constants）"
+    }
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-pa171.md",
+      "line": 170,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "note": "上轮 ADVISORY #1 仍成立并反向加重：C1-T2 仍按进程级声明「`Arc<AtomicBool>` 的 compare_exchange(false,true,SeqCst,SeqCst) 抢租约，抢不到即直接 return（仅落 warn 日志）」，而实现已是按 session_id 分区的 Mutex<HashSet<String>>（tui.rs:8331）且抢不到改为可见上报（tui.rs:8164-8178）。⇒ 本轮 BLOCKING 的「按会话」口径未进矩阵；同时 C1-T2 仍写「直接 return」，与同矩阵 G7（:70「任何新增停止路径都必须产出可见状态行 + 结构化日志」）继续自相矛盾。后续波次按矩阵复核会把已修实现判成漂移。",
+      "counterexample_cmd": "grep -n 'Arc<AtomicBool>' .dev-team/contract-matrix-pa171.md && sed -n '170,175p' .dev-team/contract-matrix-pa171.md && sed -n '8331p;8164,8178p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "file": ".dev-team/nfr-baseline-wave68.json",
+      "line": 59,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "note": "wave68_locks.goal_round_loop_lease.kind 仍为「Arc<AtomicBool> compare_exchange(SeqCst) + RAII drop」，未反映 Mutex<HashSet<String>> 按会话注册表；同条目也缺 critical_section / forbidden_under_lock / poison_recovery / no_await_across_lock 四字段（对照同文件 provider_cooldown_registry 的完整声明）。审计机只读 NFR 无法复核「按会话互斥 + 锁内无阻塞」，且与代码相反——这正是上一轮 BLOCKING 的声明面。",
+      "counterexample_cmd": "python3 -c \"import json;d=json.load(open('.dev-team/nfr-baseline-wave68.json'));print(json.dumps(d['wave68_locks']['goal_round_loop_lease'],ensure_ascii=False))\""
+    },
+    {
+      "file": ".dev-team/nfr-baseline-wave68.json",
+      "line": 139,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "note": "新增第 7 变体及其可见文案未入封闭清单：NFR goal_round_failure_stop.visible_stop_reason_variants 仍 6 项（:139-146）、矩阵 C1-S3 逐字冻结表仍「六条」（:115-124），而代码已有 LoopAlreadyOwned（goal.rs:443-445、:470-472）。NFR wave68_constants.single_source_note 自declared「矩阵 / NFR / 代码三处同源，改任一常量必须三处同改」⇒ 本次新增用户可见停止原因落在可审计封闭值域之外（与上轮 A3 同类）。",
+      "counterexample_cmd": "python3 -c \"import json;d=json.load(open('.dev-team/nfr-baseline-wave68.json'));print(d['goal_round_failure_stop']['visible_stop_reason_variants'])\" ; grep -c 'LoopAlreadyOwned' .dev-team/contract-matrix-pa171.md .dev-team/nfr-baseline-wave68.json || echo 'docs: 0 hits (variant unregistered)'"
+    },
+    {
+      "file": ".dev-team/contract-matrix-pa171.md",
+      "line": 206,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "note": "上轮 ADVISORY #3 收窄后的残留：C1-T3「冻结伪代码」:204-207 仍是 `Ok(Cancelled)|Ok(Suspended)|Ok(Unknown) => break` 与 `Err(_) => break`（无任何上报），与同节新增的 C1-T3′（:213+「上述循环体内全部非成功出口都不得裸 break」）直接冲突；a2 补了 C1-T3′ 却没同步伪代码。实现按 C1-T3′（tui.rs:8285-8312），故只是文本面，但「冻结面」自相矛盾会让后续以伪代码为准的复核误判。",
+      "counterexample_cmd": "sed -n '203,208p' .dev-team/contract-matrix-pa171.md && sed -n '8285,8312p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8324,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "note": "同函数内文档与实现自相矛盾：:8324 仍写「单循环租约（`Arc<AtomicBool>` 的 compare-exchange）」，:8162-8163 仍写「抢不到租约 ⇒ 另一个轮次线程正在推进 goal 轮，本线程直接返回」，而 :8331/:8164-8178 已是 HashSet 键控 + 可见上报。新读者按注释会误判为进程级布尔租约（即上一轮 BLOCKING 的形态）。",
+      "counterexample_cmd": "sed -n '8324p;8162,8164p;8331p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 10663,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "note": "跨会话串台（pre-existing，本轮新增的 LoopAlreadyOwned 上报多开一条可达面）：UiEvent::GoalRoundsStopped 只带 reason/status_line（:278-282），handler 无条件写 state.status_text、向当前会话 state.messages 追加 System 消息、并用 state.session_id 刷新 goal 投影。改为按会话租约后，A 会话的续轮循环可与 B 会话并行；用户在 B 时 A 的循环停轮，其「goal 续轮已停止…」文案会落进 B 的对话与状态行（且 goal 投影按 B 重取）。建议事件带 session_id、不匹配时只记日志不渲染。",
+      "counterexample_cmd": "sed -n '10663,10680p' crates/pony-agent-core/src/bin/tui.rs && sed -n '276,284p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/pa171_goal_round_failure_contract.rs",
+      "line": 1,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "note": "上轮 ADVISORY #5 仍成立：本轮修复的三条承诺（A 持租不阻塞 B / 同会话仍严格单循环 / Drop 按 key 释放且 panic 亦释放）零机械锚点。租约类型非 pub（tui.rs:8331/8333/8339），bin 内无任何 `#[test]`（tui.rs `#[test]` 计数=0），tests/ 下 `LoopAlreadyOwned`/`HashSet<String>` 零命中；`cargo test --test pa171_goal_round_failure_contract` 7 例全绿但均不触及租约。⇒ 若后续有人把键改回全局常量或删掉 report，CI 不会红（违反「机械可查的承诺配一条非零退出命令」）。",
+      "counterexample_cmd": "grep -c '#\\[test\\]' crates/pony-agent-core/src/bin/tui.rs ; grep -rn 'LoopAlreadyOwned\\|HashSet<String>' crates/pony-agent-core/tests/ | wc -l"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/goal.rs",
+      "line": 508,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "note": "上轮 ADVISORY #2 仍成立（过度设计）：GoalRoundOutcome（:410）+ advance_goal_round_for_outcome（:508）在生产侧仍只有一个调用点且恒传 Succeeded（tui.rs:8246），Failed 分支零调用 ⇒ 运行语义等价于「成功臂调既有 advance_goal_round、其余不调」。删两符号可直接削减公共面；当前无功能风险故仅 ADVISORY。",
+      "counterexample_cmd": "grep -n 'advance_goal_round_for_outcome\\|GoalRoundOutcome::' crates/pony-agent-core/src/bin/tui.rs"
+    }
+  ]
+}

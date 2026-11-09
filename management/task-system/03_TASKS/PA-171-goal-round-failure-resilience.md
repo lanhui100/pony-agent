@@ -120,7 +120,9 @@ PY
 11. 租约与 `start_turn_stream_checked` 五臂归约缺可执行用例（`--list` 0 命中；L3-A v3 建议下波补锚点）。
 12. `GoalRoundLoopLease` 的类型 doc 首句仍写「`Arc<AtomicBool>` 的 compare-exchange」（a2 已改为
     `HashSet<String>` 按会话分区）——注释陈旧，非语义问题，随下波一并校正。
-13. a2 的计划复审（`review-plan-wave68-v2.json`）由 Lead 定点复核替代（Subagent 未产出）：
+13. `UiEvent::GoalRoundsStopped` 只带 reason/status_line，**不带 session_id**：按会话分区后，
+    非当前会话的停轮上报可能落进当前会话消息区（pre-existing 面，本轮因"跨会话互不阻塞"而多一条可达路径）。
+14. a2 的计划复审（`review-plan-wave68-v2.json`）由 Lead 定点复核替代（Subagent 未产出）：
     证据 = `tui.rs:8331-8372`（分区租约 + Drop 释放）、`tui.rs:8160-8180`（抢不到即可见上报）；
     **如实登记为 Lead 复核，非独立审查收据**。
 

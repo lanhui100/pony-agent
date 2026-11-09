@@ -57,9 +57,17 @@
       "no_await_across_lock": true
     },
     "goal_round_loop_lease": {
-      "kind": "Arc<AtomicBool> compare_exchange(SeqCst) + RAII drop",
-      "purpose": "同一会话同一时刻只允许一个 goal 续轮循环（消除 2×8 叠加）",
-      "evidence": "crates/pony-agent-core/src/bin/tui.rs:9756-9790（每用户提交起一个轮次线程）"
+      "kind": "Arc<std::sync::Mutex<std::collections::HashSet<String>>>（按 session_id 分区）",
+      "type_alias": "type GoalRoundLoopLeaseRegistry = Arc<std::sync::Mutex<HashSet<String>>>",
+      "purpose": "同一会话同一时刻只允许一个 goal 续轮循环（消除 2×8=16 叠加），跨会话互不阻塞",
+      "critical_section": "仅 HashSet::insert（抢租约）/ HashSet::remove（RAII Drop 释放）两个内存操作",
+      "forbidden_under_lock": ["http_request", "block_on", "sleep", "channel_send_blocking", "turn_execution"],
+      "poison_recovery": "lock().unwrap_or_else(|e| e.into_inner())",
+      "no_await_across_lock": true,
+      "not_acquired_behavior": "可见上报 GoalRoundStopReason::LoopAlreadyOwned（不得静默 return）+ warn 结构化日志 goal_rounds_loop_already_owned",
+      "evidence": "crates/pony-agent-core/src/bin/tui.rs:8331（类型）、:8339-8345（try_acquire 抢租约）、:8362-8369（Drop 释放）、:8164-8179（未抢到的可见上报）、:8352-8357（结构化日志）",
+      "testing_anchor": "none（遗留缺口：tests/ 全目录 grep GoalRoundLoopLease/try_acquire/LoopAlreadyOwned/loop_already_owned 均 0 命中，wave-68-a3 实测；只能靠代码评审覆盖，不伪称已有锚点）",
+      "adr": "ADR 0103（按会话互斥）"
     },
     "goal_store": {
       "kind": "进程级 Mutex（既有，不变）",
@@ -142,7 +150,8 @@
       "BudgetExhausted",
       "AutoContinueBudget",
       "TurnSuspended",
-      "TurnUnclassified"
+      "TurnUnclassified",
+      "LoopAlreadyOwned"
     ]
   },
   "wave68_constants": {
