@@ -333,11 +333,20 @@ pub trait SessionBackend: Send + Sync {
         SeparateTraceTableMode::Off
     }
 
-    /// ADR 0099 阶段 0（E5）：后端是否处于**降级只读**（例如抢不到 `sessions.db.lock`）。
+    /// ADR 0099 阶段 0（E5）→ ADR 0107 §5 P1：后端是否只读。
     ///
-    /// 默认 `false`。宿主据此关闭同一库上的**旁路写连接**（`pending_asks` 等）——否则
-    /// 「第二实例只读、库文件零写入」会被第二条连接击穿，单实例锁形同虚设。
+    /// P1 起「抢不到库级锁 ⇒ 整库降级只读」已取消，本方法等价于
+    /// [`Self::storage_read_only`]（仅维护/诊断句柄为 `true`）；保留它是因为既有调用点
+    /// 语义就是「这次写入是否会被拒绝」。
     fn is_read_only(&self) -> bool {
+        self.storage_read_only()
+    }
+
+    /// ADR 0107 §5 P1：后端是否为**维护/诊断只读句柄**（`mode=ro` + `query_only`）。
+    ///
+    /// 默认 `false`。宿主据此关闭同一库上的**旁路写连接**（`pending_asks` 等）——维护
+    /// 句柄必须保持「库文件零写入」。日常实例不再进入该状态（不再有锁降级）。
+    fn storage_read_only(&self) -> bool {
         false
     }
 

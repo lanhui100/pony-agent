@@ -638,16 +638,43 @@ impl SqliteSessionBackend {
 
     /// One-time migration from the legacy JSON file to SQLite.
     /// Runs automatically when the SQLite DB is empty and a JSON file exists.
+    /// 旧 JSON → SQLite 一次性迁移。
+    ///
+    /// ADR 0107 §5 P1（契约 R-A）：去掉库级全局锁后，**多个进程可能同时冷启**，
+    /// 而旧实现是「先 `SELECT COUNT(*)` 再整库写入」的 TOCTOU：
+    /// 二次迁移会把并发进程刚写的数据覆盖回 legacy 快照（实测可丢 `workspaces`）。
+    ///
+    /// 现改为**单事务内的幂等迁移**：
+    /// 1. `BEGIN IMMEDIATE` 先拿写锁（多进程只有一个能进来，其余等 `busy_timeout`）；
+    /// 2. 事务内检查 `store_metadata['legacy_json.migrated']` 完成标记；
+    /// 3. 未迁移且索引为空 ⇒ 在同一事务内整库写入 + 写完成标记 + 提交（原子）。
+    ///
+    /// 标记存在即跳过：即使 legacy 文件还在，也不会二次覆盖已有数据。
     fn migrate_from_json(&self, conn: &Connection) -> Result<(), String> {
+        const MIGRATION_MARKER: &str = "legacy_json.migrated";
         let Some(json_path) = &self.legacy_json_path else {
             return Ok(());
         };
 
-        // Check if DB already has data
-        let session_count: i64 = conn
+        // 快路径：标记已存在 ⇒ 无需事务（避免每次启动都抢写锁）。
+        if Self::legacy_migration_done(conn, MIGRATION_MARKER) {
+            return Ok(());
+        }
+
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("begin tx: {e}"))?;
+        // 事务内二次确认（另一个进程可能刚迁移完并提交）。
+        if Self::legacy_migration_done(&tx, MIGRATION_MARKER) {
+            return Ok(());
+        }
+        let session_count: i64 = tx
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .unwrap_or(0);
         if session_count > 0 {
+            // 索引已有数据但无标记（历史库）：补标记，避免以后重复迁移。
+            Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
             return Ok(());
         }
 
@@ -658,16 +685,42 @@ impl SqliteSessionBackend {
 
         let legacy = FileSessionBackend::new(json_path.clone());
         let Some(store) = legacy.load_store() else {
+            Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
+            tx.commit().map_err(|e| format!("commit: {e}"))?;
             return Ok(());
         };
 
-        self.write_full_store(conn, &store)?;
+        // ADR 0099 阶段 0：落盘主体迁至 `sqlite_session_commit.rs`；
+        // 本入口保持 `save_store` 的**无版本守门**旧语义（空墓碑集 = 不跳过任何会话）。
+        self.write_store_tx(&tx, &store, &std::collections::HashSet::new())?;
+        Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
+        tx.commit().map_err(|e| format!("commit: {e}"))?;
 
         eprintln!(
             "[pony-agent][session] migration complete: {} sessions",
             store.sessions.len()
         );
         Ok(())
+    }
+
+    /// 旧 JSON 迁移完成标记是否已存在。
+    fn legacy_migration_done(conn: &Connection, marker: &str) -> bool {
+        conn.query_row(
+            "SELECT value FROM store_metadata WHERE key = ?1",
+            [marker],
+            |row| row.get::<_, String>(0),
+        )
+        .is_ok()
+    }
+
+    /// 写入迁移完成标记（幂等）。
+    fn mark_legacy_migrated(conn: &Connection, marker: &str) -> Result<(), String> {
+        conn.execute(
+            "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
+            rusqlite::params![marker, "1"],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("write migration marker: {e}"))
     }
 
     fn write_full_store(&self, conn: &Connection, store: &PersistedStore) -> Result<(), String> {

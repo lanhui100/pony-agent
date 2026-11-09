@@ -218,12 +218,12 @@ impl SessionStore {
             SeparateTraceTableMode::WriteSeparate,
         ));
         let mut store = Self::with_backend(backend);
-        // ADR 0099 阶段 0（E5 / BLOCKING-5）：降级只读实例**不得**在同一个库上再开第二条
-        // 写连接（`open_ask_store` 会建表/写 `pending_asks`，直接击穿「第二实例只读、
-        // 库文件零写入」），退化为内存 dispatcher 镜像。
-        if store.backend.is_read_only() {
+        // ADR 0099 阶段 0（E5 / BLOCKING-5）→ ADR 0107 §5 P1：判据由「抢不到库级锁的
+        // 降级实例」收窄为**真正的维护/诊断只读句柄**（`storage_read_only`）。日常实例
+        // 不再降级，`open_ask_store` 照常开第二条写连接（WAL + busy_timeout 串行化）。
+        if store.backend.storage_read_only() {
             eprintln!(
-                "[pony-agent][session] single_instance_lock_denied：{} 降级只读，跳过 ask store（避免旁路连接击穿单实例锁）",
+                "[pony-agent][session] storage_read_only：{} 为维护/诊断只读句柄，跳过 ask store（库文件零写入）",
                 sqlite_path.display()
             );
             return store;

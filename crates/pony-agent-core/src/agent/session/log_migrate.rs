@@ -281,6 +281,16 @@ pub fn migrate_grandfathered_sessions(
     backend: &SqliteSessionBackend,
     options: MigrateOptions,
 ) -> Result<MigrateReport, String> {
+    // ADR 0107 §5 P1：破坏性维护（非 dry-run）必须独占 `<db>.lock`；抢不到 ⇒ 明确失败。
+    // dry-run 零写入、不需要锁（也绝不能因为别的进程在做维护就被拒）。
+    let _maintenance_guard = if options.dry_run {
+        None
+    } else {
+        Some(
+            crate::agent::sqlite_session::commit::acquire_maintenance_lock(backend.db_path())
+                .map_err(|busy| busy.to_string())?,
+        )
+    };
     // 源状态取**运行时读路径**（`load_store`）：对 grandfather 会话它等于 blob 状态
     // （没有日志可合并）；对已有日志的会话我们本来就会跳过。
     // 刻意**不**用 `load_index_store`：那是「索引原样视图」的诊断口径，`session_read_from_log`

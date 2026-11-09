@@ -74,7 +74,7 @@ impl Fixture {
         })
     }
 
-    /// 单实例锁文件路径（`<db>.lock`，见 `sqlite_session_commit::acquire_single_instance_lock`）。
+    /// 库级锁文件路径（`<db>.lock`；ADR 0107 §5 P1 后只服务维护锁）。
     fn lock_path(&self) -> PathBuf {
         PathBuf::from(format!("{}.lock", self.db().display()))
     }

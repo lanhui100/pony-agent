@@ -703,7 +703,7 @@ fn try_lock_exclusive(file: &std::fs::File) -> bool {
     let error = std::io::Error::last_os_error();
     if !matches!(error.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK) {
         eprintln!(
-            "[pony-agent][session] single_instance_lock_error：flock 异常，按抢不到处理并降级只读：{error}"
+            "[pony-agent][session] maintenance_lock_error：flock 异常，按抢不到处理并拒绝维护：{error}"
         );
     }
     false
@@ -728,7 +728,7 @@ fn try_lock_exclusive(file: &std::fs::File) -> bool {
     let error = std::io::Error::last_os_error();
     if error.raw_os_error() != Some(ERROR_LOCK_VIOLATION as i32) {
         eprintln!(
-            "[pony-agent][session] single_instance_lock_error：LockFileEx 异常，按抢不到处理并降级只读：{error}"
+            "[pony-agent][session] maintenance_lock_error：LockFileEx 异常，按抢不到处理并拒绝维护：{error}"
         );
     }
     false
@@ -757,24 +757,18 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 ///   写任何字节，调用方**不得**把随之而来的索引失败判成 `LogPersisted`（R5）；
 /// - **维护句柄**（`new_read_only`：`--dry-run` / 诊断 / 测试夹具，E8 零写入）⇒ `Ok(false)`
 ///   且连日志都不写（R4）；
-/// - **锁降级实例**（抢不到 `sessions.db.lock`，`is_read_only() && !storage_read_only()`）
-///   同样写日志（ADR 0107 §5 P0 日志先行），但 writer 按批开/放（R3）——不长期持有 flock。
+/// - ADR 0107 §5 P1：**不存在**「锁降级实例」这一状态（日常实例恒可写），故这里只保留
+///   长命 writer 缓存（[`SessionLogSink::append_commands`]）；「按批释放 flock」的
+///   `append_commands_releasing` 退化为仅测试用的原语。
 pub(crate) fn append_session_log_to_file(
     backend: &super::SqliteSessionBackend,
     commands: &[crate::agent::session::PersistCommand],
 ) -> Result<(bool, Vec<(String, u64)>, Vec<(String, u64)>), String> {
-    use crate::agent::session::SessionBackend;
     // R4 / E8：维护句柄零写入（连日志也不写——否则 `--dry-run` 会产出 session.jsonl）。
     if backend.storage_read_only {
         return Ok((false, Vec::new(), Vec::new()));
     }
-    // R3：锁降级实例按批开/放 writer（append 完立刻 drop ⇒ 释放 flock），
-    // 否则主可写实例写同一会话会被挡成 `Locked`（可写实例零回归被破坏）。
-    let receipt = if backend.is_read_only() {
-        backend.session_log_sink.append_commands_releasing(commands)?
-    } else {
-        backend.session_log_sink.append_commands(commands)?
-    };
+    let receipt = backend.session_log_sink.append_commands(commands)?;
     Ok((receipt.written, receipt.restored, receipt.post_append_len))
 }
 
@@ -1385,6 +1379,14 @@ impl SqliteSessionBackend {
     }
 
     fn backfill_orphans(&self, dry_run: bool) -> Result<BackfillReport, String> {
+        // ADR 0107 §5 P1：全库回填属于破坏性维护，非 dry-run 必须独占 `<db>.lock`。
+        let _maintenance_guard = if dry_run {
+            None
+        } else {
+            Some(
+                acquire_maintenance_lock(self.db_path()).map_err(|busy| busy.to_string())?,
+            )
+        };
         let slot = self.connection()?;
         let conn = slot
             .as_ref()
