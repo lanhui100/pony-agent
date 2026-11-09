@@ -1007,6 +1007,7 @@ fn finish_writer(path: &Path, session_id: &str, mut file: File) -> Result<LogWri
     Ok(LogWriter {
         path: path.to_path_buf(),
         file,
+        session_id: session_id.to_string(),
         committed_len: committed,
         next_seq: last_seq.map(|seq| seq + 1).unwrap_or(0),
     })
@@ -1035,6 +1036,8 @@ struct CommandEnvelope<'a> {
 pub struct LogWriter {
     path: PathBuf,
     file: File,
+    /// 会话 id（`rollback_to` 重扫已提交尾部时做 header 校验）。
+    session_id: String,
     committed_len: u64,
     next_seq: u64,
 }
@@ -1061,6 +1064,35 @@ impl LogWriter {
         seqs.pop().ok_or_else(|| LogStoreError::Serialize {
             reason: "append produced no seq".to_string(),
         })
+    }
+
+    /// ADR 0107 P0.3：把**已提交前缀截断回 `len`**，用于回滚被事务拒收（stale-epoch）的批次。
+    ///
+    /// 前置：调用方已持有本会话日志的**独占锁**（本类型即锁持有者）——绝不允许无锁 `set_len`，
+    /// 否则会截掉并发写者（另一降级实例）刚写入的字节。
+    ///
+    /// 截断后**重新扫描已提交尾部**校正 `committed_len` / `next_seq`：保证后续 append 的
+    /// `seq` 从被截断前缀之后继续、无空洞无重复。
+    pub fn rollback_to(&mut self, len: u64) -> Result<(), LogStoreError> {
+        if len > self.committed_len {
+            return Err(LogStoreError::Serialize {
+                reason: format!(
+                    "rollback target {len} is beyond committed length {} of `{}`",
+                    self.committed_len,
+                    self.path.display()
+                ),
+            });
+        }
+        self.file
+            .set_len(len)
+            .map_err(|e| io_err(format!("truncate `{}` for rollback", self.path.display()), e))?;
+        self.file
+            .sync_all()
+            .map_err(|e| io_err(format!("fsync rollback truncation of `{}`", self.path.display()), e))?;
+        let (committed, last_seq) = scan_committed_tail(&mut self.file, &self.session_id)?;
+        self.committed_len = committed;
+        self.next_seq = last_seq.map(|seq| seq + 1).unwrap_or(0);
+        Ok(())
     }
 
     /// 追加一批事件（一次 `write_all` + 一次 `fsync`），返回分配的 `seq` 列表。

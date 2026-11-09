@@ -769,3 +769,71 @@ fn c8_stale_epoch_batch_never_reaches_the_session_log() {
         "真源日志里不得出现被拒消息"
     );
 }
+
+// ---------------------------------------------------------------------------
+// C9：epoch 预检自身不可用时必须 fail-closed（不写日志、整批 Failed）（P0.3）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c9_precheck_failure_does_not_write_log() {
+    let fixture = Fixture::new("c9");
+    let session_id = "p0_c9_precheck_unavailable";
+
+    // —— Arrange ——：先写一条合法命令，建立真源日志（此时无 barrier 行 = barrier 0）。
+    let backend = fixture.backend();
+    let fresh = backend.persist_command(PersistCommand::AppendMessage {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        message: message("user", "c9 合法消息"),
+        ordinal: 0,
+    });
+    assert_eq!(
+        fresh,
+        PersistCommandOutcome::Succeeded,
+        "基线写入必须成功，实际 {fresh:?}"
+    );
+    let log_path = fixture.log_path(session_id);
+    let before = std::fs::read(&log_path).expect("读基线日志");
+    assert!(!before.is_empty(), "基线日志必须已有字节");
+
+    // 破坏 epoch 行：值不是数字 ⇒ 预检解析失败 ⇒ fail-closed（不写日志、Fail loud）。
+    {
+        let conn = fixture.open_sqlite();
+        conn.busy_timeout(std::time::Duration::from_millis(2000)).ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO store_metadata (key, value) \
+             VALUES ('storage.normalized.v1.epoch', 'not-a-number')",
+            [],
+        )
+        .expect("写入不可解析的 epoch 值");
+    }
+
+    // —— Act ——
+    let outcome = backend.persist_command(PersistCommand::AppendMessage {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        message: message("user", "c9 预检不可用时的消息"),
+        ordinal: 1,
+    });
+
+    // —— Assert ——
+    assert_eq!(
+        outcome,
+        PersistCommandOutcome::Failed,
+        "预检读不到 epoch 必须 fail-loud（整批 Failed），实际 {outcome:?}"
+    );
+    let after = std::fs::read(&log_path).expect("读改动后日志");
+    assert_eq!(
+        before,
+        after,
+        "fail-closed 被击穿：预检不可用时不得写日志；日志字节数 {} → {}",
+        before.len(),
+        after.len()
+    );
+    assert!(
+        !log_append_messages(&log_path)
+            .iter()
+            .any(|(_, content)| content.contains("c9 预检不可用时的消息")),
+        "未通过预检的消息不得进真源日志"
+    );
+}

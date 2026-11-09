@@ -781,7 +781,10 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 // ADR 0099 阶段 1-B：日志文件真源（写入先行 / 删除后置）
 // ---------------------------------------------------------------------------
 
-/// 真源优先：把本批命令追加进会话日志文件（含 `fsync`）。返回 `true` = **实际写入了字节**。
+/// 真源优先：把本批命令追加进会话日志文件（含 `fsync`）。
+///
+/// 返回 `(written, restored)`：`written` = **实际写入了字节**（R5）；`restored` = 每会话
+/// 追加前的已提交长度（P0.3：事务拒 stale-epoch 时据此回滚本批日志）。
 ///
 /// 放在 commit 边界旁边而不是 `sqlite_session.rs` 里：后者已计入 file-size 棘轮。
 ///
@@ -796,55 +799,123 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 pub(crate) fn append_session_log_to_file(
     backend: &super::SqliteSessionBackend,
     commands: &[crate::agent::session::PersistCommand],
-) -> Result<bool, String> {
+) -> Result<(bool, Vec<(String, u64)>), String> {
     use crate::agent::session::SessionBackend;
     // R4 / E8：维护句柄零写入（连日志也不写——否则 `--dry-run` 会产出 session.jsonl）。
     if backend.storage_read_only {
-        return Ok(false);
+        return Ok((false, Vec::new()));
     }
     // R3：锁降级实例按批开/放 writer（append 完立刻 drop ⇒ 释放 flock），
     // 否则主可写实例写同一会话会被挡成 `Locked`（可写实例零回归被破坏）。
-    if backend.is_read_only() {
-        return backend.session_log_sink.append_commands_releasing(commands);
-    }
-    backend.session_log_sink.append_commands(commands)
+    let receipt = if backend.is_read_only() {
+        backend.session_log_sink.append_commands_releasing(commands)?
+    } else {
+        backend.session_log_sink.append_commands(commands)?
+    };
+    Ok((receipt.written, receipt.restored))
 }
 
-/// ADR 0107 P0.2（BLOCKING）：**写日志之前**的 epoch 预检——stale-epoch 命令不得进真源日志。
+/// ADR 0107 P0.3：事务拒 stale-epoch 时**回滚本批已写日志**（预检与事务之间的竞态窗口兜底）。
+///
+/// 只回滚 `StaleEpoch`：`Failed` 时日志本来就没写成；`LogPersisted`（索引滞后）必须保留日志。
+pub(crate) fn rollback_stale_batch_log(
+    backend: &super::SqliteSessionBackend,
+    written: bool,
+    restored: &[(String, u64)],
+    outcome: &crate::agent::session::PersistCommandOutcome,
+) {
+    if !written || !matches!(outcome, crate::agent::session::PersistCommandOutcome::StaleEpoch) {
+        return;
+    }
+    eprintln!(
+        "[pony-agent][session] stale_epoch_log_rollback: 事务拒收 stale epoch ⇒ 回滚本批日志（{} 个会话）",
+        restored.len()
+    );
+    backend.session_log_sink.rollback(restored);
+}
+
+/// 写日志前 epoch 预检的**拒绝原因**（ADR 0107 P0.3：fail-closed）。
+pub(crate) enum EpochRejection {
+    /// 明确过期：`(本批 epoch, 库内 barrier)`。
+    Stale { epoch: u64, current: u64 },
+    /// 预检自身不可用（连接 / 查询 / parse 失败）⇒ **不写日志**、整批 `Failed`（fail-loud）。
+    Unavailable(String),
+}
+
+/// ADR 0107 P0.3（BLOCKING）：**写日志之前**的 epoch 预检——stale-epoch 命令不得进真源日志。
 ///
 /// 为什么需要：日志先行是「先写日志、后校验索引」。stale-epoch 命令若先落进 JSONL，而
 /// `fold_session` 不做 epoch 过滤，重启后会把**已被拒绝的消息**当作事实复活（strace 实证：
 /// 先写 seq=2，后报 `stale epoch: 1 < 2`）。
 ///
-/// **双检语义**：本预检在日志写入前用 `store_metadata['storage.normalized.v1.epoch']` 挡掉
-/// 明确过期的批次（只读连接也能 SELECT）；**事务内的 epoch 校验仍是权威**——预检与写日志之间
-/// 存在竞态窗口（另一进程可能在此期间推进 barrier），由事务校验兜底。
+/// 语义（fail-closed）：`Ok(())` = 预检通过；`Err(Stale)` = 明确过期；`Err(Unavailable)` =
+/// 预检读不到 epoch（连接 / 查询 / 解析失败）⇒ 调用方**不得写日志**、整批判 `Failed`——
+/// 宁可不写，也不把一批未校验的命令写进唯一真源。库内**没有** barrier 行 = barrier 0
+/// （新库 / 未迁移），不是错误。
+///
+/// 与事务内校验的关系：两者是**双保险**——预检挡掉绝大多数过期批次；事务内校验在竞态窗口
+/// （另一进程在预检与写入之间推进 barrier）里仍可能拒收，此时批次日志由
+/// [`rollback_stale_batch_log`] 回滚，真源不留被拒命令。
 pub(crate) fn precheck_stale_epoch(
     backend: &super::SqliteSessionBackend,
     commands: &[crate::agent::session::PersistCommand],
-) -> Option<crate::agent::session::PersistCommandOutcome> {
-    use crate::agent::session::PersistCommandOutcome;
-    let current = {
-        let slot = backend.connection().ok()?;
-        let conn = slot.as_ref()?;
-        conn.query_row(
-            "SELECT value FROM store_metadata WHERE key = 'storage.normalized.v1.epoch'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()?
+) -> Result<(), EpochRejection> {
+    use rusqlite::OptionalExtension;
+    /// 与写路径同口径的本地锁等待预算（慢盘 / 备份进程占锁时不要误判为「预检不可用」）。
+    const PRECHECK_BUSY_TIMEOUT_MS: u64 = 5000;
+    let current: u64 = {
+        let slot = backend
+            .connection()
+            .map_err(|error| EpochRejection::Unavailable(format!("open connection: {error}")))?;
+        let conn = slot
+            .as_ref()
+            .ok_or_else(|| EpochRejection::Unavailable("connection not initialized".to_string()))?;
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(PRECHECK_BUSY_TIMEOUT_MS));
+        let raw = conn
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = 'storage.normalized.v1.epoch'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| EpochRejection::Unavailable(format!("read epoch: {error}")))?;
+        match raw {
+            // 无 barrier 行 = barrier 0（新库 / 未迁移）。
+            None => 0,
+            Some(raw) => raw.trim().parse::<u64>().map_err(|error| {
+                EpochRejection::Unavailable(format!("parse epoch `{raw}`: {error}"))
+            })?,
+        }
     };
-    let stale = commands
+    match commands
         .iter()
         .map(|command| command.epoch())
-        .find(|epoch| *epoch < current)?;
-    eprintln!(
-        "[pony-agent][session] SQLite batch command stale epoch（预检拒绝，未写日志）：{stale} < {current}"
-    );
-    Some(PersistCommandOutcome::StaleEpoch)
+        .find(|epoch| *epoch < current)
+    {
+        Some(epoch) => Err(EpochRejection::Stale { epoch, current }),
+        None => Ok(()),
+    }
+}
+
+/// 预检拒绝的收口：打结构化日志并给出批次 outcome。
+pub(crate) fn refuse_epoch_precheck(
+    rejection: EpochRejection,
+) -> crate::agent::session::PersistCommandOutcome {
+    use crate::agent::session::PersistCommandOutcome;
+    match rejection {
+        EpochRejection::Stale { epoch, current } => {
+            eprintln!(
+                "[pony-agent][session] SQLite batch command stale epoch（预检拒绝，未写日志）：{epoch} < {current}"
+            );
+            PersistCommandOutcome::StaleEpoch
+        }
+        EpochRejection::Unavailable(error) => {
+            eprintln!(
+                "[pony-agent][session] epoch_precheck_unavailable（fail-closed：不写日志、整批 Failed）：{error}"
+            );
+            PersistCommandOutcome::Failed
+        }
+    }
 }
 
 /// 日志（真源）写入失败：统一打印并整批判 `Failed`（SQLite 一行都不改）。

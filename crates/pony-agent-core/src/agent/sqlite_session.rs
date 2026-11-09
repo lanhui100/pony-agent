@@ -2718,8 +2718,7 @@ impl SessionBackend for SqliteSessionBackend {
         rows.filter_map(|row| row.ok()).collect()
     }
 
-    /// PA-089 阶段 3：规范化双写命令——统一事务写 blob（旧 sessions 表）+ normalized_* 表。
-    /// 迁移 barrier：epoch 检查（旧 epoch 命令拒绝）。
+    /// PA-089 阶段 3：规范化双写命令（单事务写 blob + normalized_*；stale-epoch 由预检/事务双拒）。
     fn persist_command(&self, command: PersistCommand) -> PersistCommandOutcome {
         self.persist_commands_batch(vec![command])
     }
@@ -2733,17 +2732,17 @@ impl SessionBackend for SqliteSessionBackend {
         }
         // ADR 0099 E5：降级只读实例每次写入口重试一次 flock（非阻塞），持锁进程退出后自动恢复可写。
         self.try_recover_instance_lock();
-        // ADR 0107 P0.2：写日志前 epoch 预检（stale-epoch 命令不得进真源日志）；事务内校验仍是权威。
-        if let Some(stale) = commit::precheck_stale_epoch(self, &commands) { return stale; }
+        // ADR 0107 P0.3：写日志前 epoch 预检（fail-closed：读不到 epoch ⇒ 不写日志、整批 Failed）。
+        if let Err(rejection) = commit::precheck_stale_epoch(self, &commands) {
+            return commit::refuse_epoch_precheck(rejection);
+        }
         // ADR 0107 §5 P0 + P0.1（R3/R4/R5）：日志先行；`log_written` = 本批**实际写入字节**，
         // 零写入批与维护句柄（`storage_read_only`）不得把索引失败判成 `LogPersisted`。
-        let log_written = match commit::append_session_log_to_file(self, &commands) {
-            Ok(written) => written,
+        let (log_written, log_restored) = match commit::append_session_log_to_file(self, &commands) {
+            Ok(receipt) => receipt,
             Err(error) => return commit::log_write_failure(error),
         };
-        // NFR：`external_call_timeout_ms=3000` 只约束外部调用；`busy_timeout` 是本地写锁等待
-        // （无网络 IO、失败可恢复）⇒ 单次预算 5000ms、重试上限 3 次；每次尝试单独取连接，
-        // **失败即释放连接 Mutex 再 sleep**（压到 3000 会把「慢盘/备份占锁」变成用户可见失败）。
+        // NFR：`busy_timeout` 是本地写锁等待（非外部调用）⇒ 单次预算 5000ms、重试上限 3 次。
         const LOCK_WAIT_BUDGET_MS: u64 = 5000;
         let started = std::time::Instant::now();
         let mut attempt = 0u32;
@@ -2765,6 +2764,8 @@ impl SessionBackend for SqliteSessionBackend {
                     // ADR 0099 阶段 1-B：SQLite 提交成功后才删 `RemoveSession` 的日志目录
                     // （先删索引行、再删目录，不留「索引已删但日志还在」的半态）。
                     commit::delete_session_logs_after_commit(self, &commands, &outcome);
+                    // ADR 0107 P0.3：事务拒 stale-epoch ⇒ 回滚本批已写日志（真源不留被拒命令）。
+                    commit::rollback_stale_batch_log(self, log_written, &log_restored, &outcome);
                     // ADR 0107 §5 P0：日志已落盘 ⇒ 索引侧失败退化为「索引滞后」（`LogPersisted`）。
                     return commit::index_failure_after_log(outcome, log_written);
                 }
@@ -2790,8 +2791,7 @@ impl SessionBackend for SqliteSessionBackend {
     }
     /// **运行时读路径**（ADR 0099 D1 / 2-B / 2-D）：**日志为真源**。
     /// 1. 索引原样视图（无日志的存量会话由它 grandfather）；2. 叠加日志 fold：有日志的会话**日志无条件为准**（2-D 已删除 `updated_at_ms` 定序）；
-    /// 3. 折叠超预算 / 日志不可读 / fold 失败 ⇒ 回落索引侧 `normalized_*` 投影；
-    ///    只读句柄不合并日志但同样做投影补全（补全**不读日志** ⇒ 独立观察者语义不变）；
+    /// 3. 折叠超预算 / 日志不可读 / fold 失败 ⇒ 回落索引侧 `normalized_*` 投影（只读句柄同样补全，补全**不读日志**）；
     /// 4. PA-174 P1：投影侧全空的会话由 durable `turn_events` 重建历史（不留空壳）。
     fn load_store(&self) -> Option<PersistedStore> {
         let mut store = self.load_index_store()?;
