@@ -25,6 +25,10 @@
 
 原文：`.dev-team/red-phase-p1-0107.log`、`.dev-team/green-phase-p1-0107.log`。
 
+**F1 整改收据（`da0ae234`）**：3 进程并发冷启同一 legacy JSON + 空库 ⇒
+`concurrent sessions in index = 3 (expect 3)`、`migration marker = 1 (expect 1)`；
+G1–G6 全 exit 0（p1 5 passed / p0 7 passed+2 ignored / lib 1408 passed / 会话套件全绿 / check 0 warning）。
+
 ## 三、P0 测试的退役与改写（显式登记）
 
 - **C1 退役**（`#[ignore]` + 原因）：P1 取消了「锁降级只读」状态，该用例的前提不复存在；
@@ -34,11 +38,11 @@
   （零字节批不得自称 `LogPersisted`）；断言强度不变。
 - C2/C3/C4/C5/C8/C9 **原样保留并全绿**（P0 的日志先行、失败域隔离、stale-epoch 预检/回滚不回归）。
 
-## 四、已知风险（P1 引入的新并发面，已在契约登记）
+## 四、已知风险（P1 引入的新并发面）
 
 | 风险 | 现状 | 处置 |
 |---|---|---|
-| R-A 旧 JSON 迁移 TOCTOU | `migrate_from_json` 仍是「先 COUNT 再导入」；两进程同时首启可能重复执行（幂等覆盖，不丢数据） | P1.1：迁移入口取维护锁或加完成标记 |
+| R-A 旧 JSON 迁移 TOCTOU | **已修复（F1）**：改为单事务幂等迁移（`BEGIN IMMEDIATE` + `store_metadata['legacy_json.migrated']` 标记 + 事务内二次确认），3 进程冷启实测无覆盖、标记恰 1 次 | 已闭环，见 G6 |
 | R-B 并发首建表 | `CREATE TABLE IF NOT EXISTS` + `busy_timeout` 已可承载 | 绿相未出现失败；需长稳观察 |
 | R-C WAL 检查点竞争 | SQLite 自身串行化 | BUSY 由既有 3 次退避兜底 |
 | R-D 同会话冲突提示 | 已类型化 + 结构化日志 | TUI/桌面侧文案待接（P2） |
