@@ -2704,6 +2704,43 @@ impl SqliteSessionBackend {
     }
 }
 
+impl SqliteSessionBackend {
+    /// ADR 0107 §5 P1：`BEGIN IMMEDIATE` + BUSY 有界退避（3 次，50/100/200ms）。
+    ///
+    /// 只对 `SQLITE_BUSY`/`SQLITE_LOCKED` 重试；其他错误立即返回（不掩盖真实故障）。
+    fn begin_immediate_with_busy_retry(
+        conn: &Connection,
+    ) -> Result<rusqlite::Transaction<'_>, String> {
+        let mut attempt = 0u32;
+        loop {
+            match rusqlite::Transaction::new_unchecked(
+                conn,
+                rusqlite::TransactionBehavior::Immediate,
+            ) {
+                Ok(tx) => return Ok(tx),
+                Err(error) => {
+                    let busy = matches!(
+                        &error,
+                        rusqlite::Error::SqliteFailure(inner, _)
+                            if matches!(
+                                inner.code,
+                                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                            )
+                    );
+                    if !busy || attempt >= 2 {
+                        return Err(error.to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        50u64 << attempt,
+                    ));
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+}
+
 impl SessionBackend for SqliteSessionBackend {
     /// ADR 0099 阶段 0（E2/E4）：**单一提交边界**（唯一整包提交入口）。
     /// 实作在 `sqlite_session_commit.rs`（单事务 + 逐会话 CAS + 墓碑跳过 + 版本自增）。
@@ -2912,7 +2949,11 @@ impl SessionBackend for SqliteSessionBackend {
             }
         };
         let conn = slot.as_ref().expect("connection initialized");
-        let tx = match conn.unchecked_transaction() {
+        // ADR 0107 §5 P1：多进程可写之后，`upsert_session` 也可能与另一个进程的写事务
+        // 撞车。旧实现是 DEFERRED 事务 + **无重试**（有全局锁时不会并发，故从未暴露）：
+        // 现在必须 `BEGIN IMMEDIATE`（一开始就拿写锁，避免读→写升级时 `database is locked`）
+        // 并对 BUSY 做与 `persist_commands_batch` 同口径的有界退避重试。
+        let tx = match Self::begin_immediate_with_busy_retry(conn) {
             Ok(tx) => tx,
             Err(e) => {
                 eprintln!("[pony-agent][session] SQLite upsert begin tx error: {e}");
