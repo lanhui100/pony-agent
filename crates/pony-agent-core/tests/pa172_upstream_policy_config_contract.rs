@@ -158,18 +158,28 @@ fn upstream_policy_defaults_match_frozen_baseline() {
 /// §2.1：9 个 `UPSTREAM_*` 常量取值逐一冻结（任一漂移即破坏 G2 默认零行为变更）。
 ///
 /// v2 第 4 条（Lead 裁决）：`UPSTREAM_RETRY_BUDGET_MS_MIN` 由 0 上调为 **1000**。
+///
+/// **PA-173 D2 迁移**（Lead 裁决）：三个下界再上调为 **15000 / 2 / 5000**——
+/// 实测最小同步请求 1.76s、网关 p50 2.2s、模型 p50 4.67s、p99 36s ⇒ 1000ms 下界物理
+/// 不可达；attempts 下界 1 等于「合法的零重试」。默认值 45000/5/30000 与上界不动。
 #[test]
 fn upstream_policy_constants_are_frozen() {
     assert_eq!(UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT, 45_000);
     assert_eq!(UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT, 5);
     assert_eq!(UPSTREAM_RETRY_BUDGET_MS_DEFAULT, 30_000);
-    assert_eq!(UPSTREAM_REQUEST_TIMEOUT_MS_MIN, 1_000);
+    assert_eq!(
+        UPSTREAM_REQUEST_TIMEOUT_MS_MIN, 15_000,
+        "PA-173 D2：请求超时下界 1000 → 15000（1.76s 实测最小完成时间下的 1s 下界物理不可达）"
+    );
     assert_eq!(UPSTREAM_REQUEST_TIMEOUT_MS_MAX, 300_000);
-    assert_eq!(UPSTREAM_DECISION_MAX_ATTEMPTS_MIN, 1);
+    assert_eq!(
+        UPSTREAM_DECISION_MAX_ATTEMPTS_MIN, 2,
+        "PA-173 D2：尝试次数下界 1 → 2（下界 1 = 合法的零重试）"
+    );
     assert_eq!(UPSTREAM_DECISION_MAX_ATTEMPTS_MAX, 10);
     assert_eq!(
-        UPSTREAM_RETRY_BUDGET_MS_MIN, 1_000,
-        "v2-4：retryBudgetMs 下界已裁决为 1000（不再是 0）"
+        UPSTREAM_RETRY_BUDGET_MS_MIN, 5_000,
+        "PA-173 D2：retryBudgetMs 下界 1000 → 5000（v2-4 的 1000 再上调）"
     );
     assert_eq!(UPSTREAM_RETRY_BUDGET_MS_MAX, 300_000);
 }
@@ -189,26 +199,26 @@ fn fields_mention(fields: &[&'static str], needle: &str) -> bool {
 /// §2.3 钳制真值表（13 行表中的前 11 行，字段级钳制）。
 #[test]
 fn upstream_policy_clamp_truth_table_row_by_row() {
-    // 行 1：requestTimeoutMs = 0 ⇒ 1000，被钳制
+    // 行 1：requestTimeoutMs = 0 ⇒ 15000，被钳制（PA-173 D2：下界 1000 → 15000）
     let (policy, fields) = UpstreamPolicy {
         request_timeout_ms: 0,
         ..UpstreamPolicy::default()
     }
     .clamped();
-    assert_eq!(policy.request_timeout_ms, 1_000, "§2.3 行1：0 必须钳到 1000");
+    assert_eq!(policy.request_timeout_ms, 15_000, "§2.3 行1（PA-173 D2）：0 必须钳到 15000");
     assert_eq!(fields.len(), 1, "§2.3 行1：必须恰有 1 个字段被钳制，实际 {fields:?}");
     assert!(
         fields_mention(&fields, "timeout"),
         "§2.3 行1：被钳制字段名必须指向请求超时，实际 {fields:?}"
     );
 
-    // 行 2：requestTimeoutMs = 999 ⇒ 1000，被钳制
+    // 行 2：requestTimeoutMs = 999 ⇒ 15000，被钳制（PA-173 D2：下界 1000 → 15000）
     let (policy, fields) = UpstreamPolicy {
         request_timeout_ms: 999,
         ..UpstreamPolicy::default()
     }
     .clamped();
-    assert_eq!(policy.request_timeout_ms, 1_000, "§2.3 行2：999 必须钳到 1000");
+    assert_eq!(policy.request_timeout_ms, 15_000, "§2.3 行2（PA-173 D2）：999 必须钳到 15000");
     assert_eq!(fields.len(), 1, "§2.3 行2：必须恰有 1 个字段被钳制，实际 {fields:?}");
 
     // 行 3：requestTimeoutMs = 45000 ⇒ 45000，不钳制
@@ -232,13 +242,13 @@ fn upstream_policy_clamp_truth_table_row_by_row() {
     );
     assert_eq!(fields.len(), 1, "§2.3 行4：必须恰有 1 个字段被钳制，实际 {fields:?}");
 
-    // 行 5：decisionMaxAttempts = 0 ⇒ 1，被钳制
+    // 行 5：decisionMaxAttempts = 0 ⇒ 2，被钳制（PA-173 D2：下界 1 → 2）
     let (policy, fields) = UpstreamPolicy {
         decision_max_attempts: 0,
         ..UpstreamPolicy::default()
     }
     .clamped();
-    assert_eq!(policy.decision_max_attempts, 1, "§2.3 行5：0 必须钳到 1");
+    assert_eq!(policy.decision_max_attempts, 2, "§2.3 行5（PA-173 D2）：0 必须钳到 2");
     assert_eq!(fields.len(), 1, "§2.3 行5：必须恰有 1 个字段被钳制，实际 {fields:?}");
     assert!(
         fields_mention(&fields, "attempt"),
@@ -276,15 +286,16 @@ fn upstream_policy_clamp_truth_table_row_by_row() {
         "§2.3 行8：被钳制字段名必须指向退避预算，实际 {fields:?}"
     );
 
-    // 行 9（v2-4）：retryBudgetMs = 0 ⇒ 1000，被钳制（下界已由 0 上调为 1000）
+    // 行 9（v2-4 / PA-173 D2）：retryBudgetMs = 0 ⇒ 5000，被钳制
+    // （下界 0 → 1000（v2-4）→ 5000（PA-173 D2））
     let (policy, fields) = UpstreamPolicy {
         retry_budget_ms: 0,
         ..UpstreamPolicy::default()
     }
     .clamped();
     assert_eq!(
-        policy.retry_budget_ms, 1_000,
-        "v2-4：retryBudgetMs=0 必须钳到 1000（下界不再是 0）"
+        policy.retry_budget_ms, 5_000,
+        "PA-173 D2：retryBudgetMs=0 必须钳到 5000（下界不再是 1000）"
     );
     assert_eq!(fields.len(), 1, "v2-4：retryBudgetMs=0 必须报 1 条钳制，实际 {fields:?}");
     assert!(
@@ -292,29 +303,29 @@ fn upstream_policy_clamp_truth_table_row_by_row() {
         "v2-4：被钳制字段名必须指向退避预算，实际 {fields:?}"
     );
 
-    // 行 10（v2-4）：retryBudgetMs = 999 ⇒ 1000，被钳制
+    // 行 10（v2-4 / PA-173 D2）：retryBudgetMs = 999 ⇒ 5000，被钳制
     let (policy, fields) = UpstreamPolicy {
         retry_budget_ms: 999,
         ..UpstreamPolicy::default()
     }
     .clamped();
     assert_eq!(
-        policy.retry_budget_ms, 1_000,
-        "v2-4：retryBudgetMs=999 必须钳到 1000"
+        policy.retry_budget_ms, 5_000,
+        "PA-173 D2：retryBudgetMs=999 必须钳到 5000"
     );
     assert_eq!(fields.len(), 1, "v2-4：retryBudgetMs=999 必须报 1 条钳制，实际 {fields:?}");
 
-    // 行 11（v2-4）：retryBudgetMs = 1000 ⇒ 1000，不钳制（下界本身合法）
+    // 行 11（PA-173 D2）：retryBudgetMs = 5000 ⇒ 5000，不钳制（下界本身合法）
     let (policy, fields) = UpstreamPolicy {
-        retry_budget_ms: 1_000,
+        retry_budget_ms: 5_000,
         ..UpstreamPolicy::default()
     }
     .clamped();
     assert_eq!(
-        policy.retry_budget_ms, 1_000,
-        "v2-4：retryBudgetMs=1000 必须原样保留"
+        policy.retry_budget_ms, 5_000,
+        "PA-173 D2：retryBudgetMs=5000（下界本身）必须原样保留"
     );
-    assert!(fields.is_empty(), "v2-4：retryBudgetMs=1000 不得报钳制，实际 {fields:?}");
+    assert!(fields.is_empty(), "PA-173 D2：retryBudgetMs=5000 不得报钳制，实际 {fields:?}");
 }
 
 /// §2.3 行 12/13（wire 层默认，不经过 `clamped()`）：
@@ -407,10 +418,14 @@ fn upstream_policy_and_failover_ids_survive_registry_round_trip() {
 
 // ── L2-AT：极端值钳制不致命 + 候选链卫生（C2-a / C2-c） ────────────────────────────
 
-/// L2-AT：`u64::MAX` / `u32::MAX` / 0 / 超长候选链 9 项 ⇒ 钳制 + 截断 8 + 去重/去自身，
-/// 全程**不致命**（配置仍可用，provider 面不塌）。
+/// L2-AT：`u64::MAX` / `u32::MAX` / 0 / 超长候选链 9 项 ⇒ **读取路径**钳制 + 截断 8 +
+/// 去重/去自身，全程**不致命**（配置仍可用，provider 面不塌）。
+///
+/// PA-173 D1 迁移：钳制只发生在「生效策略」解析处（`upstream_policy()`），磁盘与
+/// `load_view` 一律按原值往返——本测试名由 `invalid_json_like_values_are_clamped_not_fatal`
+/// 改为「读取路径钳制而非落盘钳制」，原意图（极端值不致命）不变。
 #[test]
-fn invalid_json_like_values_are_clamped_not_fatal() {
+fn extreme_values_are_clamped_on_effective_path_not_persisted() {
     // ── Arrange/Act 1：纯函数面（`clamped()`）的极端值 ──
     let (clamped, clamped_fields) = UpstreamPolicy {
         request_timeout_ms: u64::MAX,
@@ -451,7 +466,7 @@ fn invalid_json_like_values_are_clamped_not_fatal() {
     );
     assert_eq!(
         floor.0.retry_budget_ms, UPSTREAM_RETRY_BUDGET_MS_MIN,
-        "v2-4：retryBudgetMs 下界已抬到 1000"
+        "PA-173 D2：retryBudgetMs 下界已抬到 5000"
     );
     assert_eq!(
         floor.1.len(),
@@ -480,16 +495,64 @@ fn invalid_json_like_values_are_clamped_not_fatal() {
     let reloaded = serde_json::to_value(store.load_view())
         .expect("PA-172：ProviderRegistryView 必须可序列化");
 
-    // ── Assert 2a：极端值在端到端路径上被钳到边界（C2-a/C2-b 生效） ──
+    // ── Assert 2a（PA-173 D1 迁移）：钳制只发生在「生效策略」解析处，不落盘、不进视图 ──
+    //
+    // 旧断言（PA-172 wave-69）：「落盘极端值**读回时**必须钳到边界 (MAX/MAX/MAX)」——
+    // 它把钳制绑在 load/save 路径上，与 PA-173 D1 的冻结语义互斥（钳制结果禁止落盘）。
+    // 新语义：①磁盘保留调用方原值；②`load_view` 按原值往返；③`upstream_policy()` 才钳制。
+    // ⚠ 禁令：**不得**在 `ProviderManager::with_policy`（provider/mod.rs:885）加钳制——
+    //   该处必须保持不钳制，否则 `pa172_provider_failover_contract:709–715` 的 F-c
+    //   elapsed 有界断言会破（该用例直接构造 1000ms 的 per-attempt 超时）。
+    let on_disk = sandbox.read_json();
+    let policy_key = locate_policy_key(&on_disk);
+    let mut on_disk_values: Vec<u64> = on_disk[policy_key]
+        .as_object()
+        .unwrap_or_else(|| panic!("PA-173 D1：策略段 `{policy_key}` 必须是 JSON 对象"))
+        .values()
+        .map(|value| {
+            value.as_u64().unwrap_or_else(|| {
+                panic!("PA-173 D1：策略字段必须是 u64 整数（禁止字符串/浮点），实际 {value}")
+            })
+        })
+        .collect();
+    on_disk_values.sort_unstable();
+    let mut expected_raw_values = vec![u64::MAX, u64::MAX, u64::from(u32::MAX)];
+    expected_raw_values.sort_unstable();
+    assert_eq!(
+        on_disk_values, expected_raw_values,
+        "PA-173 D1：磁盘必须保留调用方原值（u64::MAX / u32::MAX 各就各位），\
+         钳制结果**禁止**落盘"
+    );
+
+    // ② `load_view` 按原值往返（视图层不得出现钳制值 ⇒ 前端不会被静默降级）。
     assert_eq!(
         policy_of(&reloaded),
         Some(&json!({
-            "requestTimeoutMs": UPSTREAM_REQUEST_TIMEOUT_MS_MAX,
-            "decisionMaxAttempts": UPSTREAM_DECISION_MAX_ATTEMPTS_MAX,
-            "retryBudgetMs": UPSTREAM_RETRY_BUDGET_MS_MAX
+            "requestTimeoutMs": u64::MAX,
+            "decisionMaxAttempts": u32::MAX,
+            "retryBudgetMs": u64::MAX
         })),
-        "C2-a：落盘极端值读回时必须钳到边界，实际 {:?}",
+        "PA-173 D1：`load_view` 必须按原值往返（不得钳制），实际 {:?}",
         policy_of(&reloaded)
+    );
+
+    // ③ 生效策略才钳到上界（C2-a 非致命：越界不 fail 配置，只是解析时被钳到边界）。
+    let effective = store.upstream_policy();
+    assert_eq!(
+        (
+            effective.request_timeout_ms,
+            effective.decision_max_attempts,
+            effective.retry_budget_ms
+        ),
+        (
+            UPSTREAM_REQUEST_TIMEOUT_MS_MAX,
+            UPSTREAM_DECISION_MAX_ATTEMPTS_MAX,
+            UPSTREAM_RETRY_BUDGET_MS_MAX
+        ),
+        "PA-173 D1：`upstream_policy()` 必须钳到上界，实际 ({}, {}, {})",
+        effective.request_timeout_ms,
+        effective.decision_max_attempts,
+        effective.retry_budget_ms
     );
 
     // ── Assert 2b：provider 面仍可用（非致命） ──
