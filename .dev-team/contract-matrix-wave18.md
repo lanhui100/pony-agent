@@ -284,6 +284,7 @@ function ctxLineFacts(context, lineNumber) {
 | B3 | **FN**：`token` 之外的泛化标签（如 `apikey`、`passphrase`、`secretkey` 连写形态） | `apikey=<H>` | `CRED_WORD_RE` 的 `api[\s_-]*key\b` 不匹配 `apikey`（无分隔符）。已知窄口，随 B1 同批评估 |
 | B4 | **FP 面（已关闭，留档）**：r3 曾对摘要收据误报 | `<H>  scripts/rotate-secret.sh` | r4 的 R1′ 已修复（§4.8 FP1–FP6 全 0）；留档以便复审对照 |
 | B5 | 反引号豁免（豁免 4）为"当前树零误报"所必需 | 6 处 `.dev-team/**` 收据把摘要写成 `` `<H>` `` | 无此豁免则 `--all` 在干净树即 FAIL；若要收紧为"仅 `.dev-team/**` 生效"需向 `isSafe` 传路径（扩签名，本波不做） |
+| B6 | **FN（AMEND-6 新增）**：语义泛化的非凭证键 | `{"value": "<H>"}` / `{"data": "<H>"}` / `{"content": "<H>"}` / `{"payload": "<H>"}` / `{"env": "<H>"}` / `{"detail": "<H>"}` | 豁免 5 只拦「键名含凭证词干」，故上述键下的 64-hex 被豁免。这是**有意的取舍**：不设此豁免则 `assertion_hashes` 的 30 种摘要键全数误报、历史取证无法入库（ADR 0111）。收紧方向是「键名必须显式含摘要语义词」（`*hash`/`*sha256`/`*digest`/`*fingerprint`）而非「不含凭证词干」，但这会让 54 条 `"<文件名>": "<H>"` 形态重新误报 —— 需连收据 schema 一起改，属独立议题 |
 
 ---
 

@@ -670,6 +670,31 @@ MIIEowIBAAKCAQEA0Y1+xyz...
       }
     });
 
+    /**
+     * B6 已知漏报面（ADR 0111 诚实登记）：泛化键名下的 64-hex 被豁免 5 放行。
+     * 本条**固化当前行为**，不是为了让它「正确」——一旦收紧为「键名必须含摘要语义词」，
+     * 本条会转红，届时按 ADR 0111「已知边界」表同步改判据与收据 schema。
+     */
+    it("B6 固化：泛化键名（value/data/content/payload/env）下的 64-hex 当前判 0 命中", () => {
+      const genericKeys = ["value", "data", "content", "payload", "env", "detail"];
+      const offenders = genericKeys
+        .filter((key) => scanTextContent(`  "${key}": "${LOW}",`, "").length !== 0)
+        .map((key) => `泛化键 ${key} 当前应为 0 命中，实得 >0`);
+      expect(offenders).toEqual([]);
+    });
+
+    /** 与 B6 对照：键名含凭证词干的仍必须命中（Authorization / cookie 等）。 */
+    it("B6 对照：凭证词干键（Authorization/cookie/session）仍必须 ≥1 命中", () => {
+      const cases: Array<[string, string]> = [
+        ["Authorization", `  "Authorization": "${LOW}",`],
+        ["cookie", `  "cookie": "${LOW}",`],
+        ["session", `  "session": "${LOW}",`],
+      ];
+      for (const [label, content] of cases) {
+        expectCaughtSecret(scanTextContent(content, ""), [LOW], `${label} :: ${show(content)}`);
+      }
+    });
+
     /** 端到端：审计取证目录（r1-dim6 / r2-dim1 / r3-dim3）必须全绿，否则历史取证无法入库。 */
     it("S13 端到端：docs/audit/rounds 取证文件 0 违规（修复前 65 条误报）", () => {
       // vitest 在 jsdom 环境下改写 import.meta.url，故用 process.cwd()（仓库根）
