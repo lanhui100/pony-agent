@@ -2738,7 +2738,7 @@ impl SessionBackend for SqliteSessionBackend {
         }
         // ADR 0107 §5 P0 + P0.1（R3/R4/R5）：日志先行；`log_written` = 本批**实际写入字节**，
         // 零写入批与维护句柄（`storage_read_only`）不得把索引失败判成 `LogPersisted`。
-        let (log_written, log_restored) = match commit::append_session_log_to_file(self, &commands) {
+        let (log_written, log_restored, log_post) = match commit::append_session_log_to_file(self, &commands) {
             Ok(receipt) => receipt,
             Err(error) => return commit::log_write_failure(error),
         };
@@ -2765,7 +2765,7 @@ impl SessionBackend for SqliteSessionBackend {
                     // （先删索引行、再删目录，不留「索引已删但日志还在」的半态）。
                     commit::delete_session_logs_after_commit(self, &commands, &outcome);
                     // ADR 0107 P0.3：事务拒 stale-epoch ⇒ 回滚本批已写日志（真源不留被拒命令）。
-                    commit::rollback_stale_batch_log(self, log_written, &log_restored, &outcome);
+                    commit::rollback_stale_batch_log(self, log_written, &log_restored, &log_post, &outcome);
                     // ADR 0107 §5 P0：日志已落盘 ⇒ 索引侧失败退化为「索引滞后」（`LogPersisted`）。
                     return commit::index_failure_after_log(outcome, log_written);
                 }

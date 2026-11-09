@@ -783,8 +783,9 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 
 /// 真源优先：把本批命令追加进会话日志文件（含 `fsync`）。
 ///
-/// 返回 `(written, restored)`：`written` = **实际写入了字节**（R5）；`restored` = 每会话
-/// 追加前的已提交长度（P0.3：事务拒 stale-epoch 时据此回滚本批日志）。
+/// 返回 `(written, restored, post_append_len)`：`written` = **实际写入了字节**（R5）；
+/// `restored` = 每会话追加前的已提交长度；`post_append_len` = 每会话追加后长度
+/// （P0.5：回滚前用它校验偏移未过期，绝不在「文件已被他人追加」时截断）。
 ///
 /// 放在 commit 边界旁边而不是 `sqlite_session.rs` 里：后者已计入 file-size 棘轮。
 ///
@@ -799,11 +800,11 @@ fn try_lock_exclusive(_file: &std::fs::File) -> bool {
 pub(crate) fn append_session_log_to_file(
     backend: &super::SqliteSessionBackend,
     commands: &[crate::agent::session::PersistCommand],
-) -> Result<(bool, Vec<(String, u64)>), String> {
+) -> Result<(bool, Vec<(String, u64)>, Vec<(String, u64)>), String> {
     use crate::agent::session::SessionBackend;
     // R4 / E8：维护句柄零写入（连日志也不写——否则 `--dry-run` 会产出 session.jsonl）。
     if backend.storage_read_only {
-        return Ok((false, Vec::new()));
+        return Ok((false, Vec::new(), Vec::new()));
     }
     // R3：锁降级实例按批开/放 writer（append 完立刻 drop ⇒ 释放 flock），
     // 否则主可写实例写同一会话会被挡成 `Locked`（可写实例零回归被破坏）。
@@ -812,7 +813,7 @@ pub(crate) fn append_session_log_to_file(
     } else {
         backend.session_log_sink.append_commands(commands)?
     };
-    Ok((receipt.written, receipt.restored))
+    Ok((receipt.written, receipt.restored, receipt.post_append_len))
 }
 
 /// ADR 0107 P0.3：事务拒 stale-epoch 时**回滚本批已写日志**（预检与事务之间的竞态窗口兜底）。
@@ -822,6 +823,7 @@ pub(crate) fn rollback_stale_batch_log(
     backend: &super::SqliteSessionBackend,
     written: bool,
     restored: &[(String, u64)],
+    post_append_len: &[(String, u64)],
     outcome: &crate::agent::session::PersistCommandOutcome,
 ) {
     if !written || !matches!(outcome, crate::agent::session::PersistCommandOutcome::StaleEpoch) {
@@ -831,7 +833,7 @@ pub(crate) fn rollback_stale_batch_log(
         "[pony-agent][session] stale_epoch_log_rollback: 事务拒收 stale epoch ⇒ 回滚本批日志（{} 个会话）",
         restored.len()
     );
-    backend.session_log_sink.rollback(restored);
+    backend.session_log_sink.rollback(restored, post_append_len);
 }
 
 /// 写日志前 epoch 预检的**拒绝原因**（ADR 0107 P0.3：fail-closed）。

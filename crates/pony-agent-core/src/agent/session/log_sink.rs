@@ -85,7 +85,11 @@ pub fn session_log_path_for_db(db_path: &Path, session_id: &str) -> Option<PathB
 #[derive(Debug, Default, Clone)]
 pub struct LogAppendReceipt {
     pub written: bool,
+    /// 每会话**追加前**长度（回滚要截回的目标）。
     pub restored: Vec<(String, u64)>,
+    /// 每会话**追加后**长度（与 `restored` 同序）。回滚前用它做偏移校验：
+    /// 文件若在「append 完成 → 回滚」之间被别人追加过，长度不等 ⇒ 放弃截断（绝不猜）。
+    pub post_append_len: Vec<(String, u64)>,
 }
 
 /// 会话日志写入端：一个 `SqliteSessionBackend` 持有一个实例。
@@ -213,6 +217,9 @@ impl SessionLogSink {
                     .append_commands(ts, &values)
                     .map_err(|error| format!("append session log for `{session_id}`: {error}"))?;
                 receipt.restored.push((session_id.to_string(), pre_append_len));
+                receipt
+                    .post_append_len
+                    .push((session_id.to_string(), writer.committed_len()));
                 drop(writer); // 立即释放 flock（不缓存）
                 continue;
             }
@@ -231,6 +238,9 @@ impl SessionLogSink {
                 return Err(format!("append session log for `{session_id}`: {error}"));
             }
             receipt.restored.push((session_id.to_string(), pre_append_len));
+            receipt
+                .post_append_len
+                .push((session_id.to_string(), writer.committed_len()));
         }
         receipt.written = true;
         Ok(receipt)
@@ -243,7 +253,11 @@ impl SessionLogSink {
     /// [`LogWriter::rollback_to`]（`set_len` + `sync_all` + 重扫校正 `committed_len`/`next_seq`）。
     /// 抢不到锁 ⇒ 打 `stale_epoch_log_rollback_failed` 并跳过（不重试、绝不无锁截断）。
     /// 回滚句柄不缓存：drop 即释放 flock，后续 append 重新 open + scan。
-    pub fn rollback(&self, restored: &[(String, u64)]) {
+    pub fn rollback(&self, restored: &[(String, u64)], post_append_len: &[(String, u64)]) {
+        let expected_by_session: HashMap<&str, u64> = post_append_len
+            .iter()
+            .map(|(session_id, len)| (session_id.as_str(), *len))
+            .collect();
         for (session_id, pre_append_len) in restored {
             // 先丢弃缓存 writer（否则自己会挡自己的锁），再**走 open_writer 重新抢独占锁**：
             // 截断必须在持锁前提下做——无锁 `set_len` 会截掉并发写者（另一降级实例）的字节。
@@ -260,12 +274,27 @@ impl SessionLogSink {
                     continue;
                 }
             };
-            if let Err(error) = writer.rollback_to(*pre_append_len) {
+            let Some(expected) = expected_by_session.get(session_id.as_str()).copied() else {
                 eprintln!(
-                    "[pony-agent][session] stale_epoch_log_rollback_failed: session={session_id} path={} pre_append_len={pre_append_len}：{error}",
-                    writer.path().display()
+                    "[pony-agent][session] stale_epoch_log_rollback_skipped: session={session_id} expected=? actual=?（回执缺 post_append_len，不猜、不截断）"
                 );
                 continue;
+            };
+            match writer.rollback_to(*pre_append_len, expected) {
+                Ok(()) => {}
+                Err(LogStoreError::RollbackStaleOffset { expected, actual }) => {
+                    eprintln!(
+                        "[pony-agent][session] stale_epoch_log_rollback_skipped: session={session_id} expected={expected} actual={actual}（追加后文件又变长，偏移已过期；不猜、不截断，stale 批残留在日志中）"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[pony-agent][session] stale_epoch_log_rollback_failed: session={session_id} path={} pre_append_len={pre_append_len}：{error}",
+                        writer.path().display()
+                    );
+                    continue;
+                }
             }
             // 不缓存该句柄：drop ⇒ 释放 flock，后续 append 重新 open + scan（seq 以重扫为准）。
             drop(writer);
@@ -359,6 +388,7 @@ mod tests {
         let receipt = sink.append_commands(&[command]).expect("no-op append");
         assert!(!receipt.written, "无会话归属的命令 ⇒ 零字节写入");
         assert!(receipt.restored.is_empty(), "零写入批不得记录回滚目标");
+        assert!(receipt.post_append_len.is_empty(), "零写入批不得记录追加后长度");
         assert!(
             !sink.root().exists(),
             "no session-scoped command ⇒ 不创建任何日志目录"
@@ -413,7 +443,12 @@ mod tests {
             "回滚前文件必须已变长（否则本用例证明不了回滚）"
         );
 
-        sink.rollback(&stale.restored);
+        assert_eq!(
+            stale.post_append_len.len(),
+            1,
+            "回执必须记录一个会话的追加后长度（偏移校验用）"
+        );
+        sink.rollback(&stale.restored, &stale.post_append_len);
         assert_eq!(
             std::fs::metadata(&path).expect("metadata").len(),
             len_after_first,
@@ -465,6 +500,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ADR 0107 P0.5：回滚偏移过期时**必须跳过**——「append 完成 → 回滚」之间别人追加了字节，
+    /// 此时按旧偏移 `set_len` 会截掉他人写入，并让对方 writer 的 `committed_len` 指向文件外。
+    #[test]
+    fn rollback_is_skipped_when_the_file_grew_after_append() {
+        let dir = temp_dir("rollback-stale-offset");
+        let sink = SessionLogSink::for_db(&dir.join("sessions.db"));
+        let session_id = "pa_rb_stale_offset";
+
+        // 用 releasing 路径（append 完即释放 flock），模拟降级实例：窗口内别人可以追加。
+        sink.append_commands_releasing(&[append_message_command(session_id, "偏移-第一问", 0)])
+            .expect("first append");
+        let stale = sink
+            .append_commands_releasing(&[append_message_command(session_id, "偏移-被拒消息", 1)])
+            .expect("stale append");
+        assert!(stale.written);
+        assert_eq!(stale.post_append_len.len(), 1);
+        assert_eq!(stale.post_append_len[0].0, session_id);
+        let post_len = stale.post_append_len[0].1;
+
+        // 另一句柄在「append 完成 → 回滚」窗口里追加了字节。
+        let other = SessionLogStore::new(sink.root());
+        let meta = SessionLogMeta::new(session_id, current_log_cwd());
+        {
+            let mut writer = other.open_write(session_id, &meta).expect("other writer");
+            writer
+                .append_commands(
+                    now_ms(),
+                    &[command_to_value(&append_message_command(session_id, "偏移-他人字节", 2))
+                        .expect("encode")],
+                )
+                .expect("other append");
+        }
+        let path = sink.log_path(session_id).expect("log path");
+        let len_with_foreign = std::fs::metadata(&path).expect("metadata").len();
+        assert!(
+            len_with_foreign > post_len,
+            "前置：他人追加后文件必须长于回执的 post_append_len（{len_with_foreign} vs {post_len}）"
+        );
+        let before = std::fs::read(&path).expect("read log");
+
+        // 回滚：偏移已过期 ⇒ 必须跳过（不猜、不截断）。
+        sink.rollback(&stale.restored, &stale.post_append_len);
+
+        let after = std::fs::read(&path).expect("read log");
+        assert_eq!(
+            before, after,
+            "偏移过期时回滚必须跳过：绝不截掉他人字节（{} → {} 字节）",
+            before.len(),
+            after.len()
+        );
+        assert!(
+            String::from_utf8_lossy(&after).contains("偏移-他人字节"),
+            "他人写入的字节必须完整保留"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// ADR 0107 P0.3：回滚必须**持该会话日志独占锁**（绝不无锁 `set_len`）。
     ///
     /// 同进程两个 `LogStore` 句柄 = 两个独立 open file description ⇒ flock 相互生效，
@@ -500,8 +593,8 @@ mod tests {
             ),
         }
 
-        // ② 回滚（内部重新抢锁 + set_len + 重扫）。
-        sink.rollback(&stale.restored);
+        // ② 回滚（内部重新抢锁 + 偏移校验 + set_len + 重扫）。
+        sink.rollback(&stale.restored, &stale.post_append_len);
         let path = sink.log_path(session_id).expect("log path");
         assert_eq!(
             std::fs::metadata(&path).expect("metadata").len(),

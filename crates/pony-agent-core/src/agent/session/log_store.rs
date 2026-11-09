@@ -86,6 +86,10 @@ pub enum LogStoreError {
     Io { context: String, source: std::io::Error },
     /// 事件序列化失败。
     Serialize { reason: String },
+    /// 回滚目标偏移已过期：文件在「append 完成 → 回滚」之间被别人追加过字节
+    /// （`expected` = 回执记录的追加后长度，`actual` = 抢到锁后看到的长度）。
+    /// 语义：**不猜、不截断**（否则会截掉他人字节），调用方按可观测残留处理。
+    RollbackStaleOffset { expected: u64, actual: u64 },
 }
 
 impl std::fmt::Display for LogStoreError {
@@ -117,6 +121,10 @@ impl std::fmt::Display for LogStoreError {
             }
             Self::Io { context, source } => write!(f, "{context}: {source}"),
             Self::Serialize { reason } => write!(f, "failed to encode session log event: {reason}"),
+            Self::RollbackStaleOffset { expected, actual } => write!(
+                f,
+                "rollback offset is stale: expected file length {expected}, actual {actual}"
+            ),
         }
     }
 }
@@ -1073,7 +1081,20 @@ impl LogWriter {
     ///
     /// 截断后**重新扫描已提交尾部**校正 `committed_len` / `next_seq`：保证后续 append 的
     /// `seq` 从被截断前缀之后继续、无空洞无重复。
-    pub fn rollback_to(&mut self, len: u64) -> Result<(), LogStoreError> {
+    pub fn rollback_to(&mut self, len: u64, expected_len: u64) -> Result<(), LogStoreError> {
+        // 偏移校验（ADR 0107 P0.5）：文件长度必须仍是回执记录的「追加后长度」。
+        // 不等 ⇒ 期间有人追加过字节，`len` 会截掉对方的写入 ⇒ 拒绝，交调用方按残留处理。
+        let actual = self
+            .file
+            .metadata()
+            .map_err(|e| io_err(format!("stat `{}` before rollback", self.path.display()), e))?
+            .len();
+        if actual != expected_len {
+            return Err(LogStoreError::RollbackStaleOffset {
+                expected: expected_len,
+                actual,
+            });
+        }
         if len > self.committed_len {
             return Err(LogStoreError::Serialize {
                 reason: format!(
