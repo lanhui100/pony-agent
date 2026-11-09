@@ -8192,7 +8192,14 @@ fn run_goal_rounds(
             .then_some(GoalRoundStopReason::AutoContinueBudget)
         });
         if let Some(reason) = stop_reason {
-            report_goal_rounds_stopped(sink, reason);
+            report_goal_rounds_stopped(
+                sink,
+                session_id,
+                reason,
+                failures,
+                active_goal.rounds_started,
+                active_goal.max_goal_rounds,
+            );
             break;
         }
         // C2-S2：轮次号 = 只读快照派生（`rounds_started + 1`）；预算只在**本轮成功后**推进。
@@ -8232,13 +8239,26 @@ fn run_goal_rounds(
                     }
                     Err(error) => {
                         // 预算推进失败 ⇒ 停（不得让"轮次已跑完但预算没记"静默演变成无限续轮）。
-                        eprintln!("[pony-tui] goal_round_advance_failed: {error}");
+                        pony_agent_core::agent::otel::log::log_json_with_fields(
+                            "error",
+                            "goal_round_advance_failed",
+                            None,
+                            &[
+                                ("session_id", serde_json::json!(session_id)),
+                                ("goal_id", serde_json::json!(&active_goal.id)),
+                                ("error", serde_json::json!(error)),
+                            ],
+                        );
                         report_goal_rounds_stopped(
                             sink,
+                            session_id,
                             GoalRoundStopReason::BudgetExhausted {
                                 rounds_started: active_goal.rounds_started,
                                 max_rounds: active_goal.max_goal_rounds,
                             },
+                            failures,
+                            active_goal.rounds_started,
+                            active_goal.max_goal_rounds,
                         );
                         break;
                     }
@@ -8248,12 +8268,41 @@ fn run_goal_rounds(
             Ok(pony_agent_core::agent::control_plane::TurnStreamOutcome::Failed { .. }) => {
                 failures = failures.saturating_add(1);
             }
-            // 取消 / 挂起 / 无可采终态：本轮不成功，停止续轮（不烧预算、不计失败）。
-            Ok(_) => break,
-            // 该轮已执行过但收口失败：不重跑，按失败轮计（不烧预算）。
+            // 取消 / 挂起 / 无可采终态：本轮不成功 ⇒ 停止续轮（不烧预算、不计失败），
+            // 并把自己作为**同一个停止上报路径**（状态行 + 消息区 + 结构化日志），不留静默 break。
+            Ok(outcome) => {
+                report_goal_rounds_stopped(
+                    sink,
+                    session_id,
+                    goal_round_stop_reason_for_outcome(&outcome),
+                    failures,
+                    active_goal.rounds_started,
+                    active_goal.max_goal_rounds,
+                );
+                break;
+            }
+            // 该轮已执行过但收口失败（无可用终态）：对齐契约矩阵 §2.3 C1-T3 的 `Err(_) => break`
+            // ——立即停止新增 goal 轮，**不计连续失败**（无终态依据不冒充失败轮）、不烧预算。
             Err(error) => {
-                eprintln!("[pony-tui] goal_round_turn_failed: {error}");
-                failures = failures.saturating_add(1);
+                pony_agent_core::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "goal_round_turn_failed",
+                    None,
+                    &[
+                        ("session_id", serde_json::json!(session_id)),
+                        ("goal_id", serde_json::json!(&active_goal.id)),
+                        ("error", serde_json::json!(error)),
+                    ],
+                );
+                report_goal_rounds_stopped(
+                    sink,
+                    session_id,
+                    GoalRoundStopReason::TurnUnclassified,
+                    failures,
+                    active_goal.rounds_started,
+                    active_goal.max_goal_rounds,
+                );
+                break;
             }
         }
     }
@@ -8279,10 +8328,7 @@ impl GoalRoundLoopLease {
                     "warn",
                     "goal_rounds_loop_already_owned",
                     None,
-                    &[
-                        ("session_id", serde_json::json!(session_id)),
-                        ("lease", serde_json::json!("goal_round_loop")),
-                    ],
+                    &[("session_id", serde_json::json!(session_id))],
                 );
                 None
             }
@@ -8302,14 +8348,83 @@ impl Drop for GoalRoundLoopLease {
 /// 「已停止」更具体，且 `TuiState::goal_rounds_stopped` 需要结构化留痕（C1-T4）。
 fn report_goal_rounds_stopped(
     sink: &TuiTurnSink,
+    session_id: &str,
     reason: pony_agent_core::agent::goal::GoalRoundStopReason,
+    consecutive_failures: u32,
+    rounds_started: u32,
+    max_rounds: u32,
 ) {
+    log_goal_rounds_stopped(
+        session_id,
+        goal_round_stop_reason_tag(&reason),
+        consecutive_failures,
+        rounds_started,
+        max_rounds,
+    );
     let status_line = reason.visible_line();
-    eprintln!("[pony-tui] goal_rounds_stopped: {status_line} reason={reason:?}");
     let _ = sink.tx.send(UiEvent::GoalRoundsStopped {
         reason,
         status_line,
     });
+}
+
+/// PA-171 C1：把「本轮不成功但无停止原因枚举」的终态归约为可见停止原因。
+///
+/// `Cancelled` ⇒ 既有 `Cancelled` 文案；`Suspended` ⇒ 挂起（等待用户）；其余（`Unknown`，
+/// 以及调用方已单独处理的 `Completed`/`Failed`）⇒ `TurnUnclassified`（不知道成没成）。
+fn goal_round_stop_reason_for_outcome(
+    outcome: &pony_agent_core::agent::control_plane::TurnStreamOutcome,
+) -> pony_agent_core::agent::goal::GoalRoundStopReason {
+    use pony_agent_core::agent::control_plane::TurnStreamOutcome;
+    use pony_agent_core::agent::goal::GoalRoundStopReason;
+    match outcome {
+        TurnStreamOutcome::Cancelled => GoalRoundStopReason::Cancelled,
+        TurnStreamOutcome::Suspended => GoalRoundStopReason::TurnSuspended,
+        TurnStreamOutcome::Completed => GoalRoundStopReason::TurnUnclassified,
+        TurnStreamOutcome::Failed { .. } => GoalRoundStopReason::TurnUnclassified,
+        TurnStreamOutcome::Unknown => GoalRoundStopReason::TurnUnclassified,
+    }
+}
+
+/// PA-171 C1/C2：停止原因的**机器可判**取值（结构化日志 `reason` 字段；与枚举一一对应）。
+fn goal_round_stop_reason_tag(
+    reason: &pony_agent_core::agent::goal::GoalRoundStopReason,
+) -> &'static str {
+    use pony_agent_core::agent::goal::GoalRoundStopReason;
+    match reason {
+        GoalRoundStopReason::Cancelled => "cancelled",
+        GoalRoundStopReason::ConsecutiveFailures { .. } => "consecutive_failures",
+        GoalRoundStopReason::BudgetExhausted { .. } => "budget_exhausted",
+        GoalRoundStopReason::AutoContinueBudget => "auto_continue_budget",
+        GoalRoundStopReason::TurnSuspended => "turn_suspended",
+        GoalRoundStopReason::TurnUnclassified => "turn_unclassified",
+    }
+}
+
+/// PA-171（NFR wave68_logging_events）：续轮停止的**唯一结构化出口**。
+///
+/// 字段逐字按 `.dev-team/nfr-baseline-wave68.json` → `wave68_logging_events[goal_rounds_stopped]`：
+/// `trace_id`（由 `log_json_with_fields` 自动补齐并保证键存在）/ `session_id` / `reason` /
+/// `consecutive_failures` / `rounds_started` / `max_rounds`。禁止退回裸 `eprintln`。
+fn log_goal_rounds_stopped(
+    session_id: &str,
+    reason: &str,
+    consecutive_failures: u32,
+    rounds_started: u32,
+    max_rounds: u32,
+) {
+    pony_agent_core::agent::otel::log::log_json_with_fields(
+        "info",
+        "goal_rounds_stopped",
+        None,
+        &[
+            ("session_id", serde_json::json!(session_id)),
+            ("reason", serde_json::json!(reason)),
+            ("consecutive_failures", serde_json::json!(consecutive_failures)),
+            ("rounds_started", serde_json::json!(rounds_started)),
+            ("max_rounds", serde_json::json!(max_rounds)),
+        ],
+    );
 }
 
 fn tui_event_loop(

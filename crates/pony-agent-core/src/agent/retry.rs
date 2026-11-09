@@ -357,7 +357,14 @@ pub(crate) const UPSTREAM_CONTEXT_OVERFLOW_HINTS: &[&str] = &[
 pub(crate) const UPSTREAM_AUTH_HINTS: &[&str] = &["401", "403"];
 /// PA-171 C3-S1：`classify_error_class` 的 auth 措辞补充（与 `UPSTREAM_AUTH_HINTS` 同一
 /// 注册表出口；仅供审计/文案分类消费，不改 `classify` 的重试结论）。
-pub(crate) const UPSTREAM_AUTH_WORDING_HINTS: &[&str] = &["api key", "invalid_api_key"];
+/// L3-B 复审追加 `unauthorized`/`forbidden`/`authentication`（词边界判定，禁止裸 contains）。
+pub(crate) const UPSTREAM_AUTH_WORDING_HINTS: &[&str] = &[
+    "api key",
+    "invalid_api_key",
+    "unauthorized",
+    "forbidden",
+    "authentication",
+];
 /// PA-171 C3-S1：`classify_error_class` 的 bad_request 措辞补充（同上，单一注册表）。
 pub(crate) const UPSTREAM_BAD_REQUEST_WORDING_HINTS: &[&str] = &["invalid request", "missing field"];
 pub(crate) const RATE_LIMIT_LONG_BACKOFF_HINTS: &[&str] = &[
@@ -788,21 +795,75 @@ pub fn is_rate_limit_error(err: &str) -> bool {
 pub const RETRY_AFTER_MARKER: &str = "retry_after=";
 
 /// C3-S4：把 `Retry-After` 秒数追加为结构化后缀（幂等：已有标记则不重复追加）。
+///
+/// L3-B：标记必须落在**头部段**（`；响应正文` 之前）——正文是上游可控内容，
+/// 不得让正文里的 `retry_after=999999` 覆盖真实头（解析侧只读头部段）。
 pub fn append_retry_after_marker(err: &str, seconds: u64) -> String {
-    if err.contains(RETRY_AFTER_MARKER) {
+    // L3-B：幂等只看**头部段**——正文里同名 token 不得短路权威头值的写入。
+    if parse_retry_after_marker(err).is_some() {
         return err.to_string();
     }
-    format!("{err}；{RETRY_AFTER_MARKER}{seconds}")
+    match err.find("响应正文") {
+        Some(index) => {
+            let (head, body) = err.split_at(index);
+            format!(
+                "{}；{RETRY_AFTER_MARKER}{seconds}；{body}",
+                head.trim_end_matches('；')
+            )
+        }
+        None => format!("{err}；{RETRY_AFTER_MARKER}{seconds}"),
+    }
 }
 
 /// C3-S4：从错误文本解析 `Retry-After` 秒数（唯一解析点）。
+///
+/// L3-B：只解析**头部段**（`；响应正文` 之前）——正文段不参与，避免正文劫持冷却窗口。
 pub fn parse_retry_after_marker(err: &str) -> Option<u64> {
-    let index = err.find(RETRY_AFTER_MARKER)?;
-    let digits: String = err[index + RETRY_AFTER_MARKER.len()..]
+    let head_end = err.find("响应正文").unwrap_or(err.len());
+    let head = &err[..head_end];
+    let index = head.find(RETRY_AFTER_MARKER)?;
+    let digits: String = head[index + RETRY_AFTER_MARKER.len()..]
         .chars()
         .take_while(|ch| ch.is_ascii_digit())
         .collect();
     digits.parse::<u64>().ok()
+}
+
+/// L3-B：错误文本的头部段（`；响应正文` 之前）——结构化判定只看这一段。
+pub fn error_head_segment(error: &str) -> &str {
+    let head_end = error.find("响应正文").unwrap_or(error.len());
+    &error[..head_end]
+}
+
+/// C5 文案层 auth 判定：只看头部段 + 词边界（禁止裸 `contains` 扫全文）。
+///
+/// L3-B BLOCKING 反例：`429 … 耗时=4031ms` / `429 … 耗时=401ms + quota` / `429 … 正文含
+/// "api key"` 均**不得**判为 auth。状态码 `401/403` 走 [`hints_match`] 词边界判据
+/// （`4031`、`401ms` 不命中），响应正文整体不参与。
+pub fn is_auth_error(error: &str) -> bool {
+    let head = error_head_segment(error).to_ascii_lowercase();
+    let stripped = strip_endpoint_fragments(&head);
+    hints_match(&stripped, UPSTREAM_AUTH_HINTS)
+        || hints_match(&stripped, UPSTREAM_AUTH_WORDING_HINTS)
+}
+
+/// L3-B ADVISORY：provider 已在冷却期的结构化标记（HTTP 出口登记冷却 / 冷却短路时追加）。
+///
+/// 重试编排见此标记立即 Abort（**全 scope**：Decision 与 Followup 都不 sleep、不再发 HTTP），
+/// 这是「冷却期 0 次 HTTP」在编排层的唯一判据（不依赖错误分类，避免把正常限流重试误伤）。
+pub const COOLDOWN_ACTIVE_MARKER: &str = "provider_cooldown_active=";
+
+/// L3-B ADVISORY：给错误文本追加冷却标记（幂等）。
+pub fn append_cooldown_active_marker(err: &str) -> String {
+    if err.contains(COOLDOWN_ACTIVE_MARKER) {
+        return err.to_string();
+    }
+    format!("{err}；{COOLDOWN_ACTIVE_MARKER}true")
+}
+
+/// L3-B ADVISORY：该错误是否表示「provider 已进入/处于冷却期」。
+pub fn is_cooldown_active_error(err: &str) -> bool {
+    err.contains(COOLDOWN_ACTIVE_MARKER)
 }
 
 /// C4：错误文本 → 审计可判的 `error_class`（`turn_flow` 失败事件消费）。
@@ -857,9 +918,10 @@ pub fn is_rate_limit_cooldown_error(err: &str) -> bool {
 }
 
 /// 从错误文本解析限流恢复窗口（毫秒）。来源优先级：
-/// 1. `Retry-After` 结构化后缀（[`parse_retry_after_marker`]，唯一解析点）；
+/// 1. `Retry-After` 结构化后缀（[`parse_retry_after_marker`]，**只读头部段**，唯一解析点）；
 /// 2. UTC 重置时刻（`not asked again before 06:01 UTC` / `resets at 06:01 UTC`），
-///    按 `now_utc_hm` 求到下一次该时刻的距离（跨日由取模覆盖）。
+///    按 `now_utc_hm` 求到该时刻的**同日**距离；**复位时刻已过（`target <= now`）不跨日回绕**，
+///    返回 60s 软窗口（语义：窗口已过去，下一次调用正常尝试，最多再被限流一次即重新校准）。
 /// 返回 `None` = 文本无任何窗口指示（调用方使用默认窗口/既有退避）。
 pub fn rate_limit_window_ms(err: &str, now_utc_hm: (u8, u8)) -> Option<u64> {
     if let Some(secs) = parse_retry_after_marker(err) {
@@ -869,12 +931,14 @@ pub fn rate_limit_window_ms(err: &str, now_utc_hm: (u8, u8)) -> Option<u64> {
     let (hour, minute) = utc_reset_hint(&lower)?;
     let now_minutes = u32::from(now_utc_hm.0) * 60 + u32::from(now_utc_hm.1);
     let target = u32::from(hour) * 60 + u32::from(minute);
-    let mut delta = (target + 24 * 60 - now_minutes) % (24 * 60);
-    if delta == 0 {
-        // 恰在当前分钟：给 1 分钟（不按整天处理），让调度方走默认窗口/既有退避。
-        delta = 1;
+    // L3-A BLOCKING：**禁止跨日回绕**。复位时刻已过（target <= now）说明窗口已经过去，
+    // 若回绕成 ~24h 会被 `enter_cooldown` 的 6h 上限截断 ⇒ 造成连续 6 小时 0 次 HTTP
+    // 的过度熔断（比原缺陷更严重）。此处返回 60s 软窗口（含义：窗口已过，下一次调用
+    // 正常尝试；最多再被限流一次即可重新校准）。
+    if target <= now_minutes {
+        return Some(60_000);
     }
-    Some(u64::from(delta) * 60_000)
+    Some(u64::from(target - now_minutes) * 60_000)
 }
 
 /// 从错误文本提取人读的恢复时间（TUI 文案与冷却文案共用，单一格式化出口）。
@@ -1716,13 +1780,71 @@ mod tests {
     }
 
     #[test]
+    fn pa171_l3b_retry_after_marker_and_auth_are_body_proof() {
+        // A3：正文里的同名 token 既不得短路权威头值写入，也不得被解析成窗口。
+        let poisoned = "provider 返回错误状态：429 Too Many Requests；耗时=4031ms；响应正文：{\"note\":\"retry_after=999999\"}";
+        let error = append_retry_after_marker(poisoned, 60);
+        assert!(
+            error.contains("retry_after=60"),
+            "权威头值必须写进文本：{error}"
+        );
+        assert_eq!(parse_retry_after_marker(&error), Some(60));
+        assert_eq!(rate_limit_window_ms(&error, (0, 0)), Some(60_000));
+        assert_eq!(
+            rate_limit_recovery_hint(&error).as_deref(),
+            Some("预计 60s 后恢复")
+        );
+        assert_eq!(
+            parse_retry_after_marker("无头；响应正文：retry_after=999999"),
+            None,
+            "正文段不得参与 marker 解析"
+        );
+
+        // A1：auth 只看头部段 + 词边界，不得被耗时数字或正文措辞劫持。
+        for probe in [
+            "provider 返回错误状态：429 Too Many Requests；耗时=4031ms；响应正文：{}",
+            "provider 返回错误状态：429 Too Many Requests；耗时=401ms；响应正文：{}",
+            "provider 返回错误状态：429 Too Many Requests；耗时=18ms；响应正文：for this api key",
+        ] {
+            assert!(!is_auth_error(probe), "429 不得被误判 auth：{probe}");
+        }
+        // A2 反向钉子：真 auth 仍判 auth（状态行 401/403 与措辞，词边界）。
+        assert!(is_auth_error(
+            "provider 返回错误状态：401 Unauthorized；响应正文：{\"message\":\"invalid api key\"}"
+        ));
+        assert!(is_auth_error(
+            "provider 返回错误状态：403 Forbidden；耗时=4ms；响应正文：{}"
+        ));
+        assert!(!is_auth_error("provider 返回错误状态：503 Service Unavailable"));
+    }
+
+    #[test]
+    fn pa171_l3b_cooldown_active_marker_round_trips() {
+        let plain = "provider 处于限流冷却中（quota）";
+        assert!(!is_cooldown_active_error(plain));
+        let marked = append_cooldown_active_marker(plain);
+        assert!(is_cooldown_active_error(&marked));
+        assert_eq!(append_cooldown_active_marker(&marked), marked, "幂等");
+        assert!(marked.contains(COOLDOWN_ACTIVE_MARKER));
+    }
+
+    #[test]
     fn pa171_utc_reset_hint_is_parsed_and_bounded_by_next_occurrence() {
         let text = "{\"error\":{\"type\":\"exceeded_current_quota_error\",\"message\":\"You've reached your 5-hour usage limit, resets at 06:01 UTC\"}}";
-        // 05:00 UTC ⇒ 61 分钟；07:00 UTC ⇒ 23 小时 1 分（跨日取模）。
+        // 05:00 UTC ⇒ 61 分钟；06:01/07:00 UTC（复位时刻已到/已过）⇒ 60s 软窗口，
+        // **不得**跨日回绕成 ~24h（否则被 6h 上界截断 ⇒ 连续 6h 全短路）。
+        println!(
+            "[L3-A UTC] now=05:00 -> {:?}, now=06:01 -> {:?}, now=07:00 -> {:?}",
+            rate_limit_window_ms(text, (5, 0)),
+            rate_limit_window_ms(text, (6, 1)),
+            rate_limit_window_ms(text, (7, 0))
+        );
         assert_eq!(rate_limit_window_ms(text, (5, 0)), Some(61 * 60_000));
-        assert_eq!(
-            rate_limit_window_ms(text, (7, 0)),
-            Some((23 * 60 + 1) * 60_000)
+        assert_eq!(rate_limit_window_ms(text, (6, 1)), Some(60_000));
+        assert_eq!(rate_limit_window_ms(text, (7, 0)), Some(60_000));
+        assert!(
+            rate_limit_window_ms(text, (23, 59)).unwrap_or(u64::MAX) <= 60_000,
+            "复位时刻已过必须返回 ≤60s 软窗口，不得 ≥6h"
         );
         assert_eq!(
             rate_limit_recovery_hint(text).as_deref(),

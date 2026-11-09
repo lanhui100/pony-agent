@@ -747,17 +747,34 @@ impl ProviderManager {
         let class = ProviderCooldownRegistry::global()
             .class_for(&self.cooldown_key())
             .unwrap_or("rate_limited");
-        Err(format!(
+        // nfr-baseline-wave68 `wave68_logging_events`：冷却期 0 次 HTTP，结构化日志是唯一
+        // 可观测面（metrics 为结构性 N-A）。只打声明字段，不含响应正文/密钥。
+        crate::agent::otel::log::log_json_with_fields(
+            "warn",
+            "provider_cooldown_short_circuit",
+            None,
+            &[
+                (
+                    "provider_name",
+                    serde_json::json!(self.config.provider_name),
+                ),
+                ("model", serde_json::json!(self.config.model)),
+                ("remaining_ms", serde_json::json!(remaining.as_millis() as u64)),
+            ],
+        );
+        // L3-B ADVISORY：短路错误打标 ⇒ 重试编排全 scope 立即 Abort（不 sleep、不再 HTTP）。
+        Err(crate::agent::retry::append_cooldown_active_marker(&format!(
             "provider {} 处于限流冷却中（{class}），预计 {secs}s 后恢复；本次未发起请求；retry_after={secs}",
             self.config.provider_name
-        ))
+        )))
     }
 
     /// PA-171 C3-P1/C3-P6：命中限流/配额才登记冷却（其余类别保留既有重试语义）。
-    fn enter_cooldown(&self, error: &str) {
+    /// 返回 `true` = 本次确实进入/刷新了冷却（调用方据此给错误文本打冷却标记）。
+    fn enter_cooldown(&self, error: &str) -> bool {
         let class = crate::agent::retry::classify_error_class(error);
         if !matches!(class, "rate_limited" | "quota") {
-            return;
+            return false;
         }
         let retry_after_s = crate::agent::retry::parse_retry_after_marker(error);
         let window_ms = crate::agent::retry::rate_limit_window_ms(
@@ -766,14 +783,33 @@ impl ProviderManager {
         )
         .unwrap_or(COOLDOWN_DEFAULT_MS)
         .clamp(1_000, COOLDOWN_MAX_MS);
+        let until_unix_ms = now_unix_ms() + window_ms;
+        // nfr-baseline-wave68 `wave68_logging_events`：进入冷却的结构化留痕
+        // （事件名逐字；字段 = 声明清单，禁止夹带响应正文/密钥）。
+        crate::agent::otel::log::log_json_with_fields(
+            "warn",
+            "provider_cooldown_entered",
+            None,
+            &[
+                (
+                    "provider_name",
+                    serde_json::json!(self.config.provider_name),
+                ),
+                ("model", serde_json::json!(self.config.model)),
+                ("error_class", serde_json::json!(class)),
+                ("retry_after_s", serde_json::json!(retry_after_s)),
+                ("until_unix_ms", serde_json::json!(until_unix_ms)),
+            ],
+        );
         ProviderCooldownRegistry::global().enter(
             &self.cooldown_key(),
             ProviderCooldownEntry {
-                until_unix_ms: now_unix_ms() + window_ms,
+                until_unix_ms,
                 class,
                 retry_after_s,
             },
         );
+        true
     }
 
     /// W2（additive）：当前生效的 provider 选择真值（宿主继承源）。
@@ -2296,13 +2332,17 @@ impl ProviderManager {
                 format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
             })?;
 
-            let error = provider_status_error(
+            let mut error = provider_status_error(
                 status,
                 started_at.elapsed().as_millis(),
                 &text,
                 retry_after.as_deref(),
             );
-            self.enter_cooldown(&error);
+            // L3-B ADVISORY：冷却登记成功 ⇒ 打标；重试编排见标记即**全 scope** 立即 Abort
+            // （不 sleep、不再发 HTTP），保证「冷却期内 0 次 HTTP」。
+            if self.enter_cooldown(&error) {
+                error = crate::agent::retry::append_cooldown_active_marker(&error);
+            }
             return Err(error);
         }
 
@@ -2355,13 +2395,17 @@ impl ProviderManager {
                 format_request_error("读取 provider 流式返回失败", &error, started_at.elapsed())
             })?;
 
-            let error = provider_status_error(
+            let mut error = provider_status_error(
                 status,
                 started_at.elapsed().as_millis(),
                 &text,
                 retry_after.as_deref(),
             );
-            self.enter_cooldown(&error);
+            // L3-B ADVISORY：冷却登记成功 ⇒ 打标；重试编排见标记即**全 scope** 立即 Abort
+            // （不 sleep、不再发 HTTP），保证「冷却期内 0 次 HTTP」。
+            if self.enter_cooldown(&error) {
+                error = crate::agent::retry::append_cooldown_active_marker(&error);
+            }
             return Err(error);
         }
 
@@ -2714,13 +2758,17 @@ impl ProviderManager {
         })?;
 
         if !status.is_success() {
-            let error = provider_status_error(
+            let mut error = provider_status_error(
                 status,
                 started_at.elapsed().as_millis(),
                 &text,
                 retry_after.as_deref(),
             );
-            self.enter_cooldown(&error);
+            // L3-B ADVISORY：冷却登记成功 ⇒ 打标；重试编排见标记即**全 scope** 立即 Abort
+            // （不 sleep、不再发 HTTP），保证「冷却期内 0 次 HTTP」。
+            if self.enter_cooldown(&error) {
+                error = crate::agent::retry::append_cooldown_active_marker(&error);
+            }
             return Err(error);
         }
 
@@ -2771,13 +2819,17 @@ impl ProviderManager {
         })?;
 
         if !status.is_success() {
-            let error = provider_status_error(
+            let mut error = provider_status_error(
                 status,
                 started_at.elapsed().as_millis(),
                 &text,
                 retry_after.as_deref(),
             );
-            self.enter_cooldown(&error);
+            // L3-B ADVISORY：冷却登记成功 ⇒ 打标；重试编排见标记即**全 scope** 立即 Abort
+            // （不 sleep、不再发 HTTP），保证「冷却期内 0 次 HTTP」。
+            if self.enter_cooldown(&error) {
+                error = crate::agent::retry::append_cooldown_active_marker(&error);
+            }
             return Err(error);
         }
 
@@ -4888,6 +4940,12 @@ where
                 let last_error = extract_provider_error_detail(&err);
                 last_failure = Some(err.clone());
                 let failure = policy.classify(&err);
+                // L3-B ADVISORY：该错误已把 provider 置入冷却（HTTP 出口/短路打标）⇒
+                // **全 scope** 立即 Abort：不 sleep、不再发 HTTP（冷却期 0 次 HTTP）。
+                if crate::agent::retry::is_cooldown_active_error(&err) {
+                    let outcome = report(&budget, attempts_total, slept_ms, rl_active);
+                    return (Err(last_error), outcome);
+                }
                 // PA-171 C3-P2：Decision（对话首跳）作用域首跳限流/配额即 Abort——
                 // 冷却已在 4 个 HTTP 出口登记，重试循环不得再 sleep（否则
                 // 0.5+1+2+4=7.5s 违反 "限流快速失败(<3s)" 契约）。
@@ -8836,5 +8894,122 @@ mod tests {
             "180s 语义必须是读空闲超时，卡死的流要报 timeout，实际错误={error:?}"
         );
         let _ = stalled_handle.join();
+    }
+
+    // ── PA-171 L3-B：冷却期全 scope 短路（ADVISORY） ────────────────────────────────
+
+    /// L3-B ADVISORY：冷却标记错误在 **Followup** 作用域同样一失败即 Abort（不 sleep、不再发请求）。
+    #[test]
+    fn followup_cooldown_active_error_aborts_without_sleep() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let cooldown_error = crate::agent::retry::append_cooldown_active_marker(
+            "provider test 处于限流冷却中（quota），预计 60s 后恢复；本次未发起请求；retry_after=60",
+        );
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "followup_sync",
+                ProviderRetryScope::Followup,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err(cooldown_error.clone())
+                },
+                &sleeper,
+                None,
+            );
+
+        println!(
+            "[L3-B Followup abort] attempts={} slept_ms={}",
+            attempts.get(),
+            sleeper.total_slept.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1, "冷却期 Followup 必须只尝试一次（不得 sleep 后重放）");
+        assert_eq!(
+            sleeper.total_slept.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "冷却期不得发生任何退避 sleep"
+        );
+        assert_eq!(report.attempts_total, 1);
+        assert!(!report.switched_to_rl);
+    }
+
+    /// L3-B ADVISORY：冷却窗口内第 2 次调用**0 次 HTTP**（用回环 mock 物理计数）。
+    #[test]
+    fn cooldown_window_short_circuits_without_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind cooldown mock");
+        let address = listener.local_addr().expect("read cooldown mock address");
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests_for_thread = Arc::clone(&requests);
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_for_thread = Arc::clone(&shutdown);
+        let handle = thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("set cooldown mock nonblocking");
+            let mut buffer = [0_u8; 4096];
+            while !shutdown_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                        let _ = stream.read(&mut buffer);
+                        requests_for_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let body = "{\"error\":{\"type\":\"exceeded_current_quota_error\"}}";
+                        let response = format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nRetry-After: 60\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+
+        let config = ResolvedProviderSelection {
+            requested_name: "pa171-cooldown-test".to_string(),
+            provider_name: "pa171-cooldown-test".to_string(),
+            protocol: ProviderProtocol::OpenAiCompletions,
+            base_url: format!("http://{address}/v1"),
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "PA171_COOLDOWN_TEST_API_KEY".to_string(),
+            api_key: Some("pa171-dummy".to_string()),
+            model: "pa171-cooldown-model".to_string(),
+            temperature: 0.0,
+            max_output_tokens: 64,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities::default(),
+            thinking_param_pattern: ThinkingParamPattern::None,
+        };
+        let manager = ProviderManager::new(config);
+        let endpoint = format!("http://{address}/v1/chat/completions");
+        let body = serde_json::json!({});
+
+        let first = manager.post_openai_json(&endpoint, &body);
+        assert!(first.is_err(), "首次 429 必须返回 Err");
+        let after_first = requests.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(after_first, 1, "首次 429 只应发 1 次 HTTP");
+
+        let second = manager.post_openai_json(&endpoint, &body);
+        let after_second = requests.load(std::sync::atomic::Ordering::SeqCst);
+        let error = second.expect_err("冷却窗口内必须直接返回可读失败");
+        assert_eq!(
+            after_second, after_first,
+            "冷却窗口内不得再发起 HTTP，实际新增 {} 次",
+            after_second - after_first
+        );
+        println!(
+            "[L3-B Followup] http first={} second={} err={}",
+            after_first, after_second, error
+        );
+        assert!(error.contains("冷却"), "冷却失败文案必须可读：{error}");
+        assert!(manager.cooldown_remaining().is_some());
+        manager.clear_cooldown();
+
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = handle.join();
     }
 }

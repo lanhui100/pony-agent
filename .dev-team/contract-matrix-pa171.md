@@ -1,5 +1,13 @@
 # PA-171 契约矩阵（wave-68）：goal 续轮失败止损 / 失败不烧预算 / 限流冷却 / 失败轮归因
 
+Amendment: wave-68-a1（2026-11-09）
+
+> - **a1-1** §4.2 / C4-S5：`fallback_reason` 封闭值域（`provider_decision_failed` 首跳 / `provider_followup_failed` 工具 followup / `turn_failed_no_fallback` 默认值 + `provider_meta=None` 缺席态）、判定优先级、附件保存失败走默认值的例外。
+> - **a1-2** §6.1：`provider_cooldown_entered` / `provider_cooldown_short_circuit` / `goal_rounds_stopped` 的契约归属与封闭字段；metrics 结构性 N-A ⇒ 结构化日志是唯一观测面。
+> - **a1-3** §3.1 / C1-A4：`start_turn_stream_checked` outcome 派生判别式（`Fail⇒Failed` / `Cancel⇒Cancelled` / `WaitUser⇒Suspended` / 其余按 phase），并闭合 C1-A2 的 error 采集条件。
+> - **a1-4** §3.3 / C3-P7：冷却键改为**四段** `requested_name|provider_name|model|base_url`（**D68-7**，Lead 批准；理由：同进程内不同 endpoint 各有独立配额窗口，三段键会把 C3-d 的 503 反向钉子用例短路成「冷却中」，生产上造成跨环境误杀）。
+> - **a1-5 已知限制（ADVISORY，如实登记，未接线）**：`clear_cooldown()`（`crates/pony-agent-core/src/agent/provider/mod.rs:737`）与 `cooldown_remaining()`（`:732`，仅被 `ensure_not_cooling` 在 `:743` 内部消费）**当前零生产调用点** ⇒ 冷却期内没有任何用户/宿主可操作的复位入口，**复位只能靠进程重启**；单条冷却由 6h 冻结上界兜底（§3.3 C3-P5）。本项**不**作为「已接线」宣称。
+
 > **批准声明（Protocol Agent, 2026-11-09）**：本矩阵**批准** Test Agent 已冻结并锚定的红相面
 > （`crates/pony-agent-core/tests/pa171_goal_round_failure_contract.rs`、
 > `pa171_provider_rate_limit_cooldown_contract.rs`、
@@ -237,6 +245,24 @@ impl HostControlPlane {
   `start_turn_stream_legacy`（`ask_resume_commands.rs:104`）时，外层 `RecordingTurnEventSink`
   仍能采到终态（F5），故 legacy 路径同样产出真实 outcome；**禁止**因此修改
   `ask_resume_commands.rs`（不在 t-w1 写域）。
+- **C1-A4（wave-68-a1 补登）outcome 派生判别式（封闭，冻结）**：`start_turn_stream_checked`
+  必须按如下**单一优先序**判别，不得引入第二种判据：
+
+  | 序 | 判据（按序命中即返回） | outcome |
+  |---|---|---|
+  | 1 | `GraphRunTurnResponse.decision.kind == Fail` | `Failed { error }` |
+  | 2 | `decision.kind == Cancel` | `Cancelled` |
+  | 3 | `decision.kind == WaitUser` | `Suspended` |
+  | 4 | 其余决策 ⇒ 按 turn phase：`failed` / `cancelled` / `suspended` / `completed` | 依次 `Failed { error }` / `Cancelled` / `Suspended` / `Completed` |
+  | 5 | 无终态可采（`build_turn_result()` 返回 `None`，或 phase 不在上述四值） | `Unknown`（**不得**当成功） |
+
+  即：**`Fail⇒Failed` / `Cancel⇒Cancelled` / `WaitUser⇒Suspended` / 其余按 phase**。决策序优先于
+  phase 的理由（`[DERIVED]`）：`decision.kind` 是 graph 层对轮次结果的显式裁决
+  （`control_plane/mod.rs:2025-2035`，含 `graph.rs:829-836` 的 Cancel 归一），phase 只是终态事件
+  的文本相位（`turn_flow.rs:573`），二者冲突时以显式裁决为准。
+  本项同时**闭合 C1-A2 的落地条件**：序 1/4 的 `Failed { error }` 需要的 `error` 正是由 C1-A2 在
+  `RecordedTurnTerminal` 新增的 `error: Option<String>` 采集（否则 `Failed { error: None }` 恒空，
+  状态行与审计拿不到失败文本）。`Err(String)` 通道的语义不变（见上「既有失败面透传」）。
 
 ### 3.2 限流分类（冻结面，写域 `agent/retry.rs` = `t-w2`）
 
@@ -302,11 +328,23 @@ impl ProviderCooldownRegistry {
 impl ProviderManager {
     pub fn cooldown_remaining(&self) -> Option<Duration>;   // 宿主/测试可观测
     pub fn clear_cooldown(&self);                           // 恢复开关/测试复位
-    fn cooldown_key(&self) -> String;                       // requested_name|provider_name|model
+    /// 冷却键：**四段** `requested_name|provider_name|model|base_url`（D68-7，见 C3-P7）。
+    fn cooldown_key(&self) -> String;
     fn ensure_not_cooling(&self) -> Result<(), String>;     // 冷却期直接 Err（0 次 HTTP）
     fn enter_cooldown(&self, error: &str);                  // 仅 rate_limited|quota 类
 }
 ```
+
+- **C3-P7（wave-68-a1 补登）冷却键 = 四段，含 `base_url`（D68-7，Lead 已批准）**：
+  `provider_cooldown_key = "{requested_name}|{provider_name}|{model}|{base_url}"`
+  （实现取证：`crates/pony-agent-core/src/agent/provider/mod.rs:721-729`，四段字面量逐段取自
+  `self.config`）。
+  **理由（D68-7）**：同一进程内不同 endpoint（含本地回环 mock / 不同网关环境）各自拥有**独立的配额
+  窗口**；若只用三段键，同一 provider/model 在一个 endpoint 上撞 429 后，另一 endpoint（以及 C3-d 的
+  503 反向钉子用例）会被误判为「冷却中」直接短路 ⇒ 生产上造成**跨环境误杀**（一个环境的限流冻结
+  掉另一个环境的正常调用），且会让反向钉子用例变成假绿。
+  纪律：`base_url` 参与键 ⇒ 冷却语义是「**每个 endpoint 一份窗口**」，不是「每个 provider 一份」；
+  任何新增键段必须走同一函数，禁止在调用点另行拼键。
 
 - **C3-P1 接入点（冻结）**：`ensure_not_cooling()?` 加在 F8 的 **4 个 HTTP 出口发送前**
   （`provider/mod.rs:2126`、`:2179`、`:2524`、`:2565` 的 `let request = ...` 之前）；
@@ -382,7 +420,7 @@ pub fn emit_stream_failed_attributed(/* 上述 14 参原序 */, attribution: Fai
   |---|---|---|---|
   | `provider_source` | `format!("provider_attempt_failed:{}", meta.requested_name)`（必须**含真实 provider 名**，如 `magpie`/`kimi`） | `None` | 红相要求含 `magpie`/`kimi`；`:148-155` |
   | `provider_mode` | `"failed"` | `None` | 与失败 `TurnResult` 同值（F11 `turn_flow.rs:456`），且非占位词 |
-  | `fallback_reason` | `"turn_failed_no_fallback"` | `None` | 本卡无跨 provider 备用链（任务卡 §非目标），"未发生降级"必须可判 |
+  | `fallback_reason` | 取 **§C4-S5 的封闭值域**（`provider_decision_failed` / `provider_followup_failed` / `turn_failed_no_fallback`） | `None` | 触发方标签优先；未命中任何触发方标签 ⇒ 默认值（详见 C4-S5） |
   | `error_class` | `Some(classify_error_class(&error))` | 同（**永远有值**） | 红相 `:203-216` 要求 wire 上键存在 |
   红相 `assert_non_placeholder` 禁止 `""`/`none`/`null`/`unknown`（`:104-116`），上表逐项满足。
 - **C4-S2 失败语义不得被归因破坏**（G6）：事件名仍 `turn:failed`、`kind == "failed"`、
@@ -396,6 +434,28 @@ pub fn emit_stream_failed_attributed(/* 上述 14 参原序 */, attribution: Fai
   `#[serde(default, skip_serializing_if = "Option::is_none")]`，键 `errorClass`）。
 - **C4-S4 单一分类器**（G1）：`error_class` 值只能来自 `retry::classify_error_class`（§3.2），
   禁止在 `turn_flow.rs` 内写第二套映射。
+- **C4-S5（wave-68-a1 补登）`fallback_reason` 封闭值域 + 判定优先级 + 例外**：
+  L3-P 指出原矩阵只登记了默认值、与实现（按**触发方标签**落值）不一致。此处把实现取值**全部登记**为
+  **封闭值域**（3 个字面量 + 1 个缺席态），任何第 4 个字面量都属契约违规：
+
+  | # | 取值（逐字） | 触发方 | 判定优先级 | 证据 |
+  |---|---|---|---|---|
+  | 1 | `provider_decision_failed` | **首跳 decision** 的模型调用失败（provider 类失败） | 最高（先于 2/3） | `runtime/turn_stream.rs:2928-2931`（`fallback_reason: Some("provider_decision_failed")`） |
+  | 2 | `provider_followup_failed` | **工具 followup** 的模型调用失败（provider 类失败） | 次之 | `runtime/turn_stream.rs:1226-1246`（触发方标签 `"provider_followup_failed"` 传入失败收口） |
+  | 3 | `turn_failed_no_fallback` | **默认值**：没有任何 provider 触发方标签时的失败（工具/钩子/**附件保存失败**等） | 低于 1/2，仅作兜底 | `agent/turn_flow.rs:552-564`（`provider_meta.map(\|_\| "turn_failed_no_fallback")`） |
+  | 4 | 键缺席（`None`） | `provider_meta == None`（本轮从未选出 provider） | — | 同上（`provider_meta.map(..)` 在 `None` 时不置值） |
+
+  **判定优先级（冻结）**：`触发方标签 1/2` → `默认值 3` → （`provider_meta == None` 时）`缺席 4`。
+  即「有标签用标签、无标签用默认值、无 provider 则缺席」，**禁止**用默认值掩盖已识别的触发方
+  （否则审计机无法区分「首跳失败」与「工具 followup 失败」）。
+  **落地约束**：标签只能由 `runtime/turn_stream.rs` 的上述两个 provider 失败入口写入；
+  非 provider 失败**必须**走不带标签的同名入口（`turn_persist.rs:493-495` 注释即为该纪律的原文）。
+  **例外（明确登记）**：**附件保存失败**（以及工具/钩子类失败）即使发生在 provider_meta 存在的轮次，
+  也**走默认值 `turn_failed_no_fallback`**——因为它们不是 provider 触发方，硬塞标签会伪造归因。
+  同名前缀的**非失败轮**用法：`agent/provider/mod.rs:5017` 的
+  `format!("provider_followup_failed: {}", preview_text(&error, 240))` 属
+  `ProviderDecision.fallback_reason`（本地工具 fallback 的降级原因，`provider_mode = "fallback"`），
+  **不是**失败轮事件的值域成员；二者必须共用同一标签来源，禁止各自拼字面量（G1）。
 
 ---
 
@@ -444,6 +504,29 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String;
 | 门禁 | `audit-diff.sh --base d9425a70` 与 `check-declaration.sh <repo>` 双 Exit 0 | 任务卡 §验收 6 |
 
 > 本矩阵**只读** `docs/observability.yaml`（Protocol 不改它）。文件修改权属 Lead 收口阶段。
+
+### 6.1 `wave68_logging_events` 契约归属（wave-68-a1 补登）
+
+**前提（结构性）**：本项目 metrics 维度是**结构性 N-A**（`docs/observability.yaml:45-56`：桌面/TUI
+交付形态无常驻监听地址、无 Service、无 `/metrics`，pull 模型前提不成立；logs 亦为结构性 N-A，
+`:57-66`）。因此**冷却与续轮止损这两类"抑制了多少次失败"的事实，唯一可观测面就是结构化 JSON 日志
+（带 `trace_id`）**——不作为「新增遥测面」，也不得为让巡检变绿而伪造 `/metrics`。
+三个事件名的家与封闭字段清单如下（字段即声明清单，**禁止夹带响应正文/密钥**）：
+
+| # | 事件名（逐字） | 归属契约 | 唯一发射点 | 字段（封闭） | 语义 |
+|---|---|---|---|---|---|
+| 1 | `provider_cooldown_entered` | C3（§3.3） | `crates/pony-agent-core/src/agent/provider/mod.rs:787-800`（`ProviderManager::enter_cooldown`，`log_json_with_fields` warn 级） | `trace_id`(自动) / `provider_name` / `model` / `error_class` / `retry_after_s` / `until_unix_ms` | 一次 `rate_limited`\|`quota` 失败**首次**把该 provider 置入冷却；审计机据此算「一次 429 被抑制成多少轮」 |
+| 2 | `provider_cooldown_short_circuit` | C3（§3.3） | `provider/mod.rs:752-764`（`ensure_not_cooling`，warn 级） | `trace_id`(自动) / `provider_name` / `model` / `remaining_ms` | 冷却窗口内**0 次 HTTP** 的唯一物理证据（历史缺陷是每轮再打 5 次） |
+| 3 | `goal_rounds_stopped` | C1/C2（§2.2/§2.3） | `crates/pony-agent-core/src/bin/tui.rs:8395-8414`（`log_goal_rounds_stopped`，info 级；唯一结构化出口，禁止退回裸 `eprintln`——`:8390-8394`） | `trace_id`(自动) / `session_id` / `reason` / `consecutive_failures` / `rounds_started` / `max_rounds` | 续轮停止原因（取代历史静默 `break`）；`reason` 取值为 `goal_round_stop_reason_tag` 的封闭集合（`tui.rs:8377-8387`：`cancelled` / `consecutive_failures` / `budget_exhausted` / `auto_continue_budget` / …） |
+
+**同族但未列入上述三项的日志面（如实登记）**：`goal_rounds_loop_already_owned`
+（`tui.rs:8321`，warn；对应 C1-T2 租约未抢到）与 `goal_round_turn_failed`
+（`tui.rs:8287-8290`，warn；`Err` 通道无终态）同属本波次新增可观测面，
+字段以代码为准，`nfr-baseline-wave68.json` 的 `wave68_logging_events` 已声明前者；
+本补登**不新增**事件名，只登记归属与观测面地位。
+
+**门禁口径**：三事件的「已落地」判据是「发射点存在 + 字段清单一致」，由 L3 审查/`audit-diff.sh`
+比对；本矩阵不声称任何 metrics/logs 维度由 N-A 转为 applicable。
 
 ---
 

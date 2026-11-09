@@ -688,11 +688,27 @@ pub enum TurnStreamOutcome {
     Unknown,
 }
 
-/// PA-171 C1-A1：把 `RecordingTurnEventSink` 采到的终态 `(phase, error)` 归约为
-/// [`TurnStreamOutcome`]（契约矩阵 §3.1 冻结表，phase 取自终态事件而非 graph 决策）。
+/// PA-171 C1-A1：把终态 `(phase, error)` 与 graph 决策归约为 [`TurnStreamOutcome`]
+/// （契约矩阵 §3.1 冻结表）。
 ///
+/// 判定优先级：**决策真值优先**（`Fail ⇒ Failed` / `Cancel ⇒ Cancelled` /
+/// `WaitUser ⇒ Suspended` / `Pause`（用户停止被折成 Pause）`⇒ Cancelled`），
+/// 其余（`Continue`/`Complete`/无 run 事实）回落终态 phase 判定。
 /// 未知 phase（含将来新增的相位）一律 `Unknown`：宁可让续轮停止，也不把不确定当成功。
-fn turn_stream_outcome_from_terminal(phase: &str, error: Option<String>) -> TurnStreamOutcome {
+fn turn_stream_outcome_from_terminal(
+    phase: &str,
+    error: Option<String>,
+    decision: Option<GraphDecisionKind>,
+) -> TurnStreamOutcome {
+    if let Some(kind) = decision {
+        match kind {
+            GraphDecisionKind::Fail => return TurnStreamOutcome::Failed { error },
+            GraphDecisionKind::Cancel => return TurnStreamOutcome::Cancelled,
+            GraphDecisionKind::WaitUser => return TurnStreamOutcome::Suspended,
+            GraphDecisionKind::Pause => return TurnStreamOutcome::Cancelled,
+            GraphDecisionKind::Continue | GraphDecisionKind::Complete => {}
+        }
+    }
     match phase.trim().to_ascii_lowercase().as_str() {
         "completed" => TurnStreamOutcome::Completed,
         "failed" => TurnStreamOutcome::Failed { error },
@@ -2212,14 +2228,42 @@ impl HostControlPlane {
         sink: &S,
         command: StartTurnStreamCommand,
     ) -> Result<TurnStreamOutcome, String> {
+        let turn_id = command.turn_id.clone();
         let recording = RecordingTurnEventSink::new(sink);
         match self.start_ask_aware_turn_stream(&recording, command) {
-            Ok(()) => Ok(match recording.recorded_terminal_outcome() {
-                Some((phase, error)) => turn_stream_outcome_from_terminal(&phase, error),
-                None => TurnStreamOutcome::Unknown,
-            }),
+            Ok(()) => {
+                // 契约矩阵 §3.1 C1-A1：终态 phase + **graph 决策**双真值判定。
+                // 只看 phase 会把「WaitUser（模型挂起等用户）」当成 Completed，进而多开一轮。
+                let decision = self.turn_graph_decision_for(&turn_id);
+                Ok(match recording.recorded_terminal_outcome() {
+                    Some((phase, error)) => {
+                        turn_stream_outcome_from_terminal(&phase, error, decision)
+                    }
+                    None => TurnStreamOutcome::Unknown,
+                })
+            }
             Err(error) => Err(error),
         }
+    }
+
+    /// PA-171 C1-A1：该轮落库的 graph 决策（`None` = 无 run 事实的旧兜底路径）。
+    ///
+    /// 真值来源：`GraphRun.last_decision`（由 `GraphRunner::apply_turn_result` 按
+    /// `decide_after_turn` 落库）+ `last_completed_turn_id` 定位本轮。
+    fn turn_graph_decision_for(&self, turn_id: &str) -> Option<GraphDecisionKind> {
+        let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            e.into_inner()
+        });
+        graph_runs
+            .list_runs()
+            .into_iter()
+            .find(|run| {
+                run.last_completed_turn_id.as_deref() == Some(turn_id)
+                    || run.active_turn_id.as_deref() == Some(turn_id)
+            })
+            .and_then(|run| run.last_decision)
+            .map(|decision| decision.kind)
     }
 
     /// wave-60 C2：注册某 turn 的**即时事件出口**（宿主角色的唯一注入点）。

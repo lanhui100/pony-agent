@@ -177,13 +177,10 @@ pub fn user_facing_error_summary(error: &str) -> String {
 /// 限流分支必须早于 transient：否则 429 会被折叠成「重试已用尽」（历史缺陷 F13）。
 pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String {
     let _ = now_unix_ms;
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("401")
-        || lower.contains("403")
-        || lower.contains("api key")
-        || lower.contains("unauthorized")
-        || lower.contains("forbidden")
-    {
+    // L3-B BLOCKING：auth 只认**头部段**（`；响应正文` 之前）的词边界判据，禁止裸
+    // `contains` 扫全文——`429 … 耗时=4031ms` / `… 耗时=401ms` / 正文含 "api key"
+    // 都会被裸 contains 误判成凭据错误（真因是限流/配额）。
+    if pony_agent_core::agent::retry::is_auth_error(error) {
         return ERROR_SUMMARY_AUTH.to_string();
     }
     if matches!(

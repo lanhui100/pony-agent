@@ -430,6 +430,16 @@ pub enum GoalRoundStopReason {
     },
     /// 每线程自动续轮次数用尽（既有 F-G 契约的 8 轮预算；不静默 break）。
     AutoContinueBudget,
+    /// PA-171 C1：本轮**挂起**等待用户（Ask / 审批待作答）；续轮让位，不再起新轮。
+    ///
+    /// 与 `AutoContinueBudget` 同为 additive 变体：`goal_round_stop_reason` 不产出它，
+    /// 由宿主按 `TurnStreamOutcome::Suspended` 构造（否则「模型挂起等用户」会被当成功多开一轮）。
+    TurnSuspended,
+    /// PA-171 C1：本轮**无可用终态**（收口失败 / 旧无 run 事实兜底路径）。
+    ///
+    /// additive 变体，由宿主按 `TurnStreamOutcome::Unknown` 或派发 `Err` 构造；
+    /// 语义是「不知道成没成」⇒ 停止续轮，且**不计失败、不烧预算**（不得冒充失败轮）。
+    TurnUnclassified,
 }
 
 impl GoalRoundStopReason {
@@ -450,6 +460,10 @@ impl GoalRoundStopReason {
                 "goal 续轮已停止（目标轮次预算已用尽：{rounds_started}/{max_rounds}）"
             ),
             Self::AutoContinueBudget => "goal 续轮已停止（自动续轮次数用尽）".to_string(),
+            Self::TurnSuspended => "goal 续轮已停止（本轮挂起：等待用户作答/审批）".to_string(),
+            Self::TurnUnclassified => {
+                "goal 续轮已停止（本轮无可用终态，已暂停自动续轮）".to_string()
+            }
         }
     }
 }

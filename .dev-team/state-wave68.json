@@ -3,7 +3,7 @@
  "task": "PA-171",
  "theme": "TUI 连环错误根因修复（goal 续轮失败止损 / provider 限流冷却 / 失败轮归因）",
  "baseline_commit": "d9425a70",
- "status": "red-anchored-pending",
+ "status": "implemented-pending-reviews",
  "note": "共享 .dev-team/state.json 由他会话并发使用，本波次账本单列于本文件（沿用 wave16/17/61 先例），避免格式级整文件改写污染共享账本。",
  "contract_matrix": ".dev-team/contract-matrix-pa171.md",
  "nfr_baseline": ".dev-team/nfr-baseline-wave68.json",
@@ -86,11 +86,55 @@
   {
    "id": "D68-6",
    "text": "dev-stub-lint.py 仅支持 Python AST，Rust 仓空桩纯度门禁不适用，以契约矩阵冻结签名 + cargo check Exit 0 替代（已写入矩阵偏差声明）"
+  },
+  {
+   "id": "D68-8",
+   "text": "ADR 编号 0102 被并行会话先占用 ⇒ 本卡 ADR 改为 0103（编号不复用）"
+  },
+  {
+   "id": "D68-9",
+   "text": "L3 审查收据按 schema v2（reviewer/executed_by/reviewed_commit/attestation，wave-scoped 文件名 review-*-wave68-v2.json），禁止复用历史 review 文件名"
+  },
+  {
+   "id": "D68-10",
+   "text": "L3-P BLOCKING：NFR logging 声明的 provider_cooldown_entered/short_circuit/goal_rounds_stopped 未落 ⇒ 派 executor-beta/alpha 补结构化日志（禁新增裸 eprintln）"
+  },
+  {
+   "id": "D68-11",
+   "text": "L3-A ADVISORY 升级为必修：outcome 必须消费 decision.kind（WaitUser⇒Suspended），否则挂起轮被当成功多开一轮"
   }
  ],
  "gates": {
-  "regression_baseline": "captured (check exit0 / 96+98 passed)",
-  "nfr_lint": "pending",
-  "red_phase": "frozen"
+  "regression_baseline": "captured",
+  "nfr_lint": "PASS (dev-nfr-lint.py exit 0)",
+  "red_phase": "frozen (4 files exit=101)",
+  "join_machine": "cargo check --all-targets exit 0; pa171 4 文件 89/3/7/5 passed; tui 96/98; lib 1400 passed",
+  "smoke": "ponycli build exit 0 / --help exit 0（--version 未支持，属 PA-164 既有）",
+  "observability": "audit-diff exit 0; check-declaration PASS exit 0",
+  "reviews": "round1 无效（越界审计，已作废）；round2 进行中"
+ },
+ "commits": {
+  "red": "e8c460ab",
+  "protocol": "e1227763",
+  "t_w2": "d04d543c",
+  "docs": "59ec6797",
+  "adr_renumber": "1f5610d6",
+  "t_w1_t_w3": "12a155b5"
+ },
+ "reviews": {
+  "round1": "invalid（三个审查员越界审计 wave-54/59 主题；收据改名 review-l3{a,b,p}-round1-invalid.json）",
+  "round2": {
+   "l3a": {
+    "artifact": ".dev-team/review-l3a-wave68-v2.json",
+    "verdict": "PASS",
+    "findings": "0 BLOCKING / 5 ADVISORY"
+   },
+   "l3p": {
+    "artifact": ".dev-team/review-l3p-wave68-v2.json",
+    "verdict": "FAIL",
+    "findings": "1 BLOCKING(logging 未落) / 3 ADVISORY"
+   },
+   "l3b": "round2 未回收（将重跑）"
+  }
  }
 }
