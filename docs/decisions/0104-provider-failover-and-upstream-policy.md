@@ -180,3 +180,35 @@ ADR 0103（PA-171）把"一次上游限流"收敛为一次可见失败，但明�
 新增/迁移冻结验收：`tests/pa173_upstream_policy_guard_contract.rs`（D1 磁盘原值 + 生效钳制、
 D2 下界、D3 批量重试与有界重试）、`tests/pa172_upstream_policy_config_contract.rs`（三处下界断言
 + 极端值语义改为「读取路径钳制、磁盘保原值」）。
+
+## PA-174 修订（2026-11-09，第二轮）
+
+现场症状：「新的轮次开始，没有成功接入之前轮次的历史」。取证后确认是**两个独立缺陷**叠加，
+外加三项 PA-173 登记的遗留项，一并收口：
+
+1. **P1 历史重建（主症状；数据面）**：实测会话 `pa_01a1ba70` 的 `session_data` 为 `__index_only`
+   且 `history: []`、`normalized_messages` 该会话 0 行、会话日志 0 条 `append_message`，而
+   `turn_events` 有 13098 行 / 48 turn —— 历史**只**存在于事件日志。`sqlite_session_commit.rs`
+   对「投影侧全空」的行故意跳过 ⇒ 空壳永久保留；TUI 新轮次又传 `history: Vec::new()`。
+   决定：新增 `session::history_from_turn_events`（纯函数，按 seq 升序只取 user/assistant
+   消息事件），并接入 `SqliteSessionBackend::load_store` 的两条返回路径 ⇒ 折叠历史为空但事件
+   日志有消息时**必须重建**，不返回空壳。契约红线：不得凭空造假（无消息事件则保持空）。
+2. **P2 角色还原（协议面）**：历史把上一轮 assistant 存为 `Developer + "Previous assistant reply: "`
+   标记，而 `to_chat_role` 把 Developer 映成 `system` —— openai-completions / openai-responses
+   两条协议**不还原**（仅 Anthropic 还原）。实测 125 条 decision 请求中 75 条携带该标记、单条
+   最多 12 条。决定：三条协议统一还原为 `role: assistant` 并剥前缀，顺序不变，system 文本不含
+   该字面量。
+3. **F1 1:1 followup 重试污染与错误降级**：1:1 三臂补 pristine-base 重置与原始错误保真
+   （与 PA-173 批量同构）；Anthropic 1:1 臂补回缺失的重试层。
+4. **F2 聚合墙钟（取代本文 §PA-173 修订第 2 条的「无总 deadline」代价条款）**：
+   新增 `UPSTREAM_AGGREGATE_DEADLINE_MS_MAX = 180_000` 与
+   `aggregate_sync_call_budget_ms = min(timeout × attempts + retry_budget, 180_000)`，
+   同步入口（decision / 1:1 / batch 三臂）注入绝对 deadline；退避 sleep 按剩余预算截断
+   （`DeadlineSleeper`）。未注入 deadline 的调用者行为逐字不变（既有 sleep 累计断言不动）。
+5. **F3 生效策略出口**：新增 `upstream_policy_report(raw, effective)` 与
+   `ponycli config effective`（打印 `disk_policy` / `effective_policy` / `clamped_fields`，
+   不含任何密钥）⇒ 修掉「钳制只读后生效值无观测出口」的缺口。
+
+冻结验收：`tests/pa174_history_wiring_and_followup_contract.rs`（10 用例：P1×3 / P2 / F1×3 /
+F2×2 / F3）。红相：P1 装载侧 `[]` vs 重建历史、P2 角色序列 `[system,system,user,system,user]`、
+F1 `5≠3` 与 `1≠2`、F2 未接行为面时 `hits=5` 且 12.76s。

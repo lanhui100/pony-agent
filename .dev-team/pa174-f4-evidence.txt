@@ -1,0 +1,20 @@
+# PA-174 F4 现场取证（2026-11-09，来源：~/.pony-agent/tui-logs/tui-runtime.log + 源码）
+
+## 1. 物理观测（运行时，非推断）
+- 扫描 `[pony-provider] request:openai decision messages=` 共 125 条请求预览：
+  其中 **75 条**包含 `Developer:Previous assistant reply:`。
+- 单条请求内最多携带 **12** 条上一轮 assistant 回复（示例：`… | User:继续 | Developer:Previous assistant reply: **collect 阶段已有机器证据… | User:（已作答，继续上一轮未完成的步骤） | Developer:Previous assistant reply: ## 建议：本会话退让…`）。
+
+## 2. 机制（代码真值）
+- 历史写入：`crates/pony-agent-core/src/agent/context.rs:1866-1871`
+  `"assistant" => ProviderMessage { role: ProviderRole::Developer, content: format!("Previous assistant reply: {}", content) }`
+- 角色映射：`crates/pony-agent-core/src/agent/provider/mod.rs:4112-4117`
+  `ProviderRole::System | ProviderRole::Developer => "system"`
+- OpenAI 组装：`provider/mod.rs:4784-4800` `openai_request_messages` **不还原** Developer/前缀，直接 `to_chat_role`。
+- Anthropic 组装：`provider/mod.rs:4570-4610` `anthropic_conversation_messages` **有**还原（剥前缀 → `role: assistant`），且 `anthropic_system_text:4516-4520` 显式过滤掉这些行。
+
+## 3. 结论
+走 openai-completions 的 provider（当前在用的 ponyllm/magpie/workbuddy 全部是）在一个新轮次里收到的历史形如
+`[system, system, user, system, user, …]`，其中「上一轮 assistant 回复」以 **system 角色 + 字面前缀** 出现；
+即：历史内容在、**角色结构丢失**、且与 anthropic 路径行为不一致（同一会话换协议即变语义）。
+判据：这不是「历史完全没带」而是「历史未被正确接入」——与用户报告一致。

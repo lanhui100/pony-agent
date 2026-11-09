@@ -23,6 +23,16 @@ reviewed_at: "2026-11-09"
 #     metrics/logs 维度仍是结构性 N-A（桌面进程无常驻监听地址、无 /metrics）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point，tracing 收口点仍是 agent/otel/mod.rs。
 
+# PA-174（ADR 0104「PA-174 修订」）归属说明：轮次历史接入（P1/P2）+ F1/F2/F3 遗留收口。
+# (1) P1 历史重建发生在**会话装载**（`SqliteSessionBackend::load_store` → 读 `turn_events`），
+#     读的是本地 sqlite，无新增网络出口；失败降级为「保持空历史」而不造数据。
+# (2) P2/F1/F2 只改消息角色与重试时序，复用既有 `provider_log` 行（`{label}:attempt=N/M`）与
+#     per-attempt 错误日志 ⇒ 无新增结构化事件。
+# (3) F3 新增**对外接口**：`ponycli config effective`（stdout 单行 JSON：disk_policy /
+#     effective_policy / clamped_fields）。它是一条本地只读 CLI 出口，不上报、不含密钥，
+#     故 metrics / logs 维持结构性 N-A；issues 维度不变（异常仍走既有 PonySentry 边界）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point；tracing 收口点仍是 agent/otel/mod.rs。
+
 # Trace 审核 loop（ADR 0101 / PA-168..170）归属说明：loop 会话复用 ponycli headless 既有 OTel 出口
 # （tracing anchor 不变，仍 agent/otel/mod.rs），自身即维度 6 的审计对象（自举）；scripts/audit/* 确定性
 # 节点只产本地回执，无新增网络遥测面；fetch 查询 Tempo/Langfuse 复用 check-langfuse.sh 凭据纪律
