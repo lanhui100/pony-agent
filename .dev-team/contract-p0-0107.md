@@ -61,6 +61,22 @@
 | R1 | `apply_persist_command_tx` 的 stale-epoch 拒绝返回 `Err(String)` → 被 `index_failure_after_log` 吞成 `LogPersisted`（内存误前进） | 让 apply 层返回**类型化**结果：stale-epoch ⇒ `PersistCommandOutcome::StaleEpoch`；其余应用错误 ⇒ `Failed`。`index_failure_after_log` 只改判 `Failed`，`StaleEpoch` 必须透传 | `persist_command_writes_normalized_tables_and_checks_epoch` 绿（old epoch → `StaleEpoch`/非 Ok），且 `store.rs:645` 对 `StaleEpoch` 仍 `Err` 不入内存 |
 | R2 | 门禁漏跑 `--lib`，2 条断言红 | ① 修复 R1 后 epoch 用例应自然转绿；② `flush_events_rolls_back_on_injected_failure` 的 outcome 断言按新语义从 `Failed` 改为 `LogPersisted`（并保留其"事务回滚无残留"断言），在 `.dev-team/green-phase-p0-0107.log` 显式登记「已声明的语义变更」 | `cargo test --lib` exit 0（1405 passed） |
 | R3 | 降级实例 `LogWriter` 长期缓存并持 flock ⇒ 主可写实例写同一会话 `Locked → Failed → 整轮回滚`（破坏"可写实例零回归"） | 降级实例（`is_read_only() && !storage_read_only()`）改走**按批开/放** writer（append 后立即释放 flock）；可写实例保持缓存 writer 不变 | 新增用例：降级实例 append 一次后释放 flock（主实例随后同会话 append 成功）；现有并发/日志套件不回归 |
-| R4 | `new_read_only`（`--dry-run`/诊断/测试夹具）在删除短路后会真写 `session.jsonl`，破坏 E8「零写入」 | 短路**只对 `storage_read_only` 保留**（维护句柄不写日志）；锁降级实例仍写日志 | `session_log_wiring.rs:196` 等维护句柄用例不出现日志写入；`--dry-run` 路径零写入 |
+| R4 | `new_read_only`（`--dry-run`/诊断/测试夹具）在删除短路后会真写 `session.jsonl`，破坏 E8「零写入」 | 短路**只对 `storage_read_only` 保留**（维护句柄不写日志）；锁降级实例仍写日志。新增 `SqliteSessionBackend::storage_read_only()` 访问器 | 维护句柄用例零日志写入；`--dry-run` 路径零写入 |
 | R5 | `append_commands` 在 `grouped.is_empty()` 时 `Ok(())`（零字节）仍被判 `LogPersisted` | 日志层返回"是否实际写入"；零写入时不得判 `LogPersisted`（应 `Failed`） | 构造 `RemoveSession`-only 批：outcome 不得为 `LogPersisted` |
 | R6 | `append_failed_turn_fallible` 未打 `index_deferred` 告警，executor 声称的 `persist_session_and_trace_change` 覆盖对 `ReplaceAll` 不可达 | 在 `append_failed_turn_fallible` 的索引失败路径补同一告警（不改落盘顺序/返回值） | grep 可得告警；行为零变更 |
+
+### 契约修订 v2（Lead 裁决，2026-11-09）
+
+**C1 构造方式修订（断言不变）**：区分两种 readonly——
+- **维护句柄** `new_read_only()`（`storage_read_only=true`）：dry-run/诊断/测试夹具，**零写入**（E8），对应 R4；
+- **运行时锁降级**（`new()` + 抢锁失败）：`is_read_only()==true && storage_read_only==false`，**必须写日志**（P0 主体）。
+
+C1 因此改为：测试自持 `<db>.lock` 的 `std::fs::File::try_lock()` 排他锁 + `SqliteSessionBackend::new(db)`，断言保持「session.jsonl 存在、索引零行」。
+新增 `c5_maintenance_handle_stays_zero_write`：`new_read_only` 句柄 persist 后不得产生 session.jsonl。
+
+**写域扩展（Lead 批准）**：新增 `agent/session/log_sink.rs`、`agent/session/fold.rs`（R3/R5/R6 必需），其余不变。
+
+**已声明语义变更（允许更新既有断言）**：
+1. `flush_events_rolls_back_on_injected_failure`：outcome `Failed → LogPersisted`（回滚断言保留）。
+2. `persist_command_writes_normalized_tables_and_checks_epoch`：old epoch `Failed → StaleEpoch`（R1 类型化）。
+理由：ADR 0107 §5 P0 要求「索引失败（可恢复）」与「命令被拒（不可恢复）」必须可区分，否则内存会被错误推进。
