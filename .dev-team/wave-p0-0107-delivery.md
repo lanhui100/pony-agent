@@ -57,3 +57,21 @@ cd /home/dm/pony-agent
 git merge --no-ff wave/p0-0107-log-first
 ```
 主工作区当前有他人未提交改动（`sqlite_session.rs`/`sqlite_session_commit.rs`/`store.rs` 同文件），合并前需先处理。
+
+## 六、P0.3–P0.5（三轮独立复核后的加固）
+
+| 轮次 | 复核发现 | 修复 | 收据 |
+|---|---|---|---|
+| v3 | 预检 `.ok()?` fail-open；事务拒 stale 不回滚日志 | 预检 fail-closed（读失败⇒不写日志、整批 Failed、busy_timeout=5000）+ `LogAppendReceipt` + 持锁回滚 | c9 新增；lib 1406→1408 |
+| v4 | 回滚按过期偏移截断会切掉他人字节（F1，实测 634→265） | `post_append_len` 双检：抢锁后长度不符 ⇒ 不截断、打 `stale_epoch_log_rollback_skipped` | 新单测 `rollback_is_skipped_when_the_file_grew_after_append`；独立复核者 repro 复跑 `foreign_bytes_survived=true`、`expected=452 actual=644` |
+
+最终门禁：`--lib` **1408 passed** / exit 0；p0 **C1–C9 9 passed** / exit 0；`session_log_*` 四套件 + `pa174` exit 0；`check --all-targets` 0 warning；16 个既有套件全绿（`session_row_heal` 为 pre-existing）。
+
+**残余风险（全部 ADVISORY，已登记 P1/P2）**
+1. 回滚抢不到日志锁时放弃截断 ⇒ stale 批可能残留（有 `stale_epoch_log_rollback_skipped` 可观测，无数据损坏）；
+2. 降级实例每批重开 writer 全扫会话日志（10MB≈16.8ms，线性）；
+3. 预检读失败（BUSY/IO）⇒ 该批整轮失败（fail-loud，非静默）；
+4. 同会话两实例并发写仍是一方失败；索引滞后无 UI 提示；
+5. `persist_events` 仍把 `LogPersisted` 当非成功（与改动前一致，无回归）。
+
+**决策记录**：`.agents/notes/implemented/bug-fix/2026-11-09-log-first-durability-and-index-lag.md`（ADR verify 通过）。
