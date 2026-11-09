@@ -810,6 +810,43 @@ pub(crate) fn append_session_log_to_file(
     backend.session_log_sink.append_commands(commands)
 }
 
+/// ADR 0107 P0.2（BLOCKING）：**写日志之前**的 epoch 预检——stale-epoch 命令不得进真源日志。
+///
+/// 为什么需要：日志先行是「先写日志、后校验索引」。stale-epoch 命令若先落进 JSONL，而
+/// `fold_session` 不做 epoch 过滤，重启后会把**已被拒绝的消息**当作事实复活（strace 实证：
+/// 先写 seq=2，后报 `stale epoch: 1 < 2`）。
+///
+/// **双检语义**：本预检在日志写入前用 `store_metadata['storage.normalized.v1.epoch']` 挡掉
+/// 明确过期的批次（只读连接也能 SELECT）；**事务内的 epoch 校验仍是权威**——预检与写日志之间
+/// 存在竞态窗口（另一进程可能在此期间推进 barrier），由事务校验兜底。
+pub(crate) fn precheck_stale_epoch(
+    backend: &super::SqliteSessionBackend,
+    commands: &[crate::agent::session::PersistCommand],
+) -> Option<crate::agent::session::PersistCommandOutcome> {
+    use crate::agent::session::PersistCommandOutcome;
+    let current = {
+        let slot = backend.connection().ok()?;
+        let conn = slot.as_ref()?;
+        conn.query_row(
+            "SELECT value FROM store_metadata WHERE key = 'storage.normalized.v1.epoch'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+    };
+    let stale = commands
+        .iter()
+        .map(|command| command.epoch())
+        .find(|epoch| *epoch < current)?;
+    eprintln!(
+        "[pony-agent][session] SQLite batch command stale epoch（预检拒绝，未写日志）：{stale} < {current}"
+    );
+    Some(PersistCommandOutcome::StaleEpoch)
+}
+
 /// 日志（真源）写入失败：统一打印并整批判 `Failed`（SQLite 一行都不改）。
 pub(crate) fn log_write_failure(error: String) -> crate::agent::session::PersistCommandOutcome {
     eprintln!("[pony-agent][session] 会话日志（真源）写入失败，SQLite 索引未改动：{error}");
@@ -828,16 +865,6 @@ pub(crate) fn index_failure_after_log(
     match outcome {
         PersistCommandOutcome::Failed if log_written => PersistCommandOutcome::LogPersisted,
         other => other,
-    }
-}
-
-impl super::SqliteSessionBackend {
-    /// ADR 0107 P0.1 / R4：构造期**存储级只读**标志（维护 / `--dry-run` / 诊断句柄）。
-    ///
-    /// 与运行时的**锁降级只读**（`is_read_only()`）是两种不同语义：前者必须零写入，
-    /// 后者必须写会话日志（日志先行）。
-    pub fn storage_read_only(&self) -> bool {
-        self.storage_read_only
     }
 }
 

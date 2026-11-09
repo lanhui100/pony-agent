@@ -700,3 +700,72 @@ fn c7_remove_session_only_batch_never_claims_log_persisted() {
     );
     drop(lock_holder);
 }
+
+// ---------------------------------------------------------------------------
+// C8：stale-epoch 批**不得**进真源日志（P0.2 预检；否则重启后 fold 会复活被拒消息）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn c8_stale_epoch_batch_never_reaches_the_session_log() {
+    let fixture = Fixture::new("c8");
+    let session_id = "p0_c8_stale_epoch";
+
+    // —— Arrange ——：先写一条**合法**命令，建立真源日志（epoch=1）。
+    let backend = fixture.backend();
+    let fresh = backend.persist_command(PersistCommand::AppendMessage {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        message: message("user", "c8 合法消息（epoch=1）"),
+        ordinal: 0,
+    });
+    assert_eq!(
+        fresh,
+        PersistCommandOutcome::Succeeded,
+        "基线写入必须成功，实际 {fresh:?}"
+    );
+    let log_path = fixture.log_path(session_id);
+    let before = std::fs::read(&log_path).expect("读基线日志");
+    assert!(!before.is_empty(), "基线日志必须已有字节");
+
+    // 推进 materialize barrier 到 epoch=2（模拟另一实例已完成迁移）。
+    {
+        let conn = fixture.open_sqlite();
+        conn.busy_timeout(std::time::Duration::from_millis(2000)).ok();
+        conn.execute(
+            "INSERT OR REPLACE INTO store_metadata (key, value) \
+             VALUES ('storage.normalized.v1.epoch', '2')",
+            [],
+        )
+        .expect("推进 storage.normalized.v1.epoch 到 2");
+    }
+
+    // —— Act ——：epoch=1 现在已过期（1 < 2）。
+    let stale = backend.persist_command(PersistCommand::AppendMessage {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        message: message("user", "c8 过期消息（epoch=1 < 2）"),
+        ordinal: 1,
+    });
+
+    // —— Assert ——
+    assert_eq!(
+        stale,
+        PersistCommandOutcome::StaleEpoch,
+        "过期批次必须返回 `StaleEpoch`，实际 {stale:?}"
+    );
+    let after = std::fs::read(&log_path).expect("读改动后日志");
+    assert_eq!(
+        before,
+        after,
+        "P0.2 被击穿：stale-epoch 命令不得写进真源日志（fold 不做 epoch 过滤 ⇒ 重启会复活被拒消息）；\
+         日志字节数 {} → {}",
+        before.len(),
+        after.len()
+    );
+    assert!(
+        !log_append_messages(&log_path)
+            .iter()
+            .any(|(_, content)| content.contains("c8 过期消息")),
+        "真源日志里不得出现被拒消息"
+    );
+}

@@ -232,6 +232,11 @@ impl SqliteSessionBackend {
         Self::build(db_path, SeparateTraceTableMode::Off, true)
     }
 
+    /// ADR 0107 P0.2：构造期**存储级只读**（维护 / `--dry-run` / 诊断句柄，E8 零写入）。
+    pub fn storage_read_only(&self) -> bool {
+        self.storage_read_only
+    }
+
     pub fn new_with_trace_mode(db_path: PathBuf, trace_mode: SeparateTraceTableMode) -> Self {
         Self::build(db_path, trace_mode, false)
     }
@@ -2720,29 +2725,25 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     /// 批量规范化持久化命令（单个 `BEGIN IMMEDIATE` 事务原子提交，附带 busy 退避重试）。
-    ///
-    /// 这里必须是 **IMMEDIATE** 而不是 rusqlite 默认的 DEFERRED：本事务的第一批语句就是写操作，
-    /// DEFERRED 事务会先取共享锁、写时才尝试升级为写锁 —— 两个并发写事务都在升级点等待对方，
-    /// 直接落进 `SQLITE_BUSY`（SQLite 不对此做死锁回退）。IMMEDIATE 在事务开始就取写锁，
-    /// 把冲突收敛到事务入口，由下面的 busy 退避重试吸收。
+    /// 必须 IMMEDIATE：DEFERRED 会在「读→写升级」点对撞成 `SQLITE_BUSY`（SQLite 不做死锁回退），
+    /// 冲突因此收敛到事务入口、由 busy 退避吸收。
     fn persist_commands_batch(&self, commands: Vec<PersistCommand>) -> PersistCommandOutcome {
         if commands.is_empty() {
             return PersistCommandOutcome::Succeeded;
         }
-        // ADR 0099 阶段 0（E5）：降级只读实例在每次写入口重试一次 flock（非阻塞），
-        // 持锁进程退出后自动恢复可写（query_only 本身不可逆）。
+        // ADR 0099 E5：降级只读实例每次写入口重试一次 flock（非阻塞），持锁进程退出后自动恢复可写。
         self.try_recover_instance_lock();
+        // ADR 0107 P0.2：写日志前 epoch 预检（stale-epoch 命令不得进真源日志）；事务内校验仍是权威。
+        if let Some(stale) = commit::precheck_stale_epoch(self, &commands) { return stale; }
         // ADR 0107 §5 P0 + P0.1（R3/R4/R5）：日志先行；`log_written` = 本批**实际写入字节**，
         // 零写入批与维护句柄（`storage_read_only`）不得把索引失败判成 `LogPersisted`。
         let log_written = match commit::append_session_log_to_file(self, &commands) {
             Ok(written) => written,
             Err(error) => return commit::log_write_failure(error),
         };
-        // NFR（契约 §4 结构性理由）：`external_call_timeout_ms=3000` 只约束**外部调用**
-        // （网络/HTTP/跨进程 RPC）。SQLite 的 `busy_timeout` 是**本地写锁等待**，不在其域内
-        // ——无网络 IO、失败可恢复；压到 3000 会把"慢盘 / 备份进程占锁"变成用户可见的保存
-        // 失败。故单次尝试的本地锁等待预算 = 5000ms，重试上限 3 次（backoff 50→200ms）。
-        // 另一条硬约束保留：每次尝试单独取连接，**失败即释放连接 Mutex 再 sleep**。
+        // NFR：`external_call_timeout_ms=3000` 只约束外部调用；`busy_timeout` 是本地写锁等待
+        // （无网络 IO、失败可恢复）⇒ 单次预算 5000ms、重试上限 3 次；每次尝试单独取连接，
+        // **失败即释放连接 Mutex 再 sleep**（压到 3000 会把「慢盘/备份占锁」变成用户可见失败）。
         const LOCK_WAIT_BUDGET_MS: u64 = 5000;
         let started = std::time::Instant::now();
         let mut attempt = 0u32;
@@ -2787,7 +2788,6 @@ impl SessionBackend for SqliteSessionBackend {
             }
         }
     }
-
     /// **运行时读路径**（ADR 0099 D1 / 2-B / 2-D）：**日志为真源**。
     /// 1. 索引原样视图（无日志的存量会话由它 grandfather）；2. 叠加日志 fold：有日志的会话**日志无条件为准**（2-D 已删除 `updated_at_ms` 定序）；
     /// 3. 折叠超预算 / 日志不可读 / fold 失败 ⇒ 回落索引侧 `normalized_*` 投影；
