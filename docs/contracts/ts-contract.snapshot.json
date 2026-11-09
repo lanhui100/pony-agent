@@ -104,6 +104,7 @@
         "costUsd",
         "emittedAtMs",
         "error",
+        "errorClass",
         "eventId",
         "eventType",
         "eventVersion",

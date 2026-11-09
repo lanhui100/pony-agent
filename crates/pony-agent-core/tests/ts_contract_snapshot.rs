@@ -87,7 +87,10 @@ fn turn_stream_event_sample() -> Value {
         // P0 metrics-snapshot：`#[serde(default, skip_serializing_if = "Option::is_none")]`，
         // 必须填 Some 才真正上线缆 —— 否则 `metrics` 及其 25 个子键完全落在契约门禁之外。
         metrics: Some(turn_metrics_snapshot_sample()),
-        error_class: None,
+        // PA-172 §6 T1（遗留 #2）：`#[serde(default, skip_serializing_if = "Option::is_none")]`
+        // ⇒ 必须填 `Some` 才真正上线缆，否则 `errorClass` 完全落在契约门禁之外
+        // （历史缺陷：夹具填 None ⇒ 快照 38 键不含 errorClass，`check-ts-contract.mjs` 对漂移失明）。
+        error_class: Some("rate_limited".to_string()),
     };
     serde_json::to_value(&event).expect("TurnStreamEvent must serialize")
 }
