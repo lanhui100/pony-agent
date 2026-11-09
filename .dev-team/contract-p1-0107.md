@@ -53,7 +53,7 @@
 |---|---|---|
 | 日常连接不再抢库级锁：`connection()` 删掉 `acquire_single_instance_lock` 与 `read_only` 降级分支；统一 `journal_mode=WAL / synchronous=NORMAL / busy_timeout=5000 / wal_autocheckpoint=256` + `ensure_schema` | `agent/sqlite_session.rs` | `:299-320` |
 | `is_read_only()` 语义收窄为 `storage_read_only`；删除 `read_only` 原子量与 `instance_lock` 字段 | `agent/sqlite_session.rs` | `:209-217`、`:2675` |
-| 新增维护锁：`MaintenanceGuard` + `acquire_maintenance_lock(db_path)`（`<db>.maintenance.lock`，`try_lock` 非阻塞，抢不到返回 `MaintenanceBusy`，Drop 释放） | `agent/instance_lock.rs` | 复用 `:67` 的 flock 原语 |
+| 新增维护锁：`MaintenanceGuard` + `acquire_maintenance_lock(db_path)`（**沿用既有 `<db>.lock`**：不新增锁文件、与旧版本进程兼容；`try_lock` 非阻塞，抢不到返回 `MaintenanceBusy`，Drop 释放） | `agent/instance_lock.rs` | 复用 `:67` 的 flock 原语 |
 | 维护入口加锁：`rebuild_index*` / migrate / backfill 非 dry-run 路径先取维护锁；`dry_run` 不需要（零写入） | `agent/session/fold.rs`、`bin/cli.rs` | `fold.rs:1745`、`cli.rs:1306/1423` |
 | 删除 `try_recover_instance_lock` 及其两处调用 | `agent/sqlite_session_commit.rs`、`agent/sqlite_session.rs` | `:696`、`:2734`、`:2817` |
 | `open_ask_store` 跳过条件改为 `storage_read_only()`（日常实例不再跳过） | `agent/session/store.rs` | `:224-233` |
@@ -74,3 +74,10 @@
 | R-B 并发首建表 | 多进程首次 `ensure_schema` | 已有 `busy_timeout=5000` + `CREATE TABLE IF NOT EXISTS`，后到者等待后成功；需在绿相日志里留一条双进程首启证据 |
 | R-C WAL 检查点竞争 | 多进程写时 `wal_autocheckpoint` 并发 | SQLite 自身串行化 checkpoint；若出现 `SQLITE_BUSY` 由既有 3 次退避兜底 |
 | R-D 会话写冲突可观测性 | 同会话第二写者 | 必须返回 `SessionError::SessionWriterBusy` 且日志含 `session_writer_busy`（D4 断言） |
+
+## 契约修订（Lead，实现对齐）
+
+- 维护锁文件名：**沿用 `<db>.lock`**（原 E5 单实例锁文件路径），不新增 `<db>.maintenance.lock`。
+  理由：① 与已存在的锁文件/旧进程兼容；② 少一个文件少一处状态；③ 语义靠**谁去抢**区分
+  （只有维护入口抢），不靠文件名区分。
+- 测试侧因此同时兼容两种路径（`p1_helper_hold_maintenance_lock` 锁 `<db>.lock`）。
