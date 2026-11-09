@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bddb-7970-76c2-8d2f-1d779824033a",
+  "turn_id": "turn-8c4e008e-6d10-48c7-89f3-31d5dfcb227b",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "搜索完成，只读操作，没有改动任何文件。命中 38 处，均为`exported_trace_id`子串匹配，因此包含`exported_trace_id_for_turn`等变体，搜索不区分大小写，覆盖 193 个文件。\n\n前 5 处：\n1. `crates/pony-agent-core/src/agent/otel/mod.rs:1875` — `// - [\\`exported_trace_id\\`]：**导出态** id…`\n2. `crates/pony-agent-core/src/agent/otel/mod.rs:1884` — `/// 那类场景请用 [\\`exported_trace_id\\`]。`\n3. `crates/pony-agent-core/src/agent/otel/mod.rs:1906` — `pub fn exported_trace_id() -> Option<String> {`\n4. `crates/pony-agent-core/src/agent/otel/mod.rs:2185` — `register_turn_exported_trace_id(turn_id, trace_id);`\n5. `crates/pony-agent-core/src/agent/otel/mod.rs:2314` — `/// 若下游要「按 id 去上游检索链路」…TurnTraceGuard::exported_trace_id`\n\n命中分布在 6 个文件：`agent/otel/mod.rs`（22）、`agent/ponysentry/client.rs`（4）、`agent/ponysentry/mod.rs`（3）、`agent/runtime/turn_persist.rs`（3）、`agent/turn_flow.rs`（5）、`agent/runtime/types.rs`（1）。",
+  "usage": {
+    "input_tokens": 54401,
+    "output_tokens": 726
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 3966,
+  "failure_reason": null
+}

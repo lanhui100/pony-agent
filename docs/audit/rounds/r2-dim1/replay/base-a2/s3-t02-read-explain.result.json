@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb8c-933e-7463-979d-96f4b0b3874e",
+  "turn_id": "turn-b24e6db1-4bd9-46a2-b9f2-e73104b1639d",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "工具 `Read` 已执行完成，但 provider 在整合工具结果时失败。\n失败原因：\n\n本地兜底摘要：workspace_gather_context 已聚合 2 个上下文子调用，整体状态为 ok。\n\n结果预览：\n{\\n  \"abortedCount\": 0,\\n  \"completedCount\": 2,\\n  \"errorCount\": 0,\\n  \"meta\": {\\n    \"mode\": \"file\",\\n    \"path\": \"scripts/observability/check-langfuse.sh\",\\n    \"query\": null\\n  },\\n  \"ok\": true,\\n  \"partialCount\": 0,\\n  \"permissionSummary\": {\\n    \"childDecisions\": [\\n      {\\n        \"decisionSource\": \"child_execution_observed\",\\n        \"verdict\": \"allow\"\\n      },\\n      {\\n        \"decisionSource\": \"child_execution_observed\",\\n        \"verdict\": \"allow\"\\n      }\\n    ],\\n    \"hostMediated\": false,\\n    \"requiresApproval\": false,\\n    \"scopes\": [\\n      \"workspace_read\"\\n    ]\\n  },\\n  \"plan\": {\\n    \"continueOnError\": true,\\n    \"kind\": \"workspace_gather_context\",\\n    \"parallel\": true,\\n    \"steps\": [\\n      {\\n        \"arguments\": {\\n          \"description\": \"gather 内部子调用\",\\n          \"path\": \"scripts/observability/check-langfuse.sh\"\\n        },\\n        \"name\": \"workspace_path_info\",\\n        \"summary\": \"第 1 个子调用：`workspace_path_info`。\"\\n      },\\n      {\\n        \"arguments\": {\\n          \"description\": \"gather 内部子调用\",\\n          \"lineCount\": 40,\\n          \"path\": \"scripts/observability/check-langfuse.sh\",\\n          \"startLine\": 80\\n        },\\n        \"name\": \"workspace_read_file_segment\",\\n        \"summary\": \"第 2 个子调用：`workspace_read_file_segment`。\"\\n      }\\n    ],\\n    \"summary\": \"围绕文件 `scripts/observability/check-langfuse.sh` 聚合元信息与代码片段。\"\\n  },\\n  \"plannedCount\": 2,\\n  \"results\": [\\n    {\\n      \"aggregateStatus\": \"ok\",\\n      \"arguments\": {\\n        \"description\": \"gather 内部子调用\",\\n        \"path\": \"scripts/observability/check-langfuse.sh\"\\n      },\\n      \"canonicalTool\": \"workspace_path_info\",\\n      \"durationMs\": 0,\\n      \"error\": null,\\n      \"index\": 0,\\n      \"ok\": true,\\n      \"output\": {\\n        \"absolutePath\": \"/tmp/audit-r2-base/scripts/observability/check-langfuse.sh\",\\n        \"childCount\": null,\\n        \"isReadableTextHint\": true,\\n        \"kind\": \"file\",\\n        \"modifiedUnixSeconds\": 1794147439,\\n        \"path\": \"scripts/observability/check-langfuse.sh\",\\n        \"sizeBytes\": 5099\\n      },\\n      \"status\": \"ok\",\\n      \"tool\": \"workspace_path_info\"\\n    },\\n    {\\n      \"aggregateStatus\": \"ok\",\\n      \"arguments\": {\\n        ...(+2291 chars)",
+  "usage": {
+    "input_tokens": 23017,
+    "output_tokens": 688
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 7619,
+  "failure_reason": null
+}

@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "013-p1-fetch-unknown",
+ "phase": "verify",
+ "node": "script",
+ "command": "env LANGFUSE_PUBLIC_KEY= LANGFUSE_SECRET_KEY= KUBECONFIG=/nonexistent bash scripts/audit/fetch.sh --arm-dir /tmp/fetch-arm",
+ "exit_code": 3,
+ "ts_unix": 1794140466,
+ "artifact": "/tmp/f-unknown.log",
+ "summary": "红相：抽掉 Langfuse 凭据 + 伪造 KUBECONFIG → fetch exit=3 UNKNOWN（不判 PASS）"
+}

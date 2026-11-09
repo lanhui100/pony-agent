@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "010-p1-selftest",
+ "phase": "implement",
+ "node": "script",
+ "command": "bash scripts/audit/selftest.sh",
+ "exit_code": 0,
+ "ts_unix": 1794140462,
+ "artifact": "scripts/audit/selftest.sh",
+ "summary": "节点自测 26/26 断言符合预期（含 UNKNOWN≠PASS、棘轮只增不减、冻结漂移 exit4、臂产物不可变）"
+}

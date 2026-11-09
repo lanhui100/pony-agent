@@ -1,0 +1,36 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb21-8933-73c0-8eeb-92f34cb9f56d",
+  "turn_id": "turn-f7ecc956-6eb3-4632-9ce6-e9791f30ed4d",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 直属条目只有两项：`manifest.json` 与 `tasks/` 子目录，**没有任何直属 markdown 文件**（`docs/audit/corpus/*.md` 匹配数为 0），因此无需逐文件说明用途。\n\n供参考（子目录，不计入）：`tasks/` 下有 t01-list-summarize.md、t02-read-explain.md、t03-search-locate.md 三个任务卡。",
+  "usage": {
+    "input_tokens": 79947,
+    "output_tokens": 708
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 14273,
+  "failure_reason": null
+}

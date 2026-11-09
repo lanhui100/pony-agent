@@ -1,0 +1,1 @@
+{"seq": "006", "phase": "propose", "node": "manual", "command": "bash docs/audit/rounds/r1-dim6/tools/assert-dim6.sh replay/base /tmp/audit-r1-baseline metrics.json", "exit_code": 1, "ts_unix": 1794139473, "artifact": "proposals/r1-dim6.pa01a1ba70.md", "summary": "三断言全红（A1 9/9、A2 9/9、A3 9/9），提案含 F1/F2/F3 最小闭包与阈值冻结"}

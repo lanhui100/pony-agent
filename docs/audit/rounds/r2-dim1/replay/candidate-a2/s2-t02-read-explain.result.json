@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb92-d05f-7d12-9834-41ce10d34879",
+  "turn_id": "turn-4ec0c7f8-9045-4d76-b3b6-8582a5143991",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码语义（`scripts/observability/check-langfuse.sh`，L22 定义、L73–92 分流）**\n\n| 码 | 判定 | 触发条件 |\n|---|---|---|\n| **0** | `pass` 或 `no-candidates` | ① `pass`：Tempo 有语义轨候选 span（`gen_ai.system` / `langfuse.trace.id`）且 Langfuse API 返回 `data` 且条数 >0（L89–91）；② `no-candidates`：时间窗内 Tempo 候选为 **0** —— 上游压根没产出语义轨 span，不算 fan-out 断链（L76–79） |\n| **2** | `gap` | Tempo 候选 >0，但 Langfuse 侧采样条数 `<=0` ⇒ 副本 fan-out 断链或两侧采样不一致（L86–88），这是唯一真正的「语义轨缺失」信号 |\n| **3** | `unknown`（证据不足） | Tempo 查询失败返回 -1（L74）、缺 `LANGFUSE_PUBLIC_KEY/SECRET_KEY`（L80）、API 401 凭据无效/项目不匹配（L82）、API 不可达（L84）、未知参数（L35） |\n\n**为什么缺凭据不许判 PASS**\n\n- 判据是**两步证据链**（L15–17）：先证明 Tempo 有候选 span，再证明同窗口 Langfuse 有对应 trace。缺凭据时第二步物理上不可观测，`Langfuse 空` 与 `根本没查` 无法区分。\n- 脚本的立项动机就是「Tempo 全绿而语义轨静默丢失、巡检依然全绿」（L9–10）。若缺凭据退化为 PASS，凭据一丢或采集断链就会被静默掩盖，工具反而重建它要消除的盲区。\n- 因此遵循纪律 **UNKNOWN ≠ PASS**（L18、L81）：不可验证的状态必须显式暴露为 exit 3，不能被当成已验证健康。\n- 附带一点：`no-candidates` 也是 exit 0，但 reason 明确写「先修 trace 出口」——exit 0 在此只表示「不构成 fan-out 断链」，并不等于该维度健康，消费方不应把 0 一律读作全绿。\n\n未修改任何文件。",
+  "usage": {
+    "input_tokens": 35803,
+    "output_tokens": 889
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 7611,
+  "failure_reason": null
+}

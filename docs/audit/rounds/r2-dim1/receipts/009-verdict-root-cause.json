@@ -1,0 +1,34 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "009",
+ "phase": "verdict",
+ "node": "script",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794152700,
+ "commands": [
+  {"command": "bash scripts/audit/verdict.sh --round r2-dim1 --dim 1 --arm-dir docs/audit/rounds/r2-dim1/replay/candidate-a2 --expected-cwd /tmp/audit-r2-cand --metrics docs/audit/rounds/r2-dim1/metrics.candidate-a2.json", "exit_code": 1, "summary": "assert=1 ratchet=0 freeze=0 → FAIL"}
+ ],
+ "artifact": "docs/audit/rounds/r2-dim1/receipts/verdict-dim1-verdict-script.json, /tmp/dim1-assert.*",
+ "summary": "verdict FAIL exit=1。逐断言：L1 根 span 缺失 1/9；L2 span 丢失 3/30；L3 不可归因 0（F3 生效，已转绿）；L4 超阈缺口 1（unmeasurable 1）。棘轮 dim6 全绿（A1/A2/A3 PASS），无历史回归。",
+ "per_assertion": {
+  "L1_root_span": "FAIL：candidate-a2/s1-t02-read-explain turn_spans=0（trace f7fd5969c739 仅 4 个 observation）",
+  "L2_span_fidelity": "FAIL：s1-t02 provider=2 spans=1；s3-t01 provider=4 spans=2（4 次 usage 行、2 个 GENERATION span）",
+  "L3_transport": "PASS：arm=candidate-a2 calls=27 ttft_missing=5 unattributable=0（F3 新增键已生效）",
+  "L4_unattributed_gap": "FAIL：pa_01a1bb93-e77c-7 gap=22867ms（after=None，前一个 span 为 GENERATION:llm.chat）"
+ },
+ "root_cause_of_failure": {
+  "F1_not_sufficient": "EXIT_FLUSH_BUDGET_MS=1000ms < EXPORT_TIMEOUT_MS=3000ms ⇒ 退出 flush 在有 span 待导出时仍会超时。实测 candidate-a2/s1-t02 与 s1-t01 stderr 均含「退出 flush（cli-drop）未在预算内完成」+「provider 关闭超时 Timeout(1s)」，s1-t02 正是 L1 缺失会话。s3-t01 无 flush warn 却丢 2 span，属另一条路径（批量 followup 单请求多调用，span 与 usage 计数口径需复核）。",
+  "evidence": "candidate-a2/s1-t02-read-explain.stderr:1267-1269 三行 warn 连发，时间戳 14:29:42.813Z/14:29:43.813Z；该会话 trace 仅 4 observation。"
+ },
+ "harness_fixes_this_round": [
+  "collect_dim1.py 输出 trace 级超集字段（trace_release/root_attributes 等）⇒ 单份 metrics 同时满足 dim1 与 dim6，消除「换 metrics 就假红」的通道分裂。",
+  "lib.sh 新增 metrics_arm_guard：断言开头校验 metrics 的 session_id 覆盖本臂 sessions.tsv，串臂 → exit 2（UNKNOWN ≠ PASS）。",
+  "state.py check-freeze：assertion_hashes 为空判 exit 2（原为静默 pass，等于防篡改未装上仍报绿）。",
+  "selftest.sh 补两条红相（串臂 metrics / 空冻结集），31/31 通过。"
+ ],
+ "honesty_notes": [
+  "本轮为 attempt 1 的 verdict，结论 FAIL，不得改判。",
+  "对端会话 pa_01a1bae5 于 22:38 已产出同结论的 verdict（exit=1），本会话在其 lease 过期后接管复跑，结论一致。",
+  "F1 修复本身有效（L3 转绿、基线臂 L1 4/9 → 候选臂 1/9），但未达到「缺失数=0」的冻结阈值 ⇒ 提案方案不充分，需修订而非放宽阈值。"
+ ]
+}

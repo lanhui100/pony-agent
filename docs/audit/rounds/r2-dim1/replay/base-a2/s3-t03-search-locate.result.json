@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb8d-4b14-7522-b004-134ac75fbea8",
+  "turn_id": "turn-9b8b604d-36c3-477e-82d9-df6c7be7998f",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**命中总数：38 处**：大小写不敏感的子串匹配，包含 `exported_trace_id_for_turn`、`register_turn_exported_trace_id`、`TURN_EXPORTED_TRACE_IDS` 等派生名；涉及 5 个文件，其中 `agent/otel/mod.rs` 占 22 处。\n\n前 5 处命中，按扫描顺序如下：\n\n| # | 文件 | 行号 |\n|---|---|---|\n| 1 | crates/pony-agent-core/src/agent/otel/mod.rs | 1824 |\n| 2 | crates/pony-agent-core/src/agent/otel/mod.rs | 1833 |\n| 3 | crates/pony-agent-core/src/agent/otel/mod.rs | 1855 |\n| 4 | crates/pony-agent-core/src/agent/otel/mod.rs | 2134 |\n| 5 | crates/pony-agent-core/src/agent/otel/mod.rs | 2263 |\n\n其余分布为 `ponysentry/client.rs` 4 处、`ponysentry/mod.rs` 3 处、`runtime/turn_persist.rs` 3 处、`turn_flow.rs` 5 处、`runtime/types.rs` 1 处。本次全部为只读检索，未修改任何文件；`grep`/`wc` 因会话只读模式被拒绝，统计结果基于工作区文本搜索工具。",
+  "usage": {
+    "input_tokens": 54402,
+    "output_tokens": 878
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 13970,
+  "failure_reason": null
+}

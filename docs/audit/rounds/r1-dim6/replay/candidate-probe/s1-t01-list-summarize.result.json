@@ -1,0 +1,32 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb30-0b19-75b1-9389-fb5754403656",
+  "turn_id": "turn-f773df52-fc46-4c40-9619-86e0ff89a11c",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**`docs/audit/corpus` 直属目录下没有 markdown 文件。**\n\n- 直属条目仅 2 个：`manifest.json` 和 `tasks/`（目录）。\n- 三份 `.md` 都在子目录中：`tasks/t01-list-summarize.md`、`tasks/t02-read-explain.md`、`tasks/t03-search-locate.md`（按你的要求不算在内）。\n\n注：`Run` 被只读模式拒绝（`permission_denied: tool_authorization_mode_read_only`），上述结论来自目录列举与 `*.md` 直接模式匹配（匹配数 0），未执行任何写操作。",
+  "usage": {
+    "input_tokens": 46982,
+    "output_tokens": 760
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 20318,
+  "failure_reason": null
+}

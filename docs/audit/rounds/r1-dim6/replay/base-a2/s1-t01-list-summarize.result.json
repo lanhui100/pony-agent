@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb27-53a3-73d3-8b1f-15864aa260de",
+  "turn_id": "turn-6bdfb1bd-8b31-4259-b8be-6c11e2727de2",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "论证：无法完成，因为目标目录在工作区内不存在。\n\n- 工作区 `/home/dm/pony_agent` 只包含 `scripts/`（空）和 `test_appr.txt`，全库 `**/*.md` 匹配数为 0，不存在 `docs/` 目录，更无 `docs/audit/corpus`。\n- 该目录可能位于工作区外（如 `<上级>/docs/audit/corpus`），但读取被拒绝：`requires_authorization`，当前会话为只读模式。\n\n请确认：把该文档库放入工作区，或授权读取工作区外路径，我再列出并逐文件说明用途。",
+  "usage": {
+    "input_tokens": 83347,
+    "output_tokens": 862
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 12991,
+  "failure_reason": null
+}

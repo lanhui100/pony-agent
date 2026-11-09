@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb85-c31e-72b0-821f-a9811b8a5d89",
+  "turn_id": "turn-cba2f281-2ee2-4caa-b253-d74dda1a1e1a",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**判定口径**（`scripts/observability/check-langfuse.sh`，共 116 行）\n\n| 退出码 | verdict | 含义 |\n|---|---|---|\n| **0** | `pass` / `no-candidates` | 一、两轨都有数据：Tempo 中存在的语义轨候选 span 数量大于 0，且 Langfuse 侧 trace 数量也大于 0；二、时间窗内**没有**任何带 `gen_ai.*`/`langfuse.*` 的 span，此时这属于上游 trace 出口没有数据，不属于 fan-out（分链转发）断链（L76–79、L89–91） |\n| **2** | `gap` | Tempo 有 ≥1 条语义轨候选，Langfuse 侧返回 0 条 → fan-out 断链或采样不一致（L86–88） |\n| **3** | `unknown` | 证据不足：Tempo 查询失败（`-1`）、缺 `LANGFUSE_PUBLIC_KEY`/`SECRET_KEY`、API 401、Langfuse 不可达，以及未知参数（L35、L74–85） |\n\n**为什么缺凭据不允许判 PASS**：判定第 2 步（“同一时间窗内 Langfuse 有对应 trace”）只能通过 Langfuse API 观测，凭据缺失时该命题既未被证实也未被否证，属于 UNKNOWN。若降级为 PASS，就相当于把“没测到”伪装成“测过了”，从而让脚本要防的真实故障（Tempo 有 trace、Langfuse 为空，导致思考树、工具调用、会话成本全部丢失）静默通过，因此脚本注释中明确了纪律：UNKNOWN ≠ PASS（L18、L81）。\n\n**一处需注意的假通过风险（未改文件，仅提示）**：L41 的 `tcount_traceql` 不存在时 `TRACE_CANDIDATES` 保持初值 `0`，会走 `no-candidates` → exit 0；这与“查询失败应判 3”的意图不一致。",
+  "usage": {
+    "input_tokens": 35799,
+    "output_tokens": 905
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 7469,
+  "failure_reason": null
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb93-1d7d-7ea1-afd1-450048c35494",
+  "turn_id": "turn-add0cedd-90a5-4964-822d-d399fcaa317d",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`crates/pony-agent-core/src` 内的命中情况如下（共扫描 193 个文件）：\n\n**命中总数**：按精确小写匹配为 **35 行**；按不区分大小写额外命中 3 行（`TURN_EXPORTED_TRACE_IDS` 常量，`otel/mod.rs:3835/3840/3853`），共 **38 处**。\n\n**前 5 处命中**\n\n| # | 文件 | 行号 | 内容摘要 |\n|---|---|---|---|\n| 1 | `agent/otel/mod.rs` | 1866 | 文档注释：`[exported_trace_id]` 导出态 id 语义 |\n| 2 | `agent/otel/mod.rs` | 1875 | 文档注释交叉引用 |\n| 3 | `agent/otel/mod.rs` | 1897 | `pub fn exported_trace_id() -> Option<String>` 定义 |\n| 4 | `agent/otel/mod.rs` | 2176 | `register_turn_exported_trace_id(turn_id, trace_id)` 调用 |\n| 5 | `agent/otel/mod.rs` | 2305 | `TurnTraceGuard::exported_trace_id` 交叉引用 |\n\n**分布**：`otel/mod.rs` 19、`turn_flow.rs` 5、`ponysentry/client.rs` 4、`ponysentry/mod.rs` 3、`runtime/turn_persist.rs` 3、`runtime/types.rs` 1。\n\n全程只读：未修改任何文件（尝试执行的 `grep` 统计命令被只读模式拒绝，改用工作区搜索工具完成计数）。",
+  "usage": {
+    "input_tokens": 77038,
+    "output_tokens": 1139
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 12676,
+  "failure_reason": null
+}

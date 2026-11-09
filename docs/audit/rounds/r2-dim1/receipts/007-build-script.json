@@ -1,0 +1,30 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "007",
+ "phase": "build",
+ "node": "script",
+ "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+ "ts_unix": 1794146900,
+ "command": "bash scripts/audit/build-install.sh",
+ "exit_code": 1,
+ "artifact": "/tmp/build-install.log",
+ "summary": "verify_mode=linux-fallback 在 npm run size:check 处 exit=1：otel/mod.rs 5592 行 > 基线 5509（本轮 +45 行）。逐级复核：b2d603d0（dim6 之前）size 门禁已有 1 条既有违规（turn_stream.rs 函数 1707 > 1695），即门禁在本轮之前已非绿；本轮把 otel/mod.rs 由 5509 抬到 5592 属新增 1 条。另 turn_flow.rs 已通过合并实参回到 3489（与 HEAD 持平）。",
+ "ladder": [
+  {"step": "npm run version:check", "exit_code": 0},
+  {"step": "npm run test:unit", "exit_code": 0},
+  {"step": "npm run build", "exit_code": 0},
+  {"step": "npm run contract:check", "exit_code": 0},
+  {"step": "npm run size:check", "exit_code": 1, "detail": "otel/mod.rs 文件行数=5592 超限（基线允许 ≤5509）"},
+  {"step": "npm run ext:check", "exit_code": null, "detail": "size:check 失败后按脚本 break，未执行"},
+  {"step": "cargo check --manifest-path crates/pony-agent-core/Cargo.toml", "exit_code": null, "detail": "同上未执行"}
+ ],
+ "follow_up": {
+  "command": "bash scripts/audit/build-install.sh --skip-verify",
+  "exit_code": 0,
+  "detail": "cargo build --release 6m43s 成功；pony / ponycli 均安装到 ~/.local/bin（exit=0）。release 二进制供 verify 臂重放使用。"
+ },
+ "honesty_notes": [
+  "verify 未全绿：size:check 红相已如实记录，未用 --skip-verify 冒充 verify 通过。",
+  "既有红相（turn_stream.rs 函数 1707 > 1695）在本轮之前即存在（b2d603d0 worktree 实测），不属本轮引入。"
+ ]
+}

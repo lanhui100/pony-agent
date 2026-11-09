@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "003",
+ "phase": "collect",
+ "node": "script",
+ "command": "python3 scripts/audit/analyze_latency_gaps.py",
+ "exit_code": 1,
+ "ts_unix": 1794144421,
+ "artifact": "docs/audit/rounds/r2-dim1/latency-gaps.json",
+ "summary": "缺口取证：4/18 会话存在无 span 覆盖的 >5s 空白（最大 42.4s）"
+}

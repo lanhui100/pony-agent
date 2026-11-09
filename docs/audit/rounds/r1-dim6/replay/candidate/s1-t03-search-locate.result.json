@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb22-fd01-7923-bc83-874580d9af54",
+  "turn_id": "turn-31badfd0-0765-425a-8e37-0f0f8a62408f",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**命中总数：38 处（38 行、6 个文件），未截断。**\n\n前 5 处：\n1. `crates/pony-agent-core/src/agent/otel/mod.rs:1824`\n2. `crates/pony-agent-core/src/agent/otel/mod.rs:1833`\n3. `crates/pony-agent-core/src/agent/otel/mod.rs:1855`（`pub fn exported_trace_id`）\n4. `crates/pony-agent-core/src/agent/otel/mod.rs:2134`\n5. `crates/pony-agent-core/src/agent/otel/mod.rs:2263`\n\n按文件分布：`otel/mod.rs` 22（含 `exported_trace_id_for_turn`/`register_turn_exported_trace_id` 与测试）、`turn_flow.rs` 5、`ponysentry/client.rs` 4、`ponysentry/mod.rs` 3、`runtime/turn_persist.rs` 3、`runtime/types.rs` 1。\n\n说明：统计按子串匹配（忽略大小写），因此 `register_turn_exported_trace_id` 等也计入。全程只读，未修改任何文件。",
+  "usage": {
+    "input_tokens": 54350,
+    "output_tokens": 930
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 10039,
+  "failure_reason": null
+}

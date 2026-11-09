@@ -1,0 +1,135 @@
+{
+  "ok": false,
+  "arm": "docs/audit/rounds/r1-dim6/replay/base",
+  "expected_cwd": "/tmp/audit-r1-baseline",
+  "session_count": 9,
+  "isolation_mismatch_count": 9,
+  "sessions": [
+    {
+      "tag": "s1-t01-list-summarize",
+      "session_id": "pa_01a1baff-3274-7971-90e2-d68e043209ec",
+      "status": "suspended",
+      "exit_code": 6,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 108,
+      "tool_error_activities": 56,
+      "trace_ids": [
+        "0244fec64f2742ceeeac740db6e3da8f"
+      ],
+      "input_tokens": 0
+    },
+    {
+      "tag": "s1-t02-read-explain",
+      "session_id": "pa_01a1bb00-c10d-7090-9281-3ee3805797c1",
+      "status": "completed",
+      "exit_code": 0,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 173,
+      "tool_error_activities": 46,
+      "trace_ids": [
+        "51156a17f2c78aa8f04f198b1478e0fb"
+      ],
+      "input_tokens": 86067
+    },
+    {
+      "tag": "s1-t03-search-locate",
+      "session_id": "pa_01a1bb01-3227-7d01-90ce-787f55902c70",
+      "status": "completed",
+      "exit_code": 0,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 126,
+      "tool_error_activities": 76,
+      "trace_ids": [
+        "b98da7a49a268266400d3a6f1ed33e82"
+      ],
+      "input_tokens": 99342
+    },
+    {
+      "tag": "s2-t01-list-summarize",
+      "session_id": "pa_01a1bb02-47a3-7dd2-a8cf-cdaa6811d7aa",
+      "status": "completed",
+      "exit_code": 0,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 93,
+      "tool_error_activities": 30,
+      "trace_ids": [
+        "ad46eb0e6bdcb74b6871d801fb33263d"
+      ],
+      "input_tokens": 55847
+    },
+    {
+      "tag": "s2-t02-read-explain",
+      "session_id": "pa_01a1bb02-9493-79a3-afa0-4a34ce14f396",
+      "status": "completed",
+      "exit_code": 0,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 99,
+      "tool_error_activities": 29,
+      "trace_ids": [
+        "b4cec7f93b282fb82623b7f1b65abd1f"
+      ],
+      "input_tokens": 70993
+    },
+    {
+      "tag": "s2-t03-search-locate",
+      "session_id": "pa_01a1bb03-1615-7e80-b82d-862dfb9377aa",
+      "status": "completed",
+      "exit_code": 0,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 162,
+      "tool_error_activities": 80,
+      "trace_ids": [
+        "8bd4c412acae43183680b3a0d82f9fa2"
+      ],
+      "input_tokens": 131400
+    },
+    {
+      "tag": "s3-t01-list-summarize",
+      "session_id": "pa_01a1bb03-c953-7273-973b-42e3a6d16bfb",
+      "status": "completed",
+      "exit_code": 0,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 93,
+      "tool_error_activities": 37,
+      "trace_ids": [
+        "4938186ca48a4c01cfa9350a26101c54"
+      ],
+      "input_tokens": 55587
+    },
+    {
+      "tag": "s3-t02-read-explain",
+      "session_id": "pa_01a1bb04-0cce-75d3-a22b-38e4e3e0e68f",
+      "status": "completed",
+      "exit_code": 0,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 207,
+      "tool_error_activities": 54,
+      "trace_ids": [
+        "bb4495540438a05fc606d2246d375858"
+      ],
+      "input_tokens": 101347
+    },
+    {
+      "tag": "s3-t03-search-locate",
+      "session_id": "pa_01a1bb04-8285-7d80-9b20-ea414a7eaa94",
+      "status": "suspended",
+      "exit_code": 6,
+      "env_cwd": "/home/dm/pony_agent",
+      "isolated": false,
+      "tool_activities": 57,
+      "tool_error_activities": 39,
+      "trace_ids": [
+        "11993b8eb00e97a248ac8a144ff3cd93"
+      ],
+      "input_tokens": 0
+    }
+  ]
+}

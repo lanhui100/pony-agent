@@ -1,0 +1,36 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf2-3bc0-7702-9a0b-d9d7e2f5d69d",
+  "turn_id": "turn-7416ea38-a56d-4f68-857e-ef3fab8dfdbc",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "未找到目标目录，搜索无法执行。\n\n- 工作区 `/home/dm/pony_agent` 下仅有 `scripts/`（空目录）与 `test_appr.txt`，**不存在 `crates/`**。\n- 全工作区检索 `exported_trace_id`：命中 **0** 处（`scannedFiles=1`，即仅 `test_appr.txt`）。\n- 本会话为只读模式，无法执行 `Run` 去跨目录查找；请确认代码库实际路径（是否在其他主机/目录下挂载）。",
+  "usage": {
+    "input_tokens": 69372,
+    "output_tokens": 672
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 1459,
+  "failure_reason": null
+}

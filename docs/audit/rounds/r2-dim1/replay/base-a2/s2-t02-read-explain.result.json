@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb88-7e61-7f40-9f6e-cae2993fb651",
+  "turn_id": "turn-e3f46053-ca8d-4983-8716-704b5bf73d4e",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码判定**（`scripts/observability/check-langfuse.sh:22, 72-92`）\n\n| 码 | verdict | 触发条件 |\n|---|---|---|\n| 0 | `pass` / `no-candidates` | 两条路径：① Tempo 无候选 span（`TRACE_CANDIDATES==0`，L76-79，判「上游没数据」，按非缺口放行）；② Tempo 有候选且 Langfuse 采样 >0（L89-91）——只有这条才是真通 |\n| 2 | `gap` | Tempo 有候选、Langfuse 侧 `LANGFUSE_COUNT<=0` ⇒ fan-out 断链或采样不一致（L86-88） |\n| 3 | `unknown` | 证据不足：Tempo 查询失败(<-1)、缺凭据、401、不可达、未知参数（L74-85, L35），默认态即 3 |\n\n**为何缺凭据不许判 PASS**：第 2 步判定「Langfuse 侧是否有数据」只能通过 API 取证，缺 `LANGFUSE_PUBLIC_KEY/SECRET_KEY` 时 `LANGFUSE_STATE=no-credentials`，此时代码从未观测到 Langfuse 侧任何字节，判 PASS 等于把「没检查」当成「检查通过」——语义轨（思考树/成本透视）丢了也照样全绿，正是脚本要消灭的那类假绿。故纪律为 UNKNOWN ≠ PASS：三态语义里 fail-closed，只有 reachable 且 count>0 才落地为 0（见 `docs/audit/observability-audit-*.md` 的「UNKNOWN，不判 PASS」一致口径）。\n\n注意一处可被误读的地方：`no-candidates` 也返回 0，理由是「先修 trace 出口」——即 0 中有一支其实是待修状态，消费方不能把 0 直接读作「语义轨健康」，需结合 `verdict` 字段区分。",
+  "usage": {
+    "input_tokens": 79811,
+    "output_tokens": 934
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 70406,
+  "failure_reason": null
+}

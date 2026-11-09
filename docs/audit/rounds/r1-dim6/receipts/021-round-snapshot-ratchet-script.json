@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "021-round-snapshot",
+ "phase": "ratchet",
+ "node": "script",
+ "command": "python3 scripts/audit/state.py archive --session pa_01a1ba70 --round r1-dim6",
+ "exit_code": 0,
+ "ts_unix": 1794142830,
+ "artifact": "docs/audit/rounds/r1-dim6/round-state.json",
+ "summary": "补轮次快照：收口后 loop-state.current 已指向 r2-dim1，旧轮复跑裁决会把新轮字段当旧轮（实测假 UNKNOWN exit=2）。快照归档 baseline/impl_base/candidate/write_scope/assertion_hashes，复跑 verdict 恢复 exit=0 且冻结哈希 13 项逐项一致"
+}

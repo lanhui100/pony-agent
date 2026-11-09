@@ -1,0 +1,1 @@
+{"seq":"002","phase":"collect","node":"manual","command":"check-langfuse.sh --json (creds via kubectl secret -> env pipe)","exit_code":0,"ts_unix":1794136855,"artifact":"002-collect-langfuse.json"}

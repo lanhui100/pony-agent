@@ -1,0 +1,36 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb93-e77c-7fb2-9fd1-d206bda497aa",
+  "turn_id": "turn-45032f21-40b6-4a59-8575-7d4004ffc05b",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**结论：`docs/audit/corpus` 直属层级没有任何 markdown 文件**（`Glob docs/audit/corpus/*.md` 匹配数为 0），因此无“每个文件一句话用途”可列。\n\n直属条目仅 2 项：\n- `manifest.json` — 语料清单/元数据文件（非 md）。\n- `tasks/` — 子目录，内含 `t01-list-summarize.md`、`t02-read-explain.md`、`t03-search-locate.md` 三个任务卡（属于子目录，按你的要求未纳入）。\n\n注：只读模式下 `Run` 被拒（permission_denied），已改用 `List`+`Glob` 取证，未修改任何文件。",
+  "usage": {
+    "input_tokens": 63025,
+    "output_tokens": 662
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 15245,
+  "failure_reason": null
+}

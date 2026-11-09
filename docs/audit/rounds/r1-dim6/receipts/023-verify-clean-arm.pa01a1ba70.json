@@ -1,0 +1,61 @@
+{
+  "schema": "pony.audit.receipt.v1",
+  "seq": "023-verify-clean-arm",
+  "phase": "verify",
+  "node": "manual",
+  "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+  "ts_unix": 1794142954,
+  "motivation": "归因修正：20:27 构建的 candidate 二进制取自工作区，当时工作区还带着其他会话的未提交改动（session/fold.rs、sqlite_session*.rs 等），二进制不严格对应 candidate 提交。为守住「臂 = 固定提交」纪律，从干净 candidate worktree（6b77f939）以独立 CARGO_TARGET_DIR 重建并重放。",
+  "steps": [
+    {
+      "command": "cd /tmp/audit-r1-candidate && CARGO_TARGET_DIR=/tmp/audit-r1-candidate-target cargo build -p pony-agent-core --bin ponycli",
+      "exit_code": 0,
+      "summary": "干净 worktree 构建完成（3m14s），二进制 /tmp/audit-r1-candidate-target/debug/ponycli"
+    },
+    {
+      "command": "bash docs/audit/rounds/r1-dim6/tools/replay-arm.sh candidate-clean /tmp/audit-r1-candidate /tmp/audit-r1-candidate-target/debug/ponycli 3",
+      "exit_code": 0,
+      "summary": "9/9 会话 exit=0；产物 docs/audit/rounds/r1-dim6/replay/candidate-clean/"
+    },
+    {
+      "command": "python3 docs/audit/rounds/r1-dim6/tools/analyze-replay-isolation.py docs/audit/rounds/r1-dim6/replay/candidate-clean /tmp/audit-r1-candidate",
+      "exit_code": 0,
+      "summary": "A1：9 会话 mismatch=0（env cwd 全部 = /tmp/audit-r1-candidate）"
+    },
+    {
+      "command": "python3 docs/audit/rounds/r1-dim6/tools/collect-dim6.py replay/candidate-clean/sessions.tsv metrics.candidate-clean.json",
+      "exit_code": 0,
+      "summary": "9 会话全取到 trace；trace_release 9/9 = 0.1.158（A2 绿）；phase=completed 会话的 outcome 全为 degraded 或无该键（A3 绿）"
+    },
+    {
+      "command": "bash scripts/audit/verdict.sh --round r1-dim6 --dim 6 --arm-dir docs/audit/rounds/r1-dim6/replay/candidate-clean --expected-cwd /tmp/audit-r1-candidate --metrics docs/audit/rounds/r1-dim6/metrics.candidate-clean.json",
+      "exit_code": 0,
+      "summary": "verdict PASS：freeze=0（corpus + 13 断言哈希一致）、scope=0（4 文件全在写域）、assert=0、ratchet=0；dim6 已登记棘轮"
+    },
+    {
+      "command": "bash docs/audit/rounds/r1-dim6/tools/assert-dim6.sh docs/audit/rounds/r1-dim6/replay/base-a2 /tmp/audit-r1-baseline docs/audit/rounds/r1-dim6/metrics.base-a2.json",
+      "exit_code": 1,
+      "summary": "对照臂（baseline c1f47e9d 自建二进制）：A1 9/9 失配、A2 9/9 release=null、A3 8/9 冲突 —— 同一断言集在基线红、候选绿，前后对照成立"
+    },
+    {
+      "command": "bash scripts/audit/selftest.sh",
+      "exit_code": 0,
+      "summary": "PA-169 节点自测 pass=26 fail=0（含冻结漂移 exit=4、棘轮只增不减、verdict 三态、replay 不可变性、fetch UNKNOWN）"
+    }
+  ],
+  "conclusion": "维度 6 在两条独立候选臂（dirty-binary 与 clean-binary）上均判 PASS，且基线臂同断言集判红；结论不依赖单次重放。",
+  "residual_findings": [
+    {
+      "id": "R1",
+      "severity": "follow-up",
+      "fact": "clean 臂 9 会话中 3 条 trace 缺 agent.turn 根 span（只剩 llm.chat / tool.call 子 span，parent spanId 悬空）。stderr 同时出现 `otel::shutdown：provider 关闭超时或失败 ... Timeout(1s)`。",
+      "evidence": "replay/candidate-clean/s1-t01、s2-t01、s1-t02；对比 base-a2 臂关闭超时 0/9 且根 span 9/9 齐全",
+      "impact": "A3 不判红（缺根 span 的会话没有 outcome 键，不构成 completed+error 并存），但「轮次结局」在这类会话上不可检索，属维度 6 的观测面缺口。",
+      "next": "不在本轮改阈值（阈值已冻结）；转下一轮或独立 follow-up：把 CLI 退出前的 OTel 排空预算与 span 队列深度纳入 A 组断言（新增断言 = 新提案）。"
+    }
+  ],
+  "honesty_notes": [
+    "本轮存在并发会话：scripts/audit/*（P1 节点）、docs/audit/ratchet.json、.agents/notes/...p1-nodes.md 与 20:58 的 016–021 回执并非本会话产出。本会话只写自己的回执（009 / 023）与 candidate-clean 臂，未覆盖对端产物。",
+    "20:58 的 verdict（回执 018）与本会话 21:02 的 verdict 均判 PASS；前者用 dirty-binary 臂，后者用 clean 臂，互为独立复核。"
+  ]
+}

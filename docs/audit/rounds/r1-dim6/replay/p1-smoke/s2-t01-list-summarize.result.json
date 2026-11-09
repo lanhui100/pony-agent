@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb17-f663-7483-b1d3-662ae54a4e7f",
+  "turn_id": "turn-68eec33a-6a1d-4f00-9203-cf6df701c909",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 在工作区中不存在，因此无法列出文件，也没有任何可总结用途的 markdown 文件。\n\n证据（均为只读操作）：\n- 用 `Read docs/audit/corpus` 读取该路径时返回 `invalid_path: No such file or directory`。\n- 用 `List .` 列出工作区根目录，发现只有 `scripts/`（空目录）和 `test_appr.txt` 两个条目。\n- `Glob **/*.md` 命中 0；`Glob **/*audit*`、`**/corpus/**` 也均命中 0；而且不存在 `docs/` 目录。\n- 本会话为只读模式，`_run_command` 被拒绝，因此无法用 shell 进一步探查工作区之外的路径。\n\n如果你指的是其他位置的 corpus（例如仓库外某个路径），请给出确切路径，我再确认。",
+  "usage": {
+    "input_tokens": 55897,
+    "output_tokens": 1023
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 6040,
+  "failure_reason": null
+}

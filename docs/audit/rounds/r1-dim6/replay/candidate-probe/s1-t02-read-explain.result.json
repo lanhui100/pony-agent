@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb30-9da4-7f21-b93b-38754e6d4e85",
+  "turn_id": "turn-ec4117a1-153d-4691-8fe4-6b1a7591f750",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码语义（`scripts/observability/check-langfuse.sh`，第 22、72–92、116 行）**\n\n| 码 | verdict | 触发条件 | 含义 |\n|---|---|---|---|\n| 0 | `pass` | Tempo 候选 > 0 **且** Langfuse `reachable` 且采样数 > 0 | 两轨都有数据，语义轨健康 |\n| 0 | `no-candidates` | Tempo 候选 == 0 | 时间窗内没有带 `gen_ai.*`/`langfuse.*` 的 span；Langfuse 空是“上游没数据”而非 fan-out 断链，因此不算本维度缺口（理由里提示先修 trace 出口） |\n| 2 | `gap` | Tempo 候选 > 0 **但** Langfuse `langfuse_traces_sampled -le 0` | 确定性缺口：fan-out 断链或采样不一致 |\n| 3 | `unknown` | Tempo 查询失败（count < 0）／`no-credentials`／`unauthorized`(401)／不可达／非法参数 | 证据不足，**无法判定** |\n\n**为什么缺凭据不允许判 PASS**\n\n1. 该脚本的业务前提是「agent 形态 ⇒ `contract.json` 的 `langfuse_applicability` 为必需维度」，但 Langfuse 空/异常本身不产生任何本地可见信号——Tempo 有 trace、Langfuse 空时静态检查（T5）依然全绿。判定必须依赖第 2 步的 Langfuse API 实查（第 53–67 行），凭据缺失时这一步**根本没执行**。\n2. 未执行 ≠ 通过。把 `no-credentials` 判 PASS，等于用“我没看”冒充“我看过了没问题”，正是该脚本要堵的盲区（思考树/工具调用/成本静默丢失）。故纪律写明 `UNKNOWN ≠ PASS`（第 18、81 行），缺证据只能落 `unknown`/exit 3，让门禁变红、暴露在可见处。\n3. 可区分性：exit 3 让运维知道该补密钥（`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`），而 exit 2 指向真实断链。若压成 0，两类问题都会被吞掉。\n\n补充两处实现细节值得注意：`unauthorized`/不可达虽然服务端可达性已知，也仍归 3（属认证/网络证据不足，不能等同“空数据”）；而 `LANGFUSE_COUNT` 解析失败返回 `-1`，会落进 `-le 0` 分支判 exit 2 —— 即将“解析失败”当成了“0 条 trace”。",
+  "usage": {
+    "input_tokens": 35809,
+    "output_tokens": 893
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 6195,
+  "failure_reason": null
+}

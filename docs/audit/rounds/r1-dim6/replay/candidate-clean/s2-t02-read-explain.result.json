@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb3c-e71d-7511-8537-f230e9c000b7",
+  "turn_id": "turn-cd8d936a-f0cf-4171-9b9f-9b9bb5570611",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码语义**（`scripts/observability/check-langfuse.sh:22,72-92`）\n\n| 退出码 | verdict | 判定 |\n|---|---|---|\n| **0** | `pass` | Tempo 有候选 span，且 Langfuse 侧采样到 trace，语义轨数据齐全，检查通过 |\n| **0** | `no-candidates` | 时间窗内 Tempo 里根本没有带 `gen_ai.*`/`langfuse.*` 的 span；这是**上游出口没数据**，不归 fan-out 管，所以不判缺口 |\n| **2** | `gap` | Tempo 有候选，但 Langfuse 侧 0 条 trace，说明副本 fan-out 断链或采样不一致 |\n| **3** | `unknown` | 证据不足：缺凭据 / 401 / 不可达 / Tempo 查询失败 / 未知参数 |\n\n**为什么缺凭据不许判 PASS**\n\n1. 脚本的判定分两步（`:14-18`）：先确认 Tempo 有语义轨候选，再验证 Langfuse 侧有对应 trace。第二步必须调用 Langfuse API，而凭据缺失时**第二步根本无法执行**，脚本拿不到任何 Langfuse 侧证据。\n2. 它的纪律是 `UNKNOWN ≠ PASS`（`:18, :81`）：把“没查”当成“查过且正常”，会让 fan-out 断链（Tempo 有 trace、Langfuse 空）被静默放行，这正是本脚本要补的盲区（`:9-10`）。\n3. 这个退出码设计还会把压力转嫁给调用方：退出码 3 属于非零退出，任何按 `set -e` 或门禁风格编排的流程都会因此失败，迫使使用者要么配置凭据，要么显式标注“靠 review”，而不是靠误判通过蒙过关。\n\n只读操作：未修改任何文件。",
+  "usage": {
+    "input_tokens": 35805,
+    "output_tokens": 573
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 40844,
+  "failure_reason": null
+}

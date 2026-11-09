@@ -1,0 +1,22 @@
+{
+  "seq": "008",
+  "phase": "transition",
+  "node": "manual",
+  "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+  "transition": "collect+audit -> await_approval",
+  "ts_unix": 1794139729,
+  "cas": {
+    "expected_hash": "054725ac49e430fc8e3f04dd0ef76567f491d16e8e5e59fa748136a7cf75c5d9",
+    "new_hash": "86d8857cd3542e8dcf22be44ef6212f5bc522ba98820275ae4180bba973c6214"
+  },
+  "state_changes": {
+    "phase": "await_approval",
+    "approval": "proposed",
+    "proposal_path": "docs/audit/rounds/r1-dim6/proposals/r1-dim6.pa01a1ba70.md",
+    "evidence_sessions": 9,
+    "evidence_arms": "base @ /tmp/audit-r1-baseline（commit c1f47e9d），isolation_mismatch=9",
+    "assertion_hashes": "四件工具脚本哈希已冻结（assert/analyze/collect/replay）"
+  },
+  "stop_point": "await_approval（提案 status=proposed，未获批准前 implement 不得开始）",
+  "double_run_note": "并发会话 pa_01a1ba70 在 audit→propose 阶段产出同名提案；本会话独立重放与复核后确认其三条根因的代码事实成立，故采纳同一提案文件作为本 round 唯一提案，不另写第二份。回执按会话后缀解耦。"
+}

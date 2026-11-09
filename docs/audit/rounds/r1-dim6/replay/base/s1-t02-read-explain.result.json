@@ -1,0 +1,56 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb00-c10d-7090-9281-3ee3805797c1",
+  "turn_id": "turn-c5509986-51b3-482f-b464-b89ba9325ffd",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "未找到该文件，无法给出依据源码的判定说明。\n\n- 工作区 `/home/dm/pony_agent` 仅有 `scripts/`（空目录）与 `test_appr.txt`；`**/*langfuse*`、`**/*.sh`、`scripts/**/*` 均 0 命中。\n- 当前会话为只读模式，`Run` 被拒（tool_authorization_mode_read_only），无法到仓外路径确认。\n\n请提供脚本实际所在路径（或确认是否在 `../crates` 等仓外目录），我再读取后说明 0/2/3 的判定语义及\"缺凭据不得判 PASS\"的原因。",
+  "usage": {
+    "input_tokens": 86067,
+    "output_tokens": 1033
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 7140,
+  "failure_reason": null
+}

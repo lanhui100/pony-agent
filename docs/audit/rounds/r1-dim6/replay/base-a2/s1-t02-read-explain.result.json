@@ -1,0 +1,40 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb28-404a-75d3-9738-e1f70e2cf3fb",
+  "turn_id": "turn-8e9fbd0f-050b-436f-bc49-0999a4bce3d3",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**结论：目标文件不存在，因此无法说明退出码含义——我不会凭文件名臆测判定逻辑。**\n\n证据：\n- `Read scripts/observability/check-langfuse.sh` → `invalid_path: No such file or directory`\n- `List scripts` → 0 个条目（目录存在但为空）；`Find check-langfuse` 与全文搜索 `langfuse`（扫描 1 个文件）均 0 命中\n- 当前会话为只读模式，`ls`/`find` 命令被拒绝（`permission_denied`），故仅以工作区工具结果为准\n\n请确认：脚本真实路径、是否尚未落盘，或需我从别处（如依赖源码目录）按显式路径读取。",
+  "usage": {
+    "input_tokens": 69723,
+    "output_tokens": 768
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 5469,
+  "failure_reason": null
+}

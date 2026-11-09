@@ -1,0 +1,52 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb2a-fc94-7f33-a844-776abbee4aa7",
+  "turn_id": "turn-c830797c-8b06-46e3-b989-a1de40d7cead",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`scripts/observability/check-langfuse.sh` 在当前工作区不存在，因此无法读取，也无法说明它的判定逻辑。\n\n证据：\n- 工作区根目录下只有 `scripts/` 和 `test_appr.txt`；其中 `scripts/` 是空目录，子项数为 0。\n- `Glob **/*langfuse*`、`Find langfuse` 均 0 命中；对全文执行 `Search \"langfuse\"` 时只扫描到 1 个文件、共 5 字节。\n- 本次会话处于只读模式，无法执行 `ls` 或 shell 做外部探测。\n\n请确认正确的路径或分支，或者先把该脚本放到工作区；我不会在缺少原文的情况下猜测退出码含义。",
+  "usage": {
+    "input_tokens": 85910,
+    "output_tokens": 1296
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 7907,
+  "failure_reason": null
+}

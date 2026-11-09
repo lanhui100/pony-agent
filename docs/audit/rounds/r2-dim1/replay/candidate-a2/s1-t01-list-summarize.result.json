@@ -1,0 +1,36 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb8e-0a90-74b3-a8f1-3c338847c186",
+  "turn_id": "turn-d71b3914-e3eb-4260-baf1-cc945d27973d",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**结论：`docs/audit/corpus` 直属目录下没有 markdown 文件（0 个）。**\n\n直属条目仅 2 个：`manifest.json`（语料清单）与 `tasks/`（子目录，不纳入直属范围）。\n\nmarkdown 全部位于子目录 `docs/audit/corpus/tasks/`（仅供参考，非直属）：`t01-list-summarize.md`、`t02-read-explain.md`、`t03-search-locate.md`。\n\n本次为只读操作，未修改任何文件。",
+  "usage": {
+    "input_tokens": 50513,
+    "output_tokens": 671
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 31510,
+  "failure_reason": null
+}

@@ -1,0 +1,33 @@
+── A1 replay isolation (env cwd == arm worktree)
+   FAIL sessions=9 mismatch=9 expected=/tmp/audit-r1-baseline
+     - s1-t01-list-summarize: env_cwd=/home/dm/pony_agent
+     - s1-t02-read-explain: env_cwd=/home/dm/pony_agent
+     - s1-t03-search-locate: env_cwd=/home/dm/pony_agent
+     - s2-t01-list-summarize: env_cwd=/home/dm/pony_agent
+     - s2-t02-read-explain: env_cwd=/home/dm/pony_agent
+     - s2-t03-search-locate: env_cwd=/home/dm/pony_agent
+     - s3-t01-list-summarize: env_cwd=/home/dm/pony_agent
+     - s3-t02-read-explain: env_cwd=/home/dm/pony_agent
+     - s3-t03-search-locate: env_cwd=/home/dm/pony_agent
+── A2 trace-level release 必须非空（按发布线筛选可用）
+   sampled=9 release_null=9
+     - s1-t01-list-summarize: trace_release=null
+     - s1-t02-read-explain: trace_release=null
+     - s1-t03-search-locate: trace_release=null
+     - s2-t01-list-summarize: trace_release=null
+     - s2-t02-read-explain: trace_release=null
+     - s2-t03-search-locate: trace_release=null
+     - s3-t01-list-summarize: trace_release=null
+     - s3-t02-read-explain: trace_release=null
+     - s3-t03-search-locate: trace_release=null
+── A3 turn 结局单值：禁止 phase=completed 与 outcome=error 并存
+   sampled=9 conflicting=7
+     - s1-t02-read-explain: tool_failures=2 degraded=true
+     - s1-t03-search-locate: tool_failures=4 degraded=true
+     - s2-t01-list-summarize: tool_failures=2 degraded=true
+     - s2-t02-read-explain: tool_failures=2 degraded=true
+     - s2-t03-search-locate: tool_failures=4 degraded=true
+     - s3-t01-list-summarize: tool_failures=2 degraded=true
+     - s3-t02-read-explain: tool_failures=2 degraded=true
+
+verdict: failed=3 missing_evidence=0

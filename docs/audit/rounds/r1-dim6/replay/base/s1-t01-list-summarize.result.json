@@ -1,0 +1,48 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baff-3274-7971-90e2-d68e043209ec",
+  "turn_id": "turn-72137492-7dda-424a-b93b-6b93e1491d53",
+  "status": "suspended",
+  "exit_code": 6,
+  "final_text": "",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "error"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "done"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "done"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "done"
+    },
+    {
+      "name": "Ask",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 29346,
+  "failure_reason": "control_outcome_pending"
+}

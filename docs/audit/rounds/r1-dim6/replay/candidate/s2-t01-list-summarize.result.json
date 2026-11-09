@@ -1,0 +1,36 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb24-9ed7-7993-bded-10ac8070f34d",
+  "turn_id": "turn-402fe66b-cf87-4c2d-8de5-e75036b23a57",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "直属 `docs/audit/corpus/` 的 markdown 文件数量为 **0 个**，因此无用途可逐条说明。\n\n- 实测结构：`manifest.json` + `tasks/` 子目录（`Glob docs/audit/corpus/*.md` 命中 0，`List` 亦只有这两项）。\n- 供参考（非直属，不计入）：`tasks/t01-list-summarize.md`、`t02-read-explain.md`、`t03-search-locate.md`。\n- 全程只读：`Run` 被只读模式拒绝（permission_denied），仅使用 Glob/List 取证，未修改任何文件。",
+  "usage": {
+    "input_tokens": 63258,
+    "output_tokens": 1011
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 19875,
+  "failure_reason": null
+}

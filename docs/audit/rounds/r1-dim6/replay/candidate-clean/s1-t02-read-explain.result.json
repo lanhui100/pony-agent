@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb39-bc20-73b3-bc84-4b75bb51d60f",
+  "turn_id": "turn-01bf2b38-45c5-429b-b4db-2468588aa8d2",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码含义**（脚本 `scripts/observability/check-langfuse.sh`，判定逻辑在 72–92 行）\n\n- **0**：表示判定通过，但有两种不同的情形，需通过 `verdict` 字段区分：\n  - `pass`：Tempo 中存在语义轨候选 span，且 Langfuse 同一时间窗内 `traces?limit=1` 返回的 `data` 非空，即两轨都有数据。\n  - `no-candidates`：时间窗内压根没有带 `gen_ai.*` / `langfuse.*` 的 span，因此 Langfuse 为空属于“上游没数据”，而不是 fan-out 断链，所以不判为缺口；但 reason 明确要求先修 trace 出口。\n- **2**：`gap`，语义轨缺口。Tempo 有 ≥1 条候选，Langfuse 侧 `LANGFUSE_COUNT <= 0`，说明 otel-collector 的副本 fan-out 断链或采样不一致，这是真正的“静默丢数据”告警。\n- **3**：`unknown`，证据不足，默认值即为此。触发条件有：Tempo 查询失败（`TRACE_CANDIDATES < 0`）、缺凭据、Langfuse 返回 401、Langfuse 不可达，以及未知 CLI 参数。\n\n**为什么缺凭据不能判 PASS**\n\n静态检查（`ponygo observe audit` 的 T5）只验证源码里写了 `gen_ai.*` / `langfuse.*` 属性；能否落到 Langfuse 取决于运行时 fan-out。缺凭据时第 2 步（Langfuse 侧是否有对应 trace）**完全没有被执行**，此时 PASS 会把“没验证”伪装成“验证通过”，让 Tempo 有 trace、Langfuse 空的故障永久隐身。脚本因此把无凭据显式置为 `LANGFUSE_STATE=no-credentials` 并走 3，贯彻注释里的纪律“UNKNOWN ≠ PASS”：只有拿到正反两轨的确定性证据才允许 0 表示通过。\n\n只读操作，未修改任何文件。",
+  "usage": {
+    "input_tokens": 35806,
+    "output_tokens": 592
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 7086,
+  "failure_reason": null
+}

@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "017-verify-assert-candidate",
+ "phase": "verify",
+ "node": "script",
+ "command": "bash scripts/audit/assertions/dim6.sh --arm-dir .../replay/candidate --expected-cwd /tmp/audit-r1-candidate --metrics .../metrics.candidate.json",
+ "exit_code": 0,
+ "ts_unix": 1794142724,
+ "artifact": "docs/audit/rounds/r1-dim6/replay/candidate",
+ "summary": "candidate 臂 9 会话三断言全绿：A1 隔离 0 失配（cwd=/tmp/audit-r1-candidate）、A2 trace release 9/9 非空（0.1.158）、A3 结局单值 0 冲突（completed+degraded 取代 completed+error）"
+}

@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb3f-5071-7331-9ab9-410fc8a8030d",
+  "turn_id": "turn-175ae1d9-6394-44c7-a285-4878f6685476",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码语义**（`scripts/observability/check-langfuse.sh`，判定段在 73–92 行）\n\n| 码 | verdict | 触发条件 |\n|---|---|---|\n| 0 | `pass` | Tempo 有语义轨候选 span（`gen_ai.*` / `langfuse.*`），且 Langfuse 同窗口有 trace |\n| 0 | `no-candidates` | Tempo 候选为 0：Langfuse 空属“上游没数据”，不算 fan-out 断链（提示先修 trace 出口） |\n| 2 | `gap` | Tempo 有 N 条候选但 Langfuse 侧 0 条 ⇒ 副本 fan-out 断链或采样不一致（真缺口） |\n| 3 | `unknown` | 证据不足：缺 `LANGFUSE_PUBLIC_KEY`/`SECRET_KEY`、401 鉴权失败、API 不可达、Tempo 查询失败（`-1`）、未知参数 |\n\n**为什么缺凭据禁止判 PASS**：判定关注的是“两轨交叉验证”，即 Langfuse 侧还必须存在对应 trace，不能只看 Tempo 有没有数据。缺凭据时第二步根本没被执行（`LANGFUSE_STATE=no-credentials`），此时“Langfuse 空”与“查不到”无法区分，判 PASS 等于用未观测的事实冒充观测成功，会让“Tempo 有 trace、Langfuse 空”这一真实断链继续全绿，正是脚本注释所补的盲区。因此遵守 `UNKNOWN ≠ PASS` 纪律，退 3 让门禁红。\n\n补充一处潜在盲点（未改动）：若 `tcount_traceql` 命令不存在，`TRACE_CANDIDATES` 保持初值 `0`，会落到 `no-candidates` 退出 0，工具缺失被当作“无候选”，与“Tempo 查询失败→3”的预期不一致。",
+  "usage": {
+    "input_tokens": 35805,
+    "output_tokens": 706
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 5814,
+  "failure_reason": null
+}

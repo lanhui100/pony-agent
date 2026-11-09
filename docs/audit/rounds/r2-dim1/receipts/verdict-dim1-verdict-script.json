@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "verdict-dim1",
+ "phase": "verdict",
+ "node": "script",
+ "command": "bash scripts/audit/verdict.sh --dim 1 --arm-dir docs/audit/rounds/r2-dim1/replay/candidate-a3",
+ "exit_code": 0,
+ "ts_unix": 1794189143,
+ "artifact": "/home/dm/pony-agent/docs/audit/rounds/r2-dim1/receipts",
+ "summary": "PASS：assert 与 ratchet 全绿，维度 1 已入棘轮"
+}

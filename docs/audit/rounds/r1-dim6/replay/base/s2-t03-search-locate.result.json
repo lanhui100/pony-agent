@@ -1,0 +1,52 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb03-1615-7e80-b82d-862dfb9377aa",
+  "turn_id": "turn-c740363a-16c3-4b83-be87-acceb26aaceb",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**未完成：目标路径在当前工作区不存在**\n\n已核实证据：\n- 工作区根 `/home/dm/pony_agent` 仅有 `scripts/`（空目录）和 `test_appr.txt` 两项。\n- `Glob **/*.rs` → 0 命中；`Glob **/*pony*` → 0 命中。\n- `Read` 目标路径 `crates/pony-agent-core/src` → `invalid_path: No such file or directory`。\n- 尝试 `../crates/pony-agent-core/src` → `requires_authorization`：该路径在 `/home/dm/crates`，位于工作区之外，未获授权；本会话为只读模式，`Run` 也被拒绝（`permission_denied`），因此也无法用 grep/rg 替代搜索。\n\n请确认：仓库是否在 `/home/dm/crates/...`？若是，请授权该目录（或把仓库放入工作区），我再执行搜索并报告命中总数与前 5 处路径+行号。",
+  "usage": {
+    "input_tokens": 131400,
+    "output_tokens": 1750
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "error"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 5645,
+  "failure_reason": null
+}

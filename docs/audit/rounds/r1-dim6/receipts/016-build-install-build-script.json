@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "016-build-install",
+ "phase": "build",
+ "node": "script",
+ "command": "bash scripts/audit/build-install.sh",
+ "exit_code": 1,
+ "ts_unix": 1794142724,
+ "artifact": "/tmp/build-install.log",
+ "summary": "build-install.sh verify_mode=linux-fallback 在 npm run test:unit 处 exit=1：失败 3 例均在既有验收门禁（wave47-ob2 的 audit-diff 因 replay jsonl 未忽略而 WARN、v10-baseline-freeze 自指涉全量单测）。已定位为审计产物污染 + 自指涉，非本轮实施缺陷；修 .gitignore 后 ob2 恢复（violations=0）"
+}

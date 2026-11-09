@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bdda-91d8-7df2-98ad-1e4469627ba8",
+  "turn_id": "turn-100fff2a-f617-4ec2-a24e-da2e247218f2",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码含义**（`verdict` 取值对应一个 `exit_code`）\n\n- **0 —— PASS 或 no-candidates**：`pass`（Tempo 有语义轨候选，Langfuse 侧也取样到 trace）；`no-candidates`（时间窗内连 `gen_ai.*`/`langfuse.*` 的 span 都没有，属“上游没数据”，不算 fan-out 断链）。\n- **2 —— gap**：Tempo 侧有语义轨候选（>0），但 Langfuse API 可达却返回 0 条 → fan-out 断链或采样不一致。\n- **3 —— UNKNOWN（证据不足）**：`unknown`，即 Tempo 查询失败（候选数 -1）、缺凭据、401、Langfuse 不可达、未知参数。\n\n**缺凭据必须判 UNKNOWN 的理由**\n\n- 判定含两步：Tempo 有候选 **且** 同一时间窗 Langfuse 有对应 trace。凭据缺失时第二步根本没执行，`LANGFUSE_STATE=no-credentials` → 无证据 ⇒ 只能判 UNKNOWN（纪律：UNKNOWN ≠ PASS）。\n- 若缺凭据回落到 PASS，等于“没查就绿灯”：Tempo 有 trace、Langfuse 空（思考树/工具调用/成本全丢）的故障会被伪装成健康，这正是不变量要堵的漏洞。\n- 同源风险：`reason` 文案与 401/不可达分支都保留 exit 3，确保“环境/权限问题”与“真的没断链”在机器口径上永不混淆。\n\n补充一处口径观察（只读未改）：L42/L41 中若 `tcount_traceql` 不存在，`TRACE_CANDIDATES` 保持初始 `0`，会落到 `no-candidates` 的 exit 0 而非 UNKNOWN，与“证据不足不判 PASS”的纪律存在张力，建议 review 时确认是否应初始化为 -1。",
+  "usage": {
+    "input_tokens": 35821,
+    "output_tokens": 750
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 3246,
+  "failure_reason": null
+}

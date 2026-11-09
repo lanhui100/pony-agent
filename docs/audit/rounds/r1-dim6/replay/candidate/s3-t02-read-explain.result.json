@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb26-74da-7452-aa5a-ab03fccb39d0",
+  "turn_id": "turn-249835d5-7d9a-4068-bd66-1fe8e9a467b6",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**结论：** 该脚本只做两段证据链判定（Tempo 侧语义轨候选 → Langfuse 侧同窗 trace），退出码表达「证据强度」而非「好坏」。\n\n| 退出码 | verdict | 触发条件（行号） | 含义 |\n|---|---|---|---|\n| 0 | `pass` / `no-candidates` | L89-91 / L76-79 | `pass`：Tempo 有候选 span，且 Langfuse 同窗有 trace。`no-candidates`：`TRACE_CANDIDATES==0`，Langfuse 空属「上游没数据」，不是 fan-out 断链（理由里仍提示先修 trace 出口） |\n| 2 | `gap` | L86-88 | 确定性缺口：Tempo 有 N 条候选 span，Langfuse 侧 0 条 ⇒ fan-out 断链或采样不一致，唯一的「真失败」 |\n| 3 | `unknown` | L74-75、L80-85 | 证据不足：Tempo 查询失败（候选数 -1）、缺 `LANGFUSE_PUBLIC_KEY/SECRET_KEY`、API 401、API 不可达 |\n\n**缺凭据为何禁止判 PASS：**\n- 判定第 2 步（Langfuse 侧是否有 trace）在无凭据时**根本无法执行**，`LANGFUSE_STATE=\"no-credentials\"`、计数保持 `-1`（L50、L69）。此时「没发现问题」只等于「没看」，是`absence of evidence`，不是`evidence of absence`。\n- 若把缺凭据当 PASS，门禁就变成**不可反驳**的：删掉凭据即可永远全绿，恰好放过本脚本要防的故障形态——Tempo 有 trace、Langfuse 空（思考树/工具调用/会话成本全丢却不报警，见 L9-10）。\n- 且它恰是「有候选 span」的关键分支（L80 位于 `TRACE_CANDIDATES>0` 之后），此时最需要第二段证据；缺失必须回落 UNKNOWN，让调用方显式区分「通过」与「未验证」，而不是用一条 `unknown` 混进绿色统计。\n- 同纪律也适用于 401/不可达（L82-85）：认证或网络问题属观测能力缺失，同样归 3，只有「确证 Langfuse 侧 0 条」才升级为 2。",
+  "usage": {
+    "input_tokens": 35804,
+    "output_tokens": 906
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 4535,
+  "failure_reason": null
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb3e-cf20-7131-bc34-cc45e7ed7af7",
+  "turn_id": "turn-3ec03f79-661a-472b-ab52-3bb0cfe6cfb5",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 直属目录下**没有 markdown 文件**，仅有两项：\n\n| 条目 | 说明 |\n|---|---|\n| `manifest.json` | 语料清单等元数据文件（非 markdown） |\n| `tasks/` | 子目录，而非文件 |\n\n如果你要找的是任务卡 markdown，实际位于 `docs/audit/corpus/tasks/` 下：`t01-list-summarize.md`、`t02-read-explain.md`、`t03-search-locate.md`（`docs/audit/` 直属另有 5 个审计报告 md）。需要我逐个说明用途请说一声。",
+  "usage": {
+    "input_tokens": 63697,
+    "output_tokens": 891
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 5647,
+  "failure_reason": null
+}

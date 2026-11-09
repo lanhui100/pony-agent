@@ -1,0 +1,76 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "011-diagnose-f5",
+ "phase": "implement",
+ "node": "agent",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794185700,
+ "scope": "单会话根因诊断（用户建议的第 2 步）：s3-t01 丢 2 个 llm.chat span 的机制定位。只读取证，未改代码、未改状态机。",
+ "question": "attempt2 方案 A（退出 flush 预算 1000→3000）能否修复 L2/L4 的剩余红相？",
+ "answer": "不能。丢失的 span 在 turn 中途就已结束（早于退出 7–23 秒），退出 flush 的等待窗口覆盖不到它们。",
+ "evidence": [
+  {
+   "claim": "span 曾经生成过（不是「压根没建 span」）",
+   "proof": "根 span agent.turn 的 gen_ai.usage.output_tokens=662 = 186+203+104+169，恰好等于该会话 4 次 provider 调用的 output_tokens 之和；而 LlmSpanGuard::record_usage 的累加被 `if self.span.is_some()` 门控（otel/mod.rs:2660）⇒ 4 个 guard 的 span 都真实存在过。",
+   "source": "Tempo /api/traces/bcf88582a37f6e3474bc216c49d79ccc + crates/pony-agent-core/src/agent/otel/mod.rs:2655-2664"
+  },
+  {
+   "claim": "丢失的是最早 2 次调用，到达的是最晚 2 次",
+   "proof": "stderr 4 条 `usage:openai raw={` 的 prompt_tokens 依次 15419 / 15632 / 15891 / 16083；到达 span 只有 15891 与 16083（start 14:33:37.772 / 14:33:46.793）。根 span start 14:33:14.905、end 14:33:53.723 ⇒ 缺失的 2 个 span 在 14:33:37 之前就已结束，距进程退出至少 7 秒，更早的那个约 23 秒。",
+   "source": "docs/audit/rounds/r2-dim1/replay/candidate-a2/s3-t01-list-summarize.stderr 行 237/448/468/821"
+  },
+  {
+   "claim": "Tempo 与 Langfuse 双轨一致（不是单侧查询问题）",
+   "proof": "Tempo 该 trace 共 4 个 span（agent.turn 1 / llm.chat 2 / tool.call 1）；Langfuse /api/public/observations 同样 4 条。工具侧也缺：result.json 记录 5 次工具调用（Read/Run/List/Glob/List），tool.call span 只有 1 个。",
+   "source": "Tempo /api/traces/… + Langfuse observations?traceId=… + s3-t01-list-summarize.result.json"
+  },
+  {
+   "claim": "导出失败完全静默（无任何告警可追）",
+   "proof": "该会话 stderr 的 warn 计数为 0；全仓 grep 无 OTel logger provider 装配，且 opentelemetry 依赖 default-features=false 未开 internal-logs ⇒ SDK 的 otel_error!(BatchSpanProcessor.ExportError) 被编译为空语句（opentelemetry-0.30.0/src/global/internal_logging.rs:185-195 的 #[cfg(feature=\"internal-logs\")] 分支）。",
+   "source": "crates/pony-agent-core/Cargo.toml:45-47 + ~/.cargo/registry/.../opentelemetry-0.30.0/src/global/internal_logging.rs"
+  },
+  {
+   "claim": "SDK 批量导出无重试，失败即丢弃",
+   "proof": "export_batch_sync 先 `batch.split_off(0)` 清空再 export，失败仅返回 Err；worker 循环对 get_spans_and_export 的返回值一律 `let _ =` 忽略 ⇒ 该批 span 永久丢失，且不影响后续批次。",
+   "source": "opentelemetry_sdk-0.30.0/src/trace/span_processor.rs:470-510（export_batch_sync）与 340-420（worker loop）"
+  },
+  {
+   "claim": "collector 侧无拒收/丢弃（排除「服务端丢」）",
+   "proof": "Prometheus：otelcol_exporter_send_failed_spans=0、otelcol_receiver_refused_spans=0；enqueue_failed / processor_dropped 指标不存在（该版本无此指标）。",
+   "source": "pquery sum(otelcol_*) via observability skill lib.sh"
+  }
+ ],
+ "conclusion": {
+  "verdict_on_plan_A": "方案 A 只能救「退出时刻仍在批量队列里」的尾批；本例丢失发生在 turn 中段的批量周期导出失败，A 对其零覆盖 ⇒ 单靠 A 的 attempt 2 必然 L2/L4 仍红。",
+  "agrees_with_peer": "与并发会话 pa_01a1bae5 的回执 010 中 F5 结论方向一致（我独立复核并补充了「根 span 聚合值证明 span 生成过」这一条硬证据）。",
+  "new_finding_F7": {
+   "id": "F7（major，判据口径，提案外）",
+   "claim": "N>1 批量路径的 transport 标注与真实通道不符，使 L3 判据对批量调用失真。",
+   "evidence": "s3-t01 第 3 次调用日志为 `followup:start mode=sync-batch … calls=2`（同步 HTTP 通道），但其到达 span 的 llm.request.transport 写的是 stream；原因在 turn_flow.rs:3347 —— provider_followup_stream_with_calls 的 N>1 分支硬编码 LLM_REQUEST_TRANSPORT_STREAM，而该分支实际经 continue_with_tool_results_stream 走同步 post。",
+   "impact": "L3 把批量调用计为 stream 且无 ttft，于是被归入 ttft_missing（s3-t01 的 ttft_missing_calls=1）而非「buffered 本无首包」。当前 L3 判绿（unattributable=0）部分依赖这个错标。",
+   "fix_scope": "turn_flow.rs:3347 一处常量改为 BUFFERED + 断言用例补批量分支；属 attempt2 提案写域内（turn_flow.rs 已在 write_scope）。"
+  }
+ },
+ "commands": [
+  {
+   "command": "python3 scripts/audit/state.py take-lease --session pa_01a1ba70-… --ttl 1800",
+   "exit_code": 0,
+   "detail": "对端已释放 lease（released_reason=实施完成，待用户裁定），本会话接管"
+  },
+  {
+   "command": "bash scripts/audit/fetch.sh --raw /api/public/observations?traceId=bcf88582…",
+   "exit_code": 0,
+   "detail": "4 条 observation，与 Tempo 一致"
+  },
+  {
+   "command": "tcount_traceql '{ name=\"llm.chat\" && span.langfuse.session.id=\"\" }' 90000",
+   "exit_code": 0,
+   "detail": "raw_count=0 ⇒ 丢失的 span 不在任何其它 trace 下（排除「串到别的 trace」）"
+  }
+ ],
+ "honesty_notes": [
+  "本次只做诊断，未修改任何代码、未改 loop-state 阶段、未写棘轮；工作区里 otel/mod.rs、src-tauri/lib.rs、docs/observability.yaml 的改动属并发会话 pa_01a1bae5 的 attempt2 实施，我未触碰。",
+  "未跑全量双臂重放（约 40 分钟）：F5 的机器证据已足以判定「方案 A 单独实施必然仍红」，先请用户裁定是否把导出层修复并入 attempt 2，避免消耗仅剩的一次 attempt 预算做已知结论的重放。",
+  "「导出失败」的具体网络错误类别（连接重置 / 5xx / 超时）无法从现有证据区分——因为 internal-logs 未启用，SDK 连错误码都没留下。这是 F5 的可见性缺口本身，不是本次遗漏。"
+ ]
+}

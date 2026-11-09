@@ -1,0 +1,40 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb04-8285-7d80-9b20-ea414a7eaa94",
+  "turn_id": "turn-358e54d6-b9da-414d-b994-6c1338398b72",
+  "status": "suspended",
+  "exit_code": 6,
+  "final_text": "当前会话只读：`Run`（grep）被禁止，且目标路径在工作区之外。\n\n- 工作区 `/home/dm/pony_agent` 内只有 `scripts/` 和 `test_appr.txt`，不存在 `crates/`。\n- 解析到 `/home/dm/crates/pony-agent-core/src`，属工作区外，需显式授权。",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "error"
+    },
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Ask",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 4569,
+  "failure_reason": "control_outcome_pending"
+}

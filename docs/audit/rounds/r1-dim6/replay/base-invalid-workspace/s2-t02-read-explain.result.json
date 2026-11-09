@@ -1,0 +1,52 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf2-035a-7fb1-8f9c-ce43aa94c292",
+  "turn_id": "turn-96a3b81c-47ec-442d-aca0-bb794efbe9ce",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`scripts/observability/check-langfuse.sh` 在工作区中不存在，因此我无法说明它的退出码判定。这是只读核查的结果，我没有修改任何文件。\n\n核查证据：\n- `Find check-langfuse` 和 `Find langfuse` 都返回 0 条匹配；`Glob **/*.sh` 也返回 0 条匹配。\n- `List scripts` 显示该目录为空，共 0 个条目；`scripts/observability` 目录也不存在。\n- 整个工作区只有两项内容：空的 `scripts/` 和内容为 `hello` 的 `test_appr.txt`。\n\n请提供该脚本的实际路径或包含该脚本的仓库；我会在读取脚本后再给出退出码 0、2、3 的语义，以及缺少凭据时禁止判定 PASS 的原因。",
+  "usage": {
+    "input_tokens": 85381,
+    "output_tokens": 1090
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 1359,
+  "failure_reason": null
+}

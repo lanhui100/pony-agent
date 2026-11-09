@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb2c-de31-7352-b567-30435af35ac1",
+  "turn_id": "turn-a0069a8c-7790-446d-b1df-0076c4afc71a",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "文件不存在，无法读取。\n\n**核实证据（均为只读操作）**\n- `Read scripts/observability/check-langfuse.sh` → `invalid_path: No such file or directory`\n- `List .` → 仅有 `scripts/`（空目录）与 `test_appr.txt`\n- `Glob **/*.sh` → 0 命中；`Glob **/*` → 仅 `test_appr.txt`\n- 当前会话为只读模式，`Run`/`ls` 被拒（`tool_authorization_mode_read_only`），故无法进一步探测\n\n**需要你提供其一**：①该脚本的真实路径（可能在另一工作区/仓库），②直接粘贴脚本内容。我不会臆测退出码语义——凭据缺失不得判 PASS 属安全判定逻辑，凭空推测会误导验收结论。",
+  "usage": {
+    "input_tokens": 70373,
+    "output_tokens": 724
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 20628,
+  "failure_reason": null
+}

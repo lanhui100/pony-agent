@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb3d-f173-7581-a9bc-0903d734f936",
+  "turn_id": "turn-45fd326e-eb79-4862-890a-d15bb78b20f1",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`crates/pony-agent-core/src` 内共 **35 处**命中，未截断。这些匹配均为整行匹配，且包含 `exported_trace_id_for_turn` 等子串，分布在 6 个文件中。\n\n前 5 处（依次为 otel/mod.rs:1824, 1833, 1855, 2134, 2263）：\n\n| # | 文件 | 行号 | 摘要 |\n|---|---|---|---|\n| 1 | agent/otel/mod.rs | 1824 | 文档注释：导出态 id 语义 |\n| 2 | agent/otel/mod.rs | 1833 | 文档注释：指引用法 |\n| 3 | agent/otel/mod.rs | 1855 | `pub fn exported_trace_id() -> Option<String>` |\n| 4 | agent/otel/mod.rs | 2134 | `register_turn_exported_trace_id(...)` |\n| 5 | agent/otel/mod.rs | 2263 | 文档注释：`TurnTraceGuard::exported_trace_id` |\n\n其余命中位于 ponysentry/{client,mod}.rs、runtime/{turn_persist,types}.rs 和 turn_flow.rs。本次会话为只读模式，`grep` 执行被拒绝（permission_denied），统计改用工作区搜索工具完成；未修改任何文件。",
+  "usage": {
+    "input_tokens": 54337,
+    "output_tokens": 960
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 10590,
+  "failure_reason": null
+}

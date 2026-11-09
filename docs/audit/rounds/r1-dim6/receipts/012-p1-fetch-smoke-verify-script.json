@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "012-p1-fetch-smoke",
+ "phase": "verify",
+ "node": "script",
+ "command": "bash scripts/audit/fetch.sh --arm-dir /tmp/fetch-arm --out /tmp/metrics-1.json",
+ "exit_code": 0,
+ "ts_unix": 1794140466,
+ "artifact": "/tmp/metrics-1.json",
+ "summary": "fetch.sh 单会话取证成功：trace 0244fec6…，trace_release=null，deployment.environment=audit-base，observation_count=17"
+}

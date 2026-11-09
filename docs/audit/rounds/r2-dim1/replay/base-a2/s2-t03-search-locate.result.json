@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb8a-b893-7c22-97f4-f082063cd896",
+  "turn_id": "turn-62be520e-2ec5-4c96-8844-a4f6d6424ee9",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**命中总数 38 处**（`crates/pony-agent-core/src`，忽略大小写；结果完整未截断）。注：`Run` 命令被只读模式拒绝，因此以工作区文本搜索为唯一证据。\n\n前 5 处命中：\n\n| # | 文件 | 行号 |\n|---|---|---|\n| 1 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1824（文档注释）|\n| 2 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1833（文档注释）|\n| 3 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1855（`pub fn exported_trace_id()`）|\n| 4 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2134（`register_turn_exported_trace_id`）|\n| 5 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2263（`TurnTraceGuard::exported_trace_id` 引用）|\n\n分布：`otel/mod.rs` 22 处、`turn_flow.rs` 5 处、`ponysentry/client.rs` 4 处、`ponysentry/mod.rs` 3 处、`runtime/turn_persist.rs` 3 处、`runtime/types.rs` 1 处。未修改任何文件。",
+  "usage": {
+    "input_tokens": 57110,
+    "output_tokens": 944
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 6177,
+  "failure_reason": null
+}

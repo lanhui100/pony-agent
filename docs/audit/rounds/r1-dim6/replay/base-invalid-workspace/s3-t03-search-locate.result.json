@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf2-bb3b-78a1-9b01-17e24f7949ab",
+  "turn_id": "turn-8f41a8c3-abbf-4e1b-8a35-54cd42f6108c",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**无法完成：目标路径不存在于当前工作区。**\n\n- `crates/pony-agent-core/src` 在 cwd `/home/dm/pony_agent` 下不存在（工作区仅含 `scripts/`（空）与 `test_appr.txt`）。\n- 全局搜索 `exported_trace_id`：命中 0 处（扫描 1 个文件、5 字节）。\n- 尝试访问 `/home/dm/crates/pony-agent-core/src`：工作区外，未授权读取；且当前会话为只读模式，无法执行 `ls` 等命令定位。\n\n请提供正确路径（或授权读取工作区外目录），我再重新检索。",
+  "usage": {
+    "input_tokens": 98561,
+    "output_tokens": 1155
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 1472,
+  "failure_reason": null
+}

@@ -1,0 +1,56 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb91-a170-7242-9ee1-9b1ef955589e",
+  "turn_id": "turn-a15d9fda-7a1b-44c3-a4c1-f8d89f708c87",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**结论：`docs/audit/corpus` 直属目录下没有任何 markdown 文件**（`docs/audit/corpus/*.md` 匹配数为 0），因此“用一句话说明每个文件用途”无对象可述。\n\n直属条目仅 2 项：\n- `manifest.json`：语料清单，定义 schema、只读/回放隔离等约束，并登记各任务卡的路径与 sha256 及聚合校验值。\n- `tasks/`：子目录，非直属文件。\n\n若需覆盖子目录，`tasks/` 下有 3 个 md：`t01-list-summarize.md`（本问题即其题面）、`t02-read-explain.md`（解释 `check-langfuse.sh` 退出码 0/2/3 与缺凭据不得判 PASS）、`t03-search-locate.md`（在 core 中搜索 `exported_trace_id` 并报命中位置）。\n\n全程只读，未修改任何文件。",
+  "usage": {
+    "input_tokens": 104997,
+    "output_tokens": 1855
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 25676,
+  "failure_reason": null
+}

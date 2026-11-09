@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bdda-6b90-7273-b3ca-ec93056f4f85",
+  "turn_id": "turn-c6561d45-d427-4adf-88d2-cd0c4cd1488e",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 目录下没有直接放置的 markdown 文件；该目录只包含 `manifest.json` 和 `tasks/` 子目录，markdown 文件都在子目录里。",
+  "usage": {
+    "input_tokens": 30994,
+    "output_tokens": 169
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 3884,
+  "failure_reason": null
+}

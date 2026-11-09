@@ -1,0 +1,109 @@
+{
+ "schema": 1,
+ "dimension": 1,
+ "kind": "span-fidelity",
+ "totals": {
+  "provider_calls": 15,
+  "generation_spans": 8,
+  "lost": 8,
+  "root_missing": 4
+ },
+ "sessions": [
+  {
+   "arm": "base",
+   "tag": "s1-t01-list-summarize",
+   "session_id": "pa_01a1bb85-561b-78f0-9cb1-135f72ea51cc",
+   "trace_id": "81a85c98b86f8a12c6f2931b621f9dc1",
+   "provider_calls": 1,
+   "generation_spans": 2,
+   "span_loss": -1,
+   "turn_spans": 1,
+   "turn_calls_attr": 1,
+   "observation_count": 7,
+   "missing": false
+  },
+  {
+   "arm": "base",
+   "tag": "s1-t02-read-explain",
+   "session_id": "pa_01a1bb85-c31e-72b0-821f-a9811b8a5d89",
+   "trace_id": "9da333aa6a7517195489be5f241b12cd",
+   "provider_calls": 2,
+   "generation_spans": 0,
+   "span_loss": 2,
+   "turn_spans": 0,
+   "turn_calls_attr": null,
+   "observation_count": 2,
+   "missing": false
+  },
+  {
+   "arm": "base",
+   "tag": "s1-t03-search-locate",
+   "session_id": "pa_01a1bb86-a856-7b01-b071-b575840904e6",
+   "trace_id": "74bf1825ef0fff4a0e013501f6e18970",
+   "provider_calls": 3,
+   "generation_spans": 2,
+   "span_loss": 1,
+   "turn_spans": 0,
+   "turn_calls_attr": null,
+   "observation_count": 4,
+   "missing": false
+  },
+  {
+   "arm": "base",
+   "tag": "s2-t01-list-summarize",
+   "session_id": "pa_01a1bb88-2061-7250-bb5b-3b0f90091938",
+   "missing": true
+  },
+  {
+   "arm": "base",
+   "tag": "s2-t02-read-explain",
+   "session_id": "pa_01a1bb88-7e61-7f40-9f6e-cae2993fb651",
+   "trace_id": "ae97deee2c7e41237a59526017aacf84",
+   "provider_calls": 3,
+   "generation_spans": 1,
+   "span_loss": 2,
+   "turn_spans": 0,
+   "turn_calls_attr": null,
+   "observation_count": 2,
+   "missing": false
+  },
+  {
+   "arm": "base",
+   "tag": "s2-t03-search-locate",
+   "session_id": "pa_01a1bb8a-b893-7c22-97f4-f082063cd896",
+   "trace_id": "1f136e6cb96d5590ddbe3c2e7154f882",
+   "provider_calls": 3,
+   "generation_spans": 3,
+   "span_loss": 0,
+   "turn_spans": 1,
+   "turn_calls_attr": 2,
+   "observation_count": 8,
+   "missing": false
+  },
+  {
+   "arm": "base",
+   "tag": "s3-t01-list-summarize",
+   "session_id": "pa_01a1bb8b-4f17-7833-ba0e-4f65dd9bbae1",
+   "missing": true
+  },
+  {
+   "arm": "base",
+   "tag": "s3-t02-read-explain",
+   "session_id": "pa_01a1bb8c-933e-7463-979d-96f4b0b3874e",
+   "missing": true
+  },
+  {
+   "arm": "base",
+   "tag": "s3-t03-search-locate",
+   "session_id": "pa_01a1bb8d-4b14-7522-b004-134ac75fbea8",
+   "trace_id": "a23b20cacaa26cfbaa65914cc2018d6e",
+   "provider_calls": 3,
+   "generation_spans": 0,
+   "span_loss": 3,
+   "turn_spans": 0,
+   "turn_calls_attr": null,
+   "observation_count": 2,
+   "missing": false
+  }
+ ]
+}

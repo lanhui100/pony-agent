@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "015-implement-unit-tests",
+ "phase": "implement",
+ "node": "script",
+ "command": "cargo test -p pony-agent-core --lib agent::otel::tests && cargo test -p pony-agent-core --test otel_resource_turn_status_test && cargo test -p pony-agent-core --test cli_acceptance",
+ "exit_code": 0,
+ "ts_unix": 1794140858,
+ "artifact": "target/debug/deps",
+ "summary": "定向单测全绿：agent::otel::tests 32 passed；otel_resource_turn_status_test 6 passed（含 PA154-T1 期望 degraded）；cli_acceptance 6 passed（含 bind_workspace_id 单测）"
+}

@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb17-86c6-7db1-9e8a-962792a0d7ad",
+  "turn_id": "turn-055d8ae8-1e90-4f27-b4f6-dd73370327df",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**未找到该目录**：`docs/audit/corpus` 在当前工作区中不存在。\n\n- 工作区根目录仅有 `scripts/`（空目录）和 `test_appr.txt`；\n- 递归搜索 `**/corpus/**`、`**/docs/**` 及模糊查找 `corpus`，均返回 0 条命中。\n\n会话处于只读模式，无法通过命令进一步探查。请确认路径是否正确，或该目录是否位于其他工作区。",
+  "usage": {
+    "input_tokens": 55750,
+    "output_tokens": 602
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 3685,
+  "failure_reason": null
+}

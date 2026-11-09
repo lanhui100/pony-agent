@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bddb-4593-7733-bc64-a349f8be70ef",
+  "turn_id": "turn-b1b185ab-4bf5-4827-91aa-6f35469a5fe1",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**判定分层（第 73–92 行）**\n\n| 退出码 | verdict | 判定含义 |\n|---|---|---|\n| `0` | `pass` / `no-candidates` | 两种子情形：① `pass` —— Tempo 有语义轨候选 span，且 Langfuse 同窗口内有 trace（两条数据通路都有数据）；② `no-candidates` —— Tempo 查询成功但候选数为 0，说明上游 trace 出口就没有语义轨数据，因此 fan-out 断链不成立（属“尚未产生”，非“链路故障”）。 |\n| `2` | `gap` | Tempo 有 ≥1 条候选，但 Langfuse 侧 0 条 —— 语义轨 fan-out 断链或采样不一致，确认缺口。 |\n| `3` | `unknown` | 证据不足，默认兜底值（`verdict=unknown` 初值即 `exit_code=3`）：Tempo 查询失败、缺 `LANGFUSE_PUBLIC_KEY`/`SECRET_KEY`、API 401、API 不可达，以及未知参数。 |\n\n**缺凭据不得判 PASS 的原因**\n\n- 判定契约是两步串行（第 16–17 行）：① Tempo 有候选 → ② Langfuse 有对应 trace。缺凭据时第 2 步根本没执行，只得到“未验证”，不是“已验证通过”。\n- `0` 的语义被定义为正向证据（两轨都有数据，或确定性证据证明上游为空）；缺凭据既非“有”，也非“确定性为空”，套用 `0` 会把不可观测性伪装成健康。\n- 后果是门禁静默放行：`audit-project.sh` 只做静态检查，恰好靠本脚本补齐语义轨盲区。若缺凭据返回 0，Tempo 有 trace 而 Langfuse 空（思考树、工具调用透视、会话成本全丢）这类真实故障将无人报警。\n- 与 `no-candidates` 的区别正是纪律要点：后者有确定性证据（查询成功且计数为 0）可良性判 `0`；前者无任何证据，只能 `3`，让调用方显式暴露凭据缺失而不是把问题消化掉。\n\n（只读完成，未修改任何文件。）",
+  "usage": {
+    "input_tokens": 35812,
+    "output_tokens": 851
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 2823,
+  "failure_reason": null
+}

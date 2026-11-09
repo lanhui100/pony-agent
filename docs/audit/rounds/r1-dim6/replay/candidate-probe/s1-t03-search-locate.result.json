@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb30-eceb-7e81-860a-7828afe8a4f4",
+  "turn_id": "turn-8d2c2b82-6356-4766-95a8-449c2c77cf7d",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**命中总数：38 处**（`crates/pony-agent-core/src`，扫描 192 个文件 / 8.0 MB，未被截断）\n\n前 5 处（按检索顺序）：\n\n| # | 文件 | 行号 |\n|---|---|---|\n| 1 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1824 |\n| 2 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1833 |\n| 3 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1855（`pub fn exported_trace_id()`） |\n| 4 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2134 |\n| 5 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2263 |\n\n统计口径说明：检索为大小写不敏感的子串匹配，38 处中含派生标识（`register_turn_exported_trace_id`、`exported_trace_id_for_turn`、`TURN_EXPORTED_TRACE_IDS`）与文档/测试注释；纯函数名精确调用点少于该值。分布：`agent/otel/mod.rs` 21、`agent/ponysentry/client.rs` 4、`agent/ponysentry/mod.rs` 3、`agent/runtime/turn_persist.rs` 3、`agent/turn_flow.rs` 5、`agent/runtime/types.rs` 1、`agent/otel/mod.rs` 测试段 7。\n\n（`Run` 命令被只读模式拒绝，故未用 `grep` 二次校验；以上来自工作区检索工具的单次完整结果。）",
+  "usage": {
+    "input_tokens": 54779,
+    "output_tokens": 939
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 5059,
+  "failure_reason": null
+}

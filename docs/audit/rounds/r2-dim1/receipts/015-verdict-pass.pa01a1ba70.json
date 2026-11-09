@@ -1,0 +1,32 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "015-verdict-pass.pa01a1ba70",
+ "phase": "verdict",
+ "node": "script",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794189161,
+ "command": "bash scripts/audit/verdict.sh --round r2-dim1 --dim 1 --arm-dir docs/audit/rounds/r2-dim1/replay/candidate-a3 --expected-cwd /tmp/audit-r2-cand-a3 --metrics docs/audit/rounds/r2-dim1/metrics.dim1.candidate-a3.json",
+ "exit_code": 0,
+ "artifact": "docs/audit/ratchet.json",
+ "summary": "verdict PASS：freeze=0 scope=0 assert=0 ratchet=0；dim1 已入棘轮，共 2 维",
+ "assertions": {
+  "L1_root_span_missing": {"threshold": 0, "actual": 0, "sessions": 9},
+  "L2_span_lost": {"threshold": 0, "actual": 0, "spans": 23},
+  "L3_unattributable": {"threshold": 0, "actual": 0, "calls": 23, "ttft_missing": 3},
+  "L4_gap_over_5s": {"threshold": 0, "actual": 0, "measured_sessions": 9}
+ },
+ "ratchet_recheck": {
+  "dimension": 6,
+  "A1_mismatch": 0,
+  "A2_release_null": 0,
+  "A3_conflicting": 0,
+  "regression": 0,
+  "missing": 0
+ },
+ "freeze_scope": {
+  "assertions": 14,
+  "changed_files": 8,
+  "scope_entries": 8,
+  "violations": 0
+ }
+}

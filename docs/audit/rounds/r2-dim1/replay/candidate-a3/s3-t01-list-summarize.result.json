@@ -1,0 +1,32 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bddb-b7ba-7b90-bd4c-c23807f2653e",
+  "turn_id": "turn-900b833e-f2c0-49a7-bba8-b0657f969743",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**`docs/audit/corpus` 直属目录下没有任何 markdown 文件**：`Glob docs/audit/corpus/*.md` 命中 0 条，目录列表也只返回 2 个条目——`manifest.json` 和子目录 `tasks/`。\n\n三个 `.md` 文件都在下一层 `tasks/` 里（不计入“直属”）：\n- `t01-list-summarize.md`、`t02-read-explain.md`、`t03-search-locate.md`\n\n未做任何写入；`Run` 因会话只读被拒绝，故用 Glob + List 双向交叉核对。",
+  "usage": {
+    "input_tokens": 47184,
+    "output_tokens": 634
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 3573,
+  "failure_reason": null
+}

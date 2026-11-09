@@ -1,0 +1,63 @@
+{
+  "seq": "007",
+  "phase": "audit",
+  "node": "manual",
+  "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+  "ts_unix": 1794139700,
+  "steps": [
+    {
+      "command": "python3 docs/audit/rounds/r1-dim6/tools/analyze-replay-isolation.py docs/audit/rounds/r1-dim6/replay/base /tmp/audit-r1-baseline",
+      "exit_code": 1,
+      "artifact": "007-audit-isolation.pa01a1bae5.json",
+      "summary": "9/9 会话 env cwd=/home/dm/pony_agent（臂 worktree=/tmp/audit-r1-baseline）；工具活动合计 1118 次、失败 447 次"
+    },
+    {
+      "command": "python3 docs/audit/rounds/r1-dim6/tools/collect-dim6.py replay/base/sessions.tsv metrics.pa01a1bae5.json",
+      "exit_code": 0,
+      "artifact": "metrics.pa01a1bae5.json",
+      "summary": "9 会话全部取到 trace；trace_release 9/9 为 null；trace_version 9/9 = 0.1.158；trace_total_cost 9/9 = 0"
+    },
+    {
+      "command": "bash docs/audit/rounds/r1-dim6/tools/assert-dim6.sh replay/base /tmp/audit-r1-baseline metrics.pa01a1bae5.json",
+      "exit_code": 1,
+      "artifact": "007-assert-dim6.pa01a1bae5.out",
+      "summary": "A1 9/9 失配；A2 9/9 release 为空；A3 7/9 冲突（另 2 会话以 suspended/exit 6 结束，phase 缺失）"
+    },
+    {
+      "command": "bash docs/audit/rounds/r1-dim6/tools/assert-dim6.sh replay/base /tmp/audit-r1-baseline (no metrics)",
+      "exit_code": 2,
+      "artifact": "007-assert-dim6-nometrics.pa01a1bae5.out",
+      "summary": "缺 metrics ⇒ exit 2（UNKNOWN ≠ PASS 路径实测）"
+    },
+    {
+      "command": "bash docs/audit/rounds/r1-dim6/tools/assert-dim6.sh /tmp/assert-unknown-fixture /tmp/audit-r1-baseline (isolated fixture, no metrics)",
+      "exit_code": 2,
+      "artifact": "007-assert-dim6-fixture.pa01a1bae5.out",
+      "summary": "A1 通过但缺 metrics ⇒ 仍 exit 2；证明 exit 2 与 A1 无关，专指证据缺失"
+    }
+  ],
+  "code_facts_verified": {
+    "F1_workspace_binding": [
+      "crates/pony-agent-core/src/bin/cli.rs:651 `workspace_id: None`（会话不盖章）",
+      "crates/pony-agent-core/src/agent/runtime/mod.rs:452-468 resolve_session_workspace_root：owner=None ⇒ 注册表 default 优先，宿主 -w 仅作回落",
+      "crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs:33 ensure_workspace_for_root 存在（提案 F1 方案依赖项）",
+      "crates/pony-agent-core/src/bin/tui.rs:6995-6999 TUI 已按同构方式盖章 ⇒ F1 修法有先例，非新造契约"
+    ],
+    "F2_trace_release": [
+      "crates/pony-agent-core/src/agent/otel/mod.rs:102 ATTR_LANGFUSE_RELEASE 只作 span 属性写入（2100 行）",
+      "resolve_resource_attributes（约 767-800 行）只推 service.version / pony.* / ingest.*，未推 langfuse.release"
+    ],
+    "F3_outcome_semantics": [
+      "crates/pony-agent-core/src/agent/otel/mod.rs:2300-2318 (false, Some(reason)) 分支写 outcome=error + Status::error",
+      "crates/pony-agent-core/src/agent/otel/mod.rs:2413-2425 phase==completed && tool_failures>0 写 degraded=true",
+      "两条规则独立成立 ⇒ 同一轮同时出现 phase=completed 与 outcome=error"
+    ]
+  },
+  "divergence_from_peer": {
+    "peer_session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+    "peer_claim": "A3 9/9 冲突（receipts/006-propose-dim6-pa01a1ba70.meta.json）",
+    "this_arm_measured": "A3 7/9 冲突；s1-t01 与 s3-t03 以 suspended（exit 6）结束，根 span 无 phase 键",
+    "resolution": "两者均判 A3 红（冲突数 > 0），阈值不受影响；计数差异来自会话集合（本臂含 2 个权限挂起会话）。回执按本臂实测记录，不照抄对端数字。"
+  },
+  "conclusion": "维度 6 未通过：上报值与实际值不一致（A1 阻断）、trace 级发布线缺失（A2）、结局语义非单值（A3）。根因与修复闭包见 proposals/r1-dim6.pa01a1ba70.md（对端会话产出，本会话独立复核代码事实成立）。"
+}

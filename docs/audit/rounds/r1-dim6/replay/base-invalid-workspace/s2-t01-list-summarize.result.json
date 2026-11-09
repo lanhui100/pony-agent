@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf1-dd0e-7250-8144-58204eacc50d",
+  "turn_id": "turn-5d6f88cf-a0d8-4b7c-8e68-2750f9460cbc",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "路径不存在：`docs/audit/corpus` 在当前工作区 `/home/dm/pony_agent` 中未找到。\n\n- 工作区实际仅有 `scripts/`（空目录）和 `test_appr.txt`，全库无任何 `.md` 文件，也无 `audit`/`corpus` 目录。\n- 当前会话为只读模式，`ls/find` 执行被拒绝，结论基于 List/Read/Glob 结果。\n\n请确认正确路径（可能在另一个工作区或需切到该项目根目录），我再列出清单并逐条说明用途。",
+  "usage": {
+    "input_tokens": 69468,
+    "output_tokens": 634
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 1433,
+  "failure_reason": null
+}

@@ -1,0 +1,66 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "012-verify-attempt2.pa01a1ba70",
+ "phase": "verify",
+ "node": "script",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794187600,
+ "scope": "attempt 2 全量双臂重放（候选臂 candidate-a3 = d9425a70，9 会话）与维度 1 断言裁决",
+ "commands": [
+  {
+   "command": "ROUND=r2-dim1 bash scripts/audit/replay.sh --arm candidate --commit d9425a70 --sessions 3 --label candidate-a3 --worktree /tmp/audit-r2-cand-a3 --bin /tmp/ponycli-candidate-a3",
+   "exit_code": 0,
+   "detail": "9/9 会话 exit=0，产物落 docs/audit/rounds/r2-dim1/replay/candidate-a3"
+  },
+  {
+   "command": "python3 scripts/audit/collect_dim1.py --arm candidate-a3=…/replay/candidate-a3 --out …/metrics.dim1.candidate-a3.json",
+   "exit_code": 0,
+   "detail": "collected=9 failed=0"
+  },
+  {
+   "command": "bash scripts/audit/assertions/dim1.sh --arm-dir …/replay/candidate-a3 --metrics …/metrics.dim1.candidate-a3.json",
+   "exit_code": 0,
+   "detail": "L1 root_span_missing=0/9；L2 span_lost=0/23；L3 unattributable=0（ttft_missing=3 全在 buffered）；L4 gap_over_5s=0（max 587ms）"
+  },
+  {
+   "command": "bash scripts/audit/selftest.sh",
+   "exit_code": 0,
+   "detail": "pass=34 fail=0"
+  },
+  {
+   "command": "cargo test -p pony-agent-core --lib agent::otel",
+   "exit_code": 0,
+   "detail": "45 passed"
+  },
+  {
+   "command": "bash scripts/audit/freeze-check.sh --round r2-dim1",
+   "exit_code": 1,
+   "detail": "freeze=0 PASS（assertions=14）；scope=1 越界 src-tauri/src/lib.rs（该路径不在 attempt2 提案写域）"
+  }
+ ],
+ "assertions": {
+  "L1_root_span_missing": {"threshold": 0, "value": 0, "sessions": 9, "verdict": "PASS"},
+  "L2_span_lost": {"threshold": 0, "value": 0, "spans": 23, "verdict": "PASS"},
+  "L3_unattributable": {"threshold": 0, "value": 0, "calls": 23, "ttft_missing": 3, "verdict": "PASS"},
+  "L4_gap_over_5s": {"threshold": 0, "value": 0, "measured": 9, "max_gap_ms": 587, "verdict": "PASS"}
+ },
+ "before_after": {
+  "attempt1_candidate_a2": {"L1": "1/9", "L2": "3/30", "L3": "0/27", "L4": "1 会话 22867ms"},
+  "attempt2_candidate_a3": {"L1": "0/9", "L2": "0/23", "L3": "0/23", "L4": "0/9（max 587ms）"}
+ },
+ "findings": [
+  "F5 已实施并生效（导出有界重试 2 次 + 逐次告警 + 最终丢弃告警），但**本轮 9 会话 stderr 零条重试日志** ⇒ 本轮没有发生导出失败。F5 的有效性由单测与日志面锁定，不能声称「重放证明 F5 修复了丢 span」。",
+  "F7 已生效：批量调用（s2-t01 两个、s3-t01 一个）在 wire 上标为 buffered，L3 的 ttft_missing 全部落在 buffered 调用上，语义自洽。",
+  "L2 真值口径变化：本轮 usage_raw 行数与 logical 调用数逐会话完全相等（9/9），attempt1 的 F6「usage 口径低估」未在本轮复现（该轮 s1-t01 有 5 请求 vs 3 usage，本轮 2 vs 2）。F6 是否需要修判据，留待更多样本。"
+ ],
+ "blocking_issue": {
+  "what": "verdict 无法在冻结集下走完：写域检查判 src-tauri/src/lib.rs 越界",
+  "why": "attempt2 提案的 write_scope 未包含该路径，而方案 A 的实施必须改它（桌面端与 CLI/TUI 同源）",
+  "resolution": "已写补遗提案 docs/audit/rounds/r2-dim1/proposals/r2-dim1.attempt2-addendum.md（status: proposed），待用户批准后把该路径纳入写域再跑 verdict。按纪律不得自行放宽写域。"
+ },
+ "honesty_notes": [
+  "本轮先误把重放跑进 r1-dim6 轮次目录（replay.sh 的 --round 只认环境变量，不认命令行参数），已中止并用 find -delete 清理该目录；r1-dim6 的既有证据（base/base-a2/candidate/candidate-clean 等）未被覆盖，已核对目录列表确认。",
+  "前端全量 npm run test:unit 在 build-install 中报 2 failed / 1385 passed；单独复跑这两个用例（update-signed-store.spec.ts、plan-goal-refresh.spec.ts）为 16 passed。判定为全量并发抖动而非本次改动引入，但**未复跑全量确认**，故 build 回执只记 --skip-verify。",
+  "candidate_commit 与 approval 是分两次 transition 写入的：首次 --patch 未带 current. 前缀被写到顶层，已用正确前缀补写并核对落盘值。"
+ ]
+}

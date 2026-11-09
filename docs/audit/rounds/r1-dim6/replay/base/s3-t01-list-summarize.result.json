@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb03-c953-7273-973b-42e3a6d16bfb",
+  "turn_id": "turn-4a04fc20-6802-443b-8353-5a38b010ba72",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 不存在，无法列出。\n\n证据：\n- `Read docs/audit/corpus` → `invalid_path: No such file or directory`\n- 工作区根目录仅 2 项：`scripts/`（空目录）、`test_appr.txt`\n- `**/*audit*`、`**/corpus*`、`docs/**/*.md` 全局搜索均 0 命中\n- 当前会话为只读模式，`Run`（ls 等）被拒，故仅用 List/Glob/Read 验证\n\n请确认路径是否正确，或该目录是否在其他工作区/分支下。",
+  "usage": {
+    "input_tokens": 55587,
+    "output_tokens": 550
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 4612,
+  "failure_reason": null
+}

@@ -1,0 +1,14 @@
+── A1 replay isolation (env cwd == arm worktree)
+   FAIL sessions=9 mismatch=9 expected=/tmp/audit-r1-baseline
+     - s1-t01-list-summarize: env_cwd=/home/dm/pony_agent
+     - s1-t02-read-explain: env_cwd=/home/dm/pony_agent
+     - s1-t03-search-locate: env_cwd=/home/dm/pony_agent
+     - s2-t01-list-summarize: env_cwd=/home/dm/pony_agent
+     - s2-t02-read-explain: env_cwd=/home/dm/pony_agent
+     - s2-t03-search-locate: env_cwd=/home/dm/pony_agent
+     - s3-t01-list-summarize: env_cwd=/home/dm/pony_agent
+     - s3-t02-read-explain: env_cwd=/home/dm/pony_agent
+     - s3-t03-search-locate: env_cwd=/home/dm/pony_agent
+── A2/A3 skipped: metrics.json 未提供（UNKNOWN ≠ PASS，计为证据缺失）
+
+verdict: failed=1 missing_evidence=1

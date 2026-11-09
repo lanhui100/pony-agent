@@ -1,0 +1,40 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf2-8361-7c22-aa1c-fb8da568b3bc",
+  "turn_id": "turn-5b22b8a7-6ff2-44bd-a3e7-68cb775d7b65",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**结论：目标文件不存在，无法给出退出码语义说明。**\n\n- 工作区实际内容：根目录只有 `scripts/`（空目录，childCount=0）与 `test_appr.txt`。\n- 证据：`Read scripts/observability/check-langfuse.sh` → `invalid_path: No such file or directory`；`Glob **/*langfuse*`、`**/*` 在 scripts 下均 0 命中；`Search langfuse` 扫描 1 个文件 0 命中。\n- 本次会话为只读模式，`Run` 被拒（`tool_authorization_mode_read_only`），无法用 `find` 跨目录额外核查。\n\n要我说明 0/2/3 的判定逻辑，需你提供其一：脚本真实路径，或直接把内容贴出来。在拿到真实实现前我不会凭惯例推测这三个码的含义。",
+  "usage": {
+    "input_tokens": 93235,
+    "output_tokens": 998
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 2444,
+  "failure_reason": null
+}

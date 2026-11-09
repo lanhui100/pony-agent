@@ -1,0 +1,40 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf2-627f-7861-9d23-9bc6e0fae4b9",
+  "turn_id": "turn-e380c918-7c76-4f71-98b2-9b28856a1aee",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 在当前工作区中不存在，因此我无法列出其中的文件，也无法说明各文件的用途；我不会凭空编造。\n\n- 工作区根目录下只有两项：`scripts/`（空目录）和 `test_appr.txt`；根目录下没有 `docs/`。\n- 用 `**/corpus` 和 `**/audit/**` 进行全量搜索，结果是 0 条命中。\n- 当前会话处于只读模式，`Run` 被拒绝，因此我无法通过 shell 在 `cwd` 之外进一步探测。\n\n请确认该目录是在其他仓库或服务器路径下，还是要先同步或克隆仓库到此工作区。",
+  "usage": {
+    "input_tokens": 55611,
+    "output_tokens": 662
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 1838,
+  "failure_reason": null
+}

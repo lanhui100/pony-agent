@@ -1,0 +1,11 @@
+{
+  "seq": 1,
+  "phase": "collect",
+  "node": "manual",
+  "command": "bash scripts/observability/check-langfuse.sh --json --since 86400",
+  "exit_code": 3,
+  "verdict": "unknown",
+  "date": "2026-11-08",
+  "outputs": ["001-collect-langfuse.json", "001-collect-langfuse.stderr"],
+  "note": "Tempo 语义轨候选 115 条（出口有数据）；缺 LANGFUSE 凭据 ⇒ UNKNOWN ≠ PASS。凭据供给是 r1-dim6 首个审计发现项。"
+}

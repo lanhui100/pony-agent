@@ -1,0 +1,10 @@
+{
+ "dimension": "tracing.semantic_track",
+ "verdict": "unknown",
+ "exit_code": 3,
+ "reason": "缺 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY，无法验证语义轨（UNKNOWN ≠ PASS）",
+ "window_seconds": 86400,
+ "tempo_candidates": 115,
+ "langfuse_state": "no-credentials",
+ "langfuse_traces_sampled": -1
+}

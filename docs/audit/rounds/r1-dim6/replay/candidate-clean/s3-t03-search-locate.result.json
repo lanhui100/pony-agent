@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb3f-9883-7dd3-a665-2fe8d107072b",
+  "turn_id": "turn-9f5fb7dd-bac5-41c1-8287-6e9600e84014",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "搜索完成，未修改任何文件；由于只读模式禁止执行 `grep`，统计以工作区搜索工具的结果为准，共命中 **38** 处。\n\n前 5 处：\n\n1. `crates/pony-agent-core/src/agent/otel/mod.rs:1824`\n2. `crates/pony-agent-core/src/agent/otel/mod.rs:1833`\n3. `crates/pony-agent-core/src/agent/otel/mod.rs:1855`\n4. `crates/pony-agent-core/src/agent/otel/mod.rs:2134`\n5. `crates/pony-agent-core/src/agent/otel/mod.rs:2263`",
+  "usage": {
+    "input_tokens": 54496,
+    "output_tokens": 690
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 8396,
+  "failure_reason": null
+}

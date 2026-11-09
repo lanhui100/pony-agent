@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb86-a856-7b01-b071-b575840904e6",
+  "turn_id": "turn-27675f5a-5cd8-4cab-a249-dfd236fa7b52",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**命中总数 38 处，分布在 6 个文件**（read-only 模式下无法运行 grep，数据来自 workspace 全文检索，未截断）。\n\n前 5 处（按检索返回顺序）：\n1. `crates/pony-agent-core/src/agent/otel/mod.rs:1824`\n2. `crates/pony-agent-core/src/agent/otel/mod.rs:1833`\n3. `crates/pony-agent-core/src/agent/otel/mod.rs:1855`\n4. `crates/pony-agent-core/src/agent/otel/mod.rs:2134`\n5. `crates/pony-agent-core/src/agent/otel/mod.rs:2263`\n\n注意：38 条中混有子串命中（如 `register_turn_exported_trace_id`、`TURN_EXPORTED_TRACE_IDS`），精确符号调用数需逐条剔除。",
+  "usage": {
+    "input_tokens": 59883,
+    "output_tokens": 688
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 6952,
+  "failure_reason": null
+}

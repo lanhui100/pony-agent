@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb2c-7a85-7f13-a77f-5ab37c94c6f4",
+  "turn_id": "turn-fa44168a-ab1f-46c1-827c-8e5d60a6998d",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 在当前工作区（`/home/dm/pony_agent`）中不存在，因此没有可列出的 markdown 文件，也没有文件用途可以说明。\n\n证据：\n- 当前工作区根目录下只有 `scripts/`（空目录）和 `test_appr.txt`；\n- `**/*corpus*`、`**/audit/**`、`**/*.md` 三次在全工作区范围内搜索，命中数均为 0。\n\n本次会话处于只读模式，`Run` 被拒绝，无法执行 `ls/find` 进行二次确认。请确认路径是否正确，例如是否应在其他仓库或子目录中，例如是否存在 `docs/audit/markdown` 之类。",
+  "usage": {
+    "input_tokens": 69947,
+    "output_tokens": 1085
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 4833,
+  "failure_reason": null
+}

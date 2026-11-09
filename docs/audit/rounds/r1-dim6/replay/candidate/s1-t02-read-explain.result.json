@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb22-8b76-7310-b304-21f86fb44b91",
+  "turn_id": "turn-958470c5-2ac5-4a49-8f44-b31977f31cb3",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码判定（scripts/observability/check-langfuse.sh:73-116）**\n\n| 退出码 | verdict | 触发条件 | 含义 |\n|---|---|---|---|\n| 0 | `pass` | Tempo 候选 >0 且 Langfuse 可达、采样 trace >0 | 两条轨都有数据 |\n| 0 | `no-candidates` | Tempo 候选 =0 | 语义轨上游无候选，Langfuse 空属正常（先修 trace 出口） |\n| 2 | `gap` | Tempo 候选 >0，但 Langfuse 侧 `LANGFUSE_COUNT -le 0` | fan-out 断链或采样不一致 |\n| 3 | `unknown` | Tempo 查询失败（-1）、缺凭据、401、API 不可达、未知参数 | 证据不足，无法判定 |\n\n注意：退出码 0 对应两种不同 verdict，门禁若只看退出码，会混淆“已证无候选”与“已证两轨正常”，应以 JSON 的 `verdict` 为准；退出码 3 还兼作参数错误（:35）的用法错误码。\n\n**缺凭据时不允许判 PASS 的原因**\n- 判定是**两条轨都有数据**的合取断言；无凭据时，Langfuse 这一半从未被观测，只证明了 Tempo 有候选，等于“1/2 验证通过判整体通过”。\n- 这正是脚本设计要补的盲区：T5 静态检查只看源码里有无 `gen_ai.*/langfuse.*` 属性，导致“Tempo 有 trace、Langfuse 空、巡检全绿”。凭据缺失时给 PASS 会把该盲区原样恢复成假绿。\n- 因此要区分“没证据”与“证据表明正常”（UNKNOWN ≠ PASS），并保留处置语义差异：`gap` 应查 collector fan-out，`unknown` 应补凭据；归为 0 会让门禁在凭据长期缺失时静默通过。\n- 同源纪律：凭据只经 stdin 管道进入远端（:56），401 与不可达也一并降级为 3，而非退化成“无数据也算过”。\n\n未执行脚本、未修改任何文件（纯读取 :1-116）。",
+  "usage": {
+    "input_tokens": 35806,
+    "output_tokens": 1036
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 11560,
+  "failure_reason": null
+}

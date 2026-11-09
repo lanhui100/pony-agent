@@ -1,0 +1,48 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb01-3227-7d01-90ce-787f55902c70",
+  "turn_id": "turn-ed828bf6-79c4-4586-b8a0-821f8e704faf",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "已停止执行：目标目录不存在于可访问工作区。\n\n- 工作区 `/home/dm/pony_agent` 内仅有 `test_appr.txt` 与空目录 `scripts/`，无 `crates/`。\n- `crates/pony-agent-core/src` 若位于工作区之外（如 `/home/dm/crates/...`），读取需用户显式授权，且当前会话为只读模式，无法用 `grep`/`rg` 命令检索。\n\n请授权该路径的读取权限，或告知其所属工作区/绝对路径，我再执行搜索并报告命中总数与前 5 处文件路径+行号。",
+  "usage": {
+    "input_tokens": 99342,
+    "output_tokens": 1180
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 6617,
+  "failure_reason": null
+}

@@ -1,0 +1,18 @@
+{
+  "seq": "009",
+  "phase": "approval",
+  "node": "manual",
+  "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+  "ts_unix": 1794140100,
+  "command": "用户批准：① 批准 r1-dim6 提案；② 按推荐方案收敛双跑（对端 pa_01a1bae5 已在 await_approval 停点释放 lease，本会话 CAS 接管）",
+  "exit_code": 0,
+  "artifact": "proposals/r1-dim6.pa01a1ba70.md",
+  "state_changes": {
+    "proposal_status": "proposed -> approved",
+    "approval": "approved",
+    "approved_scope": "F1 / F2 / F3",
+    "lease": "taken over from pa_01a1bae5 (expires_unix=0 released) at 1794139881"
+  },
+  "double_run_resolution": "对端在 await_approval 停点主动释放 lease（expires_unix=0）；按 ADR 0101「过期/释放租约可被新唤起接管」由本会话接管，未抢占未过期租约。对端产物（003/007/008 回执、metrics.pa01a1bae5.json）作为独立复核证据保留，不覆盖。",
+  "summary": "提案 frontmatter 置 approved，阈值与断言 hash 冻结；F3 附带黑盒测试契约演进已获 Lead 授权（approval_note）。"
+}

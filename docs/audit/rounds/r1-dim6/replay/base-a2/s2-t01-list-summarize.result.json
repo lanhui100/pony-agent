@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb2a-54ed-7a31-8281-6acf6a0627d4",
+  "turn_id": "turn-9db812b9-c193-46ae-8dc8-c7438b87ed1c",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**目标目录不存在，无法列出文件。**\n\n- 当前工作区 `/home/dm/pony_agent` 下仅有 `scripts/`（空目录）和 `test_appr.txt`（内容为 `hello`），没有 `docs/`。\n- 已尝试：`List .`、`Find corpus`、`Read docs/audit/corpus`、`List /home/dm/pony_agent/docs/audit/corpus`，均返回不存在；`Run` 因会话为只读模式被拒绝（permission_denied）。\n\n请确认正确的仓库路径或工作区，我再执行只读清点。",
+  "usage": {
+    "input_tokens": 70605,
+    "output_tokens": 841
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 10546,
+  "failure_reason": null
+}

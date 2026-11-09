@@ -1,0 +1,1891 @@
+{
+ "schema": 1,
+ "dimension": 1,
+ "collected_from": "langfuse",
+ "sessions": [
+  {
+   "tag": "base/s1-t01-list-summarize",
+   "arm": "base",
+   "session_id": "pa_01a1bb27-53a3-73d3-8b1f-15864aa260de",
+   "trace_id": "e0d579eee3f1ea1cfec29f1a32a7aef4",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 58838.0,
+   "turn_latency_ms": 58839.0,
+   "turn_calls_attr": 5.0,
+   "llm_call_count": 6,
+   "tool_call_count": 7,
+   "llm_total_ms": 57790.0,
+   "llm_ttft_total_ms": 38026.0,
+   "llm_generation_total_ms": 19764.0,
+   "tool_total_ms": 2.0,
+   "unattributed_ms": 1046.0,
+   "unattributed_ratio": 0.0178,
+   "llm_share": 0.9822,
+   "ttft_share_of_llm": 0.658,
+   "ttft_missing_calls": 1,
+   "tool_zero_duration": 5,
+   "tool_error_count": 3,
+   "calls": [
+    {
+     "duration_ms": 6794.0,
+     "ttft_ms": null,
+     "generation_ms": 6794.0,
+     "input_tokens": 14358.0,
+     "output_tokens": 147.0,
+     "latency_s": 6.794,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 7263.0,
+     "ttft_ms": 5092.0,
+     "generation_ms": 2171.0,
+     "input_tokens": 14058.0,
+     "output_tokens": 291.0,
+     "latency_s": 7.263,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 6890.0,
+     "ttft_ms": 5703.0,
+     "generation_ms": 1187.0,
+     "input_tokens": 13920.0,
+     "output_tokens": 140.0,
+     "latency_s": 6.892,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 6742.0,
+     "ttft_ms": 5828.0,
+     "generation_ms": 914.0,
+     "input_tokens": 13808.0,
+     "output_tokens": 93.0,
+     "latency_s": 6.742,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 17560.0,
+     "ttft_ms": 10082.0,
+     "generation_ms": 7478.0,
+     "input_tokens": 13690.0,
+     "output_tokens": 93.0,
+     "latency_s": 17.561,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 12541.0,
+     "ttft_ms": 11321.0,
+     "generation_ms": 1220.0,
+     "input_tokens": 13513.0,
+     "output_tokens": 98.0,
+     "latency_s": 12.541,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Glob",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: requires_authorization: 读取路径 [USER_HOME]/pony_agent/../docs/audit/corpus 位于工作区之外且未获得授权，需要用户显式授权后才能读取。"
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: invalid_path: 无法解析路径 docs/audit/corpus：No such file or directory (os error 2)"
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "base/s1-t02-read-explain",
+   "arm": "base",
+   "session_id": "pa_01a1bb28-404a-75d3-9738-e1f70e2cf3fb",
+   "trace_id": "5ecd085b76258ff30f0b69f321766f63",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 55307.0,
+   "turn_latency_ms": 55308.0,
+   "turn_calls_attr": 3.0,
+   "llm_call_count": 5,
+   "tool_call_count": 6,
+   "llm_total_ms": 54268.0,
+   "llm_ttft_total_ms": 38083.0,
+   "llm_generation_total_ms": 16185.0,
+   "tool_total_ms": 5.0,
+   "unattributed_ms": 1034.0,
+   "unattributed_ratio": 0.0187,
+   "llm_share": 0.9812,
+   "ttft_share_of_llm": 0.7018,
+   "ttft_missing_calls": 1,
+   "tool_zero_duration": 4,
+   "tool_error_count": 2,
+   "calls": [
+    {
+     "duration_ms": 26413.0,
+     "ttft_ms": 22732.0,
+     "generation_ms": 3681.0,
+     "input_tokens": 14295.0,
+     "output_tokens": 320.0,
+     "latency_s": 26.414,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 6385.0,
+     "ttft_ms": 4173.0,
+     "generation_ms": 2212.0,
+     "input_tokens": 14078.0,
+     "output_tokens": 166.0,
+     "latency_s": 6.386,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 10911.0,
+     "ttft_ms": 6258.0,
+     "generation_ms": 4653.0,
+     "input_tokens": 13965.0,
+     "output_tokens": 73.0,
+     "latency_s": 10.912,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5553.0,
+     "ttft_ms": null,
+     "generation_ms": 5553.0,
+     "input_tokens": 13851.0,
+     "output_tokens": 76.0,
+     "latency_s": 5.553,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5006.0,
+     "ttft_ms": 4920.0,
+     "generation_ms": 86.0,
+     "input_tokens": 13534.0,
+     "output_tokens": 133.0,
+     "latency_s": 5.006,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Search",
+     "duration_ms": 2.0,
+     "latency_s": 0.002,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Find",
+     "duration_ms": 3.0,
+     "latency_s": 0.003,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: invalid_path: 无法解析路径 scripts/observability/check-langfuse.sh：No such file or directory (os error 2)"
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "base/s1-t03-search-locate",
+   "arm": "base",
+   "session_id": "pa_01a1bb29-1d2e-7d13-b35d-9d894fdcdb79",
+   "trace_id": "b3ecde69361507841f92ad469444f9e5",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 76852.0,
+   "turn_latency_ms": 76853.0,
+   "turn_calls_attr": 6.0,
+   "llm_call_count": 6,
+   "tool_call_count": 6,
+   "llm_total_ms": 74942.0,
+   "llm_ttft_total_ms": 43369.0,
+   "llm_generation_total_ms": 31573.0,
+   "tool_total_ms": 2.0,
+   "unattributed_ms": 1908.0,
+   "unattributed_ratio": 0.0248,
+   "llm_share": 0.9751,
+   "ttft_share_of_llm": 0.5787,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 5,
+   "tool_error_count": 4,
+   "calls": [
+    {
+     "duration_ms": 7265.0,
+     "ttft_ms": 4132.0,
+     "generation_ms": 3133.0,
+     "input_tokens": 14558.0,
+     "output_tokens": 282.0,
+     "latency_s": 7.266,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 15238.0,
+     "ttft_ms": 6455.0,
+     "generation_ms": 8783.0,
+     "input_tokens": 14386.0,
+     "output_tokens": 214.0,
+     "latency_s": 15.238,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 8291.0,
+     "ttft_ms": 6313.0,
+     "generation_ms": 1978.0,
+     "input_tokens": 14227.0,
+     "output_tokens": 150.0,
+     "latency_s": 8.295,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 19821.0,
+     "ttft_ms": 17815.0,
+     "generation_ms": 2006.0,
+     "input_tokens": 14091.0,
+     "output_tokens": 171.0,
+     "latency_s": 19.822,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 13259.0,
+     "ttft_ms": 3839.0,
+     "generation_ms": 9420.0,
+     "input_tokens": 13653.0,
+     "output_tokens": 314.0,
+     "latency_s": 13.26,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 11068.0,
+     "ttft_ms": 4815.0,
+     "generation_ms": 6253.0,
+     "input_tokens": 13545.0,
+     "output_tokens": 84.0,
+     "latency_s": 11.069,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Search",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "requires_authorization: 读取路径 [USER_HOME]/pony_agent/../crates/pony-agent-core/src 位于工作区之外且未获得授权，需要用户显式授权后才能读取。"
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 2.0,
+     "latency_s": 0.002,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "requires_authorization: 读取路径 [USER_HOME]/pony_agent/../crates 位于工作区之外且未获得授权，需要用户显式授权后才能读取。"
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: invalid_path: 无法解析路径 crates/pony-agent-core/src：No such file or directory (os error 2)"
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "base/s2-t01-list-summarize",
+   "arm": "base",
+   "session_id": "pa_01a1bb2a-54ed-7a31-8281-6acf6a0627d4",
+   "trace_id": "ee2a4d3a1d6d50692fb3dc920c7936cf",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 40188.0,
+   "turn_latency_ms": 40188.0,
+   "turn_calls_attr": 3.0,
+   "llm_call_count": 4,
+   "tool_call_count": 5,
+   "llm_total_ms": 28607.0,
+   "llm_ttft_total_ms": 11143.0,
+   "llm_generation_total_ms": 17464.0,
+   "tool_total_ms": 4.0,
+   "unattributed_ms": 11577.0,
+   "unattributed_ratio": 0.2881,
+   "llm_share": 0.7118,
+   "ttft_share_of_llm": 0.3895,
+   "ttft_missing_calls": 2,
+   "tool_zero_duration": 3,
+   "tool_error_count": 1,
+   "calls": [
+    {
+     "duration_ms": 8563.0,
+     "ttft_ms": 6905.0,
+     "generation_ms": 1658.0,
+     "input_tokens": 15249.0,
+     "output_tokens": 139.0,
+     "latency_s": 8.563,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 4545.0,
+     "ttft_ms": null,
+     "generation_ms": 4545.0,
+     "input_tokens": 14270.0,
+     "output_tokens": 177.0,
+     "latency_s": 4.546,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 10162.0,
+     "ttft_ms": null,
+     "generation_ms": 10162.0,
+     "input_tokens": 13892.0,
+     "output_tokens": 288.0,
+     "latency_s": 10.163,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5337.0,
+     "ttft_ms": 4238.0,
+     "generation_ms": 1099.0,
+     "input_tokens": 13679.0,
+     "output_tokens": 153.0,
+     "latency_s": 5.337,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "invalid_path: 无法解析路径 [USER_HOME]/pony_agent/docs/audit/corpus：No such file or directory (os error 2)"
+    },
+    {
+     "name": "Find",
+     "duration_ms": 3.0,
+     "latency_s": 0.003,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "base/s2-t02-read-explain",
+   "arm": "base",
+   "session_id": "pa_01a1bb2a-fc94-7f33-a844-776abbee4aa7",
+   "trace_id": "ffffda56fea5f670cf0d18282e27e253",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 57549.0,
+   "turn_latency_ms": 57549.0,
+   "turn_calls_attr": 3.0,
+   "llm_call_count": 6,
+   "tool_call_count": 9,
+   "llm_total_ms": 55501.0,
+   "llm_ttft_total_ms": 28270.0,
+   "llm_generation_total_ms": 27231.0,
+   "tool_total_ms": 7.0,
+   "unattributed_ms": 2041.0,
+   "unattributed_ratio": 0.0355,
+   "llm_share": 0.9644,
+   "ttft_share_of_llm": 0.5094,
+   "ttft_missing_calls": 3,
+   "tool_zero_duration": 5,
+   "tool_error_count": 2,
+   "calls": [
+    {
+     "duration_ms": 7224.0,
+     "ttft_ms": null,
+     "generation_ms": 7224.0,
+     "input_tokens": 15469.0,
+     "output_tokens": 571.0,
+     "latency_s": 7.224,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 21293.0,
+     "ttft_ms": 18662.0,
+     "generation_ms": 2631.0,
+     "input_tokens": 14568.0,
+     "output_tokens": 232.0,
+     "latency_s": 21.293,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5221.0,
+     "ttft_ms": 3852.0,
+     "generation_ms": 1369.0,
+     "input_tokens": 14342.0,
+     "output_tokens": 73.0,
+     "latency_s": 5.222,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 4207.0,
+     "ttft_ms": null,
+     "generation_ms": 4207.0,
+     "input_tokens": 14207.0,
+     "output_tokens": 97.0,
+     "latency_s": 4.207,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 10992.0,
+     "ttft_ms": null,
+     "generation_ms": 10992.0,
+     "input_tokens": 13792.0,
+     "output_tokens": 192.0,
+     "latency_s": 10.993,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 6564.0,
+     "ttft_ms": 5756.0,
+     "generation_ms": 808.0,
+     "input_tokens": 13532.0,
+     "output_tokens": 131.0,
+     "latency_s": 6.564,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Find",
+     "duration_ms": 3.0,
+     "latency_s": 0.003,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Search",
+     "duration_ms": 2.0,
+     "latency_s": 0.002,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: invalid_path: 无法解析路径 scripts/observability/check-langfuse.sh：No such file or directory (os error 2)"
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "base/s2-t03-search-locate",
+   "arm": "base",
+   "session_id": "pa_01a1bb2b-e286-79e1-85a0-81de54cf9773",
+   "trace_id": "a8f08f7584115bf2239018deeb1d39a9",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 37043.0,
+   "turn_latency_ms": 37043.0,
+   "turn_calls_attr": 3.0,
+   "llm_call_count": 5,
+   "tool_call_count": 7,
+   "llm_total_ms": 35878.0,
+   "llm_ttft_total_ms": 19307.0,
+   "llm_generation_total_ms": 16571.0,
+   "tool_total_ms": 3.0,
+   "unattributed_ms": 1162.0,
+   "unattributed_ratio": 0.0314,
+   "llm_share": 0.9686,
+   "ttft_share_of_llm": 0.5381,
+   "ttft_missing_calls": 2,
+   "tool_zero_duration": 5,
+   "tool_error_count": 3,
+   "calls": [
+    {
+     "duration_ms": 5029.0,
+     "ttft_ms": null,
+     "generation_ms": 5029.0,
+     "input_tokens": 14602.0,
+     "output_tokens": 276.0,
+     "latency_s": 5.029,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5982.0,
+     "ttft_ms": null,
+     "generation_ms": 5982.0,
+     "input_tokens": 14071.0,
+     "output_tokens": 320.0,
+     "latency_s": 5.983,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 15315.0,
+     "ttft_ms": 12314.0,
+     "generation_ms": 3001.0,
+     "input_tokens": 13821.0,
+     "output_tokens": 218.0,
+     "latency_s": 15.316,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 4971.0,
+     "ttft_ms": 3767.0,
+     "generation_ms": 1204.0,
+     "input_tokens": 13702.0,
+     "output_tokens": 105.0,
+     "latency_s": 4.973,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 4581.0,
+     "ttft_ms": 3226.0,
+     "generation_ms": 1355.0,
+     "input_tokens": 13543.0,
+     "output_tokens": 78.0,
+     "latency_s": 4.581,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: requires_authorization: 读取路径 [USER_HOME]/crates/pony-agent-core/src 位于工作区之外且未获得授权，需要用户显式授权后才能读取。"
+    },
+    {
+     "name": "Search",
+     "duration_ms": 2.0,
+     "latency_s": 0.002,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: invalid_path: 无法解析路径 crates/pony-agent-core/src：No such file or directory (os error 2)"
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "base/s3-t01-list-summarize",
+   "arm": "base",
+   "session_id": "pa_01a1bb2c-7a85-7f13-a77f-5ab37c94c6f4",
+   "trace_id": "5b8fedd18e00477b2cbc0c6610215c86",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 24500.0,
+   "turn_latency_ms": 24501.0,
+   "turn_calls_attr": 3.0,
+   "llm_call_count": 5,
+   "tool_call_count": 7,
+   "llm_total_ms": 23309.0,
+   "llm_ttft_total_ms": 8507.0,
+   "llm_generation_total_ms": 14802.0,
+   "tool_total_ms": 2.0,
+   "unattributed_ms": 1189.0,
+   "unattributed_ratio": 0.0485,
+   "llm_share": 0.9514,
+   "ttft_share_of_llm": 0.365,
+   "ttft_missing_calls": 2,
+   "tool_zero_duration": 5,
+   "tool_error_count": 2,
+   "calls": [
+    {
+     "duration_ms": 5412.0,
+     "ttft_ms": 2920.0,
+     "generation_ms": 2492.0,
+     "input_tokens": 14655.0,
+     "output_tokens": 241.0,
+     "latency_s": 5.412,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 4115.0,
+     "ttft_ms": null,
+     "generation_ms": 4115.0,
+     "input_tokens": 14261.0,
+     "output_tokens": 311.0,
+     "latency_s": 4.116,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5907.0,
+     "ttft_ms": null,
+     "generation_ms": 5907.0,
+     "input_tokens": 13881.0,
+     "output_tokens": 251.0,
+     "latency_s": 5.908,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 3574.0,
+     "ttft_ms": 2438.0,
+     "generation_ms": 1136.0,
+     "input_tokens": 13634.0,
+     "output_tokens": 199.0,
+     "latency_s": 3.575,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 4301.0,
+     "ttft_ms": 3149.0,
+     "generation_ms": 1152.0,
+     "input_tokens": 13516.0,
+     "output_tokens": 83.0,
+     "latency_s": 4.301,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: invalid_path: 无法解析路径 docs/audit/corpus：No such file or directory (os error 2)"
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "base/s3-t02-read-explain",
+   "arm": "base",
+   "session_id": "pa_01a1bb2c-de31-7352-b567-30435af35ac1",
+   "trace_id": "820021507999793b149fa1ab265190ef",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 47258.0,
+   "turn_latency_ms": 47259.0,
+   "turn_calls_attr": 3.0,
+   "llm_call_count": 5,
+   "tool_call_count": 6,
+   "llm_total_ms": 46173.0,
+   "llm_ttft_total_ms": 26952.0,
+   "llm_generation_total_ms": 19221.0,
+   "tool_total_ms": 2.0,
+   "unattributed_ms": 1083.0,
+   "unattributed_ratio": 0.0229,
+   "llm_share": 0.977,
+   "ttft_share_of_llm": 0.5837,
+   "ttft_missing_calls": 2,
+   "tool_zero_duration": 5,
+   "tool_error_count": 1,
+   "calls": [
+    {
+     "duration_ms": 4511.0,
+     "ttft_ms": null,
+     "generation_ms": 4511.0,
+     "input_tokens": 14504.0,
+     "output_tokens": 238.0,
+     "latency_s": 4.511,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 7740.0,
+     "ttft_ms": 5226.0,
+     "generation_ms": 2514.0,
+     "input_tokens": 14227.0,
+     "output_tokens": 154.0,
+     "latency_s": 7.741,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 3816.0,
+     "ttft_ms": 2884.0,
+     "generation_ms": 932.0,
+     "input_tokens": 14021.0,
+     "output_tokens": 137.0,
+     "latency_s": 3.816,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 9980.0,
+     "ttft_ms": null,
+     "generation_ms": 9980.0,
+     "input_tokens": 13908.0,
+     "output_tokens": 73.0,
+     "latency_s": 9.98,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 20126.0,
+     "ttft_ms": 18842.0,
+     "generation_ms": 1284.0,
+     "input_tokens": 13713.0,
+     "output_tokens": 122.0,
+     "latency_s": 20.127,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Glob",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Find",
+     "duration_ms": 2.0,
+     "latency_s": 0.002,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "base/s3-t03-search-locate",
+   "arm": "base",
+   "session_id": "pa_01a1bb2d-9c45-7853-9094-736688a7c5eb",
+   "trace_id": "1edc859734c04f46d13d12ab11d03ba6",
+   "environment": "audit-base-a2",
+   "turn_duration_ms": 108811.0,
+   "turn_latency_ms": 108811.0,
+   "turn_calls_attr": 7.0,
+   "llm_call_count": 7,
+   "tool_call_count": 8,
+   "llm_total_ms": 65685.0,
+   "llm_ttft_total_ms": 40591.0,
+   "llm_generation_total_ms": 25094.0,
+   "tool_total_ms": 2.0,
+   "unattributed_ms": 43124.0,
+   "unattributed_ratio": 0.3963,
+   "llm_share": 0.6037,
+   "ttft_share_of_llm": 0.618,
+   "ttft_missing_calls": 1,
+   "tool_zero_duration": 7,
+   "tool_error_count": 3,
+   "calls": [
+    {
+     "duration_ms": 15521.0,
+     "ttft_ms": null,
+     "generation_ms": 15521.0,
+     "input_tokens": 14878.0,
+     "output_tokens": 345.0,
+     "latency_s": 15.522,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 10723.0,
+     "ttft_ms": 7354.0,
+     "generation_ms": 3369.0,
+     "input_tokens": 14684.0,
+     "output_tokens": 128.0,
+     "latency_s": 10.724,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 7325.0,
+     "ttft_ms": 6335.0,
+     "generation_ms": 990.0,
+     "input_tokens": 14466.0,
+     "output_tokens": 99.0,
+     "latency_s": 7.325,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5896.0,
+     "ttft_ms": 4773.0,
+     "generation_ms": 1123.0,
+     "input_tokens": 14347.0,
+     "output_tokens": 98.0,
+     "latency_s": 5.897,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 11815.0,
+     "ttft_ms": 9801.0,
+     "generation_ms": 2014.0,
+     "input_tokens": 14203.0,
+     "output_tokens": 118.0,
+     "latency_s": 11.815,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5489.0,
+     "ttft_ms": 4592.0,
+     "generation_ms": 897.0,
+     "input_tokens": 13721.0,
+     "output_tokens": 80.0,
+     "latency_s": 5.489,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 8916.0,
+     "ttft_ms": 7736.0,
+     "generation_ms": 1180.0,
+     "input_tokens": 13544.0,
+     "output_tokens": 94.0,
+     "latency_s": 8.917,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Ask",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "control_outcome_pending: 工具调用尚处于控制请求状态，尚未产生可供 provider 消费的终态结果。"
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Search",
+     "duration_ms": 2.0,
+     "latency_s": 0.002,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "Read",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "handler_error: invalid_path: 无法解析路径 crates/pony-agent-core/src：No such file or directory (os error 2)"
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s1-t01-list-summarize",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb39-4766-7ae0-aa1e-61468367a868",
+   "trace_id": "b335e85419cbee6ca69b1671a223d7cb",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": null,
+   "turn_latency_ms": 0.0,
+   "turn_calls_attr": null,
+   "llm_call_count": 1,
+   "tool_call_count": 1,
+   "llm_total_ms": 11796.0,
+   "llm_ttft_total_ms": 10198.0,
+   "llm_generation_total_ms": 1598.0,
+   "tool_total_ms": 0.0,
+   "unattributed_ms": -11796.0,
+   "unattributed_ratio": null,
+   "llm_share": null,
+   "ttft_share_of_llm": 0.8645,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 1,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 11796.0,
+     "ttft_ms": 10198.0,
+     "generation_ms": 1598.0,
+     "input_tokens": 15561.0,
+     "output_tokens": 159.0,
+     "latency_s": 11.797,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s1-t02-read-explain",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb39-bc20-73b3-bc84-4b75bb51d60f",
+   "trace_id": "6e8eea3ec979d2aca6e7816bd1c4e45c",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": 29714.0,
+   "turn_latency_ms": 29715.0,
+   "turn_calls_attr": 2.0,
+   "llm_call_count": 2,
+   "tool_call_count": 2,
+   "llm_total_ms": 28239.0,
+   "llm_ttft_total_ms": 15525.0,
+   "llm_generation_total_ms": 12714.0,
+   "tool_total_ms": 2.0,
+   "unattributed_ms": 1473.0,
+   "unattributed_ratio": 0.0496,
+   "llm_share": 0.9504,
+   "ttft_share_of_llm": 0.5498,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 0,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 21776.0,
+     "ttft_ms": 11358.0,
+     "generation_ms": 10418.0,
+     "input_tokens": 18722.0,
+     "output_tokens": 476.0,
+     "latency_s": 21.777,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 6463.0,
+     "ttft_ms": 4167.0,
+     "generation_ms": 2296.0,
+     "input_tokens": 17084.0,
+     "output_tokens": 116.0,
+     "latency_s": 6.465,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s1-t03-search-locate",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb3a-383d-7252-a5c4-1e2755afcc30",
+   "trace_id": "5793e04b0e10e5fe6e5ee972d14193f3",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": 72205.0,
+   "turn_latency_ms": 72206.0,
+   "turn_calls_attr": 4.0,
+   "llm_call_count": 3,
+   "tool_call_count": 3,
+   "llm_total_ms": 46982.0,
+   "llm_ttft_total_ms": 18609.0,
+   "llm_generation_total_ms": 28373.0,
+   "tool_total_ms": 432.0,
+   "unattributed_ms": 24791.0,
+   "unattributed_ratio": 0.3433,
+   "llm_share": 0.6507,
+   "ttft_share_of_llm": 0.3961,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 1,
+   "tool_error_count": 1,
+   "calls": [
+    {
+     "duration_ms": 9312.0,
+     "ttft_ms": 4436.0,
+     "generation_ms": 4876.0,
+     "input_tokens": 22620.0,
+     "output_tokens": 574.0,
+     "latency_s": 9.312,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5923.0,
+     "ttft_ms": 3699.0,
+     "generation_ms": 2224.0,
+     "input_tokens": 20075.0,
+     "output_tokens": 274.0,
+     "latency_s": 5.923,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 31747.0,
+     "ttft_ms": 10474.0,
+     "generation_ms": 21273.0,
+     "input_tokens": 19812.0,
+     "output_tokens": 553.0,
+     "latency_s": 31.748,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Search",
+     "duration_ms": 156.0,
+     "latency_s": 0.156,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "Read",
+     "duration_ms": 276.0,
+     "latency_s": 0.276,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s2-t01-list-summarize",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb3b-59a5-7bc0-ba00-c330ce0376e2",
+   "trace_id": "2d7a27abf308041cd3dfe93627d1911e",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": null,
+   "turn_latency_ms": 0.0,
+   "turn_calls_attr": null,
+   "llm_call_count": 4,
+   "tool_call_count": 4,
+   "llm_total_ms": 45028.0,
+   "llm_ttft_total_ms": 10208.0,
+   "llm_generation_total_ms": 34820.0,
+   "tool_total_ms": 116.0,
+   "unattributed_ms": -45144.0,
+   "unattributed_ratio": null,
+   "llm_share": null,
+   "ttft_share_of_llm": 0.2267,
+   "ttft_missing_calls": 2,
+   "tool_zero_duration": 0,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 5551.0,
+     "ttft_ms": null,
+     "generation_ms": 5551.0,
+     "input_tokens": 21391.0,
+     "output_tokens": 275.0,
+     "latency_s": 5.551,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 16508.0,
+     "ttft_ms": null,
+     "generation_ms": 16508.0,
+     "input_tokens": 16379.0,
+     "output_tokens": 264.0,
+     "latency_s": 16.508,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 14475.0,
+     "ttft_ms": 5298.0,
+     "generation_ms": 9177.0,
+     "input_tokens": 15787.0,
+     "output_tokens": 143.0,
+     "latency_s": 14.476,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 8494.0,
+     "ttft_ms": 4910.0,
+     "generation_ms": 3584.0,
+     "input_tokens": 15631.0,
+     "output_tokens": 114.0,
+     "latency_s": 8.495,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 3.0,
+     "latency_s": 0.003,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 47.0,
+     "latency_s": 0.047,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 65.0,
+     "latency_s": 0.065,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s2-t02-read-explain",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb3c-e71d-7511-8537-f230e9c000b7",
+   "trace_id": "91129590d2bb8e7f22b32550feb237c8",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": 66697.0,
+   "turn_latency_ms": 66698.0,
+   "turn_calls_attr": 2.0,
+   "llm_call_count": 2,
+   "tool_call_count": 2,
+   "llm_total_ms": 65391.0,
+   "llm_ttft_total_ms": 24190.0,
+   "llm_generation_total_ms": 41201.0,
+   "tool_total_ms": 2.0,
+   "unattributed_ms": 1304.0,
+   "unattributed_ratio": 0.0196,
+   "llm_share": 0.9804,
+   "ttft_share_of_llm": 0.3699,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 0,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 25077.0,
+     "ttft_ms": 14178.0,
+     "generation_ms": 10899.0,
+     "input_tokens": 18722.0,
+     "output_tokens": 466.0,
+     "latency_s": 25.078,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 40314.0,
+     "ttft_ms": 10012.0,
+     "generation_ms": 30302.0,
+     "input_tokens": 17083.0,
+     "output_tokens": 107.0,
+     "latency_s": 40.315,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s2-t03-search-locate",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb3d-f173-7581-a9bc-0903d734f936",
+   "trace_id": "41968f73d03d581d6163812e641ba3fe",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": 55275.0,
+   "turn_latency_ms": 55275.0,
+   "turn_calls_attr": 3.0,
+   "llm_call_count": 2,
+   "tool_call_count": 1,
+   "llm_total_ms": 43650.0,
+   "llm_ttft_total_ms": 17917.0,
+   "llm_generation_total_ms": 25733.0,
+   "tool_total_ms": 167.0,
+   "unattributed_ms": 11458.0,
+   "unattributed_ratio": 0.2073,
+   "llm_share": 0.7897,
+   "ttft_share_of_llm": 0.4105,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 0,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 32822.0,
+     "ttft_ms": 8820.0,
+     "generation_ms": 24002.0,
+     "input_tokens": 19902.0,
+     "output_tokens": 455.0,
+     "latency_s": 32.822,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 10828.0,
+     "ttft_ms": 9097.0,
+     "generation_ms": 1731.0,
+     "input_tokens": 17361.0,
+     "output_tokens": 180.0,
+     "latency_s": 10.828,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Search",
+     "duration_ms": 167.0,
+     "latency_s": 0.167,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s3-t01-list-summarize",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb3e-cf20-7131-bc34-cc45e7ed7af7",
+   "trace_id": "0dd5d8d15af3055549d4b1f1277f9af5",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": 31621.0,
+   "turn_latency_ms": 31622.0,
+   "turn_calls_attr": 2.0,
+   "llm_call_count": 4,
+   "tool_call_count": 6,
+   "llm_total_ms": 30018.0,
+   "llm_ttft_total_ms": 14913.0,
+   "llm_generation_total_ms": 15105.0,
+   "tool_total_ms": 92.0,
+   "unattributed_ms": 1511.0,
+   "unattributed_ratio": 0.0478,
+   "llm_share": 0.9493,
+   "ttft_share_of_llm": 0.4968,
+   "ttft_missing_calls": 2,
+   "tool_zero_duration": 3,
+   "tool_error_count": 1,
+   "calls": [
+    {
+     "duration_ms": 5604.0,
+     "ttft_ms": null,
+     "generation_ms": 5604.0,
+     "input_tokens": 16765.0,
+     "output_tokens": 282.0,
+     "latency_s": 5.605,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5939.0,
+     "ttft_ms": null,
+     "generation_ms": 5939.0,
+     "input_tokens": 15897.0,
+     "output_tokens": 251.0,
+     "latency_s": 5.94,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 13408.0,
+     "ttft_ms": 11366.0,
+     "generation_ms": 2042.0,
+     "input_tokens": 15615.0,
+     "output_tokens": 214.0,
+     "latency_s": 13.408,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5067.0,
+     "ttft_ms": 3547.0,
+     "generation_ms": 1520.0,
+     "input_tokens": 15420.0,
+     "output_tokens": 144.0,
+     "latency_s": 5.068,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Glob",
+     "duration_ms": 46.0,
+     "latency_s": 0.046,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Glob",
+     "duration_ms": 45.0,
+     "latency_s": 0.045,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "List",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    },
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s3-t02-read-explain",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb3f-5071-7331-9ab9-410fc8a8030d",
+   "trace_id": "1f1b49260b75dd221a3318ccf855df85",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": 16877.0,
+   "turn_latency_ms": 16878.0,
+   "turn_calls_attr": 2.0,
+   "llm_call_count": 2,
+   "tool_call_count": 2,
+   "llm_total_ms": 15479.0,
+   "llm_ttft_total_ms": 8485.0,
+   "llm_generation_total_ms": 6994.0,
+   "tool_total_ms": 2.0,
+   "unattributed_ms": 1396.0,
+   "unattributed_ratio": 0.0827,
+   "llm_share": 0.9172,
+   "ttft_share_of_llm": 0.5482,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 0,
+   "tool_error_count": 0,
+   "calls": [
+    {
+     "duration_ms": 10231.0,
+     "ttft_ms": 4400.0,
+     "generation_ms": 5831.0,
+     "input_tokens": 18721.0,
+     "output_tokens": 593.0,
+     "latency_s": 10.232,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 5248.0,
+     "ttft_ms": 4085.0,
+     "generation_ms": 1163.0,
+     "input_tokens": 17084.0,
+     "output_tokens": 113.0,
+     "latency_s": 5.249,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Read",
+     "duration_ms": 1.0,
+     "latency_s": 0.001,
+     "status": "success",
+     "error": null
+    }
+   ],
+   "missing": false
+  },
+  {
+   "tag": "candidate/s3-t03-search-locate",
+   "arm": "candidate",
+   "session_id": "pa_01a1bb3f-9883-7dd3-a665-2fe8d107072b",
+   "trace_id": "9540071dc4952392fbc33079c89037cd",
+   "environment": "audit-candidate-clean",
+   "turn_duration_ms": 22472.0,
+   "turn_latency_ms": 22472.0,
+   "turn_calls_attr": 3.0,
+   "llm_call_count": 3,
+   "tool_call_count": 2,
+   "llm_total_ms": 20356.0,
+   "llm_ttft_total_ms": 12878.0,
+   "llm_generation_total_ms": 7478.0,
+   "tool_total_ms": 391.0,
+   "unattributed_ms": 1725.0,
+   "unattributed_ratio": 0.0768,
+   "llm_share": 0.9058,
+   "ttft_share_of_llm": 0.6326,
+   "ttft_missing_calls": 0,
+   "tool_zero_duration": 1,
+   "tool_error_count": 1,
+   "calls": [
+    {
+     "duration_ms": 8641.0,
+     "ttft_ms": 5231.0,
+     "generation_ms": 3410.0,
+     "input_tokens": 20076.0,
+     "output_tokens": 183.0,
+     "latency_s": 8.642,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 4160.0,
+     "ttft_ms": 2757.0,
+     "generation_ms": 1403.0,
+     "input_tokens": 17344.0,
+     "output_tokens": 138.0,
+     "latency_s": 4.161,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    },
+    {
+     "duration_ms": 7555.0,
+     "ttft_ms": 4890.0,
+     "generation_ms": 2665.0,
+     "input_tokens": 17076.0,
+     "output_tokens": 369.0,
+     "latency_s": 7.556,
+     "time_to_first_token_s": null,
+     "mode": "tool_followup",
+     "transport": null
+    }
+   ],
+   "tools": [
+    {
+     "name": "Search",
+     "duration_ms": 391.0,
+     "latency_s": 0.391,
+     "status": "success",
+     "error": null
+    },
+    {
+     "name": "Run",
+     "duration_ms": 0.0,
+     "latency_s": 0.0,
+     "status": "failed",
+     "error": "permission_denied: permission denied for `builtin:workspace_run_command`: 当前会话处于只读模式（工作区查看），禁止执行写入与执行类操作。 (decision source: tool_authorization_mode_read_only)"
+    }
+   ],
+   "missing": false
+  }
+ ]
+}

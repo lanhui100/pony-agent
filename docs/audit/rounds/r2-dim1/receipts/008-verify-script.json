@@ -1,0 +1,21 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "008",
+ "phase": "verify",
+ "node": "script",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794152400,
+ "commands": [
+  {"command": "bash scripts/audit/replay.sh --arm base --commit 1bca9458 --label base-a2 --sessions 3", "exit_code": 0, "summary": "基线臂 9 会话（3 任务 × 3），sessions.tsv 完整"},
+  {"command": "bash scripts/audit/replay.sh --arm candidate --commit e51c076d --label candidate-a2 --sessions 3", "exit_code": 0, "summary": "候选臂 9 会话（3 任务 × 3），sessions.tsv 完整"},
+  {"command": "python3 scripts/audit/collect_dim1.py --arm base-a2=.../base-a2 --arm candidate-a2=.../candidate-a2 --out metrics.a2.json", "exit_code": 1, "summary": "18 会话采集：基线臂 3 会话 observations 不可用（missing），候选臂 9/9 成功"},
+  {"command": "python3 scripts/audit/collect_dim1.py --arm candidate-a2=.../candidate-a2 --out metrics.candidate-a2.json", "exit_code": 0, "summary": "候选臂单臂 9/9 采集成功（verdict 用）"},
+  {"command": "python3 scripts/audit/collect_dim1.py --arm base-a2=.../base-a2 --out metrics.base-a2.json", "exit_code": 1, "summary": "基线臂 6/9 成功、3 缺失（同上）"}
+ ],
+ "artifact": "docs/audit/rounds/r2-dim1/replay/{base-a2,candidate-a2}, docs/audit/rounds/r2-dim1/metrics.{candidate-a2,base-a2,a2}.json",
+ "summary": "双臂各 9 会话重放完成（scratch worktree @ 1bca9458 / e51c076d，PONY_OTEL_ENVIRONMENT=audit-<label>）。基线臂 3 会话 observations 不可用属既有缺陷（dim1 L1 已计入 root_span_missing），不折算为 pass。",
+ "honesty_notes": [
+  "基线臂 3 会话 trace 存在但 observations 接口返回空 → 计 missing，未用 0 值填充。",
+  "本轮 verify 期间对端会话 pa_01a1bae5 先完成重放与首轮 verdict（exit=1），其回执 verdict-dim1-verdict-script.json 已被本次复跑覆盖为同一退出码，历史时间戳见本回执。"
+ ]
+}

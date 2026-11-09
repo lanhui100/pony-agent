@@ -1,0 +1,17 @@
+{
+ "dimension": 6,
+ "round": "r1-dim6",
+ "phase": "collect",
+ "node": "manual",
+ "arm": "baseline",
+ "sessions": 9,
+ "tasks": 3,
+ "repetitions": 3,
+ "scratch_worktree": "/tmp/audit-r1-base",
+ "baseline_commit": "59f6bc00",
+ "exit_codes_all_zero": true,
+ "corpus_aggregate_sha256": "879597eb3594eb365bdbe033f7fbcd8353380e359170267f8d3e621255b8300a",
+ "corpus_hash_matches_manifest": true,
+ "replay_script": "docs/audit/rounds/r1-dim6/tools/replay-p0.sh",
+ "artifact": "docs/audit/rounds/r1-dim6/replay/base/"
+}

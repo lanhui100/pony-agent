@@ -1,0 +1,40 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb29-1d2e-7d13-b35d-9d894fdcdb79",
+  "turn_id": "turn-213ff0e5-e6f7-42d6-8923-2d7b43cad9ff",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "无法完成搜索：目标目录不在当前工作区，访问被拦截。\n\n**证据**\n- `crates/pony-agent-core/src` 相对当前工作区（`/home/dm/pony_agent`，仅含 `scripts/`、`test_appr.txt`）不存在 → `invalid_path`\n- `../crates` → `requires_authorization`（工作区外路径）\n- `**/pony-agent-core/**` 全工作区 glob → 0 命中\n- 尝试 `ls` 探测真实位置 → 被只读模式拒绝（`permission_denied`：会话为只读，禁止执行类操作）\n\n因此命中总数与前 5 处路径/行号均无可靠数据，不做任何推测。\n\n**需要你选一项**：\n1. 授权读取 `../crates`（或告知实际绝对路径，如 `/home/dm/crates`）；\n2. 把该 crate 复制/软链到 `/home/dm/pony_agent` 内，我再执行只读搜索。",
+  "usage": {
+    "input_tokens": 84460,
+    "output_tokens": 1215
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 11516,
+  "failure_reason": null
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb18-90ee-7f90-b0b8-7970500fbb82",
+  "turn_id": "turn-cb6fa49c-19cb-4b2f-9fbb-ee51b31e62f5",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 不存在：当前工作区 `/home/dm/pony_agent` 仅含 `scripts/`（空）和 `test_appr.txt`，全库无任何 `.md` 文件（`**/*.md` 命中 0）。\n\n补充：执行类工具受只读模式限制（`permission denied`），无法探测工作区之外的路径。若该目录在 `/home/dm` 下其他位置，请提供绝对路径，或放开执行权限后我再定位。",
+  "usage": {
+    "input_tokens": 55753,
+    "output_tokens": 869
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 4656,
+  "failure_reason": null
+}

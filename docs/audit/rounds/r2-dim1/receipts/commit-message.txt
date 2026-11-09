@@ -1,0 +1,18 @@
+fix(otel): r2-dim1 时延结构修复（退出前置 flush + transport 口径 + 文档校正）
+
+r2-dim1 提案（docs/audit/rounds/r2-dim1/proposals/r2-dim1.md）批准实施的最小闭包。
+
+- F1（blocker）尾批 span 丢失：`BATCH_SCHEDULED_DELAY_MS`=5000ms 大于关闭等待上限
+  `SHUTDOWN_TIMEOUT_MS`=1000ms，而单次导出网络超时 3000ms ⇒ 关闭窗口内导出必然未完成，
+  关闭函数走 `mem::forget` 后进程退出。新增 `otel::flush_on_exit(stage)`（有界 1000ms +
+  幂等 + 未装配跳过 + 失败只降级 warn）作为 CLI/TUI/桌面端唯一出口，在关闭函数前调用；
+  CLI `ObservabilityBootstrap::drop` 与 TUI 5 个 `process::exit` 前显式出口全部接入。
+- F3（major）`llm.request.mode` 不区分传输：新增 `llm.request.transport`
+  （`stream` | `buffered`），与 mode/messages/system_prefix 四键同生同灭，6 个 llm span
+  调用点按实际传输方式传值。使「无 llm.call.ttft_ms」成为可归因事实（r2-dim1 L3）。
+- F4（minor）`agent.turn.calls` 文档措辞校正为「参与速度计算的合格调用数」，
+  并注明真实调用总数以 GENERATION span 计数为准；值域与实现均不变。
+
+验证：cargo test --lib agent::otel → 43 passed；--test otel_request_transport_test → 2 passed；
+--test otel_resource_turn_status_test → 6 passed；llm_request 单测 2 passed；
+cargo check --all-targets 无 warning。

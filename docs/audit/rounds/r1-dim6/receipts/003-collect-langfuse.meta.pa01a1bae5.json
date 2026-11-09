@@ -1,0 +1,15 @@
+{
+  "seq": "003",
+  "phase": "collect",
+  "node": "manual",
+  "command": "kubectl -n observability get secret observability-secrets (LANGFUSE_INIT_PROJECT_*) -> env pipe; bash scripts/observability/check-langfuse.sh --json --since 86400",
+  "exit_code": 0,
+  "verdict": "pass",
+  "ts_unix": 1794138533,
+  "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+  "artifacts": [
+    "003-collect-langfuse.pa01a1bae5.json",
+    "003-collect-langfuse.pa01a1bae5.stderr"
+  ],
+  "note": "凭据供给闭环（001 的 exit=3 UNKNOWN 已消除）；Tempo 语义轨候选 142 条，Langfuse 侧 reachable 且有数据。本回执与并发会话 pa_01a1ba70 的同序号产物解耦（该会话产物带 pa01a1ba70 后缀）。"
+}

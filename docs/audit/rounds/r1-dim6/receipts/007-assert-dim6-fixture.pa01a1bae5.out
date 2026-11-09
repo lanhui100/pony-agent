@@ -1,0 +1,5 @@
+── A1 replay isolation (env cwd == arm worktree)
+   PASS
+── A2/A3 skipped: metrics.json 未提供（UNKNOWN ≠ PASS，计为证据缺失）
+
+verdict: failed=0 missing_evidence=1

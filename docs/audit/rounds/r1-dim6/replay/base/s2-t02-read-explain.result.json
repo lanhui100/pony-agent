@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb02-9493-79a3-afa0-4a34ce14f396",
+  "turn_id": "turn-6706c9d8-c1b1-4afe-8996-074d7c99c11d",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`scripts/observability/check-langfuse.sh` 在当前工作区不存在，因此我无法判断脚本退出码的含义。\n\n证据如下：`scripts/` 是空目录，对整个工作区搜索 `langfuse` 没有命中，`Glob **/*langfuse*` 返回 0 个结果；工作区仅有 `test_appr.txt`，且其内容为 `hello`。此外，本次会话处于只读模式，无法执行命令，也无法在 cwd 之外查找该脚本。\n\n请提供该脚本的实际路径或内容，随后我会按脚本内容逐行说明退出码 0、2、3 分别对应哪种判定，以及缺少凭据时为什么不能判为 PASS。",
+  "usage": {
+    "input_tokens": 70993,
+    "output_tokens": 789
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 5411,
+  "failure_reason": null
+}

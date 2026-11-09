@@ -1,0 +1,36 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf1-4620-7261-9fcd-ab6d43efd041",
+  "turn_id": "turn-f2672335-2bdb-4b43-99dc-9b96bd46883a",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`docs/audit/corpus` 不存在，因此该目录下没有任何直属 markdown 文件可供列出。\n\n- 工作区 `/home/dm/pony_agent` 的实际内容只有 `scripts/`（空目录）和 `test_appr.txt`；此外，`**/*corpus*` 与 `docs/**/*.md` 都匹配到 0 个文件。\n- `List docs/audit/corpus` 和绝对路径调用都返回 `No such file or directory (os error 2)`；按你的只读要求，我没有做任何写操作（这是只读模式）。\n- 本次只做了只读查询，没有启动任何用于自动修复的命令，无需人工介入。\n\n请确认：该目录是否位于别的仓库或机器路径下？或者需要我先创建目录结构（需要你解除只读模式）？",
+  "usage": {
+    "input_tokens": 72204,
+    "output_tokens": 969
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "done"
+    },
+    {
+      "name": "BatchExecute",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 1869,
+  "failure_reason": null
+}

@@ -1,0 +1,52 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "008-recheck",
+ "phase": "verify",
+ "node": "agent",
+ "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+ "ts_unix": 1794152200,
+ "scope": "只读复核（lease 由 pa_01a1ba70 持有 → 本会话不写 loop-state、不迁移阶段）",
+ "commands": [
+  {
+   "command": "bash scripts/audit/verdict.sh --round r2-dim1 --dim 1 --arm-dir docs/audit/rounds/r2-dim1/replay/candidate-a2 --expected-cwd /tmp/audit-r2-cand --metrics docs/audit/rounds/r2-dim1/metrics.candidate.merged.json",
+   "exit_code": 1,
+   "detail": "freeze=0 scope=0；assert=1（L1 1/9 根 span 缺失、L2 丢 3/30 span、L4 1 会话缺口 22867ms）；ratchet dim6=0 PASS"
+  },
+  {
+   "command": "bash scripts/audit/assertions/dim1.sh --arm-dir .../candidate-a2 --arm-tag candidate --metrics metrics.candidate.merged.json",
+   "exit_code": 1,
+   "detail": "L3 arm=candidate sessions=9 calls=27 ttft_missing=5 unattributable=0（PASS）；L1/L2/L4 红"
+  },
+  {
+   "command": "bash scripts/audit/assertions/dim1.sh --arm-dir .../candidate-a2 --metrics metrics.candidate.merged.json（不带 --arm-tag，即 verdict.sh 实际调用路径）",
+   "exit_code": 1,
+   "detail": "L3 arm=candidate-a2 sessions=0 calls=0 unattributable=0 → 逐臂过滤静默命中 0 行，L3 假绿；failed 由 2 变 3 全因 L3 空集被判 not calls"
+  },
+  {
+   "command": "bash scripts/audit/assertions/dim6.sh --arm-dir .../candidate-a2 --metrics metrics.dim6.a2.json",
+   "exit_code": 0,
+   "detail": "A1 9/9 隔离、A2 release_null=0、A3 conflicting=0 → 棘轮无回归"
+  },
+  {
+   "command": "python3 scripts/audit/state.py --round r2-dim1 check-freeze",
+   "exit_code": 0,
+   "detail": "冻结一致 corpus=879597eb… assertions=14（并发会话已于 23:33 补齐冻结集）"
+  }
+ ],
+ "artifacts": [
+  "docs/audit/rounds/r2-dim1/metrics.candidate.merged.json（按 tag 联合并 dim1+dim6 指标，仅供单文件裁决）",
+  "/tmp/verdict-dim1-attempt1.log",
+  "/tmp/dim1-merged-tag.log",
+  "/tmp/dim1-merged-notag.log"
+ ],
+ "findings": [
+  "红相 1（L1/L2 真红）：s1-t02-read-explain 因流式 SSE 解码失败回退 sync，根 span 整条缺失（trace f7fd5969 仅 4 个 observation，无 agent.turn）；该会话 stderr 含「退出 flush（cli-drop）未在预算内完成」+「force_flush 在 1000ms 内未完成」→ F1 已生效但 1000ms 预算 < 导出层自身 3000ms 超时，尾批仍丢。",
+  "红相 2（L2 真红）：s3-t01-list-summarize 丢 2 span（provider=4 spans=2），该会话无任何 flush 告警，属独立路径，需 attempt 2 定位。",
+  "红相 3（L4 真红）：会话 pa_01a1bb93-e77c 单会话未归属缺口 22867ms（first_ttft=None），缺口位于 turn 起点至首个 GENERATION 之间。",
+  "harness 缺陷（非本轮代码）：verdict.sh / ratchet.sh 均不向 dim1.sh 传 --arm-tag，而 dim1.sh 以臂目录 basename（candidate-a2）为默认标签，metrics 里 arm 字段为 candidate → L3 逐臂过滤静默命中 0 行。当前靠「not calls」兜底才判红，若 metrics 存在任一臂数据即可假绿。已由并发会话在 lib.sh 加 metrics_arm_guard（会话同源校验），但未解决 arm 标签传播。"
+ ],
+ "honesty_notes": [
+  "本次未取得 lease，未迁移阶段、未写棘轮、未改 loop-state；所有结论仅为只读复核。",
+  "metrics.candidate.merged.json 是本会话新生成的派生文件（dim6 原文件缺 arm 字段，按 tag 补齐为 candidate），不改动原始两份 metrics。"
+ ]
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bdda-c2cf-7263-a3a6-c1f2eb5654d4",
+  "turn_id": "turn-fb68a33c-4127-4c29-b1b7-ab8d5ee48ba1",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "搜索完成，只读模式已生效：`grep`/Run 被拒绝，因此我用工作区搜索工具完成；该工具大小写不敏感，并按子串匹配，因此也命中了 `exported_trace_id_for_turn`、`TURN_EXPORTED_TRACE_IDS`、`register_turn_exported_trace_id` 等变体。\n\n**命中总数：38 行**；这些命中分布在 6 个文件，覆盖 193 个文件、约 8.1 MB，没有截断。\n\n按文件统计：`agent/otel/mod.rs` 22 行，`agent/turn_flow.rs` 5 行，`agent/ponysentry/client.rs` 4 行，`agent/ponysentry/mod.rs` 3 行，`agent/runtime/turn_persist.rs` 3 行，`agent/runtime/types.rs` 1 行。\n\n前 5 处命中，即工具返回顺序的前 5 条：\n1. `crates/pony-agent-core/src/agent/otel/mod.rs:1875` — 注释 `[exported_trace_id]` 导出态 id 语义\n2. `crates/pony-agent-core/src/agent/otel/mod.rs:1884` — 文档注释指向 `exported_trace_id`\n3. `crates/pony-agent-core/src/agent/otel/mod.rs:1906` — `pub fn exported_trace_id() -> Option<String>`\n4. `crates/pony-agent-core/src/agent/otel/mod.rs:2185` — `register_turn_exported_trace_id(turn_id, trace_id);`\n5. `crates/pony-agent-core/src/agent/otel/mod.rs:2314` — 注释 `TurnTraceGuard::exported_trace_id`\n\n未修改任何文件。",
+  "usage": {
+    "input_tokens": 54491,
+    "output_tokens": 1184
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 4615,
+  "failure_reason": null
+}

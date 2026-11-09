@@ -1,0 +1,17 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "006",
+ "phase": "implement",
+ "node": "agent",
+ "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+ "ts_unix": 1794146100,
+ "commands": [
+  {"command": "cargo test -p pony-agent-core --lib agent::otel", "exit_code": 0, "summary": "43 passed"},
+  {"command": "cargo test -p pony-agent-core --test otel_request_transport_test", "exit_code": 0, "summary": "2 passed（新增 RT-T1/RT-T2）"},
+  {"command": "cargo test -p pony-agent-core --test otel_resource_turn_status_test", "exit_code": 0, "summary": "6 passed（dim6 契约无回归）"},
+  {"command": "cargo test -p pony-agent-core --lib agent::runtime::tests::llm_request", "exit_code": 0, "summary": "2 passed（四键出口一致性）"},
+  {"command": "cargo check -p pony-agent-core --all-targets", "exit_code": 0, "summary": "无 warning / 无 error"}
+ ],
+ "artifact": "crates/pony-agent-core/src/agent/otel/mod.rs, turn_flow.rs, bin/cli.rs, bin/tui.rs, tests/otel_request_transport_test.rs, docs/observability.yaml",
+ "summary": "F1 退出前置有界 flush（otel::flush_on_exit 单一出口，CLI Drop + TUI 5 个显式退出点接入）/ F3 llm.request.transport 四键同生同灭（6 个 llm span 调用点按传输方式传值）/ F4 observability.yaml 措辞与值域说明校正"
+}

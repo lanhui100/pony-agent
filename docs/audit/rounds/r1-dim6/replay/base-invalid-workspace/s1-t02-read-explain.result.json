@@ -1,0 +1,48 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf1-7c1f-7643-8f24-524adbca1f42",
+  "turn_id": "turn-052958b3-db49-42a7-a9b4-775469898917",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`scripts/observability/check-langfuse.sh` 不存在，无法说明退出码语义：`scripts/` 目录存在但为空（`childCount: 0`），全工作区也搜不到 `langfuse` / `check-langfuse` 任何命中。\n\n补充：当前会话为只读模式，shell 命令被拒（`permission_denied`），上述结论基于目录列举与内容搜索。\n\n请确认文件是否在别的仓库路径下，或贴出脚本内容/正确路径，我再做退出码 0/2/3 的判定语义与\"缺凭据不得判 PASS\"的原因分析。",
+  "usage": {
+    "input_tokens": 85651,
+    "output_tokens": 901
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 1878,
+  "failure_reason": null
+}

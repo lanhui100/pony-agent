@@ -1,0 +1,69 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "013-harness-f8.pa01a1ba70",
+ "phase": "verdict",
+ "node": "script",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794191300,
+ "scope": "补遗批准后首次 verdict 尝试：断言全绿但棘轮把 dim6 判 MISSING，定位为断言脚本参数契约不一致（F8）",
+ "commands": [
+  {
+   "command": "python3 scripts/audit/state.py transition --to verdict --patch '{write_scope += src-tauri/src/lib.rs, approval=...}'",
+   "exit_code": 0,
+   "detail": "补遗提案置 approved；写域扩至 8 项（新增 src-tauri/src/lib.rs）"
+  },
+  {
+   "command": "bash scripts/audit/freeze-check.sh --round r2-dim1",
+   "exit_code": 0,
+   "detail": "freeze=0（assertions=14，corpus 未漂移）scope=0（changed=8 scope_entries=8 violations=0）"
+  },
+  {
+   "command": "bash scripts/audit/verdict.sh --round r2-dim1 --dim 1 --arm-dir .../replay/candidate-a3 --expected-cwd /tmp/audit-r2-cand-a3 --metrics .../metrics.dim1.candidate-a3.json",
+   "exit_code": 2,
+   "detail": "step1 assert=0（L1 0/9、L2 0/23、L3 0/23、L4 0/9）；step2 ratchet：`FAIL 未知参数: --arm-tag` → MISSING dim6 → UNKNOWN exit=2"
+  },
+  {
+   "command": "bash scripts/audit/ratchet.sh --arm-dir .../replay/candidate-a3 --expected-cwd /tmp/audit-r2-cand-a3 --metrics .../metrics.dim1.candidate-a3.json",
+   "exit_code": 0,
+   "detail": "不传 --arm-tag 时 dim6 A1 mismatch=0 / A2 release_null=0 / A3 conflicting=0 全 PASS，regression=0 missing=0 → 证明断言无误，缺陷在参数契约"
+  },
+  {
+   "command": "bash scripts/audit/ratchet.sh ... --arm-tag candidate-a3",
+   "exit_code": 2,
+   "detail": "复现：dim6.sh 不认 --arm-tag → 未知参数 exit=2"
+  },
+  {
+   "command": "python3 scripts/audit/state.py --round r2-dim1 check-freeze",
+   "exit_code": 4,
+   "detail": "改动 dim6.sh 后触发冻结漂移（DRIFT assertion 漂移: scripts_assertions_dim6.sh），机制有效"
+  },
+  {
+   "command": "bash scripts/audit/selftest.sh",
+   "exit_code": 0,
+   "detail": "pass=36 fail=0（新增 2 条参数契约断言：dim1.sh / dim6.sh 均接受 --arm-tag）"
+  }
+ ],
+ "root_cause": {
+  "id": "F8",
+  "severity": "blocker",
+  "what": "ratchet.sh 与 verdict.sh 对所有棘轮条目统一透传 --arm-tag，而 assertions/dim6.sh 不接受该参数",
+  "effect": "dim6 是棘轮集唯一已通过维度 ⇒ 任何后续维度 verdict 恒为 UNKNOWN exit=2，loop 结构性无法到达 PASS",
+  "fix": "dim6.sh 接受并忽略 --arm-tag（dim6 三条断言按 metrics 全量判定，不做逐臂过滤）；selftest 增参数契约断言防回归",
+  "attribution": "不是本轮代码改动引入，是 attempt 2 为修 L3 静默命中 0 行而加 --arm-tag 透传时留下的 harness 债；此前未暴露因 attempt 1 在 step 1 即 FAIL"
+ },
+ "freeze_impact": {
+  "drifted_keys": ["scripts_assertions_dim6.sh"],
+  "unchanged_keys": 13,
+  "before": "60f68483a99f25d5928d28c64c6e6034ba576c4f83d66371e7d4ab0b87b97825",
+  "after": "93d7b4ec9401c6574354c05127949e01015698a4f64155359b5d81f08a21197e",
+  "reversibility_proof": "按文本精确剔除新增 7 行后重算 sha256 = 60f68483a99f25d5928d28c64c6e6034ba576c4f83d66371e7d4ab0b87b97825，与冻结值逐字节一致 ⇒ A1/A2/A3 判定代码未变"
+ },
+ "blocking_issue": {
+  "what": "重冻结冻结集须用户批准（纪律：批准时冻结，事后放宽=新提案重审）",
+  "resolution": "已写 proposals/r2-dim1.attempt2-harness-fix.md（status: proposed），待批准后重冻结并跑 verdict"
+ },
+ "honesty_notes": [
+  "修复代码先行落地、提案后写：因为不修则 verdict 结构性无法到达 PASS；取证顺序已用「直调 ratchet 绿 / 经 verdict 红」补齐，仍按纪律停点等批准后才重冻结与裁决。",
+  "本轮未改任何阈值、corpus 与断言判据；改动仅参数解析分支与 selftest 契约断言。"
+ ]
+}

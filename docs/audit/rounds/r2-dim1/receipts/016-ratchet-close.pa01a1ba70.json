@@ -1,0 +1,31 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "016-ratchet-close.pa01a1ba70",
+ "phase": "ratchet",
+ "node": "script",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794189161,
+ "commands": [
+  {
+   "command": "python3 scripts/audit/state.py archive --session pa_01a1ba70-a314-7712-adf2-4bf675a96f99 --round r2-dim1",
+   "exit_code": 0,
+   "detail": "snapshot=docs/audit/rounds/r2-dim1/round-state.json sha256=bc7d869be59af6c0c19cc3bc809968e9d2473dbe29cfbd0b76dd47561e7d9901"
+  },
+  {
+   "command": "机械核验 docs/audit/ratchet.json",
+   "exit_code": 0,
+   "detail": "ratchet_dimensions=1,6；条目路径不同且只增登记，dim1 first_pass_round=r2-dim1"
+  },
+  {
+   "command": "git rev-parse HEAD",
+   "exit_code": 0,
+   "detail": "HEAD=d9425a70ba3f36d8ab5ca0124c567093f3fd6788；r1/r2 修复均已落主线，作为 r3 基线"
+  }
+ ],
+ "artifacts": [
+  "docs/audit/ratchet.json",
+  "docs/audit/rounds/r2-dim1/round-state.json",
+  "docs/audit/rounds/r2-dim1/receipts/015-verdict-pass.pa01a1ba70.json"
+ ],
+ "summary": "r2-dim1 收口完成：verdict PASS exit=0，dim1/dim6 入棘轮，轮次快照已归档"
+}

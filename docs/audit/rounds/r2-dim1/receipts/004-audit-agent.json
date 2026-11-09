@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "004",
+ "phase": "audit",
+ "node": "agent",
+ "command": "agent 只读分析（18 会话证据 + 代码定位）",
+ "exit_code": 0,
+ "ts_unix": 1794144421,
+ "artifact": "docs/audit/rounds/r2-dim1/root-cause.md",
+ "summary": "根因 F1 关闭预算/导出超时错配丢尾批 span（blocker）、F2 重试无 span（major）、F3 mode 不区分传输（major）、F4 turn.calls 语义漂移（minor）"
+}

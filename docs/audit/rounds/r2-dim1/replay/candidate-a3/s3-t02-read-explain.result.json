@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bddc-0688-7ad2-8ec9-29c117e1dc21",
+  "turn_id": "turn-7b7b8f2f-bbd2-4533-9ae8-94ef38e1482e",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码语义**\n\n- **0**：两种绿灯。① `no-candidates`——时间窗内 Tempo 没有带 `gen_ai.*`/`langfuse.*` 的 span，Langfuse 空属\"上游没数据\"，不是 fan-out 断链（L76-79）；② `pass`——Tempo 有候选且 Langfuse 侧 `data` 非空（L89-91）。\n- **2**：`gap`——Tempo 有 N 条语义轨候选、Langfuse 侧 0 条 ⇒ 副本 fan-out 断链或采样不一致，真缺口（L86-88）。\n- **3**：`unknown`，证据不足，缺省值（L73）：Tempo 查询失败（-1）、缺凭据 `no-credentials`、401 `unauthorized`、Langfuse 不可达；另含参数错误（L35 `exit 3`）。\n\n**为何缺凭据不许 PASS**\n\n判定第 2 步只有 Langfuse API 能证伪/证实，凭据缺失时\"Langfuse 确实为空\"与\"我没看见\"在观测上不可区分。若判 PASS，正是脚本开头要补的盲区复现：Tempo 有 trace、Langfuse 静默断链而巡检全绿，思考树/工具透视/成本全丢却不报警。故 `<确定性证据缺失 ⇒ 非零退出>`：`UNKNOWN ≠ PASS`，让门禁把不确定性显式暴露为失败，而非用乐观默认换取的假绿。\n\n未做任何写操作。",
+  "usage": {
+    "input_tokens": 35829,
+    "output_tokens": 740
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 5934,
+  "failure_reason": null
+}

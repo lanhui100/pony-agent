@@ -1,0 +1,1 @@
+{"seq": "003", "phase": "collect", "node": "manual", "command": "bash docs/audit/rounds/r1-dim6/tools/replay-p0.sh base /tmp/audit-r1-base", "exit_code": 0, "ts_unix": 1794138461, "artifact": "003-collect-replay.json"}

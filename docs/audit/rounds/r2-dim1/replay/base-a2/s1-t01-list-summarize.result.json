@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb85-561b-78f0-9cb1-135f72ea51cc",
+  "turn_id": "turn-621a0ab3-71da-4aa7-82c7-9ba9a446823a",
+  "status": "failed",
+  "exit_code": 4,
+  "final_text": "",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 18471,
+  "failure_reason": "provider 返回错误状态：522 <unknown status code>；耗时=6342ms；响应正文："
+}

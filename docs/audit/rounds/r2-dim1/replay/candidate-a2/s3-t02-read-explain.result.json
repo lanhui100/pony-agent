@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb94-8827-7b22-b942-e2f31e0559d5",
+  "turn_id": "turn-b3371758-5867-4ace-8e00-8844d235451c",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码语义（`verdict` 与退出码联合判读，缺一不可）**\n\n| 码 | verdict | 条件 | 含义 |\n|---|---|---|---|\n| 0 | `pass` | Tempo 语义轨候选 > 0 且 Langfuse 侧 `data` 非空 | 两轨都有数据 |\n| 0 | `no-candidates` | Tempo 候选 = 0（L42 查询成功） | Langfuse 空属\"上游无数据\"，非 fan-out 断链；退出码绿但 reason 提示\"先修 trace 出口\" |\n| 2 | `gap` | Tempo 候选 > 0 但 Langfuse 采样数 ≤ 0 | 真断链：otlp fan-out 副本丢失或采样不一致 |\n| 3 | `unknown` | Tempo 查询失败/候选 < 0、`no-credentials`、`unauthorized`(401)、`!reachable`、未知参数 | 证据不足，无法判定 |\n\n**缺凭据不允许判 PASS 的原因**：第二步验证依赖 Langfuse API 凭据，无凭据时 `LANGFUSE_COUNT=-1` 代表\"未观测\"而非\"零条\"。若把它折算成 PASS，就等于「未验证」冒充「已验证」——一条空管道长期静默通过；口径是 **UNKNOWN ≠ PASS**，让证据缺失表现为非零退出，逼出补凭据这个动作，而不是污染绿色通道。\n\n注：`no-candidates` 也走 0，故下游不应只看退出码，需同时读 `verdict` 字段区分 `pass` 与 `no-candidates`。",
+  "usage": {
+    "input_tokens": 35800,
+    "output_tokens": 660
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 8359,
+  "failure_reason": null
+}

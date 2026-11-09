@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "005",
+ "phase": "propose",
+ "node": "agent",
+ "command": "agent 写提案（status: proposed）",
+ "exit_code": 0,
+ "ts_unix": 1794144718,
+ "artifact": "docs/audit/rounds/r2-dim1/proposals/r2-dim1.md",
+ "summary": "提案：L1-L4 四断言 + F1 退出前置 flush（blocker）/F3 transport 口径（major）/F4 文档校正（minor）；记录 r1 修复未入主线这一前置事实"
+}

@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "002",
+ "phase": "collect",
+ "node": "script",
+ "command": "python3 scripts/audit/analyze_span_fidelity.py",
+ "exit_code": 1,
+ "ts_unix": 1794144421,
+ "artifact": "docs/audit/rounds/r2-dim1/span-fidelity.json",
+ "summary": "span 保真取证：provider 80 次调用 / 72 GENERATION span，丢 8（10.0%），根 span 缺 2"
+}

@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "014-implement-f1f2f3",
+ "phase": "implement",
+ "node": "agent",
+ "command": "git diff --stat（4 文件 +177/-21）",
+ "exit_code": 0,
+ "ts_unix": 1794140858,
+ "artifact": "crates/pony-agent-core/src/bin/cli.rs crates/pony-agent-core/src/agent/otel/mod.rs docs/observability.yaml crates/pony-agent-core/tests/otel_resource_turn_status_test.rs",
+ "summary": "F1/F2/F3 实施完成：cli 新增 bind_workspace_id（与 TUI 同构）+ otel resource 补 langfuse.release + outcome 新增 degraded 值；observability.yaml 按 ADR 0068 登记 additive 变更"
+}

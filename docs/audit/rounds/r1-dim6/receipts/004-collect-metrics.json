@@ -1,0 +1,11 @@
+{
+ "dimension": 6,
+ "phase": "collect",
+ "node": "manual",
+ "command": "python3 tools/collect-dim6.py replay/base/sessions.tsv metrics.json",
+ "exit_code": 0,
+ "sessions_collected": 9,
+ "sessions_missing": 0,
+ "artifact": "docs/audit/rounds/r1-dim6/metrics.json",
+ "metrics_sha256": "03a97420b480c8f4c34d16cb1690c7fbccf79b242514848fd85912d762face15"
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb94-d3cb-72f2-a66b-eb4a78b1df80",
+  "turn_id": "turn-8e239713-1468-42d3-bdfa-8e5b3c92ddfd",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "`crates/pony-agent-core/src` 内搜索 `exported_trace_id`：\n\n- 精确匹配（大小写敏感）：**35 处**，分布 6 个文件；忽略大小写时为 38 处（额外 3 处是常量 `TURN_EXPORTED_TRACE_IDS`）。\n- 前 5 处命中：`agent/otel/mod.rs`:1866、1875、1897、2176、2305。\n\n只读操作，未修改任何文件（`Run` 因只读模式被拒，已改用 `Search` 完成）。",
+  "usage": {
+    "input_tokens": 82550,
+    "output_tokens": 1309
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 12190,
+  "failure_reason": null
+}

@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "019-ratchet-blocking",
+ "phase": "ratchet",
+ "node": "script",
+ "command": "bash scripts/audit/ratchet.sh --arm-dir .../replay/base --expected-cwd /tmp/audit-r1-baseline --metrics .../metrics.pa01a1bae5.json",
+ "exit_code": 1,
+ "ts_unix": 1794142724,
+ "artifact": "/tmp/ratchet-regress.log",
+ "summary": "PA-169 验收4 反向证据：用基线臂（上报链路未修）跑棘轮 → REGRESSION dim6 exit=1，证明棘轮可复现阻断回归"
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb25-a7e6-7370-b6fe-f4698dce8f1b",
+  "turn_id": "turn-afc320c6-55a7-4d88-81e9-f6888aa80832",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**命中总数：38 处**（只读模式，`grep` 被拒绝执行，改用 workspace 文本搜索，全量扫描 192 文件 / 8.0 MB，`truncated: false`）。\n\n前 5 处：\n\n| # | 文件 | 行号 |\n|---|---|---|\n| 1 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1824 |\n| 2 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1833 |\n| 3 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1855 |\n| 4 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2134 |\n| 5 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2263 |\n\n分布：`otel/mod.rs` 22 处（含 3 处测试）、`ponysentry/client.rs` 4 处、`ponysentry/mod.rs` 3 处、`runtime/turn_persist.rs` 3 处、`turn_flow.rs` 5 处、`runtime/types.rs` 1 处。计数为大小写不敏感子串匹配，包含 `TURN_EXPORTED_TRACE_IDS`、`exported_trace_id_for_turn`、`register_turn_exported_trace_id` 等衍生标识符；仅统计精确函数名的独立出现会少于此数。",
+  "usage": {
+    "input_tokens": 54399,
+    "output_tokens": 846
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 7238,
+  "failure_reason": null
+}

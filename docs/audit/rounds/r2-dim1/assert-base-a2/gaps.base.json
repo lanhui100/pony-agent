@@ -1,0 +1,129 @@
+{
+ "schema": 1,
+ "dimension": 1,
+ "kind": "latency-gaps",
+ "sessions": [
+  {
+   "session_id": "pa_01a1bb85-561b-78f0-9cb1-135f72ea51cc",
+   "trace_id": "81a85c98b86f8a12c6f2931b621f9dc1",
+   "missing": false,
+   "root_span": {
+    "ms": 25530,
+    "attr_duration_ms": 25530
+   },
+   "llm_calls": 2,
+   "tool_calls": 3,
+   "llm_ms": 24273,
+   "tool_ms": 53,
+   "union_covered_ms": 24326,
+   "gap_total_ms": 1135,
+   "gap_ratio": 0.0445,
+   "top_gaps": [
+    {
+     "from_s": 0.27,
+     "to_s": 0.84,
+     "ms": 573,
+     "after": "SPAN:governance.decide",
+     "before": "TOOL:Read"
+    },
+    {
+     "from_s": 25.24,
+     "to_s": 25.53,
+     "ms": 291,
+     "after": "GENERATION:llm.chat",
+     "before": null
+    },
+    {
+     "from_s": 0.0,
+     "to_s": 0.27,
+     "ms": 271,
+     "after": null,
+     "before": "SPAN:governance.decide"
+    }
+   ],
+   "first_call_ttft": "11708",
+   "first_call_mode": "tool_followup"
+  },
+  {
+   "session_id": "pa_01a1bb85-c31e-72b0-821f-a9811b8a5d89",
+   "trace_id": "9da333aa6a7517195489be5f241b12cd",
+   "missing": false,
+   "root_span": null,
+   "note": "无 agent.turn 根 span：时延分母不可测"
+  },
+  {
+   "session_id": "pa_01a1bb86-a856-7b01-b071-b575840904e6",
+   "trace_id": "74bf1825ef0fff4a0e013501f6e18970",
+   "missing": false,
+   "root_span": null,
+   "note": "无 agent.turn 根 span：时延分母不可测"
+  },
+  {
+   "session_id": "pa_01a1bb88-2061-7250-bb5b-3b0f90091938",
+   "missing": true
+  },
+  {
+   "session_id": "pa_01a1bb88-7e61-7f40-9f6e-cae2993fb651",
+   "trace_id": "ae97deee2c7e41237a59526017aacf84",
+   "missing": false,
+   "root_span": null,
+   "note": "无 agent.turn 根 span：时延分母不可测"
+  },
+  {
+   "session_id": "pa_01a1bb8a-b893-7c22-97f4-f082063cd896",
+   "trace_id": "1f136e6cb96d5590ddbe3c2e7154f882",
+   "missing": false,
+   "root_span": {
+    "ms": 36881,
+    "attr_duration_ms": 36881
+   },
+   "llm_calls": 3,
+   "tool_calls": 3,
+   "llm_ms": 34619,
+   "tool_ms": 638,
+   "union_covered_ms": 35257,
+   "gap_total_ms": 1539,
+   "gap_ratio": 0.0417,
+   "top_gaps": [
+    {
+     "from_s": 36.26,
+     "to_s": 36.88,
+     "ms": 622,
+     "after": "GENERATION:llm.chat",
+     "before": null
+    },
+    {
+     "from_s": 0.3,
+     "to_s": 0.92,
+     "ms": 613,
+     "after": "SPAN:governance.decide",
+     "before": "TOOL:Read"
+    },
+    {
+     "from_s": 0.0,
+     "to_s": 0.3,
+     "ms": 304,
+     "after": null,
+     "before": "SPAN:governance.decide"
+    }
+   ],
+   "first_call_ttft": "4047",
+   "first_call_mode": "tool_followup"
+  },
+  {
+   "session_id": "pa_01a1bb8b-4f17-7833-ba0e-4f65dd9bbae1",
+   "missing": true
+  },
+  {
+   "session_id": "pa_01a1bb8c-933e-7463-979d-96f4b0b3874e",
+   "missing": true
+  },
+  {
+   "session_id": "pa_01a1bb8d-4b14-7522-b004-134ac75fbea8",
+   "trace_id": "a23b20cacaa26cfbaa65914cc2018d6e",
+   "missing": false,
+   "root_span": null,
+   "note": "无 agent.turn 根 span：时延分母不可测"
+  }
+ ]
+}

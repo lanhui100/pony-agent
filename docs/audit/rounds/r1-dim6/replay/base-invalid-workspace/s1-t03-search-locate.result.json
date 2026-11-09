@@ -1,0 +1,40 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1baf1-aa26-7303-8a35-1561ec92bfd3",
+  "turn_id": "turn-9d3c1ecf-51b0-458e-846f-b0ec057b1941",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "没有找到目标路径，无法给出命中结果。\n\n- `crates/pony-agent-core/src` 在当前工作区 `/home/dm/pony_agent` 下**不存在**：读取时报 `invalid_path`；用 `**/pony-agent-core/**` 做全局匹配，命中 0 条。\n- 工作区实际只有 `scripts/`（空目录）和 `test_appr.txt`。全量搜索 `exported_trace_id` 时，仅扫描 1 个文件、共 5 字节，**命中 0 条**。\n- 尝试检查上级目录 `../crates` 时，命令被执行层拒绝（会话处于只读模式：`permission_denied / tool_authorization_mode_read_only`），这是我唯一尝试的越界探测，因此无法确认依赖源码在其他位置。\n\n如果 crates 位于工作区外（如 `/home/dm/crates` 或另一仓库），请把该目录挂载/复制进工作区，或给我可读的绝对路径范围，我再重新统计命中总数与行号。",
+  "usage": {
+    "input_tokens": 69739,
+    "output_tokens": 826
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 1324,
+  "failure_reason": null
+}

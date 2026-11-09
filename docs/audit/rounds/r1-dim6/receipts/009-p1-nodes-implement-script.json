@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "009-p1-nodes",
+ "phase": "implement",
+ "node": "script",
+ "command": "bash scripts/audit/selftest.sh",
+ "exit_code": 0,
+ "ts_unix": 1794140462,
+ "artifact": "scripts/audit/",
+ "summary": "PA-169 C1-C8 确定性节点落地：replay/fetch/assert/ratchet/freeze-check/build-install/verdict + state.py CAS"
+}

@@ -1,0 +1,58 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "014-approval-freeze.pa01a1ba70",
+ "phase": "await_approval",
+ "node": "script",
+ "session": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+ "ts_unix": 1794189055,
+ "scope": "用户批准 F8 补遗后，机械核验批准状态，重冻结 dim6 参数契约并证明其余冻结项未变",
+ "commands": [
+  {
+   "command": "python3 scripts/audit/state.py take-lease --session pa_01a1ba70-a314-7712-adf2-4bf675a96f99 --ttl 1800",
+   "exit_code": 0,
+   "detail": "lease 已由对端释放，本会话取得推进权"
+  },
+  {
+   "command": "机械解析 r2-dim1.attempt2-harness-fix.md frontmatter",
+   "exit_code": 0,
+   "detail": "status=approved approved_by=user approved_unix=1794188982"
+  },
+  {
+   "command": "python3 scripts/audit/state.py --round r2-dim1 check-freeze",
+   "exit_code": 4,
+   "detail": "重冻结前红相符合预期：仅 DRIFT scripts_assertions_dim6.sh；断言计数与漂移范围由包装断言机械核验"
+  },
+  {
+   "command": "bash scripts/audit/selftest.sh",
+   "exit_code": 0,
+   "detail": "pass=42 fail=0；dim1.sh 与 dim6.sh 均接受 --arm-tag"
+  },
+  {
+   "command": "python3 scripts/audit/state.py --round r2-dim1 freeze --session pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+   "exit_code": 0,
+   "detail": "corpus_hash 保持 879597eb…；scripts_assertions_dim6.sh 更新为 93d7b4ec…"
+  },
+  {
+   "command": "重冻结前后 assertion_hashes 逐键比对",
+   "exit_code": 0,
+   "detail": "changed_keys=1 unchanged_keys=13；唯一变化 60f68483… → 93d7b4ec…"
+  },
+  {
+   "command": "bash scripts/audit/freeze-check.sh --round r2-dim1",
+   "exit_code": 0,
+   "detail": "freeze=0（assertions=14，corpus 未漂移）scope=0（changed=8 scope_entries=8 violations=0）"
+  }
+ ],
+ "artifacts": [
+  "docs/audit/rounds/r2-dim1/proposals/r2-dim1.attempt2-harness-fix.md",
+  "docs/audit/loop-state.json",
+  "scripts/audit/assertions/dim6.sh",
+  "scripts/audit/selftest.sh"
+ ],
+ "freeze_impact": {
+  "changed_keys": ["scripts_assertions_dim6.sh"],
+  "unchanged_keys": 13,
+  "before": "60f68483a99f25d5928d28c64c6e6034ba576c4f83d66371e7d4ab0b87b97825",
+  "after": "93d7b4ec9401c6574354c05127949e01015698a4f64155359b5d81f08a21197e"
+ }
+}

@@ -1,0 +1,24 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb25-5c29-7cb0-bf2b-8a19724c5236",
+  "turn_id": "turn-e6b73cd8-42f8-4aff-a791-1fbd4ba112e6",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**退出码判定（`scripts/observability/check-langfuse.sh`）**\n\n| 退出码 | verdict | 触发条件 |\n|---|---|---|\n| 0 | `pass`：Tempo 候选条数大于 0，且 Langfuse 侧有数据（`data` 非空），即两条数据链路都有数据；<br>`no-candidates`：Tempo 侧候选条数为 0，即上游没有 span，因此把语义轨的缺席归因于 trace 出口（应用侧输出）未产生数据，而不是 Langfuse 数据链路断链，所以也判 0，并在 reason 中提示「先修 trace 出口」 | 第 90、78 行 |\n| 2 | `gap`：Tempo 侧存在语义轨候选 span，但 Langfuse 侧采样到的条数 `<=0`，说明 fan-out（collector 副本转发）断链，或两端采样不一致 | 第 86-88 行 |\n| 3 | `unknown`（脚本初始默认值）：证据不足，包含四类情形：Tempo 查询失败（`TRACE_CANDIDATES -lt 0`）、缺少 `LANGFUSE_PUBLIC_KEY/SECRET_KEY`、Langfuse API 返回 401、API 不可达；参数非法时也用 3 | 第 73-85、35 行 |\n\n**为什么缺凭据不允许判 PASS**\n\n1. 判定必须分两步完成：Tempo 有候选只证明「上游产生了语义轨」，只有 Langfuse 侧读回数据，才证明「fan-out 链路真的把数据送到了 Langfuse」。缺少凭据时，第二步完全空白；如果此时放行，就等于把「没验证」当成「已验证」。\n2. 本项目 AI 形态是 agent，按 `references/contract.json` 的 `langfuse_applicability`，Langfuse 是**必需**维度；一旦判 PASS，就会与 T5 静态检查一起形成「Tempo 有、Langfuse 空却全绿」的盲区，思考树、工具调用透视、成本数据全部丢失且不报警。脚本开头的注释说明了这个动机（第 6-10 行）。\n3. 这是 fail-closed 纪律的直接体现：`UNKNOWN ≠ PASS`（第 18、81 行）。缺少证据只能让判定降级为 UNKNOWN（3），由人来补齐凭据后重跑；不能因为「没拿到证据」就默认通过。",
+  "usage": {
+    "input_tokens": 35810,
+    "output_tokens": 941
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 4669,
+  "failure_reason": null
+}

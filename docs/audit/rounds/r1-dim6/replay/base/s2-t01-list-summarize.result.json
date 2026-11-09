@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb02-47a3-7dd2-a8cf-cdaa6811d7aa",
+  "turn_id": "turn-cefbe4c0-637c-4278-967b-bd663fea86a4",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "未找到目标目录，无内容可列出。\n\n- 工作区 `/home/dm/pony_agent` 仅含 `scripts/` 与 `test_appr.txt`，不存在 `docs/` 目录，`**/corpus/**`、`**/*.md` 均零命中。\n- 本次会话处于只读模式，无法执行 shell 命令到工作区外查找；若该目录在别处（如其他项目路径），请提供路径或切换会话模式。",
+  "usage": {
+    "input_tokens": 55847,
+    "output_tokens": 727
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Find",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 4566,
+  "failure_reason": null
+}

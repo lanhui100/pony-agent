@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "011-p1-replay-smoke",
+ "phase": "verify",
+ "node": "script",
+ "command": "bash scripts/audit/replay.sh --arm base --commit c1f47e9d --label p1-smoke --sessions 3 --tasks t01-list-summarize",
+ "exit_code": 0,
+ "ts_unix": 1794140462,
+ "artifact": "docs/audit/rounds/r1-dim6/replay/p1-smoke",
+ "summary": "replay.sh 端到端冒烟：3 会话 × t01，退出码全 0，产物 arm.json/sessions.tsv/jsonl 齐全；隔离仍 3/3 失配（F1 未修，符合预期）"
+}

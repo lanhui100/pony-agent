@@ -1,0 +1,28 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb26-bc4c-72a2-ad5e-342d43f9f56c",
+  "turn_id": "turn-83978a40-2aff-48f1-b033-be11a05a17f2",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "**命中总数：38 行，分布在 6 个文件**；搜索时忽略大小写，未发生截断。注意：本次会话为只读模式，`grep` 命令被拒绝执行（permission_denied），所以结果来自内置搜索工具。\n\n前 5 处命中：\n\n| # | 文件 | 行号 |\n|---|---|---|\n| 1 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1824 |\n| 2 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1833 |\n| 3 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1855 |\n| 4 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2134 |\n| 5 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2263 |\n\n按文件分布：`agent/otel/mod.rs` 22 处，`agent/turn_flow.rs` 5 处，`agent/ponysentry/client.rs` 4 处，`agent/ponysentry/mod.rs` 3 处，`agent/runtime/turn_persist.rs` 3 处，`agent/runtime/types.rs` 1 处。未修改任何文件。",
+  "usage": {
+    "input_tokens": 54521,
+    "output_tokens": 1213
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 8504,
+  "failure_reason": null
+}

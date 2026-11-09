@@ -1,0 +1,1 @@
+{"seq": "004", "phase": "collect", "node": "manual", "command": "python3 tools/collect-dim6.py replay/base/sessions.tsv metrics.json", "exit_code": 0, "ts_unix": 1794138461, "artifact": "004-collect-metrics.json"}

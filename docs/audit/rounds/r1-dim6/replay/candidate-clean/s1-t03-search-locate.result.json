@@ -1,0 +1,32 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb3a-383d-7252-a5c4-1e2755afcc30",
+  "turn_id": "turn-1464e4fa-d0e5-4b24-ad07-e21f4776fe98",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "搜索结果（只读，未改动任何文件）：\n\n**命中总数：35 处（精确匹配 `exported_trace_id`）；大小写不敏感匹配为 38 处**，差值这 3 处来自大写形式的 `TURN_EXPORTED_TRACE_IDS` 常量。\n\n前 5 处：\n\n| # | 文件 | 行号 |\n|---|---|---|\n| 1 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1824 |\n| 2 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1833 |\n| 3 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 1855 |\n| 4 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2134 |\n| 5 | `crates/pony-agent-core/src/agent/otel/mod.rs` | 2263 |\n\n新增的分组统计（按精确匹配）：`agent/otel/mod.rs` 19 处，`turn_flow.rs` 5 处，`ponysentry/client.rs` 4 处，`ponysentry/mod.rs` 3 处，`runtime/turn_persist.rs` 3 处，`runtime/types.rs` 1 处。当前会话处于只读模式，`grep` 交叉验证被拒绝，因此上述数字仅来自工作区搜索工具。",
+  "usage": {
+    "input_tokens": 79584,
+    "output_tokens": 1656
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    }
+  ],
+  "duration_ms": 23727,
+  "failure_reason": null
+}

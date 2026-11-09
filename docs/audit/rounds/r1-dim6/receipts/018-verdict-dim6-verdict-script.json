@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "018-verdict-dim6",
+ "phase": "verdict",
+ "node": "script",
+ "command": "bash scripts/audit/verdict.sh --round r1-dim6 --dim 6 --arm-dir .../replay/candidate --expected-cwd /tmp/audit-r1-candidate --metrics .../metrics.candidate.json",
+ "exit_code": 0,
+ "ts_unix": 1794142724,
+ "artifact": "docs/audit/ratchet.json",
+ "summary": "verdict PASS exit=0：freeze=0 scope=0 assert=0 ratchet=0；dim6 已写入棘轮集（首个通过维度）"
+}

@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "020-ratchet-close",
+ "phase": "ratchet",
+ "node": "script",
+ "command": "python3 scripts/audit/state.py transition --to ratchet",
+ "exit_code": 0,
+ "ts_unix": 1794142738,
+ "artifact": "docs/audit/ratchet.json",
+ "summary": "r1-dim6 收口：dim6 入棘轮（首个通过维度）；passed_dimensions=[6]；队列推进 r2-dim1（维度1 时延结构）；lease 停点释放"
+}

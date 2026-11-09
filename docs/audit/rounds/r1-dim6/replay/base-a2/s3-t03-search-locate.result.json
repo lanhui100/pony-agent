@@ -1,0 +1,52 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb2d-9c45-7853-9094-736688a7c5eb",
+  "turn_id": "turn-706a8bb2-c2be-413f-a114-59dfcd79a6ca",
+  "status": "suspended",
+  "exit_code": 6,
+  "final_text": "",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Ask",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 9383,
+  "failure_reason": "control_outcome_pending"
+}

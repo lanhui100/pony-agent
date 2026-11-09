@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "kind": "round-snapshot",
+  "round": "r2-dim1",
+  "archived_unix": 1794189194,
+  "current": {
+    "dimension": 1,
+    "round": "r2-dim1",
+    "phase": "ratchet",
+    "attempt": 2,
+    "baseline_commit": "b4e48b4157a04322a7ad0a9caa779387a2a75cb7",
+    "impl_base_commit": "1bca945808fc189435460ed83d789f8789b078a4",
+    "candidate_commit": "d9425a70",
+    "corpus_hash": "879597eb3594eb365bdbe033f7fbcd8353380e359170267f8d3e621255b8300a",
+    "corpus_hash_frozen": true,
+    "assertion_hashes": {
+      "analyze_latency_gaps.py": "02327de625df7a831b36be1c4ac0812902af6b457ca43a8e9d09e08f2d67a6ff",
+      "analyze_span_fidelity.py": "8e184900d4afd30a04b883bf48bab18696d818bd956d1fe228ddfabc40f14293",
+      "collect_dim1.py": "a7d674dc09d958dc0d61516c56de62af9652ddd681b4f661b7234292bd8fa8e2",
+      "scripts_assertions_dim1.sh": "a74f0ac3f2efe07c093e9a823fc93ad5e455db5c498c5af674c4c4744fb600ba",
+      "scripts_assertions_dim6.sh": "93d7b4ec9401c6574354c05127949e01015698a4f64155359b5d81f08a21197e",
+      "scripts_analyze_latency_gaps.py": "02327de625df7a831b36be1c4ac0812902af6b457ca43a8e9d09e08f2d67a6ff",
+      "scripts_analyze_replay_isolation.py": "3c49f23177a8ecb66a6efecbeb1f3d57e9a67a059b222e3ec68b39853f1fe901",
+      "scripts_analyze_span_fidelity.py": "8e184900d4afd30a04b883bf48bab18696d818bd956d1fe228ddfabc40f14293",
+      "scripts_collect_dim1.py": "956b9452d4ca4c93ecee2763f70497b91ea8132e9d5e7a338d39ce1999ecaa67",
+      "scripts_fetch.sh": "c08d44c6052d924daa8c53628c0fd9a88006b7d3654b3e3f0c9c8488e7220018",
+      "scripts_replay.sh": "0546a12267a4945c17d68859f7825f9350df894290bae038620bd4091eec0582",
+      "scripts_ratchet.sh": "db26d56c0bfb11d60d3a11c00146faa1453e1a4b5bd78e0d8649421229be7990",
+      "scripts_ratchet_add.py": "eddec41a2429895658224c07c87d693a0bc4ac6ab625939b3f5f552a084bb0b6",
+      "scripts_verdict.sh": "ff5a06499888dd56695aa5e956cbc070d68543c6c540db28342f407ea6f6dab9"
+    },
+    "proposal_path": "docs/audit/rounds/r2-dim1/proposals/r2-dim1.attempt2-harness-fix.md",
+    "approval": {
+      "proposal": "docs/audit/rounds/r2-dim1/proposals/r2-dim1.attempt2-harness-fix.md",
+      "mode": "refreeze-dim6-arm-tag-contract",
+      "approved_by": "user",
+      "approved_unix": 1794188982
+    },
+    "evidence_sessions": [
+      "base-a2:9",
+      "candidate-clean:9"
+    ],
+    "receipts_dir": "docs/audit/rounds/r2-dim1/receipts",
+    "write_scope": [
+      "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "crates/pony-agent-core/src/agent/turn_flow.rs",
+      "crates/pony-agent-core/src/agent/runtime/tests.rs",
+      "crates/pony-agent-core/src/bin/cli.rs",
+      "crates/pony-agent-core/src/bin/tui.rs",
+      "crates/pony-agent-core/tests/otel_request_transport_test.rs",
+      "docs/observability.yaml",
+      "src-tauri/src/lib.rs"
+    ],
+    "corpus_task_hashes": {
+      "t01-list-summarize.md": "aea153e098ed04e4119cfab3f292c7c59cffe787c1880cd1b1729eeeb852274c",
+      "t02-read-explain.md": "f3c29640220302d060a6c46c8b57b5718abc921042f6077480213c4f0fcdb0b7",
+      "t03-search-locate.md": "94506acb19140a0211f23b881be18ceab39790e4ffc7236480024589d02c2694"
+    }
+  },
+  "lease": {
+    "session_id": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+    "expires_unix": 1794192794
+  }
+}

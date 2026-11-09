@@ -1,0 +1,10 @@
+{
+ "dimension": "tracing.semantic_track",
+ "verdict": "pass",
+ "exit_code": 0,
+ "reason": "Tempo 候选 116 条，Langfuse 侧有数据",
+ "window_seconds": 86400,
+ "tempo_candidates": 116,
+ "langfuse_state": "reachable",
+ "langfuse_traces_sampled": 1
+}

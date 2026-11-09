@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "022-observability-gate",
+ "phase": "build",
+ "node": "script",
+ "command": "bash ~/.agents/skills/observability-onboarding/scripts/audit-diff.sh --repo . --decl-approved",
+ "exit_code": 0,
+ "ts_unix": 1794142853,
+ "artifact": "/tmp/audit-diff.log",
+ "summary": "observability 变更门禁 PASS exit=0：violations=0 warnings=0（此前 96 WARN 全由 replay jsonl 未忽略造成，已由 .gitignore 修正）。该门禁是 wave47-ob2 与 v10 基线冻结两处验收的前置"
+}

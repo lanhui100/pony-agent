@@ -1,0 +1,44 @@
+{
+  "schema": "pony.headless.result.v1",
+  "session_id": "pa_01a1bb2b-e286-79e1-85a0-81de54cf9773",
+  "turn_id": "turn-f888f49c-2b56-4a42-b92b-6eb915b25f18",
+  "status": "completed",
+  "exit_code": 0,
+  "final_text": "未完成：目标路径不存在于可访问范围。\n\n- 证据：`List .` → 仅 `scripts/`（0 项）与 `test_appr.txt`；`Glob **/pony-agent-core/**` → 0 命中；全工作区搜索 `exported_trace_id` → scannedFiles=1，0 命中。\n- 阻塞：`crates/` 不在 `/home/dm/pony_agent` 内；`Read /home/dm/crates/pony-agent-core/src` 返回 `requires_authorization`（工作区外）；`Run` 被只读模式拒绝（`permission_denied`），无法用 rg 兜底。\n\n结论：命中数无法确认为 0 或非 0——源仓库不在工作区，因此不能报告任何文件路径与行号。\n\n请选择：① 授权读取工作区外路径并告知仓库绝对路径；② 或将仓库挂载/复制到工作区内。",
+  "usage": {
+    "input_tokens": 69739,
+    "output_tokens": 997
+  },
+  "tool_calls": [
+    {
+      "name": "Read",
+      "status": "error"
+    },
+    {
+      "name": "Run",
+      "status": "error"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Glob",
+      "status": "done"
+    },
+    {
+      "name": "List",
+      "status": "done"
+    },
+    {
+      "name": "Search",
+      "status": "done"
+    },
+    {
+      "name": "Read",
+      "status": "error"
+    }
+  ],
+  "duration_ms": 5090,
+  "failure_reason": null
+}

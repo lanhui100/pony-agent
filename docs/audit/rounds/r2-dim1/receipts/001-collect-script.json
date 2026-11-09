@@ -1,0 +1,11 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "001",
+ "phase": "collect",
+ "node": "script",
+ "command": "python3 scripts/audit/collect_dim1.py",
+ "exit_code": 0,
+ "ts_unix": 1794144417,
+ "artifact": "docs/audit/rounds/r2-dim1/metrics.dim1.json",
+ "summary": "18 会话时延证据采集成功：逐调用 duration/ttft/generation/mode"
+}

@@ -1,0 +1,119 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "010-implement-attempt2",
+ "phase": "implement",
+ "node": "agent",
+ "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+ "ts_unix": 1794184800,
+ "scope": "attempt 2 方案 A（退出 flush 预算对齐导出超时）+ 提案『不属本提案范畴』的 harness 自证缺陷修复",
+ "proposal": "docs/audit/rounds/r2-dim1/proposals/r2-dim1.attempt2.md（用户已批准，方案 A）",
+ "changes": [
+  {
+   "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+   "what": "EXIT_FLUSH_BUDGET_MS 1000 → 3000（= EXPORT_TIMEOUT_MS）",
+   "why": "预算 < 单次导出最坏耗时 ⇒ recv_timeout 必先超时，等于没加 flush（attempt 1 实测）"
+  },
+  {
+   "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+   "what": "SHUTDOWN_TIMEOUT_MS 1000 → 100",
+   "why": "预算主体让给唯一有收益的 flush 步；关闭只承担线程握手"
+  },
+  {
+   "file": "crates/pony-agent-core/src/agent/otel/mod.rs",
+   "what": "新增单测 exit_flush_budget_covers_worst_case_export",
+   "why": "把『预算 ≥ 导出超时』与『关闭档位 ∈ (0, 导出超时)』钉成编译期不变量，防回退"
+  },
+  {
+   "file": "src-tauri/src/lib.rs",
+   "what": "删除桌面端独立常量 EXIT_FLUSH_BUDGET_MS=1000，改为复用 core 常量",
+   "why": "两处各写各的正是 attempt 1 缺陷来源；桌面端与 CLI/TUI 必须同源"
+  },
+  {
+   "file": "docs/observability.yaml",
+   "what": "第 964-980 行退出预算口径同步为 3000 / 100",
+   "why": "改行为的那次提交同步更新文档（常载命约第 4 条）"
+  },
+  {
+   "file": "scripts/audit/lib.sh",
+   "what": "新增 resolve_arm_tag（从 metrics 反查覆盖本臂会话的 arm 标签）",
+   "why": "verdict/ratchet 不传 --arm-tag 时，dim1 L3 用目录名过滤 arm 字段 ⇒ 静默命中 0 行"
+  },
+  {
+   "file": "scripts/audit/assertions/dim1.sh",
+   "what": "臂标签缺省改为 metrics 反查；L3 空集单列 exit 2（UNKNOWN）",
+   "why": "空集旧实现折进 not calls 判 FAILED，一旦别处判据变宽即假绿"
+  },
+  {
+   "file": "scripts/audit/verdict.sh, scripts/audit/ratchet.sh",
+   "what": "显式解析并向下传播 --arm-tag",
+   "why": "标签传播收敛到裁决者，不靠各断言脚本猜目录名"
+  },
+  {
+   "file": "scripts/audit/selftest.sh",
+   "what": "补 3 条自测：标签反查成功 / 不覆盖时拒绝 / L3 空集判 UNKNOWN",
+   "why": "新增分支必须有红相锁定，否则下次改动无门禁"
+  }
+ ],
+ "commands": [
+  {
+   "command": "cargo test -p pony-agent-core --lib exit_flush_budget_covers_worst_case_export",
+   "exit_code": 0,
+   "detail": "1 passed"
+  },
+  {
+   "command": "cargo test -p pony-agent-core --lib agent::otel",
+   "exit_code": 0,
+   "detail": "44 passed; 0 failed"
+  },
+  {
+   "command": "cargo check -p pony-agent-core --all-targets",
+   "exit_code": 0,
+   "detail": "Finished dev profile"
+  },
+  {
+   "command": "bash scripts/audit/selftest.sh",
+   "exit_code": 0,
+   "detail": "pass=34 fail=0（原 31，新增 3 条）"
+  },
+  {
+   "command": "for f in scripts/audit/*.sh scripts/audit/assertions/*.sh; do bash -n \"$f\"; done",
+   "exit_code": 0,
+   "detail": "全部脚本语法通过"
+  }
+ ],
+ "self_caught_defect": {
+  "what": "我第一版把 SHUTDOWN_TIMEOUT_MS 设为 0",
+  "why_wrong": "SDK shutdown_with_timeout 是 try_send + recv_timeout，导出线程需一次往返；0ms 使 recv_timeout(0) 几乎必然超时 ⇒ 每次正常退出都走 mem::forget 并刷假 warn，比原值更差",
+  "correction": "改为 100ms（远大于 µs 级握手，远小于导出预算），并写进单测不变量",
+  "evidence": "opentelemetry_sdk-0.30.0/src/trace/span_processor.rs::shutdown_with_timeout（try_send + recv_timeout）"
+ },
+ "new_findings_blocking_attempt2": [
+  {
+   "id": "F5（blocker，提案外）",
+   "claim": "方案 A 无法修复 L2/L4 的剩余红相，因为丢的是**最早两个** span，早于退出时刻十余秒，退出 flush 不可能把它们捞回来。",
+   "evidence": [
+    "candidate-a2/s3-t01: stderr 4 个 request（followup-stream ×3 + followup-sync-batch ×1），4 条 usage raw={，但 Tempo 与 Langfuse 同 trace 均只有 4 个 observation（agent.turn + llm.chat ×2 + tool.call）",
+    "根 span 聚合 gen_ai.usage.output_tokens=662 = 186+203+104+169（4 次调用全发生过）⇒ span 已生成、丢失在导出环节",
+    "到达的 2 个 span 是第 3、4 次调用（out_tok 104 / 169，start 14:33:37.772 / 14:33:46.793）；缺失的是第 1、2 次（out_tok 186 / 203）",
+    "该会话 stderr 的 warn 计数为 0 —— 导出失败完全静默"
+   ],
+   "root_cause": "OTLP/HTTP 导出器无重试；且 opentelemetry 的内部日志宏需 feature internal-logs（本仓 default-features=false 未启用），SDK 的 otel_error!(BatchSpanProcessor.ExportError) 被编译掉 ⇒ 导出失败既不可见也不可恢复",
+   "implication": "L4 的 22.8s 缺口正是这 2 个缺失 span 造成的同源现象，不是独立缺陷"
+  },
+  {
+   "id": "F6（major，提案外，涉及判据）",
+   "claim": "L2 的真值口径（usage 行数）系统性低估真实调用数。",
+   "evidence": [
+    "candidate-a2/s1-t01: request 行 5 条，usage raw={ 仅 3 条，spans 3 ⇒ 按 usage 口径 loss=0（判绿），按 request 口径 loss=2",
+    "base-a2/s1-t01: request 2 条，usage raw={ 1 条，spans 2 ⇒ loss=-1（负丢失，口径自相矛盾）",
+    "根因：只有成功解析出 usage 的请求才写 raw={ 行，失败/回退请求只写 raw=null"
+   ],
+   "implication": "L2 当前可能同时存在假绿（s1-t01）与口径噪声（负值）。修判据 = 改冻结阈值语义，须新提案 + 重冻结，不得在 attempt 2 内改。"
+  }
+ ],
+ "honesty_notes": [
+  "本轮只实施了提案批准的方案 A 与既有先例允许的 harness 自证修复；F5/F6 未实施，因为它们超出批准提案的范围与写域语义。",
+  "我没有跑 build/verify/verdict：基于 F5 的机器证据，attempt 2 的 L2（s3-t01 丢 2）与 L4（同源 22867ms 缺口）必然仍红，跑完整双臂重放（约 40 分钟）只会得到已知的 FAIL，并消耗一次 attempt 预算。是否先扩提案由用户裁定。",
+  "未写棘轮、未改 loop-state 冻结集；当前 phase 仍为 await_approval→implement 之间的实施完成态，等待范围裁定后迁移。"
+ ]
+}

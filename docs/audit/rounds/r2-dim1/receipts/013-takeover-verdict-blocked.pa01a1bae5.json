@@ -1,0 +1,63 @@
+{
+ "schema": "pony.audit.receipt.v1",
+ "seq": "013-takeover-verdict-blocked.pa01a1bae5",
+ "phase": "await_approval",
+ "node": "agent",
+ "session": "pa_01a1bae5-8b23-7dd2-8384-37dd3cdbdf3d",
+ "ts_unix": 1794188600,
+ "scope": "按用户裁定「另一会话已暂停、接管推进」接管 lease，复核 attempt2 证据并跑 verdict；结论：被 F8 冻结漂移阻断，需批准 harness 补遗",
+ "commands": [
+  {
+   "command": "python3 scripts/audit/state.py take-lease --session pa_01a1bae5… --takeover --reason '…' --expect 536410b0…",
+   "exit_code": 0,
+   "detail": "接管前先补 state.py 的显式接管路径（见 F9），默认行为不变：他人持有未过期仍 exit=3"
+  },
+  {
+   "command": "bash scripts/audit/selftest.sh",
+   "exit_code": 0,
+   "detail": "pass=42 fail=0（新增 6 条 lease 接管用例：无 --takeover→3、缺 --reason→2、缺 --expect→2、--expect 失配→1、正确接管→0、history 可审计）"
+  },
+  {
+   "command": "bash scripts/audit/assertions/dim1.sh --arm-dir …/replay/candidate-a3 --metrics …/metrics.dim1.candidate-a3.json [--arm-tag candidate-a3]",
+   "exit_code": 0,
+   "detail": "L1 0/9、L2 0/23、L3 unattributable=0（ttft_missing=3 全 buffered）、L4 gap_over_5s=0（measured 9/9）"
+  },
+  {
+   "command": "bash scripts/audit/ratchet.sh … --arm-tag candidate-a3",
+   "exit_code": 0,
+   "detail": "dim6 A1/A2/A3 全 PASS，regression=0 missing=0（F8 修复生效后棘轮可绿）"
+  },
+  {
+   "command": "bash scripts/audit/verdict.sh --round r2-dim1 --dim 1 --arm-dir …/candidate-a3 --expected-cwd /tmp/audit-r2-cand-a3 --metrics …",
+   "exit_code": 4,
+   "detail": "freeze=4 scope=0：DRIFT scripts_assertions_dim6.sh（冻结 60f68483… vs 现 93d7b4ec…）；写域 8 项 violations=0（src-tauri/src/lib.rs 已纳入）"
+  },
+  {
+   "command": "python3 - <<'PY'（剔除 F8 新增 7 行后重算 sha256）",
+   "exit_code": 0,
+   "detail": "rebuilt=60f68483a99f25d5928d28c64c6e6034ba576c4f83d66371e7d4ab0b87b97825 = 冻结值 ⇒ F8 改动可逆地只含参数解析分支，A1/A2/A3 判据逐字节未变（独立复核，采信提案主张）"
+  }
+ ],
+ "assertions": {
+  "dim1_candidate_a3": {"L1": "0/9", "L2": "0/23", "L3": "0/23", "L4": "0/9（max 587ms）", "verdict": "PASS"},
+  "ratchet_dim6": {"A1_mismatch": 0, "A2_release_null": 0, "A3_conflicting": 0, "verdict": "PASS"},
+  "freeze": {"verdict": "DRIFT exit=4", "key": "scripts_assertions_dim6.sh"},
+  "scope": {"changed": 8, "scope_entries": 8, "violations": 0, "verdict": "PASS"}
+ },
+ "new_finding": {
+  "id": "F9",
+  "what": "state.py take-lease 无接管路径：他人 lease 未过期时恒 exit=3，即使人工裁定对方已暂停，推进权也只能空等 ttl 到期",
+  "fix": "新增 --takeover，强制同时给 --reason（落 history 可审计）与 --expect（CAS 守卫）；默认行为不变",
+  "why_not_self_approve": "属 harness 自身修复（state.py 不在冻结集，见 state.py JUDGING_FILES 注释），且已配 6 条 selftest 用例"
+ },
+ "blocking_issue": {
+  "what": "verdict 在冻结检查即 exit=4，无法到达 assert/ratchet",
+  "why": "dim6.sh 为接受 --arm-tag 而改动（F8，另一会话已实施），其哈希在批准时已冻结",
+  "resolution": "已有提案 docs/audit/rounds/r2-dim1/proposals/r2-dim1.attempt2-harness-fix.md（status: proposed）待用户批准；批准后重冻结即可跑完 verdict。不得自行重冻结。"
+ },
+ "honesty_notes": [
+  "F8 的修复是**先改文件后写提案**（另一会话所为），本会话只做独立复核：用哈希等式证明改动可逆且判据未动，未采信叙述。",
+  "本会话新增 state.py 接管路径属 harness 自身修复，未越权改任何冻结集文件（JUDGING_FILES 14 项哈希全部未变，freeze-check 只报 dim6.sh 一项漂移）。",
+  "F8 提案里 created_unix=1794191300 与 approved_unix=1794190500 均为**未来时间戳**（相对 09:40 实测），时间字段不可信，以文件 mtime 与回执为准。"
+ ]
+}

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "kind": "round-snapshot",
+  "round": "r1-dim6",
+  "archived_unix": 1794142798,
+  "current": {
+    "dimension": 6,
+    "round": "r1-dim6",
+    "phase": "ratchet",
+    "attempt": 1,
+    "baseline_commit": "c1f47e9d6f8d1509f57d1cff71e38c9b2c4a2916",
+    "impl_base_commit": "b4e48b4157a04322a7ad0a9caa779387a2a75cb7",
+    "candidate_commit": "6b77f93932e7ede599fe926f2292ca6cb1e7366b",
+    "corpus_hash": "879597eb3594eb365bdbe033f7fbcd8353380e359170267f8d3e621255b8300a",
+    "corpus_hash_frozen": true,
+    "write_scope": [
+      "crates/pony-agent-core/src/bin/cli.rs",
+      "crates/pony-agent-core/src/agent/otel/mod.rs",
+      "docs/observability.yaml",
+      "crates/pony-agent-core/tests/otel_resource_turn_status_test.rs"
+    ],
+    "proposal_path": "docs/audit/rounds/r1-dim6/proposals/r1-dim6.pa01a1ba70.md",
+    "approval": "approved",
+    "verdict": "pass",
+    "verdict_exit": 0,
+    "assertion_hashes": {
+      "scripts_assertions_dim6.sh": "60f68483a99f25d5928d28c64c6e6034ba576c4f83d66371e7d4ab0b87b97825",
+      "scripts_analyze_replay_isolation.py": "3c49f23177a8ecb66a6efecbeb1f3d57e9a67a059b222e3ec68b39853f1fe901",
+      "scripts_fetch.sh": "c08d44c6052d924daa8c53628c0fd9a88006b7d3654b3e3f0c9c8488e7220018",
+      "scripts_replay.sh": "0546a12267a4945c17d68859f7825f9350df894290bae038620bd4091eec0582",
+      "scripts_ratchet.sh": "9cb768b759a6ace93bdba2a6a22bb6aea8d1ac391102cd62b40d5e44ae6a835c",
+      "scripts_ratchet_add.py": "eddec41a2429895658224c07c87d693a0bc4ac6ab625939b3f5f552a084bb0b6",
+      "scripts_verdict.sh": "c236b9e113f201d3de21dee7d97b8bd60f583b57f7b25fd973048b924318a897",
+      "analyze_replay_isolation.py": "54509e38dadad06ff2f9a322e74b684bff6728080b6c1054cf0f3f98d425f65a",
+      "assert_dim6.sh": "05ec03f941f1faf7fb8883d8797d6cbc593a45d507942c9407a7f116f1a5830b",
+      "collect_dim6.py": "92c6ca94ab829bb2c77a2a8895ee7fa9c8318bb11dd4717c696af9952294da17",
+      "lf_fetch.sh": "02f6496e36734c63c60cd5a227320e7c2985b4a41ade76a48d94bbc20838db0e",
+      "replay_arm.sh": "0879bae0a41b68d9dc3f5197e1a8bb544c17fca87097f87dca7913efc63becaf",
+      "replay_p0.sh": "d1a27bbcfff08afb6c07f87fa1e89e1877c313e75f974b2e25b3a2d87d291c7b"
+    }
+  },
+  "lease": {
+    "session_id": "pa_01a1ba70-a314-7712-adf2-4bf675a96f99",
+    "expires_unix": 1794146398
+  }
+}

@@ -1,0 +1,15 @@
+{
+ "schema": "pony.audit.arm.v1",
+ "arm": "base",
+ "slug": "base-a2",
+ "commit": "1bca9458",
+ "worktree": "/tmp/audit-r2-base",
+ "sessions": 3,
+ "tasks": [
+  "t01-list-summarize",
+  "t02-read-explain",
+  "t03-search-locate"
+ ],
+ "created_unix": 1794147998,
+ "exit_all_zero": false
+}
