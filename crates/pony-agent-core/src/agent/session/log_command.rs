@@ -43,6 +43,8 @@ pub fn command_session_id(command: &PersistCommand) -> Option<&str> {
         | PersistCommand::UpdateCursor { session_id, .. }
         | PersistCommand::UpdateBranch { session_id, .. }
         | PersistCommand::UpdateSessionMeta { session_id, .. }
+        | PersistCommand::AppendProviderTranscript { session_id, .. }
+        | PersistCommand::UpdateSessionMemory { session_id, .. }
         | PersistCommand::RemoveSession { session_id, .. }
         | PersistCommand::FlushEvents { session_id, .. } => Some(session_id.as_str()),
         PersistCommand::PublishMetadata { .. } => None,
@@ -160,6 +162,36 @@ pub fn command_to_value(command: &PersistCommand) -> Result<Value, String> {
             "epoch": epoch,
             "sessionId": session_id,
             "metaPatch": session_meta_patch_to_value(meta_patch),
+        }),
+        PersistCommand::AppendProviderTranscript {
+            epoch,
+            session_id,
+            messages,
+        } => json!({
+            "type": "append_provider_transcript",
+            "encodingVersion": SESSION_LOG_COMMAND_ENCODING_VERSION,
+            "epoch": epoch,
+            "sessionId": session_id,
+            // 逐字段原样落盘：transcript 是不透明 JSON（provider 原生结构），
+            // 这里禁止任何重编码/裁剪，否则重放会读到与写入不同的载荷。
+            "messages": messages,
+        }),
+        PersistCommand::UpdateSessionMemory {
+            epoch,
+            session_id,
+            entries,
+            evidence,
+            hook_trace_records,
+            history_state_evidence,
+        } => json!({
+            "type": "update_session_memory",
+            "encodingVersion": SESSION_LOG_COMMAND_ENCODING_VERSION,
+            "epoch": epoch,
+            "sessionId": session_id,
+            "entries": serialize(entries)?,
+            "evidence": serialize(evidence)?,
+            "hookTraceRecords": serialize(hook_trace_records)?,
+            "historyStateEvidence": serialize(history_state_evidence)?,
         }),
         PersistCommand::RemoveSession { epoch, session_id } => json!({
             "type": "remove_session",

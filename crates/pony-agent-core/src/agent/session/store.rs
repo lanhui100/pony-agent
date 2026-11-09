@@ -545,7 +545,9 @@ impl SessionStore {
         let meta_patch: Option<SessionMetaPatch>;
 
         // 两阶段暂存提交（Staging Commit）：在克隆状态上计算新 turn，持久化成功后才提交到 live
-        let mut staged_session = self.ensure_session(&session_key).clone();
+        let before_state = self.ensure_session(&session_key).clone();
+        let mut staged_session = before_state.clone();
+        let transcript_delta: Vec<Value> = provider_native_transcript.clone().unwrap_or_default();
         {
             ensure_history_graph(&mut staged_session);
             prepare_session_for_new_turn(&mut staged_session);
@@ -600,6 +602,10 @@ impl SessionStore {
         // 增量批事务持久化（消除写放大）
         if self.backend.supports_turn_events() {
             let mut commands = Vec::new();
+            // ADR 0102：transcript / 记忆原只有 blob 载体（2-D 后即丢）⇒ 并入本批命令流；
+            // 日志先行不变（日志失败 ⇒ 整批 Failed，SQLite 零改动）。
+            super::fold::append_transcript_command(&mut commands, &session_key, &transcript_delta);
+            super::fold::append_memory_command_if_changed(&mut commands, &session_key, &before_state, &staged_session);
             for (ordinal, message) in [
                 (history_len_before, appended_user.take()),
                 (history_len_before + 1, appended_assistant.take()),
@@ -2125,7 +2131,7 @@ impl SessionStore {
     /// 会话重命名：写入独立 override 字段（每轮派生刷新不再冲掉）。
     /// 校验：trim 后非空、≤64 字符；会话必须已存在（不隐式创建）；同值重命名
     /// 视为成功 no-op。
-    /// 元数据真源追加（阶段 2-D）：见 `fold::persist_session_meta_command`。
+    /// 元数据真源追加（2-D）：见 `fold::persist_session_meta_command`。
     fn persist_session_meta_command(&self, session_id: &str) {
         super::fold::persist_session_meta_command(self.backend.as_ref(), session_id, &self.sessions);
     }
@@ -2591,7 +2597,7 @@ impl SessionStore {
                 }
                 // 命令失败 → 回退全量路径（不丢数据）
             }
-            // 阶段 2-D：`ReplaceAll` 改走日志命令流（以前只写 blob ⇒ 停写 blob 后图状态会丢）。
+            // 2-D：`ReplaceAll` 走日志命令流（以前只写 blob ⇒ 停写后图状态会丢）。
             if matches!(mutation, SessionTraceMutation::ReplaceAll { .. })
                 && super::fold::persist_graph_projection_commands(
                     self.backend.as_ref(), session_id, session, &effective_mutation,

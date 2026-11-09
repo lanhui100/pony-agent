@@ -76,10 +76,11 @@ use super::backend::{
 };
 use super::log_store::{SessionLogMeta, SessionLogStore};
 use super::types::{
-    HistoryBranch, HistoryCursor, HistoryNode, SessionState, TurnHistoryMessage, TurnTraceRecord,
+    HistoryBranch, HistoryCursor, HistoryNode, LongTermMemoryRecord, SessionState,
+    TurnHistoryMessage, TurnTraceRecord,
 };
 use super::types::{DEFAULT_SESSION_SUMMARY, DEFAULT_SESSION_TITLE};
-use crate::agent::hooks::HookTraceRecord;
+use crate::agent::hooks::{HistoryStateHookEvidence, HookTraceRecord, PersistedEffectEvidence};
 use crate::agent::sqlite_session::SqliteSessionBackend;
 use crate::agent::turn_event::TurnEvent;
 
@@ -338,6 +339,19 @@ enum FoldCommand {
         session_id: String,
         meta_patch: SessionMetaPatch,
     },
+    /// ADR 0102：provider transcript 的**追加**载荷。
+    AppendProviderTranscript {
+        session_id: String,
+        messages: Vec<serde_json::Value>,
+    },
+    /// ADR 0102：记忆四件套（**整份替换**）+ `history_state_evidence`（**追加**）。
+    UpdateSessionMemory {
+        session_id: String,
+        entries: Vec<LongTermMemoryRecord>,
+        evidence: Vec<PersistedEffectEvidence>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        history_state_evidence: Vec<HistoryStateHookEvidence>,
+    },
     RemoveSession {
         session_id: String,
     },
@@ -528,6 +542,17 @@ impl FoldCommand {
                     meta_patch: decode_meta_patch(patch_value, seq, kind)?,
                 }
             }
+            "append_provider_transcript" => Self::AppendProviderTranscript {
+                session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
+                messages: payload(value, seq, kind, "messages")?,
+            },
+            "update_session_memory" => Self::UpdateSessionMemory {
+                session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
+                entries: payload(value, seq, kind, "entries")?,
+                evidence: payload(value, seq, kind, "evidence")?,
+                hook_trace_records: payload(value, seq, kind, "hookTraceRecords")?,
+                history_state_evidence: payload(value, seq, kind, "historyStateEvidence")?,
+            },
             "remove_session" => Self::RemoveSession {
                 session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
             },
@@ -557,6 +582,8 @@ impl FoldCommand {
             | Self::UpdateCursor { session_id, .. }
             | Self::UpdateBranch { session_id, .. }
             | Self::UpdateSessionMeta { session_id, .. }
+            | Self::AppendProviderTranscript { session_id, .. }
+            | Self::UpdateSessionMemory { session_id, .. }
             | Self::RemoveSession { session_id }
             | Self::FlushEvents { session_id, .. } => Some(session_id),
             Self::PublishMetadata => None,
@@ -773,6 +800,27 @@ impl Folder {
                 if let Some(updated_at_ms) = meta_patch.updated_at_ms {
                     state.updated_at_ms = updated_at_ms;
                 }
+            }
+            // ADR 0102：transcript —— **追加**（与写路径 `store.rs` 的 `extend` 同语义：
+            // 每轮把新增的 provider 消息接到尾部，历史消息一条都不得丢）。
+            FoldCommand::AppendProviderTranscript { messages, .. } => {
+                self.state().provider_native_transcript.extend(messages);
+            }
+            // ADR 0102：记忆 —— 三项**整份替换**（写路径就地重建它们），
+            // `history_state_evidence` 则**追加**（写路径逐条累加）。两者语义不同，
+            // 混用会让「同一 turn 重放两次」的记忆条数翻倍或清空。
+            FoldCommand::UpdateSessionMemory {
+                entries,
+                evidence,
+                hook_trace_records,
+                history_state_evidence,
+                ..
+            } => {
+                let state = self.state();
+                state.long_term_memory_entries = entries;
+                state.memory_write_evidence = evidence;
+                state.memory_write_hook_trace_records = hook_trace_records;
+                state.history_state_evidence.extend(history_state_evidence);
             }
             FoldCommand::RemoveSession { .. } => {
                 // D3 墓碑：fold 结果为「已删除」。删除是幂等的终态。
@@ -1502,6 +1550,151 @@ pub fn rebuild_index_at_root(
     Ok(report)
 }
 
+// ---------------------------------------------------------------------------
+// ADR 0102：索引侧投影写入（transcript 追加 / 记忆整份替换 + evidence 追加）
+// ---------------------------------------------------------------------------
+//
+// 为什么放在 fold 模块而不是 `sqlite_session*.rs`：那两个文件已被行数棘轮卡死
+// （`sqlite_session_commit.rs` 剩余额度 < 一个写函数的体积）。语义上也成立——本模块就是
+// 「命令流 ↔ 状态投影」的家，这里补的是「命令 → 索引投影」的同一条映射。
+
+/// 读-改-写 `normalized_sessions` 的某个 JSON 数组列（**追加**语义）。
+fn append_json_column_tx<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(
+    tx: &rusqlite::Transaction<'_>, session_id: &str, column: &str, delta: &[T],
+) -> Result<(), String> {
+    let raw: Option<String> = tx
+        .query_row(
+            &format!("SELECT {column} FROM normalized_sessions WHERE session_id = ?1"),
+            rusqlite::params![session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
+    let mut all: Vec<T> = raw.as_deref().and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+    all.extend(delta.iter().cloned());
+    let encoded = serde_json::to_string(&all).map_err(|e| format!("encode {column}: {e}"))?;
+    tx.execute(
+        &format!("UPDATE normalized_sessions SET {column} = ?2 WHERE session_id = ?1"),
+        rusqlite::params![session_id, encoded],
+    )
+    .map_err(|e| format!("update {column}: {e}"))?;
+    Ok(())
+}
+
+/// ADR 0102：transcript **追加**进索引投影（与 fold 应用、`store.rs` 的 `extend` 同语义）。
+pub(crate) fn append_provider_transcript_tx(
+    tx: &rusqlite::Transaction<'_>, session_id: &str, messages: &[serde_json::Value],
+) -> Result<(), String> {
+    append_json_column_tx(tx, session_id, "provider_native_transcript_json", messages)
+}
+
+/// ADR 0102：记忆三项**整份替换** + `history_state_evidence` **追加**进索引投影。
+///
+/// 并列是刻意的：与命令定义、`Folder::apply` 一一对应；混用会让重放后的条数翻倍或清空。
+pub(crate) fn update_session_memory_tx(
+    tx: &rusqlite::Transaction<'_>, session_id: &str, entries: &[LongTermMemoryRecord],
+    evidence: &[PersistedEffectEvidence], hook_trace_records: &[HookTraceRecord],
+    history_state_evidence: &[HistoryStateHookEvidence],
+) -> Result<(), String> {
+    let memory = serde_json::json!({
+        "longTermMemoryEntries": entries, "memoryWriteEvidence": evidence,
+        "memoryWriteHookTraceRecords": hook_trace_records,
+    });
+    let encoded = serde_json::to_string(&memory).map_err(|e| format!("encode memory: {e}"))?;
+    tx.execute(
+        "UPDATE normalized_sessions SET memory_json = ?2 WHERE session_id = ?1",
+        rusqlite::params![session_id, encoded],
+    )
+    .map_err(|e| format!("update session memory: {e}"))?;
+    append_json_column_tx(tx, session_id, "history_state_evidence_json", history_state_evidence)
+}
+
+/// ADR 0102：把「内容类命令」写进索引投影（`apply_persist_command_tx` 的单一分派点）。
+///
+/// 只覆盖这两条命令；其它命令由调用方的**穷尽 match** 各自表态（这里不是兜底：
+/// 调用点的主 match 仍无通配臂，新增变体会被编译器逼着表态）。非内容类命令传进来属于
+/// 编程错误，返回 `Err` 而不是静默 no-op。
+pub(crate) fn persist_session_content_tx(
+    tx: &rusqlite::Transaction<'_>,
+    command: &PersistCommand,
+) -> Result<(), String> {
+    match command {
+        PersistCommand::AppendProviderTranscript { session_id, messages, .. } => {
+            append_provider_transcript_tx(tx, session_id, messages)
+        }
+        PersistCommand::UpdateSessionMemory {
+            session_id, entries, evidence, hook_trace_records, history_state_evidence, ..
+        } => update_session_memory_tx(
+            tx, session_id, entries, evidence, hook_trace_records, history_state_evidence,
+        ),
+        other => Err(format!("persist_session_content_tx 收到非内容类命令：{other:?}")),
+    }
+}
+
+/// ADR 0102：把 **transcript 增量** 追加进命令批（**追加**语义）。
+///
+/// 与 `store.rs` 的 `staged_session.provider_native_transcript.extend(..)` 一一对应：
+/// 命令里只放本批新增的 provider 消息，重放时接到尾部（历史消息不会被覆盖）。
+pub(crate) fn append_transcript_command(
+    commands: &mut Vec<PersistCommand>,
+    session_id: &str,
+    messages: &[serde_json::Value],
+) {
+    if messages.is_empty() {
+        return;
+    }
+    commands.push(PersistCommand::AppendProviderTranscript {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        messages: messages.to_vec(),
+    });
+}
+
+/// ADR 0102：记忆/证据**发生变化**时，把记忆投影追加进命令批。
+///
+/// 语义（与命令定义、`fold` 一一对应，不得混用）：
+/// - `entries` / `evidence` / `hook_trace_records`：**整份替换**（写路径就地重建）；
+/// - `history_state_evidence`：**追加**，故只发「本批新增的尾部」。
+///
+/// 尾部判据是 `after.starts_with(before)`：写路径只会 `extend`，前缀必然保持。若出现
+/// 「证据被改写」（前缀不再匹配）这种当前写路径不可能产生的形态，则**不发该字段**并
+/// 告警（宁可少一条投影，也不伪造一条语义相反的命令）。
+pub(crate) fn append_memory_command_if_changed(
+    commands: &mut Vec<PersistCommand>,
+    session_id: &str,
+    before: &SessionState,
+    after: &SessionState,
+) {
+    let memory_changed = before.long_term_memory_entries != after.long_term_memory_entries
+        || before.memory_write_evidence != after.memory_write_evidence
+        || before.memory_write_hook_trace_records != after.memory_write_hook_trace_records;
+    let evidence_appended = after.history_state_evidence.len() > before.history_state_evidence.len();
+    let evidence_prefix_ok = after
+        .history_state_evidence
+        .starts_with(&before.history_state_evidence);
+    if !memory_changed && !evidence_appended {
+        return;
+    }
+    let evidence_delta = if evidence_appended && evidence_prefix_ok {
+        after.history_state_evidence[before.history_state_evidence.len()..].to_vec()
+    } else {
+        if evidence_appended {
+            eprintln!(
+                "[pony-agent][session] history_state_evidence_prefix_mismatch: session={session_id}（证据不是追加形态，本命令不带 evidence）"
+            );
+        }
+        Vec::new()
+    };
+    commands.push(PersistCommand::UpdateSessionMemory {
+        epoch: 1,
+        session_id: session_id.to_string(),
+        entries: after.long_term_memory_entries.clone(),
+        evidence: after.memory_write_evidence.clone(),
+        hook_trace_records: after.memory_write_hook_trace_records.clone(),
+        history_state_evidence: evidence_delta,
+    });
+}
+
 /// 把**整份图投影**（trace 行 + 节点 + 分支 + 光标）作为命令流追加进真源日志。
 ///
 /// ADR 0099 阶段 2-D：`ReplaceAll` 突变（fork / switch / checkout / restore / trace 全量重写）
@@ -1624,7 +1817,30 @@ pub(crate) fn canonical_commands(state: &SessionState, epoch: u64) -> Vec<Persis
         },
     });
     for (trace_order, trace) in state.turn_trace_history.iter().enumerate() {
-        commands.push(PersistCommand::AppendTrace {
+        // ADR 0102：transcript / 记忆 / evidence 也必须参与索引重建——否则 rebuild 出来的
+    // 投影会把这几个字段丢掉（日志有、索引无 ⇒ 「索引可重建」不成立）。
+    if !state.provider_native_transcript.is_empty() {
+        commands.push(PersistCommand::AppendProviderTranscript {
+            epoch,
+            session_id: session_id.clone(),
+            messages: state.provider_native_transcript.clone(),
+        });
+    }
+    if !state.long_term_memory_entries.is_empty()
+        || !state.memory_write_evidence.is_empty()
+        || !state.memory_write_hook_trace_records.is_empty()
+        || !state.history_state_evidence.is_empty()
+    {
+        commands.push(PersistCommand::UpdateSessionMemory {
+            epoch,
+            session_id: session_id.clone(),
+            entries: state.long_term_memory_entries.clone(),
+            evidence: state.memory_write_evidence.clone(),
+            hook_trace_records: state.memory_write_hook_trace_records.clone(),
+            history_state_evidence: state.history_state_evidence.clone(),
+        });
+    }
+    commands.push(PersistCommand::AppendTrace {
             epoch,
             session_id: session_id.clone(),
             trace: trace.clone(),

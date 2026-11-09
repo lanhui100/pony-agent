@@ -1154,6 +1154,8 @@ impl SqliteSessionBackend {
                 | PersistCommand::UpdateCursor { session_id, .. }
                 | PersistCommand::UpdateBranch { session_id, .. }
                 | PersistCommand::UpdateSessionMeta { session_id, .. }
+                | PersistCommand::AppendProviderTranscript { session_id, .. }
+                | PersistCommand::UpdateSessionMemory { session_id, .. }
                 | PersistCommand::RemoveSession { session_id, .. }
                 | PersistCommand::FlushEvents { session_id, .. } => session_id,
                 PersistCommand::PublishMetadata { .. } => unreachable!(),
@@ -1504,6 +1506,7 @@ impl SqliteSessionBackend {
                 )
                 .map_err(|e| format!("update session meta: {e}"))?;
             }
+            PersistCommand::AppendProviderTranscript { .. } | PersistCommand::UpdateSessionMemory { .. } => super::session::fold::persist_session_content_tx(tx, command)?, // ADR 0102
             PersistCommand::RemoveSession { session_id, .. } => {
                 tx.execute(
                     "DELETE FROM normalized_sessions WHERE session_id = ?1",
@@ -1797,8 +1800,8 @@ impl SqliteSessionBackend {
                 .map_err(|e| format!("read blob {session_id}: {e}"))?;
             let session: crate::agent::session::SessionState =
                 serde_json::from_str(&data).map_err(|e| format!("parse blob {session_id}: {e}"))?;
-            // 阶段 2-D：轻量索引行没有历史内容，反推只会得到零条却写 "done" 标记（伪装成
-            // 「回填完成」）⇒ 显式跳过且不落标记（真源是日志，不在本函数职责内）。
+            // 2-D：轻量行没有历史内容，反推只会得到零条却写 "done"（伪装成「回填完成」）
+            // ⇒ 跳过且不落标记（真源是日志，不在本函数职责内）。
             if commit::is_index_only_row(&data) {
                 eprintln!(
                     "[pony-agent][session] turn_event_backfill_skip: session={session_id} 是轻量索引行（blob 已停写），跳过"
@@ -2555,10 +2558,8 @@ impl SqliteSessionBackend {
     /// 「日志 fold ∪ 索引 grandfather」（ADR 0099 D1）。把索引当真相正是本阶段要消灭的东西，
     /// 所以这里刻意**不**叫 `load_store`，也不给它加日志合并逻辑。
     ///
-    /// **阶段 2-D 的已知形态（不是缺陷）**：停写 blob 后，有日志会话的行是「轻量索引行」，
-    /// 本函数对它们只给出索引字段；完整内容由调用方用
-    /// [`SqliteSessionBackend::fill_index_only_rows_from_index_projection`] 从索引自己的
-    /// `normalized_*` 投影补全（**依旧不读日志**——本函数是「索引原样」的最窄定义）。
+    /// **2-D 形态（非缺陷）**：有日志会话的行是「轻量索引行」，本函数只给索引字段；完整内容
+    /// 由 `fill_index_only_rows_from_index_projection` 补全（**不读日志**——索引原样最窄定义）。
     pub fn load_index_store(&self) -> Option<PersistedStore> {
         eprintln!(
             "[pony-agent][session] loading sessions from SQLite index only {}",
@@ -2786,17 +2787,10 @@ impl SessionBackend for SqliteSessionBackend {
         }
     }
 
-    /// **运行时读路径**（ADR 0099 D1 / 阶段 2-B / 2-D）：**日志为真源**。
-    ///
-    /// 层次（顺序有意义）：
-    /// 1. 取索引原样视图（`load_index_store`）——存量会话（无日志）由它 grandfather 出来；
-    /// 2. 叠加日志 fold：有日志的会话**日志无条件为准**（阶段 2-D 删除 `updated_at_ms` 定序）；
-    /// 3. 折叠超预算 / 日志根不可读 / 单会话 fold 失败 ⇒ 回落索引侧 `normalized_*` 投影。
-    ///
-    /// **存储级只读句柄不合并日志**（`new_read_only`：维护 / `--dry-run` / 双读比对基准）：
-    /// 否则 `rebuild_index` 的 `mismatched` 会退化成「fold 与 fold 比」的恒零。
-    /// 停写 blob 后它同样需要投影补全（否则只读句柄只能看到索引字段），补全**不读日志**，
-    /// 独立观察者语义不变。
+    /// **运行时读路径**（ADR 0099 D1 / 2-B / 2-D）：**日志为真源**。
+    /// 1. 索引原样视图（无日志的存量会话由它 grandfather）；2. 叠加日志 fold：有日志的会话**日志无条件为准**（2-D 已删除 `updated_at_ms` 定序）；
+    /// 3. 折叠超预算 / 日志不可读 / fold 失败 ⇒ 回落索引侧 `normalized_*` 投影；
+    ///    只读句柄不合并日志但同样做投影补全（补全**不读日志** ⇒ 独立观察者语义不变）。
     fn load_store(&self) -> Option<PersistedStore> {
         let mut store = self.load_index_store()?;
         if self.storage_read_only {
@@ -2808,11 +2802,9 @@ impl SessionBackend for SqliteSessionBackend {
             &self.session_log_root(),
             &mut store.sessions,
         );
-        // 索引侧内容补全：**凡日志没有给出的轻量索引行**（降级 / fold 失败 / 日志不可读）回落
-        // 到索引自己的 `normalized_*` 投影；正常路径 `covered` 覆盖全部轻量行 ⇒ 提前返回。
+        // 日志没给出的轻量行 + observation 投影都从索引补回（补全不读日志）。
         let covered: std::collections::HashSet<String> = outcome.folded.iter().cloned().collect();
         self.fill_index_only_rows_from_index_projection(&mut store.sessions, &covered);
-        // 索引独有的 trace 投影（observation 外置载荷/引用）日志没有载体 ⇒ 从索引补回。
         self.attach_index_trace_projections(&mut store.sessions, &covered);
         Some(store)
     }

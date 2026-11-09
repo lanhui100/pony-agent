@@ -186,7 +186,37 @@ pub fn synthesize_log_events(state: &SessionState, log_meta: &SessionLogMeta) ->
         },
     });
 
-    // 3) 历史消息：ordinal 递增（fold 按 ordinal 排序，同 ordinal 用到达顺序）。
+    // 3) ADR 0102：transcript / 记忆四件套 / `history_state_evidence` 的载体。
+    //
+    // 位置：紧跟 `UpdateSessionMeta`（同属「会话级状态」），排在消息/图/trace 之前——这些
+    // 命令彼此独立、fold 可任意重放，固定顺序只为让「合成流」与「真实写路径的命令次序」
+    // 保持一致（meta → 会话级内容 → 消息 → 图 → trace），便于人工对读日志。
+    //
+    // 语义：transcript 是**追加**、记忆三项**整份替换**、evidence **追加**。日志此刻为空，
+    // 整份状态恰好等于「一次追加 / 一次替换 + 一批追加」，不会重复累加。
+    if !state.provider_native_transcript.is_empty() {
+        commands.push(PersistCommand::AppendProviderTranscript {
+            epoch: 1,
+            session_id: session_id.clone(),
+            messages: state.provider_native_transcript.clone(),
+        });
+    }
+    let memory_present = !state.long_term_memory_entries.is_empty()
+        || !state.memory_write_evidence.is_empty()
+        || !state.memory_write_hook_trace_records.is_empty()
+        || !state.history_state_evidence.is_empty();
+    if memory_present {
+        commands.push(PersistCommand::UpdateSessionMemory {
+            epoch: 1,
+            session_id: session_id.clone(),
+            entries: state.long_term_memory_entries.clone(),
+            evidence: state.memory_write_evidence.clone(),
+            hook_trace_records: state.memory_write_hook_trace_records.clone(),
+            history_state_evidence: state.history_state_evidence.clone(),
+        });
+    }
+
+    // 4) 历史消息：ordinal 递增（fold 按 ordinal 排序，同 ordinal 用到达顺序）。
     for (ordinal, message) in state.history.iter().enumerate() {
         commands.push(PersistCommand::AppendMessage {
             epoch: 1,
@@ -196,7 +226,7 @@ pub fn synthesize_log_events(state: &SessionState, log_meta: &SessionLogMeta) ->
         });
     }
 
-    // 4) 历史节点（含节点快照：refs 为空时 fold 会保留内嵌 trace）。
+    // 5) 历史节点（含节点快照：refs 为空时 fold 会保留内嵌 trace）。
     for node in &state.history_nodes {
         commands.push(PersistCommand::UpdateHistoryNode {
             epoch: 1,
@@ -205,7 +235,7 @@ pub fn synthesize_log_events(state: &SessionState, log_meta: &SessionLogMeta) ->
         });
     }
 
-    // 5) 光标（水位写进 cursor —— 日志格式里唯一的载体）。
+    // 6) 光标（水位写进 cursor —— 日志格式里唯一的载体）。
     let mut cursor = state.history_cursor.clone();
     cursor.session_id = session_id.clone();
     cursor.event_watermark = state.event_watermark;
@@ -215,7 +245,7 @@ pub fn synthesize_log_events(state: &SessionState, log_meta: &SessionLogMeta) ->
         cursor,
     });
 
-    // 6) 分支。
+    // 7) 分支。
     for branch in &state.history_branches {
         commands.push(PersistCommand::UpdateBranch {
             epoch: 1,
@@ -224,7 +254,7 @@ pub fn synthesize_log_events(state: &SessionState, log_meta: &SessionLogMeta) ->
         });
     }
 
-    // 7) trace（`trace_order` = 当前顺序，fold 按它排序）。
+    // 8) trace（`trace_order` = 当前顺序，fold 按它排序）。
     for (trace_order, trace) in state.turn_trace_history.iter().enumerate() {
         commands.push(PersistCommand::AppendTrace {
             epoch: 1,

@@ -1,10 +1,10 @@
 use super::store::PersistedStore;
 use super::types::{
-    AttachmentAssetMap, HistoryBranch, HistoryCursor, HistoryNode, SessionAttachmentIndex,
-    SessionState, TurnHistoryMessage, TurnTraceRecord,
+    AttachmentAssetMap, HistoryBranch, HistoryCursor, HistoryNode, LongTermMemoryRecord,
+    SessionAttachmentIndex, SessionState, TurnHistoryMessage, TurnTraceRecord,
 };
 use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
-use crate::agent::hooks::HookTraceRecord;
+use crate::agent::hooks::{HistoryStateHookEvidence, HookTraceRecord, PersistedEffectEvidence};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -120,6 +120,33 @@ pub enum PersistCommand {
         epoch: u64,
         session_id: String,
         meta_patch: SessionMetaPatch,
+    },
+    /// ADR 0102：provider 原生 transcript 的**追加**载体。
+    ///
+    /// 语义唯一的理由是写路径：`store.rs` 对 transcript 做的是 `extend`（逐轮追加），
+    /// 日志必须能表达同一件事，否则「有日志的会话」重启即丢 transcript
+    /// （阶段 2-D 的轻量索引行不再写它，日志又没有载体）。
+    AppendProviderTranscript {
+        epoch: u64,
+        session_id: String,
+        /// 本批**新增**的 transcript 消息（不是全量快照）。
+        messages: Vec<serde_json::Value>,
+    },
+    /// ADR 0102：会话记忆 + `history_state_evidence` 的载体。
+    ///
+    /// **两种语义刻意放在同一条命令里**，因为它们由同一次「记忆更新」产生，拆开会让
+    /// 重放出现「记忆已换、证据还是旧的」中间态：
+    /// - `entries` / `evidence` / `hook_trace_records`：**整份替换**（对齐
+    ///   `update_long_term_memory_from_user_message` 的产物——它就地重建这三项）；
+    /// - `history_state_evidence`：**追加**（对齐 `persist_history_state_hook_evidence`
+    ///   的 `extend` 语义）。
+    UpdateSessionMemory {
+        epoch: u64,
+        session_id: String,
+        entries: Vec<LongTermMemoryRecord>,
+        evidence: Vec<PersistedEffectEvidence>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        history_state_evidence: Vec<HistoryStateHookEvidence>,
     },
     RemoveSession {
         epoch: u64,
@@ -240,6 +267,8 @@ impl PersistCommand {
             | PersistCommand::UpdateCursor { epoch, .. }
             | PersistCommand::UpdateBranch { epoch, .. }
             | PersistCommand::UpdateSessionMeta { epoch, .. }
+            | PersistCommand::AppendProviderTranscript { epoch, .. }
+            | PersistCommand::UpdateSessionMemory { epoch, .. }
             | PersistCommand::RemoveSession { epoch, .. }
             | PersistCommand::FlushEvents { epoch, .. }
             | PersistCommand::PublishMetadata { epoch, .. } => *epoch,
