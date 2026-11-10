@@ -5541,4 +5541,143 @@ it.skip("renders message-level checkpoint actions only for non-latest assistant 
       expectedCursorVersion: null
     });
   });
+
+  describe("keyboard timeline navigation", () => {
+    function pressWindowKey(init: KeyboardEventInit) {
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ...init
+      });
+      window.dispatchEvent(event);
+      return event;
+    }
+
+    function resetScrollDebugBuffer() {
+      (
+        window as typeof window & { __ponyScrollDebugBuffer?: Array<Record<string, unknown>> }
+      ).__ponyScrollDebugBuffer = [];
+    }
+
+    function patchThreeTurns() {
+      const runtimeStore = useRuntimeStore();
+      runtimeStore.$patch({
+        sessionOperation: null,
+        phase: "ready",
+        isSubmitting: false,
+        error: null,
+        messages: [
+          createMessage({ id: "user-1", turnId: "turn-1", content: "第一轮问题" }),
+          createMessage({ id: "user-2", turnId: "turn-2", content: "第二轮问题" }),
+          createMessage({ id: "user-3", turnId: "turn-3", content: "第三轮问题" })
+        ]
+      });
+      return runtimeStore;
+    }
+
+    function getTurnSections(wrapper: ReturnType<typeof mountWorkspace>) {
+      const contentColumn = wrapper.get('[data-testid="workspace-content-column"]');
+      return Array.from(contentColumn.element.querySelectorAll("[data-turn-id]")) as HTMLElement[];
+    }
+
+    it("Ctrl+T 平滑滚动到会话顶部并发出调试事件", async () => {
+      patchThreeTurns();
+      mountWorkspace();
+      await nextTick();
+      await advanceAnimationFrames(3);
+      resetScrollDebugBuffer();
+      viewportScrollToSpy.mockClear();
+
+      const event = pressWindowKey({ key: "t", ctrlKey: true });
+      await nextTick();
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(viewportScrollToSpy).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
+      expect(latestScrollDebugEvent("keyboard-nav:scroll-to-top")).toBeDefined();
+    });
+
+    it("Ctrl+B 触发滚动到最新（复用按钮收口并恢复自动跟随）", async () => {
+      patchThreeTurns();
+      mountWorkspace();
+      await nextTick();
+      await advanceAnimationFrames(3);
+      resetScrollDebugBuffer();
+
+      const event = pressWindowKey({ key: "b", ctrlKey: true });
+      await nextTick();
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(latestScrollDebugEvent("keyboard-nav:scroll-to-bottom")).toBeDefined();
+      // handleScrollToBottom => resumeTimelineAutoFollow 会同步发出 resume-auto-follow
+      expect(latestScrollDebugEvent("resume-auto-follow")).toBeDefined();
+    });
+
+    it("Alt+↑ / Alt+↓ 在相邻轮次之间跳转并夹取首尾", async () => {
+      patchThreeTurns();
+      const wrapper = mountWorkspace();
+      await nextTick();
+      await advanceAnimationFrames(3);
+
+      const sections = getTurnSections(wrapper);
+      expect(sections.map((el) => el.getAttribute("data-turn-id"))).toEqual([
+        "turn-1",
+        "turn-2",
+        "turn-3"
+      ]);
+      [200, 400, 800].forEach((top, index) => {
+        Object.defineProperty(sections[index]!, "offsetTop", {
+          configurable: true,
+          get: () => top
+        });
+      });
+
+      resetScrollDebugBuffer();
+      viewportScrollToSpy.mockClear();
+
+      // 默认锚定最后一轮；Alt+↑ => 第二轮（offsetTop 400 - 16）
+      const upEvent = pressWindowKey({ key: "ArrowUp", altKey: true });
+      await nextTick();
+      expect(upEvent.defaultPrevented).toBe(true);
+      expect(viewportScrollToSpy).toHaveBeenLastCalledWith({
+        top: 400 - 16,
+        behavior: "smooth"
+      });
+      expect(latestScrollDebugEvent("keyboard-nav:turn")).toMatchObject({
+        direction: "prev",
+        toTurnId: "turn-2",
+        toIndex: 1
+      });
+
+      // 当前已锚定第二轮；Alt+↓ => 第三轮（offsetTop 800 - 16）
+      viewportScrollToSpy.mockClear();
+      const downEvent = pressWindowKey({ key: "ArrowDown", altKey: true });
+      await nextTick();
+      expect(downEvent.defaultPrevented).toBe(true);
+      expect(viewportScrollToSpy).toHaveBeenLastCalledWith({
+        top: 800 - 16,
+        behavior: "smooth"
+      });
+      expect(latestScrollDebugEvent("keyboard-nav:turn")).toMatchObject({
+        direction: "next",
+        toTurnId: "turn-3",
+        toIndex: 2
+      });
+    });
+
+    it("旧的 Ctrl+Home 不再触发自定义滚动（已改用 Ctrl+T）", async () => {
+      patchThreeTurns();
+      mountWorkspace();
+      await nextTick();
+      await advanceAnimationFrames(3);
+      resetScrollDebugBuffer();
+      viewportScrollToSpy.mockClear();
+
+      const event = pressWindowKey({ key: "Home", ctrlKey: true });
+      await nextTick();
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(viewportScrollToSpy).not.toHaveBeenCalled();
+      expect(latestScrollDebugEvent("keyboard-nav:scroll-to-top")).toBeUndefined();
+    });
+  });
 });

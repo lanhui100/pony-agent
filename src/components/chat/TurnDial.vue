@@ -70,6 +70,9 @@ watch(activeIndex, (newIdx) => {
     if (!scroller) return;
     const tickEl = scroller.querySelector(`[data-turn-index="${newIdx}"]`) as HTMLElement | null;
     if (!tickEl) return;
+    // 非浏览器环境（jsdom/单测）下 Element.scrollTo 可能不存在，缺少时静默跳过，
+    // 避免键盘/按钮切换激活轮时抛出未捕获 rejection。
+    if (typeof scroller.scrollTo !== "function") return;
     const offset = tickEl.offsetTop - scroller.clientHeight / 2 + tickEl.clientHeight / 2;
     scroller.scrollTo({
       top: Math.max(0, offset),

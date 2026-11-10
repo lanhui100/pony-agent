@@ -122,18 +122,88 @@ const lastTrustedTraceTimelineByTurnId = new Map<string, TraceTimelineEntry[]>()
 
 const activeTurnIdForDial = ref<string | null>(null);
 
-function handleSelectDialTurn(turnId: string) {
+/**
+ * 收集时间线里已渲染的轮次节点（按 DOM 顺序 = 会话顺序）。
+ * 优先从内容列取（真实视口与单测视口都能覆盖到），退化到滚动视口。
+ */
+function getTimelineTurnElements(): HTMLElement[] {
+  const root = workspaceContentColumnRef.value ?? resolveTimelineViewport();
+  if (!root) {
+    return [];
+  }
+  return Array.from(root.querySelectorAll<HTMLElement>("[data-turn-id]"));
+}
+
+/** 把视口平滑滚动到指定轮次节点，并同步拨盘激活轮。 */
+function scrollToTurnElement(targetTurnEl: HTMLElement) {
   const viewport = resolveTimelineViewport();
   if (!viewport) return;
-  const targetTurnEl = viewport.querySelector(`[data-turn-id="${turnId}"]`) as HTMLElement | null;
-  if (!targetTurnEl) return;
 
-  activeTurnIdForDial.value = turnId;
+  const turnId = targetTurnEl.getAttribute("data-turn-id");
+  if (turnId) {
+    activeTurnIdForDial.value = turnId;
+  }
   const targetTop = targetTurnEl.offsetTop - 16;
   viewport.scrollTo({
     top: Math.max(0, targetTop),
     behavior: "smooth"
   });
+}
+
+function handleSelectDialTurn(turnId: string) {
+  const targetTurnEl = getTimelineTurnElements().find(
+    (el) => el.getAttribute("data-turn-id") === turnId
+  );
+  if (!targetTurnEl) return;
+  scrollToTurnElement(targetTurnEl);
+}
+
+/** Alt+↑ / Alt+↓：在相邻轮次之间跳转（首尾夹取，不越界）。 */
+function handleNavigateTurn(direction: -1 | 1) {
+  const turnElements = getTimelineTurnElements();
+  if (turnElements.length === 0) return;
+
+  const currentId = activeTurnIdForDial.value;
+  let currentIndex = currentId
+    ? turnElements.findIndex((el) => el.getAttribute("data-turn-id") === currentId)
+    : turnElements.length - 1;
+  if (currentIndex < 0) {
+    currentIndex = turnElements.length - 1;
+  }
+
+  const targetIndex = Math.min(
+    turnElements.length - 1,
+    Math.max(0, currentIndex + direction)
+  );
+  const targetTurnEl = turnElements[targetIndex];
+  if (!targetTurnEl) return;
+
+  scrollToTurnElement(targetTurnEl);
+  emitTimelineScrollDebug("keyboard-nav:turn", {
+    direction: direction < 0 ? "prev" : "next",
+    fromTurnId: currentId ?? null,
+    toTurnId: targetTurnEl.getAttribute("data-turn-id"),
+    fromIndex: currentIndex,
+    toIndex: targetIndex,
+    turnCount: turnElements.length
+  });
+}
+
+/** Ctrl/Cmd+T：平滑滚动到会话顶部（滚动事件会视为用户意图，暂停自动跟随）。 */
+function handleTimelineScrollToTop() {
+  const viewport = resolveTimelineViewport();
+  if (!viewport) return;
+  viewport.scrollTo({ top: 0, behavior: "smooth" });
+  emitTimelineScrollDebug("keyboard-nav:scroll-to-top");
+}
+
+/**
+ * Ctrl/Cmd+B：复用“滚动到最新”的既有收口（清未读 + 恢复自动跟随），
+ * 不另起一套到底逻辑，保证与按钮行为单一真源。
+ */
+function handleTimelineScrollToBottom() {
+  emitTimelineScrollDebug("keyboard-nav:scroll-to-bottom");
+  handleScrollToBottom();
 }
 
 function updateActiveTurnFromViewport() {
@@ -1603,6 +1673,41 @@ function handleWindowKeydown(event: KeyboardEvent) {
     event.preventDefault();
     runtimeStore.toggleQueueDeliveryMode();
     return;
+  }
+
+  // 会话时间线快速导航（组合键同时可作为「用户滚动意图」，由滚动事件接管自动跟随）：
+  //   Ctrl/Cmd+T：滚动到会话顶部；Ctrl/Cmd+B：滚动到会话底部（最新）；
+  //   Alt+↑：跳到上一轮；Alt+↓：跳到下一轮。
+  // IME 组合态（isComposing / keyCode 229）不参与，避免吞掉候选词输入。
+  if (!event.isComposing && event.keyCode !== 229) {
+    const hasPrimaryModifier = event.ctrlKey || event.metaKey;
+
+    if (hasPrimaryModifier && !event.altKey && !event.shiftKey) {
+      const key = event.key.toLowerCase();
+      if (key === "t") {
+        event.preventDefault();
+        handleTimelineScrollToTop();
+        return;
+      }
+      if (key === "b") {
+        event.preventDefault();
+        handleTimelineScrollToBottom();
+        return;
+      }
+    }
+
+    if (event.altKey && !hasPrimaryModifier && !event.shiftKey) {
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        handleNavigateTurn(-1);
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        handleNavigateTurn(1);
+        return;
+      }
+    }
   }
 }
 
