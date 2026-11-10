@@ -84,10 +84,19 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+/// 读一个完整 HTTP/1.1 请求（头 + `Content-Length` 正文），返回原始字节。
+///
+/// `budget` 是整个读取（含正文）的硬截止：调用方按自己的容忍度给（OTLP sink 秒级，
+/// provider 假服务给足正文用量）。
+///
+/// B043：只读到 `\r\n\r\n` 就停会把未读正文留在内核，服务端随即 close ⇒ 客户端仍在写正文时
+/// 连接被关。CI 日志（run 42764566715，Windows）物证：客户端 `type=request`
+/// `client error (SendRequest)`（**不是** `connect`）、elapsed 1–2ms、请求体 27856 字节，5+5
+/// 次重试全败。故这里以 `expected_total` 对齐到正文结束，读满再回写。
+fn read_http_request(stream: &mut TcpStream, budget: Duration) -> Vec<u8> {
     let mut raw: Vec<u8> = Vec::new();
     let mut buffer = [0u8; 4096];
-    let deadline = Instant::now() + Duration::from_millis(1_000);
+    let deadline = Instant::now() + budget;
     let mut expected_total: Option<usize> = None;
 
     while Instant::now() < deadline {
@@ -150,7 +159,7 @@ fn spawn_otlp_sink(budget: Duration) -> (u16, JoinHandle<Vec<CapturedRequest>>) 
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-                    let raw = read_http_request(&mut stream);
+                    let raw = read_http_request(&mut stream, Duration::from_millis(1_000));
                     let _ = stream.write_all(
                         b"HTTP/1.1 200 OK\r\ncontent-type: application/x-protobuf\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                     );
@@ -1515,9 +1524,46 @@ impl ToolExecutor for TestNoopExecutor {
     }
 }
 
-/// 启动一个按顺序返回预设响应的 HTTP 回环服务
-fn spawn_sequential_http_server(responses: Vec<String>) -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>, JoinHandle<()>) {
-    use std::sync::atomic::AtomicBool;
+/// 请求语义指纹：`messages` 中 `role == "tool"`（工具结果回填）的条数。
+/// 0＝initial 决策轮，1＝第 1 次 followup（纯工具调用），2＝第 2 次 followup（最终回答）。
+///
+/// 返回 `None` ⇒ 请求体不是完整 JSON（正文被截断 / 非预期请求）：调用方不回写响应，
+/// 用例会以「无 turn:completed + 请求指纹缺失」失败，而不是被误判成健康的 0 指纹。
+fn tool_result_message_count(request: &[u8]) -> Option<usize> {
+    let header_end = find_subslice(request, b"\r\n\r\n")?;
+    let body: serde_json::Value = serde_json::from_slice(&request[header_end + 4..]).ok()?;
+    let messages = body.get("messages")?.as_array()?;
+    Some(
+        messages
+            .iter()
+            .filter(|message| {
+                message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+            })
+            .count(),
+    )
+}
+
+/// 排空入站残余字节：半关闭写端后再读干净，避免带未读数据 close 触发 RST。
+fn drain_incoming(stream: &mut TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    let mut chunk = [0u8; 4096];
+    while matches!(stream.read(&mut chunk), Ok(read) if read > 0) {}
+}
+
+/// 启动一个按**请求语义**返回预设 SSE 响应的 HTTP 回环服务。
+///
+/// `responses`：`(tool 结果条数, 原始 HTTP 响应)`；按请求里的 tool 结果条数选取，**与连接次序
+/// 无关** ⇒ 客户端重试拿到同一条响应。
+///
+/// 次序无关是**结构性**加固而非 B043 的失败因果：CI 日志显示 attempt=1/5 已在 send 阶段失败、
+/// 从未读到过任何响应，所以「顺序响应被重试吃乱」只是隐患，不是本次根因（根因见
+/// [`read_http_request`]。此处的语义选取保证以后真出现瞬时重试时不会连坐后续轮次。
+///
+/// 请求被**完整**消费后才回写，回写后 `shutdown(Write)` 并排空入站残余（[`drain_incoming`]），
+/// 给客户端干净的 EOF 而不是带未读数据的 close。
+fn spawn_request_keyed_http_server(
+    responses: Vec<(usize, String)>,
+) -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
     let port = listener.local_addr().expect("local addr").port();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1526,36 +1572,32 @@ fn spawn_sequential_http_server(responses: Vec<String>) -> (u16, Arc<Mutex<Vec<S
     let shutdown_clone = Arc::clone(&shutdown);
 
     let handle = std::thread::spawn(move || {
-        let mut resp_iter = responses.into_iter();
         while !shutdown_clone.load(std::sync::atomic::Ordering::SeqCst) {
-            let _ = listener.set_nonblocking(false);
             let Ok((mut stream, _)) = listener.accept() else {
                 break;
             };
-            let mut req_buffer = Vec::new();
-            let mut chunk = [0u8; 4096];
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        req_buffer.extend_from_slice(&chunk[..n]);
-                        if req_buffer.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+            // 正文预算 10s：Windows runner 慢，但请求本身只有几十 KB。
+            let raw = read_http_request(&mut stream, Duration::from_secs(10));
+            if raw.is_empty() {
+                // 空连接＝用例收尾的唤醒连接，不是请求。
+                continue;
             }
             requests_clone
                 .lock()
                 .unwrap()
-                .push(String::from_utf8_lossy(&req_buffer).to_string());
+                .push(String::from_utf8_lossy(&raw).to_string());
 
-            if let Some(resp) = resp_iter.next() {
-                let _ = stream.write_all(resp.as_bytes());
+            let fingerprint = tool_result_message_count(&raw);
+            if let Some((_, response)) = responses
+                .iter()
+                .find(|(tool_results, _)| Some(*tool_results) == fingerprint)
+            {
+                let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
             }
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            drain_incoming(&mut stream);
         }
     });
 
@@ -1590,7 +1632,12 @@ fn followup_stream_pure_tool_call_records_first_token_latency() {
         + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":5,\"total_tokens\":35}}\n\n"
         + "data: [DONE]\n\n";
 
-    let (port, _reqs, shutdown, handle) = spawn_sequential_http_server(vec![initial_sse, followup_sse, final_sse]);
+    // 按请求语义装载：tool 结果条数 0/1/2 分别对应 initial / 第 1 次 followup / 第 2 次 followup。
+    let (port, requests, shutdown, handle) = spawn_request_keyed_http_server(vec![
+        (0, initial_sse),
+        (1, followup_sse),
+        (2, final_sse),
+    ]);
 
     let selection = ResolvedProviderSelection {
         requested_name: "test-openai".to_string(),
@@ -1656,15 +1703,53 @@ fn followup_stream_pure_tool_call_records_first_token_latency() {
     let _ = std::fs::remove_file(&temp_file);
 
     let events = sink.events.lock().unwrap();
-    let completed = events
+    let event_names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+    // 失败时给出物证：事件序列 + turn:failed 的错误文本 + 实际到达的请求指纹，
+    // 不用「turn:completed 缺失」这一句把根因（provider 请求在 send 阶段失败）吞掉。
+    let Some(completed) = events
         .iter()
-        .find_map(|(name, payload)| (name == "turn:completed").then_some(payload.clone()))
-        .expect("turn:completed event must be emitted");
+        .find_map(|(name, payload)| (name == "turn:completed").then_some(payload))
+    else {
+        let failure_error = events
+            .iter()
+            .find_map(|(name, payload)| (name == "turn:failed").then_some(&payload.error))
+            .map(|error| format!("{error:?}"))
+            .unwrap_or_else(|| "无 turn:failed 事件".to_string());
+        let fingerprints: Vec<Option<usize>> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| tool_result_message_count(request.as_bytes()))
+            .collect();
+        panic!(
+            "turn:completed event must be emitted；事件序列={event_names:?}；turn:failed.error={failure_error}；实际请求指纹={fingerprints:?}"
+        );
+    };
 
     let provider_calls = completed
         .provider_call_records
         .as_ref()
         .expect("provider_call_records must exist");
+
+    // 物证：initial / 第 1 次 followup / 第 2 次 followup 三轮请求都真实到达过假服务（指纹 0/1/2）。
+    // 允许指纹重复——重试已被请求语义吸收（重试拿到同一条响应），不再污染后续轮次；
+    // 但三轮语义必须齐全，否则说明请求映射失效、用例跑的不是它声称验证的链路。
+    let mut served_fingerprints: Vec<Option<usize>> = Vec::new();
+    for fingerprint in requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| tool_result_message_count(request.as_bytes()))
+    {
+        if !served_fingerprints.contains(&fingerprint) {
+            served_fingerprints.push(fingerprint);
+        }
+    }
+    assert_eq!(
+        served_fingerprints,
+        vec![Some(0), Some(1), Some(2)],
+        "三轮 provider 请求（tool 结果指纹 0/1/2）必须都到达过假服务；缺任何一轮即链路不完整"
+    );
 
     // 应该有 3 次 provider call：initial 决策 + 第 1 次 followup(纯工具) + 第 2 次 followup(最终回答)
     assert_eq!(provider_calls.len(), 3, "expected 3 provider call records");
