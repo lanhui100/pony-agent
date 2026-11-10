@@ -6,7 +6,7 @@
 
 ## 待办
 
-- [ ] `B0xx` - P1: Windows CI 四个 write_separate 用例失败（reload 后 turn_trace_history 计数/event_id 不符）
+- [x] `B0xx` - P1: Windows CI 四个 write_separate 用例失败（reload 后 turn_trace_history 计数/event_id 不符）
   - 路径：`crates/pony-agent-core/src/agent/{sqlite_session.rs,session/log_sink.rs,session/store.rs}`
   - 现象（CI run 42739179126，Windows）：`node_materialize_uses_full_table_not_top_level_filtered_subset`、
     `session_store_write_separate_hot_path_keeps_trace_rows_across_reload`、
@@ -16,7 +16,16 @@
   - 初判：Windows 临时目录为 8.3 短路径（`C:\Users\RUNNER~1\...`），会话日志根由 `db_path.parent()` 派生、
     而 cwd 分组由 `current_dir()` 派生，短/长路径两种字符串形式可能指向**同目录的两份日志** ⇒ 物化重复或跨分组读空。
     另需复核 0106 `startup_repair_deferred` 在 Windows 的 reasons 分支（日志见 `workspace_bootstrap,history_graph`）。
-  - 验收：同四个用例在 windows-latest CI 全绿；Linux 不回归；`--lib` 仍全绿。
+  - 修复（2026-11-10，已随 CI 验证通过）：Windows `LockFileEx` 是**强制**锁，第一个 store 持日志写者锁时第二个 store reload 读日志被拒 ⇒ 先在 reload 前释放写者（`SessionBackend::release_log_writers_for_test` 测试钩子）。
+  - 验收：四个用例在 windows-latest CI 全绿。
+
+- [ ] `B0xx` - P1: Windows CI `jobs::tests::promoted_job_releases_manager_entry_after_natural_exit` 输出竞态
+  - 路径：`crates/pony-agent-core/src/agent/jobs.rs`
+  - 现象（CI run @8feb744a，Windows）：`jobs.rs:1091` 断言 `回收不得影响已读输出，实际 output=""`；
+    用例已有 2s 有界重试仍空。Linux 全绿。
+  - 初判：`job_output(wait:true)` 在 Windows 上于「进程已退出、stdout 管道未排空」时返回空，
+    随后 manager 条目按终态被回收，重试路径（`offset=0`）拿到空 ⇒ 读不到已产出的 "done"。
+  - 验收：该用例在 windows-latest 稳定全绿（建议多跑 3 次防 flake）；Linux 不回归。
 - [x] `B019` - P1: T1 工具面单一真值闭合与外部工具通道（ADR 0065，W1）
   - 路径：`crates/pony-agent-core/src/agent/{tools.rs,dispatcher.rs,governed_executor.rs,provider/mod.rs}`
   - 描述：execute_internal 分派表化、`swap_tool_surface` 原子换入、拆 `is_builtin_tool_definition_set`、修只读模式按名嗅探漏洞、`ToolProvider` + `ExternalToolHandler`。
