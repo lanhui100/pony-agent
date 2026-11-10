@@ -1016,16 +1016,38 @@ mod tests {
     }
 
     /// 轮询进程直到终态（或超时），返回终态那次 poll 的结果（含最后一段输出）。
+    /// 轮询到进程退出，**累积**每次 poll 的输出（`manager.poll` 每次都会排空缓冲区）。
+    ///
+    /// 为什么必须累积：`poll` 是「取走」语义——若某次 poll 看到 `Running`（进程还没退出）
+    /// 但它已经把此前的 stdout 排空返回，那么丢弃这次结果就等于**丢输出**。旧实现在这里
+    /// 直接丢弃中间结果，只在「恰好由终态那次 poll 拿到输出」时才正确；Linux 上时序通常如此，
+    /// Windows CI 上 `cmd /C echo done` 更快，输出被一次 `Running` 的 poll 取走 ⇒ 断言
+    /// `output=""` 失败（jobs.rs:1091）。
     fn poll_until_exited(
         manager: &ProcessManager,
         session_id: &str,
         handle: &str,
     ) -> Option<ProcessPollResult> {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut stdout_truncated = false;
+        let mut stderr_truncated = false;
         while Instant::now() < deadline {
             let result = manager.poll(session_id, handle).expect("poll must succeed");
+            stdout.push_str(&result.stdout);
+            stderr.push_str(&result.stderr);
+            stdout_truncated |= result.stdout_truncated;
+            stderr_truncated |= result.stderr_truncated;
             if result.state == ProcessState::Exited {
-                return Some(result);
+                return Some(ProcessPollResult {
+                    state: result.state,
+                    exit_code: result.exit_code,
+                    stdout,
+                    stderr,
+                    stdout_truncated,
+                    stderr_truncated,
+                });
             }
             std::thread::sleep(Duration::from_millis(10));
         }
