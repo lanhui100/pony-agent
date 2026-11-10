@@ -1,6 +1,8 @@
 //! web 抓取/搜索与 pinned 连接（重定向链、预算、时间戳重试、真实 socket 自证）。
 use super::*;
 
+use crate::agent::tools::web::{exa_error_message, exa_search_result_items};
+
 #[test]
 fn web_fetch_rejects_non_http_urls() {
     let workspace = temp_workspace();
@@ -166,6 +168,53 @@ fn exa_search_request_body_matches_recommended_shape() {
     assert!(body.get("type").is_none(), "不得显式发送 type");
     assert!(body.get("numResults").is_none(), "不得发送 numResults");
     assert!(body.get("category").is_none(), "不得发送 category");
+}
+
+#[test]
+fn exa_search_result_items_keep_all_highlights_and_published_date() {
+    // 技能要求：工具结果返回 `highlights`（而非整页 `text`），并保留每条结果天然携带的
+    // `title` / `url` / `publishedDate`；缺字段降级为空值。
+    let parsed = json!({
+        "requestId": "req-1",
+        "results": [
+            {
+                "title": "Rust API docs",
+                "url": "https://docs.example.com/rust",
+                "publishedDate": "2026-01-02T00:00:00.000Z",
+                "score": 0.91,
+                "highlights": ["第一条摘录", "第二条摘录"]
+            },
+            { "url": "https://docs.example.com/partial" }
+        ]
+    });
+
+    let items = exa_search_result_items(&parsed);
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["title"], json!("Rust API docs"));
+    assert_eq!(items[0]["url"], json!("https://docs.example.com/rust"));
+    assert_eq!(items[0]["publishedDate"], json!("2026-01-02T00:00:00.000Z"));
+    assert_eq!(
+        items[0]["highlights"],
+        json!(["第一条摘录", "第二条摘录"]),
+        "全部 highlights 必须保留，不得只留首条"
+    );
+    assert!(items[0].get("text").is_none(), "不得把整页 text 塞进工具结果");
+    assert_eq!(items[1]["title"], json!(""));
+    assert_eq!(items[1]["highlights"], json!([]));
+    assert_eq!(items[1]["score"], json!(0.0));
+}
+
+#[test]
+fn exa_error_message_accepts_string_and_object_shapes() {
+    assert_eq!(
+        exa_error_message(&json!({ "error": "Invalid API key", "tag": "INVALID_API_KEY" })),
+        "Invalid API key"
+    );
+    assert_eq!(
+        exa_error_message(&json!({ "error": { "message": "Bad request" } })),
+        "Bad request"
+    );
+    assert_eq!(exa_error_message(&json!({ "unexpected": true })), "未知错误");
 }
 
 #[test]

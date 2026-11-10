@@ -241,7 +241,11 @@ wins.
   `query` + required `objective` + `contents.highlights`, leaving `type`/`numResults`
   to server defaults (build-with-exa skill: every field except `objective` is gated by
   an explicit task requirement). Missing/blank `objective` fails closed as
-  `missing_argument` / `empty_objective`.
+  `missing_argument` / `empty_objective`. The tool result keeps the skill's
+  token-efficient shape: `title`/`url`/`publishedDate` plus the full `highlights`
+  array per hit and never full page `text`; the legacy single-`snippet` projection is
+  gone. Exa error payloads are read from either `{"error": "..."}` or
+  `{"error": {"message": "..."}}`.
 - `search.rs`: `SearchEngine` replaces the wildcard pseudo-regex and the
   unstable first-N-files traversal with real `regex`, `globset`, and `ignore`
   semantics. `workspace_search_text` and `workspace_glob_files` use it, produce

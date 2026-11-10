@@ -176,6 +176,14 @@
   不再显式发送 `type`/`numResults`（`type` 默认 auto，`numResults` 默认 10），也不再把 `limit` 映射成
   `numResults`。`timeoutMs` 仍是本地传输超时，非 Exa 字段。
 - 请求体由纯函数 `exa_search_request_body(query, objective)` 生成，便于离线断言形态而不触网。
+- 结果映射由纯函数 `exa_search_result_items(response)` 生成：每条结果回 `title` / `url` /
+  `publishedDate` / `highlights`（全量数组）/ `score`，不把整页 `text` 塞进工具结果（技能要求“返回
+  highlights 而非 text”以压低工具结果 token）。旧的 `snippet`（只取首条 highlight 的投影）已移除；
+  `title`/`url`/`publishedDate` 是每条结果天然携带的可用性元数据，缺失时降级为空串而不是报错。
+- Exa 错误体兼容两种形态：`{"error":"..."}` 与 `{"error":{"message":"..."}}`，由
+  `exa_error_message(response)` 统一读取，避免结构化错误被降级成「未知错误」。
+- 工具描述补“搜索实时网络 / 模型训练数据之外的新鲜信息”语义（技能建议的 “search the live web” 提示），
+  让模型在需要新鲜信息时优先选该工具。描述文本不参与冻结面签名（见下条），改动不需重算 golden。
 
 ### 前端展示契约
 

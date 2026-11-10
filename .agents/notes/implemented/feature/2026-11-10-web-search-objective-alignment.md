@@ -69,3 +69,43 @@ Status: implemented
 - `cargo test --manifest-path src-tauri/Cargo.toml --test tool_router_regression web_search`：1 passed。
 - `node scripts/check-file-size.mjs --baseline scripts/file-size-baseline.json`：`builtin_tools` 行数 1074 与 HEAD 持平
   （既有基线 1070 已陈旧，属存量债，本卡未新增）；`web_search` 仍在 200 行内。
+
+## Addendum（同日续：重读技能后的第二处收口）
+
+重读 `SKILL.md` 与 `references/prompting-and-patterns.md`、`references/search.md`、`references/common-mistakes.md`
+后，仍有四处未完全对齐，本次一并收口（依旧不新增端点）：
+
+1. **结果映射**（新增纯函数 `exa_search_result_items`）：技能 design tip 要求“返回 `highlights` 而非整页 `text`
+   以压低工具结果 token”，且 `/search` 每条结果天然携带 `title` / `url` / `publishedDate`。原实现只把
+   `highlights[0]` 投影成 `snippet`，其余摘录与发布日期全部丢弃。现改为
+   `title` / `url` / `publishedDate` / `highlights[]`（全量）/ `score`，移除 `snippet`。
+   仓库内无 `snippet` 消费方（`src/` 零命中；`telemetry.rs` 只做通用 JSON 摘要，不按字段取用），属无损替换。
+2. **工具描述**：技能建议描述出现 "search the live web ... fresh information beyond the model's training data"，
+   以便模型在需要新鲜信息时选该工具；`schema.rs` 与前端镜像 `src/lib/runtime/browser-preview.ts` 同步改写。
+3. **错误体**：原实现只读 `error.message`（对象形态）。Exa 也会返回 `{"error":"...","tag":"..."}` 字符串形态，
+   会被降级成「未知错误」。新增 `exa_error_message`，两种形态都读。
+4. **冻结面事实（只记录、不改）**：`tool_surface_singularity` 的签名仅覆盖
+   `(descriptor_id, model_name, kind, exposure, FNV(input_schema))`，**不含描述文本**。因此本轮改了描述但
+   golden 不变（实测 23 passed）。这也意味着描述漂移不会被该门禁拦住——已知缺口，扩展签名需一次性重算
+   45 条 golden，属独立卡，本轮不静默扩大改动面。
+
+## Alternatives considered（第二轮）
+
+1. **保留 `snippet` 并额外返回 `highlights`** — 否决：两者内容重复（`snippet` 恒等于 `highlights[0]`），
+   只会让工具结果 token 翻倍，与技能“压低 token”取向相反。
+2. **不返回 `publishedDate`** — 否决：技能明确把 `publishedDate` 列为每条结果天然携带的字段，
+   缺失会让模型无法判断“最新/近期”类需求是否被满足。
+3. **对 `objective` 按 4096 上限做本地校验** — 暂缓：技能只说明该字段上限，未要求客户端校验；
+   新增一条模型可见错误码属额外契约，等出现真实超长 `objective` 反馈再定。
+4. **顺手扩展冻结签名覆盖描述文本** — 否决（本轮）：需重算全部 45 条 golden，属独立卡；
+   本轮在 note 与 `docs/architecture/runtime.md` 明示该缺口即可。
+5. **为请求体/结果形态做真实 HTTP 抓包** — 沿用上轮结论：会新增 `EXA_API_BASE_URL` 之类环境契约与出网面，
+   继续用纯函数（`exa_search_request_body` / `exa_search_result_items` / `exa_error_message`）离线断言形态。
+
+## Evidence（第二轮）
+
+- `cargo test -p pony-agent-core --lib -- agent::tools::tests::web`：**40 passed**（含新增
+  `exa_search_result_items_keep_all_highlights_and_published_date`、`exa_error_message_accepts_string_and_object_shapes`）。
+- `cargo test -p pony-agent-core --test tool_surface_singularity`：**23 passed**（描述变更不影响 golden，见上文第 4 点）。
+- `node scripts/check-ts-contract.mjs`：通过；`node scripts/check-decisions.mjs`：117 篇一致。
+- `npx vitest run tests/runtime-store.spec.ts`：**119 passed**（前端镜像描述改动无回归）。

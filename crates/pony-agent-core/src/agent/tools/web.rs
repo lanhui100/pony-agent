@@ -271,11 +271,7 @@ impl ToolRouter {
         };
 
         if !status.is_success() {
-            let error_msg = parsed
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("未知错误");
+            let error_msg = exa_error_message(&parsed);
             return error_result(
                 TOOL_WEB_SEARCH_QUERY,
                 "api_error",
@@ -284,26 +280,7 @@ impl ToolRouter {
             );
         }
 
-        let results: Vec<Value> = parsed
-            .get("results")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .map(|r| {
-                        json!({
-                            "title": r.get("title").and_then(Value::as_str).unwrap_or(""),
-                            "url": r.get("url").and_then(Value::as_str).unwrap_or(""),
-                            "snippet": r.get("highlights")
-                                .and_then(Value::as_array)
-                                .and_then(|h| h.first())
-                                .and_then(Value::as_str)
-                                .unwrap_or(""),
-                            "score": r.get("score").and_then(Value::as_f64).unwrap_or(0.0),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let results = exa_search_result_items(&parsed);
 
         ToolResult {
             tool_name: TOOL_WEB_SEARCH_QUERY.to_string(),
@@ -336,6 +313,53 @@ pub(super) fn exa_search_request_body(query: &str, objective: &str) -> Value {
             "highlights": true
         }
     })
+}
+
+/// Exa `/search` 结果映射：技能要求「返回 `highlights` 而非整页 `text`」以压低工具结果 token，
+/// 同时保留每条结果天然携带的 `title` / `url` / `publishedDate`（时效与可用性判断依据）。
+/// 传入完整响应体（`{results:[...]}`）或单条结果数组均可表达；缺字段一律降级为空值而非 panic。
+pub(super) fn exa_search_result_items(parsed: &Value) -> Vec<Value> {
+    let items = parsed
+        .get("results")
+        .and_then(Value::as_array)
+        .or_else(|| parsed.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    items
+        .iter()
+        .map(|r| {
+            let highlights: Vec<&str> = r
+                .get("highlights")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            json!({
+                "title": r.get("title").and_then(Value::as_str).unwrap_or(""),
+                "url": r.get("url").and_then(Value::as_str).unwrap_or(""),
+                "publishedDate": r.get("publishedDate").and_then(Value::as_str).unwrap_or(""),
+                "highlights": highlights,
+                "score": r.get("score").and_then(Value::as_f64).unwrap_or(0.0),
+            })
+        })
+        .collect()
+}
+
+/// Exa 错误体没有单一公开形态：`/search` 可能返回 `{"error":"..."}`，
+/// 也可能返回 `{"error":{"message":"..."}}`；两者都读，避免把结构化错误降级成「未知错误」。
+pub(super) fn exa_error_message(parsed: &Value) -> String {
+    match parsed.get("error") {
+        Some(Value::String(message)) => message.clone(),
+        Some(error) => error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("未知错误")
+            .to_string(),
+        None => parsed
+            .as_str()
+            .unwrap_or("未知错误")
+            .to_string(),
+    }
 }
 
 pub(super) fn build_web_client(timeout_ms: u64) -> Result<Client, String> {

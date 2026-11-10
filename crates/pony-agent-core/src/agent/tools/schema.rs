@@ -274,7 +274,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_WEB_SEARCH_QUERY,
-            description: "执行外部搜索并返回结构化结果列表，不把抓取和搜索混为一个工具；每次调用必须同时给出 query 与 objective（本轮搜索目标）。",
+            description: "搜索实时网络（live web）并返回最相关的 URL 与 highlights 摘录，用于获取模型训练数据之外的新鲜信息；不把抓取和搜索混为一个工具；每次调用必须同时给出 query 与 objective（本轮搜索目标）。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
