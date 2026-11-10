@@ -2416,6 +2416,12 @@ impl SessionStore {
     }
 
     /// PA-095：后端是否具备事件持久化能力（Memory/File 为 false）。
+    /// 仅测试用：释放后端日志写者（详见 `SessionBackend::release_log_writers_for_test`）。
+    #[cfg(test)]
+    pub(crate) fn release_log_writers_for_test(&self) {
+        self.backend.release_log_writers_for_test();
+    }
+
     pub fn supports_turn_events(&self) -> bool {
         self.backend.supports_turn_events()
     }

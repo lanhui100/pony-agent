@@ -556,6 +556,20 @@ mod ask_resume_fallback_tests {
             "指定的 run 不可续时必须回落到通用入口并返回 Ok，实际 = {outcome:?}"
         );
         let names = sink.names();
+        eprintln!("OBSERVE_EVENTS = {names:?}");
+        let runs = {
+            let graph_runs = control_plane
+                .graph_runs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            graph_runs.list_runs()
+        };
+        eprintln!(
+            "OBSERVE_RUNS = {:?}",
+            runs.iter()
+                .map(|run| (run.id.clone(), run.session_id.clone(), format!("{:?}", run.phase)))
+                .collect::<Vec<_>>()
+        );
         assert!(
             !names.is_empty(),
             "回落路径必须真的执行了一轮并派发事件（否则 fallback 是死代码），实际 = {names:?}"

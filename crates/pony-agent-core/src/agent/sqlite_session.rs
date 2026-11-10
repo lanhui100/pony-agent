@@ -2831,6 +2831,11 @@ impl SessionBackend for SqliteSessionBackend {
         outcome
     }
 
+    #[cfg(test)]
+    fn release_log_writers_for_test(&self) {
+        self.session_log_sink.release_writers_for_test();
+    }
+
     fn trace_storage_mode(&self) -> SeparateTraceTableMode {
         self.trace_mode
     }
@@ -4073,6 +4078,8 @@ mod tests {
             db_path,
             SeparateTraceTableMode::WriteSeparate,
         ));
+        // Windows: 先释放日志写者（LockFileEx 强制锁会挡住第二个 store 的日志读取）。
+        store.release_log_writers_for_test();
         let mut reloaded = SessionStore::with_backend(reloaded_backend);
         let snapshot = reloaded.snapshot(Some("s1"), &[]);
 
@@ -4242,6 +4249,8 @@ mod tests {
             db_path.clone(),
             SeparateTraceTableMode::WriteSeparate,
         ));
+        // Windows: 先释放日志写者（LockFileEx 强制锁会挡住第二个 store 的日志读取）。
+        store.release_log_writers_for_test();
         let mut reloaded_main = SessionStore::with_backend(reloaded_main_backend);
         let main_snapshot = reloaded_main.snapshot(Some("switch-session"), &[]);
         assert_eq!(
@@ -4353,6 +4362,8 @@ mod tests {
             db_path,
             SeparateTraceTableMode::WriteSeparate,
         ));
+        // Windows: 先释放日志写者（LockFileEx 强制锁会挡住第二个 store 的日志读取）。
+        store.release_log_writers_for_test();
         let mut reloaded = SessionStore::with_backend(reloaded_backend);
         let snapshot = reloaded.snapshot(Some("s1"), &[]);
         assert_eq!(snapshot.turn_trace_history.len(), 1);
@@ -4621,6 +4632,8 @@ mod tests {
             db_path.clone(),
             SeparateTraceTableMode::WriteSeparate,
         ));
+        // Windows: 先释放日志写者（LockFileEx 强制锁会挡住第二个 store 的日志读取）。
+        store.release_log_writers_for_test();
         let mut reloaded = SessionStore::with_backend(reloaded_backend);
         let snapshot = reloaded.snapshot(Some("s1"), &[]);
 
