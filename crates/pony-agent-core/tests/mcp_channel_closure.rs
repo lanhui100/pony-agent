@@ -786,6 +786,8 @@ fn t2_shutdown_reclaims_the_child_process() {
             observed_exit = true;
             break;
         }
+        // 只有 linux 会走到这里；显式 cfg 以免非 linux 目标的 `-D warnings` 报 unreachable。
+        #[cfg(target_os = "linux")]
         std::thread::sleep(Duration::from_millis(20));
     }
 
