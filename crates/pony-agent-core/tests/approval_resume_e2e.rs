@@ -787,10 +787,16 @@ fn t2_approval_then_authorized_continuation_turn_completes_the_read() {
             offset + 2
         );
     }
+    // Windows：请求体是 JSON，路径里的 `\` 会被转义成 `\\`；必须按**转义后**的形态比对，
+    // 否则断言在 Windows 上恒假（Linux 路径无反斜杠，故此前只在 Windows CI 暴露）。
+    let outside_path_json = serde_json::to_string(&outside_path)
+        .expect("encode outside path")
+        .trim_matches('"')
+        .to_string();
     assert!(
         continuation_bodies
             .iter()
-            .any(|body| body.contains(&outside_path)),
+            .any(|body| body.contains(&outside_path_json)),
         "T2（C5）：续轮必须重新发起同一越界 Read（请求体必须包含路径 `{outside_path}`），实际 = {continuation_bodies:?}"
     );
 }
