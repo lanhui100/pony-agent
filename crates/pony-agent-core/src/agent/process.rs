@@ -57,13 +57,7 @@ pub(crate) fn hide_console_window(command: &mut Command) {
 /// Default per-stream output cap (64 KiB).
 const DEFAULT_BUFFER_CAP: usize = 64 * 1024;
 /// How long `poll` waits for drain threads to flush after the child has exited.
-///
-/// Windows CI（`jobs::tests::promoted_job_releases_manager_entry_after_natural_exit`）实测：
-/// 子进程退出后读线程看到管道 EOF 可能需要数百毫秒（runner 负载 + `LockFileEx`/线程调度），
-/// 500ms 预算下偶发「poll 先返回 Exited、输出仍为空」，调用方随后回收条目 ⇒ **已产出的输出被丢**。
-/// 这里放宽到 2s：只在「已退出但读线程未完成」这一窄路径上等待，正常路径读线程立即 done，
-/// 不产生额外延迟。
-const DRAIN_SETTLE_MAX: Duration = Duration::from_millis(2_000);
+const DRAIN_SETTLE_MAX: Duration = Duration::from_millis(500);
 /// Best-effort reap budget after `kill` (30 × 10 ms = 300 ms).
 const KILL_REAP_ATTEMPTS: u32 = 30;
 const KILL_REAP_INTERVAL: Duration = Duration::from_millis(10);
