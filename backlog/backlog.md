@@ -19,13 +19,24 @@
   - 修复（2026-11-10，已随 CI 验证通过）：Windows `LockFileEx` 是**强制**锁，第一个 store 持日志写者锁时第二个 store reload 读日志被拒 ⇒ 先在 reload 前释放写者（`SessionBackend::release_log_writers_for_test` 测试钩子）。
   - 验收：四个用例在 windows-latest CI 全绿。
 
-- [ ] `B0xx` - P1: Windows CI `jobs::tests::promoted_job_releases_manager_entry_after_natural_exit` 输出竞态
+- [x] `B0xx` - P1: Windows CI `jobs::tests::promoted_job_releases_manager_entry_after_natural_exit` 输出竞态
   - 路径：`crates/pony-agent-core/src/agent/jobs.rs`
   - 现象（CI run @8feb744a，Windows）：`jobs.rs:1091` 断言 `回收不得影响已读输出，实际 output=""`；
     用例已有 2s 有界重试仍空。Linux 全绿。
   - 初判：`job_output(wait:true)` 在 Windows 上于「进程已退出、stdout 管道未排空」时返回空，
     随后 manager 条目按终态被回收，重试路径（`offset=0`）拿到空 ⇒ 读不到已产出的 "done"。
-  - 验收：该用例在 windows-latest 稳定全绿（建议多跑 3 次防 flake）；Linux 不回归。
+  - **根因（已修，CI 验证通过）**：`jobs.rs::poll_until_exited` 轮询时**丢弃**了中间结果，而
+    `ProcessManager::poll` 是「取走」语义（每次排空缓冲区）⇒ 若输出被一次 `Running` 的 poll 取走，
+    终态 poll 就只能拿到空串。修复：跨 poll **累积** stdout/stderr。同时撤销了一次未被验证的
+    `DRAIN_SETTLE_MAX` 500→2000ms 改动（纪律：不用未验证的改动充数）。
+  - 验收：该用例 windows-latest 全绿（run 932a1837 通过）。
+
+- [ ] `B0xx` - P1: Windows CI `observability_reporting_fixes_test::followup_stream_pure_tool_call_records_first_token_latency` 偶发无 `turn:completed`
+  - 路径：`crates/pony-agent-core/tests/observability_reporting_fixes_test.rs:1662`
+  - 现象：`turn:completed event must be emitted` 的 `expect` 失败（Windows runner 上偶发）；Linux 全绿。
+  - 初判：内置 TcpListener 假 provider + `shutdown` 协同的时序窗，属**既有 flake**（该文件属
+    observability 线，非本轮 ADR 0107 改动面）。
+  - 验收：windows-latest 连跑 ≥3 次稳定通过，或改为确定性同步（去掉 sleep/连接唤醒的不确定性）。
 - [x] `B019` - P1: T1 工具面单一真值闭合与外部工具通道（ADR 0065，W1）
   - 路径：`crates/pony-agent-core/src/agent/{tools.rs,dispatcher.rs,governed_executor.rs,provider/mod.rs}`
   - 描述：execute_internal 分派表化、`swap_tool_surface` 原子换入、拆 `is_builtin_tool_definition_set`、修只读模式按名嗅探漏洞、`ToolProvider` + `ExternalToolHandler`。
