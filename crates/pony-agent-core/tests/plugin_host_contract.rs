@@ -284,6 +284,9 @@ fn t3_fixture_plugin_runs_spawn_initialize_call_shutdown_lifecycle() {
     // Act — shutdown
     let pid = supervisor.child_pid().expect("已 initialize 的插件必须有子进程 pid");
     supervisor.shutdown().expect("shutdown 必须成功");
+    // 非 linux 没有 /proc 可轮询；显式消费 pid，避免 `-D warnings` 的 unused_variables。
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
 
     // Assert — shutdown 后进程必须被回收（有界轮询 /proc，非裸 sleep）
     #[cfg(target_os = "linux")]
