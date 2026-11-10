@@ -787,17 +787,21 @@ fn t2_approval_then_authorized_continuation_turn_completes_the_read() {
             offset + 2
         );
     }
-    // Windows：请求体是 JSON，路径里的 `\` 会被转义成 `\\`；必须按**转义后**的形态比对，
-    // 否则断言在 Windows 上恒假（Linux 路径无反斜杠，故此前只在 Windows CI 暴露）。
-    let outside_path_json = serde_json::to_string(&outside_path)
-        .expect("encode outside path")
-        .trim_matches('"')
+    // 比对标识用「探针文件所在目录名」而不是整条路径：目录名只含 ASCII 且**不含路径分隔符**，
+    // 因此不受 JSON 转义层级影响（Windows 的 `C:\a\b` 在请求体里可能是 `\\` 甚至 `\\\\`；
+    // 此前按原始路径比对在 Windows CI 恒假，Linux 无反斜杠故未暴露）。目录名带 pid + 用例名，
+    // 唯一性足够。
+    let outside_dir_marker = outside
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .expect("outside workspace dir name")
         .to_string();
     assert!(
         continuation_bodies
             .iter()
-            .any(|body| body.contains(&outside_path_json)),
-        "T2（C5）：续轮必须重新发起同一越界 Read（请求体必须包含路径 `{outside_path}`），实际 = {continuation_bodies:?}"
+            .any(|body| body.contains(&outside_dir_marker)),
+        "T2（C5）：续轮必须重新发起同一越界 Read（请求体必须包含 `{outside_dir_marker}`，路径 `{outside_path}`），实际 = {continuation_bodies:?}"
     );
 }
 
