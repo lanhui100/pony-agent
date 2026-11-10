@@ -2,6 +2,10 @@
 
 Status: implemented
 
+> 后续修订（2026-11-10）：9×10 / 7×8 栅格没有任何近乎实心子像素，折带与负形糊化；
+> 现行尺寸以 [ADR 0112](0112-tui-splash-logo-legibility-floor.md) 的 14×16 / 11×12 为准。
+> 本文保留 1/3 缩小的原始决策与实测，不再代表现行尺寸。
+
 日期：2026-11-09
 关联：[0098](0098-tui-splash-master-truecolor-bitmap-first.md)（真色表 + 位图优先，本次只改尺寸）、
 [0080](0080-tui-splash-protocol-env-only-detection.md)（零 I/O 协议判定，不变）；

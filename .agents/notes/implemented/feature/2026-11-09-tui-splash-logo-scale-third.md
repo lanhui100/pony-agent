@@ -5,6 +5,8 @@ Status: implemented
 配套决策：[ADR 0105](../../../docs/decisions/0105-tui-splash-logo-scale-third.md)
 （局部修订 [ADR 0098](../../../docs/decisions/0098-tui-splash-master-truecolor-bitmap-first.md) 的档位尺寸）；
 方案与历史实测：[docs/design/tui-splash-logo.md](../../../docs/design/tui-splash-logo.md)。
+后续修订：[ADR 0112](../../../docs/decisions/0112-tui-splash-logo-legibility-floor.md)
+将现行档位改为 14×16 / 11×12，解决本文 1/3 栅格导致的实心细节与负形丢失。
 
 ## Context
 

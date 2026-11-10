@@ -867,6 +867,21 @@ note: >-
       `splash_master_rgb_keeps_master_colors` 与 `splash_master_rgb_differs_from_canvas`
       改为**占比**判据（不再依赖绝对子像素个数），生成物幂等仍由 `generate_script_check_is_idempotent` 把守。
 
+  【ADR 0112 归属登记（2026-11-10）｜启动页品牌标小尺寸糊化修复（Rich 14×16 / Compact 11×12）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**生成脚本档位、重生成资产与渲染尺寸断言**，
+  无新增对外接口、网络 IO、后台任务、LLM 调用、依赖、env 契约或持久化 schema；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（既有落点不变），metrics / logs 维持结构性 N-A
+      （终端进程随用户启停、无常驻监听地址、无 Service，Prometheus pull 与节点侧日志采集前提不成立）。
+  (2) 本轮 N-A 的结构性理由：变更发生在启动页静态绘制栅格——`TIERS` 由 9×10 / 7×8 调整为
+      14×16 / 11×12，覆盖率表、真色表与 448×512 内嵌位图同源重生成；`init_splash_image()` 仍零 I/O，
+      不产生新的遥测事实、不新增指标/日志字段/Loki 上送路径。
+  (3) 变更性质（仅登记，非遥测变更）：品牌画字符矩形 9×5 / 7×4 → 14×8 / 11×6；
+      抗锯齿、母版真色、协议判定、环境变量与 28 / 24 高度阈值均不变。
+  (4) 收口点：不新增 enforcement_point；既有 `error_boundary` / `http_client` 未改动。
+      行为门机械收口为 `cargo test --bin pony splash` 16 项，其中新增
+      `splash_tiers_retain_solid_ink_after_scaling` 要求两档近乎实心子像素均 ≥3%；
+      生成物幂等仍由 `generate_script_check_is_idempotent` 把守。
+
   【归属登记（2026-11-08）｜`Ctrl+O` / `/settings` 切换过程可见性后**当帧贴底**（滚动阻尼只服务增量追加）】
   一行结论：四维归属不变，metrics / logs 结构性 N-A —— 只改 TUI 进程内的滚动偏移赋值时机，
   无新增对外接口、网络 IO、后台任务、LLM 调用、依赖、env 契约或持久化 schema；不新增收口点，不伪造 /metrics。

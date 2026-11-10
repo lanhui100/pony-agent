@@ -2,8 +2,9 @@
 
 Status: implemented
 
-> 档位尺寸（Rich 26×30 / Compact 20×22、位图 832×960）已由 [0105](0105-tui-splash-logo-scale-third.md)
-> 修订为原 1/3（9×10 / 7×8、位图 288×320），高度阶梯阈值 28 / 24 不变；
+> 档位尺寸（Rich 26×30 / Compact 20×22、位图 832×960）曾由 [0105](0105-tui-splash-logo-scale-third.md)
+> 缩为 9×10 / 7×8；因小栅格丢失实心细节，现由 [0112](0112-tui-splash-logo-legibility-floor.md)
+> 修订为 Rich 14×16 / Compact 11×12、位图 448×512，高度阶梯阈值 28 / 24 不变；
 > 本文件中「覆盖率表 + 母版真色表」「位图优先（含 halfblocks）」「零 stdin 判定承接 0080」等部分仍现行。
 
 日期：2026-11-08

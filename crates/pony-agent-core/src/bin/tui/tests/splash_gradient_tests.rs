@@ -14,10 +14,10 @@ fn master_rgb_at(cols: usize, rows: usize, rgb: &[u8], x: usize, y: usize) -> [u
 /// 这是「单一真值源 = 官方母版重采样」的编译期 + 运行期双重锚点。
 #[test]
 fn splash_coverage_tables_match_declared_dims() {
-    assert_eq!(splash_coverage::RICH_COLS, 9, "Rich 档列数");
-    assert_eq!(splash_coverage::RICH_ROWS, 10, "Rich 档子像素行数");
-    assert_eq!(splash_coverage::COMPACT_COLS, 7, "Compact 档列数");
-    assert_eq!(splash_coverage::COMPACT_ROWS, 8, "Compact 档子像素行数");
+    assert_eq!(splash_coverage::RICH_COLS, 14, "Rich 档列数");
+    assert_eq!(splash_coverage::RICH_ROWS, 16, "Rich 档子像素行数");
+    assert_eq!(splash_coverage::COMPACT_COLS, 11, "Compact 档列数");
+    assert_eq!(splash_coverage::COMPACT_ROWS, 12, "Compact 档子像素行数");
 
     assert_eq!(
         splash_coverage::RICH_COVERAGE.len(),
@@ -66,9 +66,9 @@ fn splash_coverage_tables_match_declared_dims() {
 
 #[test]
 fn splash_logo_asset_decodes_for_image_protocol() {
-    // 位图由同一 master 生成，铺满 Rich 档字符矩形（9×5 格 × 8×16 像素 × 4 超采样）。
+    // 位图由同一 master 生成，铺满 Rich 档字符矩形（14×8 格 × 8×16 像素 × 4 超采样）。
     let img = image::load_from_memory(SPLASH_LOGO_PNG).expect("内嵌品牌标必须可解码");
-    assert_eq!((img.width(), img.height()), (288, 320));
+    assert_eq!((img.width(), img.height()), (448, 512));
 }
 
 #[test]
@@ -425,6 +425,23 @@ fn splash_composite_soft_edges_exist() {
         assert!(
             m >= lo && m <= hi,
             "通道 {channel} 的软边值 {m} 未落在 [{lo},{hi}] 区间"
+        );
+    }
+}
+
+/// 缩小不能把所有折带都面积平均成半透明格：两档都必须保留至少 3% 的近乎实心子像素。
+/// ADR 0105 的 9×10 / 7×8 两档均为 0%，会在真实终端里失去高光与内部负形。
+#[test]
+fn splash_tiers_retain_solid_ink_after_scaling() {
+    for (name, coverage) in [
+        ("Rich", &splash_coverage::RICH_COVERAGE[..]),
+        ("Compact", &splash_coverage::COMPACT_COVERAGE[..]),
+    ] {
+        let solid = coverage.iter().filter(|&&cov| cov >= 242).count();
+        assert!(
+            solid * 100 >= coverage.len() * 3,
+            "{name} 档实心子像素不足：{solid} / {}（ADR 0112 要求 ≥3%）",
+            coverage.len()
         );
     }
 }

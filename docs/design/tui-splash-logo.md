@@ -2,11 +2,14 @@
 
 > 状态：已实施（ADR 0098 implemented）。配套决策：[ADR 0098](../decisions/0098-tui-splash-master-truecolor-bitmap-first.md)
 > （承接已被接替的 [ADR 0085](../decisions/superseded/0085-tui-splash-logo-fidelity-and-antialiasing.md)）。
-> **尺寸自 2026-11-09 起按 [ADR 0105](../decisions/0105-tui-splash-logo-scale-third.md) 缩为原 1/3**
-> （Rich 9×10 / Compact 7×8，位图 288×320）；下文「26×30 / 832×960 / 15 行」的量化实测属修改前基线，
-> 作为当时验收凭证保留，不再代表现行尺寸。
+> **现行尺寸以 [ADR 0112](../decisions/0112-tui-splash-logo-legibility-floor.md) 为准**
+> （Rich 14×16 / Compact 11×12，位图 448×512）；[ADR 0105](../decisions/0105-tui-splash-logo-scale-third.md)
+> 的 9×10 / 7×8 因实心细节与内部负形丢失已修订。
+> 下文「26×30 / 832×960 / 15 行」的量化实测属最初基线，作为当时验收凭证保留，不再代表现行尺寸。
 > 对比图：[tui-splash-options.png](tui-splash-options.png)
 > 落地验收图：[tui-splash-receipt.png](tui-splash-receipt.png)（官方 master / 实机 tmux 字符画 / 同源位图 三联）
+> 糊化修复前后对照：[tui-splash-legibility-receipt.png](tui-splash-legibility-receipt.png)
+> （同一 tmux 会话规格 120×36 实机捕获：上 9×10 糊块 / 下 14×16 可辨折带）
 
 ## 1. 现象
 

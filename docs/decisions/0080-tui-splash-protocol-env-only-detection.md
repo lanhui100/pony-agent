@@ -2,8 +2,9 @@
 
 Status: implemented
 
-> 品牌标布局尺寸（本文第 5 条的 26×15 字符矩形）已由 [0105](0105-tui-splash-logo-scale-third.md)
-> 修订为 9×5；零 I/O 环境判定、图形协议白名单与字符画回退部分仍现行。
+> 品牌标布局尺寸（本文第 5 条的 26×15 字符矩形）先由 [0105](0105-tui-splash-logo-scale-third.md)
+> 修订为 9×5，现由 [0112](0112-tui-splash-logo-legibility-floor.md) 定为 14×8；
+> 零 I/O 环境判定、图形协议白名单与字符画回退部分仍现行。
 
 ## 背景
 
