@@ -6,7 +6,7 @@
 
 ## 待办
 
-- [x] `B0xx` - P1: Windows CI 四个 write_separate 用例失败（reload 后 turn_trace_history 计数/event_id 不符）
+- [x] `B041` - P1: Windows CI 四个 write_separate 用例失败（reload 后 turn_trace_history 计数/event_id 不符）
   - 路径：`crates/pony-agent-core/src/agent/{sqlite_session.rs,session/log_sink.rs,session/store.rs}`
   - 现象（CI run 42739179126，Windows）：`node_materialize_uses_full_table_not_top_level_filtered_subset`、
     `session_store_write_separate_hot_path_keeps_trace_rows_across_reload`、
@@ -19,7 +19,7 @@
   - 修复（2026-11-10，已随 CI 验证通过）：Windows `LockFileEx` 是**强制**锁，第一个 store 持日志写者锁时第二个 store reload 读日志被拒 ⇒ 先在 reload 前释放写者（`SessionBackend::release_log_writers_for_test` 测试钩子）。
   - 验收：四个用例在 windows-latest CI 全绿。
 
-- [x] `B0xx` - P1: Windows CI `jobs::tests::promoted_job_releases_manager_entry_after_natural_exit` 输出竞态
+- [x] `B042` - P1: Windows CI `jobs::tests::promoted_job_releases_manager_entry_after_natural_exit` 输出竞态
   - 路径：`crates/pony-agent-core/src/agent/jobs.rs`
   - 现象（CI run @8feb744a，Windows）：`jobs.rs:1091` 断言 `回收不得影响已读输出，实际 output=""`；
     用例已有 2s 有界重试仍空。Linux 全绿。
@@ -31,7 +31,7 @@
     `DRAIN_SETTLE_MAX` 500→2000ms 改动（纪律：不用未验证的改动充数）。
   - 验收：该用例 windows-latest 全绿（run 932a1837 通过）。
 
-- [ ] `B0xx` - P1: Windows CI `observability_reporting_fixes_test::followup_stream_pure_tool_call_records_first_token_latency` 偶发无 `turn:completed`
+- [ ] `B043` - P1: Windows CI `observability_reporting_fixes_test::followup_stream_pure_tool_call_records_first_token_latency` 偶发无 `turn:completed`
   - 路径：`crates/pony-agent-core/tests/observability_reporting_fixes_test.rs:1662`
   - 现象：`turn:completed event must be emitted` 的 `expect` 失败（Windows runner 上偶发）；Linux 全绿。
   - 初判：内置 TcpListener 假 provider + `shutdown` 协同的时序窗，属**既有 flake**（该文件属
