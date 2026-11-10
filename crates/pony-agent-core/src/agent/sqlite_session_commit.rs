@@ -1850,12 +1850,18 @@ mod startup_self_heal_budget_tests {
             crate::agent::session::startup_repair::DEFAULT_STARTUP_SELF_HEAL_BUDGET_MS,
             1200
         );
-        // 进程级预算只冻结一次：重复取到的是**同一个** deadline（否则 load_store 与
-        // with_backend 各算一份，启动自愈上限会被放大成 N 倍）。
+        // ADR 0107 修复后语义：预算**每次装载**重起算（`reset_startup_budget` 在
+        // `load_store` 入口调用），同一次装载内的多个自愈入口仍共用一条 deadline。
+        // 因此这里不再断言「进程内跨调用恒等」——那正是导致长驻进程后续装载永久跳过
+        // 历史重建的旧缺陷；改为断言「reset 后重新起算、且不回退到更早的 deadline」。
         let first = SqliteSessionBackend::startup_self_heal_deadline();
+        crate::agent::session::startup_repair::reset_startup_budget();
         std::thread::sleep(std::time::Duration::from_millis(1));
         let second = SqliteSessionBackend::startup_self_heal_deadline();
-        assert_eq!(first, second, "启动预算必须在进程内只冻结一次");
+        assert!(
+            second >= first,
+            "reset 后必须按当前时刻重新起算（旧 deadline={first:?}，新 deadline={second:?}）"
+        );
         // 0ms ⇒ 调用瞬间即到期（应急/测试用的「全跳过」口径）。
         let deadline = std::time::Instant::now()
             .checked_add(std::time::Duration::from_millis(0))
