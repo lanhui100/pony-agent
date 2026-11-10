@@ -167,6 +167,16 @@
 - `workspace_run_command` 当前不自动重试；因为命令可能有副作用，timeout 后重放会带来重复执行风险。
 - `web_fetch` 与 `web_search` 在最终收口失败时，工具结果里的 `error.code` 会稳定落为 `timeout`，而不是泛化成 `request_failed`。
 
+### 2026-11-10 Exa 搜索请求形态对齐（objective 必填）
+
+- 按 `build-with-exa` 技能，`web_search_query` 作为“LLM 当工具调用”的搜索，必须带必填 `objective`
+  （模型侧同时给出 `query` 与 `objective`，宿主原样透传）；缺参/空串分别收敛为
+  `missing_argument` / `empty_objective`。
+- 发往 Exa `/search` 的请求体收敛为推荐形态 `{query, objective, contents:{highlights:true}}`：
+  不再显式发送 `type`/`numResults`（`type` 默认 auto，`numResults` 默认 10），也不再把 `limit` 映射成
+  `numResults`。`timeoutMs` 仍是本地传输超时，非 Exa 字段。
+- 请求体由纯函数 `exa_search_request_body(query, objective)` 生成，便于离线断言形态而不触网。
+
 ### 前端展示契约
 
 - 当上一轮 assistant 失败原因为 timeout，且用户直接再次发送时，前端会在主对话区提前创建一个 pending assistant 气泡，文案为 `超时后错误重连中...`。
@@ -181,6 +191,8 @@
 - `retry_tool_timeout_retries_until_success`
 - `web_fetch_returns_timeout_error_after_retries`
 - `web_search_returns_timeout_error_after_retries`
+- `web_search_requires_objective` / `web_search_rejects_empty_objective`
+- `exa_search_request_body_matches_recommended_shape`
 - Frontend：
 - `tests/runtime-store.spec.ts` 中“timeout failure 后再次 submitTurn 会注入 retrying assistant”用例
 - `tests/HomeWorkspace.spec.ts` 中“主对话区 timeout retrying assistant 走错误色展示”用例

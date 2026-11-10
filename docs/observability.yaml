@@ -52,6 +52,16 @@ reviewed_at: "2026-11-09"
 #     承诺 `pony resume <id>`。不改变持久化 schema（锁文件仍是既有 `<db>.lock`，旧实例不解析其内容）。
 # ⇒ 不新增 applicable 判定、不新增 enforcement_point。
 
+# web_search_query 对齐 build-with-exa（objective 必填 + 请求体收敛）归属说明：
+# (1) 只改既有 `web_search_query` 工具的输入 schema（+objective、-limit）与发往既有 Exa `/search`
+#     端点的请求体形态，**不新增网络端点、不新增 provider、不新增依赖或环境变量**；
+# (2) 出网仍走既有 web 工具模块的 reqwest 客户端，`tool.call` span 与分源错误码口径不变；新增的
+#     本地参数校验错误码 `empty_objective` 与既有 `empty_query` 同一校验点，属既有工具错误包络，
+#     不是新的异常上报边界；
+# (3) ⇒ 四维归属不变：tracing/issues 仍 applicable（落点不变 agent/otel/mod.rs、agent/ponysentry/client.rs），
+#     metrics/logs 维持结构性 N-A；不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
 dimensions:
   tracing:
     applicable: true

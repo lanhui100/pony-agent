@@ -22,6 +22,7 @@ use crate::agent::tools::web::PinnedSender;
 use crate::agent::tools::web::ReqwestPinnedSender;
 use crate::agent::tools::web::WebFetchTransportError;
 use crate::agent::tools::web::build_pinned_web_client;
+use crate::agent::tools::web::exa_search_request_body;
 use crate::agent::tools::web::is_tool_timeout_message;
 use crate::agent::tools::web::pinned_web_fetch;
 use crate::agent::tools::web::retry_tool_timeout;

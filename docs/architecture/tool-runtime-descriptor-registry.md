@@ -237,6 +237,11 @@ wins.
 - `web_fetch_url` fails closed: arbitrary-URL fetching is denied before any
   connection (structured `web_access_denied`), no ambient proxy is adopted, and
   redirects are not auto-followed (design Decision 8 / tasks 6.1–6.3).
+- `web_search_query` calls Exa `/search` with the recommended request shape only:
+  `query` + required `objective` + `contents.highlights`, leaving `type`/`numResults`
+  to server defaults (build-with-exa skill: every field except `objective` is gated by
+  an explicit task requirement). Missing/blank `objective` fails closed as
+  `missing_argument` / `empty_objective`.
 - `search.rs`: `SearchEngine` replaces the wildcard pseudo-regex and the
   unstable first-N-files traversal with real `regex`, `globset`, and `ignore`
   semantics. `workspace_search_text` and `workspace_glob_files` use it, produce

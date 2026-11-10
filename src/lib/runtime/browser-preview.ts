@@ -258,7 +258,7 @@ export const defaultAvailableTools: AvailableTool[] = [
     name: "WebSearch",
     canonicalToolName: "WebSearch",
     executionPrimitive: "web_search_query",
-    description: "执行外部搜索并返回结构化结果列表，不把抓取和搜索混为一个工具。",
+    description: "执行外部搜索并返回结构化结果列表，不把抓取和搜索混为一个工具；每次调用必须同时给出 query 与 objective（本轮搜索目标）。",
     kind: "search",
     exposure: "model_visible",
     displayMetadata: { displayNameZh: "外搜" },
@@ -277,16 +277,16 @@ export const defaultAvailableTools: AvailableTool[] = [
           type: "string",
           description: "外部搜索关键词"
         },
-        limit: {
-          type: "integer",
-          description: "最多返回多少条搜索结果，默认 5"
+        objective: {
+          type: "string",
+          description: "Goal for this search turn; say which documents should rank first, which should be excluded, and what specific facts or figures to pull from them."
         },
         timeoutMs: {
           type: "integer",
           description: "请求超时毫秒数，默认 15000"
         }
       },
-      required: ["query"],
+      required: ["query", "objective"],
       additionalProperties: false
     }
   },

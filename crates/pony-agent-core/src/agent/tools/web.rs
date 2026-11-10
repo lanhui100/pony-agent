@@ -141,7 +141,7 @@ impl ToolRouter {
                 TOOL_WEB_SEARCH_QUERY,
                 "missing_argument",
                 "缺少必填参数 `query`。".to_string(),
-                Some("参数示例：{\"query\":\"rust reqwest tutorial\",\"limit\":5}".to_string()),
+                Some("参数示例：{\"query\":\"rust reqwest tutorial\",\"objective\":\"优先权威文档并抽取 API 用法\"}".to_string()),
             );
         };
         let query = query.trim();
@@ -154,12 +154,23 @@ impl ToolRouter {
             );
         }
 
-        let limit = call
-            .arguments
-            .get("limit")
-            .and_then(Value::as_u64)
-            .map(|value| value.clamp(1, 10) as usize)
-            .unwrap_or(5);
+        let Some(objective) = call.arguments.get("objective").and_then(Value::as_str) else {
+            return error_result(
+                TOOL_WEB_SEARCH_QUERY,
+                "missing_argument",
+                "缺少必填参数 `objective`。".to_string(),
+                Some("参数示例：{\"query\":\"rust reqwest tutorial\",\"objective\":\"优先权威文档，抽取 API 用法与版本事实\"}".to_string()),
+            );
+        };
+        let objective = objective.trim();
+        if objective.is_empty() {
+            return error_result(
+                TOOL_WEB_SEARCH_QUERY,
+                "empty_objective",
+                "参数 `objective` 不能为空字符串。".to_string(),
+                Some("请说明本轮搜索目标：哪些文档应排在前、应排除什么、要抽取哪些事实或数字。".to_string()),
+            );
+        }
         let timeout_ms = call
             .arguments
             .get("timeoutMs")
@@ -189,14 +200,8 @@ impl ToolRouter {
             }
         };
 
-        let body = json!({
-            "query": query,
-            "type": "auto",
-            "numResults": limit,
-            "contents": {
-                "highlights": true
-            }
-        });
+        // 推荐请求 = query + objective + contents.highlights；不含 type/numResults 等未被任务显式要求的字段。
+        let body = exa_search_request_body(query, objective);
 
         let response = match retry_tool_timeout(
             TOOL_WEB_SEARCH_QUERY,
@@ -306,6 +311,7 @@ impl ToolRouter {
             output: json_string(json!({
                 "ok": true,
                 "query": query,
+                "objective": objective,
                 "statusCode": status.as_u16(),
                 "resultCount": results.len(),
                 "results": results,
@@ -318,6 +324,19 @@ impl ToolRouter {
     }
 }
 
+
+/// Exa `/search` 推荐请求体：只含 `query` + `objective` + `contents.highlights`。
+/// 刻意省略 `type` / `numResults` / 域过滤等门控字段——除任务显式要求外不加装饰字段
+/// （见 build-with-exa 技能：`objective` 是搜索被 LLM 当工具调用时的唯一默认新增字段）。
+pub(super) fn exa_search_request_body(query: &str, objective: &str) -> Value {
+    json!({
+        "query": query,
+        "objective": objective,
+        "contents": {
+            "highlights": true
+        }
+    })
+}
 
 pub(super) fn build_web_client(timeout_ms: u64) -> Result<Client, String> {
     // Design Decision 8: no ambient proxy and no automatic redirects. The web access policy

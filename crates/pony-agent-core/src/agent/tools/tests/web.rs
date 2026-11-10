@@ -99,6 +99,76 @@ fn web_search_rejects_empty_query() {
 }
 
 #[test]
+fn web_search_requires_objective() {
+    let workspace = temp_workspace();
+    let router = ToolRouter::with_workspace_root(workspace);
+
+    let result = router.execute(&ToolCall {
+        call_id: None,
+        name: TOOL_WEB_SEARCH_QUERY.to_string(),
+        arguments: json!({
+            "query": "pony agent"
+        }),
+        plan: None,
+    });
+
+    assert_eq!(result.status, "error");
+    let payload =
+        serde_json::from_str::<Value>(&result.output).expect("web search output json");
+    assert_eq!(
+        payload
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str),
+        Some("missing_argument")
+    );
+}
+
+#[test]
+fn web_search_rejects_empty_objective() {
+    let workspace = temp_workspace();
+    let router = ToolRouter::with_workspace_root(workspace);
+
+    let result = router.execute(&ToolCall {
+        call_id: None,
+        name: TOOL_WEB_SEARCH_QUERY.to_string(),
+        arguments: json!({
+            "query": "pony agent",
+            "objective": "   "
+        }),
+        plan: None,
+    });
+
+    assert_eq!(result.status, "error");
+    let payload =
+        serde_json::from_str::<Value>(&result.output).expect("web search output json");
+    assert_eq!(
+        payload
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str),
+        Some("empty_objective")
+    );
+}
+
+#[test]
+fn exa_search_request_body_matches_recommended_shape() {
+    // 请求体收敛：只含 query + objective + contents.highlights，不含 type / numResults 等装饰字段。
+    let body = exa_search_request_body("rust reqwest tutorial", "优先官方文档并抽取 API 用法");
+    assert_eq!(
+        body,
+        json!({
+            "query": "rust reqwest tutorial",
+            "objective": "优先官方文档并抽取 API 用法",
+            "contents": { "highlights": true }
+        })
+    );
+    assert!(body.get("type").is_none(), "不得显式发送 type");
+    assert!(body.get("numResults").is_none(), "不得发送 numResults");
+    assert!(body.get("category").is_none(), "不得发送 category");
+}
+
+#[test]
 fn web_fetch_fails_closed_for_loopback_and_private_urls() {
     let workspace = temp_workspace();
     let router = ToolRouter::with_workspace_root(workspace);
@@ -251,6 +321,7 @@ fn web_search_returns_timeout_error_after_retries() {
                 name: TOOL_WEB_SEARCH_QUERY.to_string(),
                 arguments: json!({
                     "query": "pony agent",
+                    "objective": "验证超时重试错误码",
                     "timeoutMs": 50
                 }),
                 plan: None,

@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "build-with-exa": {
+      "source": "exa-labs/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/build-with-exa/SKILL.md",
+      "computedHash": "7de41eddc6b8d039c96195237ce9c9a815ab05ac34c58af161071037a341fb48"
+    },
     "shadcn-vue": {
       "source": "unovue/shadcn-vue",
       "sourceType": "github",

@@ -321,14 +321,18 @@ impl ToolProvider for RecordingProvider {
 /// 顺序 = registry 顺序（ADR 0065：registry 位置是每次投影的唯一真值源）。
 const BUILTIN_GOLDEN: &[(&str, &str, &str, &str, u64)] = &[
     ("builtin:workspace_run_command", "Run", "execute", "model_visible", 0xaf509ca0aed2dd54),
-    ("builtin:ask_user", "Ask", "interactive", "model_visible", 0x3151a4babe493151),
+    // ask_user：HEAD 73857b6e（ADR 0117 端到端多选）给 schema 增加 `multiSelect`，但漏同步本 golden；
+    // 本次顺带补齐（属该已批准变更的收尾），非本卡 web_search 改造引入。
+    ("builtin:ask_user", "Ask", "interactive", "model_visible", 0x2450d4c82f154d1c),
     ("builtin:workspace_gather_context", "Read", "read", "model_visible", 0x5af475abe80c4c20),
     ("builtin:workspace_read_document", "ReadDocument", "read", "model_visible", 0x5769b65e6b8a7858),
     ("builtin:workspace_list_files", "List", "read", "model_visible", 0x01f988b03f5936aa),
     ("builtin:workspace_search_text", "Search", "search", "model_visible", 0xedde05539ffda305),
     ("builtin:workspace_glob_files", "Glob", "read", "model_visible", 0x7d7b2f45daf2ad24),
     ("builtin:web_fetch_url", "WebFetch", "read", "model_visible", 0x53548f927d9049d8),
-    ("builtin:web_search_query", "WebSearch", "search", "model_visible", 0xe28717c7e81f74c2),
+    // web_search_query：按 build-with-exa 技能把 `objective` 提升为必填、请求体收敛去掉 `limit/numResults`，
+    // schema 逐字节变化属本卡（已批准）变更，golden 随之同步；日后再变必须重新走 decl-change 评审，不得照抄实测值。
+    ("builtin:web_search_query", "WebSearch", "search", "model_visible", 0x8e6bb1b6acd76fd1),
     ("builtin:mcp_resource_read", "MCPResource", "read", "model_visible", 0x06d727013908acfc),
     ("builtin:tool_search", "ToolSearch", "search", "deferred", 0xccee49ae3acd7fa1),
     ("builtin:workspace_write_file", "Write", "write", "model_visible", 0x5196db9d3c2fc7be),
