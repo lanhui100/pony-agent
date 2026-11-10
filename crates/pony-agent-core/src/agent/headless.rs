@@ -19,7 +19,7 @@
 
 use crate::agent::runtime::TurnStreamEvent;
 use crate::agent::turn_flow::TurnEventSink;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -225,11 +225,18 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 ///
 /// v2（Lead 裁定 D1）删除了 v1 的 `decide()` —— 无头侧无法自行裁决单次工具调用
 /// （无策略求值接缝），只做模式透传，严禁在上层伪造放行结论。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     ReadOnly,
     WorkspaceWrite,
     FullAccess,
+}
+
+impl Default for PermissionMode {
+    fn default() -> Self {
+        Self::WorkspaceWrite
+    }
 }
 
 impl FromStr for PermissionMode {

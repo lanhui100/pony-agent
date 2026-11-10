@@ -27,6 +27,7 @@ use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalDa
 use pony_agent_core::agent::metrics_snapshot::{context_ratio_for_window, TurnMetricsSnapshot};
 use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
 // 显示偏好（/settings 与 Ctrl+O 的唯一真值）：独立文件持久化，与桌面端 settings.json 契约解耦。
+use pony_agent_core::agent::headless::PermissionMode;
 use pony_agent_core::agent::tui_preferences::{TuiPreferences, TuiPreferencesStore};
 // PA-172 §7.1（遗留 #7/#12）：续轮**单循环租约**已抽入库模块 `agent::goal_lease`，
 // 本文件只 `use`（不再本地定义），语义逐字不变。
@@ -77,6 +78,7 @@ use ratatui_image::{
 use std::io::IsTerminal;
 use std::io;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -593,6 +595,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/provider", "管理与切换模型提供商"),
     ("/models", "切换当前活跃模型"),
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
+    ("/permission", "查看或切换工具执行权限级别"),
     ("/settings", "设置 TUI 显示与交互偏好"),
     ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
     ("/approve", "批准当前会话的草稿计划（解除写保护）"),
@@ -1336,6 +1339,10 @@ pub struct TuiState {
     pub hide_process: bool,
     /// 思考块折叠：`true` ⇒ `MessageRole::Thinking` 只渲染一行摘要（行数 + 已折叠）。
     pub thinking_collapsed: bool,
+    /// 会话权限模式（只读 / 工作区写入 / 完全访问），对齐内核 PermissionMode 契约。
+    pub permission_mode: PermissionMode,
+    /// 状态行右槽轮播基准时间（None 表示使用当前瞬时）。
+    pub status_carousel_started_at: Option<std::time::Instant>,
     /// `/settings` 面板当前选中项下标（0 起，越界由渲染钳制）。
     pub settings_selected_index: usize,
     /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的覆盖层状态（`None` = 未打开）。
@@ -1475,6 +1482,8 @@ impl Default for TuiState {
             // 产品默认（隐藏 + 折叠）由 `TuiPreferences::default()` 在 run_tui 启动时覆盖。
             hide_process: false,
             thinking_collapsed: false,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            status_carousel_started_at: None,
             settings_selected_index: 0,
             rewind_state: None,
             status_text: "Ready".to_string(),
@@ -2151,11 +2160,37 @@ impl TuiState {
         self.mode = InteractionMode::SelectingReasoningEffort;
     }
 
-    /// 契约 C11/C12：显示偏好加载点（`run_tui` 启动时调用；让渲染缓存整体失效）。
+    /// 契约 C11/C12：显示与权限偏好加载点（`run_tui` 启动时调用；让渲染缓存整体失效）。
     pub fn apply_tui_preferences(&mut self, prefs: &TuiPreferences) {
         self.hide_process = prefs.hide_process;
         self.thinking_collapsed = prefs.thinking_collapsed;
+        self.permission_mode = prefs.default_permission_mode;
         self.invalidate_render_cache();
+    }
+
+    /// 轮转切换权限级别：WorkspaceWrite → FullAccess → ReadOnly → WorkspaceWrite。
+    pub fn rotate_permission_mode(&mut self) -> PermissionMode {
+        let next = match self.permission_mode {
+            PermissionMode::WorkspaceWrite => PermissionMode::FullAccess,
+            PermissionMode::FullAccess => PermissionMode::ReadOnly,
+            PermissionMode::ReadOnly => PermissionMode::WorkspaceWrite,
+        };
+        self.permission_mode = next;
+        next
+    }
+
+    /// 显式设置权限级别。
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_mode = mode;
+    }
+
+    /// 权限模式的中文显示标签。
+    pub fn permission_mode_label(&self) -> &'static str {
+        match self.permission_mode {
+            PermissionMode::ReadOnly => "只读",
+            PermissionMode::WorkspaceWrite => "工作区写入",
+            PermissionMode::FullAccess => "完全访问",
+        }
     }
 
     /// 契约 C8：只改内存（写盘由事件循环负责），并让历史按新口径整体重排。
@@ -2214,6 +2249,12 @@ impl TuiState {
                 self.thinking_collapsed,
                 "思考块折叠为一行摘要（原文仍保留在会话历史）",
             ),
+            (
+                "default_permission_mode",
+                "默认权限模式",
+                self.permission_mode != PermissionMode::ReadOnly,
+                "设置启动时的默认工具执行权限级别（只读/工作区/完全访问）",
+            ),
         ]
     }
 
@@ -2239,6 +2280,10 @@ impl TuiState {
                 self.set_thinking_collapsed(!self.thinking_collapsed);
                 Some(("thinking_collapsed", self.thinking_collapsed))
             }
+            "default_permission_mode" => {
+                let next = self.rotate_permission_mode();
+                Some(("default_permission_mode", next != PermissionMode::ReadOnly))
+            }
             _ => None,
         }
     }
@@ -2256,16 +2301,22 @@ impl TuiState {
             KeyCode::Down | KeyCode::Char('j') => self.move_settings_selection(1),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some((key_name, enabled)) = self.toggle_selected_setting() {
-                    let label = if key_name == "hide_process" {
-                        "隐藏 Agent 过程"
-                    } else {
-                        "折叠思考"
+                    let notice = match key_name {
+                        "hide_process" => format!(
+                            "隐藏 Agent 过程：{}",
+                            if enabled { "已开启" } else { "已关闭" }
+                        ),
+                        "thinking_collapsed" => format!(
+                            "折叠思考：{}",
+                            if enabled { "已开启" } else { "已关闭" }
+                        ),
+                        "default_permission_mode" => format!(
+                            "默认权限模式已切换为: {}",
+                            self.permission_mode_label()
+                        ),
+                        _ => String::new(),
                     };
-                    self.set_status_notice(format!(
-                        "{}：{}",
-                        label,
-                        if enabled { "已开启" } else { "已关闭" }
-                    ));
+                    self.set_status_notice(notice);
                     return Some((key_name, enabled));
                 }
             }
@@ -3402,7 +3453,7 @@ pub fn build_turn_input(
         images: Vec::new(),
         workspace_id: state.active_workspace_id.clone(),
         plan_execution_approval: None,
-        tool_authorization_mode: None,
+        tool_authorization_mode: Some(state.permission_mode.tool_authorization_mode().to_string()),
     }
 }
 
@@ -4107,18 +4158,60 @@ fn header_metrics_text(state: &TuiState) -> String {
     metrics_segments(state).join(" · ")
 }
 
-/// 输入框下方状态行：左槽 = 一次性提示 / 计划模式横幅 / 排队反馈，右槽 = 当前模型身份。
+pub const STATUS_CAROUSEL_MODEL_HOLD_MS: u64 = 3_000;
+pub const STATUS_CAROUSEL_PERM_HOLD_MS: u64 = 3_000;
+pub const STATUS_CAROUSEL_PERIOD_MS: u64 = STATUS_CAROUSEL_MODEL_HOLD_MS + STATUS_CAROUSEL_PERM_HOLD_MS;
+
+/// 当前状态行右槽轮播相位。
+/// 返回 `(是否为 Model 阶段, 距离下次切换的毫秒数)`。
+pub fn status_carousel_phase(state: &TuiState) -> (bool, u64) {
+    let now_ms = match state.status_carousel_started_at {
+        Some(t) => t.elapsed().as_millis() as u64,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    };
+    let elapsed = now_ms % STATUS_CAROUSEL_PERIOD_MS;
+    if elapsed < STATUS_CAROUSEL_MODEL_HOLD_MS {
+        (true, STATUS_CAROUSEL_MODEL_HOLD_MS - elapsed)
+    } else {
+        (false, STATUS_CAROUSEL_PERIOD_MS - elapsed)
+    }
+}
+
+/// 右槽轮播渲染文本与样式（模型身份与执行权限模式时分轮播）。
+pub fn right_slot_content(state: &TuiState) -> (String, Style) {
+    let (is_model, _) = status_carousel_phase(state);
+    if is_model {
+        let text = match state.reasoning_effort {
+            Some(_) => format!("{} · {}", state.model, state.reasoning_effort_label()),
+            None => state.model.clone(),
+        };
+        (text, Style::default().fg(theme::GHOST))
+    } else {
+        let text = match state.permission_mode {
+            PermissionMode::ReadOnly => "权限 · 只读".to_string(),
+            PermissionMode::WorkspaceWrite => "权限 · 工作区".to_string(),
+            PermissionMode::FullAccess => "权限 · 完全访问".to_string(),
+        };
+        let color = match state.permission_mode {
+            PermissionMode::ReadOnly => theme::WARN,
+            PermissionMode::WorkspaceWrite => theme::MUTED,
+            PermissionMode::FullAccess => theme::ACCENT,
+        };
+        (text, Style::default().fg(color))
+    }
+}
+
+/// 输入框下方状态行：左槽 = 一次性提示 / 计划模式横幅 / 排队反馈，右槽 = 当前模型身份与权限模式时分轮播。
 ///
 /// 与 header 的分工（ADR 0078）：header 左 = 品牌 + 工作区（`~/<文件夹名称>`），header 右 = 数值指标；
-/// 本行不再重复工作区路径，改为右对齐展示模型（含思考强度）。排队/提示留在本行，
+/// 本行不再重复工作区路径，改为右对齐时分轮播展示模型（含思考强度）与权限级别。排队/提示留在本行，
 /// 因为它们紧贴输入动作，且必须在**每一帧**都有渲染点（C7/C18③/C23）。
 fn status_line(state: &TuiState, width: usize) -> Line<'static> {
     let ghost = || Style::default().fg(theme::GHOST);
-    // 右槽：模型身份 —— `model`，有思考强度时补 ` · <英文档位>`（不含 provider，也不加中文前缀）。
-    let model_text = match state.reasoning_effort {
-        Some(_) => format!("{} · {}", state.model, state.reasoning_effort_label()),
-        None => state.model.clone(),
-    };
+    let (right_text, right_style) = right_slot_content(state);
     // C7/C18③/C23：排队指示器**唯一渲染点**就是本行（每帧都渲染，与 `mode`/`runtime_mode`
     // 无关），故 `status_word` 不再重复输出。`queue_indicator_line` 保证流式期 / 工具执行期
     // 都有输出；宽度受限时按 34 列截断，避免挤掉右槽的模型身份。
@@ -4134,7 +4227,7 @@ fn status_line(state: &TuiState, width: usize) -> Line<'static> {
     )
     .map(|indicator| (truncate_width(&indicator, 34), ghost()));
     // 契约 P-5 / F-N：一次性提示（非流式 + TTL 内）与非流式的计划模式横幅优先占左槽，
-    // 其次排队反馈；两者都没有时左槽留空，右槽始终是模型身份。
+    // 其次排队反馈；两者都没有时左槽留空，右槽始终是模型/权限轮播槽。
     let transient_left: Option<(String, Style)> = state
         .status_notice
         .as_ref()
@@ -4154,9 +4247,8 @@ fn status_line(state: &TuiState, width: usize) -> Line<'static> {
                 .map(|banner| (banner.to_string(), muted()))
         });
     if let Some((left_text, left_style)) = transient_left.or(queue_left) {
-        let right = model_text.clone();
-        let right_w = str_width(&right);
-        if right.is_empty() || RAIL + 2 + str_width(&left_text) + right_w > width {
+        let right_w = str_width(&right_text);
+        if right_text.is_empty() || RAIL + 2 + str_width(&left_text) + right_w > width {
             return Line::from(vec![
                 Span::raw(" ".repeat(RAIL)),
                 Span::styled(
@@ -4172,7 +4264,7 @@ fn status_line(state: &TuiState, width: usize) -> Line<'static> {
             Span::raw(" ".repeat(RAIL)),
             Span::styled(left, left_style),
             Span::raw(" ".repeat(width.saturating_sub(used + right_w))),
-            Span::styled(right, ghost()),
+            Span::styled(right_text, right_style),
         ]);
     }
 
@@ -4202,15 +4294,15 @@ fn status_line(state: &TuiState, width: usize) -> Line<'static> {
         }
     }
 
-    // 默认态：左槽留空（工作区已在 header 展示一次），模型身份右对齐到内容列最后一列。
-    let right_w = str_width(&model_text);
+    // 默认态：左槽留空（工作区已在 header 展示一次），模型身份与权限右对齐到内容列最后一列。
+    let right_w = str_width(&right_text);
     if right_w <= width {
         Line::from(vec![
             Span::raw(" ".repeat(width - right_w)),
-            Span::styled(model_text, ghost()),
+            Span::styled(right_text, right_style),
         ])
     } else {
-        Line::from(Span::styled(ellipsize_width(&model_text, width), ghost()))
+        Line::from(Span::styled(ellipsize_width(&right_text, width), right_style))
     }
 }
 
@@ -4755,9 +4847,10 @@ fn persist_tui_preferences(state: &TuiState) {
     let prefs = TuiPreferences {
         hide_process: state.hide_process,
         thinking_collapsed: state.thinking_collapsed,
+        default_permission_mode: state.permission_mode,
     };
     if let Err(error) = store.save(&prefs) {
-        eprintln!("[pony-tui] 显示偏好落盘失败：{error}");
+        eprintln!("[pony-tui] 显示与权限偏好落盘失败：{error}");
     }
 }
 
@@ -5219,8 +5312,18 @@ fn render_settings_panel(f: &mut Frame, state: &TuiState) {
     let inner_w = body.width as usize;
     let selected = state.settings_selected_index.min(total.saturating_sub(1));
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for (idx, (_key, label, enabled, desc)) in rows.iter().enumerate() {
-        let mark = if *enabled { "[开]" } else { "[关]" };
+    for (idx, (key, label, enabled, desc)) in rows.iter().enumerate() {
+        let mark = if *key == "default_permission_mode" {
+            match state.permission_mode {
+                PermissionMode::ReadOnly => "[只读]",
+                PermissionMode::WorkspaceWrite => "[工作区]",
+                PermissionMode::FullAccess => "[全开]",
+            }
+        } else if *enabled {
+            "[开]"
+        } else {
+            "[关]"
+        };
         // 名称优先：先按名称实际宽度锁定左列，再让说明只用剩余预算。
         // 若把完整说明先塞进右侧（`list_row` 只按 width-8 截断），长说明会把左列压到
         // 「隐藏」两个字，契约 C7 的「名称 + 说明」同时可见即失效。
@@ -8445,6 +8548,7 @@ fn tui_event_loop(
     let mut last_tick_instant = std::time::Instant::now();
     let mut last_poll_instant = std::time::Instant::now();
     let mut last_goal_phase: Option<bool> = None;
+    let mut last_status_carousel_phase: Option<bool> = None;
     let mut cap_poll_ms: Option<u64> = None;
     // C24 单飞闩（时间窗）：队首派发后置 `now + QUEUE_DISPATCH_LATCH_MS`，窗口内不再派发。
     // 不再「收到任何 InputKey 就清闩」—— 那会在「派发后、合成 Enter 被消费前」开单飞缺口
@@ -8589,6 +8693,15 @@ fn tui_event_loop(
             cap_poll_ms = Some(cap_poll_ms.map_or(remaining, |cap| cap.min(remaining)));
         }
 
+        // 状态行右槽：模型身份与权限模式时分轮播（3 秒交替）。
+        let (carousel_phase, carousel_remaining) = status_carousel_phase(&state);
+        if last_status_carousel_phase != Some(carousel_phase) {
+            last_status_carousel_phase = Some(carousel_phase);
+            dirty = true;
+        }
+        let carousel_cap = carousel_remaining.saturating_add(1);
+        cap_poll_ms = Some(cap_poll_ms.map_or(carousel_cap, |cap| cap.min(carousel_cap)));
+
         let mut poll_ms = if state.is_streaming || state.has_pending_animation() { 16 } else { 120 };
         if let Some(cap) = cap_poll_ms {
             poll_ms = poll_ms.min(cap.max(30));
@@ -8710,6 +8823,25 @@ fn tui_event_loop(
                             "已隐藏 Agent 过程（仅显示状态消息）".to_string()
                         } else {
                             "已显示 Agent 过程（思考与工具调用）".to_string()
+                        });
+                        dirty = true;
+                        continue;
+                    }
+
+                    // 全局快捷键（任意模态可用）：Ctrl+P 轮转切换工具执行权限。
+                    if is_permission_mode_shortcut(key.code, key.modifiers) {
+                        state.rotate_permission_mode();
+                        persist_tui_preferences(&state);
+                        let notice = format!("权限模式已切换为: {}", state.permission_mode_label());
+                        state.set_status_notice(notice);
+                        state.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: format!(
+                                "当前执行权限已设置为: {} ({})",
+                                state.permission_mode_label(),
+                                state.permission_mode.tool_authorization_mode()
+                            ),
+                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                         });
                         dirty = true;
                         continue;
@@ -9813,6 +9945,46 @@ fn tui_event_loop(
                                     state.open_settings();
                                     continue;
                                 }
+                                // 本轮：`/permission` 查看或修改工具权限级别。
+                                if known_command == Some("/permission")
+                                    || input.trim().eq_ignore_ascii_case("/permission")
+                                    || input.trim().to_ascii_lowercase().starts_with("/permission ")
+                                {
+                                    let trimmed = input.trim();
+                                    let arg = if let Some(stripped) = trimmed.strip_prefix("/permission") {
+                                        stripped.trim()
+                                    } else if let Some(stripped) = trimmed.strip_prefix("/PERMISSION") {
+                                        stripped.trim()
+                                    } else {
+                                        ""
+                                    };
+                                    if arg.is_empty() {
+                                        state.rotate_permission_mode();
+                                    } else {
+                                        match PermissionMode::from_str(arg) {
+                                            Ok(mode) => state.set_permission_mode(mode),
+                                            Err(_) => {
+                                                state.set_status_notice("无效的权限模式参数（可选：read-only | workspace-write | full-access）");
+                                                dirty = true;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    persist_tui_preferences(&state);
+                                    let notice = format!("权限模式已切换为: {}", state.permission_mode_label());
+                                    state.set_status_notice(notice);
+                                    state.messages.push(ChatMessage {
+                                        role: MessageRole::System,
+                                        content: format!(
+                                            "当前执行权限已设置为: {} ({})",
+                                            state.permission_mode_label(),
+                                            state.permission_mode.tool_authorization_mode()
+                                        ),
+                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                    });
+                                    dirty = true;
+                                    continue;
+                                }
                                 // `/effort` 是 `/thinking` 的历史别名（不在命令表内，同样整串匹配）。
                                 if known_command == Some("/thinking")
                                     || input_is_alias(&input, "/effort")
@@ -9874,7 +10046,7 @@ fn tui_event_loop(
                                     // C18②：流式期可用性说明（旧文案让人以为生成中键盘全失效）。
                                     // 本轮：补 Ctrl+O（过程显示/隐藏），与 /settings 同字段。
                                     help.push_str(
-                                        "\n流式期仍可输入 · Enter 排队（本轮结束后自动发送） · Ctrl+T/Ctrl+R 可用 · Ctrl+O 过程显示/隐藏",
+                                        "\n流式期仍可输入 · Enter 排队（本轮结束后自动发送） · Ctrl+T/Ctrl+R 可用 · Ctrl+O 过程显示/隐藏 · Ctrl+P 切换权限",
                                     );
                                     // W3b：子会话语境下的唯一逃逸/切换路径（徽标同文案）。
                                     help.push_str(

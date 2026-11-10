@@ -28,6 +28,11 @@ pub fn is_hide_process_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool 
     modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('o')
 }
 
+/// Ctrl+P 是否为「轮转切换工具权限级别」快捷键。
+pub fn is_permission_mode_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('p')
+}
+
 pub fn composer_enter_action(key: &crossterm::event::KeyEvent) -> ComposerEnterAction {
     // Shift+Enter / Alt+Enter 是「换行」的显式语义；其余键（含裸 Enter）落到 Enter 分支的提交语义。
     if key.code == KeyCode::Enter

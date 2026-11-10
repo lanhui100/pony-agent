@@ -1,11 +1,12 @@
-//! TUI 显示偏好持久化：过程隐藏（hide_process）与思考折叠（thinking_collapsed）。
+//! TUI 显示偏好持久化：过程隐藏（hide_process）、思考折叠（thinking_collapsed）与默认权限模式（default_permission_mode）。
 //!
 //! 存储与 `model-preferences.json` 同目录（`<config_dir>/pony-agent/tui-preferences.json`），
-//! 但**独立成文件**：这些是纯终端渲染侧开关，与 `providers.json`（provider 注册表契约）
+//! 但**独立成文件**：这些是纯终端渲染侧开关与默认选项，与 `providers.json`（provider 注册表契约）
 //! 和桌面端 `settings.json`（前端契约）互不相干，混写会污染既有迁移链与前端类型定义，
-//! 因此单独成文件、独立演进；文件里的字段缺失一律按产品默认（隐藏 + 折叠）处理，
+//! 因此单独成文件、独立演进；文件里的字段缺失一律按产品默认（隐藏 + 折叠 + workspace_write）处理，
 //! 保证旧文件向前兼容。
 
+use crate::agent::headless::PermissionMode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -14,7 +15,11 @@ fn default_true() -> bool {
     true
 }
 
-/// TUI 显示偏好快照。缺失字段一律取产品默认值（`true`）。
+fn default_permission_mode() -> PermissionMode {
+    PermissionMode::WorkspaceWrite
+}
+
+/// TUI 显示与会话偏好快照。缺失字段一律取产品默认值。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TuiPreferences {
@@ -24,6 +29,9 @@ pub struct TuiPreferences {
     /// 思考块折叠为单行摘要，默认折叠。
     #[serde(default = "default_true")]
     pub thinking_collapsed: bool,
+    /// 默认工具权限级别，默认工作区写入 (WorkspaceWrite)。
+    #[serde(default = "default_permission_mode")]
+    pub default_permission_mode: PermissionMode,
 }
 
 impl Default for TuiPreferences {
@@ -31,6 +39,7 @@ impl Default for TuiPreferences {
         Self {
             hide_process: true,
             thinking_collapsed: true,
+            default_permission_mode: PermissionMode::WorkspaceWrite,
         }
     }
 }
@@ -100,6 +109,7 @@ mod tests {
         let prefs = TuiPreferences::default();
         assert!(prefs.hide_process);
         assert!(prefs.thinking_collapsed);
+        assert_eq!(prefs.default_permission_mode, PermissionMode::WorkspaceWrite);
     }
 
     #[test]
@@ -117,6 +127,7 @@ mod tests {
         let prefs = TuiPreferences {
             hide_process: false,
             thinking_collapsed: false,
+            default_permission_mode: PermissionMode::FullAccess,
         };
         store.save(&prefs).unwrap();
         let loaded = TuiPreferencesStore::with_path(&path).load();
@@ -143,6 +154,7 @@ mod tests {
         let prefs = store.load();
         assert!(!prefs.hide_process);
         assert!(prefs.thinking_collapsed);
+        assert_eq!(prefs.default_permission_mode, PermissionMode::WorkspaceWrite);
         cleanup(&path);
     }
 }
