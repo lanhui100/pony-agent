@@ -15,7 +15,7 @@ repo 模板文件与 `ponygo` 内 heredoc 双写，EOL 归一后逐字节一致�
 | A2 | `.meta/gates/adr-verify.spec.sh` | A1 的负样本执行判据（非法→拒、合法→放行、TOCTOU→拒） | 0 = 自检通过 |
 | A3 | `.githooks/pre-commit`（或既有钩子内追加块） | 本地层挂载点 | 转发 A1 的退出码 |
 | A4 | `.meta/gates/ci-verify.sh` | forge 无关全树门（verify-note 整树 + A2 + A6/A7，三段） | 0 放行 / 非零拒绝 |
-| A5 | `.github/workflows/ponygo-governance.yml` | GitHub 薄适配器（checkout + A4） | 同 A4 |
+| A5 | `.github/workflows/ponygo-governance.yml` | GitHub 薄适配器（checkout + A4）；等价形态是主 `ci.yml` 内 `governance` job 直接跑 A4——只有同 workflow 的 job 才能被聚合门 `needs` 消费 | 同 A4 |
 | A6 | `.meta/gates/archive-verify.sh` | 归档 SHA-256 封印门：`check`（默认，只读）/ `seal`（追加封印，互斥 + 原子替换），零旗标 | 0 通过 / 1 拒绝 |
 | A7 | `.meta/gates/archive-verify.spec.sh` | A6 的负样本执行判据（篡改/缺条目/孤儿/重复/非追加 → 必须拒；合法样本 → 放行） | 0 = 自检通过 |
 
@@ -147,11 +147,6 @@ staged 后又在工作区改动（两个方向：暂存合法→工作区改、�
 每个"必须被拒"的样本都配一个相邻的正向对照（补一行理由 / 补 `## Decision` → 放行），
 证明判据不是"一律拒绝"——只有负样本的 spec 分不清"门会响"和"门坏了"。
 
-**已知弱点（诚实条款）**：`verify-note.sh` 按**行**匹配标题、不解析 Markdown 结构——围栏代码块内
-（``` / ~~~ 之中）写的 `## Decision` / `## Alternatives considered` 同样被认作"在场"，
-故把标题塞进示例代码块可绕过 1.8/1.10 的在场判据（与 1.10 同型弱点）。修它需要真 Markdown 解析，
-收益低而回归面大；这道缝由 review 兜，spec 不冒充已闭。
-
 **围栏感知（Wave-2 §D2）**：1.8/1.10 的标题判定只认**围栏外**的 `## 标题`——``` 围栏内的标题是示例文本，
 不算在场；未闭合围栏 → 其后全部视为围栏内（fail-closed）。故"把 `## Decision` 塞进示例代码块"不再能骗过
 A1/A2/A4，spec 用「围栏内 Decision / 围栏内 Alternatives / 未闭合围栏」三负样本 + 一条"围栏外真标题"正向对照看守。
@@ -229,6 +224,14 @@ bash .meta/gates/ci-verify.sh
 ponygo audit --run-specs          # 跑 gates/*.spec.sh，断言各自 exit 0
 bash .meta/gates/<name>.spec.sh   # CI / pre-push 层的等价写法
 ```
+
+### 2.3 门与负样本配对（实例门）
+
+- 每个实例门（`*.sh` / `*.ps1`）必须有**同 Stem、同语言后缀**的负样本 spec：
+  `foo.sh ↔ foo.spec.sh`、`foo.ps1 ↔ foo.spec.ps1`；空文件不算配对。
+- `ci-verify.sh` 是唯一编排器豁免；框架内置 A1/A2/A6/A7 不冒充实例门计分。
+- 默认只读 `audit` 即核对配对，缺口以 `gate_spec_missing` 非零；`--run-specs` 仍只执行
+  `*.spec.sh`，`.ps1` 只作结构配对，其执行语义由对应平台 CI 或 review 承担。
 
 `*.spec.sh` 契约（违反即执行判据失败）：
 
