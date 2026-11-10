@@ -14,7 +14,19 @@ use std::path::Path;
 
 pub(crate) const DEFAULT_SESSION_ID: &str = "local-dev-session";
 pub(super) const DEFAULT_SESSION_SUMMARY: &str = "Pony Agent 本地开发会话";
+/// trace 历史保留条数（**观测数据**，不参与上下文组装）。
+///
+/// 与上下文体积无关，保持历史值不变：调大只会让 trace 表变胖。
 pub(super) const DEFAULT_HISTORY_LIMIT: usize = 24;
+/// 会话历史的**紧急上限**（条消息）。
+///
+/// 正常会话永不触达：上下文体积由压缩（token 预算）治理，而不是每轮丢掉最老消息。
+/// 曾经的 24 条硬截断是**隐式滑窗**——每轮整体前移一条，provider 前缀缓存每轮全灭
+/// （ADR 0007 的一等指标）。这里保留一个足够大、只在病态增长时兜底的上限。
+///
+/// `crate` 可见：投影侧（`agent/projection.rs`）与上下文组装侧必须与写路径同口径，
+/// 否则「写进去 400 条、读回来只剩 24 条」又是一条隐式滑窗。
+pub(crate) const HISTORY_EMERGENCY_LIMIT: usize = 400;
 pub(super) const DEFAULT_SESSION_TITLE: &str = "\u{65B0}\u{5BF9}\u{8BDD}";
 pub(super) const TITLE_MAX_CHARS: usize = 28;
 pub(super) const DEFAULT_ATTACHMENT_RECLAIM_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;

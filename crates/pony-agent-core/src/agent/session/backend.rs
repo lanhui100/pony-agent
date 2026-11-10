@@ -106,6 +106,25 @@ pub enum PersistCommand {
         session_id: String,
         node: HistoryNode,
     },
+    /// 上下文压缩提交：**一次压缩 = 一条 append-only 命令**。
+    ///
+    /// 语义（与 `TurnEvent::HistorySquash` 事件、`store.rs::commit_compaction`
+    /// 一一对应）：
+    /// - `node`：压缩后的**可见节点快照**（整份替换同 `node_id` 的行），会话历史的
+    ///   可见视图由它派生；
+    /// - `transcript`：压缩后的原生 transcript **全量替换**（不是追加）。
+    ///
+    /// 为什么必须落日志：压缩原先只写 blob（`replace_session_history` →
+    /// `save_to_backend`），而装载以**日志为真源**
+    /// （`merge_log_truth_into_sessions`）⇒ 重启后压缩结果被日志里的旧历史覆盖，
+    /// 「压缩了但重启就回到未压缩」。
+    CompactHistory {
+        epoch: u64,
+        session_id: String,
+        node: HistoryNode,
+        transcript: Vec<serde_json::Value>,
+        summary_message: String,
+    },
     UpdateCursor {
         epoch: u64,
         session_id: String,
@@ -308,6 +327,7 @@ impl PersistCommand {
             | PersistCommand::UpdateTraceTerminal { epoch, .. }
             | PersistCommand::AppendHookRecords { epoch, .. }
             | PersistCommand::UpdateHistoryNode { epoch, .. }
+            | PersistCommand::CompactHistory { epoch, .. }
             | PersistCommand::UpdateCursor { epoch, .. }
             | PersistCommand::UpdateBranch { epoch, .. }
             | PersistCommand::UpdateSessionMeta { epoch, .. }

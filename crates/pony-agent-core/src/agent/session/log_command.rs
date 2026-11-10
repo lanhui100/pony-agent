@@ -40,6 +40,7 @@ pub fn command_session_id(command: &PersistCommand) -> Option<&str> {
         | PersistCommand::UpdateTraceTerminal { session_id, .. }
         | PersistCommand::AppendHookRecords { session_id, .. }
         | PersistCommand::UpdateHistoryNode { session_id, .. }
+        | PersistCommand::CompactHistory { session_id, .. }
         | PersistCommand::UpdateCursor { session_id, .. }
         | PersistCommand::UpdateBranch { session_id, .. }
         | PersistCommand::UpdateSessionMeta { session_id, .. }
@@ -129,6 +130,22 @@ pub fn command_to_value(command: &PersistCommand) -> Result<Value, String> {
             "epoch": epoch,
             "sessionId": session_id,
             "node": serialize(node)?,
+        }),
+        PersistCommand::CompactHistory {
+            epoch,
+            session_id,
+            node,
+            transcript,
+            summary_message,
+        } => json!({
+            "type": "compact_history",
+            "encodingVersion": SESSION_LOG_COMMAND_ENCODING_VERSION,
+            "epoch": epoch,
+            "sessionId": session_id,
+            "node": serialize(node)?,
+            // transcript 是不透明 provider 原生 JSON：逐字段原样落盘，禁止重编码。
+            "transcript": transcript,
+            "summaryMessage": summary_message,
         }),
         PersistCommand::UpdateCursor {
             epoch,

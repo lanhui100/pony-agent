@@ -336,7 +336,9 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
                 supports_streaming: true,
                 supports_image_input: true,
                 supports_reasoning: false,
-                context_window_tokens: Some(1_000_000),
+                context_window_tokens: Some(
+                    pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                ),
                 ..Default::default()
             },
             thinking_param_pattern: ThinkingParamPattern::None,

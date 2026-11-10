@@ -799,89 +799,6 @@ fn append_turn_characterization_snapshot() {
 /// PA-095 #2：物化选取逻辑——最近 turn 的 user/assistant 提取；
 /// failed turn（仅 user/message）assistant 缺席由调用方补占位。
 #[test]
-fn materialize_last_turn_messages_picks_latest_turn() {
-    use crate::agent::turn_event::{TurnEndReason, TurnEvent};
-    let events = |events: Vec<TurnEvent>| {
-        events
-            .into_iter()
-            .enumerate()
-            .map(|(seq, event)| (seq as u64, "main".to_string(), event))
-            .collect::<Vec<_>>()
-    };
-    // 两个 turn：物化必须取最近一个。
-    let two_turns = events(vec![
-        TurnEvent::TurnStart {
-            turn_id: "t1".into(),
-        },
-        TurnEvent::UserMessage {
-            turn_id: "t1".into(),
-            text: "第一问".into(),
-            attachments: Vec::new(),
-        },
-        TurnEvent::AssistantMessage {
-            turn_id: "t1".into(),
-            step: 0,
-            text: "第一答".into(),
-            reasoning_content: None,
-            usage: None,
-            chunk_missing: None,
-        },
-        TurnEvent::TurnEnd {
-            turn_id: "t1".into(),
-            reason: TurnEndReason::Completed,
-            turn_duration_ms: Some(10),
-        },
-        TurnEvent::TurnStart {
-            turn_id: "t2".into(),
-        },
-        TurnEvent::UserMessage {
-            turn_id: "t2".into(),
-            text: "第二问".into(),
-            attachments: Vec::new(),
-        },
-        TurnEvent::AssistantMessage {
-            turn_id: "t2".into(),
-            step: 0,
-            text: "第二答".into(),
-            reasoning_content: Some("推理R".into()),
-            usage: None,
-            chunk_missing: None,
-        },
-    ]);
-    let (user, assistant) = materialize_last_turn_messages(&two_turns, 0).expect("materialized");
-    assert_eq!(user.as_deref(), Some("第二问"));
-    assert_eq!(
-        assistant
-            .as_ref()
-            .map(|(text, reasoning)| (text.as_str(), reasoning.as_deref())),
-        Some(("第二答", Some("推理R")))
-    );
-
-    // failed turn：仅 user/message——assistant 为 None（调用方补占位）。
-    let failed_turn = events(vec![
-        TurnEvent::TurnStart {
-            turn_id: "t3".into(),
-        },
-        TurnEvent::UserMessage {
-            turn_id: "t3".into(),
-            text: "失败问".into(),
-            attachments: Vec::new(),
-        },
-        TurnEvent::TurnEnd {
-            turn_id: "t3".into(),
-            reason: TurnEndReason::Error,
-            turn_duration_ms: None,
-        },
-    ]);
-    let (user, assistant) = materialize_last_turn_messages(&failed_turn, 0).expect("materialized");
-    assert_eq!(user.as_deref(), Some("失败问"));
-    assert!(assistant.is_none(), "failed turn has no assistant message");
-
-    // 无 turn 归属事件 → None（整体回退）。
-    assert!(materialize_last_turn_messages(&[], 0).is_none());
-}
-
-#[test]
 fn append_turn_persists_memory_write_evidence_for_explicit_note() {
     let mut store = SessionStore::memory_only();
     store.append_turn(
@@ -5329,7 +5246,12 @@ fn pa093_fold_10k_events_stays_under_budget() {
     let started = std::time::Instant::now();
     let (history, _) = fold_session_views(&with_seq, "branch-main", &[], &[]);
     let elapsed = started.elapsed();
-    assert_eq!(history.len(), 24, "window truncated");
+    // 窗口 = **紧急上限**（不再是 24 条的隐式滑窗）：10k 事件仍然只留上限条数。
+    assert_eq!(
+        history.len(),
+        crate::agent::session::HISTORY_EMERGENCY_LIMIT,
+        "window truncated to emergency limit"
+    );
     let budget = if cfg!(debug_assertions) { 2000 } else { 100 };
     assert!(
         elapsed.as_millis() < budget,
@@ -6895,3 +6817,4 @@ fn continuation_only_turns_do_not_pollute_title_turn_count_or_resume_list() {
         .expect("会话应出现在列表");
     assert!(!overview.continuation_only);
 }
+

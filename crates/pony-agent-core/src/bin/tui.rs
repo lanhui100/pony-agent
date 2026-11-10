@@ -2484,10 +2484,12 @@ impl TuiState {
 }
 
 /// wave-39 R3：解析当前 provider/model 的上下文窗口 token 数。
-/// 命中注册表则取 `capabilities.context_window_tokens`，否则回退 `1_000_000`。
+/// 命中注册表则取 `capabilities.context_window_tokens`，否则回退配置默认窗口。
 pub fn resolve_context_window_tokens(state: &TuiState) -> u32 {
-    /// 与 `config::DEFAULT_CONTEXT_WINDOW_TOKENS` 同值；TUI 侧不引入额外依赖。
-    const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
+    // 真值只有一处：`config::DEFAULT_CONTEXT_WINDOW_TOKENS`（256K）。TUI 侧曾复制
+    // 一份 `1_000_000` 字面量，于是界面占用率与压缩预算各按一套窗口算。
+    const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 =
+        pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS;
 
     let view = ProviderRegistryStore::new().load_view();
     let provider = resolve_active_provider_id(state)
@@ -2951,7 +2953,9 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
                 supports_streaming: true,
                 supports_image_input: true,
                 supports_reasoning: false,
-                context_window_tokens: Some(1_000_000),
+                context_window_tokens: Some(
+                    pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
+                ),
                 ..Default::default()
             },
             thinking_param_pattern: ThinkingParamPattern::None,

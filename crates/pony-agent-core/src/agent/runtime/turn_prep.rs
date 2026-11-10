@@ -22,77 +22,61 @@ impl AgentRuntime {
         let provider = self.resolve_provider(input);
         let workspace_mode = input.workspace_mode.as_deref();
 
-        // 上下文压缩检查：在构建上下文前，检查是否需要压缩历史
+        // 上下文压缩：在构建上下文前检查是否需要压缩。
+        //
+        // 锁纪律（契约 C-1 / 审查 F2a）：摘要调用是**网络 IO**，绝不能在持有 `sessions`
+        // 读写锁时发生。因此这里只做一次短读判定，真正的压缩交给
+        // `compact_session_with_sessions` 的三段式（短读快照 → 无锁摘要 → 短写回写），
+        // 与手动 `/compact` 共用**同一实现**：两个入口若各写一套，阈值/切分/双写口径
+        // 迟早分叉。
+        let compression_candidate = {
+            let sessions = self.sessions.read().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
+            });
+            let current = sessions.snapshot_at_readonly(
+                input.session_id.as_deref(),
+                input.node_id.as_deref(),
+                &input.history,
+            );
+            let config = crate::agent::compression::CompressionConfig::default();
+            // 计量必须覆盖两条记忆载体：native-tool-flow 会话的上下文只看 transcript，
+            // 只估 history 会让「一轮 90 个工具 hop」的增长永不触发压缩。
+            let pressure = crate::agent::compression::ContextPressure::from_layers(
+                &current.history,
+                &current.provider_native_transcript,
+            )
+            .with_measured_input_tokens(
+                crate::agent::session::last_context_input_tokens(&current)
+                    .map(|tokens| tokens as usize),
+            );
+            crate::agent::compression::should_compress_pressure(pressure, &provider, &config)
+                .then(|| current.conversation_id.clone())
+        };
+        if let Some(session_id) = compression_candidate {
+            // `force = true`：水位已在此判定过，让压缩入口再判一次只会引入第二套口径。
+            match compact_session_with_sessions(&self.sessions, provider.clone(), &session_id, true)
+            {
+                Ok(outcome) if outcome.compacted => eprintln!(
+                    "[pony-agent] auto compaction completed: compressed {} messages, kept {}",
+                    outcome.compressed_count, outcome.kept_count
+                ),
+                Ok(outcome) => eprintln!(
+                    "[pony-agent] auto compaction skipped: {} (not splittable at retain budget)",
+                    outcome.reason
+                ),
+                Err(error) => eprintln!(
+                    "[pony-agent] session compression failed: {error}, continuing without compression"
+                ),
+            }
+        }
+
+        // 获取最终（可能已压缩）的快照
         let session = {
             let mut sessions = self.sessions.write().unwrap_or_else(|e| {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             });
-
-            // 先获取当前快照，检查是否需要压缩
-            let current_snapshot = sessions.snapshot_at(
-                input.session_id.as_deref(),
-                input.node_id.as_deref(),
-                &input.history,
-            );
-
-            let config = crate::agent::compression::CompressionConfig::default();
-            if crate::agent::compression::should_compress(
-                &current_snapshot.history,
-                &provider,
-                &config,
-            ) {
-                let (to_compress, _to_keep) =
-                    crate::agent::compression::split_history(&current_snapshot.history, &config);
-
-                if !to_compress.is_empty() {
-                    let system_prompt =
-                        crate::agent::compression::build_compression_system_prompt();
-                    let mut compression_messages = vec![ProviderMessage::system(system_prompt)];
-                    for msg in &to_compress {
-                        compression_messages.push(ProviderMessage::user(&msg.content));
-                    }
-
-                    let compression_request = ProviderRequest {
-                        model: provider.model().to_string(),
-                        input: compression_messages,
-                        images: Vec::new(),
-                        native_messages: Vec::new(),
-                        observation: ProviderRequestObservation::default(),
-                        temperature: 0.3,
-                        max_output_tokens: 2048,
-                    };
-
-                    match provider.decide_with_tools(&compression_request, &[]) {
-                        Ok(decision) => {
-                            let summary_msg = crate::agent::compression::wrap_summary_to_message(
-                                &decision.output_text,
-                            );
-                            let result = crate::agent::compression::apply_compression(
-                                current_snapshot.history.clone(),
-                                summary_msg,
-                                &config,
-                            );
-                            eprintln!(
-                                "[pony-agent] auto compaction completed: compressed {} messages, kept {}",
-                                result.compressed_count, result.kept_count
-                            );
-                            sessions.replace_session_history(
-                                input.session_id.as_deref(),
-                                result.history,
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[pony-agent] session compression failed: {e}, \
-                                 continuing without compression"
-                            );
-                        }
-                    }
-                }
-            }
-
-            // 获取最终（可能已压缩）的快照
             sessions.snapshot_at(
                 input.session_id.as_deref(),
                 input.node_id.as_deref(),

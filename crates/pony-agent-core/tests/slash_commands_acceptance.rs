@@ -33,7 +33,10 @@ use std::sync::{Arc, Once, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use pony_agent_core::agent::compression::{should_compress, split_history, CompressionConfig};
+use pony_agent_core::agent::compression::{
+    retain_tokens_for, should_compress_pressure, split_history_by_tokens, CompressionConfig,
+    ContextPressure,
+};
 use pony_agent_core::agent::config::{
     ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
     ThinkingParamPattern,
@@ -55,8 +58,9 @@ use pony_agent_core::agent::tools::{ToolCall, ToolExecutor, ToolResult};
 // 2026-11-07 wave-cli-update：/settings 与 /teams 早前加入命令表但契约表漏同步（基线即红），此处按 AVAILABLE_COMMANDS 真值补齐；非本波功能变更。
 // 2026-11-08 ADR 0092：/approve 为宿主盖章入口（Draft→Executing）；契约矩阵 C-4 已同提交原地改写并登记流水，此处按真值表同步。
 // 2026-11-10 ADR 0113：/rewind 与「非流式双击 Esc」共用撤回面板；契约矩阵 C-4 同提交原地改写为 16 条，其余条目顺序/文案未改。
-const CONTRACT_COMMANDS: [&str; 16] = [
-    "/resume", "/rewind", "/provider", "/models", "/thinking", "/settings", "/plan", "/approve",
+// 2026-11-10 wave-tui-permission：新增 /permission 命令支持查看与切换工具执行权限（ReadOnly / WorkspaceWrite / FullAccess）。
+const CONTRACT_COMMANDS: [&str; 17] = [
+    "/resume", "/rewind", "/provider", "/models", "/thinking", "/permission", "/settings", "/plan", "/approve",
     "/tasks", "/agents", "/teams", "/clear", "/compact", "/help", "/update", "/quit",
 ];
 
@@ -407,6 +411,14 @@ fn t3_command_token_matching_is_case_insensitive_and_tolerates_trailing_args() {
 
 // ── T4：force=true 在历史过短会话上是「诚实空操作」（C-1 语义 3） ────────────────────
 
+/// 长历史的播种材料：内容长度必须让 token 估算越过 `retain_tokens`
+/// （128k 窗口 × 0.16 ≈ 19.8k token），否则压缩入口会因「无可压缩段」提前返回
+/// `history_too_short`，把用例变成**假绿**（precondition 断言是为了防这个）。
+fn long_half_turn(prefix: &str, round: usize) -> String {
+    let filler = "上下文压缩阈值与保留预算的语义说明。".repeat(70);
+    format!("{prefix} 第 {round} 轮：{filler}")
+}
+
 #[test]
 fn t4_forced_compaction_on_short_history_is_a_noop_and_preserves_history() {
     let _guard = TestRuntimeGuard::new();
@@ -426,10 +438,14 @@ fn t4_forced_compaction_on_short_history_is_a_noop_and_preserves_history() {
 
     // 前置条件（真实断言，不是注释）：该历史确实「过短」——
     // `split_history` 的可压缩段为空，因此 C-1 语义 3 必然要求 history_too_short。
-    let (to_compress, to_keep) = split_history(&seeded, &CompressionConfig::default());
+    let t4_config = CompressionConfig::default();
+    let t4_provider = ProviderManager::new(test_selection("http://127.0.0.1:1/v1".to_string()));
+    let t4_retain =
+        retain_tokens_for(&t4_provider, &t4_config).expect("测试 provider 必须声明 context window");
+    let (to_compress, to_keep) = split_history_by_tokens(&seeded, t4_retain);
     assert!(
         to_compress.is_empty(),
-        "T4 前置条件失败：本用例的历史必须落在 split_history 的『无可压缩段』区间"
+        "T4 前置条件失败：本用例的历史必须落在『按 token 预算无可压缩段』区间"
     );
     assert_eq!(to_keep.len(), seeded.len(), "T4 前置条件：过短历史应整段保留");
 
@@ -495,7 +511,7 @@ fn g2a_unforced_compaction_reports_below_threshold_before_history_length() {
     let config = CompressionConfig::default();
     let provider = ProviderManager::new(test_selection("http://127.0.0.1:1/v1".to_string()));
     assert!(
-        !should_compress(&seeded, &provider, &config),
+        !should_compress_pressure(ContextPressure::from_layers(&seeded, &[]), &provider, &config),
         "G-2a 前置条件失败：过短历史必须低于压缩阈值"
     );
 
@@ -524,28 +540,24 @@ fn g2b_unforced_compaction_on_long_history_stays_below_threshold_without_llm() {
 
     let (plane, sessions) = build_control_plane("g2b", "http://127.0.0.1:1/v1".to_string());
 
-    // 足够长的历史（24 条），确保即便 `force` 判断被跳过、split_history 也能给出可压缩段——
-    // 这样「错误地继续走压缩流程」会立刻暴露为 Err（provider 不可达）。
+    // 够长的历史：内容量必须越过 `retain_tokens`（128k × 0.16 ≈ 19.8k token），
+    // 这样「错误地继续走压缩流程」才会暴露为 Err（provider 不可达），而不是被
+    // `history_too_short` 提前挡掉。
     let mut seeded: Vec<TurnHistoryMessage> = Vec::new();
-    for round in 0..12 {
-        seeded.push(msg(
-            "user",
-            &format!("第 {round} 轮：请说明手动压缩的 force 语义与阈值判定顺序。"),
-        ));
-        seeded.push(msg(
-            "assistant",
-            &format!("第 {round} 轮：force=false 时先判 should_compress，未达阈值即返回 below_threshold。"),
-        ));
+    for round in 0..40 {
+        seeded.push(msg("user", &long_half_turn("问题：", round)));
+        seeded.push(msg("assistant", &long_half_turn("回答：", round)));
     }
     seed_history(&sessions, SESSION, seeded.clone());
 
     let config = CompressionConfig::default();
     let provider = ProviderManager::new(test_selection("http://127.0.0.1:1/v1".to_string()));
     assert!(
-        !should_compress(&seeded, &provider, &config),
+        !should_compress_pressure(ContextPressure::from_layers(&seeded, &[]), &provider, &config),
         "G-2b 前置条件失败：该历史必须仍未达压缩阈值"
     );
-    let (to_compress, _to_keep) = split_history(&seeded, &config);
+    let retain = retain_tokens_for(&provider, &config).expect("测试 provider 必须声明窗口");
+    let (to_compress, _to_keep) = split_history_by_tokens(&seeded, retain);
     assert!(
         !to_compress.is_empty(),
         "G-2b 前置条件失败：历史必须存在可压缩段，否则『跳过 force 判定』不会被暴露"
@@ -581,28 +593,20 @@ fn t5_compaction_fails_loudly_when_provider_is_unavailable() {
     let provider = UnauthorizedProviderMock::start();
     let (plane, sessions) = build_control_plane("t5", provider.base_url());
 
-    // 足够长的历史：24 条（12 轮），远超 keep_recent_turns*2，确保 split_history 有可压缩段。
+    // 够长的历史（40 轮，越过 retain 预算）⇒ 可压缩段非空，provider 失败路径才会被触达。
     let mut seeded: Vec<TurnHistoryMessage> = Vec::new();
-    for round in 0..12 {
-        seeded.push(msg(
-            "user",
-            &format!(
-                "第 {round} 轮问题：请详细说明上下文压缩在长会话中的触发条件与阈值计算方式。"
-            ),
-        ));
-        seeded.push(msg(
-            "assistant",
-            &format!(
-                "第 {round} 轮回答：阈值 = min(context_window * 0.8, context_window - reserved - headroom)，\
-                 超过阈值后按 turn 边界把最旧的消息压成摘要。"
-            ),
-        ));
+    for round in 0..40 {
+        seeded.push(msg("user", &long_half_turn("问题：", round)));
+        seeded.push(msg("assistant", &long_half_turn("回答：", round)));
     }
     seed_history(&sessions, SESSION, seeded.clone());
 
     // 前置条件（真实断言）：历史确实足够长，可压缩段非空——否则「因历史太短而提前返回」会让
     // 本用例以错误理由通过（假绿）。
-    let (to_compress, to_keep) = split_history(&seeded, &CompressionConfig::default());
+    let t5_provider = ProviderManager::new(test_selection(provider.base_url()));
+    let t5_retain = retain_tokens_for(&t5_provider, &CompressionConfig::default())
+        .expect("测试 provider 必须声明窗口");
+    let (to_compress, to_keep) = split_history_by_tokens(&seeded, t5_retain);
     assert!(
         !to_compress.is_empty(),
         "T5 前置条件失败：历史必须存在可压缩段，否则 provider 失败路径不会被触达"

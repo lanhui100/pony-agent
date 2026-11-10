@@ -689,9 +689,11 @@ impl SqliteSessionBackend {
                     );
                     continue;
                 }
-                let events: Vec<crate::agent::turn_event::TurnEvent> = raw_events
+                // 事件必须带 seq：`history/squash` 的边界判据是 seq（压缩过的会话
+                // 一旦丢掉 seq，重建就会把被压缩历史整段复活）。
+                let events: Vec<(u64, crate::agent::turn_event::TurnEvent)> = raw_events
                     .into_iter()
-                    .map(|(_seq, _branch_id, event)| event)
+                    .map(|(seq, _branch_id, event)| (seq, event))
                     .collect();
                 crate::agent::session::history_from_turn_events(&events)
             };

@@ -1102,6 +1102,7 @@ impl SqliteSessionBackend {
                 | PersistCommand::UpdateTraceTerminal { session_id, .. }
                 | PersistCommand::AppendHookRecords { session_id, .. }
                 | PersistCommand::UpdateHistoryNode { session_id, .. }
+                | PersistCommand::CompactHistory { session_id, .. }
                 | PersistCommand::UpdateCursor { session_id, .. }
                 | PersistCommand::UpdateBranch { session_id, .. }
                 | PersistCommand::UpdateSessionMeta { session_id, .. }
@@ -1340,44 +1341,18 @@ impl SqliteSessionBackend {
             PersistCommand::UpdateHistoryNode {
                 session_id, node, ..
             } => {
-                let snapshot_json = if !node.history.is_empty() {
-                    serde_json::to_string(&serde_json::json!({
-                        "history": node.history,
-                        "providerNativeTranscript": node.provider_native_transcript,
-                        "longTermMemoryEntries": node.long_term_memory_entries,
-                        "memoryWriteEvidence": node.memory_write_evidence,
-                        "memoryWriteHookTraceRecords": node.memory_write_hook_trace_records,
-                        "turnCount": node.turn_count,
-                        "lastReferencedFile": node.last_referenced_file,
-                    }))
-                    .ok()
-                } else {
-                    None
-                };
-                tx.execute(
-                    "INSERT OR REPLACE INTO normalized_history_nodes
-                     (session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id,
-                      turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                    params![
-                        session_id,
-                        node.node_id,
-                        node.parent_node_id,
-                        node.branch_id,
-                        node.forked_from_node_id,
-                        serde_json::to_string(&node.kind).unwrap_or_else(|_| "\"checkpoint\"".to_string()),
-                        node.turn_id,
-                        serde_json::to_string(&node.turn_trace_refs).unwrap_or_else(|_| "null".to_string()),
-                        node.run_id,
-                        serde_json::to_string(&node.workspace_ref).unwrap_or_else(|_| "null".to_string()),
-                        node.summary,
-                        node.title,
-                        node.created_at_ms,
-                        snapshot_json,
-                        serde_json::to_string(&node.event_seq_range).unwrap_or_else(|_| "null".to_string()),
-                    ],
-                )
-                .map_err(|e| format!("update history node: {e}"))?;
+                super::session::fold::upsert_history_node_tx(tx, session_id, node)?;
+            }
+            PersistCommand::CompactHistory {
+                session_id,
+                node,
+                transcript,
+                ..
+            } => {
+                // 与 `UpdateHistoryNode` 同一节点 upsert；transcript 走**整份替换**
+                // （压缩把被摘要覆盖的轮次真删掉了，追加语义会让重放体积反弹）。
+                super::session::fold::upsert_history_node_tx(tx, session_id, node)?;
+                super::session::fold::replace_provider_transcript_tx(tx, session_id, transcript)?;
             }
             PersistCommand::UpdateCursor {
                 session_id, cursor, ..

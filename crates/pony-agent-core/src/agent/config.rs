@@ -8,7 +8,17 @@ use std::sync::Arc;
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
-const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
+/// 默认上下文窗口（token）= **256K**：未显式声明窗口的模型一律按此计。
+///
+/// 为什么是 256K 而不是 1M：压缩水位由窗口推导
+/// （`compression::calculate_threshold_tokens` =
+/// `min(0.8×窗口, 窗口 − 输出预留 − headroom)`）。旧默认 1M ⇒ 水位约 800K，而主流
+/// 模型的真实窗口是 128K~256K，压缩**永远晚于上游溢出**触发（溢出是硬失败，直接
+/// 终止本轮并丢失本轮上下文）；256K 让水位落在约 180K~205K，压缩先于溢出发生。
+///
+/// 这是**压缩预算的默认真值**：TUI/CLI 不得各自硬编码副本（曾出现 1M 与 32K 两套
+/// 分叉：界面按 1M 算占用率、压缩按另一套算预算，同一会话两个结论）。
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 262_144;
 const DEFAULT_MODERN_MAX_OUTPUT_TOKENS: u32 = 64000;
 
 // ── PA-172 §2：上游调用策略（超时/重试/退避）配置面 ──────────────────────────────
@@ -2180,7 +2190,10 @@ mod tests {
         let normalized = normalize_storage(storage);
         let model = &normalized.providers[0].models[0];
 
-        assert_eq!(model.capabilities.context_window_tokens, Some(1_000_000));
+        assert_eq!(
+            model.capabilities.context_window_tokens,
+            Some(DEFAULT_CONTEXT_WINDOW_TOKENS)
+        );
         assert!(model.capabilities.supports_tools);
         assert!(model.capabilities.supports_streaming);
         assert!(model.capabilities.supports_reasoning);
@@ -2232,7 +2245,10 @@ mod tests {
             model.capability_preset,
             ProviderCapabilityPreset::Auto
         ));
-        assert_eq!(model.capabilities.context_window_tokens, Some(1_000_000));
+        assert_eq!(
+            model.capabilities.context_window_tokens,
+            Some(DEFAULT_CONTEXT_WINDOW_TOKENS)
+        );
         assert!(model.capabilities.supports_reasoning);
     }
 
@@ -2955,9 +2971,12 @@ mod tests {
     }
 
     #[test]
-    fn default_added_model_capabilities_have_reasoning_images_1m_context_64k_output() {
+    fn default_added_model_capabilities_have_reasoning_images_256k_context_64k_output() {
         let default_caps = default_model_capabilities(&ProviderProtocol::OpenAiCompletions, "custom-model");
-        assert_eq!(default_caps.context_window_tokens, Some(1_000_000));
+        assert_eq!(
+            default_caps.context_window_tokens,
+            Some(DEFAULT_CONTEXT_WINDOW_TOKENS)
+        );
         assert!(default_caps.supports_reasoning);
         assert!(default_caps.supports_image_input);
 
@@ -2966,7 +2985,10 @@ mod tests {
             &ProviderProtocol::OpenAiCompletions,
             "custom-model",
         );
-        assert_eq!(custom_caps.context_window_tokens, Some(1_000_000));
+        assert_eq!(
+            custom_caps.context_window_tokens,
+            Some(DEFAULT_CONTEXT_WINDOW_TOKENS)
+        );
         assert!(custom_caps.supports_reasoning);
         assert!(custom_caps.supports_image_input);
     }

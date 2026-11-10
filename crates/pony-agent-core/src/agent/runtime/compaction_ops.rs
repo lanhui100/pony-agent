@@ -10,8 +10,8 @@
 use super::*;
 use crate::agent::compression::{
     apply_compression, build_compression_system_prompt, build_summary_prefix, build_summary_suffix,
-    estimate_history_tokens, should_compress, split_history, wrap_summary_to_message,
-    CompressionConfig,
+    compact_native_transcript, estimate_history_tokens, retain_tokens_for, should_compress_pressure,
+    split_history_by_tokens, wrap_summary_to_message, CompressionConfig, ContextPressure,
 };
 use crate::agent::provider::ProviderStreamGuard;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -121,12 +121,18 @@ pub(crate) fn compact_session_with_sessions(
 ) -> Result<ManualCompactionOutcome, String> {
     let config = CompressionConfig::default();
 
-    // 1) 短读锁：取历史快照后立刻释放。
-    let base_history = read_session_history(sessions, session_id);
+    // 1) 短读锁：取**两条记忆载体**（文本历史 + 原生 transcript）的快照后立刻释放。
+    let base = read_session_snapshot(sessions, session_id);
+    let base_history = base.history.clone();
+    let base_transcript = base.provider_native_transcript.clone();
     let before_tokens = estimate_history_tokens(&base_history);
+    let pressure = ContextPressure::from_layers(&base_history, &base_transcript)
+        .with_measured_input_tokens(
+            crate::agent::session::last_context_input_tokens(&base).map(|tokens| tokens as usize),
+        );
 
-    // 2) 非强制模式下未达阈值：不改写历史，且**零 LLM 调用**。
-    if !force && !should_compress(&base_history, &provider, &config) {
+    // 2) 非强制模式下未达水位：不改写历史，且**零 LLM 调用**。
+    if !force && !should_compress_pressure(pressure, &provider, &config) {
         return Ok(ManualCompactionOutcome::untouched(
             "below_threshold",
             before_tokens,
@@ -134,8 +140,12 @@ pub(crate) fn compact_session_with_sessions(
         ));
     }
 
-    // 3) 切分；没有可压缩区间时同样不改写历史（也**零 LLM 调用**）。
-    let (to_compress, to_keep) = split_history(&base_history, &config);
+    // 3) 按 **token 预算**（而非轮数）切分；没有可压缩区间时同样不改写历史
+    //    （也**零 LLM 调用**）。provider 未声明窗口时退回「当前体积 × retain_ratio」——
+    //    手动 `/compact` 在没有窗口元数据时仍必须可压缩，否则该入口对这类 provider 失效。
+    let retain_tokens = retain_tokens_for(&provider, &config)
+        .unwrap_or_else(|| (before_tokens as f64 * config.retain_ratio) as usize);
+    let (to_compress, to_keep) = split_history_by_tokens(&base_history, retain_tokens);
     if to_compress.is_empty() {
         return Ok(ManualCompactionOutcome::untouched(
             "history_too_short",
@@ -155,17 +165,22 @@ pub(crate) fn compact_session_with_sessions(
             "{COMPACTION_EMPTY_SUMMARY_ERROR_CODE}: compaction aborted (model returned an empty summary)"
         ));
     }
+    // 日志命令要留摘要原文（审计/重放可读），在消息被移入压缩结果前取出。
+    let summary_for_log = summary_message.content.clone();
 
     // 5) 短写锁：回写。压缩期间并发追加的消息必须保留，绝不被覆盖丢失。
     let mut store = sessions.write().unwrap_or_else(|e| {
         eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
         e.into_inner()
     });
-    let current_history = store
-        .snapshot_at_readonly(Some(session_id), None, &[])
-        .history;
-    let appended = concurrent_suffix(&base_history, &current_history)?;
-    let result = apply_compression(base_history, summary_message, &config);
+    let current = store.snapshot_at_readonly(Some(session_id), None, &[]);
+    let appended_history = concurrent_suffix(&base_history, &current.history, "history")?;
+    let appended_transcript = concurrent_suffix(
+        &base_transcript,
+        &current.provider_native_transcript,
+        "transcript",
+    )?;
+    let result = apply_compression(base_history, summary_message, retain_tokens);
     if result.compressed_count == 0 {
         // 防御：切分结果为空时不得谎报已压缩。
         return Ok(ManualCompactionOutcome::untouched(
@@ -176,17 +191,28 @@ pub(crate) fn compact_session_with_sessions(
     }
 
     let compressed_count = result.compressed_count;
-    let appended_count = appended.len();
+    let retained_user_turns = result.retained_user_turns;
+    let kept_count = result.kept_count + appended_history.len();
     let mut new_history = result.history;
-    new_history.extend(appended);
-    let kept_count = result.kept_count + appended_count;
+    new_history.extend(appended_history);
+    // **双写**：原生 transcript 按同一轮数裁剪。native-tool-flow 会话的上下文只看
+    // transcript，只改 history 等于没压缩（下一请求照旧把全部工具往返发上去）。
+    let mut new_transcript = compact_native_transcript(&base_transcript, retained_user_turns);
+    new_transcript.extend(appended_transcript);
     let after_tokens = estimate_history_tokens(&new_history);
-    store.replace_session_history(Some(session_id), new_history);
+    store.commit_compaction(Some(session_id), new_history, new_transcript, summary_for_log);
     drop(store);
 
     runtime_log(format!(
-        "compact:session={} compressed={} kept={} before_tokens={} after_tokens={}",
-        session_id, compressed_count, kept_count, before_tokens, after_tokens
+        "compact:session={} compressed={} kept={} before_tokens={} after_tokens={} \
+         transcript_before={} transcript_after={}",
+        session_id,
+        compressed_count,
+        kept_count,
+        before_tokens,
+        after_tokens,
+        base_transcript.len(),
+        compact_native_transcript(&base_transcript, retained_user_turns).len(),
     ));
 
     Ok(ManualCompactionOutcome {
@@ -199,18 +225,19 @@ pub(crate) fn compact_session_with_sessions(
     })
 }
 
-/// 读取会话历史快照（短读锁，锁毒化按既有惯例恢复）。
-fn read_session_history(
+/// 读取会话快照（短读锁，锁毒化按既有惯例恢复）。
+///
+/// 返回整份快照而不是只返回 `history`：压缩必须同时判定/裁剪 `provider_native_transcript`
+/// 与读取上一请求的真实 input token，三者都只在快照上才拿得到。
+fn read_session_snapshot(
     sessions: &Arc<RwLock<SessionStore>>,
     session_id: &str,
-) -> Vec<TurnHistoryMessage> {
+) -> crate::agent::session::SessionSnapshot {
     let store = sessions.read().unwrap_or_else(|e| {
         eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
         e.into_inner()
     });
-    store
-        .snapshot_at_readonly(Some(session_id), None, &[])
-        .history
+    store.snapshot_at_readonly(Some(session_id), None, &[])
 }
 
 /// 构建摘要请求（与 `runtime/turn_prep.rs` 的自动压缩口径一致：
@@ -306,13 +333,14 @@ fn summary_body(wrapped_content: &str) -> String {
 ///
 /// - 基线未被改写（`current` 与 `base` 逐条相等）⇒ 返回新增尾部，回写时原样保留；
 /// - 基线被改写（分支切换 / 清空 / 重写）⇒ 返回 `Err`，放弃写入而不是覆盖丢数据。
-fn concurrent_suffix(
-    base: &[TurnHistoryMessage],
-    current: &[TurnHistoryMessage],
-) -> Result<Vec<TurnHistoryMessage>, String> {
+fn concurrent_suffix<T: PartialEq + Clone>(
+    base: &[T],
+    current: &[T],
+    label: &str,
+) -> Result<Vec<T>, String> {
     if current.len() < base.len() {
         return Err(format!(
-            "{COMPACTION_HISTORY_CHANGED_ERROR_CODE}: session history shrank during compaction; \
+            "{COMPACTION_HISTORY_CHANGED_ERROR_CODE}: session {label} shrank during compaction; \
              refusing to overwrite (base={}, current={})",
             base.len(),
             current.len()
@@ -320,8 +348,8 @@ fn concurrent_suffix(
     }
     if current[..base.len()] != *base {
         return Err(format!(
-            "{COMPACTION_HISTORY_CHANGED_ERROR_CODE}: session history was rewritten during \
-             compaction; refusing to overwrite {} messages",
+            "{COMPACTION_HISTORY_CHANGED_ERROR_CODE}: session {label} was rewritten during \
+             compaction; refusing to overwrite {} entries",
             current.len()
         ));
     }
@@ -399,21 +427,21 @@ mod tests {
         let base = vec![turn("user", "a"), turn("assistant", "b")];
 
         // 未变：无新增
-        assert!(concurrent_suffix(&base, &base).expect("unchanged").is_empty());
+        assert!(concurrent_suffix(&base, &base, "history").expect("unchanged").is_empty());
 
         // 追加：新增尾部必须原样返回（压缩期间到来的新轮次不能被覆盖丢失）
         let mut extended = base.clone();
         extended.push(turn("user", "c"));
-        let suffix = concurrent_suffix(&base, &extended).expect("extended");
+        let suffix = concurrent_suffix(&base, &extended, "history").expect("extended");
         assert_eq!(suffix, vec![turn("user", "c")]);
 
         // 变短 / 被改写：不得覆盖，返回可辨识错误
         let shrunk = vec![turn("user", "a")];
-        let error = concurrent_suffix(&base, &shrunk).expect_err("shrunk must fail");
+        let error = concurrent_suffix(&base, &shrunk, "history").expect_err("shrunk must fail");
         assert!(error.contains(COMPACTION_HISTORY_CHANGED_ERROR_CODE), "{error}");
 
         let rewritten = vec![turn("user", "a"), turn("assistant", "ZZZ")];
-        let error = concurrent_suffix(&base, &rewritten).expect_err("rewritten must fail");
+        let error = concurrent_suffix(&base, &rewritten, "history").expect_err("rewritten must fail");
         assert!(error.contains(COMPACTION_HISTORY_CHANGED_ERROR_CODE), "{error}");
     }
 }

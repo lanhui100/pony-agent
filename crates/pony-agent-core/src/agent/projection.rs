@@ -26,6 +26,13 @@ pub trait Projection<S> {
 
 /// 消息历史投影：user/assistant 消息 + 截断窗口 + `history/squash` 语义
 /// （丢弃 base_seq 之前的事件，注入摘要——折叠不复活被压缩历史）。
+///
+/// **失败轮必须折出 assistant 消息**：流式失败时事件流里只有 `user/message` +
+/// `assistant/chunk` + `turn/end{error|aborted|cancelled}`，**没有** `assistant/message`。
+/// 只折叠后者会让失败轮变成「悬空的 user」——重启后模型看不到自己做过什么、卡在哪，
+/// 这正是 `pa_01a1c4d0` 事故重启后的形态。因此 `turn/end` 非正常结束时，本投影用该轮
+/// chunk 文本 + 工具名合成中断检查点，与运行时写历史**共用**同一个纯函数
+/// （`session::interrupted_turn_checkpoint_text`），保证两层文本同构。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HistoryProjectionState {
     /// (事件 seq, 消息)。squash 后保留 seq > base_seq 的部分。
@@ -34,6 +41,54 @@ pub struct HistoryProjectionState {
     limit: usize,
     /// 最近一次 TurnEnd 的 reason（用于标记最后一条 assistant 消息状态）。
     last_end_reason: Option<TurnEndReason>,
+    /// 当前 turn 的过程累积（chunk 文本 + 工具名），失败轮合成检查点用。
+    #[serde(default)]
+    pending: Option<PendingTurnArtifacts>,
+}
+
+/// 一轮内已发生、但尚未成为「可见 assistant 消息」的过程事实。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PendingTurnArtifacts {
+    turn_id: String,
+    /// 该轮全部 `assistant/chunk` 按事件顺序拼接（含每个 hop 的部分正文）。
+    chunks: String,
+    /// 该轮已发出的工具名（按调用顺序，去重保序）。
+    tool_names: Vec<String>,
+    /// 该轮是否已有 `assistant/message`；有则不得再合成，避免同一轮两条 assistant。
+    has_assistant_message: bool,
+}
+
+/// 检查点里最多列出多少条工具步骤：一轮 90+ 个 hop 全列会把检查点本身变成新的
+/// 上下文炸弹（我们正是在修「上下文里塞了太多东西」），超出部分折叠成一行省略标记。
+const CHECKPOINT_TOOL_LINE_LIMIT: usize = 20;
+
+impl PendingTurnArtifacts {
+    fn begin(turn_id: &str) -> Self {
+        Self {
+            turn_id: turn_id.to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// 与运行时同构的中断检查点文本；无正文且无工具步骤 ⇒ `None`（不造空壳消息）。
+    fn checkpoint_text(&self) -> Option<String> {
+        let tools: Vec<String> = if self.tool_names.len() > CHECKPOINT_TOOL_LINE_LIMIT {
+            let mut kept: Vec<String> = self
+                .tool_names
+                .iter()
+                .take(CHECKPOINT_TOOL_LINE_LIMIT)
+                .cloned()
+                .collect();
+            kept.push(format!(
+                "（其余 {} 步已省略）",
+                self.tool_names.len() - CHECKPOINT_TOOL_LINE_LIMIT
+            ));
+            kept
+        } else {
+            self.tool_names.clone()
+        };
+        crate::agent::session::interrupted_turn_checkpoint_text(&self.chunks, &tools)
+    }
 }
 
 impl HistoryProjectionState {
@@ -42,6 +97,7 @@ impl HistoryProjectionState {
             messages: Vec::new(),
             limit,
             last_end_reason: None,
+            pending: None,
         }
     }
 
@@ -51,12 +107,19 @@ impl HistoryProjectionState {
             .map(|(_, message)| message.clone())
             .collect()
     }
+
+    /// `(seq, 消息)` 只读视图：压缩提交必须知道「最后一个被丢弃的消息」落在哪个 seq
+    /// 上（`history/squash.base_seq` 的唯一推导来源），否则压缩边界只能靠猜。
+    pub(crate) fn messages_with_seq(&self) -> &[(u64, TurnHistoryMessage)] {
+        &self.messages
+    }
 }
 
 impl Projection<HistoryProjectionState> for HistoryProjectionState {
     fn init() -> Self {
-        // 与 session.rs 的 DEFAULT_HISTORY_LIMIT 对齐（私有常量，投影侧复制）。
-        Self::with_limit(24)
+        // 与写路径共用**同一个**紧急上限：投影侧自己留一个 24 的副本，等于在读路径上
+        // 又装了一条隐式滑窗（写 400 条、读回 24 条）。
+        Self::with_limit(crate::agent::session::HISTORY_EMERGENCY_LIMIT)
     }
 
     fn apply(state: &mut Self, seq: u64, event: &TurnEvent) {
@@ -67,19 +130,40 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                 turn_id,
                 ..
             } => {
-                state.messages.push((
-                    seq,
-                    TurnHistoryMessage {
-                        role: "user".to_string(),
-                        content: text.clone(),
-                        attachments: attachments.clone(),
-                        turn_id: Some(turn_id.clone()),
-                        status: None,
-                        model_name: None,
-                        token_count: None,
-                        reasoning_content: None,
-                    },
-                ));
+                state.pending = Some(PendingTurnArtifacts::begin(turn_id));
+                // 空文本（含纯空白）不入历史：空历史项会污染下一轮 carry，且下游按
+                // 空文本判无效。
+                if !text.trim().is_empty() {
+                    state.messages.push((
+                        seq,
+                        TurnHistoryMessage {
+                            role: "user".to_string(),
+                            content: text.clone(),
+                            attachments: attachments.clone(),
+                            turn_id: Some(turn_id.clone()),
+                            status: None,
+                            model_name: None,
+                            token_count: None,
+                            reasoning_content: None,
+                        },
+                    ));
+                }
+            }
+            TurnEvent::AssistantChunk { turn_id, text, .. } => {
+                if let Some(pending) = state.pending.as_mut() {
+                    if pending.turn_id == *turn_id {
+                        pending.chunks.push_str(text);
+                    }
+                }
+            }
+            TurnEvent::ToolCall { turn_id, name, .. } => {
+                if let Some(pending) = state.pending.as_mut() {
+                    if pending.turn_id == *turn_id
+                        && !pending.tool_names.iter().any(|known| known == name)
+                    {
+                        pending.tool_names.push(name.clone());
+                    }
+                }
             }
             TurnEvent::AssistantMessage {
                 text,
@@ -88,22 +172,58 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                 usage,
                 ..
             } => {
-                state.messages.push((
-                    seq,
-                    TurnHistoryMessage {
-                        role: "assistant".to_string(),
-                        content: text.clone(),
-                        attachments: Vec::new(),
-                        turn_id: Some(turn_id.clone()),
-                        status: None,
-                        model_name: None,
-                        // usage 仅消息元数据展示（不参与 MetricsProjection totals，防双计数）。
-                        token_count: usage.as_ref().and_then(|u| u.total_tokens),
-                        reasoning_content: reasoning_content.clone(),
-                    },
-                ));
+                if let Some(pending) = state.pending.as_mut() {
+                    if pending.turn_id == *turn_id {
+                        pending.has_assistant_message = true;
+                    }
+                }
+                // 空文本且无推理内容 ⇒ 不落历史（与 PA-174 重建口径一致）。
+                let has_reasoning = reasoning_content
+                    .as_deref()
+                    .is_some_and(|reasoning| !reasoning.trim().is_empty());
+                if !text.trim().is_empty() || has_reasoning {
+                    state.messages.push((
+                        seq,
+                        TurnHistoryMessage {
+                            role: "assistant".to_string(),
+                            content: text.clone(),
+                            attachments: Vec::new(),
+                            turn_id: Some(turn_id.clone()),
+                            status: None,
+                            model_name: None,
+                            // usage 仅消息元数据展示（不参与 MetricsProjection totals，防双计数）。
+                            token_count: usage.as_ref().and_then(|u| u.total_tokens),
+                            reasoning_content: reasoning_content.clone(),
+                        },
+                    ));
+                }
             }
-            TurnEvent::TurnEnd { reason, .. } => {
+            TurnEvent::TurnEnd {
+                turn_id, reason, ..
+            } => {
+                // 失败/中断轮：事件流没有 assistant/message，此处用过程累积合成一条
+                // 中断检查点，等价于 dsh 的 `assistant/message{interrupted:true}`。
+                if !matches!(reason, TurnEndReason::Completed) {
+                    if let Some(pending) = state.pending.take() {
+                        if pending.turn_id == *turn_id && !pending.has_assistant_message {
+                            if let Some(text) = pending.checkpoint_text() {
+                                state.messages.push((
+                                    seq,
+                                    TurnHistoryMessage {
+                                        role: "assistant".to_string(),
+                                        content: text,
+                                        attachments: Vec::new(),
+                                        turn_id: Some(turn_id.clone()),
+                                        status: Some(crate::agent::session::MessageStatus::Error),
+                                        model_name: None,
+                                        token_count: None,
+                                        reasoning_content: None,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
                 // turn/end → 标记最后一条 assistant 消息状态（design.md:29）。
                 if let Some((_, last)) = state.messages.last_mut() {
                     if last.role == "assistant" {
@@ -120,22 +240,30 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                 summary_message,
             } => {
                 // 丢弃 base_seq 之前的事件并注入摘要（压缩不复活被压缩历史）。
-                // NOTE: 摘要格式与参考 wrap_summary_to_message（user 角色 + 包裹文本）
-                // 存在分叉——对拍字段集显式排除摘要消息格式（spec 注明）。
+                // 摘要文本由 `wrap_summary_to_message` **预先包裹**（user 角色 + 前后缀）
+                // 后写进事件，因此这里原样注入，不再二次包裹——运行时历史里的摘要就是
+                // 这个形态，折叠必须与之一致，否则「压缩后重启」会换一种措辞。
                 state.messages.retain(|(msg_seq, _)| *msg_seq > *base_seq);
-                state.messages.push((
-                    seq,
-                    TurnHistoryMessage {
-                        role: "assistant".to_string(),
-                        content: summary_message.clone(),
-                        attachments: Vec::new(),
-                        turn_id: None,
-                        status: None,
-                        model_name: None,
-                        token_count: None,
-                        reasoning_content: None,
-                    },
-                ));
+                // 被压缩区间里未结算的过程状态随边界一起丢弃（不得跨压缩边界复活）。
+                state.pending = None;
+                // **插到头部**：运行时压缩产物是 `[摘要] + 保留窗口`（`apply_compression`），
+                // 折叠必须同序，否则「压缩后重启」摘要会跑到最新位置，模型读到的时间线倒置。
+                state.messages.insert(
+                    0,
+                    (
+                        seq,
+                        TurnHistoryMessage {
+                            role: "user".to_string(),
+                            content: summary_message.clone(),
+                            attachments: Vec::new(),
+                            turn_id: None,
+                            status: None,
+                            model_name: None,
+                            token_count: None,
+                            reasoning_content: None,
+                        },
+                    ),
+                );
             }
             _ => {}
         }
@@ -1298,10 +1426,18 @@ mod tests {
         }
         let state = fold_all::<_, HistoryProjectionState>(&events);
         assert_eq!(
-            state.messages().len(),
-            24,
-            "window truncated to limit (DEFAULT_HISTORY_LIMIT)"
+            HistoryProjectionState::init().limit,
+            crate::agent::session::HISTORY_EMERGENCY_LIMIT,
+            "投影默认上限必须与写路径共用同一常量（否则读路径又装一条隐式滑窗）"
         );
+        assert_eq!(state.messages().len(), 30, "默认上限下 30 条不再被裁剪");
+
+        // 显式小窗口仍按 limit 从尾部保留：裁剪口径本身不变。
+        let mut small = HistoryProjectionState::with_limit(5);
+        for (seq, event) in &events {
+            HistoryProjectionState::apply(&mut small, *seq, event);
+        }
+        assert_eq!(small.messages().len(), 5, "window truncated to limit");
     }
 
     #[test]

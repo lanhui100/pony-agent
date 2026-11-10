@@ -327,6 +327,16 @@ enum FoldCommand {
         session_id: String,
         node: HistoryNode,
     },
+    /// 上下文压缩提交：可见节点快照**整份替换** + 原生 transcript **全量替换**。
+    ///
+    /// 与 `UpdateHistoryNode`（单条节点 upsert）的区别只在 transcript：压缩把被摘要
+    /// 覆盖的历史真删掉了，`AppendProviderTranscript` 的追加语义表达不了这件事。
+    /// `summaryMessage` 不参与折叠（摘要已在 `node.history` 首条），故不解码。
+    CompactHistory {
+        session_id: String,
+        node: HistoryNode,
+        transcript: Vec<serde_json::Value>,
+    },
     UpdateCursor {
         session_id: String,
         cursor: HistoryCursor,
@@ -525,6 +535,11 @@ impl FoldCommand {
                 session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
                 node: payload(value, seq, kind, "node")?,
             },
+            "compact_history" => Self::CompactHistory {
+                session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
+                node: payload(value, seq, kind, "node")?,
+                transcript: payload(value, seq, kind, "transcript")?,
+            },
             "update_cursor" => Self::UpdateCursor {
                 session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
                 cursor: payload(value, seq, kind, "cursor")?,
@@ -579,6 +594,7 @@ impl FoldCommand {
             | Self::UpdateTraceTerminal { session_id, .. }
             | Self::AppendHookRecords { session_id, .. }
             | Self::UpdateHistoryNode { session_id, .. }
+            | Self::CompactHistory { session_id, .. }
             | Self::UpdateCursor { session_id, .. }
             | Self::UpdateBranch { session_id, .. }
             | Self::UpdateSessionMeta { session_id, .. }
@@ -767,6 +783,17 @@ impl Folder {
             FoldCommand::UpdateHistoryNode { node, .. } => {
                 self.nodes.retain(|existing| existing.node_id != node.node_id);
                 self.nodes.push(node);
+            }
+            FoldCommand::CompactHistory {
+                node, transcript, ..
+            } => {
+                // 节点幂等 upsert（与 `UpdateHistoryNode` 同口径）。
+                self.nodes.retain(|existing| existing.node_id != node.node_id);
+                self.nodes.push(node);
+                // transcript **整份替换**：被摘要覆盖的轮次在压缩里是真删掉的，
+                // 追加语义无法表达「基线前移」。后续 `AppendProviderTranscript`
+                // 继续在这份新基线上 extend。
+                self.state().provider_native_transcript = transcript;
             }
             FoldCommand::UpdateCursor { cursor, .. } => {
                 self.cursor = Some(cursor);
@@ -1951,6 +1978,71 @@ pub(crate) fn append_provider_transcript_tx(
     append_json_column_tx(tx, session_id, "provider_native_transcript_json", messages)
 }
 
+/// 压缩提交：transcript **整份替换**（与 `AppendProviderTranscript` 的追加语义相反）。
+///
+/// 压缩把被摘要覆盖的轮次真删掉了，追加语义表达不了「基线前移」；保留追加会让
+/// 重放后的 transcript 把已摘要的历史重新装回来（上下文体积反弹）。
+pub(crate) fn replace_provider_transcript_tx(
+    tx: &rusqlite::Transaction<'_>, session_id: &str, messages: &[serde_json::Value],
+) -> Result<(), String> {
+    let encoded =
+        serde_json::to_string(messages).map_err(|e| format!("encode transcript: {e}"))?;
+    tx.execute(
+        "UPDATE normalized_sessions SET provider_native_transcript_json = ?2 WHERE session_id = ?1",
+        rusqlite::params![session_id, encoded],
+    )
+    .map_err(|e| format!("replace provider transcript: {e}"))?;
+    Ok(())
+}
+
+/// 历史节点快照 upsert（`UpdateHistoryNode` 与 `CompactHistory` 共用同一 SQL）。
+///
+/// 抽成自由函数而非 backend 方法：`sqlite_session.rs` 有 file-size 净值上限，
+/// 压缩命令复用这段写库逻辑必须**不增加**该文件的行数。
+pub(crate) fn upsert_history_node_tx(
+    tx: &rusqlite::Transaction<'_>, session_id: &str, node: &HistoryNode,
+) -> Result<(), String> {
+    let snapshot_json = if !node.history.is_empty() {
+        serde_json::to_string(&serde_json::json!({
+            "history": node.history,
+            "providerNativeTranscript": node.provider_native_transcript,
+            "longTermMemoryEntries": node.long_term_memory_entries,
+            "memoryWriteEvidence": node.memory_write_evidence,
+            "memoryWriteHookTraceRecords": node.memory_write_hook_trace_records,
+            "turnCount": node.turn_count,
+            "lastReferencedFile": node.last_referenced_file,
+        }))
+        .ok()
+    } else {
+        None
+    };
+    tx.execute(
+        "INSERT OR REPLACE INTO normalized_history_nodes
+         (session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id,
+          turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        rusqlite::params![
+            session_id,
+            node.node_id,
+            node.parent_node_id,
+            node.branch_id,
+            node.forked_from_node_id,
+            serde_json::to_string(&node.kind).unwrap_or_else(|_| "\"checkpoint\"".to_string()),
+            node.turn_id,
+            serde_json::to_string(&node.turn_trace_refs).unwrap_or_else(|_| "null".to_string()),
+            node.run_id,
+            serde_json::to_string(&node.workspace_ref).unwrap_or_else(|_| "null".to_string()),
+            node.summary,
+            node.title,
+            node.created_at_ms,
+            snapshot_json,
+            serde_json::to_string(&node.event_seq_range).unwrap_or_else(|_| "null".to_string()),
+        ],
+    )
+    .map_err(|e| format!("update history node: {e}"))?;
+    Ok(())
+}
+
 /// ADR 0102：记忆三项**整份替换** + `history_state_evidence` **追加**进索引投影。
 ///
 /// 并列是刻意的：与命令定义、`Folder::apply` 一一对应；混用会让重放后的条数翻倍或清空。
@@ -2286,6 +2378,74 @@ mod tests {
                 meta_patch: patch,
             },
         )
+    }
+
+    /// 压缩提交：transcript 走**整份替换**，后续追加接在新基线上；压缩节点进入节点表
+    /// （重启后 `apply_index_projection` 由可见节点快照 hydrate 出压缩后的历史）。
+    #[test]
+    fn compact_history_replaces_transcript_and_registers_node() {
+        let session_id = "pa_fold_compact";
+        let old = json!({"role": "user", "content": "old-1"});
+        let kept = json!({"role": "user", "content": "kept-1"});
+        let later = json!({"role": "user", "content": "later-1"});
+        let mut node = HistoryNode {
+            node_id: "node-compact-1".to_string(),
+            session_id: session_id.to_string(),
+            branch_id: "branch-main".to_string(),
+            summary: "compacted".to_string(),
+            title: "t".to_string(),
+            ..Default::default()
+        };
+        node.history = vec![TurnHistoryMessage {
+            role: "user".to_string(),
+            content: "summary".to_string(),
+            ..Default::default()
+        }];
+        node.provider_native_transcript = vec![kept.clone()];
+
+        let events = vec![
+            envelope(
+                0,
+                &PersistCommand::AppendProviderTranscript {
+                    epoch: 1,
+                    session_id: session_id.to_string(),
+                    messages: vec![old, kept.clone()],
+                },
+            ),
+            envelope(
+                1,
+                &PersistCommand::CompactHistory {
+                    epoch: 1,
+                    session_id: session_id.to_string(),
+                    node: node.clone(),
+                    transcript: vec![kept.clone()],
+                    summary_message: "summary".to_string(),
+                },
+            ),
+            envelope(
+                2,
+                &PersistCommand::AppendProviderTranscript {
+                    epoch: 1,
+                    session_id: session_id.to_string(),
+                    messages: vec![later.clone()],
+                },
+            ),
+        ];
+
+        let folded = fold_session(&events).expect("fold compact history");
+        assert_eq!(
+            folded.state.provider_native_transcript,
+            vec![kept, later],
+            "压缩后 transcript 必须是「替换 + 后续追加」，不能把被摘要的历史装回来"
+        );
+        assert!(
+            folded
+                .state
+                .history_nodes
+                .iter()
+                .any(|candidate| candidate.node_id == "node-compact-1"),
+            "压缩节点必须进入 fold 的节点表（重启后可见历史由它 hydrate）"
+        );
     }
 
     #[test]

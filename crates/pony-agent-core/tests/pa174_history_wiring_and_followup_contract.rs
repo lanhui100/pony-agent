@@ -471,10 +471,20 @@ fn seed_session_with_events(
 /// 参数类型锚点：契约写作 `TurnEventLike`，代码库暂无该类型 ⇒ 本测试用现成的
 /// `pub enum TurnEvent`（`turn_event.rs:40`，`serde(tag="type")`，正是 `turn_events.payload`
 /// 的落库类型）。「按 seq 升序」由装载侧 `ORDER BY seq` 保证，切片顺序即 seq 顺序。
+/// 事件 → `(seq, 事件)`：重建入口要求带 seq——`history/squash` 的边界判据是
+/// 「丢弃 seq <= base_seq 的消息」，不带 seq 就无法尊重压缩边界。
+fn with_seq(events: Vec<TurnEvent>) -> Vec<(u64, TurnEvent)> {
+    events
+        .into_iter()
+        .enumerate()
+        .map(|(seq, event)| (seq as u64, event))
+        .collect()
+}
+
 #[test]
 fn p1_history_is_rebuilt_from_turn_events() {
     // ── Arrange：故意乱序放入非消息事件，验证「只取消息事件 + 保序」。 ──────────────
-    let events = vec![
+    let events = with_seq(vec![
         TurnEvent::UserMessage {
             turn_id: "turn-1".to_string(),
             text: "问题一".to_string(),
@@ -525,7 +535,7 @@ fn p1_history_is_rebuilt_from_turn_events() {
             usage: None,
             chunk_missing: None,
         },
-    ];
+    ]);
 
     // ── Act ────────────────────────────────────────────────────────────────────
     let history = history_from_turn_events(&events);
@@ -615,7 +625,7 @@ fn p1_loader_rebuilds_history_from_turn_events_when_projection_is_empty() {
 #[test]
 fn p1_rebuilt_history_reaches_request() {
     // ── Arrange：重建历史并注入内存会话存储。 ────────────────────────────────────
-    let rebuilt = history_from_turn_events(&[
+    let rebuilt = history_from_turn_events(&with_seq(vec![
         TurnEvent::UserMessage {
             turn_id: "turn-1".to_string(),
             text: "上一轮问题".to_string(),
@@ -629,7 +639,7 @@ fn p1_rebuilt_history_reaches_request() {
             usage: None,
             chunk_missing: None,
         },
-    ]);
+    ]));
     assert_eq!(
         rebuilt.len(),
         2,

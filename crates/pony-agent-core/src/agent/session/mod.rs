@@ -24,6 +24,9 @@ mod tests;
 // ADR 0092 回归：goal 续轮文案识别（单独成文件，避免撑大已触棘轮的 `tests.rs`）。
 #[cfg(test)]
 mod host_continuation_goal_round_tests;
+// 历史治理门禁：追加语义 / 压缩双写 / 压缩可重放 / 事件物化（同上，避免撑大 `tests.rs`）。
+#[cfg(test)]
+mod history_compaction_tests;
 mod types;
 pub mod usage;
 pub mod workspace_snapshot;
@@ -147,3 +150,7 @@ use types::{
     DEFAULT_ATTACHMENT_RECLAIM_TTL_MS, DEFAULT_HISTORY_BRANCH_ID, DEFAULT_SESSION_SUMMARY,
     DEFAULT_SESSION_TITLE,
 };
+/// 历史**紧急上限**（条消息）：写路径、投影侧、上下文组装共用同一常量。
+///
+/// 单一口径是刻意的——任一侧自己留一个副本就是一条新的隐式滑窗。
+pub(crate) use types::HISTORY_EMERGENCY_LIMIT;

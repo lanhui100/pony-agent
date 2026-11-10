@@ -1,4 +1,7 @@
 use crate::agent::capability_bridge::SkillDescriptor;
+use crate::agent::compression::{
+    estimate_native_message_tokens, estimate_text_tokens, FALLBACK_INPUT_BUDGET_TOKENS,
+};
 use crate::agent::execution_control::ExecutionCheckpoint;
 use crate::agent::graph::GraphRun;
 use crate::agent::input::TurnInputImage;
@@ -112,7 +115,12 @@ pub fn prompt_layers_are_ordered(messages: &[ProviderMessage]) -> bool {
 }
 
 const SESSION_CONTEXT_ATTACHMENT_LIMIT: usize = 8;
-const TRANSCRIPT_CONTEXT_MESSAGE_LIMIT: usize = 24;
+/// 原生 transcript 送进 prompt 的**紧急上限**（条消息）。
+///
+/// 正常会话由压缩（token 预算）治理，不再靠条数滑窗：曾经的 24 条在多轮工具会话里
+/// 意味着「每次请求窗口都滑动一格」，provider 前缀缓存全灭（ADR 0007 的一等指标）；
+/// 单个 90 hop 的长轮次本身就有约 200 条消息，24 条连一轮都装不下。
+const TRANSCRIPT_CONTEXT_MESSAGE_LIMIT: usize = 400;
 const CODING_DOMAIN_PROFILE_PROMPT: &str = r#"Active domain profile: coding.
 
 - Focus on code, debugging, architecture, tooling, and tests.
@@ -1646,7 +1654,11 @@ fn path_looks_like_image(path: &str) -> bool {
 }
 
 fn input_budget_tokens(provider: &ProviderManager) -> Option<usize> {
-    let context_window = provider.context_window_tokens()?;
+    // 窗口未声明 ⇒ 保守兜底预算（`compression::FALLBACK_INPUT_BUDGET_TOKENS`）：
+    // 旧实现返回 `None`，等于完全没有上界（那时靠 24 条条数滑窗兜着）。
+    let Some(context_window) = provider.context_window_tokens() else {
+        return Some(FALLBACK_INPUT_BUDGET_TOKENS);
+    };
     let output_reserve = provider
         .max_output_tokens()
         .min(context_window.saturating_sub(32));
@@ -1804,53 +1816,6 @@ fn truncation_note(truncated_count: usize, label: &str) -> Option<String> {
 
 fn estimate_provider_message_tokens(message: &ProviderMessage) -> usize {
     4 + estimate_text_tokens(&message.content)
-}
-
-fn estimate_native_message_tokens(message: &Value) -> usize {
-    if let Some(content) = message.get("content").and_then(Value::as_str) {
-        return 4 + estimate_text_tokens(content);
-    }
-
-    if let Some(content) = message.get("content").and_then(Value::as_array) {
-        let content_tokens = content
-            .iter()
-            .map(estimate_native_content_block_tokens)
-            .sum::<usize>();
-        return 4 + content_tokens;
-    }
-
-    4 + estimate_text_tokens(&message.to_string())
-}
-
-fn estimate_native_content_block_tokens(block: &Value) -> usize {
-    if block.get("type").and_then(Value::as_str) == Some("image")
-        || block.get("type").and_then(Value::as_str) == Some("image_url")
-    {
-        return 256;
-    }
-
-    if let Some(text) = block.get("text").and_then(Value::as_str) {
-        return estimate_text_tokens(text);
-    }
-
-    if let Some(text) = block
-        .get("text")
-        .and_then(|value| value.get("value"))
-        .and_then(Value::as_str)
-    {
-        return estimate_text_tokens(text);
-    }
-
-    estimate_text_tokens(&block.to_string())
-}
-
-fn estimate_text_tokens(text: &str) -> usize {
-    let char_count = text.chars().count();
-    if char_count == 0 {
-        0
-    } else {
-        char_count.div_ceil(4)
-    }
 }
 
 fn to_provider_history_message(message: &TurnHistoryMessage) -> Option<ProviderMessage> {

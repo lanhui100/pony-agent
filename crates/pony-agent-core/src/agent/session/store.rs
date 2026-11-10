@@ -17,6 +17,7 @@ use super::types::{
     SessionState, SessionVersionMap, TurnHistoryMessage, TurnTraceRecord, TurnTraceRef,
     WorkspaceRef, DEFAULT_ATTACHMENT_RECLAIM_TTL_MS, DEFAULT_HISTORY_BRANCH_ID,
     DEFAULT_HISTORY_LIMIT, DEFAULT_SESSION_ID, DEFAULT_SESSION_SUMMARY, DEFAULT_SESSION_TITLE,
+    HISTORY_EMERGENCY_LIMIT,
     TITLE_MAX_CHARS,
 };
 use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
@@ -36,6 +37,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[path = "store_compaction.rs"]
+mod compaction;
 
 // ADR 0099 阶段 0：提交边界编排（CAS 重试 / 版本前进 / 快照构造）独立成文件——
 // `store.rs` 已计入 file-size 基线条目，净值不得增长。
@@ -557,8 +561,8 @@ impl SessionStore {
                 reasoning_content: assistant_reasoning,
                 ..Default::default()
             });
-            if staged_session.history.len() > DEFAULT_HISTORY_LIMIT {
-                let keep_from = staged_session.history.len() - DEFAULT_HISTORY_LIMIT;
+            if staged_session.history.len() > HISTORY_EMERGENCY_LIMIT {
+                let keep_from = staged_session.history.len() - HISTORY_EMERGENCY_LIMIT;
                 staged_session.history.drain(..keep_from);
             }
             if let Some(messages) = provider_native_transcript {
@@ -708,8 +712,8 @@ impl SessionStore {
             // wave-54 C3/C4：失败轮同样由 per-call 记录派生 provenance（与 live/fold 同口径）。
             trace.derive_usage_provenance_from_calls();
             staged_session.turn_trace_history.push(trace);
-            if staged_session.history.len() > DEFAULT_HISTORY_LIMIT {
-                let keep_from = staged_session.history.len() - DEFAULT_HISTORY_LIMIT;
+            if staged_session.history.len() > HISTORY_EMERGENCY_LIMIT {
+                let keep_from = staged_session.history.len() - HISTORY_EMERGENCY_LIMIT;
                 staged_session.history.drain(..keep_from);
             }
             if staged_session.turn_trace_history.len() > DEFAULT_HISTORY_LIMIT {
@@ -747,22 +751,6 @@ impl SessionStore {
                 self.snapshot_for_session(session_id.unwrap_or(DEFAULT_SESSION_ID))
             }
         }
-    }
-
-    /// 替换会话的历史记录（用于上下文压缩后更新历史）
-    pub fn replace_session_history(
-        &mut self,
-        session_id: Option<&str>,
-        new_history: Vec<TurnHistoryMessage>,
-    ) {
-        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
-        {
-            let session = self.ensure_session(&session_key);
-            session.history = new_history;
-            refresh_session_metadata(session, true);
-            commit_history_node_from_live_state(session, HistoryNodeKind::TurnCommitted, None);
-        }
-        self.save_to_backend();
     }
 
     /// 仅做内存更新并返回待持久化的 trace 变更（SQLite 落库由调用方决定，
