@@ -317,6 +317,19 @@ impl SessionLogSink {
             .map_err(|error| format!("delete session log for `{session_id}`: {error}"))
     }
 
+    /// 测试用：丢弃全部会话写者缓存（drop ⇒ 释放日志独占锁）。
+    ///
+    /// 为什么需要：Windows 的 `LockFileEx` 是**强制**字节锁——写者句柄持锁期间，**同进程**的
+    /// 另一个句柄也读不了该文件（`The process cannot access the file because another process
+    /// has locked a portion of the file.`）。用例要在 append 之后直接 `fs::read_to_string`
+    /// 校验日志内容，必须先放锁；Linux 的 `flock` 是劝告锁、同进程读取不受影响，故此前未暴露。
+    #[cfg(test)]
+    pub(crate) fn release_writers_for_test(&self) {
+        if let Ok(mut writers) = self.writers.lock() {
+            writers.clear();
+        }
+    }
+
     /// 打开（必要时创建）某会话的写者句柄，锁冲突按有界预算重试。
     fn open_writer(&self, session_id: &str, meta: &SessionLogMeta) -> Result<LogWriter, String> {
         let mut attempt = 0u32;
@@ -461,6 +474,7 @@ mod tests {
             .expect("append after rollback");
         assert!(third.written);
 
+        sink.release_writers_for_test();
         let raw = std::fs::read_to_string(&path).expect("read log");
         let mut seqs: Vec<u64> = Vec::new();
         for line in raw.lines().filter(|line| !line.trim().is_empty()) {
@@ -617,6 +631,7 @@ mod tests {
         assert_eq!(seqs.len(), 1);
         drop(other_writer);
 
+        sink.release_writers_for_test();
         let raw = std::fs::read_to_string(&path).expect("read log");
         let seq_numbers: Vec<u64> = raw
             .lines()
@@ -668,6 +683,7 @@ mod tests {
         }
         // 共享会话日志：4 线程 × 25 次 = 100 条命令，seq 必须严格连续。
         let path = sink.log_path("pa_shared").expect("log path");
+        sink.release_writers_for_test();
         let raw = std::fs::read_to_string(&path).expect("read shared log");
         let seqs: Vec<u64> = raw
             .lines()
