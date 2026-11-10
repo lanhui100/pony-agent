@@ -39,8 +39,12 @@ TUI 此前只有「Esc = 停止本轮 / 清空草稿」，没有把对话退回�
 ## 机器回执
 
 - `cargo check -p pony-agent-core --lib` / `--bin pony`：通过。
-- `cargo test -p pony-agent-core --test tui_rewind_acceptance`：2 passed
-  （R1/R2 会话截断 + R4 撤回到空会话并可继续对话；R3 文件 pre-image 还原与新建文件删除）。
+- `cargo test -p pony-agent-core --test tui_rewind_acceptance`：3 passed
+  （R1/R2 会话截断 + R4 撤回到空会话并可继续对话；R3 文件 pre-image 还原与新建文件删除；
+  R5 空会话 checkpoint 根与截断跨存储重载存活）。
+- `cargo test -p pony-agent-core --test tui_rewind_capture_seam`：3 passed（真实
+  `workspace_write_file` 落盘前的抓取接缝：幂等 / 最早 pre-image 取胜 + 新建删除 / 缺 turn 事实不抓 /
+  抓取失败 fail-open 不阻断写入）。
 - `cargo test -p pony-agent-core --lib rewind`：5 passed（`rewind_files` 语义：幂等、最早 pre-image 取胜、
   新建删除、超限降级、未知会话 no-op）。
 - `cargo test -p pony-agent-core --bin pony rewind`：13 passed（双击上膛窗口/会话作用域/清膛、
@@ -50,6 +54,29 @@ TUI 此前只有「Esc = 停止本轮 / 清空草稿」，没有把对话退回�
 - `node scripts/check-decisions.mjs`：通过（0113 已入索引）。
 - `node scripts/check-file-size.mjs --baseline scripts/file-size-baseline.json`：新增违规数为**存量基线**
   以外的一批（`bin/tui.rs` 等在本改动前已超基线，见「已知缺口」）。
+
+## 对抗复核（D3 / D4，2026-11-10）
+
+复核口径：只信机器回执，不复述实现意图。两条疑点各自补了**可失败的**验收用例，未发现实现缺陷，
+但暴露出两个原先没有证据的空白。
+
+- **D3（空根补齐对事件溯源语义的影响）= 通过，补证据**。疑点：`ensure_rewind_root_checkpoint`
+  在内存里合成一个**无事件承载**的空 `Checkpoint` 根，并改写现有无父节点的 `parent_node_id`；
+  若这份改写不落盘，重启后空根消失 ⇒ 新轮 `keep_node_id` 指向不存在的节点，撤回到空会话直接 Err，
+  截断状态也可能复活。证据：`tui_rewind_acceptance::r5_rewind_to_empty_survives_store_reload`
+  在同一落盘文件上新建会话存储（等价重启），断言（a）会话仍为空且已撤销轮次不被复活；（b）空根
+  **保留同一 node_id**；（c）重启后新轮 `parent_node_id` 正是该空根，二次撤回到空会话成功。
+  落盘路径成立的结构性原因：`session_is_persistable` 显式保留 `history_nodes` 非空的会话
+  （截断后仍持久化），整包快照走 `commit_store`。
+- **D4（fail-open 抓取 + 显式降级回执）= 通过，补证据**。疑点：抓取键 `(session_id, turn_id)`
+  取自 `ToolExecutionContext.dispatch_context`，与撤回侧读的节点 `turn_id` 若不是同一份事实，
+  还原会**静默空转**（`files_restored` 为空但 `degraded=false`）。证据：
+  `tui_rewind_capture_seam`（新文件）走真实 `ToolRouter::execute_with_context` →
+  `workspace_write_file`：同轮同路径只抓一次、跨轮撤回复原到最早 pre-image 且删除区间内新建文件、
+  缺 `turn_id` 时写入照做但不产生快照目录、快照根不可写时写入仍成功（fail-open）。
+- 复核后仍存在的**已知缺口**（不是缺陷，是范围）：抓取失败在撤回侧**不可区分于「该轮没改文件」**——
+  二者都表现为 0 文件可还原，`degraded` 只在「有快照但用不了」时置位。要消歧需在抓取失败时落一条
+  `capture_failed` 标记并计入降级回执，属后续增强（与快照 TTL 清理同批）。
 
 ## 已知缺口 / 后续
 

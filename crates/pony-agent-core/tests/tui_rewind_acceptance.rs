@@ -537,3 +537,131 @@ fn r3_rewind_restores_files_from_earliest_pre_image_of_cancelled_turns() {
     );
     assert!(server.wait_request_count(2), "两轮各一次上游调用");
 }
+
+fn history_node_views(
+    control_plane: &HostControlPlane,
+    session_id: &str,
+) -> Vec<pony_agent_core::agent::control_plane::HistoryNodeView> {
+    control_plane
+        .load_session_runtime_view(SessionRuntimeViewQuery {
+            session_id: Some(session_id.to_string()),
+            turn_id: None,
+            node_id: None,
+            run_id: None,
+        })
+        .history_nodes
+        .unwrap_or_default()
+}
+
+fn empty_root_node_id(
+    control_plane: &HostControlPlane,
+    session_id: &str,
+) -> String {
+    history_node_views(control_plane, session_id)
+        .into_iter()
+        .find(|node| node.parent_node_id.is_none() && node.turn_id.is_none())
+        .map(|node| node.node_id)
+        .expect("撤回/截断后的会话必须有可 checkout 的根节点")
+}
+
+// ── R5：D3 对抗复核——空会话 checkpoint 根与截断必须跨存储重载存活 ─────────────
+
+/// 怀疑点（ADR 0113 D3）：`ensure_rewind_root_checkpoint` 在内存态里**合成**一个无事件
+/// 承载的空 checkpoint 根，并把现有无父节点挂到它下面。若它没被持久化，重启后：
+/// （a）截断状态复活；（b）新轮的父节点指向不存在的节点 ⇒ 撤回到空会话直接 Err。
+/// 本测试用「同一落盘文件上新建会话存储」模拟重启，断言两条都不会发生。
+#[test]
+fn r5_rewind_to_empty_survives_store_reload() {
+    let _guard = serial_guard();
+    let _rt = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+    let workspace = isolated_workspace("reload");
+    // 同名工作区可能被历史运行留下 sessions.json ⇒ 先清干净，保证是真空装载。
+    let _ = std::fs::remove_file(workspace.join("sessions.json"));
+    let server = MockProviderServer::start(vec![
+        "第一答".to_string(),
+        "第二答".to_string(),
+        "重载答".to_string(),
+    ]);
+    let session_id = "rewind-reload";
+
+    // Arrange：两轮之后撤回到第一轮之前（此刻才补出「空会话 checkpoint 根」）。
+    let root_before = {
+        let control_plane = control_plane_with_mock_provider(server.base_url.clone(), &workspace);
+        let sink = RecordingSink::new();
+        run_turn(&control_plane, &sink, session_id, "turn-1", "第一问");
+        run_turn(&control_plane, &sink, session_id, "turn-2", "第二问");
+        let points = control_plane.list_rewind_points(RewindPointsQuery {
+            session_id: Some(session_id.to_string()),
+        });
+        let first = points.last().expect("两轮必有撤回点").node_id.clone();
+        let response = control_plane
+            .rewind_session(RewindSessionCommand {
+                session_id: Some(session_id.to_string()),
+                node_id: first,
+                mode: RewindMode::ConversationOnly,
+            })
+            .expect("撤回到空会话必须成功");
+        assert_eq!(response.turn_index, 1);
+        assert_eq!(
+            history_roles(&control_plane, session_id),
+            Vec::new(),
+            "撤回后会话必须为空"
+        );
+        empty_root_node_id(&control_plane, session_id)
+    };
+
+    // Act：同一落盘文件上新建存储（等价于重启）。
+    let restarted = control_plane_with_mock_provider(server.base_url.clone(), &workspace);
+
+    // Assert（a）：截断状态存活——会话仍为空，已撤销轮次不得复活。
+    assert_eq!(
+        history_roles(&restarted, session_id),
+        Vec::new(),
+        "重启后会话必须仍是撤回后的空状态"
+    );
+    assert!(
+        restarted
+            .list_rewind_points(RewindPointsQuery {
+                session_id: Some(session_id.to_string()),
+            })
+            .is_empty(),
+        "重启后不得把已撤销轮次重新列为可撤回点"
+    );
+    assert!(
+        history_node_views(&restarted, session_id)
+            .iter()
+            .any(|node| node.node_id == root_before),
+        "空会话 checkpoint 根必须跨重启保留同一 node_id（否则新轮父节点悬空）：{root_before}"
+    );
+
+    // Assert（b）：空根存活——重启后新轮仍能撤回到它之前（父节点必须真实存在）。
+    let sink = RecordingSink::new();
+    run_turn(&restarted, &sink, session_id, "turn-3", "重载问");
+    let points = restarted.list_rewind_points(RewindPointsQuery {
+        session_id: Some(session_id.to_string()),
+    });
+    assert_eq!(points.len(), 1, "重启 + 新轮 ⇒ 唯一可撤回点，实际 {points:?}");
+    let turn_node = history_node_views(&restarted, session_id)
+        .into_iter()
+        .find(|node| node.node_id == points[0].node_id)
+        .expect("新轮节点必须出现在会话视图里");
+    assert_eq!(
+        turn_node.parent_node_id.as_deref(),
+        Some(root_before.as_str()),
+        "重启后的新轮必须挂在持久化下来的空根之下"
+    );
+    let back_to_empty = restarted
+        .rewind_session(RewindSessionCommand {
+            session_id: Some(session_id.to_string()),
+            node_id: points[0].node_id.clone(),
+            mode: RewindMode::ConversationOnly,
+        })
+        .expect("重启后二次撤回到空会话必须成功（空根必须已持久化）");
+    assert_eq!(back_to_empty.user_message.as_deref(), Some("重载问"));
+    assert_eq!(
+        history_roles(&restarted, session_id),
+        Vec::new(),
+        "二次撤回后仍必须为空"
+    );
+    assert!(server.wait_request_count(3), "三轮各一次上游调用");
+}

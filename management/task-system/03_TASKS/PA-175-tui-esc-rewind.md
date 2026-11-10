@@ -3,7 +3,7 @@
 ## Basic Info
 
 - ID: PA-175
-- Status: Review
+- Status: Done
 - Priority: P1
 - Complexity: B
 - Owner: @orchestrator
@@ -62,3 +62,18 @@ Claude Code 的肌肉记忆是「连按两次 Esc → 撤回菜单」：把会�
 - 2026-11-10：实现 + 单测/验收测试 + ADR 0113 + 实施记录完成，进入 Review。
 - 已知缺口（如实登记）：快照目录无配额清理；脚本内改文件不回滚；`bin/tui.rs` 行数棘轮早已超基线，
   本次净增约 40 行接线；桌面端无入口。
+
+## Review（对抗复核 D3 / D4，2026-11-10，通过）
+
+- **D3（空根补齐 vs 事件溯源）**：疑点为「无事件承载的空 checkpoint 根是否跨重启存活」。
+  补验收 `tui_rewind_acceptance::r5_rewind_to_empty_survives_store_reload`（同一落盘文件上新建
+  会话存储 = 重启）：会话仍为空、已撤销轮次不复活、空根保留同一 `node_id`、重启后新轮
+  `parent_node_id` 即该空根且可二次撤回到空会话。**通过**（`session_is_persistable` 显式保留
+  `history_nodes` 非空会话，整包快照经 `commit_store` 落盘）。
+- **D4（fail-open 抓取 + 显式降级）**：疑点为「抓取键 `(session_id, turn_id)` 与撤回侧节点
+  `turn_id` 是否同一份事实；不一致会静默空转」。补验收 `tests/tui_rewind_capture_seam.rs`（3 例，
+  走真实 `workspace_write_file`）：同轮同路径只抓一次、跨轮撤回到最早 pre-image 且删除区间内新建文件、
+  缺 `turn_id` 不抓也不猜、快照根不可写时写入仍成功。**通过**。
+- 复核暴露的**已知范围**（非缺陷，未阻塞收口）：抓取失败在撤回侧不可区分于「该轮没改文件」
+  （两者都是 0 文件可还原），消歧需落 `capture_failed` 标记并计入降级，与快照 TTL 清理同批后续做。
+- 门禁：`tui_rewind_acceptance` 3/3、`tui_rewind_capture_seam` 3/3、`cargo check --all-targets` EXIT 0。
