@@ -633,8 +633,7 @@ impl SessionStore {
                 });
             }
             let outcome = self.backend.persist_commands_batch(commands);
-            // ADR 0107 §5 P1 / D4：同一会话正被另一个进程写 ⇒ 可识别的会话级冲突，
-            // 不是数据损坏、也不影响本进程写其它会话。
+            // ADR 0107 §5 P1 / D4：同一会话正被另一进程写 ⇒ 会话级冲突（非数据损坏）。
             if matches!(outcome, PersistCommandOutcome::WriterBusy) {
                 return Err(SessionError::SessionWriterBusy {
                     session_id: session_key.clone(),
@@ -645,14 +644,13 @@ impl SessionStore {
                     "append_turn batch persist failed: {outcome:?}"
                 )));
             }
-            // ADR 0107 §5 P0：`LogPersisted`（日志已落盘、索引滞后）⇒ 提交内存 live，跳过索引单行落盘。
+            // ADR 0107 P0：`LogPersisted` ⇒ 提交内存 live，跳过索引单行落盘。
             if !report_index_deferred(&session_key, &outcome) {
                 self.save_session_state_to_backend(&session_key, &staged_session);
             }
         } else {
             self.save_session_state_to_backend(&session_key, &staged_session);
         }
-
         // 提交到 live 主内存（`LogPersisted` 时索引滞后，但日志是真源 ⇒ 重启可重建）
         self.sessions.insert(session_key.clone(), staged_session);
         self.refresh_attachment_catalog();

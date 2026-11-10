@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 use crate::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 
 use super::session::{
-    AttachmentAsset, FileSessionBackend, HistoryBranch, HistoryCheckoutMode, HistoryCheckoutStatus,
+    AttachmentAsset, HistoryBranch, HistoryCheckoutMode, HistoryCheckoutStatus,
     HistoryCursor, HistoryCursorMode, HistoryNode, HistoryNodeKind, PersistCommand,
     PersistCommandOutcome, PersistedStore, SeparateTraceTableMode, SessionBackend,
     SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionState,
@@ -18,6 +18,8 @@ use super::session::{
 // 独立成文件——`sqlite_session.rs` 已计入 file-size 基线条目，净值不得增长。
 #[path = "sqlite_session_commit.rs"]
 pub(crate) mod commit;
+#[path = "sqlite_session_p1.rs"]
+mod p1;
 
 pub use commit::is_busy_error;
 
@@ -642,94 +644,12 @@ impl SqliteSessionBackend {
 
     /// One-time migration from the legacy JSON file to SQLite.
     /// Runs automatically when the SQLite DB is empty and a JSON file exists.
-    /// 旧 JSON → SQLite 一次性迁移。
+    /// 旧 JSON → SQLite 一次性迁移（单事务幂等；实作在 `sqlite_session_p1.rs`）。
     ///
-    /// ADR 0107 §5 P1（契约 R-A）：去掉库级全局锁后，**多个进程可能同时冷启**，
-    /// 而旧实现是「先 `SELECT COUNT(*)` 再整库写入」的 TOCTOU：
-    /// 二次迁移会把并发进程刚写的数据覆盖回 legacy 快照（实测可丢 `workspaces`）。
-    ///
-    /// 现改为**单事务内的幂等迁移**：
-    /// 1. `BEGIN IMMEDIATE` 先拿写锁（多进程只有一个能进来，其余等 `busy_timeout`）；
-    /// 2. 事务内检查 `store_metadata['legacy_json.migrated']` 完成标记；
-    /// 3. 未迁移且索引为空 ⇒ 在同一事务内整库写入 + 写完成标记 + 提交（原子）。
-    ///
-    /// 标记存在即跳过：即使 legacy 文件还在，也不会二次覆盖已有数据。
+    /// ADR 0107 §5 P1（契约 R-A）：去库级全局锁后多进程可能同时冷启，旧的
+    /// 「先 COUNT 再整库写」的 TOCTOU 会让二次迁移覆盖并发进程刚写的数据。
     fn migrate_from_json(&self, conn: &Connection) -> Result<(), String> {
-        const MIGRATION_MARKER: &str = "legacy_json.migrated";
-        let Some(json_path) = &self.legacy_json_path else {
-            return Ok(());
-        };
-
-        // 快路径：标记已存在 ⇒ 无需事务（避免每次启动都抢写锁）。
-        if Self::legacy_migration_done(conn, MIGRATION_MARKER) {
-            return Ok(());
-        }
-
-        // **BEGIN IMMEDIATE**（不是默认的 DEFERRED）：迁移一开始就拿写锁，
-        // 让并发的第二个进程在 `busy_timeout` 内排队，而不是「先读后写」升级事务时
-        // 撞 `database is locked` 被吞。仓内既有写事务同款写法（见 `sqlite_session_commit.rs`）。
-        let tx = rusqlite::Transaction::new_unchecked(
-            conn,
-            rusqlite::TransactionBehavior::Immediate,
-        )
-        .map_err(|e| format!("begin immediate tx: {e}"))?;
-        // 事务内二次确认（另一个进程可能刚迁移完并提交）。
-        if Self::legacy_migration_done(&tx, MIGRATION_MARKER) {
-            return Ok(());
-        }
-        let session_count: i64 = tx
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .unwrap_or(0);
-        if session_count > 0 {
-            // 索引已有数据但无标记（历史库）：补标记，避免以后重复迁移。
-            Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
-            tx.commit().map_err(|e| format!("commit: {e}"))?;
-            return Ok(());
-        }
-
-        eprintln!(
-            "[pony-agent][session] migrating from {} to SQLite",
-            json_path.display()
-        );
-
-        let legacy = FileSessionBackend::new(json_path.clone());
-        let Some(store) = legacy.load_store() else {
-            Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
-            tx.commit().map_err(|e| format!("commit: {e}"))?;
-            return Ok(());
-        };
-
-        // ADR 0099 阶段 0：落盘主体迁至 `sqlite_session_commit.rs`；
-        // 本入口保持 `save_store` 的**无版本守门**旧语义（空墓碑集 = 不跳过任何会话）。
-        self.write_store_tx(&tx, &store, &std::collections::HashSet::new())?;
-        Self::mark_legacy_migrated(&tx, MIGRATION_MARKER)?;
-        tx.commit().map_err(|e| format!("commit: {e}"))?;
-
-        eprintln!(
-            "[pony-agent][session] migration complete: {} sessions",
-            store.sessions.len()
-        );
-        Ok(())
-    }
-
-    /// 旧 JSON 迁移完成标记是否已存在。
-    fn legacy_migration_done(conn: &Connection, marker: &str) -> bool {
-        conn.query_row(
-            "SELECT value FROM store_metadata WHERE key = ?1",
-            [marker],
-            |row| row.get::<_, String>(0),
-        )
-        .is_ok()
-    }
-
-    /// 写入迁移完成标记（幂等）。
-    fn mark_legacy_migrated(conn: &Connection, marker: &str) -> Result<(), String> {
-        conn.execute(
-            "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
-            rusqlite::params![marker, "1"],
-        )
-        .map(|_| ())
-        .map_err(|e| format!("write migration marker: {e}"))
+        p1::migrate_from_json(self, conn)
     }
 
     fn write_full_store(&self, conn: &Connection, store: &PersistedStore) -> Result<(), String> {
@@ -2713,38 +2633,11 @@ impl SqliteSessionBackend {
 }
 
 impl SqliteSessionBackend {
-    /// ADR 0107 §5 P1：`BEGIN IMMEDIATE` + BUSY 有界退避（3 次，50/100/200ms）。
-    ///
-    /// 只对 `SQLITE_BUSY`/`SQLITE_LOCKED` 重试；其他错误立即返回（不掩盖真实故障）。
+    /// `BEGIN IMMEDIATE` + BUSY 有界退避（实作在 `sqlite_session_p1.rs`）。
     fn begin_immediate_with_busy_retry(
         conn: &Connection,
     ) -> Result<rusqlite::Transaction<'_>, String> {
-        let mut attempt = 0u32;
-        loop {
-            match rusqlite::Transaction::new_unchecked(
-                conn,
-                rusqlite::TransactionBehavior::Immediate,
-            ) {
-                Ok(tx) => return Ok(tx),
-                Err(error) => {
-                    let busy = matches!(
-                        &error,
-                        rusqlite::Error::SqliteFailure(inner, _)
-                            if matches!(
-                                inner.code,
-                                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                            )
-                    );
-                    if !busy || attempt >= 2 {
-                        return Err(error.to_string());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        50u64 << attempt,
-                    ));
-                    attempt += 1;
-                }
-            }
-        }
+        p1::begin_immediate_with_busy_retry(conn)
     }
 
 }
