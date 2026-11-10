@@ -31,12 +31,36 @@
     `DRAIN_SETTLE_MAX` 500→2000ms 改动（纪律：不用未验证的改动充数）。
   - 验收：该用例 windows-latest 全绿（run 932a1837 通过）。
 
-- [ ] `B043` - P1: Windows CI `observability_reporting_fixes_test::followup_stream_pure_tool_call_records_first_token_latency` 偶发无 `turn:completed`
-  - 路径：`crates/pony-agent-core/tests/observability_reporting_fixes_test.rs:1662`
-  - 现象：`turn:completed event must be emitted` 的 `expect` 失败（Windows runner 上偶发）；Linux 全绿。
-  - 初判：内置 TcpListener 假 provider + `shutdown` 协同的时序窗，属**既有 flake**（该文件属
-    observability 线，非本轮 ADR 0107 改动面）。
-  - 验收：windows-latest 连跑 ≥3 次稳定通过，或改为确定性同步（去掉 sleep/连接唤醒的不确定性）。
+- [x] `B043` - P1: Windows CI `observability_reporting_fixes_test::followup_stream_pure_tool_call_records_first_token_latency` 无 `turn:completed`
+  - 路径：`crates/pony-agent-core/tests/observability_reporting_fixes_test.rs`
+  - 现象：`turn:completed event must be emitted` 的 `expect` 失败（windows-latest **连续 5 次**命中，
+    实为确定性缺陷而非偶发；Linux 全绿）。
+  - **根因（已修，测试 harness）**：假 provider 只读到 `\r\n\r\n` 就回写并丢弃连接 ⇒ 27.8KB 请求体
+    （含 system prompt）留在内核未读；服务端 close 时客户端**仍在写正文** ⇒ 首包请求即
+    `type=request` + `client error (SendRequest)`（日志物证：**非** `connect`、elapsed 1–2ms、
+    body_chars=27856），决策流 5/5 重试后 fallback 到同步决策再 5/5 全败 ⇒ 只剩 `turn:failed`。
+  - 修复：`read_http_request` 增预算参数、按 `Content-Length` 读满正文再回写；回写后
+    `shutdown(Write)` + 排空入站（干净 EOF）；预设响应改按请求语义（`messages` 中 `role=="tool"`
+    条数 0/1/2）选取、与连接次序解耦；失败断言附事件序列 / `turn:failed.error` / 实际请求指纹，
+    并加「三轮请求指纹齐全」断言。生产代码零改动。
+  - 驳正初判：①「`shutdown`/连接唤醒时序窗」不成立（失败发生在请求发送阶段，与收尾无关）；
+    ②「重试吃乱顺序响应」无证据（attempt=1 已失败，从未读到任何响应）——该次序缺陷只是隐患，
+    已一并消除。
+  - 验收：Linux 干净 worktree 全 15 例 ×3 + 单测 ×10 全 exit 0；windows-latest 同一 commit
+    `fc20b81e` 连跑 3 次该用例全 `ok`（run 42768957244 attempt 1/2/3）。
+
+- [ ] `B044` - P1: Windows CI `p0_log_first_durability` 4 例被 Windows 强制文件锁打成红（B043 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/p0_log_first_durability.rs:195/733/802`
+  - 现象（run 42768957244 attempt 1/2/3，windows-latest 三次同签名）：`c4_writable_path_unchanged`、
+    `c2_index_failure_still_advances_memory_history`、`c8_stale_epoch_batch_never_reaches_the_session_log`、
+    `c9_precheck_failure_does_not_write_log` 全败在「读会话日志/读基线日志」：
+    `Os { code: 33, kind: Uncategorized, "another process has locked a portion of the file" }`。
+  - 初判：Windows `LockFileEx` 是**强制**锁；用例用 `std::fs::read/read_to_string` 直接读
+    `session-logs/**/session.jsonl`，而 store 的日志写者仍持锁 ⇒ 读被拒（Linux 为劝告锁，读得到）。
+    与 B041 同族（当年解是用 `SessionBackend::release_log_writers_for_test` 后再 reload）。
+  - 说明：该文件在 B043 之前从未被执行到（cargo test 在第一个失败测试二进制处停止），属**既有
+    Windows 缺陷**，非 B043 修复引入（本次改动仅一个测试文件）。
+  - 验收：windows-latest 该 4 例全绿（读日志前释放写者，或改为断言进程内已物化视图）。
 - [x] `B019` - P1: T1 工具面单一真值闭合与外部工具通道（ADR 0065，W1）
   - 路径：`crates/pony-agent-core/src/agent/{tools.rs,dispatcher.rs,governed_executor.rs,provider/mod.rs}`
   - 描述：execute_internal 分派表化、`swap_tool_surface` 原子换入、拆 `is_builtin_tool_definition_set`、修只读模式按名嗅探漏洞、`ToolProvider` + `ExternalToolHandler`。
