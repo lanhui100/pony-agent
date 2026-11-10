@@ -2831,7 +2831,8 @@ impl SessionBackend for SqliteSessionBackend {
         outcome
     }
 
-    #[cfg(test)]
+    /// 仅测试用（B041 单元测试 / B044 集成测试）：放掉会话日志写者持有的独占锁。
+    #[doc(hidden)]
     fn release_log_writers_for_test(&self) {
         self.session_log_sink.release_writers_for_test();
     }

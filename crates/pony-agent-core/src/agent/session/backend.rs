@@ -345,9 +345,13 @@ pub trait SessionBackend: Send + Sync {
     /// 仅测试用：丢弃会话日志写者缓存（释放文件级独占锁）。
     ///
     /// Windows 的 `LockFileEx` 是**强制**锁：同一进程内另一个句柄在写者持锁期间读不了该文件。
-    /// 需要"写完 → 重新装载 → 读日志"的用例必须在 reload 前放锁；Unix 的 `flock` 是劝告锁，
-    /// 读不受影响（故此前只在 Windows CI 暴露）。默认 no-op：非 SQLite backend 无日志写者。
-    #[cfg(test)]
+    /// 需要"写完 → 重新装载 / 直接读盘"的用例必须先放锁；Unix 的 `flock` 是劝告锁，读不受影响
+    /// （故此类缺陷只在 Windows CI 暴露：B041 单元测试、B044 集成测试）。
+    /// 默认 no-op：非 SQLite backend 无日志写者。
+    ///
+    /// 集成测试（`tests/` 是独立 crate，看不到 `#[cfg(test)]` 项）也要调用它，故这里**不加**
+    /// `#[cfg(test)]`；`#[doc(hidden)]` 标明它不是产品契约，只服务测试夹具。
+    #[doc(hidden)]
     fn release_log_writers_for_test(&self) {}
 
     fn trace_storage_mode(&self) -> SeparateTraceTableMode {

@@ -186,11 +186,38 @@ fn message(role: &str, content: &str) -> TurnHistoryMessage {
     }
 }
 
+/// 释放会话日志写者持有的独占锁，并**当场验证锁确实已释放**。
+///
+/// 为什么必须先放锁：Windows 的 `LockFileEx` 是**强制**字节锁——写者句柄持锁期间，**同进程**
+/// 另一个句柄读该文件就会拿到 `Os { code: 33, "another process has locked a portion of the
+/// file" }`（B044：windows-latest 4 例红在此）；Unix 的 `flock` 是劝告锁，读得到，故此前只在
+/// Windows 暴露。放锁只丢弃缓存句柄，不改磁盘内容（写的每一批都已同步落盘）。
+///
+/// 放锁后的探测（自己抢一次独占锁）让这条不变式**在 Linux 上也可验**：探不到锁 ⇒ 读盘在
+/// Windows 必然失败，用例不必等 CI 才发现。
+fn release_log_writer(release: impl FnOnce(), path: &Path) {
+    release();
+    let probe = std::fs::OpenOptions::new()
+        .read(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("打开会话日志 `{}` 失败：{error}", path.display()));
+    probe.try_lock().unwrap_or_else(|error| {
+        panic!(
+            "会话日志仍被写者独占锁住（Windows `LockFileEx` 为强制锁 ⇒ 随后读盘必失败）：`{}`：{error:?}",
+            path.display()
+        )
+    });
+    let _ = probe.unlock();
+}
+
 /// 会话 JSONL 中 `append_message` 的 `(role, content)` 序列（跳过文件头行）。
+///
+/// `release` 必须是该会话日志写者的放锁动作（`release_log_writer` 会先执行它再校验锁已放开）。
 ///
 /// 日志行格式（`log_store`）：文件头 `{"kind":"session",…}` + 每命令一行
 /// `{"seq":N,"ts":ms,"cmd":{"type":"append_message",…}}`。
-fn log_append_messages(path: &Path) -> Vec<(String, String)> {
+fn log_append_messages(release: impl FnOnce(), path: &Path) -> Vec<(String, String)> {
+    release_log_writer(release, path);
     let raw = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("读会话日志 `{}` 失败：{error}", path.display()));
     raw.lines()
@@ -217,6 +244,13 @@ fn log_append_messages(path: &Path) -> Vec<(String, String)> {
 
 fn pairs(pairs: &[(String, String)]) -> Vec<(String, String)> {
     pairs.to_vec()
+}
+
+/// 会话日志的**磁盘真源字节**（不做 JSON 解析）：同样先放锁再读（见 [`release_log_writer`]）。
+fn read_log_bytes(release: impl FnOnce(), path: &Path) -> Vec<u8> {
+    release_log_writer(release, path);
+    std::fs::read(path)
+        .unwrap_or_else(|error| panic!("读会话日志 `{}` 失败：{error}", path.display()))
 }
 
 /// 内存快照里的 `(role, content)` 序列——`snapshot_at_readonly` 只读内存状态，
@@ -304,7 +338,7 @@ fn c1_read_only_backend_still_writes_session_log() {
          必须存在，实际 `{}` 不存在（`append_session_log_to_file` 在只读时提前 return）",
         log_path.display()
     );
-    let logged = log_append_messages(&log_path);
+    let logged = log_append_messages(|| read_only.release_log_writers_for_test(), &log_path);
     assert_eq!(
         pairs(&logged),
         expected_turn(user, assistant),
@@ -357,7 +391,7 @@ fn c2_index_failure_still_advances_memory_history() {
     // —— Assert ——
     // 前提 1：日志确实成功了（否则这组「日志成功 + 索引失败」的组合没被构造出来）。
     let log_path = fixture.log_path(session_id);
-    let logged = log_append_messages(&log_path);
+    let logged = log_append_messages(|| store.release_log_writers_for_test(), &log_path);
     assert_eq!(
         pairs(&logged),
         expected_turn(user, assistant),
@@ -535,7 +569,7 @@ fn c4_writable_path_unchanged() {
         "可写路径必须产出会话日志，实际 `{}` 不存在",
         log_path.display()
     );
-    let logged = log_append_messages(&log_path);
+    let logged = log_append_messages(|| store.release_log_writers_for_test(), &log_path);
     assert_eq!(
         pairs(&logged),
         expected,
@@ -638,7 +672,7 @@ fn c6_degraded_instance_releases_session_log_lock_after_batch() {
         "日志已落盘、索引失败 ⇒ 必须是 LogPersisted，实际 {outcome:?}"
     );
     assert_eq!(
-        pairs(&log_append_messages(&fixture.log_path(session_id))),
+        pairs(&log_append_messages(|| degraded.release_log_writers_for_test(), &fixture.log_path(session_id))),
         vec![("user".to_string(), degraded_user.to_string())],
         "降级实例必须把命令写进真源日志"
     );
@@ -661,7 +695,7 @@ fn c6_degraded_instance_releases_session_log_lock_after_batch() {
         "R3 被破坏：降级实例必须按批释放 session log flock，否则主可写实例同会话 append 被 Locked 挡住：{result:?}"
     );
     assert_eq!(
-        pairs(&log_append_messages(&fixture.log_path(session_id))),
+        pairs(&log_append_messages(|| writable_store.release_log_writers_for_test(), &fixture.log_path(session_id))),
         vec![
             ("user".to_string(), degraded_user.to_string()),
             ("user".to_string(), main_user.to_string()),
@@ -730,7 +764,7 @@ fn c8_stale_epoch_batch_never_reaches_the_session_log() {
         "基线写入必须成功，实际 {fresh:?}"
     );
     let log_path = fixture.log_path(session_id);
-    let before = std::fs::read(&log_path).expect("读基线日志");
+    let before = read_log_bytes(|| backend.release_log_writers_for_test(), &log_path);
     assert!(!before.is_empty(), "基线日志必须已有字节");
 
     // 推进 materialize barrier 到 epoch=2（模拟另一实例已完成迁移）。
@@ -759,7 +793,7 @@ fn c8_stale_epoch_batch_never_reaches_the_session_log() {
         PersistCommandOutcome::StaleEpoch,
         "过期批次必须返回 `StaleEpoch`，实际 {stale:?}"
     );
-    let after = std::fs::read(&log_path).expect("读改动后日志");
+    let after = read_log_bytes(|| backend.release_log_writers_for_test(), &log_path);
     assert_eq!(
         before,
         after,
@@ -769,7 +803,7 @@ fn c8_stale_epoch_batch_never_reaches_the_session_log() {
         after.len()
     );
     assert!(
-        !log_append_messages(&log_path)
+        !log_append_messages(|| backend.release_log_writers_for_test(), &log_path)
             .iter()
             .any(|(_, content)| content.contains("c8 过期消息")),
         "真源日志里不得出现被拒消息"
@@ -799,7 +833,7 @@ fn c9_precheck_failure_does_not_write_log() {
         "基线写入必须成功，实际 {fresh:?}"
     );
     let log_path = fixture.log_path(session_id);
-    let before = std::fs::read(&log_path).expect("读基线日志");
+    let before = read_log_bytes(|| backend.release_log_writers_for_test(), &log_path);
     assert!(!before.is_empty(), "基线日志必须已有字节");
 
     // 破坏 epoch 行：值不是数字 ⇒ 预检解析失败 ⇒ fail-closed（不写日志、Fail loud）。
@@ -828,7 +862,7 @@ fn c9_precheck_failure_does_not_write_log() {
         PersistCommandOutcome::Failed,
         "预检读不到 epoch 必须 fail-loud（整批 Failed），实际 {outcome:?}"
     );
-    let after = std::fs::read(&log_path).expect("读改动后日志");
+    let after = read_log_bytes(|| backend.release_log_writers_for_test(), &log_path);
     assert_eq!(
         before,
         after,
@@ -837,7 +871,7 @@ fn c9_precheck_failure_does_not_write_log() {
         after.len()
     );
     assert!(
-        !log_append_messages(&log_path)
+        !log_append_messages(|| backend.release_log_writers_for_test(), &log_path)
             .iter()
             .any(|(_, content)| content.contains("c9 预检不可用时的消息")),
         "未通过预检的消息不得进真源日志"

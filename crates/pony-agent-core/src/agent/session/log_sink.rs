@@ -323,7 +323,7 @@ impl SessionLogSink {
     /// 另一个句柄也读不了该文件（`The process cannot access the file because another process
     /// has locked a portion of the file.`）。用例要在 append 之后直接 `fs::read_to_string`
     /// 校验日志内容，必须先放锁；Linux 的 `flock` 是劝告锁、同进程读取不受影响，故此前未暴露。
-    #[cfg(test)]
+    /// 不加 `#[cfg(test)]`：集成测试（B044）经 `SessionBackend` 走到这里。
     pub(crate) fn release_writers_for_test(&self) {
         if let Ok(mut writers) = self.writers.lock() {
             writers.clear();
