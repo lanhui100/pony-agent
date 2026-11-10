@@ -3485,6 +3485,54 @@ fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &s
         .build()
 }
 
+/// 启动期「首帧先画 + 控制面后台装载」。
+///
+/// `build_control_plane` 内部 `SessionStore::new()` 是启动路径上唯一的同步重活：真实库
+/// （1.2GB / 150+ 会话 / 88k 事件）实测 3.5–5.5s 全花在 SQLite 装载与会话日志 fold 上。
+/// 旧实现把它排在首帧之前 ⇒ 用户在备用屏上只看到空白，把「装载慢」感知成「初始化页慢」。
+///
+/// 语义与直接调用 `build_control_plane` **一致**：装载失败即启动失败（不降级成空控制面、
+/// 不吞错、不重试）；装载线程 panic 经通道断开上报。
+fn build_control_plane_after_first_frame(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    state: &mut TuiState,
+) -> Result<HostControlPlane, Box<dyn std::error::Error>> {
+    let workspace = state.workspace.clone();
+    let gateway_url = state.gateway_url.clone();
+    let model = state.model.clone();
+    let (tx, rx) = channel();
+    std::thread::Builder::new()
+        .name("pony-tui-control-plane".to_string())
+        .spawn(move || {
+            let _ = tx.send(build_control_plane(&workspace, &gateway_url, &model));
+        })
+        .map_err(|error| format!("控制面装载线程启动失败：{error}"))?;
+
+    // 首帧：不等装载，先把初始化页画出来。
+    terminal.draw(|f| ui(f, state))?;
+    // 装载期重绘节拍：既要及时响应终端 resize，也不能把静止的 splash 打成忙等。
+    const REPAINT_INTERVAL: Duration = Duration::from_millis(80);
+    const LOADING_NOTICE: &str = "正在装载会话库…";
+    loop {
+        match rx.recv_timeout(REPAINT_INTERVAL) {
+            Ok(control_plane) => {
+                // 装载期提示必须在进入主循环前清掉，否则会盖住真实的启动提示。
+                state.status_notice = None;
+                return Ok(control_plane);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // 每帧重设（TTL 按帧续期）：装载超过 `STATUS_NOTICE_TTL_MS` 时提示仍在，
+                // 用户不会把初始化页当成卡死。
+                state.set_status_notice(LOADING_NOTICE);
+                terminal.draw(|f| ui(f, state))?;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("控制面装载线程异常退出（panic），启动中止".into());
+            }
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens —— 极简克制的高级感：
 //   · 单色为骨：一块近乎无色的暖黑画布 + 暖白文字，拒绝高饱和撞色；
@@ -7094,7 +7142,12 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     if let Some(default_model) = state.model_preferences.default_model.clone() {
         state.model = default_model;
     }
-    let control_plane = Arc::new(build_control_plane(&state.workspace, &state.gateway_url, &state.model));
+    // 启动性能：先出首帧（初始化页），控制面在后台线程装载 —— 装载期间界面持续重绘，
+    // 用户不再面对空白的备用屏。见 `build_control_plane_after_first_frame`。
+    let control_plane = Arc::new(build_control_plane_after_first_frame(
+        &mut terminal,
+        &mut state,
+    )?);
 
     // 契约（修订13）：审计专用 Ask 引导（仅 debug 构建 + 显式 env，fail-closed）。
     // 只负责「经生产 API 造一条真实 pending Ask」，面板/提交/CAS 全走既有链路。

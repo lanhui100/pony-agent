@@ -152,6 +152,7 @@
 - [0112 TUI 启动页品牌标按面积约 1/3 定栅格，并以实心子像素占比设可读性下限](0112-tui-splash-logo-legibility-floor.md)
 - [0113 TUI 双击 Esc 撤回：轮次级会话截断 + 写前 pre-image 文件还原](0113-tui-esc-double-press-rewind.md)
 - [0114 TUI 拼错的斜杠命令在分发前拦截（契约 F-D）](0114-tui-unknown-slash-command-guard.md)
+- [0115 TUI 首帧先绘制、控制面后台装载（启动感知时间与真实装载时间解耦）](0115-tui-first-frame-before-control-plane.md)
 
 - [0064 Harness 可扩展性三层模型与不可替换内核](0064-extensibility-three-layer-model.md)
 - [0065 工具面单一真值闭合与外部工具通道（T1）](0065-tool-surface-single-truth.md)
