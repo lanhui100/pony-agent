@@ -3833,6 +3833,8 @@ fn fail_stream_turn_with_hook_dispatch_forwards_partial_text() {
         1,
         "provider exploded".to_string(),
         Some("已经产出的一段正文".to_string()),
+        // 本用例不构造 hop：失败轮无工具往返可恢复。
+        None,
     );
     let events = sink.events.borrow();
     let failed = events
@@ -3849,6 +3851,41 @@ fn fail_stream_turn_with_hook_dispatch_forwards_partial_text() {
     assert_ne!(
         with_text, "This turn failed.",
         "B017：有正文时不得退化成占位文案"
+    );
+
+    // P0 门禁（真实事故 pa_01a1c4d0）：失败轮必须落进历史。
+    //
+    // 事故形态：上游报错后这一轮「只落 trace、不落历史」，下一条用户消息进来时
+    // `prepare_turn` 取到的 carry 里根本没有这一轮 —— 原话与已产出正文全部消失，
+    // 模型只能从头再问一遍。这里锁的就是「失败轮次同样成对写入 user + assistant」。
+    let snapshot = {
+        let mut sessions = runtime
+            .sessions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions.snapshot_at(None, None, &[])
+    };
+    assert!(
+        snapshot
+            .history
+            .iter()
+            .any(|message| message.role == "user" && message.content == "user message"),
+        "P0：失败轮的 user 原话必须进历史，实际 history={:?}",
+        snapshot
+            .history
+            .iter()
+            .map(|message| (message.role.as_str(), message.content.as_str()))
+            .collect::<Vec<_>>()
+    );
+    let failed_assistant = snapshot
+        .history
+        .iter()
+        .find(|message| message.role == "assistant")
+        .map(|message| message.content.clone())
+        .unwrap_or_default();
+    assert!(
+        failed_assistant.contains("已经产出的一段正文"),
+        "P0：失败轮的已产出正文必须进历史检查点，实际 assistant={failed_assistant:?}"
     );
 
     // ② None（兼容锁）
@@ -3870,6 +3907,8 @@ fn fail_stream_turn_with_hook_dispatch_forwards_partial_text() {
         None,
         1,
         "provider exploded".to_string(),
+        None,
+        // 本用例不构造 hop：失败轮无工具往返可恢复。
         None,
     );
     let events = sink_without.events.borrow();

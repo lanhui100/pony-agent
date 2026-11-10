@@ -464,6 +464,8 @@ impl AgentRuntime {
         error: String,
         // B017：本轮失败前已产出的 assistant 正文（`None`/全空白 ⇒ 事件正文回落既有占位文案）。
         partial_text: Option<String>,
+        // P0：本轮失败前已产生的 native 工具往返（`None` ⇒ 本轮还没进入工具阶段）。
+        failed_turn_native_transcript: Option<Vec<Value>>,
     ) {
         // PA-171 C4-S1：归因按「本轮 provider 元数据 + 错误文本」派生（矩阵 §4.2 冻结取值），
         // 三字段**不再写 None**；落盘（checkpoint + trace record）与 wire 事件同源同值。
@@ -484,6 +486,7 @@ impl AgentRuntime {
             completed_hops,
             error,
             partial_text,
+            failed_turn_native_transcript,
             None,
         );
     }
@@ -512,6 +515,8 @@ impl AgentRuntime {
         completed_hops: usize,
         error: String,
         partial_text: Option<String>,
+        // P0：本轮失败前已产生的 native 工具往返（`None` ⇒ 本轮还没进入工具阶段）。
+        failed_turn_native_transcript: Option<Vec<Value>>,
         trigger: &'static str,
     ) {
         self.fail_stream_turn_with_hook_dispatch_impl(
@@ -531,6 +536,7 @@ impl AgentRuntime {
             completed_hops,
             error,
             partial_text,
+            failed_turn_native_transcript,
             Some(trigger),
         );
     }
@@ -554,6 +560,7 @@ impl AgentRuntime {
         completed_hops: usize,
         error: String,
         partial_text: Option<String>,
+        failed_turn_native_transcript: Option<Vec<Value>>,
         trigger: Option<&'static str>,
     ) {
         let attribution = match trigger {
@@ -563,6 +570,25 @@ impl AgentRuntime {
             },
             None => FailedTurnAttribution::from_failure(provider_meta, &error),
         };
+        // P0（真实事故 pa_01a1c4d0）：失败轮同样必须进上下文。
+        //
+        // 事故形态：上游 LLM 报错 ⇒ 本轮只落 trace + 事件，**历史与 native transcript
+        // 都没写**；下一条用户消息进来时 `prepare_turn` 取到的上下文里没有这一轮的任何
+        // 痕迹（原话、已执行工具、已得结果全部消失），模型只能从头再问一遍。
+        //
+        // 收口口径与取消轮（`persist_cancelled_turn_outcome`）一致：历史侧写
+        // 「user 原话 + 中断检查点」，native 侧写「user + 已闭合工具往返 + 中断标记」。
+        // 为什么两层都要写：native 会话的 prompt 只取 transcript（历史层不进 prompt），
+        // 只写历史等于没写；遗留会话反之。两层都写才是「两条 provider 路径都续得上」。
+        self.persist_failed_turn_context(
+            session_id,
+            user_message,
+            &tool_activities,
+            partial_text.as_deref(),
+            &error,
+            provider_meta,
+            failed_turn_native_transcript,
+        );
         self.update_execution_checkpoint(
             control,
             turn_id,
@@ -648,6 +674,54 @@ impl AgentRuntime {
                 e.into_inner()
             })
             .save_input_attachments(session_id, images)
+    }
+
+    /// P0：失败轮的上下文收口（历史 + native transcript，**不写 trace**）。
+    ///
+    /// 分工：trace（含 per-call / hook 记录）由
+    /// `persist_turn_trace_with_provider_calls_and_hooks` 负责；本方法只补「下一轮上下文
+    /// 需要看到的两层载体」，所以不能复用 `append_failed_turn`（那会把 trace 再写一遍）。
+    /// 落盘走 `persist_turn_outcome` ⇒ 与成功轮同一条 `append_turn` 通道（同一套日志命令、
+    /// 同一套两阶段暂存提交），失败轮由此获得与成功轮一致的「可重放」语义。
+    #[allow(clippy::too_many_arguments)]
+    fn persist_failed_turn_context(
+        &self,
+        session_id: Option<&str>,
+        user_message: &str,
+        tool_activities: &[TurnToolActivity],
+        partial_text: Option<&str>,
+        error: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        provider_native_transcript: Option<Vec<Value>>,
+    ) {
+        let checkpoint_tools: Vec<String> = tool_activities
+            .iter()
+            .map(|activity| {
+                if activity.description.trim().is_empty() {
+                    activity.name.clone()
+                } else {
+                    format!("{} {}", activity.name, activity.description.trim())
+                }
+            })
+            .collect();
+        let assistant_message = crate::agent::session::interrupted_turn_checkpoint_text(
+            partial_text.unwrap_or_default(),
+            &checkpoint_tools,
+        )
+        .unwrap_or_else(|| error.to_string());
+        self.persist_turn_outcome(
+            session_id,
+            user_message,
+            &assistant_message,
+            provider_meta
+                .map(|meta| meta.provider_name.as_str())
+                .unwrap_or("runtime"),
+            "failed",
+            None,
+            provider_native_transcript,
+            Vec::new(),
+            None,
+        );
     }
 
     pub(crate) fn persist_cancelled_turn_outcome(
@@ -856,7 +930,8 @@ impl AgentRuntime {
             trace_steps
         };
         // PA-171 C4-S3：watchdog 失败落盘同样带归类（唯一来源 `classify_error_class`）。
-        let error_class = Some(crate::agent::retry::classify_error_class(error.as_str()).to_string());
+        let error_class =
+            Some(crate::agent::retry::classify_error_class(error.as_str()).to_string());
         let trace_timeline = build_persisted_trace_timeline(
             user_message,
             "failed",
@@ -909,8 +984,7 @@ impl AgentRuntime {
                     tool_activities: tool_activities.clone(),
                     provider_call_records: Vec::new(),
                     hook_trace_records: Vec::new(),
-                    provider_requested_name: provider_meta
-                        .map(|meta| meta.requested_name.clone()),
+                    provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
                     provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
                     provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
                     provider_model: provider_meta.map(|meta| meta.model.clone()),
@@ -1053,7 +1127,10 @@ mod usage_ledger_entry_tests {
             None,
             1_700_000_000_000,
         );
-        assert!(entry.cost_usd.is_none(), "usage 缺失时 cost_usd 必须为 None（SQL NULL）");
+        assert!(
+            entry.cost_usd.is_none(),
+            "usage 缺失时 cost_usd 必须为 None（SQL NULL）"
+        );
         assert!(!entry.is_priced(), "usage 缺失时 priced 必须为 0");
         // 半缺失（只有 input）同样不得计价。
         let half = build_usage_ledger_entry(

@@ -533,6 +533,47 @@ pub(super) fn native_transcript_for_tool_turn(
     Some(transcript)
 }
 
+/// 失败轮的 native transcript 片段：用户原话 + **已闭合**的工具往返 + 中断标记。
+///
+/// 与成功路径 [`native_transcript_for_tool_turn`] 的唯一差别是**没有最终 response**：
+/// 末条 assistant 只能由「中断事实上报」构造。三条硬约束：
+///
+/// 1. **闭合性由构造保证**：`hop_records` 每条都是「调用 + 结果」成对记录，绝不留下孤儿
+///    `tool_calls`——`sanitize_provider_native_transcript` 看到不闭合往返会清空整段
+///    transcript，那比不写更糟。
+/// 2. **末条 assistant 必须补**：transcript 若以 `tool` 消息结尾，下一请求会出现
+///    「tool 结果后直接接 user」的非法序列（Anthropic 直接 400）。
+/// 3. **末条 assistant 必须带 reasoning**：`has_legacy_reasoning_gap` 把「`tool` 之后的
+///    无 reasoning assistant」判成 legacy 缺口并清空整段 transcript。这里写入的不是伪造的
+///    模型思考，而是**中断事实本身**（下一轮模型据此知道上一轮为什么停在工具结果）。
+///
+/// 无工具往返 => 返回 `None`（本轮还没产生可恢复的过程事实，交给文本层检查点承载）。
+pub(super) fn native_transcript_for_failed_turn(
+    protocol: &crate::agent::provider::ProviderProtocol,
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+) -> Option<Vec<Value>> {
+    if hop_records.is_empty() {
+        return None;
+    }
+    let mut transcript = vec![provider_native_user_message(user_message)];
+    for hop in hop_records {
+        transcript.push(tool_request_assistant_message(protocol, hop));
+        transcript.push(provider_native_tool_result_message_for_protocol(
+            protocol,
+            &hop.tool_call,
+            &hop.tool_result,
+        ));
+    }
+    const INTERRUPTED_NOTE: &str =
+        "（本轮上游调用中断，未产出最终回复；上面的工具往返是已执行的真实步骤。）";
+    transcript.push(provider_native_assistant_message_with_reasoning_value(
+        INTERRUPTED_NOTE,
+        Some(&Value::String(INTERRUPTED_NOTE.to_string())),
+    ));
+    Some(transcript)
+}
+
 
 pub(super) fn tool_request_assistant_message(
     protocol: &crate::agent::provider::ProviderProtocol,
@@ -595,5 +636,127 @@ pub(super) fn merge_fallback_reason(existing: Option<String>, next: Option<Strin
         (Some(existing), _) => Some(existing),
         (None, Some(next)) if !next.trim().is_empty() => Some(next),
         (None, _) => None,
+    }
+}
+
+#[cfg(test)]
+mod failed_turn_transcript_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn hop(call_id: &str, reasoning: Option<&str>) -> ToolTurnHopRecord {
+        ToolTurnHopRecord {
+            assistant_message: None,
+            assistant_output_text: String::new(),
+            assistant_reasoning_content: reasoning.map(str::to_string),
+            assistant_reasoning_content_value: reasoning.map(|value| Value::String(value.to_string())),
+            tool_call: ToolCall {
+                call_id: Some(call_id.to_string()),
+                name: "workspace_read_file".to_string(),
+                arguments: json!({"path": "src/lib.rs"}),
+                plan: None,
+            },
+            tool_result: crate::agent::tools::ToolResult {
+                tool_name: "workspace_read_file".to_string(),
+                status: "ok".to_string(),
+                output: "file body".to_string(),
+                duration_ms: 1,
+            },
+        }
+    }
+
+    /// P0 门禁（真实事故 pa_01a1c4d0）：失败轮 transcript 必须**闭合**且**以带 reasoning
+    /// 的 assistant 收尾**，否则 `sanitize_provider_native_transcript` 会把整段 transcript
+    /// 清空——那比不写更糟（历史被抹掉，会话彻底失忆）。
+    #[test]
+    fn failed_turn_transcript_is_closed_and_ends_with_assistant() {
+        let protocols = [
+            crate::agent::provider::ProviderProtocol::OpenAiCompletions,
+            crate::agent::provider::ProviderProtocol::AnthropicMessages,
+        ];
+        for protocol in protocols {
+            let hops = vec![hop("call-1", Some("thinking-1")), hop("call-2", None)];
+            let transcript =
+                native_transcript_for_failed_turn(&protocol, "搜索 vercel agent-desktop", &hops)
+                    .expect("有工具往返就必须产出 transcript");
+
+            // 首条是用户原话（真实指令不能被摘要/占位覆盖）。
+            assert_eq!(transcript[0]["role"], "user");
+            assert!(transcript[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("vercel agent-desktop"));
+
+            // 末条必须是 assistant，且 reasoning 非空（否则整段被 sanitize 清空）。
+            let last = transcript.last().unwrap();
+            assert_eq!(last["role"], "assistant");
+            assert!(
+                last.get("tool_calls").is_none(),
+                "末条不得带 tool_calls：孤儿调用会让闭合校验失败"
+            );
+            let reasoning = last.get("reasoning_content").expect("必须带 reasoning_content");
+            assert!(
+                !serde_json::to_string(reasoning).unwrap().is_empty(),
+                "reasoning_content 不得为空壳"
+            );
+
+            // 闭合性：每个声明的 tool_call id 都有且只有一条 tool 结果回应。
+            // 闭合性对两种协议统一判定：OpenAI 家族用 `tool_calls[].id` + `role:"tool"`
+            // 的 `tool_call_id`；Anthropic 家族用 `content[].tool_use.id` + 下一轮 user
+            // 消息里的 `content[].tool_result.tool_use_id`。判据只看「声明 id 是否被回应」，
+            // 不假设消息角色。
+            let mut declared: Vec<String> = Vec::new();
+            let mut answered: Vec<String> = Vec::new();
+            for message in &transcript {
+                if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                    for call in calls {
+                        declared.push(
+                            call.get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        );
+                    }
+                }
+                if let Some(id) = message.get("tool_call_id").and_then(Value::as_str) {
+                    answered.push(id.to_string());
+                }
+                if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+                    for block in blocks {
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("tool_use") => declared.push(
+                                block
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            ),
+                            Some("tool_result") => answered.push(
+                                block
+                                    .get("tool_use_id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            ),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            assert_eq!(declared.len(), 2, "两条 hop 必须都声明");
+            for id in &declared {
+                assert!(
+                    answered.contains(id),
+                    "工具调用 {id} 必须配一条结果（未闭合会清空整段 transcript）"
+                );
+            }
+        }
+    }
+
+    /// 无工具往返 ⇒ 不写 transcript（本轮还没产生可恢复的过程事实）。
+    #[test]
+    fn failed_turn_without_hops_writes_nothing() {
+        let protocol = crate::agent::provider::ProviderProtocol::OpenAiCompletions;
+        assert!(native_transcript_for_failed_turn(&protocol, "hi", &[]).is_none());
     }
 }

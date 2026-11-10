@@ -49,6 +49,8 @@ impl AgentRuntime {
         error: String,
         // B017：本轮失败前**已产出**的 assistant 正文（`None`/全空白 ⇒ 回落既有占位文案）。
         partial_text: Option<String>,
+        // P0：本轮失败前已产生的 native 工具往返（`None` ⇒ 本轮还没进入工具阶段）。
+        failed_turn_native_transcript: Option<Vec<serde_json::Value>>,
     ) {
         if !claim_failed_terminal(control, turn_id) {
             return;
@@ -70,6 +72,7 @@ impl AgentRuntime {
             completed_hops,
             error,
             partial_text,
+            failed_turn_native_transcript,
         );
     }
 
@@ -96,6 +99,8 @@ impl AgentRuntime {
         completed_hops: usize,
         error: String,
         partial_text: Option<String>,
+        // P0：本轮失败前已产生的 native 工具往返（`None` ⇒ 本轮还没进入工具阶段）。
+        failed_turn_native_transcript: Option<Vec<serde_json::Value>>,
         trigger: &'static str,
     ) {
         if !claim_failed_terminal(control, turn_id) {
@@ -118,6 +123,7 @@ impl AgentRuntime {
             completed_hops,
             error,
             partial_text,
+            failed_turn_native_transcript,
             trigger,
         );
     }
@@ -255,6 +261,7 @@ impl AgentRuntime {
                         completed_hops,
                         build_tool_hop_limit_error(max_tool_hops_per_turn()),
                         Some(accumulated_turn_text.clone()),
+                        native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
                     );
                     return;
                 }
@@ -398,6 +405,7 @@ impl AgentRuntime {
                         error,
                         // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                         Some(accumulated_turn_text.clone()),
+                        native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
                     );
                     return;
                 }
@@ -560,6 +568,7 @@ impl AgentRuntime {
                         error,
                         // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                         Some(accumulated_turn_text.clone()),
+                        native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
                     );
                     return;
                 }
@@ -645,6 +654,8 @@ impl AgentRuntime {
                             unrecoverable_error,
                             // B017：本轮失败前已产出的正文必须保留。
                             Some(accumulated_turn_text.clone()),
+
+                            native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
                         );
                         return;
                     }
@@ -730,6 +741,8 @@ impl AgentRuntime {
                             error,
                             // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                             Some(accumulated_turn_text.clone()),
+
+                            native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
                         );
                         return;
                     }
@@ -768,6 +781,7 @@ impl AgentRuntime {
                         ),
                         // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                         Some(accumulated_turn_text.clone()),
+                        native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
                     );
                     return;
                 }
@@ -798,6 +812,7 @@ impl AgentRuntime {
                         ),
                         // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                         Some(accumulated_turn_text.clone()),
+                        native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
                     );
                     return;
                 }
@@ -1078,6 +1093,11 @@ impl AgentRuntime {
                         error,
                         // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                         Some(accumulated_turn_text.clone()),
+                        native_transcript_for_failed_turn(
+                            provider.protocol(),
+                            user_message,
+                            &hop_records,
+                        ),
                     );
                     return;
                 }
@@ -1243,6 +1263,11 @@ impl AgentRuntime {
                     error,
                     // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                     Some(accumulated_turn_text.clone()),
+                    native_transcript_for_failed_turn(
+                        provider.protocol(),
+                        user_message,
+                        &hop_records,
+                    ),
                     "provider_followup_failed",
                 );
                 return;
@@ -1289,6 +1314,11 @@ impl AgentRuntime {
                             error,
                             // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                             Some(accumulated_turn_text.clone()),
+                            native_transcript_for_failed_turn(
+                                provider.protocol(),
+                                user_message,
+                                &hop_records,
+                            ),
                         );
                         return;
                     }
@@ -1356,6 +1386,11 @@ impl AgentRuntime {
                         build_tool_hop_limit_error(max_tool_hops_per_turn()),
                         // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                         Some(accumulated_turn_text.clone()),
+                        native_transcript_for_failed_turn(
+                            provider.protocol(),
+                            user_message,
+                            &hop_records,
+                        ),
                     );
                     return;
                 } else {
@@ -1430,6 +1465,11 @@ impl AgentRuntime {
                         error,
                         // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                         Some(accumulated_turn_text.clone()),
+                        native_transcript_for_failed_turn(
+                            provider.protocol(),
+                            user_message,
+                            &hop_records,
+                        ),
                     );
                     return;
                 }
@@ -1580,6 +1620,11 @@ impl AgentRuntime {
                     error,
                     // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                     Some(accumulated_turn_text.clone()),
+                    native_transcript_for_failed_turn(
+                        provider.protocol(),
+                        user_message,
+                        &hop_records,
+                    ),
                 );
                 return;
             }
@@ -1608,6 +1653,11 @@ impl AgentRuntime {
                     error,
                     // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
                     Some(accumulated_turn_text.clone()),
+                    native_transcript_for_failed_turn(
+                        provider.protocol(),
+                        user_message,
+                        &hop_records,
+                    ),
                 );
                 return;
             }
@@ -1712,7 +1762,6 @@ impl AgentRuntime {
         }
     }
 
-
     #[allow(dead_code)]
     pub fn start_turn_stream<S: TurnEventSink>(
         &mut self,
@@ -1724,7 +1773,6 @@ impl AgentRuntime {
         control.register_turn(&turn_id, input.session_id.as_deref(), None);
         self.start_turn_stream_with_control(sink, &control, turn_id, input);
     }
-
 
     pub fn start_turn_stream_with_control<S: TurnEventSink>(
         &self,
@@ -1741,7 +1789,6 @@ impl AgentRuntime {
             RunTurnFacts::default(),
         );
     }
-
 
     /// `start_turn_stream_with_control` with explicit run/turn/workspace facts for governed Ask
     /// control-request persistence (design.md Decision 5, P1-1). The host control plane supplies
@@ -1795,7 +1842,10 @@ impl AgentRuntime {
                 )
             };
             if let crate::agent::usage_governance::Decision::Block {
-                reason, current, limit, ..
+                reason,
+                current,
+                limit,
+                ..
             } = &governance.decision
             {
                 // L3 B3：阻断属**预期内用户状态**，标记后跳过 issue 上报（仍会发 turn:failed 事件）。
@@ -2518,6 +2568,8 @@ impl AgentRuntime {
                             0,
                             hook_error,
                             // B017：本函数（首轮决策 / 收尾 hook）作用域内没有「已渲染正文」累积器，传 None 走既有占位文案。
+                            None,
+                            // 本调用点在工具阶段之前：本轮没有可恢复的工具往返。
                             None,
                         );
                     }
@@ -3329,6 +3381,8 @@ impl AgentRuntime {
                 error,
                 // B017：本函数（首轮决策 / 收尾 hook）作用域内没有「已渲染正文」累积器，传 None 走既有占位文案。
                 None,
+                // 本调用点在工具阶段之前：本轮没有可恢复的工具往返。
+                None,
             );
             otel_turn_scope.set_phase("failed");
             return;
@@ -3357,6 +3411,8 @@ impl AgentRuntime {
                 0,
                 error,
                 // B017：本函数（首轮决策 / 收尾 hook）作用域内没有「已渲染正文」累积器，传 None 走既有占位文案。
+                None,
+                // 本调用点在工具阶段之前：本轮没有可恢复的工具往返。
                 None,
             );
             otel_turn_scope.set_phase("failed");
