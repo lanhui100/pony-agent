@@ -147,6 +147,50 @@ pub(crate) fn compute_content_sha256(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// 写路径单点：先抓 pre-image 再落盘（保持调用点行数中性，见 ADR 0113）。
+///
+/// 返回 `io::Error` 语义与 `std::fs::write` 完全一致——抓取失败不影响写入结果。
+pub(crate) fn write_with_rewind_capture(
+    context: &ToolExecutionContext,
+    target: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    capture_rewind_pre_image(context, target);
+    std::fs::write(target, bytes)
+}
+
+/// 「撤回」抓取点（唯一）：写工具落盘**前**把目标文件的变更前内容记进轮次快照。
+///
+/// 约定（ADR 0113）：
+/// - 身份取自 `ToolExecutionContext` 的 turn 事实（`session_id` + `turn_id`）；缺任一项
+///   ⇒ 不抓取（没有轮次键就无从归属，绝不猜）；
+/// - **fail-open**：抓取失败只留一行 stderr，绝不阻断写入——撤回是便利能力，不是写门；
+/// - 同一 `(session, turn, path)` 只抓第一次（存储侧幂等），多文件写不重复拷贝。
+pub(crate) fn capture_rewind_pre_image(context: &ToolExecutionContext, target: &Path) {
+    let Some(dispatch) = context.dispatch_context.as_ref() else {
+        return;
+    };
+    let session_id = dispatch
+        .session_id
+        .as_deref()
+        .or(context.session_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let turn_id = dispatch
+        .turn_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (Some(session_id), Some(turn_id)) = (session_id, turn_id) else {
+        return;
+    };
+    if let Err(error) =
+        crate::agent::session::RewindFileStore::shared().record_pre_image(session_id, turn_id, target)
+    {
+        eprintln!("[pony-agent] rewind pre-image skipped: {error}");
+    }
+}
+
 const TOOL_TIME_NOW: &str = "time_now";
 const TOOL_ECHO_INPUT: &str = "echo_input";
 /// First-class Ask tool (PA-114): product name `Ask` is owned by this primitive, replacing the

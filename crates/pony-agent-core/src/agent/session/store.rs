@@ -4111,7 +4111,7 @@ fn legacy_history_root_node_id(session: &SessionState) -> String {
     format!("{}-legacy-root", session.conversation_id)
 }
 
-fn new_history_node_id(session: &SessionState, ordinal: usize, created_at_ms: u64) -> String {
+pub(super) fn new_history_node_id(session: &SessionState, ordinal: usize, created_at_ms: u64) -> String {
     format!(
         "{}-node-{}-{}",
         session.conversation_id, created_at_ms, ordinal

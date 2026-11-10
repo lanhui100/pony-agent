@@ -108,6 +108,18 @@
 
 ## Review
 
+- `PA-175` TUI 双击 Esc 撤回（会话截断 + 代码还原）（P1，Complexity B）
+  状态：Review（实现 + 单测/验收测试 + ADR 0113 完成，待独立对抗复核）。
+  说明：非流式双击 Esc（同会话 700ms）与 `/rewind` 打开两段式面板：选用户轮次（新→旧）→ 选范围
+  （`恢复代码与会话` / `仅恢复会话`）。会话回滚**只复用**既有 `checkout_history_node`（父节点 = 该轮之前；
+  第一轮之前由 `ensure_rewind_root_checkpoint` 幂等补空 checkpoint 根）；文件回滚由写工具落盘前的
+  pre-image（`(session_id, turn_id)` 键 `<data_local>/PonyAgent/rewind/...`）按「被撤销轮次里最早
+  pre-image 取胜」还原，抓取时不存在 ⇒ 删除，超限/失败显式 `degraded` 回执；撤回成功后输入框回填该轮
+  用户消息。门禁：`tui_rewind_acceptance` 2/2（含 R4 撤回到空会话后继续对话）、`--lib rewind` 5/5、
+  `--bin pony rewind` 13/13、受影响既有 TUI 三套全绿。已知缺口：快照目录无配额清理、脚本内改文件不回滚、
+  桌面端无入口、`bin/tui.rs` 行数棘轮早已超基线（本次净增约 40 行接线）。任务卡：`03_TASKS/PA-175-tui-esc-rewind.md`；
+  ADR：`docs/decisions/0113-tui-esc-double-press-rewind.md`。
+
 - `PA-149 ~ PA-152` wave-42 全局配置加载四项能力（P1，Complexity B/C）
   状态：Review（实现 + 双 L3 复审 + L3-P 五问完成，待收口提交）。
   说明：① `skill_load` 技能正文按需加载（模型面 28→29，受信只读根 canonical+普通文件+256KiB 上限，`skills.read` 仅只读）；② `InstructionBudget{65536,1048576}`：最高优先级层截断（`truncated`）、低优先级层省略（`omitted`），默认预算逐字节兼容；③ 层级发现有界原语（`.git` 根/祖先链/`*.local.md`/跨层去重）+ 技能 rank 显式化（项目恒优先）；④ read/write/edit 触达即载子目录指令（符号链接逃逸门禁 + 会话 64KiB 聚合预算 + 并发幂等）。门禁：`wave42_global_config` 20/20、`wave42_skill_body` 6/6、`wave37_tool_surface` 9/9（T1 迁移至 29）、全量 `--lib` 1084 passed/1 failed（既有 config 基线，干净 worktree 复现）、`pony --version` EXIT 0、NFR lint EXIT 0。任务卡：`03_TASKS/PA-149-global-config-loading-wave42.md`；ADR：`docs/decisions/0046-global-config-loading-wave42.md`；契约：`.dev-team/contract-matrix-wave42-global-config.md`。

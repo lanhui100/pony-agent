@@ -27,6 +27,10 @@ mod host_continuation_goal_round_tests;
 mod types;
 pub mod usage;
 pub mod workspace_snapshot;
+// 「撤回」：轮次级文件回滚快照（写工具落盘前的 pre-image，契约见模块文档）。
+pub mod rewind_files;
+// 「撤回」：活动链定位 + 空会话 checkpoint 根补齐（ADR 0113）。
+mod rewind_store;
 
 // ADR 0099 阶段 1-A：仅 additive 导出。
 pub use log_store::{
@@ -67,6 +71,12 @@ pub use usage::{
     turn_usage_totals_from_snapshot, SessionUsageLedger, SessionUsageTotals,
 };
 pub use workspace_snapshot::WorkspaceSnapshotManager;
+// 「撤回」文件快照：写工具（抓取）与撤回命令（恢复）共用同一入口。
+pub use rewind_files::{
+    default_rewind_root, RewindFileStore, RewindRestoreOutcome, MAX_SNAPSHOT_BYTES,
+    SNAPSHOT_ROOT_ENV,
+};
+pub use rewind_store::RewindPlan;
 
 // PA-174 P1：投影侧全空（`__index_only` + 零 `normalized_*` 行）时，装载侧用它与
 // `turn_events` 重建历史，避免重启后历史为零（空壳）。

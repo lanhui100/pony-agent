@@ -1072,3 +1072,24 @@ note: >-
   (3) 收口点：不新增 enforcement_point。行为门机械收口在
       `crates/pony-agent-core/tests/pa171_failed_turn_attribution_contract.rs`（wire 键常驻 + 三字段非占位 + 六条真值表）
       与 `pa171_provider_rate_limit_cooldown_contract.rs`（限流单次调用 1 次 HTTP / 冷却期 0 次 HTTP / 503 仍重试）。
+
+  【ADR 0113 归属登记（2026-11-10）｜TUI 双击 Esc 撤回：会话截断 + 写前 pre-image 文件还原（PA-175）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地按键裁决、会话库截断编排与工作区文件
+  拷贝**，无新增网络出口、依赖、指标或 Loki 上送路径；不新增收口点，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更面是 `bin/tui.rs` + `tui/rewind.rs`（按键裁决/面板渲染）、
+      `agent/control_plane/rewind_commands.rs`（编排既有 `checkout_history_node`）、
+      `agent/session/rewind_store.rs`（活动链定位/空 checkpoint 根补齐）、
+      `agent/session/rewind_files.rs`（写前 pre-image 的本地文件拷贝）与写工具单点
+      `tools::write_with_rewind_capture`。全部输入是本地按键事件 + 本地会话库 + 本地文件系统，
+      不产生遥测事实；进程仍是随用户启停的终端面，Prometheus pull 与节点侧日志采集的结构前提不成立。
+  (3) 变更性质（仅登记，非遥测变更）：新增**本地取证面**（非遥测出口）
+      `<data_local>/PonyAgent/rewind/<session>/<turn>/{<sha256>.json,<sha256>.bak}`（单文件 ≤4MiB，超限只记
+      `oversized` 标记并计入撤回降级回执）+ 一行 stderr `[pony-agent] rewind pre-image skipped: …`（抓取失败
+      fail-open，含路径与错误，**不含正文与凭据**）。不改变 `sessions.db` schema、不新增环境变量
+      （测试用覆盖入口 `PONY_REWIND_SNAPSHOT_DIR` 仅供隔离，非产品开关）。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门机械收口在测试层而非遥测层——
+      `crates/pony-agent-core/tests/tui_rewind_acceptance.rs`（r1_r2/r4 会话截断 + 空 checkpoint 根可继续对话、
+      r3 pre-image 还原/新建删除）、`--lib` 的 `rewind_files` 5 例、`--bin pony` 的 `tui::rewind_tests` 13 例。

@@ -48,14 +48,15 @@ use pony_agent_core::agent::runtime_helper::TestRuntimeGuard;
 use pony_agent_core::agent::session::{FileSessionBackend, SessionStore, TurnHistoryMessage};
 use pony_agent_core::agent::tools::{ToolCall, ToolExecutor, ToolResult};
 
-/// 契约 C-4 冻结的完整命令表（顺序固定；W3 演进：`/tasks` 之后新增 `/agents`；2026-11-07 补齐 `/settings`、`/teams`；2026-11-08 新增 `/approve`，共 15 条）。
+/// 契约 C-4 冻结的完整命令表（顺序固定；W3 演进：`/tasks` 之后新增 `/agents`；2026-11-07 补齐 `/settings`、`/teams`；2026-11-08 新增 `/approve`；2026-11-10 新增 `/rewind`，共 16 条）。
 ///
 /// 演进记录：W3 可见性波次（task-9）为 TUI 增加 agent team 花名册入口；
 /// 该变更经 Lead 批准，契约矩阵 `.dev-team/contract-matrix-slash-commands.md` C-4 同步更新。
 // 2026-11-07 wave-cli-update：/settings 与 /teams 早前加入命令表但契约表漏同步（基线即红），此处按 AVAILABLE_COMMANDS 真值补齐；非本波功能变更。
 // 2026-11-08 ADR 0092：/approve 为宿主盖章入口（Draft→Executing）；契约矩阵 C-4 已同提交原地改写并登记流水，此处按真值表同步。
-const CONTRACT_COMMANDS: [&str; 15] = [
-    "/resume", "/provider", "/models", "/thinking", "/settings", "/plan", "/approve",
+// 2026-11-10 ADR 0113：/rewind 与「非流式双击 Esc」共用撤回面板；契约矩阵 C-4 同提交原地改写为 16 条，其余条目顺序/文案未改。
+const CONTRACT_COMMANDS: [&str; 16] = [
+    "/resume", "/rewind", "/provider", "/models", "/thinking", "/settings", "/plan", "/approve",
     "/tasks", "/agents", "/teams", "/clear", "/compact", "/help", "/update", "/quit",
 ];
 
@@ -279,7 +280,7 @@ fn t1_tui_command_table_drops_cost_and_adds_compact() {
         );
     }
 
-    // 契约 C-4：顺序固定、共 10 条（任何增删/重排都是契约漂移）。
+    // 契约 C-4：顺序固定、共 16 条（任何增删/重排都是契约漂移）。
     assert_eq!(
         commands,
         CONTRACT_COMMANDS.to_vec(),

@@ -238,7 +238,7 @@ pub fn is_panel_command(command: &str) -> bool {
 /// 会话变更类斜杠命令（会拆掉在飞轮次；流式期拒绝，不得就地执行也不入队）：
 /// `/clear` `/compact` `/resume`。`/quit` `/exit` 不属本类（走原退出分支）。
 pub fn is_session_mutating_command(command: &str) -> bool {
-    const MUTATING_COMMANDS: &[&str] = &["/clear", "/compact", "/resume"];
+    const MUTATING_COMMANDS: &[&str] = &["/clear", "/compact", "/resume", "/rewind"];
     let trimmed = command.trim();
     MUTATING_COMMANDS
         .iter()

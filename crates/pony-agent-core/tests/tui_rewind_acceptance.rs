@@ -1,0 +1,539 @@
+//! ADR 0113「撤回」验收：控制面 `rewind_session` 的端到端行为（TUI 真实入口 + 本地 mock provider）。
+//!
+//! 覆盖判据：
+//! - **R1**：两轮之后 `list_rewind_points` 返回 2 条（新→旧），最新一条带原文「第二问」；
+//! - **R2**（仅会话）：撤回到第 2 轮之前 ⇒ 会话只剩第 1 轮的 user+assistant，回执回填「第二问」；
+//!   活动链上只剩 1 个可撤回轮次；已取消节点不得再次撤回（明确 Err）；
+//! - **R3**（会话+代码）：文件按「被撤销轮次里最早 pre-image 取胜」还原，被撤销轮次新建的文件被删除。
+//!
+//! 纪律：AAA、真实断言、无 `#[ignore]`、不吞异常；沙箱隔离口径与 `tests/ask_resume_e2e.rs` 同源
+//! （集成测试绝不触碰用户真实数据目录与真实快照目录）。
+
+use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Once};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+
+use pony_agent_core::agent::config::{
+    ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
+    ThinkingParamPattern,
+};
+use pony_agent_core::agent::control_plane::rewind_commands::{
+    RewindMode, RewindPointsQuery, RewindSessionCommand,
+};
+use pony_agent_core::agent::control_plane::{
+    HostControlPlane, HostControlPlaneBuilder, SessionRuntimeViewQuery, StartTurnStreamCommand,
+};
+use pony_agent_core::agent::graph::GraphRunStore;
+use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
+use pony_agent_core::agent::runtime::{AgentRuntimeBuilder, TurnInput, TurnStreamEvent};
+use pony_agent_core::agent::session::{
+    FileSessionBackend, RewindFileStore, SessionStore, SNAPSHOT_ROOT_ENV,
+};
+use pony_agent_core::agent::turn_flow::TurnEventSink;
+
+const WAIT_BUDGET_MS: u64 = 10_000;
+
+static ISOLATE_PROCESS_DATA_DIR: Once = Once::new();
+
+fn isolate_process_data_dir() {
+    ISOLATE_PROCESS_DATA_DIR.call_once(|| {
+        let unique = format!(
+            "pony-agent-it-rewind-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        );
+        let sandbox = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&sandbox).expect("create isolated data dir");
+        std::env::set_var("XDG_DATA_HOME", &sandbox);
+        std::env::set_var("HOME", &sandbox);
+        std::env::set_var("LOCALAPPDATA", &sandbox);
+        // 撤回文件快照同样必须落沙箱：控制面用 `RewindFileStore::shared()` 读该 env。
+        std::env::set_var(SNAPSHOT_ROOT_ENV, sandbox.join("rewind"));
+    });
+}
+
+fn snapshot_root() -> std::path::PathBuf {
+    isolate_process_data_dir();
+    std::path::PathBuf::from(std::env::var(SNAPSHOT_ROOT_ENV).expect("snapshot root env"))
+}
+
+fn isolated_workspace(test_name: &str) -> std::path::PathBuf {
+    isolate_process_data_dir();
+    let dir = std::env::temp_dir().join(format!(
+        "pony-agent-rewind-ws-{}-{}",
+        std::process::id(),
+        test_name
+    ));
+    std::fs::create_dir_all(&dir).expect("create isolated workspace dir");
+    dir
+}
+
+/// 同进程用例共享沙箱会话库 ⇒ 串行夹具（不含断言）。
+static SERIAL_TEST_GUARD: Mutex<()> = Mutex::new(());
+
+fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL_TEST_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wait_until<F: FnMut() -> bool>(mut predicate: F, timeout_ms: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if predicate() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// 记录型 sink：断言事件序列用（只做观测，不参与判定真值）。
+#[derive(Default)]
+struct RecordingSink {
+    captured: Mutex<Vec<(String, TurnStreamEvent)>>,
+}
+
+impl RecordingSink {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.captured
+            .lock()
+            .expect("recording sink lock poisoned")
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+}
+
+impl TurnEventSink for RecordingSink {
+    fn emit(&self, name: &str, payload: TurnStreamEvent) {
+        self.captured
+            .lock()
+            .expect("recording sink lock poisoned")
+            .push((name.to_string(), payload));
+    }
+}
+
+fn turn_input(session_id: &str, message: &str) -> TurnInput {
+    TurnInput {
+        message: message.to_string(),
+        display_message: None,
+        provider_id: None,
+        model_id: None,
+        reasoning_effort: None,
+        workspace_mode: None,
+        tool_authorization_mode: None,
+        session_id: Some(session_id.to_string()),
+        node_id: None,
+        history: Vec::new(),
+        images: Vec::new(),
+        workspace_id: None,
+        plan_execution_approval: None,
+    }
+}
+
+/// 经 TUI 真实入口跑一轮，并断言以 `turn:completed` 收口。
+fn run_turn(
+    control_plane: &HostControlPlane,
+    sink: &RecordingSink,
+    session_id: &str,
+    turn_id: &str,
+    message: &str,
+) {
+    let outcome = control_plane.start_turn_stream_checked(
+        sink,
+        StartTurnStreamCommand {
+            turn_id: turn_id.to_string(),
+            input: turn_input(session_id, message),
+        },
+    );
+    assert!(
+        outcome.is_ok(),
+        "轮次 {turn_id} 必须以 Ok 收口，实际 = {:?}",
+        outcome.err()
+    );
+    let names = sink.names();
+    assert!(
+        names.iter().any(|name| name == "turn:completed"),
+        "轮次 {turn_id} 必须出现 turn:completed，实际事件序列 = {names:?}"
+    );
+}
+
+// ── 本地回环 mock provider（非流式 JSON：每次请求出队一段 assistant 文本）──────────
+
+struct MockProviderServer {
+    base_url: String,
+    addr: String,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockProviderServer {
+    fn start(replies: Vec<String>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("mock addr").port();
+        let replies = Arc::new(Mutex::new(VecDeque::from(replies)));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_thread = Arc::clone(&requests);
+        let shutdown_for_thread = Arc::clone(&shutdown);
+
+        let handle = std::thread::spawn(move || {
+            while !shutdown_for_thread.load(Ordering::SeqCst) {
+                let Ok((mut stream, _addr)) = listener.accept() else {
+                    return;
+                };
+                let _body = read_http_request_body(&mut stream);
+                if let Ok(mut captured) = requests_for_thread.lock() {
+                    captured.push("request".to_string());
+                }
+                let reply = replies
+                    .lock()
+                    .expect("mock reply queue poisoned")
+                    .pop_front()
+                    .unwrap_or_else(|| "mock-queue-exhausted".to_string());
+                write_http_json(&mut stream, &text_completion_body(&reply));
+            }
+        });
+
+        Self {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            addr: format!("127.0.0.1:{port}"),
+            shutdown,
+            handle: Some(handle),
+            requests,
+        }
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().expect("mock request lock poisoned").len()
+    }
+
+    fn wait_request_count(&self, expected: usize) -> bool {
+        wait_until(|| self.request_count() >= expected, WAIT_BUDGET_MS)
+    }
+}
+
+impl Drop for MockProviderServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.addr.clone());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn read_http_request_body(stream: &mut TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let mut header_end: Option<usize> = None;
+    let mut content_length = 0usize;
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(_) => break,
+        }
+        if header_end.is_none() {
+            if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                header_end = Some(index + 4);
+                let headers = String::from_utf8_lossy(&buffer[..index + 4]).to_lowercase();
+                for line in headers.lines() {
+                    if let Some(value) = line.strip_prefix("content-length:") {
+                        content_length = value.trim().parse::<usize>().unwrap_or(0);
+                    }
+                }
+            }
+        }
+        if let Some(header_end) = header_end {
+            if buffer.len().saturating_sub(header_end) >= content_length {
+                break;
+            }
+        }
+    }
+    let body_start = header_end.unwrap_or(buffer.len());
+    String::from_utf8_lossy(&buffer[body_start..]).to_string()
+}
+
+fn write_http_json(stream: &mut TcpStream, body: &str) {
+    let payload = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.as_bytes().len(),
+        body
+    );
+    let _ = stream.write_all(payload.as_bytes());
+    let _ = stream.flush();
+}
+
+fn text_completion_body(text: &str) -> String {
+    json!({
+        "choices": [{ "message": { "role": "assistant", "content": text } }],
+        "usage": { "prompt_tokens": 7, "completion_tokens": 7, "total_tokens": 14 }
+    })
+    .to_string()
+}
+
+struct StaticProviderResolver {
+    selection: ResolvedProviderSelection,
+}
+
+impl ProviderSelectionResolver for StaticProviderResolver {
+    fn resolve_provider_selection(
+        &self,
+        _provider_id: Option<&str>,
+        _model_id: Option<&str>,
+    ) -> ResolvedProviderSelection {
+        self.selection.clone()
+    }
+}
+
+fn provider_selection(base_url: String) -> ResolvedProviderSelection {
+    ResolvedProviderSelection {
+        requested_name: "rewind-test".to_string(),
+        provider_name: "rewind-test".to_string(),
+        protocol: ProviderProtocol::OpenAiCompletions,
+        base_url,
+        auth_type: ProviderAuthType::Auto,
+        api_key_env_var: "REWIND_TEST_API_KEY".to_string(),
+        api_key: Some("rewind-test-key".to_string()),
+        model: "rewind-test-model".to_string(),
+        temperature: 0.0,
+        max_output_tokens: 256,
+        reasoning_effort: None,
+        reasoning_budget_tokens: None,
+        capabilities: ProviderModelCapabilities {
+            context_window_tokens: Some(8_192),
+            supports_tools: true,
+            supports_streaming: false,
+            supports_image_input: false,
+            supports_reasoning: false,
+            ..Default::default()
+        },
+        thinking_param_pattern: ThinkingParamPattern::EffortStandard,
+    }
+}
+
+fn control_plane_with_mock_provider(base_url: String, workspace: &Path) -> HostControlPlane {
+    isolate_process_data_dir();
+    // 文件后端（无 turn 事件表）：节点保留内嵌快照，撤回的会话还原走 legacy 真值路径。
+    // 这样验收不依赖沙箱 SQLite 的事件装载细节，也不触碰用户真实会话库。
+    let store_path = workspace.join("sessions.json");
+    let session_store =
+        SessionStore::with_backend(Box::new(FileSessionBackend::new(store_path)));
+    let runtime = AgentRuntimeBuilder::new()
+        .session_store(session_store)
+        .provider_resolver(Box::new(StaticProviderResolver {
+            selection: provider_selection(base_url),
+        }))
+        .workspace_root(workspace)
+        .build();
+    HostControlPlaneBuilder::new()
+        .runtime(runtime)
+        .graph_run_store(GraphRunStore::new())
+        .build()
+}
+
+fn history_roles(control_plane: &HostControlPlane, session_id: &str) -> Vec<(String, String)> {
+    let view = control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
+        session_id: Some(session_id.to_string()),
+        turn_id: None,
+        node_id: None,
+        run_id: None,
+    });
+    view.session
+        .history
+        .iter()
+        .map(|message| (message.role.clone(), message.content.clone()))
+        .collect()
+}
+
+// ── R1 / R2：会话撤回（仅会话）─────────────────────────────────────────────
+
+#[test]
+fn r1_r2_rewind_lists_user_turns_and_truncates_transcript() {
+    let _guard = serial_guard();
+    let _rt = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+    let workspace = isolated_workspace("conversation");
+    let server = MockProviderServer::start(vec![
+        "第一答".to_string(),
+        "第二答".to_string(),
+        "重开答".to_string(),
+    ]);
+    let control_plane = control_plane_with_mock_provider(server.base_url.clone(), &workspace);
+
+    // Arrange：真实跑两轮，产生两个 TurnCommitted 节点。
+    let session_id = "rewind-conversation";
+    let sink = RecordingSink::new();
+    run_turn(&control_plane, &sink, session_id, "turn-1", "第一问");
+    run_turn(&control_plane, &sink, session_id, "turn-2", "第二问");
+
+    // R1：两个可撤回轮次，新→旧，且带原文。
+    let points = control_plane.list_rewind_points(RewindPointsQuery {
+        session_id: Some(session_id.to_string()),
+    });
+    assert_eq!(points.len(), 2, "两轮 ⇒ 两个撤回点，实际 {points:?}");
+    assert_eq!(points[0].user_message, "第二问", "最新一轮在最前");
+    assert_eq!(points[1].user_message, "第一问");
+
+    // R2：撤回到第 2 轮之前。
+    let response = control_plane
+        .rewind_session(RewindSessionCommand {
+            session_id: Some(session_id.to_string()),
+            node_id: points[0].node_id.clone(),
+            mode: RewindMode::ConversationOnly,
+        })
+        .expect("撤回必须成功");
+    assert_eq!(response.user_message.as_deref(), Some("第二问"));
+    assert_eq!(response.turn_index, 2);
+    assert!(
+        response.files_restored.is_empty(),
+        "仅会话模式不得触碰文件：{:?}",
+        response.files_restored
+    );
+    assert_eq!(
+        history_roles(&control_plane, session_id),
+        vec![
+            ("user".to_string(), "第一问".to_string()),
+            ("assistant".to_string(), "第一答".to_string())
+        ],
+        "会话必须截断到第 1 轮"
+    );
+    let remaining = control_plane.list_rewind_points(RewindPointsQuery {
+        session_id: Some(session_id.to_string()),
+    });
+    assert_eq!(remaining.len(), 1, "撤回后只剩第 1 轮可撤回");
+
+    // 已取消节点再撤 ⇒ 明确 Err（不伪造成功）。
+    let stale = control_plane.rewind_session(RewindSessionCommand {
+        session_id: Some(session_id.to_string()),
+        node_id: points[0].node_id.clone(),
+        mode: RewindMode::ConversationOnly,
+    });
+    assert!(stale.is_err(), "已取消的节点不得再次撤回");
+
+    // R4：撤回到**第一轮之前** ⇒ 走「空会话 checkpoint 根」路径；撤完还能继续聊。
+    let to_empty = control_plane
+        .rewind_session(RewindSessionCommand {
+            session_id: Some(session_id.to_string()),
+            node_id: remaining[0].node_id.clone(),
+            mode: RewindMode::ConversationOnly,
+        })
+        .expect("撤回到空会话必须成功");
+    assert_eq!(to_empty.user_message.as_deref(), Some("第一问"));
+    assert_eq!(to_empty.turn_index, 1);
+    assert_eq!(
+        history_roles(&control_plane, session_id),
+        Vec::new(),
+        "撤回到第一轮之前 ⇒ 会话历史清空"
+    );
+    assert!(
+        control_plane
+            .list_rewind_points(RewindPointsQuery {
+                session_id: Some(session_id.to_string()),
+            })
+            .is_empty(),
+        "空会话不得再有可撤回轮次"
+    );
+    let restarted = RecordingSink::new();
+    run_turn(&control_plane, &restarted, session_id, "turn-3", "重开一问");
+    assert_eq!(
+        history_roles(&control_plane, session_id),
+        vec![
+            ("user".to_string(), "重开一问".to_string()),
+            ("assistant".to_string(), "重开答".to_string())
+        ],
+        "撤回后新轮只带本轮上下文"
+    );
+    assert!(server.wait_request_count(3), "三轮回执各一次上游调用");
+}
+
+// ── R3：会话 + 代码（pre-image 还原 / 新建文件删除）────────────────────────
+
+#[test]
+fn r3_rewind_restores_files_from_earliest_pre_image_of_cancelled_turns() {
+    let _guard = serial_guard();
+    let _rt = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+    let workspace = isolated_workspace("files");
+    let server = MockProviderServer::start(vec!["答一".to_string(), "答二".to_string()]);
+    let control_plane = control_plane_with_mock_provider(server.base_url.clone(), &workspace);
+
+    let session_id = "rewind-files";
+    let sink = RecordingSink::new();
+    run_turn(&control_plane, &sink, session_id, "turn-1", "改第一处");
+    run_turn(&control_plane, &sink, session_id, "turn-2", "改第二处");
+
+    let points = control_plane.list_rewind_points(RewindPointsQuery {
+        session_id: Some(session_id.to_string()),
+    });
+    assert_eq!(points.len(), 2, "两轮 ⇒ 两个撤回点");
+    let turn_1 = points[1].turn_id.clone().expect("第 1 轮有 turn id");
+    let turn_2 = points[0].turn_id.clone().expect("第 2 轮有 turn id");
+
+    // Arrange：模拟写工具在落盘前的两轮快照 + 一次新建。
+    let store = RewindFileStore::new(snapshot_root());
+    let edited = workspace.join("edited.txt");
+    let created = workspace.join("created.txt");
+    std::fs::write(&edited, "v0").expect("seed v0");
+    store
+        .record_pre_image(session_id, &turn_1, &edited)
+        .expect("turn1 pre-image");
+    std::fs::write(&edited, "v1").expect("write v1");
+    store
+        .record_pre_image(session_id, &turn_2, &edited)
+        .expect("turn2 pre-image");
+    store
+        .record_pre_image(session_id, &turn_2, &created)
+        .expect("turn2 creation pre-image");
+    std::fs::write(&edited, "v2").expect("write v2");
+    std::fs::write(&created, "agent-created").expect("create file");
+
+    // Act：撤回到第 2 轮之前，且要求恢复代码。
+    let response = control_plane
+        .rewind_session(RewindSessionCommand {
+            session_id: Some(session_id.to_string()),
+            node_id: points[0].node_id.clone(),
+            mode: RewindMode::ConversationAndFiles,
+        })
+        .expect("撤回必须成功");
+
+    // Assert：最早 pre-image 取胜（turn2 的 pre-image = v1），新建文件被删除。
+    assert_eq!(
+        std::fs::read_to_string(&edited).expect("read edited"),
+        "v1",
+        "必须还原到第 2 轮之前的版本"
+    );
+    assert!(!created.exists(), "被撤销轮次新建的文件必须删除");
+    assert!(!response.file_restore_degraded, "本次还原不应降级");
+    assert_eq!(response.files_restored.len(), 1);
+    assert_eq!(response.files_deleted.len(), 1);
+    assert_eq!(
+        response.cancelled_turn_ids,
+        vec![turn_2],
+        "只撤销第 2 轮及之后"
+    );
+    assert_eq!(
+        history_roles(&control_plane, session_id).len(),
+        2,
+        "会话同口径截断到第 1 轮"
+    );
+    assert!(server.wait_request_count(2), "两轮各一次上游调用");
+}

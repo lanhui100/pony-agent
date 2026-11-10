@@ -520,6 +520,9 @@ pub use self::splash::*;
 #[path = "tui/model_panel.rs"]
 mod model_panel;
 pub use self::model_panel::*;
+// ADR 0113「撤回」：双击 Esc / `/rewind` 的两段式覆盖层（轮次 → 范围 → 执行）。
+#[path = "tui/rewind.rs"]
+mod rewind;
 
 pub use protocol::*;
 
@@ -579,10 +582,14 @@ pub enum InteractionMode {
     AgentRoster,
     /// 本轮：`/settings` 显示偏好面板（↑↓ 选择 · Space/Enter 切换 · Esc 关闭）。
     Settings,
+    /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的两段式覆盖层
+    /// （① 选轮次 ② 选范围：恢复代码与会话 / 仅恢复会话）。
+    Rewind,
 }
 
 pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "选择并恢复历史会话"),
+    ("/rewind", "撤回到某个用户轮次（会话 + 已写文件）"),
     ("/provider", "管理与切换模型提供商"),
     ("/models", "切换当前活跃模型"),
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
@@ -1331,6 +1338,8 @@ pub struct TuiState {
     pub thinking_collapsed: bool,
     /// `/settings` 面板当前选中项下标（0 起，越界由渲染钳制）。
     pub settings_selected_index: usize,
+    /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的覆盖层状态（`None` = 未打开）。
+    pub rewind_state: Option<rewind::RewindState>,
     pub status_text: String,
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
@@ -1467,6 +1476,7 @@ impl Default for TuiState {
             hide_process: false,
             thinking_collapsed: false,
             settings_selected_index: 0,
+            rewind_state: None,
             status_text: "Ready".to_string(),
             mouse_capture: true,
             mouse_selection: MouseSelectionState::default(),
@@ -5817,6 +5827,11 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         );
     }
 
+    // ADR 0113「撤回」：与其它选择器同层的居中覆盖层（轮次 → 范围两段式）。
+    if state.mode == InteractionMode::Rewind {
+        rewind::render(f, area, state, max_rows);
+    }
+
     if state.mode == InteractionMode::SelectingProvider {
         let total = state.provider_list.len();
         let shown = total.min(10.min(max_rows)).max(1);
@@ -8664,6 +8679,8 @@ fn tui_event_loop(
     // C26 权威载荷：派发时刻的正文快照。窗口内的撤销/回队**一律**用它（而不是此刻的
     // `input_buffer`）—— 用户可能在窗口内改过输入框，读字节会把已派发正文静默丢掉。
     let mut queue_dispatch_payload: Option<QueuedUserMessage> = None;
+    // ADR 0113：非流式「双击 Esc 打开撤回」的上膛状态（会话作用域 + 700ms 窗口）。
+    let mut rewind_esc_arm = rewind::RewindEscArm::default();
     // 信号处理器已在 run_tui 进入 raw mode 之前安装（启动期 SIGHUP 也要能还原终端）。
     // SIGINT/SIGTERM/SIGHUP 只置 SHUTDOWN_REQUESTED 交给主循环。
     // 挂起有两条路径，二者都必须先还原终端再停进程：
@@ -9559,6 +9576,23 @@ fn tui_event_loop(
                         continue;
                     }
 
+                    // 1j. 「撤回」覆盖层（ADR 0113）：两段式裁决，执行在第二段 ↵ 处发生。
+                    if state.mode == InteractionMode::Rewind {
+                        match rewind::handle_key(&mut state, &key) {
+                            rewind::RewindAction::Cancel => {
+                                state.rewind_state = None;
+                                state.mode = InteractionMode::Normal;
+                            }
+                            rewind::RewindAction::Confirm => {
+                                rewind_esc_arm.reset();
+                                rewind::execute(&mut state, &control_plane);
+                            }
+                            rewind::RewindAction::Consumed => {}
+                        }
+                        dirty = true;
+                        continue;
+                    }
+
                     // 2. 流式态 Esc = 停止本轮（双击）；静态下 Esc 仅用于清空输入缓冲区，不退出程序
                     if key.code == KeyCode::Esc {
                         if state.is_streaming {
@@ -9602,6 +9636,19 @@ fn tui_event_loop(
                                     .unwrap_or_else(|| state.input_buffer.trim().to_string());
                                 requeue_front(&mut state, pending);
                                 queue_dispatch_deadline = None;
+                            }
+                            // ADR 0113：非流式「双击 Esc」= 打开撤回菜单（Claude Code 心智）。
+                            // 第一次 Esc 仍保持既有语义（撤销本次派发 / 清空草稿）并上膛；
+                            // 同会话 700ms 内的第二次才开面板（不跨会话、不跨长时间）。
+                            if rewind_esc_arm.press(
+                                &state.session_id,
+                                now_epoch_ms(),
+                                rewind::REWIND_ESC_WINDOW_MS,
+                            ) {
+                                state.clear_input();
+                                rewind::open(&mut state, &control_plane);
+                                dirty = true;
+                                continue;
                             }
                             // 静态时不退出，只清空输入框
                             state.clear_input();
@@ -9934,6 +9981,11 @@ fn tui_event_loop(
                                 // 严格遵从 /quit 或 /exit 退出规范
                                 if known_command == Some("/quit") || input_is_alias(&input, "/exit") {
                                     break;
+                                }
+                                // ADR 0113：`/rewind` 与「双击 Esc」共用同一入口（可发现路径）。
+                                if known_command == Some("/rewind") {
+                                    rewind::open(&mut state, &control_plane);
+                                    continue;
                                 }
                                 // 本轮：`/settings` 显示偏好面板（面板类命令，流式期也允许打开）。
                                 if known_command == Some("/settings") {
@@ -11516,6 +11568,11 @@ mod wave65_approval_unit_tests;
 #[path = "tui/tests/wave65_r2_approval_plan_tests.rs"]
 mod wave65_r2_approval_plan_tests;
 
+
+/// ADR 0113 单测：双击 Esc 上膛 + 撤回面板两段式按键裁决 + 菜单文案归约。
+#[cfg(test)]
+#[path = "tui/tests/rewind_tests.rs"]
+mod rewind_tests;
 
 /// wave-65 R3（F3）单测：审批失效**不复用** Ask 文案。
 #[cfg(test)]

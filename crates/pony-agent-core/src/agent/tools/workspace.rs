@@ -184,7 +184,7 @@ impl ToolRouter {
             }
         }
 
-        if let Err(error) = fs::write(&target, content) {
+        if let Err(error) = super::write_with_rewind_capture(context, &target, content.as_bytes()) {
             return error_result(
                 TOOL_WORKSPACE_WRITE_FILE,
                 "write_failed",
@@ -367,7 +367,9 @@ impl ToolRouter {
             original.replacen(old_text, new_text, 1)
         };
 
-        if let Err(error) = fs::write(&target, updated.as_bytes()) {
+        if let Err(error) =
+            super::write_with_rewind_capture(context, &target, updated.as_bytes())
+        {
             return error_result(
                 TOOL_WORKSPACE_EDIT_FILE,
                 "write_failed",

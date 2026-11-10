@@ -60,6 +60,8 @@ mod history_commands;
 mod message_projection;
 mod path_authorization_commands;
 mod query_commands;
+// ADR 0113「撤回」：命令类型与编排独立成文件（mod.rs 已计入文件行数棘轮）。
+pub mod rewind_commands;
 mod trace_commands;
 mod workspace_commands;
 

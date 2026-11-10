@@ -84,10 +84,10 @@ fn compact_session(
 
 ### C-4 TUI 命令表（唯一真值源）
 
-`crates/pony-agent-core/src/bin/tui.rs::AVAILABLE_COMMANDS` 变更后**必须**为（顺序固定，共 15 条）：
+`crates/pony-agent-core/src/bin/tui.rs::AVAILABLE_COMMANDS` 变更后**必须**为（顺序固定，共 16 条）：
 
 ```
-/resume  /provider  /models  /thinking  /settings  /plan  /approve  /tasks  /agents  /teams  /clear  /compact  /help  /update  /quit
+/resume  /rewind  /provider  /models  /thinking  /settings  /plan  /approve  /tasks  /agents  /teams  /clear  /compact  /help  /update  /quit
 ```
 - `/cost` 从命令表与分发分支**移除**。
 - `/cost` 从 `bin/cli.rs` 移除（CLI 与 TUI 口径统一，`SlashCommand::Cost` 枚举、`parse` 分支、help 文案、`cli_acceptance.rs` 同步一并处理）。
@@ -235,3 +235,4 @@ TS：`tests/slash-commands.spec.ts`
   (c) **Rust 级闭环证据**（不依赖终端）：`dispatcher.dispatch_governed(builtin:ask)` → `list_pending_asks()` 恰 1 条且 kind=Interaction → `answer_ask(authorization)` 成功 → 再 `list_pending_asks()` 为空（CAS 消费生效）。
   (d) **fail-closed 证据**：无 env 时 `audit_ask_bootstrap_enabled() == false` 且不产生 pending ask；并静态断言引导代码位于 `cfg(debug_assertions)` 守卫内（release 不编译）。
 - 2026-11-08 ADR 0092 修订14（Lead 批准·Ask 自锁收口）：C-4 原地改写为 15 条真值：补齐此前漏同步的 `/settings`、`/update`、`/teams`（`/agents` 别名），并新增 `/approve`——它是宿主对 `Draft` 计划的盖章入口（调既有 `plan_execution_approve` 推进 `Draft→Executing`），模型工具参数与对话文本一律不构成批准来源（C-141-3）。冻结测试 `tests/slash_commands_acceptance.rs::CONTRACT_COMMANDS` 同提交同步，断言未放宽。
+- 2026-11-10 ADR 0113 修订15（PA-175·撤回入口）：C-4 原地改写为 16 条真值：新增 `/rewind`（紧随 `/resume`）——与「非流式双击 Esc」共用同一撤回面板（选用户轮次 → 选范围：恢复代码与会话 / 仅恢复会话），归入**会话变更类命令**（`is_session_mutating_command`，流式期拒绝，不得撕裂在飞轮次）。冻结测试 `tests/slash_commands_acceptance.rs::CONTRACT_COMMANDS` 同提交同步为 16 条，其余条目顺序/文案未改、断言未放宽。
