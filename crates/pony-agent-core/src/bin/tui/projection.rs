@@ -352,7 +352,12 @@ pub fn ask_question_from_pending(value: &serde_json::Value) -> AskUserQuestion {
             .and_then(|id| id.as_str())
             .map(str::to_string),
         question,
-        multi_select: false,
+        // 多选语义由模型声明的 `multiSelect` 决定（宿主 pending 请求的 additive 线缆键）；
+        // 缺失（旧宿主 / 旧记录）⇒ 单选，与历史行为逐字一致。
+        multi_select: value
+            .get("multiSelect")
+            .and_then(|flag| flag.as_bool())
+            .unwrap_or(false),
         options,
     }
 }

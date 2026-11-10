@@ -118,6 +118,7 @@ mod tests {
             state: PendingControlRequestState::Pending,
             prompt: Some("continue?".to_string()),
             options: Some(json!(["yes", "no"])),
+            multi_select: None,
         }
     }
 

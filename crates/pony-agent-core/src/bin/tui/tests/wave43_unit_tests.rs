@@ -280,3 +280,191 @@ fn test_permission_request_from_pending_mapping() {
     assert_eq!(req.command_or_path, Some("rm -rf /".to_string()));
     assert_eq!(req.timestamp_ms, 55555);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wave-ask-panel-multiselect：多选语义 + 版式（留白 / 折行）的纯函数契约
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn multi_select_question() -> AskUserQuestion {
+    AskUserQuestion {
+        id: "q-multi".to_string(),
+        header: None,
+        question: "选择本次要一并迁移的存储层".to_string(),
+        multi_select: true,
+        options: vec![
+            QuestionOption {
+                label: "会话库".to_string(),
+                description: Some("sessions.db".to_string()),
+            },
+            QuestionOption {
+                label: "图运行库".to_string(),
+                description: None,
+            },
+            QuestionOption {
+                label: "向量索引".to_string(),
+                description: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn test_ask_option_rows_wrap_without_exceeding_panel_width() {
+    let label = "一个非常非常长的选项标签，用于验证折行后不会越过面板右缘并且不丢字";
+    let desc = "说明文字同样很长，折行后必须继续与标签列对齐，而不是溢出到面板边界之外";
+    let rows = ask_option_rows(true, "▢", label, desc, 40);
+    assert!(rows.len() > 2, "长选项必须折行，实际只有 {} 行", rows.len());
+    for row in &rows {
+        assert!(
+            line_display_width(row) <= 40,
+            "选项行超过面板宽度：{} 列",
+            line_display_width(row)
+        );
+    }
+    // 每行末尾还有铺底的内边距空格，比较前必须先把空白抹掉，否则「包含」会被行间填充打断。
+    let joined: String = rows
+        .iter()
+        .flat_map(|row| row.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    assert!(joined.contains(label), "折行不得丢字：{joined:?}");
+    assert!(!joined.contains('…'), "选项禁止省略号截断：{joined:?}");
+    assert_eq!(
+        rows[1].spans[0].content.chars().count(),
+        ASK_OPTION_INDENT,
+        "续行缩进必须与标签列对齐（{ASK_OPTION_INDENT} 列）"
+    );
+}
+
+#[test]
+fn test_ask_panel_height_counts_wrapped_option_rows() {
+    let mut short_state = TuiState::default();
+    short_state.mode = InteractionMode::AskUserQuestion;
+    short_state.ask_user_state =
+        Some(AskUserState::new("req-short-opt".to_string(), vec![multi_select_question()]));
+
+    let mut long_state = TuiState::default();
+    long_state.mode = InteractionMode::AskUserQuestion;
+    let mut long_question = multi_select_question();
+    long_question.options = (1..=3)
+        .map(|index| QuestionOption {
+            label: format!("选项{index}：{}", "很长的选项标签".repeat(4)),
+            description: Some("说明文字".repeat(8)),
+        })
+        .collect();
+    long_state.ask_user_state =
+        Some(AskUserState::new("req-long-opt".to_string(), vec![long_question]));
+
+    let short_h = inline_ask_height(&short_state, 80);
+    let long_h = inline_ask_height(&long_state, 80);
+    assert!(
+        long_h > short_h,
+        "折行后的选项必须让面板增高：long={long_h} short={short_h}"
+    );
+}
+
+#[test]
+fn test_ask_panel_height_is_fixed_rows_plus_question_plus_options() {
+    let mut state = TuiState::default();
+    state.mode = InteractionMode::AskUserQuestion;
+    state.ask_user_state =
+        Some(AskUserState::new("req-pad".to_string(), vec![multi_select_question()]));
+    // 固定 6 行（发丝线 + 上内边距 + 标题 + 问答间距 + 键位提示 + 下内边距）
+    // + 1 行问题 + 3 行选项 + 1 行自定义输入。
+    let expected = 6 + 1 + 3 + 1;
+    assert_eq!(
+        inline_ask_height(&state, 80) as usize,
+        expected,
+        "面板行数口径（含上下内边距与问答间距）不得漂移"
+    );
+}
+
+#[test]
+fn test_ask_multi_select_collects_all_checked_in_option_order() {
+    let mut ask = AskUserState::new("req-m".to_string(), vec![multi_select_question()]);
+    ask.selected_option_index = 2;
+    ask.toggle_current_option();
+    ask.selected_option_index = 0;
+    ask.toggle_current_option();
+    assert_eq!(
+        ask_answer_values(&ask),
+        vec!["会话库".to_string(), "向量索引".to_string()],
+        "多选答案必须按选项顺序给出全部勾选项（不得按勾选顺序）"
+    );
+    let payload = ask_answer_json(&[("q-multi".to_string(), ask_answer_values(&ask))]);
+    assert_eq!(payload["answer"], json!("会话库"));
+    assert_eq!(
+        payload["values"],
+        json!(["会话库", "向量索引"]),
+        "多选必须携带全部选中项，不得只留首个取值"
+    );
+}
+
+#[test]
+fn test_ask_single_select_answer_payload_shape_is_unchanged() {
+    let mut ask = AskUserState::new(
+        "req-s".to_string(),
+        vec![AskUserQuestion {
+            id: "q1".to_string(),
+            header: None,
+            question: "继续吗？".to_string(),
+            multi_select: false,
+            options: vec![QuestionOption {
+                label: "是".to_string(),
+                description: None,
+            }],
+        }],
+    );
+    ask.selected_option_index = 0;
+    let payload = ask_answer_json(&[("q1".to_string(), ask_answer_values(&ask))]);
+    assert_eq!(
+        payload,
+        json!({ "answer": "是" }),
+        "单选载荷形状必须逐字不变（向后兼容控制面/图运行）"
+    );
+}
+
+#[test]
+fn test_ask_multi_select_marker_reflects_checked_set() {
+    let mut ask = AskUserState::new("req-mark".to_string(), vec![multi_select_question()]);
+    let question = ask.current_question().cloned().expect("question");
+    assert_eq!(ask_option_marker(&question, &ask, 0), "▢");
+    ask.toggle_current_option();
+    assert_eq!(ask_option_marker(&question, &ask, 0), "▣");
+    assert_eq!(ask_option_marker(&question, &ask, 1), "▢");
+}
+
+#[test]
+fn test_ask_question_from_pending_reads_multi_select_flag() {
+    let multi = ask_question_from_pending(&json!({
+        "prompt": "选多个",
+        "options": ["A", "B"],
+        "multiSelect": true
+    }));
+    assert!(multi.multi_select, "multiSelect=true 必须映射为多选");
+    let legacy = ask_question_from_pending(&json!({ "prompt": "选一个", "options": ["A", "B"] }));
+    assert!(!legacy.multi_select, "缺省（旧宿主 / 旧记录）必须按单选处理");
+    let loose = ask_question_from_pending(&json!({ "prompt": "选一个", "multiSelect": "true" }));
+    assert!(!loose.multi_select, "多选只认结构化布尔，字符串不得宽松解释");
+}
+
+#[test]
+fn test_ask_multi_select_enter_without_checks_submits_focused_option() {
+    let mut ask = AskUserState::new("req-focus".to_string(), vec![multi_select_question()]);
+    ask.next_option();
+    let focused = ask.selected_option_index;
+    assert_eq!(focused, 1, "前置：焦点必须已移到第二项");
+    assert_eq!(
+        ask_selected_index(&ask),
+        Some(1),
+        "多选未勾选任何项时，Enter 必须仍然可以提交焦点项（与键位提示语义一致）"
+    );
+    assert_eq!(
+        ask_answer_values(&ask),
+        vec!["图运行库".to_string()],
+        "未勾选时答案取焦点项，不得是空答案"
+    );
+}

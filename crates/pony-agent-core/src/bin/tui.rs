@@ -6210,319 +6210,10 @@ pub fn render_permission_dialog_stub(f: &mut Frame, state: &TuiState) {
     );
 }
 
-/// Ask 面板的呼吸节奏：2 帧交替（每帧约 450ms），只在问答等待期生效。
-fn ask_pulse_glyph(tick: usize) -> &'static str {
-    if tick % 2 == 0 {
-        "◆"
-    } else {
-        "◇"
-    }
-}
-
-/// 内联 Ask 面板高度：分隔线 + 标题 + 选项(含自定义输入) + 键位提示；无问答时为 0。
-/// Ask 面板问题正文换行：首行 `first_width`、续行 `rest_width`（CJK 宽度感知）。
-///
-/// 与 `wrap_line` 同一套行首避让规则（标点不落行首）；**绝不**用省略号截断 ——
-/// 问题必须完整可读。空问题返回单条空串，保证调用方至少有一行可渲染。
-pub fn wrap_ask_question(question: &str, first_width: usize, rest_width: usize) -> Vec<String> {
-    let first_limit = first_width.max(1);
-    let rest_limit = rest_width.max(1);
-    let mut out: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut col = 0usize;
-    let mut limit = first_limit;
-    for ch in question.chars() {
-        let w = char_width(ch);
-        if col + w > limit && col > 0 && !is_no_line_start(ch) {
-            out.push(std::mem::take(&mut current));
-            col = 0;
-            limit = rest_limit;
-        }
-        current.push(ch);
-        col += w;
-    }
-    out.push(current);
-    out
-}
-
-pub fn inline_ask_height(state: &TuiState, width: usize) -> u16 {
-    if state.mode != InteractionMode::AskUserQuestion {
-        return 0;
-    }
-    let Some(ask) = &state.ask_user_state else {
-        return 0;
-    };
-    let option_rows = ask
-        .current_question()
-        .map(|q| q.options.len() + 1) // +1 自定义输入项
-        .unwrap_or(0);
-    // 问题换行后可能占多行：面板高度必须随之增长，否则完整问题会被面板裁掉。
-    // 宽度口径与 `render_ask_inline` 一致（前缀 = RAIL + 呼吸 + 提问 chip + 分组 chip）。
-    let question_rows = ask
-        .current_question()
-        .map(|q| {
-            let prompt = q.question.trim().replace('\n', " ");
-            let header_width = q
-                .header
-                .as_ref()
-                .map(|header| header.trim())
-                .filter(|header| !header.is_empty())
-                .filter(|header| !header.contains(':') && !header.starts_with("builtin"))
-                .map(|header| str_width(header) + 1)
-                .unwrap_or(0);
-            let prefix = RAIL + 2 + 1 + 4 + 1 + header_width;
-            let limit = width.saturating_sub(prefix).max(8);
-            wrap_ask_question(&prompt, limit, limit).len()
-        })
-        .unwrap_or(1)
-        .max(1);
-    let needed = 2 + option_rows + 1 + (question_rows - 1);
-    // 上限只防极端长文本吞掉整屏：ui() 仍会按消息区几何二次收缩。
-    let cap = if width >= 60 { 40 } else { 24 };
-    (needed as u16).min(cap).max(4)
-}
-
-/// 单行选项：`▏ ● 标签   说明`。焦点行整行 SURFACE_SEL + INK BOLD，
-/// 说明文字跟在标签后（不再右对齐拉满一行），窄终端自然省略。
-fn ask_option_row(
-    focused: bool,
-    marker: &str,
-    label: &str,
-    description: &str,
-    width: usize,
-) -> Line<'static> {
-    let bg = if focused {
-        theme::SURFACE_SEL
-    } else {
-        theme::CANVAS
-    };
-    let bar_style = if focused {
-        Style::default().fg(theme::ACCENT).bg(bg)
-    } else {
-        Style::default().bg(bg)
-    };
-    let label_style = if focused {
-        Style::default()
-            .fg(theme::INK)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme::INK_SOFT).bg(bg)
-    };
-    let marker_style = if focused {
-        Style::default().fg(theme::ACCENT).bg(bg)
-    } else {
-        Style::default().fg(theme::MUTED).bg(bg)
-    };
-
-    // 列预算：rail(2) + marker(2) + 间隔(1) + 说明前的 2 空格。
-    let fixed = 1 + RAIL + 1;
-    let desc_budget = width.saturating_sub(fixed + str_width(label) + 3);
-    let desc = if description.trim().is_empty() {
-        String::new()
-    } else {
-        ellipsize_width(description.trim(), desc_budget.max(6))
-    };
-    let desc_w = if desc.is_empty() { 0 } else { str_width(&desc) + 2 };
-    let label_budget = width.saturating_sub(fixed + desc_w).max(6);
-    let label = ellipsize_width(label, label_budget);
-    let used = fixed + str_width(&label) + desc_w;
-
-    let mut spans = vec![
-        Span::raw(" "),
-        Span::styled(if focused { "▌" } else { " " }, bar_style),
-        Span::raw(" "),
-        Span::styled(format!("{marker} "), marker_style),
-        Span::styled(label, label_style),
-    ];
-    if !desc.is_empty() {
-        spans.push(Span::styled("  ", Style::default().bg(bg)));
-        let desc_style = if focused {
-            Style::default().fg(theme::INK_SOFT).bg(bg)
-        } else {
-            Style::default().fg(theme::MUTED).bg(bg)
-        };
-        spans.push(Span::styled(desc, desc_style));
-    }
-    spans.push(Span::styled(
-        " ".repeat(width.saturating_sub(used)),
-        Style::default().bg(bg),
-    ));
-    Line::from(spans)
-}
-
-/// 信息流底部的内联问答面板（无边框、无遮罩，与正文同一 CANVAS 底色）。
-pub fn render_ask_inline(f: &mut Frame, area: Rect, state: &TuiState) {
-    let Some(ask) = &state.ask_user_state else {
-        return;
-    };
-    fill(f, area, theme::CANVAS);
-    let width = area.width as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // ── 顶部发丝线：把问答面板钉在信息流底部，而不是浮在半空 ─────────────────
-    if area.height >= 2 {
-        lines.push(hairline(width));
-    }
-
-    let pulse = ask_pulse_glyph(state.spinner_tick);
-    let question = ask
-        .current_question()
-        .map(|q| q.question.trim().replace('\n', " "))
-        .unwrap_or_default();
-    // 分组标签只展示真正面向用户的短词；运行时内部 id（`builtin:ask_user`）不暴露到界面。
-    let header = ask
-        .current_question()
-        .and_then(|q| q.header.clone())
-        .filter(|header| !header.trim().is_empty())
-        .filter(|header| !header.contains(':') && !header.starts_with("builtin"));
-    let counter = ask
-        .current_question()
-        .map(|_| (ask.current_question_index + 1, ask.questions.len()))
-        .filter(|(_, total)| *total > 1)
-        .map(|(index, total)| format!("{index}/{total}"));
-
-    // ── 标题：呼吸标记 + 提问 chip + 分组 chip + 明亮陶土色问题正文 + 多问题计数 ─────────────
-    let mut title_spans: Vec<Span<'static>> = vec![
-        Span::raw(" ".repeat(RAIL)),
-        Span::styled(
-            pulse,
-            Style::default()
-                .fg(theme::TERRACOTTA_BRIGHT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "提问",
-            Style::default()
-                .fg(theme::TERRACOTTA_BRIGHT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-    ];
-    let mut used = RAIL + 2 + 1 + 4 + 1;
-    if let Some(header) = header {
-        let chip = format!("{header} ");
-        used += str_width(&chip);
-        title_spans.push(Span::styled(chip, muted()));
-    }
-    let tail = counter
-        .as_ref()
-        .map(|counter| format!("  {counter}"))
-        .unwrap_or_default();
-    // 契约（2026-11-07 修订）：问题正文**必须完整显示** —— 超宽时按显示宽度换行，
-    // 禁止用省略号截断（用户无法读到完整问题就等于没问）。
-    let question_style = Style::default()
-        .fg(theme::TERRACOTTA_BRIGHT)
-        .add_modifier(Modifier::BOLD);
-    let first_width = width.saturating_sub(used + str_width(&tail)).max(8);
-    let rest_width = width.saturating_sub(used).max(8);
-    let mut wrapped = wrap_ask_question(&question, first_width, rest_width).into_iter();
-    title_spans.push(Span::styled(wrapped.next().unwrap_or_default(), question_style));
-    if !tail.is_empty() {
-        title_spans.push(Span::styled(tail, faint()));
-    }
-    lines.push(Line::from(title_spans));
-    let question_indent = " ".repeat(used);
-    for segment in wrapped {
-        lines.push(Line::from(vec![
-            Span::raw(question_indent.clone()),
-            Span::styled(segment, question_style),
-        ]));
-    }
-
-    // ── 选项 + 自定义输入 ───────────────────────────────────────────────────
-    let mut custom_focused = false;
-    if let Some(q) = ask.current_question() {
-        for (idx, option) in q.options.iter().enumerate() {
-            if lines.len() + 1 >= area.height as usize {
-                break;
-            }
-            let focused = idx == ask.selected_option_index;
-            let marker = if q.multi_select {
-                if ask.multi_selected_indices.contains(&idx) {
-                    "▣"
-                } else {
-                    "▢"
-                }
-            } else if focused {
-                "●"
-            } else {
-                "○"
-            };
-            lines.push(ask_option_row(
-                focused,
-                marker,
-                &option.label,
-                option.description.as_deref().unwrap_or(""),
-                width,
-            ));
-        }
-
-        if lines.len() + 1 < area.height as usize {
-            custom_focused = ask.selected_option_index == q.options.len();
-            // 聚焦时在文本尾部显示闪烁的半角细竖线光标（▏），半角且呼吸闪烁。
-            let caret = if custom_focused && state.spinner_tick % 2 == 0 {
-                CARET
-            } else {
-                ""
-            };
-            let label = if ask.custom_input.is_empty() {
-                if custom_focused {
-                    format!("自定义输入{caret}")
-                } else {
-                    "自定义输入…".to_string()
-                }
-            } else if custom_focused {
-                format!("{}{caret}", ask.custom_input)
-            } else {
-                ask.custom_input.clone()
-            };
-            let description = if custom_focused { "↵ 提交" } else { "" };
-            lines.push(ask_option_row(
-                custom_focused,
-                ">",
-                &label,
-                description,
-                width,
-            ));
-        }
-    } else {
-        lines.push(Line::from(Span::styled("  无等待确认的问题", faint())));
-    }
-
-    // ── 键位提示：按当前状态给最短的一组 ─────────────────────────────────────
-    if lines.len() < area.height as usize {
-        let multi = ask
-            .current_question()
-            .map(|q| q.multi_select)
-            .unwrap_or(false);
-        let has_options = ask
-            .current_question()
-            .map(|question| !question.options.is_empty())
-            .unwrap_or(false);
-        // 键位语义（ADR 0074 / 契约 §6.3）：esc = **忽略此提问**（宿主 `Cancelled`），
-        // 不是「过期」也不是「取消本次运行」。此处只放一行最短提示，无倒计时、无期限暗示。
-        let hint = if !has_options {
-            "输入回答 · ↵ 提交 · esc 忽略此提问"
-        } else if custom_focused {
-            "输入自定义回答 · ↵ 提交 · esc 忽略此提问"
-        } else if multi {
-            "↑↓ 移动 · space 勾选 · ↵ 提交 · esc 忽略此提问"
-        } else {
-            "↑↓ 移动 · ↵ 确认 · esc 忽略此提问"
-        };
-        lines.push(Line::from(vec![
-            Span::raw(" ".repeat(RAIL + 1)),
-            Span::styled(hint, faint()),
-        ]));
-    }
-
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme::CANVAS)),
-        area,
-    );
-}
+// ADR 0117「Ask 面板」：多选语义 + 版式（上下内边距 / 问题独占一行 / 选项折行）。
+#[path = "tui/ask_panel.rs"]
+mod ask_panel;
+pub use self::ask_panel::*;
 
 /// Ask 态下色带输入区的替身：一行「等待选择」，不重复面板里的键位提示。
 fn render_ask_band_hint(f: &mut Frame, area: Rect, state: &TuiState) {
@@ -7443,7 +7134,15 @@ fn ask_selected_index(ask: &AskUserState) -> Option<usize> {
         return None;
     }
     if question.multi_select {
-        ask.multi_selected_indices.first().copied()
+        // 多选：有任何勾选就以勾选为准；一个都没勾时把**焦点项**当作本次选择 ——
+        // 否则「Enter 提交」在未勾选的多选问题上只会报错，与提示语义相悖。
+        ask.multi_selected_indices
+            .iter()
+            .copied()
+            .min()
+            .or_else(|| {
+                (ask.selected_option_index < question.options.len()).then_some(ask.selected_option_index)
+            })
     } else if ask.selected_option_index < question.options.len() {
         Some(ask.selected_option_index)
     } else {
@@ -7452,6 +7151,9 @@ fn ask_selected_index(ask: &AskUserState) -> Option<usize> {
 }
 
 /// 契约 F-M：当前问题的答案取值（自由输入优先，其次多选 / 单选标签）。
+///
+/// 多选按**选项在面板里的顺序**输出（不是勾选顺序）：模型读到的多选答案必须与它给出的
+/// options 顺序一致，否则「先勾 B 再勾 A」会让答案序列随机化。
 fn ask_answer_values(ask: &AskUserState) -> Vec<String> {
     let typed = ask.custom_input.trim();
     if ask.is_custom_input_active && !typed.is_empty() {
@@ -7461,7 +7163,14 @@ fn ask_answer_values(ask: &AskUserState) -> Vec<String> {
         return Vec::new();
     };
     if question.multi_select {
-        ask.multi_selected_indices
+        let mut indices = ask.multi_selected_indices.clone();
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
+            // 与 `ask_selected_index` 同口径：未勾选任何项时提交焦点项，避免空答案蒙混提交。
+            indices.push(ask.selected_option_index);
+        }
+        indices
             .iter()
             .filter_map(|&index| question.options.get(index).map(|option| option.label.clone()))
             .collect()
@@ -7484,7 +7193,16 @@ fn ask_answer_json(answers: &[(String, Vec<String>)]) -> serde_json::Value {
         .and_then(|(_, values)| values.first().cloned())
         .unwrap_or_default();
     if answers.len() <= 1 {
-        return serde_json::json!({ "answer": first_value });
+        // 多选（单问多值）必须把**全部**选中项一起交回：只留首个取值等于把用户的其余勾选
+        // 静默丢掉，模型只能看到半个答案。单值维持既有 `{"answer": …}` 形状不变。
+        let selected = answers
+            .first()
+            .map(|(_, values)| values.clone())
+            .unwrap_or_default();
+        if selected.len() <= 1 {
+            return serde_json::json!({ "answer": first_value });
+        }
+        return serde_json::json!({ "answer": first_value, "values": selected });
     }
     serde_json::json!({
         "answer": first_value,

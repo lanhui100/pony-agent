@@ -1074,6 +1074,7 @@ impl GovernedDispatcher {
             state,
             prompt: Some(record.prompt.clone()),
             options: Some(json!(record.options)),
+            multi_select: record.multi_select.then_some(true),
         };
         self.inner
             .pending_requests
@@ -1711,6 +1712,10 @@ impl Inner {
                 ),
                 _ => ask_options_from_arguments(&ready.final_arguments),
             },
+            // Ask 的多选意图随请求一起持久化（宿主面板据此决定勾选语义）；审批恒为单选。
+            multi_select: matches!(ready.decision.verdict, PermissionVerdict::WaitingHost)
+                .then(|| ask_multi_select_from_arguments(&ready.final_arguments))
+                .flatten(),
         };
         // ADR 0074: an Ask is persisted state, not process memory. Persist the full CAS facts
         // (`version`, `nonce`) so `list_pending` works after a restart and a second instance can
@@ -2136,6 +2141,12 @@ fn ask_options_from_arguments(arguments: &Value) -> Option<Value> {
         Some(Value::Array(items)) if !items.is_empty() => Some(Value::Array(items.clone())),
         _ => None,
     }
+}
+
+/// 模型在 Ask 实参里声明的**多选**意图（`multiSelect`）：只认结构化布尔 `true`；
+/// 缺失 / `false` / 字符串 `"true"` ⇒ 单选（猜宽松会让单选问题变成可勾多项，用户能提交模型没预期的组合）。
+fn ask_multi_select_from_arguments(arguments: &Value) -> Option<bool> {
+    matches!(arguments.get("multiSelect"), Some(Value::Bool(true))).then_some(true)
 }
 
 /// wave-65 C2：审批请求的**原始**目标路径（模型给的 `path` / `filePath` / `file_path`）。
@@ -4060,6 +4071,7 @@ fn persisted_ask_from_pending(
         kind: pending.request_kind.clone(),
         prompt: pending.prompt.clone().unwrap_or_default(),
         options: persisted_ask_options(pending.options.as_ref()),
+        multi_select: pending.multi_select.unwrap_or(false),
         state: crate::agent::ask_persistence::AskLifecycleState::Pending,
         created_at_ms,
         answered_at_ms: None,

@@ -199,6 +199,13 @@ pub struct PendingControlRequest {
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Value>,
+    /// 该 Ask 是否允许**多选**（模型在 `ask_user` 实参里声明的 `multiSelect`）。
+    ///
+    /// 只有 Ask（`Interaction`）用得到：审批恒为单选，恒为 `None`。缺省（含历史持久化记录、
+    /// 旧客户端解析）按**单选**处理，因此这是一个 additive 线缆键：不读它的消费方行为不变。
+    /// 宿主面板据此切换勾选语义（TUI 的 ▢/▣ 勾选框；自由输入仍可提交单条文本）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_select: Option<bool>,
 }
 
 impl PendingControlRequest {
@@ -690,6 +697,7 @@ mod tests {
             state: PendingControlRequestState::Pending,
             prompt: Some("continue?".to_string()),
             options: Some(json!(["yes", "no"])),
+            multi_select: None,
         };
 
         assert!(request.can_consume(Some("session-1"), 3, "nonce", 100));

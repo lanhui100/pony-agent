@@ -98,6 +98,10 @@ pub struct PersistedAsk {
     /// empty when the Ask carries no options.
     #[serde(default)]
     pub options: Vec<String>,
+    /// Ask 是否允许多选（模型 `ask_user` 的 `multiSelect`）。旧记录 / 旧库缺该列 ⇒ `false`（单选），
+    /// 迁移只加列不改语义，因此这是一个向后兼容的持久化事实。
+    #[serde(default)]
+    pub multi_select: bool,
     /// Current lifecycle disposition.
     pub state: AskLifecycleState,
     /// Creation wall-clock timestamp (Unix epoch ms); display/ordering only, never an expiry.
@@ -328,6 +332,7 @@ CREATE TABLE IF NOT EXISTS pending_asks (
     kind TEXT NOT NULL,
     prompt TEXT NOT NULL DEFAULT '',
     options_json TEXT NOT NULL DEFAULT '[]',
+    multi_select INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
     answered_at_ms INTEGER,
@@ -349,7 +354,16 @@ CREATE INDEX IF NOT EXISTS idx_pending_asks_session_created
 ";
 
 const ASK_COLUMNS: &str = "request_id, session_id, version, nonce, run_id, turn_id, call_id, \
-     kind, prompt, options_json, state, created_at_ms, answered_at_ms, landed_at_ms";
+     kind, prompt, options_json, state, created_at_ms, answered_at_ms, landed_at_ms, multi_select";
+
+/// `ASK_COLUMNS` 的列数；`ask_row_to_record` 末列索引与「追加一列」查询（`ASK_COLUMNS, answer_json`）
+/// 都以它为基准 —— 加列时只改这里，`debug_assert` 会抓住漏改造成的静默错位
+/// （错位会把 `answer_json` 读成 `multi_select`，sweep 直接丢答案）。
+const ASK_COLUMN_COUNT: usize = 15;
+/// `multi_select` 在 `ASK_COLUMNS` 里的位置（末列）。
+const ASK_MULTI_SELECT_INDEX: usize = ASK_COLUMN_COUNT - 1;
+/// `SELECT {ASK_COLUMNS}, answer_json` 中追加列的索引。
+const ASK_APPENDED_ANSWER_INDEX: usize = ASK_COLUMN_COUNT;
 
 /// SQLite-backed [`AskPersistenceStore`] over the session database (`sessions.db` family).
 ///
@@ -362,6 +376,11 @@ struct SqliteAskStore {
 
 impl SqliteAskStore {
     fn initialize(connection: &rusqlite::Connection) -> AskPersistenceResult<()> {
+        debug_assert_eq!(
+            ASK_COLUMNS.split(',').count(),
+            ASK_COLUMN_COUNT,
+            "ASK_COLUMNS 与 ASK_COLUMN_COUNT 漂移：列索引会静默错位"
+        );
         match pending_asks_primary_key(connection)? {
             // Fresh or already-migrated store.
             None => connection
@@ -375,7 +394,10 @@ impl SqliteAskStore {
             }
             // Legacy single-column (`request_id`) primary key: `(session_id, request_id)` is the
             // frozen isolation key (contract §2), so rebuild the table and copy surviving rows.
-            Some(_) => migrate_legacy_pending_asks(connection),
+            Some(_) => {
+                migrate_legacy_pending_asks(connection)?;
+                ensure_ask_columns(connection)
+            }
         }
     }
 
@@ -497,6 +519,7 @@ fn ask_row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedAsk> 
         state: ask_enum_from_text(10, &state_text)?,
         created_at_ms: row.get(11)?,
         answered_at_ms: row.get(12)?,
+        multi_select: row.get(ASK_MULTI_SELECT_INDEX)?,
     })
 }
 
@@ -545,6 +568,12 @@ fn ensure_ask_columns(connection: &rusqlite::Connection) -> AskPersistenceResult
     if !columns.iter().any(|column| column == "answer_json") {
         connection
             .execute_batch("ALTER TABLE pending_asks ADD COLUMN answer_json TEXT;")
+            .map_err(|error| format!("ask_store_migration_failed: {error}"))?;
+    }
+    // 多选声明（ask_user 的 `multiSelect`）：旧库补列时一律落 `0`（单选），与旧行为逐字一致。
+    if !columns.iter().any(|column| column == "multi_select") {
+        connection
+            .execute_batch("ALTER TABLE pending_asks ADD COLUMN multi_select INTEGER NOT NULL DEFAULT 0;")
             .map_err(|error| format!("ask_store_migration_failed: {error}"))?;
     }
     Ok(())
@@ -680,8 +709,8 @@ impl AskPersistenceStore for SqliteAskStore {
             .execute(
                 "INSERT INTO pending_asks (
                      session_id, request_id, version, nonce, run_id, turn_id, call_id, kind,
-                     prompt, options_json, state, created_at_ms, answered_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     prompt, options_json, state, created_at_ms, answered_at_ms, multi_select
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(session_id, request_id) DO UPDATE SET
                      version = excluded.version,
                      nonce = excluded.nonce,
@@ -693,7 +722,8 @@ impl AskPersistenceStore for SqliteAskStore {
                      options_json = excluded.options_json,
                      state = excluded.state,
                      created_at_ms = excluded.created_at_ms,
-                     answered_at_ms = excluded.answered_at_ms",
+                     answered_at_ms = excluded.answered_at_ms,
+                     multi_select = excluded.multi_select",
                 rusqlite::params![
                     ask.session_id,
                     ask.request_id,
@@ -709,6 +739,7 @@ impl AskPersistenceStore for SqliteAskStore {
                     ask_enum_to_text(&ask.state)?,
                     ask.created_at_ms,
                     ask.answered_at_ms,
+                    ask.multi_select,
                 ],
             )
             .map_err(|error| format!("ask_store_write_failed: {error}"))?;
@@ -805,7 +836,7 @@ impl AskPersistenceStore for SqliteAskStore {
         let rows = statement
             .query_map(rusqlite::params![session_id], |row| {
                 let record = ask_row_to_record(row)?;
-                let payload: Option<String> = row.get(14)?;
+                let payload: Option<String> = row.get(ASK_APPENDED_ANSWER_INDEX)?;
                 let answer = payload
                     .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
                     .unwrap_or(Value::Null);

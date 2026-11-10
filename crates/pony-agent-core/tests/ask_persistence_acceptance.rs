@@ -160,6 +160,7 @@ fn pending_ask(request_id: &str, session_id: &str, created_at_ms: u64) -> Persis
         kind: PendingControlRequestKind::Interaction,
         prompt: "继续？".to_string(),
         options: vec!["是".to_string(), "否".to_string()],
+        multi_select: false,
         state: AskLifecycleState::Pending,
         created_at_ms,
         answered_at_ms: None,
@@ -1572,6 +1573,7 @@ fn persisted_from_pending(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default(),
+        multi_select: pending.multi_select.unwrap_or(false),
         state: AskLifecycleState::Pending,
         created_at_ms: 1_000,
         answered_at_ms: None,

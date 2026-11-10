@@ -22,6 +22,8 @@ export type PendingAsk = {
   state: PendingAskState;
   prompt?: string | null;
   options?: unknown[] | null;
+  /** ADR 0117：模型在 `ask_user` 里声明的多选意图（缺失 / `false` ⇒ 单选）。 */
+  multiSelect?: boolean | null;
 };
 
 /**

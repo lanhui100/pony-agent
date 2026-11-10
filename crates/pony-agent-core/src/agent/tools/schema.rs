@@ -82,7 +82,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: TOOL_ASK_USER,
             description:
-                "向用户提问并等待其回答，适合需要用户确认、选择或补充信息后才能继续的场景；返回用户的回答（options 提供可选快捷回答）。",
+                "向用户提问并等待其回答，适合需要用户确认、选择或补充信息后才能继续的场景；返回用户的回答（options 提供可选快捷回答；multiSelect=true 时用户可以勾选多项，回答里会一并给出全部选中项）。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
@@ -96,6 +96,10 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                             "type": "string"
                         },
                         "description": "可选的预设回答选项，用户可直接点选"
+                    },
+                    "multiSelect": {
+                        "type": "boolean",
+                        "description": "仅当问题需要用户同时选择多个选项时置 true；默认 false（单选，选一项即提交）"
                     }
                 },
                 "required": ["question"],

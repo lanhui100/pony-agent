@@ -259,19 +259,26 @@ fn o2_toggling_ask_keeps_message_geometry_and_uncovered_rows_stable() {
         );
     }
 
-    // Assert 3：面板下缘贴 Composer 上缘
+    // Assert 3：面板矩形下缘仍贴 Composer 上缘，但**末行是下内边距**（1 行空白）——
+    // 版式要求「面板有上下内边距」，最后一个内容行（键位提示）因此落在 `composer_top - 2`。
     let panel_bottom = (0..composer_top(34))
         .rev()
         .find(|&y| {
             let text = row_text(&buf_opened, y);
             text.contains(QUESTION_SENTINEL) || text.contains("esc")
         })
-        .expect("O2：必须能在 Composer 之上找到 Ask 面板末行");
+        .expect("O2：必须能在 Composer 之上找到 Ask 面板最后一条内容行");
     assert_eq!(
         panel_bottom,
-        composer_top(34) - 1,
-        "O2：Ask 面板下缘必须贴 Composer 上缘（期望 row{}，实际 row{panel_bottom}）",
-        composer_top(34) - 1
+        composer_top(34) - 2,
+        "O2：Ask 面板最后一条内容行必须在 Composer 之上第 2 行（下内边距占 1 行；\
+         期望 row{}，实际 row{panel_bottom}）",
+        composer_top(34) - 2
+    );
+    let padding_row = row_text(&buf_opened, composer_top(34) - 1);
+    assert!(
+        padding_row.trim().is_empty(),
+        "O2：面板下内边距必须是整行空白（不得贴字），实际 = {padding_row:?}"
     );
 }
 

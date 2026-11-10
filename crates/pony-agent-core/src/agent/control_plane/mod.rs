@@ -10628,6 +10628,7 @@ mod wave65_r2_approval_tests {
                 "path": "/tmp/outside/probe.txt",
                 "scope": "read",
             })),
+            multi_select: None,
         }
     }
 
@@ -10751,6 +10752,7 @@ mod wave65_r2_approval_tests {
             kind: PendingControlRequestKind::Interaction,
             prompt: "继续吗？".to_string(),
             options: Vec::new(),
+            multi_select: false,
             state: AskLifecycleState::Pending,
             created_at_ms: now_ms,
             answered_at_ms: None,

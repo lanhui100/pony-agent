@@ -1012,6 +1012,7 @@ mod w1_pending_control_match_tests {
             state,
             prompt: Some("需要确认".to_string()),
             options: None,
+            multi_select: None,
         }
     }
 

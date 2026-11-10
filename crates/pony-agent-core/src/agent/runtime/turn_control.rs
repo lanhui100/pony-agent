@@ -601,6 +601,7 @@ mod w1_approval_unrecoverable_tests {
             state: PendingControlRequestState::Pending,
             prompt: Some("approve?".to_string()),
             options,
+            multi_select: None,
         }
     }
 
@@ -730,6 +731,7 @@ mod w1_unrecoverable_code_tests {
             state: PendingControlRequestState::Pending,
             prompt: Some("approve?".to_string()),
             options: None,
+            multi_select: None,
         }
     }
 

@@ -1113,6 +1113,30 @@ note: >-
       命令表/别名/路径形/带正文反例），且 `--test tui_batch1_regression` 的 N2 矩阵继续锁
       `parse_command_input` 口径不变。
 
+  【ADR 0117 归属登记（2026-11-10）｜TUI Ask 面板多选打通 + 版式重构（上下内边距 / 问题独占一行 / 选项折行）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次改的是**控制请求的持久化事实**（新增
+  `multiSelect` additive 线缆键与 `pending_asks.multi_select` 列）、**TUI 本地渲染版式**与**回答载荷形状**，
+  无新增对外接口、网络 IO、后台任务或 LLM 调用路径；不新增 enforcement_point，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更面是 `agent/tools/schema.rs` 的一行 schema 属性、`dispatcher.rs` 的
+      `ask_multi_select_from_arguments` 纯函数与 `PendingControlRequest` 字段赋值、`ask_persistence.rs` 的一列
+      前向迁移 + 读写、`bin/tui/projection.rs` 的 `multiSelect` 解析、`bin/tui/ask_panel.rs`（原 `bin/tui.rs` 内联实现外移）的
+      `ask_option_rows` / `ask_custom_input_label` / `ask_key_hint` 排版纯函数与 `ask_answer_json` 载荷合成。输入只有模型实参、
+      本地持久化记录与终端宽度，不产生新的遥测事实；进程仍是随用户启停的终端面，Prometheus pull 与
+      节点侧日志采集的结构前提不成立。
+  (3) 变更性质（仅登记，非遥测变更）：`pending_asks` 新增 `multi_select INTEGER NOT NULL DEFAULT 0`
+      （`ensure_ask_columns` 前向补列，旧库/旧记录落 `0` = 单选，行为与旧版逐字一致）；控制请求线缆新增
+      `multiSelect`（`optional` + `skip_serializing_if`，不读即不变）；TUI 回答载荷在**单问多值**时追加
+      `values: [...]`，单选与多问的既有形状不变；面板行口径（`inline_ask_height` 与 `render_ask_inline`
+      共用纯函数）与选项折行路径不含 IO。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——
+      `crates/pony-agent-core/tests/tui_ask_panel_layout.rs`（3 例：上下内边距/问题独占一行/问答间距、
+      长选项折行不越界且无省略号、多选勾选框 vs 单选圆点）、`crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs::o2_*`
+      （末条内容行与下内边距）、`bin/tui` 的 `tests/wave43_unit_tests.rs`（8 例折行/高度口径/多选排序/
+      载荷形状/投影解析）与 `tests/ask_persistence_acceptance.rs`（22 例，含新列迁移后读回）。
+
   【ADR 0118 归属登记（2026-11-10）｜会话库装载成本收口 + 库体回收（`ponycli sessions vacuum`）】
   一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次改的是**启动装载的读放大**（折叠字节预检 /
   legacy trace 兜底收窄 / 维护预算按阶段起算）与**库体维护入口**（`auto_vacuum=FULL` + `VACUUM` + WAL

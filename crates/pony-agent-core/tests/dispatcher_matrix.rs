@@ -128,6 +128,7 @@ fn canonical_pending_request() -> PendingControlRequest {
         state: PendingControlRequestState::Pending,
         prompt: Some("approve write?".to_string()),
         options: Some(json!(["yes", "no"])),
+        multi_select: None,
     }
 }
 
