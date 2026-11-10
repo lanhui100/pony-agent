@@ -1069,6 +1069,11 @@ fn print_usage(format: OutputFormat) {
     human!(format, "  ponycli sessions migrate-logs [--dry-run] [--db <path>] [--force]");
     human!(format, "                             Grandfather→log backfill (synthesized streams are");
     human!(format, "                             tagged source.kind=migrated-from-blob; blob kept for rollback)");
+    human!(format, "  ponycli sessions vacuum [--dry-run] [--db <path>]");
+    human!(format, "                             Reclaim freelist holes (auto_vacuum=FULL +");
+    human!(format, "                             VACUUM) and truncate WAL. Disk footprint only —");
+    human!(format, "                             holes do NOT slow startup (A/B: identical read bytes).");
+    human!(format, "                             Takes `<db>.lock`; exit 3 when held elsewhere");
     human!(format, "  ponycli sessions import <path> [--db <path>] [--dry-run] [--force]");
     human!(format, "                             Import writes ONLY the session log + attachments:");
     human!(format, "                             SQLite index is rebuilt by `sessions rebuild-index`.");
@@ -1077,7 +1082,7 @@ fn print_usage(format: OutputFormat) {
     human!(format, "  ponycli config effective   One-line JSON: disk_policy vs effective_policy");
     human!(format, "                             (+ clamped_fields, aggregate_budget_ms,");
     human!(format, "                             per_attempt_effective_timeout_ms); no secrets");
-    human!(format, "Sessions subcommand exit codes: 0 ok / 2 invalid bundle / 3 target exists / 4 degraded");
+    human!(format, "Sessions subcommand exit codes: 0 ok / 2 invalid bundle / 3 target exists or maintenance lock busy / 4 degraded");
     human!(format, "");
     human!(format, "Exit codes: 0 success / 1 internal / 2 usage / 3 config / 4 provider-network");
     human!(format, "            5 tool-failure / 6 permission-denied (incl. suspended) / 7 timeout");
@@ -1351,12 +1356,37 @@ fn run_sessions_rebuild_index_if_requested() -> Option<i32> {
 /// 顺序即优先级，互斥（命令行只能命中其中一个），返回值 = 进程退出码：
 /// `backfill`（阶段 0）、`rebuild-index`（阶段 2-A）、`export` / `import`（阶段 3-A）、
 /// `migrate-logs`（阶段 3-B）、`config effective`（PA-174 F3 生效策略观测）。
+/// 参数里出现 `--help` / `-h` ⇒ 维护子命令必须让路（零写入、零副作用）。
+///
+/// 事故现场（2026-11-10）：维护子命令在常规参数解析之前拦截，因此 `ponycli sessions vacuum --help`
+/// 曾**真的执行**了破坏性维护——实测把真实库 `~/.local/share/PonyAgent/sessions.db` 从 1144MB
+/// VACUUM 到 743MB（`integrity_check=ok`、行数不变，但不是用户意图）。
+fn is_help_request(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--help" || arg == "-h")
+}
+
+/// 维护子命令的统一入口。
+///
+/// **安全护栏（2026-11-10 事故现场）**：维护子命令在常规参数解析之前拦截，因此
+/// `ponycli sessions vacuum --help` 曾经**真的执行**了破坏性维护（实测把真实库
+/// `~/.local/share/PonyAgent/sessions.db` 从 1144MB VACUUM 到 743MB——数据完好，但不是用户意图）。
+/// 现在任何 `--help` / `-h` 一律不进维护分支：交回常规解析器打印用法，零写入、零副作用。
 fn run_maintenance_subcommand_if_requested() -> Option<i32> {
+    let argv: Vec<String> = std::env::args().collect();
+    if is_help_request(&argv) {
+        // 维护命名空间下的 `--help` 明确打印用法（而不是把 `--db` 当成未知参数报错）。
+        if matches!(argv.get(1).map(String::as_str), Some("sessions") | Some("config")) {
+            print_usage(OutputFormat::Text);
+            return Some(0);
+        }
+        return None;
+    }
     run_sessions_backfill_if_requested()
         .or_else(run_sessions_rebuild_index_if_requested)
         .or_else(run_sessions_export_if_requested)
         .or_else(run_sessions_import_if_requested)
         .or_else(run_sessions_migrate_logs_if_requested)
+        .or_else(run_sessions_vacuum_if_requested)
         .or_else(run_config_effective_if_requested)
 }
 
@@ -1463,6 +1493,109 @@ fn run_sessions_migrate_logs_if_requested() -> Option<i32> {
         }
         Err(error) => {
             eprintln!("[ponycli] sessions migrate-logs 失败：{error}");
+            Some(1)
+        }
+    }
+}
+
+/// `ponycli sessions vacuum [--dry-run] [--db <path>]`
+///
+/// B046：会话库的**磁盘占用**回收（与启动性能无关，别拿「提速」当理由改它）：
+/// `DELETE` 一行大 trace 会一次性释放整块页（实测 +1066 页 / 4.2MB），而库是
+/// `auto_vacuum=OFF` ⇒ 这些页**永不复用**、文件只增不减（真实库 1.2GB 里 455MB 是空洞）。
+/// 同一份快照 A/B 已证伪「空洞拖慢启动」：首帧前读盘字节完全一致（SQLite 扫表不碰 freelist）。
+///
+/// 本命令做两件事，**必须一起做**：
+/// 1. `PRAGMA auto_vacuum=FULL` + `VACUUM`（只 VACUUM 不改模式 ⇒ 空洞会再涨回来；
+///    INCREMENTAL 实测收不动，见 `reclaim_session_store_space` 的对照表）；
+/// 2. `wal_checkpoint(TRUNCATE)` 把 `-wal` 归零（真实库曾积 431MB）。
+///
+/// `--dry-run`：只读探针，打印 `page_size / page_count / freelist / auto_vacuum / -wal`，
+/// 对库文件零写入。非 dry-run 是**破坏性维护**：必须拿到 `<db>.lock`，抢不到即拒绝。
+///
+/// 退出码：`0` 成功 / `2` 参数或库非法 / `3` 维护锁被其他进程持有 / `1` 执行失败。
+fn run_sessions_vacuum_if_requested() -> Option<i32> {
+    use pony_agent_core::agent::sqlite_session::{
+        inspect_session_store, reclaim_session_store_space,
+    };
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("sessions")
+        || args.get(2).map(String::as_str) != Some("vacuum")
+    {
+        return None;
+    }
+    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    let db_path = flag_value(&args, "--db")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(pony_agent_core::agent::sqlite_session::default_sqlite_path);
+    if let Err(error) = validate_backfill_db(&db_path) {
+        eprintln!("[ponycli] sessions vacuum 参数错误：{error}");
+        return Some(2);
+    }
+    println!("db: {}", db_path.display());
+    if dry_run {
+        return match inspect_session_store(&db_path) {
+            Ok(footprint) => {
+                println!("mode: dry-run（只读探针，零写入）");
+                println!("footprint: {}", footprint.summary_line());
+                println!(
+                    "reclaimable: {}MB（freelist {} 页）",
+                    footprint.freelist_bytes() / (1024 * 1024),
+                    footprint.freelist_pages
+                );
+                println!(
+                    "note: auto_vacuum={} —— {}",
+                    footprint.auto_vacuum,
+                    if footprint.auto_vacuum == 1 {
+                        "已是 FULL（删除即回收），apply 只做一次 VACUUM 收掉既有空洞"
+                    } else {
+                        "apply 会切到 `auto_vacuum=FULL` 并整库 VACUUM（约 2 倍临时空间）"
+                    }
+                );
+                Some(0)
+            }
+            Err(error) => {
+                eprintln!("[ponycli] sessions vacuum --dry-run 失败：{error}");
+                Some(1)
+            }
+        };
+    }
+    match reclaim_session_store_space(&db_path) {
+        Ok(report) => {
+            println!(
+                "mode: apply（{}）",
+                if report.switched_to_full {
+                    "auto_vacuum=FULL + VACUUM（**模式已切换：此后删除自己回收空间，不再留洞**）"
+                } else {
+                    "已是 FULL，只做一次 VACUUM 收掉既有空洞"
+                }
+            );
+            println!(
+                "before: {}MB freelist={} 页",
+                report.db_bytes_before / (1024 * 1024),
+                report.freelist_pages_before
+            );
+            println!(
+                "after:  {}MB freelist={} 页",
+                report.db_bytes_after / (1024 * 1024),
+                report.freelist_pages_after
+            );
+            println!(
+                "auto_vacuum: {} → {}（page_size={}KB elapsed={}ms）",
+                report.auto_vacuum_before,
+                report.auto_vacuum_after,
+                report.page_size_bytes / 1024,
+                report.elapsed_ms
+            );
+            println!("summary: {}", report.summary_line());
+            Some(0)
+        }
+        Err(error) => {
+            if error.starts_with("maintenance_lock_busy") {
+                eprintln!("[ponycli] sessions vacuum 拒绝执行：{error}");
+                return Some(3);
+            }
+            eprintln!("[ponycli] sessions vacuum 失败：{error}");
             Some(1)
         }
     }
@@ -1903,5 +2036,45 @@ mod workspace_binding_tests {
         assert_eq!(again, bound, "同一 root 的绑定必须幂等");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// 维护子命令的 `--help` 护栏（B046 事故现场回归）。
+#[cfg(test)]
+mod maintenance_help_guard_tests {
+    use super::*;
+
+    fn argv(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn help_flags_never_enter_maintenance_subcommands() {
+        // 任一形态的 `--help` / `-h` 都必须让维护分支让路（否则会真的执行 VACUUM / rebuild）。
+        for raw in [
+            vec!["ponycli", "sessions", "vacuum", "--help"],
+            vec!["ponycli", "sessions", "vacuum", "-h"],
+            vec!["ponycli", "--help", "sessions", "vacuum"],
+            vec!["ponycli", "sessions", "rebuild-index", "--db", "x.db", "-h"],
+        ] {
+            assert!(
+                is_help_request(&argv(&raw)),
+                "{raw:?} 必须被判定为 help 请求（不得进入维护分支）"
+            );
+        }
+    }
+
+    #[test]
+    fn normal_invocations_are_not_treated_as_help() {
+        for raw in [
+            vec!["ponycli", "sessions", "vacuum", "--dry-run"],
+            vec!["ponycli", "sessions", "vacuum", "--db", "x.db"],
+            vec!["ponycli", "sessions", "rebuild-index"],
+        ] {
+            assert!(
+                !is_help_request(&argv(&raw)),
+                "{raw:?} 不是 help 请求，必须正常进入维护分支"
+            );
+        }
     }
 }

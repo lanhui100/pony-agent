@@ -22,6 +22,11 @@ pub(crate) mod commit;
 mod p1;
 
 pub use commit::is_busy_error;
+// B046：库体回收（freelist 空洞）与只读占用探针 —— 供 `ponycli sessions vacuum` 与运维使用。
+// 破坏性维护（VACUUM）**只**经这个显式入口发生，正常启动路径不碰它。
+pub use commit::{
+    inspect_session_store, reclaim_session_store_space, StoreFootprint, VacuumReport,
+};
 
 const SQLITE_TRACE_HISTORY_LIMIT: usize = 24;
 
@@ -992,41 +997,6 @@ impl SqliteSessionBackend {
             }
         }
         Ok(traces)
-    }
-
-    /// PA-089 优化：批量读取全部会话的 trace（一次查询替代每会话一次 = N+1）。
-    fn read_all_session_traces(
-        &self,
-        conn: &Connection,
-    ) -> Result<HashMap<String, Vec<TurnTraceRecord>>, String> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT session_id, trace_data FROM session_turn_traces
-                 ORDER BY session_id, trace_order ASC, updated_at_ms ASC, turn_id ASC",
-            )
-            .map_err(|e| format!("prepare all traces load: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| format!("query all traces load: {e}"))?;
-        let mut by_session: HashMap<String, Vec<TurnTraceRecord>> = HashMap::new();
-        for row in rows {
-            let (session_id, raw) = row.map_err(|e| format!("read all trace row: {e}"))?;
-            match serde_json::from_str::<TurnTraceRecord>(&raw) {
-                Ok(trace) => {
-                    let hydrated = self.hydrate_trace_observation(conn, &session_id, trace);
-                    by_session.entry(session_id).or_default().push(hydrated);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "[pony-agent][session] malformed trace row for session {}: {}",
-                        session_id, error
-                    );
-                }
-            }
-        }
-        Ok(by_session)
     }
 
     fn merge_trace_history(
@@ -2801,7 +2771,18 @@ impl SessionBackend for SqliteSessionBackend {
         );
         // 日志没给出的轻量行 + observation 投影都从索引补回（补全不读日志）。
         let covered: std::collections::HashSet<String> = outcome.folded.iter().cloned().collect();
-        self.run_startup_self_heal(&mut store.sessions, &covered, Self::startup_self_heal_deadline());
+        // 索引回填**不受预算约束**（它是「fold 降级仍给出完整索引视图」这条契约的落点），
+        // 但它在真实库上就是 1.5s 级的一次整库投影读 —— 旧实现把预算入口放在它之前，
+        // 于是维护项（trace 投影 / 事件重建）**在入口就过期**，每轮启动都落
+        // `history_rebuild reason=budget_exhausted sessions=28` 且永远补不上（B047）。
+        // 预算按**阶段**起算：回填跑完再重置时钟，维护项才在自己的预算里运行。
+        self.fill_index_only_rows_from_index_projection(&mut store.sessions, &covered);
+        super::session::startup_repair::reset_startup_budget();
+        self.run_budgeted_startup_self_heal(
+            &mut store.sessions,
+            &covered,
+            Self::startup_self_heal_deadline(),
+        );
         Some(store)
     }
 
@@ -2823,10 +2804,8 @@ impl SessionBackend for SqliteSessionBackend {
             eprintln!("[pony-agent][session] SQLite save error: {e}");
         }
 
-        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
-            // checkpoint 失败不影响数据正确性（只是 WAL 回收），保持既有"仅记录"语义。
-            eprintln!("[pony-agent][session] SQLite checkpoint error: {e}");
-        }
+        // B046：小 WAL 走 PASSIVE；涨过阈值才尝试 TRUNCATE（抢不到锁立即退回，不阻塞写路径）。
+        commit::checkpoint_after_write(conn, &self.db_path);
 
         outcome
     }

@@ -974,6 +974,23 @@ pub fn read_session_state(
 /// `session_fold_slow` 日志，下轮再补。绝不因为「快了才可信」而在读路径上阻塞启动。
 pub const DEFAULT_READ_FOLD_BUDGET: std::time::Duration = std::time::Duration::from_millis(800);
 
+/// 读路径折叠的**日志字节预算**：折叠开始前先按日志总字节做一次预检，超出即整轮降级。
+///
+/// 为什么需要它（B047 实测）：`DEFAULT_READ_FOLD_BUDGET` 是**时**预算，超时后的语义是
+/// 「整轮丢弃已折叠结果、回落索引视图」（见 [`fold_read_view`] 的不变量）。真实库
+/// 682MB 日志 / 154 会话时，折叠读到 800ms 只折完 10 个会话就被丢弃——
+/// `session_fold_slow: elapsed=880ms folded=10 skipped=144`，**这 880ms 是纯损耗**：
+/// 折出来的东西一行都没用上，随后 `fill_index_only_rows_from_index_projection` 又把
+/// 153 个会话从索引投影全量读一遍。
+///
+/// 换成字节预检后，同一份库的判定是**确定性**的（同一批日志两次装载给同一结论，不会
+/// 因为机器快慢而跳变），且判定时**不花任何日志 IO**：总量超预算 ⇒ 直接按索引视图。
+/// 索引视图的完整性由 `fill_index_only_rows_from_index_projection` 保证（它不受预算约束）。
+///
+/// 取值依据：实测读路径折叠吞吐 ≈ 100MB/s（10 会话 / 88MB / 880ms）⇒ 32MiB ≈ 320ms，
+/// 既留出「小库照常走日志真源」的空间，也不让大库白付秒级代价。
+pub const DEFAULT_READ_FOLD_LOG_BYTES: u64 = 32 * 1024 * 1024;
+
 /// 读路径折叠报告（供调用方记录 `session_fold_slow` 与装载耗时）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReadFoldOutcome {
@@ -998,6 +1015,19 @@ impl ReadFoldOutcome {
     }
 }
 
+/// 日志根下各会话日志文件的字节总量（`stat` 级别，不读内容）。
+///
+/// 只服务 [`fold_read_view`] 的**字节预检**：判定「本轮折叠能否在预算内跑完」。
+/// 单条 `stat` / 路径推导失败按 0 计——该会话会在折叠阶段按 `failed` 收口，预检不重复报错。
+fn total_log_bytes(store: &SessionLogStore, metas: &[SessionLogMeta]) -> u64 {
+    metas
+        .iter()
+        .filter_map(|meta| store.log_path(&meta.session_id, &meta.cwd).ok())
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|meta| meta.len())
+        .sum()
+}
+
 /// 读路径的**日志侧视图**：扫日志根，逐会话 fold 出 `SessionState`。
 ///
 /// 与 [`rebuild_index`] 的区别：这里**只读**、不写索引、单会话失败不中断整轮
@@ -1006,9 +1036,22 @@ impl ReadFoldOutcome {
 /// 超预算时返回**空视图**并把名单记进 `skipped_due_to_budget`——降级语义是「本轮按索引
 /// 读」，不是「读一半日志 + 一半索引」：半态会让 `load_store` 的同一份结果在两次调用
 /// 之间跳变，而启动路径只需要「可读且完整」。
+///
+/// 为避免「读满 800ms 又被整轮丢弃」的纯损耗，进入循环前先做**字节预检**
+/// （[`DEFAULT_READ_FOLD_LOG_BYTES`]）：日志总量超预算 ⇒ 一次日志 IO 都不做，直接降级。
 pub fn fold_read_view(
     log_root: &Path,
     budget: std::time::Duration,
+) -> (HashMap<String, SessionState>, ReadFoldOutcome) {
+    fold_read_view_with_byte_budget(log_root, budget, DEFAULT_READ_FOLD_LOG_BYTES)
+}
+
+/// 与 [`fold_read_view`] 同义，字节预算由调用方给出（测试用：单测要能在不造 32MiB 夹具的
+/// 前提下驱动预检分支）。
+fn fold_read_view_with_byte_budget(
+    log_root: &Path,
+    budget: std::time::Duration,
+    byte_budget: u64,
 ) -> (HashMap<String, SessionState>, ReadFoldOutcome) {
     let started = std::time::Instant::now();
     let store = SessionLogStore::new(log_root.to_path_buf());
@@ -1023,6 +1066,23 @@ pub fn fold_read_view(
     };
     // 预算为 0 ⇒ 立即降级（测试与「极端保护」入口用同一条判定，不做特殊分支）。
     let mut over_budget = budget.is_zero();
+    // B047 预检：日志总量超出字节预算 ⇒ 折叠注定无法在时预算内完成，而超时的语义是
+    // **整轮丢弃**。此时连一次日志读都不做，直接整轮降级为读索引（确定性、零损耗）。
+    let log_bytes_total = total_log_bytes(&store, &metas);
+    if log_bytes_total > byte_budget {
+        outcome.skipped_due_to_budget = metas
+            .iter()
+            .map(|meta| meta.session_id.clone())
+            .collect();
+        outcome.elapsed_ms = started.elapsed().as_millis();
+        eprintln!(
+            "[pony-agent][session] session_fold_precheck: log_bytes={}MB byte_budget={}MB sessions={} — 日志总量超出读路径折叠字节预算，本轮整轮按索引视图（不读日志）",
+            log_bytes_total / (1024 * 1024),
+            byte_budget / (1024 * 1024),
+            metas.len()
+        );
+        return (HashMap::new(), outcome);
+    }
     let mut folded: HashMap<String, SessionState> = HashMap::new();
     for meta in metas {
         if over_budget || started.elapsed() > budget {
@@ -2645,6 +2705,44 @@ mod tests {
             "降级后必须保持索引视图（不得被半折叠结果污染）"
         );
         assert_eq!(sessions.len(), 1, "降级不得丢会话");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fold_precheck_degrades_without_reading_when_log_bytes_exceed_budget() {
+        let root = temp_log_root("byte-budget");
+        let session_id = "pa_2b_fold_byte_budget";
+        write_log(
+            &root,
+            session_id,
+            &[append_text_command(session_id, "user", "日志内容", 0)],
+        );
+        // 前置：日志确实有字节（否则「超预算」是空判）。
+        let store = SessionLogStore::new(root.clone());
+        let metas = store.list_sessions().expect("list sessions");
+        assert!(
+            total_log_bytes(&store, &metas) > 0,
+            "前置：日志文件必须有字节"
+        );
+
+        // 字节预算 0 ⇒ 预检即判定「折叠不可能在预算内完成」：一次日志读都不做（B047）。
+        let (view, outcome) = fold_read_view_with_byte_budget(&root, Duration::from_secs(60), 0);
+
+        assert!(outcome.degraded(), "超字节预算必须标记为降级");
+        assert_eq!(
+            outcome.skipped_due_to_budget,
+            vec![session_id.to_string()],
+            "降级名单必须覆盖全部待折叠会话"
+        );
+        assert!(
+            view.is_empty() && outcome.folded.is_empty(),
+            "预检降级不得返回半折叠结果（语义仍是「整轮按索引视图」）"
+        );
+        assert!(
+            outcome.elapsed_ms < 50,
+            "预检不读日志，耗时应接近 0ms（实际 {}ms）",
+            outcome.elapsed_ms
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

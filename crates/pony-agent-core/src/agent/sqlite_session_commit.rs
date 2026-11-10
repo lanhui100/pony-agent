@@ -337,7 +337,8 @@ impl SqliteSessionBackend {
     /// `buildContextObservation`），内容字段一个都不覆盖（trace 内容仍以日志为准）。
     /// 预算版（返回值 = 因预算耗尽而**未补投影**的会话数）。
     ///
-    /// 启动期路径走 [`Self::run_startup_self_heal`]；维护/诊断路径直接传 `None`（不设上限）。
+    /// 启动期路径走 [`Self::run_budgeted_startup_self_heal`]（预算按阶段起算）；
+    /// 维护/诊断路径直接传 `None`（不设上限）。
     pub(crate) fn attach_index_trace_projections_with_deadline(
         &self,
         sessions: &mut HashMap<String, SessionState>,
@@ -418,24 +419,31 @@ impl SqliteSessionBackend {
         skipped
     }
 
-    /// 启动期自愈**编排**：先做**必然执行**的索引回填，再按预算做可跳过的维护项。
+    /// 启动期**预算内**的维护项：索引独有 trace 投影补全 + 空壳会话的事件重建。
     ///
-    /// - 索引投影回填（`fill_index_only_rows_from_index_projection`）**不受预算约束**：
-    ///   它是「日志 fold 降级 ⇒ 仍给出完整索引视图」这条既有契约的落点
-    ///   （`session_read_from_log::fifty_logged_sessions_load_within_budget_and_degrade_keeps_the_index_complete`
-    ///   守着它）。跳过它会把 50+ 会话读成空壳——那不是提速，是读错。
-    /// - 索引独有 trace 投影与事件流重建是**维护动作**：超预算跳过，本轮按索引视图，
-    ///   下轮启动再补。
+    /// ## 为什么不含索引回填（B047，改这里之前先读）
     ///
-    /// 维护/诊断路径（`new_read_only`、`rebuild_index` 双读比对）**不得**走这里：它们要的是
-    /// 完整视图，用各自的单步入口并显式传 `None`（不设上限）。
-    pub(crate) fn run_startup_self_heal(
+    /// 索引投影回填（`fill_index_only_rows_from_index_projection`）**不受预算约束**：它是
+    /// 「日志 fold 降级 ⇒ 仍给出完整索引视图」这条既有契约的落点
+    /// （`session_read_from_log::fifty_logged_sessions_load_within_budget_and_degrade_keeps_the_index_complete`
+    /// 守着它），跳过它会把 50+ 会话读成空壳——那不是提速，是读错。
+    ///
+    /// 但它同时是真实库上 1.5s 级的一次整库投影读。旧实现把预算 deadline 取在回填**之前**，
+    /// 结果维护项**在入口即判过期**（实测每轮启动都是
+    /// `history_rebuild reason=budget_exhausted sessions=28`：既没修任何会话，又白跑一遍）。
+    /// 因此预算是**按阶段起算**的：`load_store` 在回填之后调
+    /// `startup_repair::reset_startup_budget()`，再调本函数。
+    ///
+    /// ## 边界
+    ///
+    /// 维护/诊断路径（`new_read_only`、`rebuild_index` 双读比对）**不得**走这里：它们要的
+    /// 是完整视图，用各自的单步入口并显式传 `None`（不设上限）。
+    pub(crate) fn run_budgeted_startup_self_heal(
         &self,
         sessions: &mut HashMap<String, SessionState>,
         covered: &HashSet<String>,
         deadline: Option<std::time::Instant>,
     ) {
-        self.fill_index_only_rows_from_index_projection(sessions, covered);
         self.attach_index_trace_projections_with_deadline(sessions, covered, deadline);
         self.rebuild_history_from_turn_events_when_projection_empty_with_deadline(
             sessions, deadline,
@@ -831,6 +839,255 @@ fn try_lock_exclusive(file: &std::fs::File) -> bool {
 #[cfg(not(any(unix, windows)))]
 fn try_lock_exclusive(_file: &std::fs::File) -> bool {
     true
+}
+
+// ---------------------------------------------------------------------------
+// B046：库体回收（freelist 空洞）与 WAL 归零
+// ---------------------------------------------------------------------------
+//
+// 背景（2026-11-10 实测，真实库）：`DELETE` 掉一行 3.89MB 的 `session_turn_traces`
+// ⇒ `freelist_count` +1066 页（4.2MB），`page_count` 不变（**文件不缩**）；随后插入小行
+// **复用 0 页**。库是 `auto_vacuum=OFF`，于是每删一次会话就漏一个洞、永不复用：
+// 1.2GB 的库里 455MB（38%）是空洞。
+//
+// 反证先行（别拿「提速」当立项理由）：空洞**不拖慢**启动。同一份快照 A/B（1.2GB 原样
+// vs `VACUUM INTO` 后 730MB），pty 内各 3 轮，首帧前累计读盘字节**完全一致**（3083MB），
+// 耗时差落在噪声内——SQLite 全表扫描只走 B-tree 页、从不访问 freelist。本条目是**磁盘
+// 占用**项，不是性能项。
+//
+// 因此这里只提供**显式**运维入口（`ponycli sessions vacuum`）：VACUUM 要独占 + 约 2 倍
+// 临时空间，绝不挂在正常启动路径上（那等于把「打开应用」变成「可能失败的破坏性维护」）。
+//
+// 目标模式是 **`FULL`**，不是 `INCREMENTAL`：后者在真实形态下**收不动**（整表 DELETE 后
+// 1956 页空闲，一次 `PRAGMA incremental_vacuum` 只减 1 页），而 FULL 在提交时自己截断文件、
+// 200MB 库上只多 4ms。对照表见 [`reclaim_session_store_space`] 的文档。
+
+/// WAL 超过这个体量才尝试 `TRUNCATE`（真实库曾积到 431MB 未回收）。
+pub(crate) const WAL_TRUNCATE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `-wal` 文件字节数（不存在按 0）。
+pub(crate) fn wal_file_bytes(db_path: &Path) -> u64 {
+    std::fs::metadata(PathBuf::from(format!("{}-wal", db_path.display())))
+        .map(|meta| meta.len())
+        .unwrap_or(0)
+}
+
+/// 写后 WAL 回收：小 WAL 走 `PASSIVE`，大 WAL 才尝试 `TRUNCATE`（失败**不**影响写入）。
+///
+/// `TRUNCATE` 需要「此刻没有其他读事务」，且会走 busy 处理器；写路径的 `busy_timeout` 是
+/// 5000ms，若直接让它排队就等于「为主进程的回收动作卡 5 秒」。故这里把等待压到 50ms：
+/// 抢不到立刻退回 `PASSIVE`（WAL 下轮再收），绝不把回收失败变成保存失败。
+pub(crate) fn checkpoint_after_write(conn: &Connection, db_path: &Path) {
+    checkpoint_after_write_with_threshold(conn, db_path, WAL_TRUNCATE_THRESHOLD_BYTES);
+}
+
+/// 阈值可注入的版本（测试用：不必造 64MB 的 WAL 才能驱动 TRUNCATE 分支）。
+fn checkpoint_after_write_with_threshold(conn: &Connection, db_path: &Path, threshold: u64) {
+    let wal_bytes = wal_file_bytes(db_path);
+    if wal_bytes < threshold {
+        if let Err(error) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
+            // checkpoint 失败不影响数据正确性（只是 WAL 回收），保持既有「仅记录」语义。
+            eprintln!("[pony-agent][session] SQLite checkpoint error: {error}");
+        }
+        return;
+    }
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(50));
+    let attempt: Result<(i64, i64, i64), rusqlite::Error> = conn.query_row(
+        "PRAGMA wal_checkpoint(TRUNCATE);",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    );
+    // 恢复连接初始化时钉的 5000ms（见 `SqliteSessionBackend::connection`）。
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
+    match attempt {
+        Ok((0, _log, _checkpointed)) => {
+            eprintln!(
+                "[pony-agent][session] wal_truncated: before={}MB — WAL 已归零",
+                wal_bytes / (1024 * 1024)
+            );
+        }
+        Ok((busy, log, checkpointed)) => {
+            eprintln!(
+                "[pony-agent][session] wal_truncate_busy: busy={busy} log={log} checkpointed={checkpointed} — 退回 PASSIVE（不阻塞写路径）"
+            );
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+        }
+        Err(error) => {
+            eprintln!(
+                "[pony-agent][session] wal_truncate_error: {error} — 退回 PASSIVE（不阻塞写路径）"
+            );
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+        }
+    }
+}
+
+/// 库体占用快照（`ponycli sessions vacuum --dry-run` 的只读探针）。
+///
+/// 只读连接 + `query_only`：**不建表、不迁移、不改 journal_mode**，`--dry-run` 对库文件零写入。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreFootprint {
+    pub page_size_bytes: u64,
+    pub page_count: u64,
+    pub freelist_pages: u64,
+    /// `0` = OFF / `1` = FULL / `2` = INCREMENTAL。
+    pub auto_vacuum: i64,
+    pub db_bytes: u64,
+    pub wal_bytes: u64,
+}
+
+impl StoreFootprint {
+    /// 空洞占用的字节数（`freelist_count × page_size`）。
+    pub fn freelist_bytes(&self) -> u64 {
+        self.freelist_pages * self.page_size_bytes
+    }
+
+    /// 一行摘要（dry-run 与日志共用同一份措辞）。
+    pub fn summary_line(&self) -> String {
+        format!(
+            "db={}MB page={}KB pages={} freelist={} 页({}MB) auto_vacuum={} wal={}MB",
+            self.db_bytes / (1024 * 1024),
+            self.page_size_bytes / 1024,
+            self.page_count,
+            self.freelist_pages,
+            self.freelist_bytes() / (1024 * 1024),
+            self.auto_vacuum,
+            self.wal_bytes / (1024 * 1024)
+        )
+    }
+}
+
+/// 只读读取库体占用（`--dry-run` 用）。库不存在 ⇒ `Err`（与「空库」区分开）。
+pub fn inspect_session_store(db_path: &Path) -> Result<StoreFootprint, String> {
+    if !db_path.exists() {
+        return Err(format!("库文件不存在：{}", db_path.display()));
+    }
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("open db (read-only): {error}"))?;
+    conn.execute_batch("PRAGMA query_only=ON;")
+        .map_err(|error| format!("pragma query_only: {error}"))?;
+    Ok(StoreFootprint {
+        page_size_bytes: pragma_i64(&conn, "page_size")?.max(0) as u64,
+        page_count: pragma_i64(&conn, "page_count")?.max(0) as u64,
+        freelist_pages: pragma_i64(&conn, "freelist_count")?.max(0) as u64,
+        auto_vacuum: pragma_i64(&conn, "auto_vacuum")?,
+        db_bytes: std::fs::metadata(db_path).map(|meta| meta.len()).unwrap_or(0),
+        wal_bytes: wal_file_bytes(db_path),
+    })
+}
+
+/// `ponycli sessions vacuum` 的输出真值（字段即用户看到的那几行）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VacuumReport {
+    pub db_path: PathBuf,
+    pub page_size_bytes: u64,
+    /// `0` = OFF / `1` = FULL / `2` = INCREMENTAL。
+    pub auto_vacuum_before: i64,
+    pub auto_vacuum_after: i64,
+    pub freelist_pages_before: u64,
+    pub freelist_pages_after: u64,
+    pub db_bytes_before: u64,
+    pub db_bytes_after: u64,
+    /// `true` = 本次把库从 OFF/INCREMENTAL 切到了 `FULL`（此后删除**自己**回收空间）。
+    pub switched_to_full: bool,
+    pub elapsed_ms: u128,
+}
+
+impl VacuumReport {
+    /// 一行摘要（CLI 与日志共用同一份措辞）。
+    pub fn summary_line(&self) -> String {
+        format!(
+            "db={}MB→{}MB freelist={}→{} 页 auto_vacuum={}→{} switched_to_full={} elapsed={}ms",
+            self.db_bytes_before / (1024 * 1024),
+            self.db_bytes_after / (1024 * 1024),
+            self.freelist_pages_before,
+            self.freelist_pages_after,
+            self.auto_vacuum_before,
+            self.auto_vacuum_after,
+            self.switched_to_full,
+            self.elapsed_ms
+        )
+    }
+}
+
+/// 一次性回收库体：把 `auto_vacuum` 切到 `FULL` 并回收既有空洞。
+///
+/// ## 语义
+///
+/// - **破坏性维护**：必须持有 `<db>.lock`（[`acquire_maintenance_lock`]），抢不到即拒绝；
+/// - 目标模式是 **`auto_vacuum=FULL`**（不是 INCREMENTAL，实测见下）：`PRAGMA
+///   auto_vacuum=FULL` + `VACUUM`（重写整库，需要约 2 倍临时空间）。**只 VACUUM 不改模式
+///   会再涨回来**，所以两件事必须一起做；
+/// - 收尾 `wal_checkpoint(TRUNCATE)`，把 WAL 归零（否则体积统计会被 `-wal` 掩住）。
+///
+/// ## 为什么是 FULL 而不是 INCREMENTAL（实测，别改回去）
+///
+/// 同一台机器、同一份 SQLite（3.45.1），200MB 库删一行 4MB trace：
+///
+/// | `auto_vacuum` | 删除耗时 | 删除后文件 | freelist |
+/// |---|---|---|---|
+/// | `0` OFF | 46ms | 200MB | 978 页 |
+/// | `2` INCREMENTAL | 36ms | 201MB（**没有缩**） | 978 页（`incremental_vacuum` 只收 1 页） |
+/// | `1` FULL | 50ms | **197MB** | **0** |
+///
+/// `INCREMENTAL` 需要额外手动跑 `PRAGMA incremental_vacuum`，而它在真实形态下**基本收不动**
+/// （整表 DELETE 后 1956 页空闲，一次 `incremental_vacuum` 只减 1 页）；FULL 在提交时自己
+/// 就截断了文件，代价是 200MB 库上 +4ms。所以「删会话不再留洞」这条承诺只能由 FULL 兑现，
+/// 也就不需要在 `remove_session` 里追加任何回收调用。
+///
+/// ## 失败面
+///
+/// 任何一步失败都**不改数据**（SQLite 保证 VACUUM 原子）：返回 `Err` 并由调用方给非零退出码。
+pub fn reclaim_session_store_space(db_path: &Path) -> Result<VacuumReport, String> {
+    if !db_path.exists() {
+        return Err(format!("库文件不存在：{}", db_path.display()));
+    }
+    let started = std::time::Instant::now();
+    let _guard = acquire_maintenance_lock(db_path).map_err(|busy| busy.to_string())?;
+    let conn = Connection::open(db_path).map_err(|error| format!("open db: {error}"))?;
+    conn.execute_batch("PRAGMA busy_timeout=5000;")
+        .map_err(|error| format!("pragma busy_timeout: {error}"))?;
+
+    let page_size = pragma_i64(&conn, "page_size")?.max(0) as u64;
+    let auto_vacuum_before = pragma_i64(&conn, "auto_vacuum")?;
+    let freelist_pages_before = pragma_i64(&conn, "freelist_count")?.max(0) as u64;
+    let db_bytes_before = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+
+    let switched_to_full = auto_vacuum_before != 1;
+    // 幂等：已是 FULL 也照跑 VACUUM（把既有空洞一次性收掉）。
+    conn.execute_batch("PRAGMA auto_vacuum=FULL;")
+        .map_err(|error| format!("pragma auto_vacuum: {error}"))?;
+    // 模式切换只在 VACUUM 之后落到库文件头；同时回收既有空洞。
+    conn.execute_batch("VACUUM;")
+        .map_err(|error| format!("vacuum: {error}"))?;
+    // WAL 不归零的话，体积统计会被 `-wal` 掩住（真实库曾积 431MB）。
+    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+
+    let auto_vacuum_after = pragma_i64(&conn, "auto_vacuum")?;
+    let freelist_pages_after = pragma_i64(&conn, "freelist_count")?.max(0) as u64;
+    let db_bytes_after = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+    let report = VacuumReport {
+        db_path: db_path.to_path_buf(),
+        page_size_bytes: page_size,
+        auto_vacuum_before,
+        auto_vacuum_after,
+        freelist_pages_before,
+        freelist_pages_after,
+        db_bytes_before,
+        db_bytes_after,
+        switched_to_full,
+        elapsed_ms: started.elapsed().as_millis(),
+    };
+    eprintln!(
+        "[pony-agent][session] session_store_reclaimed: {}",
+        report.summary_line()
+    );
+    Ok(report)
+}
+
+/// 读一个返回单值的整数 PRAGMA（`PRAGMA <name>` 的第二列）。
+fn pragma_i64(conn: &Connection, name: &str) -> Result<i64, String> {
+    conn.query_row(&format!("PRAGMA {name};"), [], |row| row.get::<_, i64>(0))
+        .map_err(|error| format!("read pragma {name}: {error}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1399,6 +1656,28 @@ fn elapsed_ms(started: &std::time::Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
+/// legacy trace 表里**出现过**的会话 id（只走 `session_id` 覆盖索引，不碰 `trace_data` 大字段）。
+///
+/// 供 [`SqliteSessionBackend::read_traces_normalized`] 的兜底步骤使用：**先**读规范化侧，
+/// **再**只对规范化侧给不出 trace 的会话回读 legacy 行。
+///
+/// 早先的批量版本（`read_all_session_traces`）在同一次查询里扫完整个 `session_turn_traces`
+/// （真实库 397 行 / 222MB / 645ms），调用方却按 `entry().or_insert(..)` 逐会话丢弃——
+/// 绝大多数字节读完就扔。真实库实测「有 legacy 行却无规范化 trace 的会话」= 0（B047）。
+pub(crate) fn legacy_trace_session_ids(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT session_id FROM session_turn_traces ORDER BY session_id")
+        .map_err(|e| format!("prepare legacy trace session scan: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query legacy trace sessions: {e}"))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row.map_err(|e| format!("read legacy trace session id: {e}"))?);
+    }
+    Ok(ids)
+}
+
 // ---------------------------------------------------------------------------
 // E7：resume / 规范化读路径的 trace 源 = `normalized_turn_traces`
 // ---------------------------------------------------------------------------
@@ -1412,8 +1691,25 @@ impl SqliteSessionBackend {
         conn: &Connection,
     ) -> Result<HashMap<String, Vec<TurnTraceRecord>>, String> {
         let mut traces = self.read_all_normalized_traces(conn)?;
-        for (session_id, legacy_rows) in self.read_all_session_traces(conn)? {
-            traces.entry(session_id).or_insert(legacy_rows);
+        // E7 兜底口子收窄（B047）：只在**规范化侧给不出该会话语义**时回读 legacy 行。
+        //
+        // 旧实现先把整张 `session_turn_traces` 读成 HashMap，再 `entry().or_insert(..)`
+        // 逐会话丢弃——真实库 222MB / 645ms 里绝大多数读完就扔（该库「有 legacy 行但
+        // 规范化侧无 trace」的会话数实测为 0）。语义等价：命中规范化侧的会话本来就
+        // 不会被 legacy 覆盖，未命中的才需要回读。
+        for session_id in legacy_trace_session_ids(conn)? {
+            if traces.contains_key(&session_id) {
+                continue;
+            }
+            match self.read_session_traces(conn, &session_id) {
+                Ok(rows) if !rows.is_empty() => {
+                    traces.insert(session_id, rows);
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!(
+                    "[pony-agent][session] legacy trace fallback failed for session {session_id}: {error}"
+                ),
+            }
         }
         Ok(traces)
     }
@@ -1821,7 +2117,7 @@ mod startup_self_heal_budget_tests {
         sessions.insert("s2".to_string(), empty_history_session("s2"));
         let covered = HashSet::new();
 
-        backend.run_startup_self_heal(&mut sessions, &covered, expired());
+        backend.run_budgeted_startup_self_heal(&mut sessions, &covered, expired());
 
         assert_eq!(sessions.len(), 2);
         for id in ["s1", "s2"] {
@@ -1868,5 +2164,194 @@ mod startup_self_heal_budget_tests {
             .expect("deadline");
         std::thread::sleep(std::time::Duration::from_millis(1));
         assert!(SqliteSessionBackend::self_heal_budget_exhausted(Some(deadline)));
+    }
+}
+
+#[cfg(test)]
+mod store_reclaim_tests {
+    //! B046：库体回收的**行为**断言（不是实现细节）。
+    //!
+    //! 反证也钉在这里：本条目是磁盘占用项，不是性能项（空洞不影响扫表字节数）。
+    use super::*;
+
+    fn temp_db(tag: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!(
+            "pony-vacuum-{tag}-{}-{unique}.db",
+            std::process::id()
+        ))
+    }
+
+    fn create_table(db_path: &Path) {
+        let conn = Connection::open(db_path).expect("open db");
+        conn.execute_batch("PRAGMA page_size=4096; CREATE TABLE filler (x TEXT);")
+            .expect("ddl");
+    }
+
+    /// 造洞：插入 N 行 ~4MB 文本再整表删除 ⇒ 页进 freelist、`page_count` 不变。
+    fn seed_freelist(db_path: &Path, rows: usize) {
+        let conn = Connection::open(db_path).expect("open db");
+        for _ in 0..rows {
+            conn.execute("INSERT INTO filler (x) VALUES (hex(randomblob(2000000)))", [])
+                .expect("insert filler");
+        }
+        conn.execute("DELETE FROM filler", []).expect("delete filler");
+    }
+
+    #[test]
+    fn vacuum_switches_to_full_and_reclaims_holes() {
+        let db_path = temp_db("migrate");
+        create_table(&db_path);
+        seed_freelist(&db_path, 2);
+
+        let before = inspect_session_store(&db_path).expect("inspect before");
+        assert_eq!(before.auto_vacuum, 0, "前置：新库默认 auto_vacuum=OFF");
+        assert!(
+            before.freelist_pages > 0,
+            "前置：整表 DELETE 必须留下空闲页（实际 {}）",
+            before.freelist_pages
+        );
+
+        let report = reclaim_session_store_space(&db_path).expect("reclaim");
+
+        assert_eq!(
+            report.auto_vacuum_after, 1,
+            "必须切到 auto_vacuum=FULL（INCREMENTAL 实测收不动，见函数文档的对照表）"
+        );
+        assert!(report.switched_to_full, "首次迁移必须报告模式切换");
+        assert_eq!(report.freelist_pages_after, 0, "既有空洞必须清零");
+        assert!(
+            report.db_bytes_after < report.db_bytes_before,
+            "文件必须真的变小（{} → {}）",
+            report.db_bytes_before,
+            report.db_bytes_after
+        );
+        let after = inspect_session_store(&db_path).expect("inspect after");
+        assert_eq!(after.auto_vacuum, 1, "模式切换必须落到库文件头（持久）");
+        assert_eq!(after.freelist_pages, 0);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// B046 的核心承诺：迁移之后**不再需要任何手动回收**——删除自己就把文件截回去。
+    #[test]
+    fn full_mode_makes_deletes_reclaim_space_without_manual_vacuum() {
+        let db_path = temp_db("self-reclaim");
+        create_table(&db_path);
+        reclaim_session_store_space(&db_path).expect("migrate to FULL");
+
+        // 造一块大内容再删掉：FULL 模式应在提交时自己把尾部页截掉。
+        {
+            let conn = Connection::open(&db_path).expect("open db");
+            for _ in 0..2 {
+                conn.execute("INSERT INTO filler (x) VALUES (hex(randomblob(2000000)))", [])
+                    .expect("insert filler");
+            }
+        }
+        let grown = inspect_session_store(&db_path).expect("inspect grown");
+        {
+            let conn = Connection::open(&db_path).expect("open db");
+            conn.execute("DELETE FROM filler", []).expect("delete filler");
+        }
+        let after = inspect_session_store(&db_path).expect("inspect after delete");
+
+        assert!(
+            grown.db_bytes > after.db_bytes + 4 * 1024 * 1024,
+            "FULL 模式删除必须自动缩文件（{} → {}）",
+            grown.db_bytes,
+            after.db_bytes
+        );
+        assert_eq!(after.freelist_pages, 0, "删除后不得留下空闲页（无人工回收）");
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn reclaim_is_idempotent_on_an_already_full_store() {
+        let db_path = temp_db("idempotent");
+        create_table(&db_path);
+        reclaim_session_store_space(&db_path).expect("first reclaim");
+
+        let report = reclaim_session_store_space(&db_path).expect("second reclaim");
+
+        assert!(!report.switched_to_full, "已是 FULL ⇒ 不再报告模式切换");
+        assert_eq!(report.auto_vacuum_after, 1, "模式必须仍是 FULL");
+        assert_eq!(report.freelist_pages_after, 0, "二次执行不得留下空闲页");
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn wal_is_truncated_once_it_crosses_the_threshold() {
+        let db_path = temp_db("wal");
+        create_table(&db_path);
+        let conn = Connection::open(&db_path).expect("open db");
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .expect("wal pragmas");
+        for _ in 0..2 {
+            conn.execute("INSERT INTO filler (x) VALUES (hex(randomblob(1000000)))", [])
+                .expect("insert filler");
+        }
+        let before = wal_file_bytes(&db_path);
+        assert!(before > 1024 * 1024, "前置：WAL 必须真的长大（实际 {before} 字节）");
+
+        // 阈值 0 ⇒ 一定走 TRUNCATE 分支（真实阈值是 64MB，不为测试造 64MB 的 WAL）。
+        checkpoint_after_write_with_threshold(&conn, &db_path, 0);
+
+        assert_eq!(
+            wal_file_bytes(&db_path),
+            0,
+            "过阈值的 WAL 必须被 TRUNCATE 归零（真实库曾积 431MB 未回收）"
+        );
+        drop(conn);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(PathBuf::from(format!("{}-wal", db_path.display())));
+    }
+
+    #[test]
+    fn wal_truncate_falls_back_to_passive_when_a_reader_pins_the_wal() {
+        let db_path = temp_db("wal-busy");
+        create_table(&db_path);
+        let writer = Connection::open(&db_path).expect("open writer");
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .expect("wal pragmas");
+        for _ in 0..2 {
+            writer
+                .execute("INSERT INTO filler (x) VALUES (hex(randomblob(1000000)))", [])
+                .expect("insert filler");
+        }
+        // 第二个连接开一个读事务：TRUNCATE 需要「没有其他读事务」，此刻必然 busy。
+        let reader = Connection::open(&db_path).expect("open reader");
+        reader.execute_batch("BEGIN;").expect("begin read tx");
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM filler", [], |row| row.get(0))
+            .expect("read");
+        let before = wal_file_bytes(&db_path);
+        assert!(before > 0, "前置：WAL 非空");
+
+        // 不 panic、不报错、不阻塞写路径：抢不到就退回 PASSIVE。
+        checkpoint_after_write_with_threshold(&writer, &db_path, 0);
+
+        let _ = reader.execute_batch("ROLLBACK;");
+        drop(reader);
+        drop(writer);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(PathBuf::from(format!("{}-wal", db_path.display())));
+    }
+
+    #[test]
+    fn reclaim_is_fail_closed_when_the_maintenance_lock_is_held() {
+        let db_path = temp_db("lock");
+        create_table(&db_path);
+        let _guard = acquire_maintenance_lock(&db_path).expect("取到维护锁");
+
+        let error = reclaim_session_store_space(&db_path).expect_err("抢不到锁必须拒绝");
+
+        assert!(
+            error.starts_with("maintenance_lock_busy"),
+            "必须是显式的维护锁拒绝（实际：{error}）"
+        );
+        let _ = std::fs::remove_file(&db_path);
     }
 }

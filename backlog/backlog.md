@@ -80,6 +80,101 @@
     属测试夹具的 Windows 可移植性缺口（与 ADR 0067 插件协议本身无关）。
   - 说明：该二进制此前从未被执行到（cargo test 在首个失败测试二进制处停止），属**既有**缺陷。
   - 验收：windows-latest 该 11 例全绿（7 个 spawn 用例不再依赖 shebang）。
+- [x] `B047` - P1: TUI 启动装载仍 4.3s：同一份 trace 被双读 440MB，`turn_events` 自愈每轮白跑
+  - 路径：`crates/pony-agent-core/src/agent/session/sqlite_session_commit.rs`（`fill_index_only_rows_from_index_projection`、
+    `attach_index_trace_projections_with_deadline`）、`crates/pony-agent-core/src/agent/sqlite_session.rs`（`load_store` /
+    `load_store_normalized`）、`crates/pony-agent-core/src/agent/session/store.rs`
+  - 现状：首帧已在 ADR 0115 中降到 <120ms（不再受装载影响），但**装载本身**仍 ~4.3s（真实库 1.2GB + 日志 652MB），
+    期间列表为空、不可交互。这是本条目要解决的剩余部分。
+  - 实测（同一沙箱消融，release）：`ab-nonorm`（清空 `normalized_turn_traces`）2584/2616ms（−1.07s）；
+    `ab-notraces`（清空 `session_turn_traces`）2931/2950ms（−0.72s）；`ab-noturn`（清空 `turn_events`）
+    3614/3442ms（≈无收益，因重建已被 1200ms 预算截断，日志每次仍是
+    `startup_self_heal_skipped: budget_exhausted sessions=28`）。
+  - 表规模实测（`sqlite3`/python 直读）：`normalized_turn_traces` 393 行 / **219.8MB**、`session_turn_traces`
+    392 行 / **219.7MB**（同一份 trace 的两份副本）、`normalized_sessions` 159 行 / 27.5MB、
+    `normalized_history_nodes` 457 行 / 57.1MB。
+  - 成因：① `fill_index_only_rows_from_index_projection` 用 `load_store_normalized` 全量重建（含 trace），
+    而 `attach_index_trace_projections_with_deadline` 又逐会话读 `session_turn_traces` 补 observation 投影；
+    ② `load_store` 每次启动都重跑事件重建自愈，但预算固定截断在同一批会话上（永远修不完、下轮重来）。
+  - 方案（需先解契约，不是机械改）：① fill 阶段不读 trace，trace 内容由 attach 阶段单源补全
+    （**前置**：确认 ADR 0099 E7「`normalized_turn_traces` 为 trace 主源、`session_turn_traces` 仅兜底」口径下谁补历史）；
+    ② 或者启动只读轻量索引行、打开会话时 `load_normalized_session` 按需装载（**前置**：重写
+    「索引可读」契约与 `fifty_logged_sessions_load_within_budget_and_degrade_keeps_the_index_complete` 用例的验收面）；
+    ③ 自愈改为**持久化游标**（记录上轮已修到哪个 session），而不是每轮从同一批空壳重试。
+  - 验收：装载完成时间 ≥1s 降幅、读取字节 ≥200MB 降幅；**首帧保持 <200ms**（ADR 0115 口径不得回退）；
+    索引视图契约用例全绿；`startup_self_heal_skipped` 的 `sessions=` 随游标收敛到 0。
+  - 登记来源：ADR 0115「后续」；**非本轮实施面**（方案 2「定向查询」已实测否决，见 ADR 0115 候选方案 B）。
+  - **结论（2026-11-10，ADR 0118）**：三项各自收口，但第三项的成因与原文登记不同（不是「游标缺失」，是**预算被回填吃光**）：
+    ① 折叠：`fold_read_view` 加**字节预检**（32MiB），真实库 `log_bytes=650MB` ⇒ 一次日志 IO 都不做，直接整轮降级
+      （原 `session_fold_slow elapsed=880~1050ms folded=10~13` 全部白读）；
+    ② trace：`read_traces_normalized` 的 legacy 兜底由「整表 222MB/645ms 读 + 逐会话丢弃」改为「先读规范化侧，
+      再只回读缺失会话」（`SELECT DISTINCT session_id` 走覆盖索引 0ms），真实库回读集合为空 ⇒ −222MB/−645ms；
+      原文「同一份 trace 被双读 440MB」实测成立（`normalized_turn_traces` 222MB + `session_turn_traces` 222MB），
+      本项只消掉后者，前者是 `load_store_normalized` 的正常主源读；
+    ③ 自愈：改为**预算按阶段起算**（回填之后 reset），`history_rebuilt_from_turn_events: 24` 从「永不发生」变为
+      「每轮发生」；**持久化游标方案被否决**（只轮换批次、不减少工作量，且修复结果是内存态）——遗留见 B048。
+  - 验收回执：首帧不回退（49~88ms）；装载完成 `ab-logs` 2970/2897ms（旧实现同沙箱 ≈4.0s）；`ab-base` 3510~3784ms
+    （`PONY_STARTUP_SELF_HEAL_BUDGET_MS=0` 时 3007~3250ms ⇒ 维护项 +0.57s 换回 24 个会话历史）。
+    测试：`--bin pony` 119 passed、`store_reclaim` 6、`storage_stage0_recover_trace` 2、`session_read_from_log` 8。
+
+- [x] `B046` - P2: 会话库 467MB freelist 空洞 + 431MB 未 checkpoint WAL（**独立于启动性能**，单独窗口处理）
+  - 路径：`crates/pony-agent-core/src/agent/sqlite_session.rs`（`remove_session` 的 `DELETE FROM session_turn_traces` / `normalized_*`）、
+    `crates/pony-agent-core/src/agent/sqlite_session_commit.rs`（写路径 checkpoint）、库初始化 DDL / PRAGMA 处
+  - 现象（2026-11-10 实测，真实库，release 二进制）：库 1.2GB，`pragma freelist_count` = 116329 页
+    （≈455MB 空闲页，38%）；WAL 积到 412→431MB 未 checkpoint。
+  - **重要反证（先读，避免走错优化方向）**：空洞**不拖慢**启动。同一份快照 A/B（一份保留 467MB 空洞 1.2GB，
+    一份 `VACUUM INTO` 后 730MB），pty 内各 3 轮：首帧前累计读盘字节**完全一致**（3083MB），
+    耗时差落在噪声内（9.4/10.3/11.7s vs 13.4/10.1/10.1s）。SQLite 扫描只走 B-tree 页，不访问 freelist
+    ⇒ 本条目是**磁盘占用项，不是性能项**；以「提速」为由的改动不要立项。
+  - 成因（实测）：`DELETE` 一行 3.89MB 的 `session_turn_traces` ⇒ freelist +1066 页（4.2MB），`page_count`
+    不变（文件不缩）；随后插入小行**复用 0 页**；库为 `auto_vacuum=OFF`。每删一次会话漏一个洞且永不复用。
+    **不是**大 blob 重写写放大：同值重写 3.89MB blob 六次，`page_count`/`freelist` 零增长。
+  - 修复方案（需显式决策，非纯机械）：
+    ① `PRAGMA auto_vacuum=INCREMENTAL; VACUUM;` 一次性迁移（独占锁 + 约 2 倍临时空间，实测 VACUUM 2.4s）
+    ⇒ 1.2GB → 730MB 并开启后续增量回收；
+    ② 删会话事务末追加 `PRAGMA incremental_vacuum(N)`，让空洞不再累积；
+    ③ 写路径 checkpoint 由 `PASSIVE` 视情形升到 `TRUNCATE`（WAL 431MB 仍在长，读侧要沿 WAL 回放）。
+    **只 VACUUM 不改 `auto_vacuum` 会再涨回来，等于白做。**
+  - 验收：迁移后库体积回落且 `freelist_count` 稳定在低位；连续删除 N 个会话后库不膨胀；重启后 WAL 收敛；
+    **首帧耗时不因此变差**（沿用本轮同一条 pty 首帧测量口径回归）。
+  - 登记来源：本轮 TUI 启动诊断（2026-11-10）副产物；与启动装载路径无共享修复面 ⇒ 不混入同一次提交。
+  - **结论（2026-11-10，ADR 0118）**：候选①②被实测否决，改为 `auto_vacuum=FULL`：
+    - 实测（同机 SQLite 3.45.1，200MB 库删一行 4MB trace）：OFF 46ms/200MB/978 空闲页；INCREMENTAL
+      36ms/201MB/**978 页（`incremental_vacuum` 只收 1 页，多次调用仍 1 页/次）**；FULL 50ms/**197MB**/**0 页**。
+      ⇒ 「删会话后 `incremental_vacuum` 让空洞不再累积」这条承诺兑现不了，改由 FULL 在提交时自动截断文件。
+    - 落地：新增 `ponycli sessions vacuum [--dry-run]`（维护锁 → `auto_vacuum=FULL` + `VACUUM` →
+      `wal_checkpoint(TRUNCATE)`）；`remove_session` **不加**任何回收调用（FULL 自带）。
+    - 候选③（WAL checkpoint）：写路径由「恒 `PASSIVE`」改为「小 WAL `PASSIVE`；≥64MiB 才 `TRUNCATE`，busy 等待
+      压到 50ms、抢不到立即退回」（回收失败不得变成保存失败）。
+    - 验收回执（真实库副本 1144MB / freelist 114048 页）：`--dry-run` 报 445MB 可回收；apply 后 **697MB /
+      freelist 0 / auto_vacuum 0→1 / 5056ms**，`integrity_check=ok`、行数不变（154/89464/398+397）；
+      迁移后插入 4MB 再删 731.5→735.5→**731.5MB**（无需人工步骤）。单测 6 例（含 WAL 阈值与 busy 回退）。
+    - **未做（登记 B049）**：未跑本命令的库仍会累积空洞（一次性显式迁移，不自动挂在启动路径）。
+    - **附带修复（同源缺陷，事故现场）**：维护子命令在常规参数解析之前拦截，`--help` 曾被忽略 ⇒
+      `ponycli sessions vacuum --help` **真的执行了 VACUUM**（实测把真实库 1144MB 压到 743MB，
+      `integrity_check=ok`、行数不变）。已加 `is_help_request()` 护栏（对所有维护子命令生效）+ 2 例单测。
+
+- [ ] `B048` - P2: 大库拿不到「日志真源」视图 + 维护修复结果每轮重做（ADR 0118 遗留）
+  - 路径：`crates/pony-agent-core/src/agent/session/fold.rs`（`fold_read_view` 字节预检）、
+    `crates/pony-agent-core/src/agent/sqlite_session_commit.rs`（`run_budgeted_startup_self_heal`）
+  - 现状：折叠吞吐 ≈100MB/s、682MB 日志全折需 ~6.8s，远超「装载 ≤800ms」门禁 ⇒ 大库整轮降级为索引视图
+    （ADR 0118 之后连日志 IO 都不做，只落 `session_fold_precheck`）。索引投影虽完整，但「日志为真源」
+    在大库上永不生效；同时维护项修好的历史是**内存态**（`startup_repair_deferred: 交给首次真实写入落盘`），
+    每轮启动重做 ~0.57s 的同一批重建。
+  - 方向（需先解契约，不是机械改）：① 首帧后**后台折叠** + 视图失效/刷新协议（列表装载完可能再变一次）；
+    ② 维护项修复结果持久化（或「已修」标记），触及 index-only 轻量行契约与 `rebuild_index` 双读比对口径。
+  - 验收：大库「日志真源」可用（折叠在后台完成后视图切换，且有可见的完成依据）；连续两次启动的
+    `history_rebuilt_from_turn_events` 第二次为 0；首帧仍 <200ms（ADR 0115 口径）。
+
+- [ ] `B049` - P2: `auto_vacuum=FULL` 一次性迁移是否随首次启动自动执行（ADR 0118 遗留）
+  - 路径：`crates/pony-agent-core/src/agent/sqlite_session_commit.rs`（`reclaim_session_store_space`）、
+    启动装载入口（`SqliteSessionBackend::connection` / `load_store`）
+  - 取舍：VACUUM 要独占 + 约 2 倍临时空间（真实库 1144MB → 697MB，实测 5056ms）。自动挂在启动路径 = 把
+    「打开应用」变成「可能失败的破坏性维护」，与 ADR 0107「维护锁只给破坏性维护」冲突；不自动则未跑命令的
+    库继续累积空洞。
+  - 可能形态：首次启动只**提示**并给出命令；或在「空闲且磁盘余量充足」时后台一次性迁移（需先有失败可回退的
+    证据面）。验收：任何形态下首帧不回退、失败不改数据、用户可明确看到发生了/没发生什么。
+
 - [x] `B019` - P1: T1 工具面单一真值闭合与外部工具通道（ADR 0065，W1）
   - 路径：`crates/pony-agent-core/src/agent/{tools.rs,dispatcher.rs,governed_executor.rs,provider/mod.rs}`
   - 描述：execute_internal 分派表化、`swap_tool_surface` 原子换入、拆 `is_builtin_tool_definition_set`、修只读模式按名嗅探漏洞、`ToolProvider` + `ExternalToolHandler`。

@@ -203,3 +203,54 @@ fn recover_from_normalized_rows_keeps_turn_traces() {
         "ADR 0099 阶段 0（E7）：恢复出的 trace 条数必须等于 normalized_turn_traces 行数"
     );
 }
+
+/// 反向守卫（B047）：**legacy 独有**的 trace 仍必须被 E7 兜底读回。
+///
+/// `read_traces_normalized` 的兜底此前是「先整表批量读 `session_turn_traces`，再逐会话
+/// `or_insert`」——真实库上 222MB / 645ms 读完即弃（该库「有 legacy 行但规范化侧无 trace」
+/// 的会话数 = 0）。收窄为「只回读规范化侧给不出 trace 的会话」后，**语义不得变**：
+/// 这条用例钉的就是「legacy 独有的会话依然能恢复出 trace」。
+#[test]
+fn legacy_only_traces_are_still_recovered_by_the_narrowed_fallback() {
+    let dir = TempDir::new("recover-legacy-only");
+    let db = dir.db();
+    let backend = SqliteSessionBackend::new_with_trace_mode(
+        db.clone(),
+        SeparateTraceTableMode::WriteSeparate,
+    );
+
+    append_message(&backend, "s-lo", "t1", 0, "user", "第一问");
+    append_trace(&backend, "s-lo", "t1", 0);
+    append_trace(&backend, "s-lo", "t2", 1);
+
+    // 夹具手术：删掉规范化侧 trace 行，只留 legacy `session_turn_traces`
+    // （这正是 E7 兜底口子存在的唯一理由）。
+    {
+        let conn = rusqlite::Connection::open(&db).expect("open sqlite fixture");
+        conn.execute(
+            "DELETE FROM normalized_turn_traces WHERE session_id = 's-lo'",
+            [],
+        )
+        .expect("drop normalized trace rows");
+    }
+    assert_eq!(
+        row_count(&db, "normalized_turn_traces", "s-lo"),
+        0,
+        "夹具：规范化侧必须没有该会话的 trace 行"
+    );
+    assert_eq!(
+        row_count(&db, "session_turn_traces", "s-lo"),
+        2,
+        "夹具：legacy 侧必须仍有 2 行"
+    );
+
+    let recovered = backend
+        .load_normalized_session("s-lo")
+        .expect("legacy trace 行存在 ⇒ 必须能恢复出会话");
+
+    assert_eq!(
+        recovered.turn_trace_history.len(),
+        2,
+        "legacy 独有 trace 必须由 E7 兜底补回；否则「收窄兜底」= 静默丢 trace"
+    );
+}

@@ -1112,3 +1112,27 @@ note: >-
       `crates/pony-agent-core/src/bin/tui/tests/unknown_slash_command_tests.rs`（9 例：拼错正例 +
       命令表/别名/路径形/带正文反例），且 `--test tui_batch1_regression` 的 N2 矩阵继续锁
       `parse_command_input` 口径不变。
+
+  【ADR 0118 归属登记（2026-11-10）｜会话库装载成本收口 + 库体回收（`ponycli sessions vacuum`）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次改的是**启动装载的读放大**（折叠字节预检 /
+  legacy trace 兜底收窄 / 维护预算按阶段起算）与**库体维护入口**（`auto_vacuum=FULL` + `VACUUM` + WAL
+  `TRUNCATE`），无新增网络 IO、后台任务或 LLM 调用路径；新增一个 **CLI 子命令**属对外接口，登记如下但不新增
+  enforcement_point，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档
+      维度声明同源）。
+  (2) 新增对外接口（唯一一条）：`ponycli sessions vacuum [--dry-run] [--db <path>]`（`crates/pony-agent-core/src/bin/cli.rs`）。
+      语义：只读探针（`--dry-run`，`mode=ro` + `query_only`，零写入）或破坏性维护（`auto_vacuum=FULL` + `VACUUM`
+      → `wal_checkpoint(TRUNCATE)`，需持 `<db>.lock`，抢不到退出码 3）。**不进入启动路径**，不进 TUI。
+  (3) 本轮 N-A 的结构性理由：变更面全部在本地存储层——`session/fold.rs` 的 `DEFAULT_READ_FOLD_LOG_BYTES`
+      预检与 `total_log_bytes()`（`stat` 级）、`read_traces_normalized` 的兜底回读集合、自愈预算的阶段起算、
+      `checkpoint_after_write` 的阈值分支。输入只有本地 SQLite 与会话日志文件，不产生新的遥测事实；进程仍是
+      随用户启停的终端面，Prometheus pull 与节点侧日志采集的结构前提不成立。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——
+      `crates/pony-agent-core/src/agent/sqlite_session_commit.rs::store_reclaim_tests`（6 例：FULL 迁移与回收、
+      删除自回收、幂等、维护锁 fail-closed、WAL 阈值 TRUNCATE、读事务占用时退回 PASSIVE）、
+      `fold::tests::fold_precheck_degrades_without_reading_when_log_bytes_exceed_budget`、
+      `tests/storage_stage0_recover_trace.rs::legacy_only_traces_are_still_recovered_by_the_narrowed_fallback`
+      （反向守卫：收窄兜底不得丢 legacy 独有 trace）、`tests/session_read_from_log.rs`（8 例，含
+      `fifty_logged_sessions_load_within_budget_and_degrade_keeps_the_index_complete`）。
