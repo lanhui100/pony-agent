@@ -442,3 +442,42 @@ pub fn parse_command_input(input: &str) -> Option<&'static str> {
 pub fn input_is_alias(input: &str, alias: &str) -> bool {
     input.trim().eq_ignore_ascii_case(alias)
 }
+
+/// 历史别名命令（不在 [`AVAILABLE_COMMANDS`] 表内，但仍是命令语义，不得当聊天消息发出去）。
+pub const HISTORIC_COMMAND_ALIASES: &[&str] = &["/exit", "/effort"];
+
+/// 契约 F-D：**拼错的斜杠命令**识别（纯函数，可单测）。
+///
+/// 判定面只取 `trim()` 后的**首个 token**，且要求它「形如命令词」：单个前导 `/` + 仅含
+/// 字母/数字/`-`/`_`。命中命令表或历史别名 ⇒ `None`（不是拼错）。
+///
+/// 刻意返回 `None` 的反例（保持契约 F-B「不吞正文」）：
+/// - 含第二个 `/`（`/etc/hosts 是什么`、`/usr/bin`）——路径/表达式，不是命令；
+/// - 裸 `/`、`/ ` 这类没有命令词的输入；
+/// - 已知命令后跟参数（`/clear 这个需求怎么拆`）——首 token 命中命令表。
+pub fn unknown_slash_command(input: &str) -> Option<&str> {
+    let token = input.trim().split_whitespace().next()?;
+    let name = token.strip_prefix('/')?;
+    let command_shaped = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+    if !command_shaped {
+        return None;
+    }
+    if match_command_token(token).is_some() {
+        return None;
+    }
+    if HISTORIC_COMMAND_ALIASES
+        .iter()
+        .any(|alias| alias.eq_ignore_ascii_case(token))
+    {
+        return None;
+    }
+    Some(token)
+}
+
+/// 契约 F-D：未知斜杠命令被拦下时的用户提示（文案唯一真值）。
+pub fn unknown_command_notice(token: &str) -> String {
+    format!("未知斜杠命令「{token}」· 已拦截未发送 · 输入 /help 查看全部可用命令")
+}

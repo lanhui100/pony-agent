@@ -9718,6 +9718,28 @@ fn tui_event_loop(
                             // 编辑/光标/面板快捷键等：继续走既有按键处理链。
                             StreamingKeyDisposition::Forward => {}
                             StreamingKeyDisposition::QueueSubmit => {
+                                // 契约 F-D：拼错的斜杠命令在流式期同样**不入队、不发送**。
+                                // 若先入队再被拦，正文会被摘出输入框却永远发不出去（静默丢正文），
+                                // 故必须在入队前拦，并保留原文供用户就地改正。
+                                if let Some(unknown) = unknown_slash_command(&composer_text) {
+                                    let receipt = unknown_command_notice(unknown);
+                                    apply_queue_feedback(
+                                        &mut state,
+                                        QueueFeedbackChannel::SystemMessage,
+                                        receipt,
+                                    );
+                                    tui_queue_log(
+                                        "warn",
+                                        "composer_command_rejected",
+                                        &state,
+                                        &[(
+                                            "reason",
+                                            serde_json::json!("unknown_slash_command"),
+                                        )],
+                                    );
+                                    dirty = true;
+                                    continue;
+                                }
                                 // C2：流式中 Enter = 入队（绝不 spawn 第二个并发 turn）。
                                 let accepted = push_queued_message(
                                     &mut state.queued_user_messages,
@@ -9909,6 +9931,30 @@ fn tui_event_loop(
                                 // `/clear 这个需求怎么拆` 这类「命令 + 正文」不再被当成命令吞掉，
                                 // 而是整串作为普通消息发送给模型。
                                 let known_command = parse_command_input(&input);
+
+                                // 契约 F-D：拼错的斜杠命令（`/cleer`、`/thikning`…）**不得**作为
+                                // 聊天消息发给模型。拦在命令分发最前，且把原文写回输入框，
+                                // 用户可就地改正后重发（提示走 SystemMessage 通道 + 状态行）。
+                                if let Some(unknown) = unknown_slash_command(&input) {
+                                    state.set_input(&input);
+                                    let receipt = unknown_command_notice(unknown);
+                                    apply_queue_feedback(
+                                        &mut state,
+                                        QueueFeedbackChannel::SystemMessage,
+                                        receipt,
+                                    );
+                                    tui_queue_log(
+                                        "warn",
+                                        "composer_command_rejected",
+                                        &state,
+                                        &[(
+                                            "reason",
+                                            serde_json::json!("unknown_slash_command"),
+                                        )],
+                                    );
+                                    dirty = true;
+                                    continue;
+                                }
 
                                 if known_command == Some("/resume") {
                                     let raw_sessions = control_plane.list_sessions();
@@ -11573,6 +11619,11 @@ mod wave65_r2_approval_plan_tests;
 #[cfg(test)]
 #[path = "tui/tests/rewind_tests.rs"]
 mod rewind_tests;
+
+/// 契约 F-D 单测：拼错的斜杠命令判定矩阵 + 拦截提示文案（不吞正文的反例同等锁定）。
+#[cfg(test)]
+#[path = "tui/tests/unknown_slash_command_tests.rs"]
+mod unknown_slash_command_tests;
 
 /// wave-65 R3（F3）单测：审批失效**不复用** Ask 文案。
 #[cfg(test)]

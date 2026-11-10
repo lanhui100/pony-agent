@@ -1093,3 +1093,22 @@ note: >-
       `http_client` 本次未改动。行为门机械收口在测试层而非遥测层——
       `crates/pony-agent-core/tests/tui_rewind_acceptance.rs`（r1_r2/r4 会话截断 + 空 checkpoint 根可继续对话、
       r3 pre-image 还原/新建删除）、`--lib` 的 `rewind_files` 5 例、`--bin pony` 的 `tui::rewind_tests` 13 例。
+
+  【ADR 0114 归属登记（2026-11-10）｜TUI 拼错的斜杠命令在分发前拦截（契约 F-D）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地按键分发裁决与纯字符串判定**，
+  无新增网络出口、依赖、指标或 Loki 上送路径；不新增 enforcement_point，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与本文档维度声明同源）。
+  (2) 本轮 N-A 的结构性理由：变更面是 `bin/tui/projection.rs`（新增纯函数 `unknown_slash_command` /
+      `unknown_command_notice` / 常量 `HISTORIC_COMMAND_ALIASES`）与 `bin/tui.rs` 的两处拦截点
+      （非流式主分发、流式期入队前）。输入只有本地按键事件与本地命令表，不产生遥测事实；
+      进程仍是随用户启停的终端面，Prometheus pull 与节点侧日志采集的结构前提不成立。
+  (3) 变更性质（仅登记，非遥测变更）：新增本地结构化日志行
+      `composer_command_rejected{reason=unknown_slash_command}`（与既有
+      `composer_queue_submit` / `composer_queue_rejected` / `composer_key_rejected` 同通道、同收口点
+      `bin/tui.rs::tui_queue_log`，经 stderr 改道落 `~/.pony-agent/tui-logs/tui-runtime.log`；
+      字段只有 reason，**不含用户输入正文**）。
+  (4) 收口点：不新增 enforcement_point。行为门机械收口在
+      `crates/pony-agent-core/src/bin/tui/tests/unknown_slash_command_tests.rs`（9 例：拼错正例 +
+      命令表/别名/路径形/带正文反例），且 `--test tui_batch1_regression` 的 N2 矩阵继续锁
+      `parse_command_input` 口径不变。
