@@ -7012,7 +7012,11 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    // 只在 unix 分支被赋值；Windows 下保持不可变，否则发版构建的 `-D warnings` 会报 `unused_mut`。
+    #[cfg(unix)]
     let mut stderr_redirected = false;
+    #[cfg(not(unix))]
+    let stderr_redirected = false;
     #[cfg(unix)]
     if let Some(path) = runtime_log_path.as_ref() {
         if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -7191,7 +7195,11 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    // 只在 unix 分支被赋值；Windows 下保持不可变，否则发版构建的 `-D warnings` 会报 `unused_mut`。
+    #[cfg(unix)]
     let mut stderr_redirected = false;
+    #[cfg(not(unix))]
+    let stderr_redirected = false;
     #[cfg(unix)]
     if let Some(path) = runtime_log_path.as_ref() {
         if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
