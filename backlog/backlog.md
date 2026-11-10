@@ -49,18 +49,37 @@
   - 验收：Linux 干净 worktree 全 15 例 ×3 + 单测 ×10 全 exit 0；windows-latest 同一 commit
     `fc20b81e` 连跑 3 次该用例全 `ok`（run 42768957244 attempt 1/2/3）。
 
-- [ ] `B044` - P1: Windows CI `p0_log_first_durability` 4 例被 Windows 强制文件锁打成红（B043 修复后新暴露）
-  - 路径：`crates/pony-agent-core/tests/p0_log_first_durability.rs:195/733/802`
+- [x] `B044` - P1: Windows CI `p0_log_first_durability` 4 例被 Windows 强制文件锁打成红（B043 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/p0_log_first_durability.rs`、`src/agent/session/{backend.rs,store.rs,log_sink.rs}`、`src/agent/sqlite_session.rs`
   - 现象（run 42768957244 attempt 1/2/3，windows-latest 三次同签名）：`c4_writable_path_unchanged`、
     `c2_index_failure_still_advances_memory_history`、`c8_stale_epoch_batch_never_reaches_the_session_log`、
     `c9_precheck_failure_does_not_write_log` 全败在「读会话日志/读基线日志」：
     `Os { code: 33, kind: Uncategorized, "another process has locked a portion of the file" }`。
-  - 初判：Windows `LockFileEx` 是**强制**锁；用例用 `std::fs::read/read_to_string` 直接读
-    `session-logs/**/session.jsonl`，而 store 的日志写者仍持锁 ⇒ 读被拒（Linux 为劝告锁，读得到）。
-    与 B041 同族（当年解是用 `SessionBackend::release_log_writers_for_test` 后再 reload）。
-  - 说明：该文件在 B043 之前从未被执行到（cargo test 在第一个失败测试二进制处停止），属**既有
-    Windows 缺陷**，非 B043 修复引入（本次改动仅一个测试文件）。
-  - 验收：windows-latest 该 4 例全绿（读日志前释放写者，或改为断言进程内已物化视图）。
+  - **根因（已修）**：Windows `LockFileEx` 是**强制**字节锁——日志写者句柄持锁期间，**同进程**
+    另一个句柄也读不了 `session.jsonl`；Unix `flock` 是劝告锁，故只在 Windows 暴露。用例在 append
+    之后直接 `fs::read/read_to_string` 读盘，撞上仍缓存的写者。与 B041 同族（B041 用
+    `release_log_writers_for_test` 修的是 crate 内单元测试）。
+  - 修复：`SessionBackend::release_log_writers_for_test`、`SqliteSessionBackend` 实现、
+    `SessionLogSink::release_writers_for_test` 去 `#[cfg(test)]`（`tests/` 是独立 crate，看不到
+    cfg(test) 项），`SessionStore` wrapper 升为 `pub` + `#[doc(hidden)]`；生产路径零调用。
+    用例侧统一走 `release_log_writer(release, path)`：先放锁、再**当场探测**（自己抢一次独占锁）
+    确认锁已放开，之后才读盘。
+  - 顺带把手感缺陷变成 Linux 可见：探测语句让「写者没放锁」在 Linux 上即红，不必等 Windows CI。
+  - 验收：windows-latest run 42777671263 → 该二进制 **7 passed / 2 ignored(c1/c6 已退役) / 0 failed**；
+    Linux `cargo check -D warnings` Exit 0、本机该二进制 Exit 0；反向对照（去掉放锁）Linux 上
+    c2/c4/c8/c9 四例立即变红（探测报 `WouldBlock`，与 Windows `code 33` 同源）。
+
+- [ ] `B045` - P1: Windows CI `plugin_host_contract` 7 例因 `.py` 插件夹具无法直接 exec 而红（B044 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/plugin_host_contract.rs`、`src/agent/plugin_host/`（spawn 路径）
+  - 现象（run 42777671263，windows-latest）：11 例中 4 passed、7 failed；4 个通过的全是 manifest 纯解析
+    用例，7 个依赖夹具 spawn 的（t3_lifecycle / t3_call_tool_rejects_undeclared / t3_call_timeout /
+    t3_handshake_api_version / t3_initialize_undeclared_tool / t3_plugin_crash / t3_child_env_allowlist）
+    统一报：`plugin_spawn_failed: 启动插件进程 …\plugin-echo.py 失败：%1 is not a valid Win32 application`。
+  - 初判：夹具用 `Command::new("…/plugin-echo.py")` 直接 exec，靠 shebang 在 Unix 生效；Windows 不认
+    shebang ⇒ 需按平台选解释器（`python.exe <fixture>.py` 或 `py -3`），或提供 `.cmd`/交叉编译产物。
+    属测试夹具的 Windows 可移植性缺口（与 ADR 0067 插件协议本身无关）。
+  - 说明：该二进制此前从未被执行到（cargo test 在首个失败测试二进制处停止），属**既有**缺陷。
+  - 验收：windows-latest 该 11 例全绿（7 个 spawn 用例不再依赖 shebang）。
 - [x] `B019` - P1: T1 工具面单一真值闭合与外部工具通道（ADR 0065，W1）
   - 路径：`crates/pony-agent-core/src/agent/{tools.rs,dispatcher.rs,governed_executor.rs,provider/mod.rs}`
   - 描述：execute_internal 分派表化、`swap_tool_surface` 原子换入、拆 `is_builtin_tool_definition_set`、修只读模式按名嗅探漏洞、`ToolProvider` + `ExternalToolHandler`。
