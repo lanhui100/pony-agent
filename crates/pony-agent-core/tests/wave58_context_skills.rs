@@ -246,6 +246,8 @@ fn skill_fixture(
         },
         scope,
         rank,
+        disable_model_invocation: false,
+        model_invocable: true,
     }
 }
 
