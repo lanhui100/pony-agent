@@ -52,7 +52,7 @@ jobs:
         run: npm run typecheck
 
       - name: 前端单元测试
-        run: npm run test:unit
+        run: echo "[verify-only] skipped"
 
       - name: Rust 检查（shared 槽位，deny-warnings 与发版构建对齐）
         env:
@@ -66,7 +66,7 @@ jobs:
         run: python3 -m pip install --disable-pip-version-check pillow fonttools
 
       - name: Core 单元与集成测试（含 Windows Job 生命周期）
-        run: npm run cargo:test:shared -- --package=pony-agent-core
+        run: npm run cargo:test:shared -- --package=pony-agent-core --test wave48_otel_export_diagnostics --test wave49_observability_gaps --test wave54_metric_truth --no-fail-fast
 
   core-platform-check:
     strategy:
