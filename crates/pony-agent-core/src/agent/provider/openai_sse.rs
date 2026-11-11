@@ -24,6 +24,8 @@ struct OpenAiSseAccumulator {
     saw_data: bool,
     /// ADR 0055 P0-2：首个 SSE data 事件是否已发出 `StreamStart` 时点信号。
     saw_first_chunk: bool,
+    /// B060：缺 name 诊断降噪器（每个流式响应一个实例，随累积器生命周期）。
+    missing_name_diagnostics: MissingNameDiagnostics,
 }
 #[derive(Debug, Default)]
 struct PartialOpenAiToolCall {
@@ -38,6 +40,8 @@ struct PartialOpenAiToolCall {
 #[derive(Debug, Default)]
 pub(crate) struct MissingNameDiagnostics {
     seen_indexes: std::collections::BTreeSet<usize>,
+    /// 至少被抑制过一次的 index 集合（汇总行口径：受抑制的不同 index 数）。
+    suppressed_indexes: std::collections::BTreeSet<usize>,
     suppressed_total: u32,
     summary_taken: bool,
 }
@@ -45,18 +49,39 @@ pub(crate) struct MissingNameDiagnostics {
 impl MissingNameDiagnostics {
     /// 判定本次观测是否必须输出诊断行：首次为 `true`，重复为 `false` 并累计抑制计数。
     pub(crate) fn observe(&mut self, index: usize) -> bool {
-        unimplemented!("B060: MissingNameDiagnostics::observe pending implementation")
+        if self.seen_indexes.insert(index) {
+            return true;
+        }
+        self.suppressed_total = self.suppressed_total.saturating_add(1);
+        self.suppressed_indexes.insert(index);
+        false
     }
 
     /// 流结束时的汇总判定：存在被抑制的重复时返回 `(抑制总数, 受抑制 index 数)`，
     /// 且只返回一次（二次调用返回 `None`）。
     pub(crate) fn take_summary(&mut self) -> Option<(u32, usize)> {
-        unimplemented!("B060: MissingNameDiagnostics::take_summary pending implementation")
+        if self.summary_taken || self.suppressed_total() == 0 {
+            return None;
+        }
+        self.summary_taken = true;
+        Some((self.suppressed_total(), self.suppressed_indexes.len()))
+    }
+
+    /// B060 R2：构造本次观测的诊断行文本——首见返回 `Some(line)`（前缀与字段逐字保持），
+    /// 重复返回 `None` 并累计抑制计数。
+    pub(crate) fn diagnostic_line(&mut self, index: usize, item_preview: &str) -> Option<String> {
+        unimplemented!("B060 R2: MissingNameDiagnostics::diagnostic_line pending implementation")
+    }
+
+    /// B060 R2：构造流结束汇总行文本——存在被抑制的重复时返回 `Some(line)` 且只返回一次；
+    /// 文本前缀必须**不含** `sse-tool-call-missing-name` 子串（巡检针口径隔离，契约 C7）。
+    pub(crate) fn summary_line(&mut self) -> Option<String> {
+        unimplemented!("B060 R2: MissingNameDiagnostics::summary_line pending implementation")
     }
 
     /// 已抑制的累计条数（只读，供测试与汇总使用）。
     pub(crate) fn suppressed_total(&self) -> u32 {
-        unimplemented!("B060: MissingNameDiagnostics::suppressed_total pending implementation")
+        self.suppressed_total
     }
 }
 
@@ -99,7 +124,11 @@ impl OpenAiSseAccumulator {
             .and_then(extract_openai_delta_reasoning_content)
             .unwrap_or_default();
         if let Some(delta) = delta {
-            merge_openai_stream_tool_calls(&mut self.tool_calls, delta);
+            merge_openai_stream_tool_calls(
+                &mut self.tool_calls,
+                &mut self.missing_name_diagnostics,
+                delta,
+            );
         }
 
         let mut emitted_content = false;
@@ -144,7 +173,19 @@ impl OpenAiSseAccumulator {
             token_usage,
             saw_data,
             saw_first_chunk: _,
+            mut missing_name_diagnostics,
         } = self;
+
+        // B060：流结束至多输出 1 条降噪汇总行（存在被抑制的重复诊断时才输出）。
+        if let Some((suppressed_total, suppressed_indexes)) =
+            missing_name_diagnostics.take_summary()
+        {
+            provider_log(format!(
+                "provider:sse-tool-call-missing-name-suppressed suppressed_total={} suppressed_indexes={}",
+                suppressed_total, suppressed_indexes
+            ));
+        }
+
         if !saw_data {
             return Err(format!(
                 "provider 流式返回中未找到 SSE data 事件；响应预览: {}",
@@ -401,6 +442,7 @@ where
 
 fn merge_openai_stream_tool_calls(
     tool_calls: &mut BTreeMap<usize, PartialOpenAiToolCall>,
+    missing_name_diagnostics: &mut MissingNameDiagnostics,
     delta: &Value,
 ) {
     let Some(items) = delta.get("tool_calls").and_then(Value::as_array) else {
@@ -453,11 +495,15 @@ fn merge_openai_stream_tool_calls(
             .and_then(Value::as_str)
             .map_or(false, |n| !n.is_empty());
         if has_arguments && !has_name_via_function && !has_name_direct {
-            provider_log(format!(
-                "provider:sse-tool-call-missing-name index={} item_preview={}",
-                index,
-                preview_text(&item.to_string(), 400)
-            ));
+            // B060 降噪：同一 index 每流只输出 1 条诊断行，重复观测仅累计计数
+            // （汇总由 `finish()` 至多输出 1 条）。前缀/字段/preview 上限保持不变。
+            if missing_name_diagnostics.observe(index) {
+                provider_log(format!(
+                    "provider:sse-tool-call-missing-name index={} item_preview={}",
+                    index,
+                    preview_text(&item.to_string(), 400)
+                ));
+            }
         }
     }
 }
