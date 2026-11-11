@@ -65,9 +65,10 @@ pub enum RewindStage {
 }
 
 /// 范围选项（顺序即面板行序，`selected_scope` 是行下标）。
+/// 安全第一：首项为「仅恢复会话」，避免未注意范围项直接回车误回退工作区文件（ISSUE-20261111-005）。
 pub const REWIND_SCOPE_ROWS: [(&str, RewindMode); 2] = [
-    ("恢复代码与会话", RewindMode::ConversationAndFiles),
     ("仅恢复会话", RewindMode::ConversationOnly),
+    ("恢复代码与会话", RewindMode::ConversationAndFiles),
 ];
 
 /// 撤回覆盖层状态。
@@ -100,7 +101,7 @@ impl RewindState {
         REWIND_SCOPE_ROWS
             .get(self.selected_scope)
             .map(|(_, mode)| *mode)
-            .unwrap_or(RewindMode::ConversationAndFiles)
+            .unwrap_or(RewindMode::ConversationOnly)
     }
 
     /// ↑：新→旧列表里向上 = 更近的轮次（下标 -1）。

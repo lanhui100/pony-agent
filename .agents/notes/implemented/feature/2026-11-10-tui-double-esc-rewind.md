@@ -21,7 +21,7 @@ TUI 此前只有「Esc = 停止本轮 / 清空草稿」，没有把对话退回�
    - `InteractionMode::Rewind` + `TuiState::rewind_state`；
    - 非流式 Esc 上膛（`RewindEscArm`，会话作用域 + 700ms），第二次开面板；
      流式双击仍只停止本轮（两条判定互斥）；
-   - 两段式面板：选轮次（新→旧，右侧标可回滚文件数）→ 选范围（恢复代码与会话 / 仅恢复会话）；
+   - 两段式面板：选轮次（新→旧，右侧标可回滚文件数）→ 选范围（安全默认：仅恢复会话 / 需显式确认：恢复代码与会话；ISSUE-20261111-005）；
    - `/rewind` 命令同入口，并归入 `is_session_mutating_command`（流式期拒绝）；
    - 成功后 `reset_session_scope` + `hydrate_state_from_session`（与 `/resume` 同口径）+ 回填用户消息。
 2. **控制面**（`agent/control_plane/rewind_commands.rs`）
@@ -96,3 +96,5 @@ TUI 此前只有「Esc = 停止本轮 / 清空草稿」，没有把对话退回�
   `turn_events` 空导致节点折叠为空视图、且 ask-aware 路径会给两个节点写同一 `turn_id`；改为
   `FileSessionBackend`（无事件表 ⇒ legacy 节点快照真值），行为可复现且不依赖沙箱装载细节。
   SQLite + 事件的 checkout 路径由既有 `control_plane` 内测覆盖，不在此文件重复。
+- **默认范围选项安全性（ISSUE-20261111-005）**：原默认高亮「恢复代码与会话」，用户习惯性回车容易意外物理回退工作区文件。现改为默认高亮安全项「仅恢复会话」（`ConversationOnly`），破坏性项需主动下移或按数字键 2。
+

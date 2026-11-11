@@ -86,18 +86,32 @@ fn turn_selection_clamps_at_both_ends() {
 #[test]
 fn scope_rows_map_to_modes_and_clamp() {
     assert_eq!(rewind::REWIND_SCOPE_ROWS.len(), 2);
+    assert_eq!(
+        rewind::REWIND_SCOPE_ROWS[0],
+        ("仅恢复会话", RewindMode::ConversationOnly),
+        "第一项必须是安全默认（仅恢复会话）"
+    );
+    assert_eq!(
+        rewind::REWIND_SCOPE_ROWS[1],
+        ("恢复代码与会话", RewindMode::ConversationAndFiles),
+        "第二项是破坏性项（恢复代码与会话）"
+    );
     let mut state = rewind::RewindState::new(vec![point("n1", 1, "问", 0)]);
-    assert_eq!(state.scope(), RewindMode::ConversationAndFiles);
-    state.select_scope_next();
-    assert_eq!(state.scope(), RewindMode::ConversationOnly);
-    state.select_scope_next();
     assert_eq!(
         state.scope(),
         RewindMode::ConversationOnly,
+        "默认选中安全模式"
+    );
+    state.select_scope_next();
+    assert_eq!(state.scope(), RewindMode::ConversationAndFiles);
+    state.select_scope_next();
+    assert_eq!(
+        state.scope(),
+        RewindMode::ConversationAndFiles,
         "范围只有两行，向下不越界"
     );
     state.select_scope_prev();
-    assert_eq!(state.scope(), RewindMode::ConversationAndFiles);
+    assert_eq!(state.scope(), RewindMode::ConversationOnly);
 }
 
 // ── 按键裁决 ────────────────────────────────────────────────────────────────
@@ -141,6 +155,22 @@ fn turn_stage_enter_moves_to_scope_and_esc_cancels() {
 }
 
 #[test]
+fn scope_stage_direct_enter_defaults_to_conversation_only() {
+    let mut state = state_with_overlay();
+    rewind::handle_key(&mut state, &key(KeyCode::Enter));
+    // 直接按回车，不按 Down，必须是安全模式
+    assert_eq!(
+        rewind::handle_key(&mut state, &key(KeyCode::Enter)),
+        rewind::RewindAction::Confirm
+    );
+    assert_eq!(
+        state.rewind_state.as_ref().map(|overlay| overlay.scope()),
+        Some(RewindMode::ConversationOnly),
+        "未切换范围直接回车必须默认为仅恢复会话"
+    );
+}
+
+#[test]
 fn scope_stage_enter_confirms_with_selected_mode() {
     let mut state = state_with_overlay();
     rewind::handle_key(&mut state, &key(KeyCode::Enter));
@@ -151,7 +181,8 @@ fn scope_stage_enter_confirms_with_selected_mode() {
     );
     assert_eq!(
         state.rewind_state.as_ref().map(|overlay| overlay.scope()),
-        Some(RewindMode::ConversationOnly)
+        Some(RewindMode::ConversationAndFiles),
+        "按 Down 选中破坏性模式并确认"
     );
 }
 
@@ -160,12 +191,25 @@ fn scope_stage_number_keys_pick_and_confirm() {
     let mut state = state_with_overlay();
     rewind::handle_key(&mut state, &key(KeyCode::Enter));
     assert_eq!(
+        rewind::handle_key(&mut state, &key(KeyCode::Char('1'))),
+        rewind::RewindAction::Confirm
+    );
+    assert_eq!(
+        state.rewind_state.as_ref().map(|overlay| overlay.scope()),
+        Some(RewindMode::ConversationOnly),
+        "数字 1 选择仅恢复会话"
+    );
+
+    let mut state = state_with_overlay();
+    rewind::handle_key(&mut state, &key(KeyCode::Enter));
+    assert_eq!(
         rewind::handle_key(&mut state, &key(KeyCode::Char('2'))),
         rewind::RewindAction::Confirm
     );
     assert_eq!(
         state.rewind_state.as_ref().map(|overlay| overlay.scope()),
-        Some(RewindMode::ConversationOnly)
+        Some(RewindMode::ConversationAndFiles),
+        "数字 2 选择恢复代码与会话"
     );
 }
 
