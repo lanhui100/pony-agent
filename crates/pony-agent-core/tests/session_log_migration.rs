@@ -892,12 +892,16 @@ fn migration_attributes_cwd_by_workspace_and_records_fallbacks() {
     let workspace_root = fixture.root.join("ws-root");
     std::fs::create_dir_all(&workspace_root).expect("create workspace root");
 
-    let workspace_id = {
+    // 产品在 `create_workspace` 里**规范化** root（`canonicalize` + Windows 去 `\\?\` 前缀，
+    // 见 `agent/workspace.rs::normalize_workspace_root`）。Windows 的临时目录是 8.3 短名
+    // （`C:\Users\RUNNER~1\…`），canonicalize 会把它展开成长名 ⇒ 期望分组必须用**记录里的**
+    // root_path，而不是入参字符串（B051：用入参会把「归属正确」误判成红，且只在 Windows 暴露）。
+    let (workspace_id, workspace_root_recorded) = {
         let mut store = SessionStore::with_backend(Box::new(fixture.backend(&app)));
         let record = store
             .create_workspace("归属测试", workspace_root.to_string_lossy().as_ref())
             .expect("create_workspace");
-        record.id
+        (record.id, record.root_path)
     };
 
     let attributed = "pa_3b_ws_attributed";
@@ -923,7 +927,11 @@ fn migration_attributes_cwd_by_workspace_and_records_fallbacks() {
         "workspace id 在注册表里解析不到 ⇒ 必须逐条记入 cwd_fallback（不得静默）：{report:?}"
     );
 
-    let ws_group = group_dir(&fixture, &app, &workspace_root.to_string_lossy());
+    assert!(
+        !workspace_root_recorded.trim().is_empty(),
+        "前置：workspace 记录必须带 root_path（迁移按它归属 cwd 分组）"
+    );
+    let ws_group = group_dir(&fixture, &app, &workspace_root_recorded);
     let attributed_segment = encode_session_id_segment(attributed).expect("segment");
     assert!(
         ws_group
