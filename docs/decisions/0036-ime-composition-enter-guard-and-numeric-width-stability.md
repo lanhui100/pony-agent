@@ -2,6 +2,10 @@
 
 Status: implemented
 
+> 决策 1 的**判定口径**已由 [0122](0122-ime-guard-event-brand-across-realms.md) 修订
+> （`instanceof KeyboardEvent` + `isComposing === true` → 事件品牌串 + 真值语义，修跨 realm 漏拦）；
+> 本文件的其余决定（6 处入口接入、鼠标路径不加守卫、`tabular-nums` 与容器位宽）仍然现行。
+
 ## 背景
 
 前端存在两类用户可见缺陷（wave-17 修复，来源为对 `open-claude-ui`（Claude Design System 逆向工程示例库）6 项借鉴建议的对抗评审收敛）：

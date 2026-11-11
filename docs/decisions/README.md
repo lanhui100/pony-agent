@@ -54,6 +54,7 @@
 
 ### 活跃
 
+- [0122 IME 组合态守卫改按事件品牌串判定（跨 realm 事件不再漏拦）](0122-ime-guard-event-brand-across-realms.md) —— 修订 [0036](0036-ime-composition-enter-guard-and-numeric-width-stability.md) 决策 1 的判定口径，其余决定仍现行
 - [0120 插件宿主的 Windows 脚本命令解析（shebang → 解释器）](0120-plugin-host-script-command-on-windows.md)
 - [0121 Windows 全量集成测试常开 `--no-fail-fast`（首错即停的代价与替代）](0121-windows-ci-no-fail-fast.md)
 - [0117 TUI Ask 面板多选与版式重构（内边距 / 问题独占一行 / 选项折行）](0117-tui-ask-panel-multiselect-and-layout.md)
