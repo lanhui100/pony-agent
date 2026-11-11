@@ -1,0 +1,35 @@
+{
+  "task": "backlog:B060",
+  "tier": "A",
+  "tier_rationale": "单生产文件（openai_sse.rs）+ 单测试文件；仅日志降噪与测试补齐；无新接口、无新网络 IO、无序列化契约变更、无跨模块流转。未命中强制升 B 的机械触发（不改注入点/连接工厂，不新增 IO 调用）。",
+  "wave": "b060",
+  "lead": "lead",
+  "baseline_commit": "4e4fedc",
+  "regression_baseline": {
+    "command": "cargo test -p pony-agent-core --lib openai_sse",
+    "exit_code": 0,
+    "passed": 9,
+    "failed": 0,
+    "note": "改动前既有 SSE 相关用例全绿，作为回归对照组"
+  },
+  "roles": {
+    "L2-T": "test-agent",
+    "L2-E": "executor",
+    "L3": "subagent-reviewer"
+  },
+  "write_scopes": {
+    "test-agent": [
+      "crates/pony-agent-core/src/agent/provider/openai_sse_diag_tests.rs",
+      "crates/pony-agent-core/src/agent/runtime/tests.rs"
+    ],
+    "executor": ["crates/pony-agent-core/src/agent/provider/openai_sse.rs"],
+    "lead": [".dev-team/contract-matrix-b060.md", "openai_sse.rs 空桩与 mod 挂载"]
+  },
+  "contract": ".dev-team/contract-matrix-b060.md",
+  "non_goals": [
+    "不改 infer_tool_name_from_arguments 规则",
+    "不改 SSE 解析/合并语义",
+    "不引入日志级别框架",
+    "不改 runtime/stream_support 修复逻辑"
+  ]
+}

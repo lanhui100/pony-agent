@@ -32,6 +32,34 @@ struct PartialOpenAiToolCall {
     arguments: String,
 }
 
+/// B060：`sse-tool-call-missing-name` 诊断降噪器（每个流式响应一个实例）。
+/// 语义见 `.dev-team/contract-matrix-b060.md`：同一 index 每流至多输出 1 条诊断，
+/// 重复次数只累计不打印，流结束时至多输出 1 条汇总。
+#[derive(Debug, Default)]
+pub(crate) struct MissingNameDiagnostics {
+    seen_indexes: std::collections::BTreeSet<usize>,
+    suppressed_total: u32,
+    summary_taken: bool,
+}
+
+impl MissingNameDiagnostics {
+    /// 判定本次观测是否必须输出诊断行：首次为 `true`，重复为 `false` 并累计抑制计数。
+    pub(crate) fn observe(&mut self, index: usize) -> bool {
+        unimplemented!("B060: MissingNameDiagnostics::observe pending implementation")
+    }
+
+    /// 流结束时的汇总判定：存在被抑制的重复时返回 `(抑制总数, 受抑制 index 数)`，
+    /// 且只返回一次（二次调用返回 `None`）。
+    pub(crate) fn take_summary(&mut self) -> Option<(u32, usize)> {
+        unimplemented!("B060: MissingNameDiagnostics::take_summary pending implementation")
+    }
+
+    /// 已抑制的累计条数（只读，供测试与汇总使用）。
+    pub(crate) fn suppressed_total(&self) -> u32 {
+        unimplemented!("B060: MissingNameDiagnostics::suppressed_total pending implementation")
+    }
+}
+
 impl OpenAiSseAccumulator {
     fn push_payload<F>(&mut self, payload: &str, on_delta: &mut F) -> Result<bool, String>
     where
@@ -551,3 +579,7 @@ mod adr0055_tests {
         assert_eq!(seen, vec![ProviderStreamChunk::StreamStart]);
     }
 }
+
+#[cfg(test)]
+#[path = "openai_sse_diag_tests.rs"]
+mod openai_sse_diag_tests;
