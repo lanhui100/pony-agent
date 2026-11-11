@@ -13843,3 +13843,54 @@ fn w3b_shared_store_makes_teammate_session_visible_to_host_control_plane() {
 
     server.finish();
 }
+
+// ── B060 C5：空名 + {"calls":[…非空…]} 必须修复为 BatchExecute（不报错、不丢弃）──
+
+/// B060 契约 C5（`.dev-team/contract-matrix-b060.md`）：provider SSE 缺 name 的诊断降噪
+/// 不得改变修复链路——空名 + 非空 `calls` 数组仍经参数推断修复为 `BatchExecute`。
+#[test]
+fn empty_tool_call_with_nonempty_calls_array_repairs_to_batch_execute() {
+    use crate::agent::runtime::stream_support::normalize_tool_directive;
+    use crate::agent::tools::ToolCall;
+
+    // Arrange：批量并行子调用参数（calls 为非空数组），工具名缺失。
+    let arguments = json!({
+        "calls": [
+            { "tool": "workspace_read_file", "arguments": { "path": "src/lib.rs" } },
+            { "tool": "workspace_list_files", "arguments": { "path": "src" } }
+        ]
+    });
+
+    // Act
+    let normalized = normalize_tool_directive(
+        ToolCall {
+            call_id: Some("call_b060_batch".to_string()),
+            name: "".to_string(),
+            arguments: arguments.clone(),
+            plan: None,
+        },
+        None,
+        "",
+        None,
+        None,
+    )
+    .expect("C5：空名 + 非空 calls 数组必须可修复，不得报错");
+
+    // Assert
+    let repaired = normalized
+        .tool_call
+        .expect("C5：带 calls 参数的空名调用不得被丢弃");
+    assert_eq!(
+        repaired.name, "BatchExecute",
+        "C5：非空 calls 数组必须修复为 BatchExecute"
+    );
+    assert_eq!(
+        repaired.arguments, arguments,
+        "C5：修复链路不得改写原始参数（calls 数组逐字保留）"
+    );
+    assert_eq!(
+        repaired.call_id.as_deref(),
+        Some("call_b060_batch"),
+        "C5：修复链路必须原样保留 call_id"
+    );
+}
