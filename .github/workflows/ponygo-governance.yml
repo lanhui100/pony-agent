@@ -14,3 +14,4 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: bash .meta/gates/ci-verify.sh
       - run: bash .meta/gates/scratch-hygiene.sh && bash .meta/gates/scratch-hygiene.spec.sh
+      - run: node scripts/backlog.mjs lint

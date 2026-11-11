@@ -19,4 +19,22 @@ fi
 if command -v pwsh >/dev/null 2>&1; then
   pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/git-guard.ps1" pre-commit || exit $?
 fi
+
+# L1 追加：backlog 账本一致性（v3 统一任务治理）。
+# 放在 ponygo-gate 哨兵块之外——判据 2.4 要求 BEGIN..END 段逐字节等于规范块，块内新增会被 init 抹掉。
+# fail-closed：账本存在但非法 → 拒绝提交；账本尚未启用（无 tasks.jsonl）→ 明确提示后放行（一次性迁移期）。
+if [ -f "$(git rev-parse --show-toplevel)/backlog/tasks.jsonl" ]; then
+  if command -v node >/dev/null 2>&1; then
+    node "$(git rev-parse --show-toplevel)/scripts/backlog.mjs" lint || {
+      echo "[pre-commit] 拒绝：backlog 账本未通过一致性校验（backlog/tasks.jsonl）" >&2
+      exit 1
+    }
+  else
+    echo "[pre-commit] 拒绝：无 node，backlog 一致性门无法执行（fail-closed）" >&2
+    exit 1
+  fi
+else
+  echo "[pre-commit] 提示：backlog/tasks.jsonl 不存在，跳过 backlog 一致性门（账本未启用）"
+fi
+
 exit 0

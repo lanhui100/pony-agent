@@ -62,7 +62,9 @@
     "version:dryrun": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bump-version.ps1 -DryRun",
     "version:show": "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"Get-Content .version.json | ConvertFrom-Json | ForEach-Object { Write-Host ('core: {0}.{1}.{2}' -f $_.core.major, $_.core.minor, $_.core.patch); Write-Host ('tauri: {0}.{1}.{2}' -f $_.tauri.major, $_.tauri.minor, $_.tauri.patch) }\"",
     "ext:check": "node scripts/gen-extension-points.mjs --check",
-    "conformance:test": "cargo test -p pony-agent-core --test conformance"
+    "conformance:test": "cargo test -p pony-agent-core --test conformance",
+    "backlog:lint": "node scripts/backlog.mjs lint",
+    "backlog:list": "node scripts/backlog.mjs list"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",
