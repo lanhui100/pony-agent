@@ -69,17 +69,40 @@
     Linux `cargo check -D warnings` Exit 0、本机该二进制 Exit 0；反向对照（去掉放锁）Linux 上
     c2/c4/c8/c9 四例立即变红（探测报 `WouldBlock`，与 Windows `code 33` 同源）。
 
-- [ ] `B045` - P1: Windows CI `plugin_host_contract` 7 例因 `.py` 插件夹具无法直接 exec 而红（B044 修复后新暴露）
-  - 路径：`crates/pony-agent-core/tests/plugin_host_contract.rs`、`src/agent/plugin_host/`（spawn 路径）
+- [x] `B045` - P1: Windows CI `plugin_host_contract` 7 例因 `.py` 插件夹具无法直接 exec 而红（B044 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/plugin_host_contract.rs`、`src/agent/plugin_host/transport.rs`（spawn 路径）
   - 现象（run 42777671263，windows-latest）：11 例中 4 passed、7 failed；4 个通过的全是 manifest 纯解析
     用例，7 个依赖夹具 spawn 的（t3_lifecycle / t3_call_tool_rejects_undeclared / t3_call_timeout /
     t3_handshake_api_version / t3_initialize_undeclared_tool / t3_plugin_crash / t3_child_env_allowlist）
     统一报：`plugin_spawn_failed: 启动插件进程 …\plugin-echo.py 失败：%1 is not a valid Win32 application`。
-  - 初判：夹具用 `Command::new("…/plugin-echo.py")` 直接 exec，靠 shebang 在 Unix 生效；Windows 不认
-    shebang ⇒ 需按平台选解释器（`python.exe <fixture>.py` 或 `py -3`），或提供 `.cmd`/交叉编译产物。
-    属测试夹具的 Windows 可移植性缺口（与 ADR 0067 插件协议本身无关）。
-  - 说明：该二进制此前从未被执行到（cargo test 在首个失败测试二进制处停止），属**既有**缺陷。
-  - 验收：windows-latest 该 11 例全绿（7 个 spawn 用例不再依赖 shebang）。
+  - **根因（已修）**：`PluginTransport::spawn` 把 `command` 直接交给 `CreateProcess`——Unix 由内核按
+    `#!` 起解释器，Windows 只认 PE ⇒ 脚本插件在该平台恒不可加载（不是测试夹具独有：Python/Node
+    正是本协议最可能的第一形态）。
+  - 修复（ADR 0120，Unix 行为零变化）：`resolve_script_command` 在 Windows 读首行 `#!` 取解释器
+    （`env` 形态取 env 之后的名字、绝对路径取文件名、保留解释器旗标），按 `PATH` 解析后以
+    「解释器 脚本 …参数」启动；无 shebang/解析不出 ⇒ 回落直接启动。解析是平台无关纯函数
+    `parse_shebang_launcher`，7 条值级单测冻结；spawn 失败文案在「脚本 ≠ 程序」时同时给出解释器。
+  - 二次暴露（同文件第 11 例）：`t3_plugin_child_env_is_exactly_the_allowlist` 修好后仍红——子进程
+    18 项 vs 期望 9 项，差的正是 `Path`/`ComSpec`/`SystemRoot`/`SystemDrive`/`windir`/`ProgramData`/
+    `ProgramFiles`/`ProgramFiles(x86)`/`ProgramW6432`。根因是**断言口径**：Windows 变量名大小写不敏感，
+    父进程按系统原始拼写（`Path`、`windir`），宿主按 `ENV_ALLOWLIST` 全大写下发 ⇒ 大小写敏感的集合
+    比较把「透传正确」误判成未透传。修法：断言按平台归一键名（Windows `to_ascii_uppercase`，POSIX 原样），
+    隔离面断言（白名单外多一个即 fail / 哨兵绝不出现）原封不动。
+  - 顺带清理（同批阻塞）：`7055b9b8` 一次 `git add -A` 把本地 `venv/`（1107 文件 / 379448 行）带进
+    main，`venv/.../certifi/cacert.pem` 命中 `Blocked Sensitive File` ⇒ 前端门禁
+    `tests/check-secrets.spec.ts` 红、Rust 测试步骤被 skip。已 `git rm -r --cached venv` +
+    `.gitignore` 增 `venv/`/`.venv/`（commit `278098b1`，本地文件保留）。
+  - 验收：Windows `plugin_host_contract` **11 passed / 0 failed**（验证分支 CI run 42972703046，
+    基础 commit 278098b1）；Linux `cargo check -D warnings` Exit 0、7 条 shebang 单测 Exit 0、
+    `plugin_host_contract` 11 passed Exit 0、`npx vitest run tests/check-secrets.spec.ts` 52 passed Exit 0。
+
+- [ ] `B050` - P1: Windows CI `session_event_carriers::memory_snapshot_replaces_but_evidence_appends` 折叠日志失败（B045 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/session_event_carriers.rs:79`、`src/agent/session/fold.rs`
+  - 现象（run 42972703046，windows-latest）：该二进制 5 passed / 1 failed，失败断言为
+    `fold `pa_adr0102`: session log not found for `pa_adr0102`: no `current` session log header in the log root`。
+  - 初判：`Fixture::folded` 依赖日志根里的 `current` 头行（ADR 0102 折叠入口）；该二进制此前从未被执行到
+    （cargo test 首错即停），属**既有** Windows 缺陷；待定是路径/大小写/`current` 指针写入时序哪一段。
+  - 验收：windows-latest 该 6 例全绿。
 - [x] `B047` - P1: TUI 启动装载仍 4.3s：同一份 trace 被双读 440MB，`turn_events` 自愈每轮白跑
   - 路径：`crates/pony-agent-core/src/agent/session/sqlite_session_commit.rs`（`fill_index_only_rows_from_index_projection`、
     `attach_index_trace_projections_with_deadline`）、`crates/pony-agent-core/src/agent/sqlite_session.rs`（`load_store` /
