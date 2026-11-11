@@ -74,8 +74,32 @@ impl Fixture {
         SessionStore::with_backend(Box::new(self.backend(app)))
     }
 
-    fn folded(&self, app: &Path, session_id: &str) -> SessionState {
-        read_session_state(&SessionLogStore::new(self.log_root(app)), session_id)
+    /// 折叠会话日志（磁盘真源 → `SessionState`）。
+    ///
+    /// `release` 必须是「让本进程不再持有该会话日志写者」的动作：Windows 的 `LockFileEx` 是
+    /// **强制**锁——写者句柄持锁期间，同进程另一个句柄读不了该文件，`list_sessions()` 会把这个
+    /// 目录**静默跳过**，折叠于是报 `no \`current\` session log header in the log root`（B050，
+    /// 与 B044 同源；Unix `flock` 是劝告锁，读得到，故只在 Windows 暴露）。无活写者传 `|| {}`。
+    ///
+    /// 放锁后的探测（自己抢一次独占锁）让这条不变式在 Linux 上也可验：探不到锁 ⇒ 折叠在 Windows
+    /// 必然失败，不必等 CI 才发现。
+    fn folded(&self, release: impl FnOnce(), app: &Path, session_id: &str) -> SessionState {
+        release();
+        let store = SessionLogStore::new(self.log_root(app));
+        if let Some(path) = store.find_log_path(session_id) {
+            let probe = std::fs::OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .unwrap_or_else(|error| panic!("打开会话日志 `{}` 失败：{error}", path.display()));
+            probe.try_lock().unwrap_or_else(|error| {
+                panic!(
+                    "会话日志仍被写者独占锁住（Windows `LockFileEx` 为强制锁 ⇒ 折叠必报 \"no current header\"）：`{}`：{error:?}",
+                    path.display()
+                )
+            });
+            let _ = probe.unlock();
+        }
+        read_session_state(&store, session_id)
             .unwrap_or_else(|error| panic!("fold `{session_id}`: {error}"))
             .state
     }
@@ -250,7 +274,7 @@ fn memory_snapshot_replaces_but_evidence_appends() {
     }]);
     assert_eq!(second, PersistCommandOutcome::Succeeded, "第二批必须成功");
 
-    let folded = fixture.folded(&app, SESSION_ID);
+    let folded = fixture.folded(|| backend.release_log_writers_for_test(), &app, SESSION_ID);
     let contents: Vec<&str> = folded
         .long_term_memory_entries
         .iter()
@@ -309,7 +333,8 @@ fn memory_and_evidence_round_trip_through_restart() {
             PersistCommandOutcome::Succeeded
         );
     }
-    let source = fixture.folded(&app, SESSION_ID);
+    // 上一 `backend` 已在作用域结束时 drop（句柄关闭即放锁），故无需额外释放。
+    let source = fixture.folded(|| {}, &app, SESSION_ID);
 
     // 重启：重新打开库并读日志（命令流重放）。
     let reloaded = fixture.backend(&app);
@@ -553,7 +578,7 @@ fn migration_now_reproduces_transcript_and_memory() {
         report.mismatched
     );
 
-    let folded = fixture.folded(&app, SESSION_ID);
+    let folded = fixture.folded(|| backend.release_log_writers_for_test(), &app, SESSION_ID);
     let issues: Vec<String> = pony_agent_core::agent::session::session_parity_issues(&source, &folded)
         .into_iter()
         .filter(|issue| {
