@@ -142,13 +142,21 @@
   - 修复：`Fixture::folded` 增 `release` 参数（放锁 + 探测），两处调用按持有关系传释放动作。
   - 验收：Linux 8 passed；Windows 侧由后续 run 覆盖。
 
-- [ ] `B055` - P0（过程）：Windows 侧「首次全量执行」扫尾——`cargo test` 首错即停掩盖了整批平台缺口
-  - 现象：B043→B054 十连红全部来自同一条因果：CI 测试步骤在**第一个失败的测试二进制**处停止，
-    于是 Windows 上从未执行过的二进制（`p*` / `session_*` / `storage_*` / `tui_*` / `wave*`）逐个暴露
-    平台缺口，每次 CI（~40min）只前进一个二进制。
-  - 已做：临时验证分支（PR #13）给 core 测试步骤加 `--no-fail-fast`，一次性取「剩余失败清单」，再批量修复。
-  - 待做：清单到手后按类批修（强制文件锁族 / 分隔符与 8.3 路径族 / 渲染基线族）；
-    并把「Windows 全量首跑」纳入 ADR/流程，避免同类问题再次以十连红形式出现。
+- [ ] `B055` - P0（过程+批次）：Windows 全量首跑扫尾——`--no-fail-fast` 清单还有 **11 个二进制 / ~23 例**
+  - 现象：CI 测试步骤在**第一个失败的测试二进制**处停止，Windows 上从未执行过的二进制逐个暴露平台缺口；
+    B043→B054 已清掉 8 个（假 provider 请求体、强制文件锁族、8.3 短路径、分隔符断言、插件脚本 spawn、env 键大小写）。
+    临时验证分支（PR #13，`--no-fail-fast` + 跳过前端步骤）一次性取到剩余清单（run 42988189901）：
+  - **TUI 渲染/终端族（7 个二进制，9 例；每个二进制 110–139 例通过，属长尾）**：
+    `tui_acceptance`(1) `tui_dialog_wave39`(2) `tui_overlay_cancel_acceptance`(2)
+    `tui_persistence_truthfulness`(1) `tui_render_layout`(2) `tui_signal_reentry`(1)
+    `tui_startup_input_guard`(2，0 passed)——初判 ConHost/VT/PTY 能力探测与快照渲染在 Windows 上的差异。
+  - **指标/可观测真值族**：`wave54_metric_truth`(4) `wave49_observability_gaps`(2)、另见
+    `wave30_hook_commands_test`(5) `wave48_otel_export_diagnostics`(2)——初判 console/OTLP 回环导出与
+    hook 子进程（`sh`/`cmd` 形态）在 Windows 的差异。
+  - **语义族**：`wave36_adversarial_classification`(5) `wave61_team_activation`(1)。
+  - 建议做法：①把这 11 个二进制按族拆成 3 张子任务并行；②每族用验证分支 `--no-fail-fast`
+    单跑该二进制收敛（一次拿全部失败用例，避免一例一轮 CI）；③修完把「Windows 全量首跑」写进 ADR/流程，
+    让 CI 的 test 步骤常开 `--no-fail-fast`（否则同类问题仍会以十连红形式出现）。
 - [x] `B047` - P1: TUI 启动装载仍 4.3s：同一份 trace 被双读 440MB，`turn_events` 自愈每轮白跑
   - 路径：`crates/pony-agent-core/src/agent/session/sqlite_session_commit.rs`（`fill_index_only_rows_from_index_projection`、
     `attach_index_trace_projections_with_deadline`）、`crates/pony-agent-core/src/agent/sqlite_session.rs`（`load_store` /
