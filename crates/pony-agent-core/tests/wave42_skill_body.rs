@@ -123,6 +123,8 @@ fn forged_skill(path: &Path) -> HotloadedSkill {
         },
         scope: AgentScope::Global,
         rank: 50,
+        disable_model_invocation: false,
+        model_invocable: true,
     }
 }
 
@@ -487,6 +489,8 @@ fn c1_oversize_skill_is_skipped_without_full_read() {
         fingerprint,
         scope: AgentScope::Project,
         rank: 200,
+        disable_model_invocation: false,
+        model_invocable: true,
     };
     // 说明（L3 r3 设计演进）：执行器在 r3 收敛为「无显式 workspace root 时只放行全局根」，
     // 项目层技能正文必须经 `load_skill_body_for_workspace(.., Some(root))` 加载。
