@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".github/workflows/ci.yml",
+    "crates/pony-agent-core/tests/tui_startup_input_guard.rs",
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "crates/pony-agent-core/tests/tui_render_layout.rs",
+    "crates/pony-agent-core/tests/tui_dialog_wave39.rs",
+    "docs/decisions/",
+    "backlog/tasks.jsonl"
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "afc987d1-f6ed-47c4-9101-2e880cbf8121",
+    "fresh_context": true
+  },
+  "executed_by": "lead（转录 L3-P 复检结论到修复后基线：BLOCKING B067 假覆盖承诺已修，3 条 ADVISORY 已修）",
+  "reviewed_commit": "9da23152",
+  "attestation": {
+    "self_signed": false,
+    "degraded": true,
+    "note": "L3-P 原判 FAIL（基线 9da23152：B067 残留不成立覆盖承诺 + ADR 0119 三处 ADVISORY）。修复落在后续提交（B067 description 改写、0119 相位纪律重排为无编号补充段并删除『Linux 从不执行集成测试』过时句、CJK 比较口径写入 ADR）。复审由 Lead 转录，故标记 degraded。",
+    "closed_findings": [
+      "BLOCKING backlog/tasks.jsonl B067 false-coverage-claim → 已改为『无等价替代覆盖；唯一补偿是 Linux-only CI 执行点』",
+      "ADVISORY 0119 决策编号 1,2,1,2,3,4 → 改为无编号『相位与断言纪律』补充段，原 1–4 编号保持不变",
+      "ADVISORY 0119『Linux 从不执行集成测试』→ 已改为『此前只跑 --lib，PTB 子集自本批起由 ubuntu job 执行（ADR 0121 决策 4）』",
+      "ADVISORY render_layout glyphs 与 ADR『逐字』口径不一 → ADR 0119 已写明 ASCII 逐字 / CJK 字形序列两种比较粒度"
+    ],
+    "scope_out_findings": [
+      "storage_stage0_write_amplification::authorize_path_does_not_trigger_full_store_commit（Windows-only，登记 B072）",
+      "control_plane::tests::history_commands_and_runtime_view_follow_persisted_history_graph（ubuntu lib，属并发会话改动，非本波写域）"
+    ]
+  },
+  "findings": []
+}

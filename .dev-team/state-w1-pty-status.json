@@ -18,7 +18,7 @@
         "crates/pony-agent-core/tests/tui_startup_input_guard.rs",
         "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs"
       ],
-      "status": "in_progress"
+      "status": "completed"
     },
     {
       "id": "task-3",
@@ -27,7 +27,7 @@
         "crates/pony-agent-core/tests/tui_render_layout.rs",
         "docs/decisions/"
       ],
-      "status": "in_progress"
+      "status": "completed"
     },
     {
       "id": "task-4",
@@ -46,5 +46,30 @@
   "red_phase": "RED DEGRADED: STATIC-ONLY（PTY/状态行红相只在 windows-latest 可复现；本机以「相位不确定性 + 平台依赖」静态证据 + CI 定向验证替代）",
   "evidence": {
     "baseline": ".dev-team/regression-baseline-w1.json"
-  }
+  },
+  "delivered_commit": "9da23152",
+  "windows_acceptance": {
+    "run": "43003138264",
+    "branch": "w1-accept（verify-only）",
+    "verify_job": "failure（仅 scope 外：storage_stage0_write_amplification）",
+    "target_binaries": {
+      "tui_startup_input_guard": "0 passed / 2 ignored（gating 生效）",
+      "tui_overlay_cancel_acceptance": "119 passed / 2 ignored",
+      "tui_render_layout": "115 passed / 0 failed",
+      "tui_dialog_wave39": "118 passed / 0 failed",
+      "tui_acceptance": "140 passed / 0 failed"
+    },
+    "note": "全量 --no-fail-fast 下仅剩 1 个 scope 外失败（已登记 B072）"
+  },
+  "review": {
+    "plan": [
+      "review-plan-w1-pty-status-a.json",
+      "review-plan-w1-pty-status-b.json"
+    ],
+    "recheck_a": "80e24fde（3/4 闭合，剩 1 ADVISORY 已于 18:43 修复）",
+    "recheck_b": "2e34a614（PASS）",
+    "join": "review-join-w1-pty-status.json",
+    "join_reviewer": "afc987d1-f6ed-47c4-9101-2e880cbf8121"
+  },
+  "updated_at": "2026-11-11T18:47:00+08:00"
 }

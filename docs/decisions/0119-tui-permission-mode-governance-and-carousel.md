@@ -26,13 +26,19 @@ Status: implemented
 
 ## 决策
 
-1. **状态行相位是显式状态，不是墙钟巧合**：`status_carousel_phase(state)` 以
-   `state.status_carousel_started_at: Option<Instant>` 为唯一相位源（`None` 时退化用墙钟毫秒取模）。
-   **所有断言必须钉住该字段**（例如 `Some(Instant::now() - 偏移)`，周期常量取
-   `STATUS_CAROUSEL_PERIOD_MS / STATUS_CAROUSEL_MODEL_HOLD_MS`），否则相位随机、断言必偶发红
-   （Linux 从不执行集成测试，该不确定性只在 windows-latest 全量首跑暴露）。
-2. **右槽两相位逐字断言**：模型相位 = `model`（有思考强度时 `model · <档位>`）；权限相位 =
-   `权限 · 只读 / 权限 · 工作区 / 权限 · 完全访问`（对应 `PermissionMode` 三态）。
+**相位与断言纪律（2026-11-11 补充，随 Windows 全量首跑收敛）**：
+
+- **相位是显式状态，不是墙钟巧合**：`status_carousel_phase(state)` 以
+  `state.status_carousel_started_at: Option<Instant>` 为唯一相位源（`None` 时退化用墙钟毫秒取模）。
+  断言必须钉住该字段（`Some(Instant::now() - 偏移)`，偏移/周期取
+  `STATUS_CAROUSEL_PERIOD_MS / STATUS_CAROUSEL_MODEL_HOLD_MS`），否则相位随机、断言偶发红。
+- **两相位断言口径**：模型相位 = `model`（有思考强度时 `model · <档位>`）；权限相位 =
+  `权限 · 只读 / 权限 · 工作区 / 权限 · 完全访问`（对应 `PermissionMode` 三态）。
+  比较粒度分两种：**ASCII 期望按整行 `trim` 后逐字相等**（空白差异也会红）；**CJK 期望按字形序列
+  相等**（宽字符右侧填充格为空格，故有意不区分 `权限·工作区` 与 `权限 · 工作区` 这类排版差异，
+  只捕获字形/措辞与分隔符存在性变化）——两种口径都在断言里写明，不混用。
+- **执行面**：Linux 侧此前只跑 `--lib` 单测（集成测试只在 windows job），故相位不确定性与平台差异
+  只在 windows-latest 暴露；PTY 子集自本批起由 ubuntu job 的独立步骤执行（见 ADR 0121 决策 4）。
 
 1. **权限契约统一**：直接复用 `pony_agent_core::agent::headless::PermissionMode`，通过 `TurnInput.tool_authorization_mode` 透传至执行内核。
 2. **偏好持久化**：`TuiPreferences` 扩展 `default_permission_mode`（默认 `WorkspaceWrite`），支持向前兼容反序列化。
