@@ -242,9 +242,16 @@ fn append_turn_writes_header_and_contiguous_command_events() {
     // cwd 分组走既有路径解析（进程当前目录 → `--<normalized-cwd>--`）。
     let expected_cwd = normalize_cwd_segment(&current_log_cwd());
     assert_eq!(header["cwd"], serde_json::json!(current_log_cwd()));
-    assert!(
-        path.to_string_lossy()
-            .contains(&format!("/{expected_cwd}/")),
+    // 用**路径组件**判分组目录名，而不是拿 `/` 拼字符串去 `contains`：Windows 分隔符是 `\\`，
+    // 旧写法「/…/」在 windows-latest 上恒不命中（B053：把「分组正确」误判成红）。
+    let group_dir_name = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(|group| group.file_name())
+        .map(|name| name.to_string_lossy().into_owned());
+    assert_eq!(
+        group_dir_name.as_deref(),
+        Some(expected_cwd.as_str()),
         "日志路径必须落在 --cwd-- 分组目录下：{}",
         path.display()
     );
