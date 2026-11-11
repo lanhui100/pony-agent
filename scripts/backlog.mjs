@@ -191,7 +191,7 @@ export function lintAll(paths) {
     for (const row of [...active, ...archived]) {
       const n = Number.parseInt(String(row?.id ?? '').replace(/^B/, ''), 10);
       if (Number.isFinite(n) && n >= nextId) {
-        problems.push(`ID ${row.id} 越过高水位（下一个候选 B${nextId}），疑似手工改号`);
+        problems.push(`ID ${row.id} 越过高水位（下一个候选 B${String(nextId).padStart(3, '0')}），疑似手工改号`);
       }
     }
   }
@@ -310,7 +310,7 @@ export function doctor(paths) {
   }, 0);
   const nextId = readHighWater(paths);
   if (nextId === 0 && maxSeen > 0) report.issues.push('高水位文件缺失（.next-id）');
-  if (nextId > 0 && nextId <= maxSeen) report.issues.push(`高水位 B${nextId}（下一候选）未越过最大编号 B${maxSeen}`);
+  if (nextId > 0 && nextId <= maxSeen) report.issues.push(`高水位 B${String(nextId).padStart(3, '0')}（下一候选）未越过最大编号 B${String(maxSeen).padStart(3, '0')}`);
   const lint = lintAll(paths);
   report.issues.push(...lint.problems);
   report.ok = report.issues.length === 0;
