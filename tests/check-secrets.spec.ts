@@ -718,4 +718,56 @@ MIIEowIBAAKCAQEA0Y1+xyz...
       expect(offenders).toEqual([]);
     });
   });
+
+  // 决策记录 `.agents/notes/implemented/process/2026-11-12-secret-gate-path-keys.md`：
+  // 摘要收据的「文件路径 → sha256」映射。路径段撞凭证词干（`session` / `key`）
+  // 不等于「键名声明此处存放凭证」；修复前 `.dev-team/verify-*.json` 的 files_sha256 恒报
+  // 2 条误报，使 `secrets:check:all` 与全仓零违规用例恒红（B082 现场）。
+  describe("路径键不是凭证键（secret-gate-path-keys）", () => {
+    const hex64 = (seed: string): string => seed.repeat(4);
+    const LOW = hex64("0123456789abcdef");
+    const show = (content: string): string => redactHexes(content, [LOW]);
+
+    /** 必须 0 命中：路径键下的 sha256 摘要值。 */
+    it("P1–P4 必须 0 命中：路径键的值槽（路径段含 session / key 等凭证词干）", () => {
+      const cases: Array<[string, string]> = [
+        ["P1 session 目录", `  "crates/pony-agent-core/src/agent/session/store.rs": "${LOW}",`],
+        ["P2 文件名含 session", `  "crates/pony-agent-core/src/agent/sqlite_session.rs": "${LOW}",`],
+        ["P3 无凭证词的普通路径", `  "scripts/backlog.mjs": "${LOW}",`],
+        ["P4 Windows 反斜杠路径", `  "crates\\\\agent\\\\session\\\\store.rs": "${LOW}",`],
+      ];
+      const offenders = cases
+        .filter(([, content]) => scanTextContent(content, "").length !== 0)
+        .map(([label, content]) => `${label} :: ${show(content)}`);
+      expect(offenders).toEqual([]);
+    });
+
+    /** 防过度豁免：路径判据必须同时要求「分隔符 + 末段扩展名」，且不覆盖非路径凭证键。 */
+    it("P5–P8 必须 ≥1 命中：仅含 `/` 的键与非路径凭证键不得被路径豁免击穿", () => {
+      const cases: Array<[string, string]> = [
+        ["P5 无扩展名的路径式键", `  "a/client_token": "${LOW}",`],
+        ["P6 URL 形态键", `  "https://host/v1/token": "${LOW}",`],
+        ["P7 裸凭证键", `  "client_token": "${LOW}",`],
+        ["P8 凭证键 session", `  "session": "${LOW}",`],
+      ];
+      for (const [label, content] of cases) {
+        expectCaughtSecret(scanTextContent(content, ""), [LOW], `${label} :: ${show(content)}`);
+      }
+    });
+
+    /** 端到端：已入仓的 L2 验收收据（files_sha256 形态）必须 0 违规。 */
+    it("P9 端到端：.dev-team 摘要收据 0 违规（修复前 2 条误报）", () => {
+      const root = path.resolve(process.cwd(), ".dev-team");
+      if (!fs.existsSync(root)) return;
+      const offenders: string[] = [];
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json")) continue;
+        const full = path.join(root, entry.name);
+        if (fs.statSync(full).size > 1024 * 1024) continue;
+        const found = scanTextContent(fs.readFileSync(full, "utf8"), full);
+        if (found.length > 0) offenders.push(`${entry.name}:${found[0].line}`);
+      }
+      expect(offenders).toEqual([]);
+    });
+  });
 });

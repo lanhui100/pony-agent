@@ -31,6 +31,15 @@ const BENIGN_RE = /(sha-?256|sha-?512|checksum|integrity|digest|computedhash|fin
 // 采用正向「键名不含凭证词干」而非反向「键名不匹配 CRED_WORD_RE」：前者能覆盖 `apikey` /
 // `secretkey` / `passphrase` 等连写形态（wave18 §4.5 B3 登记的窄口）。
 const CRED_KEY_STEM_RE = /token|secret|pass(?:word|wd|phrase)|pwd|key|cred|auth|bearer|cookie|session|signature/i;
+// 决策记录：`.agents/notes/implemented/process/2026-11-12-secret-gate-path-keys.md`。
+// **路径键不是凭证键**。摘要收据的常见形态是「文件路径 → sha256」映射
+// （`.dev-team/verify-*.json` 的 `files_sha256`），键形如
+// `crates/pony-agent-core/src/agent/session/store.rs`——路径段里出现 session/key/token
+// 纯属目录名巧合，不构成「键名声明此处存放凭证」的语义。故含路径分隔符的键视为
+// 结构化路径槽，直接进入豁免 5；凭证词干黑名单只作用于**非路径**键。
+// 判据刻意收窄：必须同时含路径分隔符**且**末段带扩展名（`a/b/store.rs`、`scripts/x.mjs`）。
+// 单纯含 `/` 的键（`v1/token`、`https://host/token`、`session/store`）仍按凭证键处理，不放行。
+const PATH_LIKE_KEY_RE = /[\\/][^\\/]*\.[A-Za-z0-9]+$/;
 const JSON_MEMBER_RE = /"([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*"/g;
 const SUMPREFIX_RE = new RegExp(`^\\s*(${HEX64})\\s+\\S`);
 const CELL_RE = new RegExp(`\\|\\s*(${HEX64})\\s*\\|`);
@@ -62,6 +71,17 @@ function hexLineFacts(line) {
       for (const m of line.matchAll(JSON_MEMBER_RE)) {
         if (CRED_KEY_STEM_RE.test(m[1])) continue;
         slots.set(m.index + m[0].length, m[1]);
+      }
+      return slots;
+    })(),
+    // 豁免 6（见上引决策记录）：路径键的值槽。路径段撞词（`.../agent/session/store.rs` 含
+    // `session`）会先命中 credIdx 守卫，故必须在凭证词守卫**之前**单独放行，不能并入
+    // digestSlots——否则路径键仍被判违规，这正是 B082 的现场。
+    pathKeySlots: (() => {
+      const slots = new Set();
+      for (const m of line.matchAll(JSON_MEMBER_RE)) {
+        if (!PATH_LIKE_KEY_RE.test(m[1])) continue;
+        slots.add(m.index + m[0].length);
       }
       return slots;
     })(),
@@ -155,6 +175,9 @@ export const SECRET_RULES = [
     isSafe: (match, context = "", matchIndex = -1, lineNumber = -1) => {
       const { facts } = ctxLineFacts(context, lineNumber); // R3'：每行一次，之后 O(1)
       const m = match.toLowerCase();
+      // 豁免 6（见上引决策记录）：路径键的值槽。必须先于 credIdx 守卫——路径段撞词会让 credIdx
+      // 落在 hex 之前从而误判违规（B082 现场：`.../agent/session/store.rs` 命中 `session`）。
+      if (facts.pathKeySlots.has(matchIndex)) return true;
       // C4-R1'（位置敏感）：仅当凭证语义词位于**该 hex 之前**、且其前**无**良性摘要关键词时判违规。
       // 目的：摘要收据形态（hex 在前 / 良性关键词在 hex 之前）不得因文件名、字段名或说明文字含
       // secret/token/credential 等词而误报（消除 r3 新误报回归）。
