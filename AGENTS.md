@@ -18,7 +18,7 @@
 - **工程复用技能库**：[`.agents/skills/`](.agents/skills/)
 - **历史归档档案（已冻结退役，只读）**：
   - OpenSpec 规范归档：[`openspec/`](openspec/)（历史规格与设计草案，见 [`RETIRED.md`](openspec/RETIRED.md)）
-  - 历史决策归档：[`docs/archive/decisions/`](docs/archive/decisions/)（早期 0001~0123 篇 ADR，见 [`RETIRED.md`](docs/archive/decisions/RETIRED.md)）
+  - 历史决策归档：[`.agents/notes/archived/`](.agents/notes/archived/)（早期 0001~0123 篇 ADR 均已全量重构迁移并封印，核心架构见 `.agents/notes/implemented/architecture/`）
 
 ---
 

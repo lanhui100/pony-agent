@@ -17,7 +17,7 @@
     "typecheck": "vue-tsc --noEmit",
     "contract:check": "node scripts/check-ts-contract.mjs",
     "contract:cli": "node scripts/check-cli-release-contract.mjs",
-    "adr:check": "bash .agents/skills/write-adr/verify-note.sh",
+    "adr:check": "bash .agents/skills/write-adr/verify-note.sh && bash .meta/gates/archive-verify.sh check",
     "decisions:check": "npm run adr:check",
     "audit:selftest": "bash scripts/audit/selftest.sh",
     "audit:verdict": "bash scripts/audit/verdict.sh",

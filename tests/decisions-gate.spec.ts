@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -51,10 +51,15 @@ function runCli(args: string[]) {
 }
 
 describe("决策记录门禁 check-decisions", () => {
-  it("真实仓：除编号唯一性外无其它违规（状态/目录/索引三项闭合）", () => {
-    const verdict = checkDecisions("docs/archive/decisions");
-    expect(verdict.checked).toBeGreaterThan(100);
-    expect(verdict.violations.filter((v) => !v.startsWith("R6"))).toEqual([]);
+  it("真实仓：docs/archive/decisions 已退役清退，由 .agents/notes 承接全量 ADR", () => {
+    // 历史 0001~0123 决策已全部规范化迁移至 .agents/notes/archived 与 implemented 并封印，历史目录彻底清退
+    expect(existsSync("docs/archive/decisions")).toBe(false);
+  });
+
+  it("真实仓：.agents/notes/archived 封印完整性契约（一改即红）", () => {
+    // 封印校验必须通过
+    const verifyRes = execFileSync("bash", [".meta/gates/archive-verify.sh", "check"], { encoding: "utf-8", stdio: "pipe" });
+    expect(verifyRes).toContain("归档封印：通过");
   });
 
   it("R1：缺 Status 行", () => {
