@@ -121,6 +121,51 @@ pub fn interrupted_turn_checkpoint_text(
     Some(checkpoint)
 }
 
+/// ADR 0123 补充（A1）：失败轮检查点文本的唯一投影纯函数。
+///
+/// 与 [`interrupted_turn_checkpoint_text`] 同形，只在**失败原因非空**时于既有检查点文本
+/// 末尾追加一行 `失败原因：<trim 后的 reason>`：
+/// - `failure_reason` 去空白后为空 ⇒ 逐字返回 [`interrupted_turn_checkpoint_text`] 的结果
+///   （既有调用点行为不变，格式禁止改写）；
+/// - 既有文本为 `None`（无正文也无工具步骤）而失败原因非空 ⇒
+///   `[中断轮次检查点]\n失败原因：<reason>`，前缀契约不变。
+///
+/// **唯一真源**：失败轮（`persist_failed_turn_context`）一律经本函数产检查点文本——
+/// 禁止因「本轮存在工具步骤」而丢弃 `error`（否则失败原因在有步骤的轮次里永久丢失）。
+pub fn failed_turn_checkpoint_text(
+    prior_assistant_text: &str,
+    tool_activities: &[String],
+    failure_reason: &str,
+) -> Option<String> {
+    let checkpoint = interrupted_turn_checkpoint_text(prior_assistant_text, tool_activities);
+    let reason = failure_reason.trim();
+    if reason.is_empty() {
+        return checkpoint;
+    }
+    Some(match checkpoint {
+        Some(text) => format!("{text}\n失败原因：{reason}"),
+        None => format!("[中断轮次检查点]\n失败原因：{reason}"),
+    })
+}
+
+/// ADR 0123 补充（D1）：「本轮被中断」类注记文本的唯一判定。
+///
+/// 命中任一前缀即 `true`：
+/// - `[中断轮次检查点`——中断轮的合成检查点（A1 与既有中断投影的唯一前缀）；
+/// - `（本轮上游调用中断`——上游中断时工具往返自愈补的注记；
+/// - `（本轮由用户终止`——用户终止注记。
+///
+/// 消费方是 `has_legacy_reasoning_gap` 的豁免判定：中断轮 transcript 由这些注记承载
+/// 「本轮未产出最终回复」的事实，**不得**被 reasoning 缺口清洗整段清空。
+pub fn is_interrupt_placeholder_text(text: &str) -> bool {
+    const INTERRUPT_PLACEHOLDER_PHRASES: [&str; 3] = [
+        "[中断轮次检查点",
+        "（本轮上游调用中断",
+        "（本轮由用户终止",
+    ];
+    contains_any_phrase(text, &INTERRUPT_PLACEHOLDER_PHRASES)
+}
+
 pub struct SessionStore {
     pub(super) sessions: SessionMap,
     pub(super) attachment_assets: AttachmentAssetMap,
@@ -5017,11 +5062,12 @@ pub(crate) fn sanitize_provider_native_transcript(session: &mut SessionState) ->
 }
 
 pub(crate) fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
-    // 只有当 transcript 中至少有一条【非中断检查点】的消息带有非空的 reasoning_content 时，
+    // 只有当 transcript 中至少有一条【非中断注记】的消息带有非空的 reasoning_content 时，
     // 该 transcript 才属于真正的 reasoning 模型上下文；纯工具模型直接豁免！
+    // D1：判据统一走 `is_interrupt_placeholder_text`（检查点 / 上游中断 / 用户终止三类注记）。
     let is_reasoning_transcript = transcript.iter().any(|msg| {
         let content_str = msg.get("content").and_then(Value::as_str).unwrap_or("");
-        if content_str.contains("[中断轮次检查点") {
+        if is_interrupt_placeholder_text(content_str) {
             return false;
         }
         msg.get("reasoning_content")
@@ -5044,7 +5090,7 @@ pub(crate) fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
             }
             Some("assistant") => {
                 let content_str = message.get("content").and_then(Value::as_str).unwrap_or("");
-                if content_str.contains("[中断轮次检查点") {
+                if is_interrupt_placeholder_text(content_str) {
                     awaiting_tool_turn_reasoning = false;
                     continue;
                 }

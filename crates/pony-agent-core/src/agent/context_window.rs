@@ -82,6 +82,11 @@ pub(super) fn truncate_native_messages(
                         role == Some("user") || role == Some("assistant")
                     })
                     .collect();
+                // C1/C2：骨架只保留 user/assistant，会留下带 tool_calls 却没有 tool 结果的
+                // 断裂往返。复用唯一配对状态机闭合它（丢弃孤儿 tool、为未闭合的
+                // assistant.tool_calls 补 synthetic tool 结果），禁止另建补齐逻辑。
+                let skeleton = crate::agent::tool_pruner::repair_and_filter_tool_roundtrips(&skeleton).0;
+                // repair 可能新增消息，估算变大：必须按修复后的列表重新判定预算。
                 if !skeleton.is_empty()
                     && estimate_native_turn_tokens(&skeleton) <= remaining_budget
                 {

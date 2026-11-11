@@ -102,8 +102,9 @@ pub use startup_meta::{
     NO_RESUMABLE_SESSION_MESSAGE,
 };
 pub use store::{
-    build_missing_run_control_audit_summary, ensure_history_graph, interrupted_turn_checkpoint_text,
-    is_host_continuation_prompt, session_is_continuation_fragment, PersistedStore, SessionStore,
+    build_missing_run_control_audit_summary, ensure_history_graph, failed_turn_checkpoint_text,
+    interrupted_turn_checkpoint_text, is_interrupt_placeholder_text, is_host_continuation_prompt,
+    session_is_continuation_fragment, PersistedStore, SessionStore,
     APPROVAL_APPROVED_CONTINUATION_PROMPT, APPROVAL_DENIED_CONTINUATION_PROMPT,
     ASK_RESUME_CONTINUATION_PROMPT,
 };

@@ -708,9 +708,13 @@ impl AgentRuntime {
                 }
             })
             .collect();
-        let assistant_message = crate::agent::session::interrupted_turn_checkpoint_text(
+        // A2（ADR 0123 补充）：失败轮一律经 A1 的唯一投影产检查点文本——**不得**因为
+        // 本轮存在工具步骤就丢弃 `error`：`failed_turn_checkpoint_text` 在既有检查点
+        // 文本后追加「失败原因：<reason>」，无步骤/无正文时同样保留原因。
+        let assistant_message = crate::agent::session::failed_turn_checkpoint_text(
             partial_text.unwrap_or_default(),
             &checkpoint_tools,
+            error,
         )
         .unwrap_or_else(|| error.to_string());
         self.persist_turn_outcome(

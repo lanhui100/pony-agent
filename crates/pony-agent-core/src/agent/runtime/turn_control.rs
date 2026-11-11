@@ -198,6 +198,40 @@ impl AgentRuntime {
         control.is_stop_requested(turn_id)
     }
 
+    /// B1（ADR 0123 补充）幂等闸门：该 turn 是否已有持久化痕迹。
+    ///
+    /// 判据（只读；任一命中即「已持久化」）：
+    /// - `turn_trace_history` 中已有同 `turn_id` 的 trace 行——`record_turn_trace_in_memory`
+    ///   以 `turn_id` 为键 upsert，任何 in-band 终态收口（成功/失败/取消）落盘即留下该行；
+    /// - 历史消息中已有同 `turn_id` 的消息（PA-059 起历史消息携带 `turn_id`）。
+    ///
+    /// C5 宽限监督者只改 checkpoint 并派发事件，**不写**以上任一载体 ⇒ 返回 `false`，
+    /// 调用方（`cancel_stream_turn` 的 claim 失败分支）据此补齐历史而不产生重复。
+    ///
+    /// 先 claim 方对账（turn-c603e22a 实测）：`agent::stop_escalation::escalate_now`
+    /// （`stop_escalation.rs:272-296`，锁内置 `status="cancelled"`）→ 出锁后经
+    /// `TerminalEmitter` 走 `turn_flow::emit_supervisor_cancelled`（`turn_flow.rs:828`）
+    /// 派发终态；该模块**零** `persist` / `append_message` / `turn_trace_history` 写入，
+    /// 故「已终态 + 零持久化」正是本函数返回 `false` 的唯一生产场景。
+    fn turn_outcome_persisted(&self, session_id: Option<&str>, turn_id: &str) -> bool {
+        let session_key = session_id.unwrap_or(crate::agent::session::DEFAULT_SESSION_ID);
+        let store = self.sessions.read().unwrap_or_else(|error| {
+            eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+            error.into_inner()
+        });
+        let Some(session) = store.get_session(session_key) else {
+            return false;
+        };
+        session
+            .turn_trace_history
+            .iter()
+            .any(|trace| trace.turn_id == turn_id)
+            || session
+                .history
+                .iter()
+                .any(|message| message.turn_id.as_deref() == Some(turn_id))
+    }
+
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn cancel_stream_turn<S: TurnEventSink>(
@@ -224,18 +258,8 @@ impl AgentRuntime {
         // 文本检查点退化为非 native provider 的兼容载体。调用点无已闭合往返时传 `None`。
         provider_native_transcript: Option<Vec<Value>>,
     ) {
-        // wave-64 R1（BLOCKING，terminal-once）：C5 宽限监督可能已先行收口并派发了一条
-        // `turn:cancelled`；此时 in-band 循环再命中停止位必须**静默退出**，禁止第二条终态、
-        // 禁止用 in-band 结果覆盖已落盘的终态 checkpoint/trace。
-        if !claim_terminal_status(control, turn_id, "cancelled") {
-            log_terminal_dispatch_suppressed(turn_id, "cancelled", "cancel_stream_turn");
-            return;
-        }
-        let error = "stopped_by_user".to_string();
-        let attachments = self
-            .save_input_attachments_for_session(session_id, input_images)
-            .unwrap_or_default();
         // wave-tui-session-resilience C5：把本轮已产生的工具活动投影为检查点步骤。
+        // （B1 的补写分支同样要用它构造检查点文本，故在 claim 之前计算。）
         let checkpoint_tools: Vec<String> = tool_activities
             .iter()
             .map(|activity| {
@@ -246,6 +270,31 @@ impl AgentRuntime {
                 }
             })
             .collect();
+
+        // wave-64 R1（BLOCKING，terminal-once）：C5 宽限监督可能已先行收口并派发了一条
+        // `turn:cancelled`；此时 in-band 循环再命中停止位必须**静默退出**，禁止第二条终态、
+        // 禁止用 in-band 结果覆盖已落盘的终态 checkpoint/trace。
+        //
+        // B1（ADR 0123 补充）：C5 监督者收口**只**写 checkpoint + 派发事件，**不写历史**——
+        // 0 步被取消轮的用户消息会因此从折叠历史与后续上下文中彻底消失（实测
+        // `turn-c603e22a`：有 turn_end=cancelled，无 append_message / 无 trace 行）。
+        // 故 claim 失败时先判该轮是否已有持久化痕迹（`turn_outcome_persisted`）：
+        // 尚无痕迹 ⇒ 本调用方是唯一能补齐历史的一方，仅补历史与 trace（不派发第二条终态、
+        // 不改写终态 checkpoint）；已有痕迹 ⇒ 静默退出。`turn_id` 是幂等键，绝不重复历史。
+        let claimed = claim_terminal_status(control, turn_id, "cancelled");
+        let persist_allowed = if claimed {
+            true
+        } else {
+            log_terminal_dispatch_suppressed(turn_id, "cancelled", "cancel_stream_turn");
+            !self.turn_outcome_persisted(session_id, turn_id)
+        };
+        if !persist_allowed {
+            return;
+        }
+        let error = "stopped_by_user".to_string();
+        let attachments = self
+            .save_input_attachments_for_session(session_id, input_images)
+            .unwrap_or_default();
         let persisted = self.persist_cancelled_turn_outcome(
             session_id,
             user_message,
@@ -256,21 +305,23 @@ impl AgentRuntime {
             checkpoint_tools,
             provider_native_transcript,
         );
-        self.update_execution_checkpoint(
-            control,
-            turn_id,
-            "cancelled",
-            provider_meta,
-            0,
-            None,
-            &trace_steps,
-            &tool_activities,
-            None,
-            None,
-            None,
-            Some("cancelled"),
-            Some(&error),
-        );
+        if claimed {
+            self.update_execution_checkpoint(
+                control,
+                turn_id,
+                "cancelled",
+                provider_meta,
+                0,
+                None,
+                &trace_steps,
+                &tool_activities,
+                None,
+                None,
+                None,
+                Some("cancelled"),
+                Some(&error),
+            );
+        }
         self.persist_turn_trace(
             session_id,
             turn_id,
@@ -295,6 +346,10 @@ impl AgentRuntime {
             Some(persisted.session_summary),
             Some(error.clone()),
         );
+        if !claimed {
+            // 终态事件已由 C5 监督者派发：此处只落持久化，绝不派发第二条终态。
+            return;
+        }
         emit_stream_cancelled(
             sink,
             turn_id.to_string(),

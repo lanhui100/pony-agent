@@ -57,3 +57,19 @@ Status: implemented
 - **负面与权衡**：
   - 相比纯文本回放，发往大模型的 prompt token 数会有适度上升（受 8KB 字符阈值约束）；
   - 仅支持 OpenAI 家族协议，Anthropic 等非 chat completions 协议暂不适用，需维持 FullReplay。
+
+## Supplement（2026-11-12）：中断轮上下文闭合与失败原因留痕
+
+> 触发：真实 TUI 会话 `pa_01a1cb08-f340-7020-83a2-3a9b2d62df29` 的 trace 诊断。
+> 取证点：`turn-e3bdbfa6`（同工具连败闸中断）、`turn-c603e22a`（0 步取消）、`turn-e58723fc`（`openai tool follow-up missing text or tool call` 降级）。
+> 本补充与前文不是同一个会话（前文 Context 引用的 `pa_01a1ca68…` 为另一会话），条款以本节为准。
+
+1. **截断后仍须配对闭合**（前文 Decision 2/3 的边界补齐）：`context_window::truncate_native_messages` 的「预算击穿骨架兜底」只保留 `user`/`assistant`，会留下「assistant 带 `tool_calls` 而无对应 `tool` 结果」的断裂往返。落点：skeleton 构造后复用单一状态机 `tool_pruner::repair_and_filter_tool_roundtrips` 闭合（丢弃孤儿 tool、为未闭合调用补 synthetic tool 结果），并按**修复后**的列表重新做预算判定。
+2. **失败轮检查点必须携带失败原因**：`session::failed_turn_checkpoint_text(prior_text, tool_activities, failure_reason)` 是失败轮检查点文本的唯一投影；`failure_reason` 非空时在既有检查点文本末尾追加「失败原因：<reason>」，为空时与 `interrupted_turn_checkpoint_text` 逐字一致。落点：`runtime/turn_persist.rs::persist_failed_turn_context`。**禁止**因「本轮存在工具步骤」而丢弃 error（否则中断轮在下一轮上下文里只剩步骤清单，模型无法自诊断——这正是本次中断后盲试的根因）。
+3. **中断注记判据唯一化**：`session::is_interrupt_placeholder_text` 统一识别 `[中断轮次检查点`、`（本轮上游调用中断`、`（本轮由用户终止` 三类注记；`has_legacy_reasoning_gap` 的豁免判定全部改走该函数，避免 reasoning 会话的中断轮 transcript 被整段 `clear()` 误杀。
+4. **0 步取消轮的历史补齐**：先 claim 终态的一方是 C5 宽限监督者（`stop_escalation::escalate_now` → `turn_flow::emit_supervisor_cancelled`），它**只写 checkpoint 与派发事件、不写历史**。因此 `runtime/turn_control.rs::cancel_stream_turn` 在 `claim_terminal_status` 失败时，先判该 turn 是否已有持久化痕迹（`turn_outcome_persisted`：`turn_trace_history` 或 `history` 中存在同 `turn_id`）；无痕迹 ⇒ 只补历史与 trace、**不派发第二条终态**；有痕迹 ⇒ 维持静默退出（terminal-once 不变量不变）。
+5. **验收（真实退出码）**：
+   - `cargo check -p pony-agent-core --features test-support --quiet` → exit 0；
+   - `cargo test -p pony-agent-core --features test-support --test adr0123_supplement_test` → 6 passed / 0 failed（T-A×3、T-D×2、T-C×1）；
+   - `cargo test -p pony-agent-core --features test-support --test multi_turn_tool_context_test` → 回归见本波基线 `.dev-team/regression-baseline-wave-adr0123-supp.json`。
+6. **已知限制**：Anthropic 家族协议仍不适用（沿用前文）；`tool_pruner` 的孤儿判定仍以前缀 `[中断轮次检查点` 为准，与第 3 条的三类注记判据保持「保守不删」语义，未做合并。
