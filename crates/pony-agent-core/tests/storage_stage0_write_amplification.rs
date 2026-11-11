@@ -37,6 +37,7 @@
 //! `create_workspace` 直连 `save_store` ⇒ `commit_boundary` 0 次，断言失败）。
 
 use pony_agent_core::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
+use pony_agent_core::agent::path_permission::AuthorizedPathEntry;
 use pony_agent_core::agent::session::{
     AttachmentAsset, CommitOutcome, PersistCommand, PersistedStore, SeparateTraceTableMode,
     SessionBackend, SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionState,
@@ -329,6 +330,21 @@ fn store_metadata_contains(db: &Path, key: &str, needle: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// 按 **JSON 语义**读回 `path_authorizations.v1` 的条目清单。
+///
+/// 不得改用裸子串比对路径：Windows 的分隔符是反斜杠，`serde_json` 会把它转义成 `\\`，
+/// 于是「条目已落盘」与「子串命中」在 Windows 上恒为假（B072：该用例 Windows CI 红、
+/// Linux 绿——Linux 临时目录不含反斜杠，转义不发生，恰好掩盖了判定口径的错误）。
+fn store_metadata_authorized_paths(db: &Path, key: &str) -> Vec<AuthorizedPathEntry> {
+    let conn = rusqlite::Connection::open(db).expect("open sqlite read-back");
+    let raw: String = conn
+        .query_row("SELECT value FROM store_metadata WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .expect("元数据 key 必须已落盘（行不存在 ⇒ 授权根本没写进去）");
+    serde_json::from_str(&raw).expect("path_authorizations.v1 必须是合法的条目数组 JSON")
+}
+
 // ---------------------------------------------------------------------------
 // 契约 1-a：消息级 turn 只允许 1 次增量提交原语，且零整包写
 // ---------------------------------------------------------------------------
@@ -480,9 +496,11 @@ fn authorize_path_does_not_trigger_full_store_commit() {
         spent.save_store, 0,
         "authorize_path 绝不得触发 save_store 全库落盘（实际 {spent:?}）"
     );
+    let persisted = store_metadata_authorized_paths(&db, "path_authorizations.v1");
     assert!(
-        store_metadata_contains(&db, "path_authorizations.v1", canonical.to_str().unwrap()),
-        "元数据必须已落盘到 store_metadata 的 path_authorizations.v1"
+        persisted.iter().any(|entry| entry.path == canonical),
+        "元数据必须已落盘到 store_metadata 的 path_authorizations.v1（期望含 {}，实际 {persisted:?}）",
+        canonical.display()
     );
 
     // Act 2: 撤销授权
@@ -501,6 +519,63 @@ fn authorize_path_does_not_trigger_full_store_commit() {
     assert_eq!(
         spent_revoke.save_store, 0,
         "revoke_authorization 绝不得触发 save_store 全库落盘（实际 {spent_revoke:?}）"
+    );
+}
+
+/// B072 回归守卫：读回判定必须按 **JSON 语义**，不得用裸子串。
+///
+/// 病灶（Windows CI 真机红、Linux 本地绿）：`store_metadata.value` 存的是 JSON，
+/// Windows 路径的分隔符 `\` 在 JSON 里被转义成 `\\`，于是「条目已落盘」与
+/// 「裸子串命中」在 Windows 上恒为假。Linux 临时目录不含反斜杠、转义不发生，
+/// 同一错误口径恰好绿——所以本用例在**任意平台**都构造同一形态（反斜杠路径写进
+/// JSON），断言两种判定口径给出相反结论：旧口径一旦回潮立即红，不再依赖平台运气。
+#[test]
+fn path_authorization_readback_compares_json_not_raw_substring() {
+    let dir = TempDir::new("amp-auth-json");
+    let db = dir.db();
+    let seed_dir = dir.path.join("seed-authorized-dir");
+    std::fs::create_dir_all(&seed_dir).expect("create seed dir");
+    // 先走一次真实授权：既触发后端建表（store_metadata 的 schema 由后端初始化），
+    // 也保证本用例断言的正是生产写入通道产出的那份 JSON。
+    let (backend, _save_store, _commit_boundary, _upsert_session, _psmtm) =
+        CountingBackend::new(&db, dir.path.join("attachments"));
+    let mut store = SessionStore::with_backend(Box::new(backend));
+    store
+        .authorize_path(
+            seed_dir.canonicalize().expect("canonicalize seed"),
+            pony_agent_core::agent::path_permission::PathAuthorizationScope::Read,
+        )
+        .expect("authorize seed path");
+
+    let windows_style = r"C:\Users\RUNNER~1\AppData\Local\Temp\authorized-dir";
+    let value = serde_json::to_string(&[serde_json::json!({
+        "path": windows_style,
+        "grantedAtMs": 1u64,
+        "scope": "read",
+    })])
+    .expect("serialize path_authorizations.v1");
+    rusqlite::Connection::open(&db)
+        .expect("open sqlite")
+        .execute(
+            "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["path_authorizations.v1", value],
+        )
+        .expect("insert metadata");
+
+    assert!(
+        !store_metadata_contains(&db, "path_authorizations.v1", windows_style),
+        "前提：反斜杠在 JSON 里被转义成 `\\\\`，裸子串比对必然落空（这正是 B072 的 Windows 红相）"
+    );
+    let persisted = store_metadata_authorized_paths(&db, "path_authorizations.v1");
+    assert_eq!(
+        persisted.len(),
+        1,
+        "按 JSON 语义读回必须拿到那一条授权（实际 {persisted:?}）"
+    );
+    assert_eq!(
+        persisted[0].path,
+        PathBuf::from(windows_style),
+        "读回的路径必须与授权时的形态逐字相等（JSON 转义不得影响语义比对）"
     );
 }
 
