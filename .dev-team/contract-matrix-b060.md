@@ -26,4 +26,18 @@ API 演进：`observe`/`take_summary` 由 `diagnostic_line`/`summary_line` 取�
 
 非目标（Non-Goals）：不改参数推断规则；不改 SSE 解析/合并语义；不引入日志级别框架；不改 `provider_log` 实现；不改 `runtime/stream_support` 修复逻辑。
 
+**靠 review 而非机器**（常载命约 2）：`provider_log` 是 `eprintln!` 直写、无注入点，因此「诊断行/汇总行是否真的被打印、
+调用点是否被改成 `let _ =`」无法由单测断言，只能由代码审查与 `grep -c 'provider_log(line)' == 2` 的调用点计数间接守。
+若未来引入日志注入点，本条应升级为机器门禁。
+
 写域：Executor = `crates/pony-agent-core/src/agent/provider/openai_sse.rs`；Test Agent = `crates/pony-agent-core/src/agent/provider/openai_sse_diag_tests.rs` + `crates/pony-agent-core/src/agent/runtime/tests.rs`。
+
+## v1.2 同类任务复用断言（离线审计产出，未纳入本轮验收）
+
+`review-plan-b060` 指出 v1.1 仍缺可机械断言的边，后续同类「日志/输出降噪」任务建议直接冻结：
+
+- `grep -c '"provider:sse-tool-call-missing-name' <src> == 1`（防别处新增日志行再次污染巡检针；C7 只管汇总行自身）。
+- `grep -c 'provider_log(line)' <src> == 2`（诊断 + 汇总两个发射点；改成 `let _ =` 会跌破此数，是当前唯一能机器发现「接线被摘掉」的手段）。
+- `grep -c 'summary_line()' <src> == 1` 且位于 `fn finish` 内（防汇总点漂移到热路径）。
+- 异常流（取消/超时/帧解析失败）必须有一条钉子用例，显式冻结「计数丢弃」为接受行为，否则行为变更无红灯。
+- 契约表必须保留「承载测试」列，禁止只写「既有测试 + grep 复核」这类不可执行表述。

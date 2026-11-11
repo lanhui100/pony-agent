@@ -69,6 +69,15 @@
     "cargo_check_warnings": "0",
     "full_lib_suite": "1482 passed / 1 failed — 失败用例 control_plane::tests::history_commands_and_runtime_view_follow_persisted_history_graph 在 HEAD 干净工作树同样失败，已登记 B068（与 B060 无关）",
     "decisions_check": "通过（120 篇）",
-    "observability": "N/A — 未新增/修改对外接口、无新增网络 IO、无新增后台任务/LLM 调用/UI 交互；仅改既有 SSE 诊断日志的条数与命名，docs/observability.yaml 四维归属无需变更"
+    "observability": "N/A — 未新增/修改对外接口、无新增网络 IO、无新增后台任务/LLM 调用/UI 交互；仅改既有 SSE 诊断日志的条数与命名，docs/observability.yaml 四维归属无需变更",
+    "receipt_caveat": "默认 ./target 曾出现陈旧指纹（源文件被外部恢复后 cargo 仍报 Fresh，裸跑复现 10 例假红）；本表绿相收据均在强制重建（touch 源文件 + 观察到 Compiling）后复跑取得。同类风险已登记 backlog:B071。"
+  },
+  "post_audit": {
+    "review": ".dev-team/review-plan-b060.json",
+    "conclusion": "v1.0 契约漏 5 条本可预见约束（探针口径/日志文本可测性/错误路径/热路径/index 缺省与规模），其中 2 条直接导致 R1 返工；v1.1 已补 C7 与行文本断言 API，残余为 provider_log 无注入点（显式标注靠 review）。",
+    "doc_fixes": [
+      "决策记录日志规模改为可复现实测口径（1,705,040 条 / 525,803,457 B）并标注任务卡快照不同源",
+      "契约非目标补「靠 review」标注"
+    ]
   }
 }
