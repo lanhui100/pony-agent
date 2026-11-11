@@ -142,21 +142,32 @@
   - 修复：`Fixture::folded` 增 `release` 参数（放锁 + 探测），两处调用按持有关系传释放动作。
   - 验收：Linux 8 passed；Windows 侧由后续 run 覆盖。
 
-- [ ] `B055` - P0（过程+批次）：Windows 全量首跑扫尾——`--no-fail-fast` 清单还有 **11 个二进制 / ~23 例**
-  - 现象：CI 测试步骤在**第一个失败的测试二进制**处停止，Windows 上从未执行过的二进制逐个暴露平台缺口；
-    B043→B054 已清掉 8 个（假 provider 请求体、强制文件锁族、8.3 短路径、分隔符断言、插件脚本 spawn、env 键大小写）。
-    临时验证分支（PR #13，`--no-fail-fast` + 跳过前端步骤）一次性取到剩余清单（run 42988189901）：
-  - **TUI 渲染/终端族（7 个二进制，9 例；每个二进制 110–139 例通过，属长尾）**：
-    `tui_acceptance`(1) `tui_dialog_wave39`(2) `tui_overlay_cancel_acceptance`(2)
-    `tui_persistence_truthfulness`(1) `tui_render_layout`(2) `tui_signal_reentry`(1)
-    `tui_startup_input_guard`(2，0 passed)——初判 ConHost/VT/PTY 能力探测与快照渲染在 Windows 上的差异。
-  - **指标/可观测真值族**：`wave54_metric_truth`(4) `wave49_observability_gaps`(2)、另见
-    `wave30_hook_commands_test`(5) `wave48_otel_export_diagnostics`(2)——初判 console/OTLP 回环导出与
-    hook 子进程（`sh`/`cmd` 形态）在 Windows 的差异。
-  - **语义族**：`wave36_adversarial_classification`(5) `wave61_team_activation`(1)。
-  - 建议做法：①把这 11 个二进制按族拆成 3 张子任务并行；②每族用验证分支 `--no-fail-fast`
-    单跑该二进制收敛（一次拿全部失败用例，避免一例一轮 CI）；③修完把「Windows 全量首跑」写进 ADR/流程，
-    让 CI 的 test 步骤常开 `--no-fail-fast`（否则同类问题仍会以十连红形式出现）。
+- [ ] `B055` - P0（过程+批次）：Windows 全量首跑扫尾——剩 **10 个二进制 / ~20 例**（B050–B056 已清 11 例）
+  - 背景：CI 在**第一个失败的测试二进制**处停止，Windows 上从未执行过的集成测试逐个暴露缺口；
+    集成测试只在 windows-latest 跑（ubuntu 只跑 lib 单测），故「产品已改、用例未跟」的过期断言也不被发现。
+  - 已完成（本族）：B050–B054（强制文件锁/8.3 短路径/分隔符）、B056（三处过期断言，见下）。
+  - **剩余清单（按族）**：
+    - 契约冲突族（需决策）：`tui_render_layout`(2) —— 状态行现在轮播「权 限 · 工 作 区」（ADR 0119），
+      用例仍按 ADR 0078「最后一行只承载模型身份」断言；两条 ADR 需要裁决（谁占最后一行、何时轮播）。
+    - PTY 族（Windows 需 ConPTY）：`tui_startup_input_guard`(2)、`tui_overlay_cancel_acceptance`(2) ——
+      用例的 Python 驱动 `import pty`/`termios` 是 Unix-only，Windows 上 Traceback。
+    - 指标导出族（疑单一根因）：`wave54_metric_truth`(4)、`wave49_observability_gaps`(2，含 PoisonError 级联)、
+      `wave48_otel_export_diagnostics`(2) —— resource 属性缺失（`deployment.environment`/`ingest.client.kind`），
+      初判「导出到回环 sink 在 Windows 未成功」一个根因带崩多条。
+    - legacy 钩子族：`wave30_hook_commands_test`(5) —— 夹具是 bash 脚本，Windows 走 `cmd /C` ⇒ 5–15s 超时。
+    - 其余：`tui_dialog_wave39::a12`(1，颜色能力/档位差异)、`tui_persistence_truthfulness`(1，读真实用户库)、
+      `tui_signal_reentry::r6`(1，Ctrl+Z 挂起语义 Unix-only)、`wave36_adversarial_classification`(5)。
+  - 建议：①契约冲突族先裁决 ADR（不裁决就没法改用例）；②指标导出族用一个验证分支拿完整清单再批修；
+    ③PTY 族与 legacy 钩子族各自评估「移植 vs 平台 gating」；④CI 常开 `--no-fail-fast`。
+
+- [x] `B056` - P1: 集成测试「产品已改、用例未跟」三处过期断言（Windows 首跑暴露）
+  - 路径：`tests/{wave61_team_activation.rs,tui_acceptance.rs,tui_dialog_wave39.rs}`
+  - 三处：①`agent/tools.rs` 已拆成 `agent/tools/` 目录 ⇒ c5 改按子树汇总 `subagent_runtime_wired()`
+    （口径不变：1 定义 + 10 门 == 11）；②`/re` 前缀过滤写死「1 条」，`/rewind` 落地后为 2 条 ⇒
+    改为从 `AVAILABLE_COMMANDS` 推导；③`~` 折叠是**展示**口径（产品恒用 `format!("~/{name}")`）⇒
+    期望由 `MAIN_SEPARATOR` 改为 `~/pony-agent`。
+  - 验收：验证分支 CI run 42991193482 → 三个二进制 `wave61_team_activation` **16/16**、
+    `tui_acceptance` **140/140**、`tui_dialog_wave39` 117/118（仅剩 a12 颜色用例，归 B055）。
 - [x] `B047` - P1: TUI 启动装载仍 4.3s：同一份 trace 被双读 440MB，`turn_events` 自愈每轮白跑
   - 路径：`crates/pony-agent-core/src/agent/session/sqlite_session_commit.rs`（`fill_index_only_rows_from_index_projection`、
     `attach_index_trace_projections_with_deadline`）、`crates/pony-agent-core/src/agent/sqlite_session.rs`（`load_store` /
