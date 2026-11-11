@@ -96,13 +96,59 @@
     基础 commit 278098b1）；Linux `cargo check -D warnings` Exit 0、7 条 shebang 单测 Exit 0、
     `plugin_host_contract` 11 passed Exit 0、`npx vitest run tests/check-secrets.spec.ts` 52 passed Exit 0。
 
-- [ ] `B050` - P1: Windows CI `session_event_carriers::memory_snapshot_replaces_but_evidence_appends` 折叠日志失败（B045 修复后新暴露）
-  - 路径：`crates/pony-agent-core/tests/session_event_carriers.rs:79`、`src/agent/session/fold.rs`
-  - 现象（run 42972703046，windows-latest）：该二进制 5 passed / 1 failed，失败断言为
-    `fold `pa_adr0102`: session log not found for `pa_adr0102`: no `current` session log header in the log root`。
-  - 初判：`Fixture::folded` 依赖日志根里的 `current` 头行（ADR 0102 折叠入口）；该二进制此前从未被执行到
-    （cargo test 首错即停），属**既有** Windows 缺陷；待定是路径/大小写/`current` 指针写入时序哪一段。
-  - 验收：windows-latest 该 6 例全绿。
+- [x] `B050` - P1: Windows CI `session_event_carriers::memory_snapshot_replaces_but_evidence_appends` 折叠日志失败（B045 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/session_event_carriers.rs`、`src/agent/session/fold.rs`
+  - 现象（run 42972703046，windows-latest）：该二进制 5 passed / 1 failed，断言
+    `fold `pa_adr0102`: … no `current` session log header in the log root`。
+  - **根因（已修）**：`read_session_state` → `list_sessions()` 逐目录读 header；Windows `LockFileEx`
+    强制锁让「本进程缓存的日志写者」挡住同进程读盘，`list_sessions` 按设计跳过坏目录 ⇒ 会话消失。
+    只有本用例在写者缓存时折叠（另外两处 backend 已 drop / migrate 自带短生命周期 store）。
+  - 修复：`Fixture::folded` 增 `release` 参数（先放锁 + 当场探测独占锁，Linux 也可验）；
+    三处调用按持有关系传释放动作（活写者 ⇒ `release_log_writers_for_test()`，已 drop ⇒ `|| {}`）。
+  - 验收：windows-latest run 42975600601 → `session_event_carriers` **6 passed / 0 failed**；
+    Linux 6 passed Exit 0；反向对照（去掉放锁）该用例立即红（探测 `WouldBlock`）。
+
+- [x] `B051` - P1: Windows CI `session_log_migration::migration_attributes_cwd_by_workspace_and_records_fallbacks` 分组名不符（B050 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/session_log_migration.rs`（`create_workspace` 后的期望分组）
+  - 现象（run 42975600601，windows-latest）：该二进制 11 passed / 1 failed；期望分组
+    `…\session-logs\--C~3a-Users-RUNNER~7e1-AppData-Loc…--` 下找不到日志。
+  - **根因（已修，断言口径）**：产品 `create_workspace` 调 `normalize_workspace_root`
+    规范化 root（`canonicalize` + Windows 去 `\\?\` 前缀）；Windows 临时目录是 8.3 短名
+    （`C:\Users\RUNNER~1\…`），canonicalize 展开成长名，而用例拿**入参字符串**算期望分组 ⇒
+    与 `resolve_session_cwd` 返回的 `record.root_path` 不同名。Linux canonicalize 恒等，故只在 Windows 暴露。
+  - 修复：期望分组改用 `record.root_path`（同一真源）+「记录必须带 root_path」前置断言；产品零改动。
+  - 验收：windows-latest run 42978397592 → `session_log_migration` **12 passed / 0 failed**；Linux 12 passed。
+
+- [x] `B052` - P1: Windows CI `session_log_store::second_open_write_for_same_session_is_rejected` 读被锁文件失败（同族扫尾）
+  - 路径：`crates/pony-agent-core/tests/session_log_store.rs`、`tests/session_log_wiring.rs`
+  - 现象（run 42978397592）：`读被锁文件: Os { code: 33, "another process has locked a portion of the file" }`。
+  - 根因：断言「被拒 writer 不得写入任何字节」时仍在第一个 writer 持锁期读文件（B044/B050 同族）。
+  - 修复：把读盘挪到 `drop(first)` 之后（`Locked`/delete 拒绝两条断言仍在持锁期验，强度不变）；
+    并在 `session_log_wiring` **预防性**修两处「store 缓存写者期间直接 `fs::read` 日志」。
+  - 验收：Linux `session_log_store` 6 passed、`session_log_wiring` 7 passed Exit 0；Windows 见 B053。
+
+- [x] `B053` - P1: Windows CI `session_log_wiring::append_turn_writes_header_and_contiguous_command_events` 分组断言用 `/` 拼接（B052 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/session_log_wiring.rs`
+  - 现象（run 42981364657）：`日志路径必须落在 --cwd-- 分组目录下：…\session-logs\--D~3a-a-pony-agent-…--\…`。
+  - 根因：断言写 `contains(&format!("/{expected_cwd}/"))`——拼 POSIX 分隔符，Windows 是 `\`，恒不命中；
+    分组名本身正确（`normalize_cwd_segment` 已含首尾 `--`）。
+  - 修复：改取 `path.parent().parent().file_name()` 与 `expected_cwd` 逐字比较（分隔符无关）。
+  - 验收：Linux 7 passed；Windows 侧由后续 run 覆盖（B052/B053 同批）。
+
+- [x] `B054` - P1: Windows CI `session_read_from_log::hook_records_are_appended_identically_by_log_fold_and_index` 折叠失败（B053 修复后新暴露）
+  - 路径：`crates/pony-agent-core/tests/session_read_from_log.rs`
+  - 现象（run 42984554543）：该二进制 7 passed / 1 failed；`fold … no `current` session log header`。
+  - 根因：`AppendHookRecords` 批写入后 `backend` 仍缓存写者（B050 同族）。
+  - 修复：`Fixture::folded` 增 `release` 参数（放锁 + 探测），两处调用按持有关系传释放动作。
+  - 验收：Linux 8 passed；Windows 侧由后续 run 覆盖。
+
+- [ ] `B055` - P0（过程）：Windows 侧「首次全量执行」扫尾——`cargo test` 首错即停掩盖了整批平台缺口
+  - 现象：B043→B054 十连红全部来自同一条因果：CI 测试步骤在**第一个失败的测试二进制**处停止，
+    于是 Windows 上从未执行过的二进制（`p*` / `session_*` / `storage_*` / `tui_*` / `wave*`）逐个暴露
+    平台缺口，每次 CI（~40min）只前进一个二进制。
+  - 已做：临时验证分支（PR #13）给 core 测试步骤加 `--no-fail-fast`，一次性取「剩余失败清单」，再批量修复。
+  - 待做：清单到手后按类批修（强制文件锁族 / 分隔符与 8.3 路径族 / 渲染基线族）；
+    并把「Windows 全量首跑」纳入 ADR/流程，避免同类问题再次以十连红形式出现。
 - [x] `B047` - P1: TUI 启动装载仍 4.3s：同一份 trace 被双读 440MB，`turn_events` 自愈每轮白跑
   - 路径：`crates/pony-agent-core/src/agent/session/sqlite_session_commit.rs`（`fill_index_only_rows_from_index_projection`、
     `attach_index_trace_projections_with_deadline`）、`crates/pony-agent-core/src/agent/sqlite_session.rs`（`load_store` /
