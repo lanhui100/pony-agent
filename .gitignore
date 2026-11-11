@@ -92,3 +92,8 @@ docs/audit/rounds/*/replay/**/*.jsonl
 
 # ponygo scratch hygiene: 临时产物统一忽略
 .scratch/
+
+# Python 虚拟环境（本地运行期产物）：site-packages 与 cacert.pem 不应入库——一次 `git add -A`
+# 曾把它带进 main（1107 文件 / 38 万行），直接打红 check-secrets 门禁（blocked sensitive file）。
+venv/
+.venv/
