@@ -428,7 +428,7 @@ fn settle_timeline(state: &mut TraceProjectionState, turn_id: &str, turn_duratio
         if let Some(entry) = timeline.iter_mut().rev().find(|e| e.kind == "call_model") {
             // wave-54 C5（§7.4）：整轮值只**补**缺失的 per-call 值，已有 per-call 真值不得覆盖
             // （运行态产物 trace_timeline.rs 用的就是 per-call 语义，折叠产物必须同口径）。
-            if entry.turn_duration_ms.is_none() {
+            if entry.turn_duration_ms.is_none() || entry.turn_duration_ms == Some(0) {
                 entry.turn_duration_ms = turn_duration_ms;
             }
         }

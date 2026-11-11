@@ -3,23 +3,37 @@ import json
 import sys
 import os
 import time
+import argparse
 
-STATE_FILE = "docs/audit/loop-state.json"
+DEFAULT_STATE_FILE = "docs/audit/loop-state.json"
 
-def read_state():
-    if not os.path.exists(STATE_FILE):
+def read_state(filepath):
+    if not os.path.exists(filepath):
         return None
-    with open(STATE_FILE, "r") as f:
+    with open(filepath, "r") as f:
         return json.load(f)
 
-def write_state(state):
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    with open(STATE_FILE, "w") as f:
+def write_state(state, filepath):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w") as f:
         json.dump(state, f, indent=2)
 
 def main():
+    parser = argparse.ArgumentParser(description="Trace Audit Loop Driver")
+    parser.add_argument("--state-file", default=DEFAULT_STATE_FILE, help="Path to state file")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+    parser.add_argument("--step", action="store_true", help="Step one round")
+    args = parser.parse_args()
+
+    state_file = args.state_file
     print("Trace Audit Loop Starting...")
-    state = read_state()
+    
+    try:
+        state = read_state(state_file)
+    except Exception as e:
+        print(f"Error reading state file {state_file}: {e}", file=sys.stderr)
+        return 1
+
     if not state:
         print("Initializing state...")
         state = {
@@ -51,9 +65,10 @@ def main():
         state["mode"] = "patrol"
         print("Queue exhausted, transitioning to patrol mode.")
         
-    write_state(state)
+    write_state(state, state_file)
     print(f"Advanced to phase: {state.get('phase')}")
     return 0
 
 if __name__ == "__main__":
     sys.exit(main())
+
