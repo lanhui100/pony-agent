@@ -1549,7 +1549,7 @@ impl WorkspaceHotloader {
             // 2) 两级保留选取（字节预算 + 条目上限，PLAN-20261111-02 Step 4）：
             //    - 先为条目分配最短行保真底座（只要预算允许，全部技能名均在目录中可见，消除「可载而不知」）
             //    - 再用剩余预算按优先级将最短行升级为完整描述行（受 max_entries 与字节上限约束）
-            let max_markers_budget = 512;
+            let max_markers_budget = 1024;
             let available_bytes = catalog_budget
                 .max_bytes
                 .saturating_sub(header_bytes + max_markers_budget);
