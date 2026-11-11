@@ -113,6 +113,14 @@ fn unix_output_command(text: &str) -> String {
 /// 结论：**Windows 命令串里不能出现任何 `"`**。故 JSON 一律先落数据文件，再用
 /// `Get-Content -Raw` 读回；路径用 PowerShell 单引号包裹（`%TEMP%` 含空格也不会被拆词）。
 fn windows_file_read_command(file: &str) -> String {
+    // 首选 `type`（cmd 内建，零进程模型）：`cmd /C` 直接交给 cmd，不额外拉起 PowerShell。
+    // 为什么不再默认走 PowerShell：`cmd /C powershell -EncodedCommand …` 在本仓 windows-latest 上
+    // 每次都应声超时（t1/t2/t3/t7/t8 全部 hook_timeout，B058 旧号 B0xx/bug），而 `ping`（t5）这类
+    // cmd 内建命令正常 ⇒ 定位在「外层再起 PowerShell」这一步，而不是 hook 执行器。
+    // 路径含空白时才回退 PowerShell（cmd 会按空格拆词，`type` 无法承受）。
+    if !file.chars().any(char::is_whitespace) {
+        return format!("type {file}");
+    }
     powershell_encoded_command(&format!("Get-Content -Raw -LiteralPath '{file}'"))
 }
 
@@ -190,6 +198,14 @@ fn timeout_command_for(windows: bool, marker: &str) -> String {
 /// 整条脚本经 `-EncodedCommand` 编码，命令串只剩 base64 载荷（不含 `"` 与任何 cmd 元字符）。
 fn stdin_capture_command_for(windows: bool, captured: &str, decision_file: &str) -> String {
     if windows {
+        // 只用 cmd 内建：`findstr .` 读 stdin 并把非空行写到捕获文件，`&` 之后 `type` 读回决策。
+        // 不再走 PowerShell：`cmd /C powershell -EncodedCommand …` 在本仓 windows-latest 上稳定
+        // 超时（t1/t2/t3/t7/t8 全 hook_timeout，而 `ping`（t5）这类纯 cmd 命令正常）。
+        if !captured.chars().any(char::is_whitespace)
+            && !decision_file.chars().any(char::is_whitespace)
+        {
+            return format!("findstr . > {captured} & type {decision_file}");
+        }
         powershell_encoded_command(&format!(
             "$i=[Console]::In.ReadToEnd(); Set-Content -LiteralPath '{captured}' -Value $i -Encoding ascii -NoNewline; Get-Content -Raw -LiteralPath '{decision_file}'"
         ))
@@ -361,23 +377,25 @@ fn t0_platform_command_strings_are_mirrorable_and_cmd_safe() {
     assert!(stdin_capture_command_for(false, "/tmp/stdin.json", "/tmp/decision.json")
         .starts_with("cat > '/tmp/stdin.json'; printf '"));
 
-    // (2) Windows 分支：命令串可镜像解码（Linux 上无法执行 cmd/PowerShell，故把 -EncodedCommand
-    //     的载荷解码回脚本，逐字校验将要执行的内容）。
+    // (2) Windows 分支：主路径是 **cmd 内建**（`type` / `findstr`），不额外拉起 PowerShell；
+    //     含空白的路径才回退 PowerShell，此时把 `-EncodedCommand` 载荷解码回脚本逐字校验。
     assert_eq!(
-        decode_powershell_script(&windows_file_read_command(r"C:\Temp\w30-decision.json")),
-        r"Get-Content -Raw -LiteralPath 'C:\Temp\w30-decision.json'",
-        "Windows 决策输出必须在 PowerShell 里按数据文件读回（且路径用单引号避免拆词）"
+        windows_file_read_command(r"C:\Temp\w30-decision.json"),
+        r"type C:\Temp\w30-decision.json",
+        "Windows 决策输出必须用 cmd 内建 `type` 读回数据文件"
     );
     assert_eq!(
-        decode_powershell_script(&stdin_capture_command_for(
-            true,
-            r"C:\Temp\stdin.json",
-            r"C:\Temp\decision.json"
-        )),
-        r"$i=[Console]::In.ReadToEnd(); Set-Content -LiteralPath 'C:\Temp\stdin.json' -Value $i -Encoding ascii -NoNewline; Get-Content -Raw -LiteralPath 'C:\Temp\decision.json'",
-        "t7 的 Windows 分支：读 stdin → 无 BOM（ascii）落盘 → 从数据文件读回决策"
+        stdin_capture_command_for(true, r"C:\Temp\stdin.json", r"C:\Temp\decision.json"),
+        r"findstr . > C:\Temp\stdin.json & type C:\Temp\decision.json",
+        "t7 的 Windows 分支：cmd 内建读 stdin → 落盘 → `type` 读回决策"
     );
-    assert!(windows_file_read_command(r"C:\Temp\x.json")
+    // 回退分支（路径含空白）：仍是 PowerShell 编码形态，脚本内容可镜像解码。
+    assert_eq!(
+        decode_powershell_script(&windows_file_read_command(r"C:\Temp dir\w30-decision.json")),
+        r"Get-Content -Raw -LiteralPath 'C:\Temp dir\w30-decision.json'",
+        "含空白路径的回退分支：PowerShell 里按数据文件读回（路径用单引号避免拆词）"
+    );
+    assert!(windows_file_read_command(r"C:\Temp dir\x.json")
         .starts_with("powershell -NoProfile -NonInteractive -EncodedCommand "));
     assert_eq!(nonzero_exit_command_for(true), "exit /b 3");
     assert_eq!(
