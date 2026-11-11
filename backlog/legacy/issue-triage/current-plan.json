@@ -5,7 +5,7 @@
     "ISSUE-20261111-009"
   ],
   "objective": "技能调用策略四象限闸门 + 目录预算保真 + 发现配置化/热刷新，对齐 dsh skill 机制（含 009：目录静默裁剪与新技能会话内不可见）",
-  "status": "completed",
+  "status": "partial",
   "steps": [
     {
       "step_id": 1,
@@ -40,16 +40,19 @@
     {
       "step_id": 6,
       "description": "热刷新 watchdog：技能根变更（稳定阈值 ~200ms）走 delta_notice 通道当前会话下一轮生效，替代「新会话才生效」（009）",
-      "status": "completed",
-      "evidence": "crates/pony-agent-core/tests/skill_invocation_policy_contract.rs:test_session_hot_reload_delta_notice_and_dynamic_skill_load"
+      "status": "pending",
+      "evidence": "crates/pony-agent-core/tests/skill_invocation_policy_contract.rs:test_session_hot_reload_delta_notice_and_dynamic_skill_load",
+      "residual": "未实现：全仓无 watchdog / 文件监听 / 200ms 去抖。原标 completed 的证据 test_session_hot_reload_delta_notice_and_dynamic_skill_load 实际跑的是既有「每轮全量重扫 + build_session_delta_notice」路径（HEAD 早已存在）。已转 backlog:B074。"
     },
     {
       "step_id": 7,
       "description": "frontmatter 校验：kebab-case name 校验（非法→omitted skill:<name> (invalid_name)）；契约测试四象限 + 预算保真 + watchdog + wave42/wave58 回归",
-      "status": "completed",
-      "evidence": "crates/pony-agent-core/tests/skill_invocation_policy_contract.rs:test_invalid_skill_name_omitted_with_invalid_name_marker"
+      "status": "pending",
+      "evidence": "（撤回）原证据 test_invalid_skill_name_omitted_with_invalid_name_marker 已随实现回退删除：扫描期丢弃非法 name 会让冻结用例 wave58_singleton_isolation::r3 由绿转红（该用例契约是「不可信文本转义保留」而非丢弃）。",
+      "residual": "未落地：kebab-case 硬门禁与环境变量的语义取舍待裁决 → backlog:B079；非 ASCII 技能名可调性语义缺失同挂 B079。"
     }
   ],
   "last_session_id": "pa_01a1c884-fc9c-7be2-834e-2d0fa415f5db",
-  "updated_at": "2026-11-11T16:10:00+08:00"
+  "updated_at": "2026-11-11T19:35:00+08:00",
+  "closure_note": "2026-11-11 收口：已实现并提交 Step 1/2/3/4/5（四象限策略、渲染过滤、skill_load 闸门 + /skill: 手势、预算保真与 500 字符描述、skillDirs 配置面），并额外修复 frontmatter 布尔大小写 fail-open。未落地：Step 6 watchdog → B074；Step 7 kebab 门禁（与冻结用例 R3 冲突，已回退）→ B079。其余：预算边界 B075、/skill: 覆盖 B076、门禁 red B077、契约面残余 B078、delta_notice 不一致 + 测试 hermeticity B080。"
 }

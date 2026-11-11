@@ -2,6 +2,12 @@
 
 Status: proposed
 
+> **收口注记（2026-11-11）**：已实现 Proposal 第 1/2/3(配置面) 项，并修复 frontmatter 布尔大小写
+> fail-open。未落地：watchdog 热刷新 → `backlog:B074`、kebab-case 名称门禁 → `backlog:B079`
+> （实现会让冻结用例 `wave58_singleton_isolation` R3「转义不丢弃」由绿转红，已回退）、
+> 预算边界 → B075、`/skill:` 覆盖 → B076、契约面残余 → B078、delta_notice 不一致 → B080。
+> 按本仓「迁移即改写」纪律，待 B074/B079 裁决后一次性改写为现在时 `## Decision` 并迁入 `implemented/`。
+
 ## Problem
 
 当前 `pa-issue-triage`（`.agents/skills/pa-issue-triage`）在 pony-agent 的会话里并非处处可被成功调用：
@@ -25,7 +31,7 @@ Status: proposed
    （`workspace_hotloader.rs` 命中数：解析 2 处、消费 0 处），`disable-model-invocation` 全仓零支持；
    渲染侧无条件列全部技能，无「人可调 / 模型可调」两套目录；人类侧也没有确定的调用手势（TUI 斜杠命令
    无技能命名空间），用户点名只能靠自由文本碰运气。
-4. **本技能自带的 CLI 缺陷（本次执行中复现）**：`scripts/pa-issue-triage.mjs::recordIssue` 的 ID 生成用
+4. **本技能自带的 CLI 缺陷（本次执行中复现）**：`scripts/pa-issue-triage.mjs::recordIssue`（注：该脚本已随统一账本迁移，见 `backlog/legacy/issue-triage/`） 的 ID 生成用
    `issues.length + 1`（而非「已有最大序号 +1」），一旦中间序号被归档（如 ISSUE-20261111-007 已归档），
    下一次记录会**复用被占用的 ID**（本次实测复现：登记 009 时实际又造出一个 `ISSUE-20261111-008`，
    与既有条目 ID 冲突，被手工改号纠正）——「记录问题」这条调用路径本身也有根因缺陷。
@@ -44,7 +50,8 @@ Status: proposed
 ## Proposal
 
 按 dsh 三包（`skill` 注册表 / `skill-filesystem` 发现 / `tool-skill` 目录与工具）的语义对齐 pony-agent，分四段实施
-（对应 `.agents/issue-triage/current-plan.json` 的 PLAN-20261111-02）：
+（对应 [`backlog/legacy/issue-triage/current-plan.json`](../../../backlog/legacy/issue-triage/current-plan.json) 的 PLAN-20261111-02；
+2026-11-11 收口时该计划 status=partial，Step 6 转 backlog:B074）：
 
 1. **双面调用策略（四象限，首要）**：
    - `workspace_hotloader` 的 `SkillFrontmatter` 新增解析 `disable-model-invocation`（bool，缺省 false），
@@ -121,3 +128,32 @@ Status: proposed
   `[pony-runtime] turn:start … message_preview=为什么一开始没有触发调用pa-issue-triage这个skill？`；
   请求体内 Developer 消息自述「原因有三，主因是我看不到这个 skill」；模型以
   `Run: cd ../pony-agent && cat …/pa-issue-triage/SKILL.md`（日志 6098650/6174908）代偿 `skill_load`。
+
+## 实现状态（2026-11-11 收口）
+
+已落地（提交见本轮 `feat(skill)` 提交，契约测试 `crates/pony-agent-core/tests/skill_invocation_policy_contract.rs` 7 例全绿）：
+
+1. 四象限策略：`SkillFrontmatter.disable_model_invocation` 解析入 `HotloadedSkill.{model_invocable,disable_model_invocation}`；
+   目录只列 `model_invocable`，被排除者输出 `omitted skill:<name> (model_invocation_disabled)`；
+   `skill_load` 返回 `skill_not_available_for_model_invocation`；TUI `/skill:<name>` 手势按 `user_invocable` 放行。
+2. 目录预算保真：description 截断 1024→500；两级渲染（全行/最短行）保证预算内 name 行可见。
+   **修正**：短行渲染不再同时计入 `omitted skill:<name> (budget)`（原实现同一技能既可见又被报告丢弃）。
+3. 发现配置化：`settings.json` 的 `skillDirs`（camelCase）+ `PONY_AGENT_SKILL_DIRS` 同一合并入口（store 优先、按首次出现去重）。
+4. frontmatter 布尔口径：新增 `parse_frontmatter_bool`（大小写不敏感，接受 true/yes/on/1 与 false/no/off/0）。
+   **缺陷修复**：原 `scalar.trim().parse()` 只认小写，`disable-model-invocation: True` 会被
+   `unwrap_or(false)` 静默吃掉 ⇒ 策略闸门 fail-open（一个大小写即可绕过）。
+
+未落地（原 Proposal 第 4 项，2026-11-11 回退）：kebab-case `is_valid_skill_name` 硬门禁。
+实现后会让冻结用例 `tests/wave58_singleton_isolation.rs` 的 R3 由绿转红——R3 的契约语义是
+「不可信技能文本必须**转义保留**」而非「丢弃」（`:341/:348` 断言伪造载荷必须真实进入描述）。
+二者不可同时成立，取舍需决策记录 → backlog:B079（含非 ASCII 技能名可调性语义）。
+
+未落地（已转待办，勿再声称完成）：
+
+- **Step 6 watchdog 热刷新 → B074**：会话内新增技能可见是既有「每轮重扫 + `build_session_delta_notice`」行为，
+  全仓无文件监听 / 200ms 去抖实现。
+- 预算边界（≥200 技能 / 长名）name 仍可能被挤出目录 → B075。
+- `/skill:` 端到端覆盖与流式入队路径 → B076。
+- observability 四维声明、`skill-manifest.v1.schema.json` 补键、缺 name/description 显式标记 → B078。
+- 门禁：`npm run size:check` 在 main 已红（本波 5→8 条新增超限）→ B077。
+- `delta_notice` 播报被 `model_invocation_disabled` 过滤的技能；用例仍读宿主 `settings.json` → B080。
