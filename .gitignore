@@ -22,6 +22,9 @@ desktop.ini
 .idea/
 .vscode/
 
+# 任务账本的本地租约目录（运行时产物：含 pid/会话/心跳，不入仓；见 scripts/backlog.mjs isLeaseTrackingActive）
+backlog/.locks/
+
 *.log
 .codex-logs/
 .devlogs/

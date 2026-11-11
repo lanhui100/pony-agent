@@ -34,6 +34,10 @@ function seed(rows: any[]) {
   writeJsonl(paths.tasks, rows);
 }
 
+function lockFileOf(id: string) {
+  return path.join(paths.locksDir, `${id}.lock`);
+}
+
 function baseRow(overrides: Record<string, unknown> = {}) {
   return {
     id: 'B056',
@@ -234,6 +238,30 @@ describe('CLI 冒烟', () => {
     expect(result.ok).toBe(true);
     expect(result.problems.join()).not.toMatch(/越过高水位/);
   });
+
+  // 回归（B081）：resolve 只归档不清锁 ⇒ `.locks/<ID>.lock` 残留到 TTL 被 reap，
+  // 期间该 ID 对其它会话是「被占用」的假信号。库与 CLI 同一路径，此处断言可观测输出。
+  it('CLI 全链路：start 建锁 → resolve 清锁并打印回收信息', () => {
+    seed([baseRow()]);
+    fs.writeFileSync(paths.nextId, '57\n');
+    const env = { ...process.env, PONY_BACKLOG_ROOT: root };
+    const started = execFileSync(process.execPath, [SCRIPT, 'start', 'B056', '--owner', 'cli-session', '--paths', 'scripts/backlog.mjs'], {
+      cwd: path.resolve('.'),
+      env,
+      encoding: 'utf8'
+    });
+    expect(started).toMatch(/in_progress/);
+    expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
+
+    const closed = execFileSync(process.execPath, [SCRIPT, 'resolve', 'B056', '--evidence', 'fix(backlog): 闭环释放租约'], {
+      cwd: path.resolve('.'),
+      env,
+      encoding: 'utf8'
+    });
+    expect(closed).toMatch(/租约已释放（原持有者 @cli-session）/);
+    expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
+    expect(doctor(paths).ok).toBe(true);
+  });
 });
 
 describe('任务级租约（单任务单会话，不同任务可并行）', () => {
@@ -282,7 +310,7 @@ describe('任务级租约（单任务单会话，不同任务可并行）', () =
     expect(res.problems.join('\n')).toMatch(/租约与记录 owner 冲突/);
   });
 
-  it('in_progress 但缺少租约锁文件（疑似手改状态）判违规', () => {
+  it('存在租约目录时，in_progress 缺锁文件（疑似手改状态）判违规', () => {
     seed([baseRow({
       status: 'in_progress',
       owner: 'session-A',
@@ -290,6 +318,72 @@ describe('任务级租约（单任务单会话，不同任务可并行）', () =
       leased_at: new Date().toISOString(),
       heartbeat_at: new Date().toISOString()
     })]);
+    fs.mkdirSync(paths.locksDir, { recursive: true });
     expect(lintAll(paths).problems.join('\n')).toMatch(/缺少租约锁文件/);
+  });
+
+  it('干净克隆（无 .locks 目录）下同一记录只提示不阻断（B069）', () => {
+    seed([baseRow({
+      status: 'in_progress',
+      owner: 'session-A',
+      touched_paths: ['crates/x'],
+      leased_at: new Date().toISOString(),
+      heartbeat_at: new Date().toISOString()
+    })]);
+    const res = lintAll(paths);
+    expect(res.problems).toEqual([]);
+    expect(res.ok).toBe(true);
+    expect(res.notes.join('\n')).toMatch(/无本地租约目录/);
+  });
+
+  it('doctor 在存在 in_progress 任务时不崩溃，并复用 lint 的租约判据（B069）', () => {
+    seed([baseRow({
+      status: 'in_progress',
+      owner: 'session-A',
+      touched_paths: ['crates/x'],
+      leased_at: new Date().toISOString(),
+      heartbeat_at: new Date().toISOString()
+    })]);
+    fs.mkdirSync(paths.locksDir, { recursive: true });
+    expect(() => doctor(paths)).not.toThrow();
+    expect(doctor(paths).issues.join('\n')).toMatch(/缺少租约锁文件/);
+  });
+});
+
+// B081：闭环是终态，租约必须随之失效——否则 `.locks/<ID>.lock` 残留到 TTL，
+// 期间挡住 ID 复用，且 `.locks/` 常驻让 lint 永久走严格支（B069 的分流语义腐化）。
+describe('闭环释放租约（B081）', () => {
+  it('resolve 归档成功后释放租约，锁文件不残留', () => {
+    seed([baseRow()]);
+    acquireLease(paths, 'B056', { owner: 'session-A' });
+    expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
+
+    const { lease } = resolve(paths, 'B056', '验证通过');
+    expect(lease.released).toBe(true);
+    expect(lease.previous.owner).toBe('session-A');
+    expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
+  });
+
+  it('无租约时 resolve 幂等：不抛错，reported released=false', () => {
+    seed([baseRow()]);
+    const { lease } = resolve(paths, 'B056', '验证通过');
+    expect(lease.released).toBe(false);
+    expect(readJsonl(paths.tasks)).toHaveLength(0);
+  });
+
+  it('他人持有的租约随闭环一并回收（闭环是终态，不因 owner 不同而卡住）', () => {
+    seed([baseRow({ owner: 'session-A' })]);
+    acquireLease(paths, 'B056', { owner: 'session-B' });
+    expect(() => resolve(paths, 'B056', '验证通过')).not.toThrow();
+    expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
+  });
+
+  it('doctor 把「无活跃记录」的残留锁判为 issue（机器可发现）', () => {
+    seed([baseRow({ id: 'B057', metadata: { fingerprint: 'fp-2' } })]);
+    acquireLease(paths, 'B056', { owner: 'dead-session' }); // 活跃池无 B056 ⇒ 残留
+    expect(doctor(paths).issues.join('\n')).toMatch(/残留租约 B056\.lock/);
+
+    acquireLease(paths, 'B057', { owner: 'session-A' }); // 有活跃记录 ⇒ 不算残留
+    expect(doctor(paths).issues.join('\n')).not.toMatch(/残留租约 B057\.lock/);
   });
 });

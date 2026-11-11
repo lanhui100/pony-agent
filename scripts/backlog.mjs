@@ -189,19 +189,8 @@ export function lintAll(paths) {
       seen.set(row.id, true);
     }
   }
-  for (const row of active) {
-    if (row.status !== 'in_progress') continue;
-    const lease = readLease(paths, row.id);
-    if (lease && row.owner && lease.owner !== row.owner) {
-      problems.push(`tasks.jsonl (${row.id}) 租约与记录 owner 冲突：记录=${row.owner} 锁=${lease.owner}`);
-    }
-    if (!lease && row.heartbeat_at) {
-      const beat = Date.parse(row.heartbeat_at);
-      if (Number.isFinite(beat) && Date.now() - beat < DEFAULT_LEASE_TTL_MS) {
-        problems.push(`tasks.jsonl (${row.id}) 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
-      }
-    }
-  }
+  const leaseProblems = leaseConsistency(paths, active);
+  problems.push(...leaseProblems.problems);
   const nextId = readHighWater(paths);
   if (nextId > 0) {
     for (const row of [...active, ...archived]) {
@@ -211,7 +200,12 @@ export function lintAll(paths) {
       }
     }
   }
-  return { ok: problems.length === 0, problems, counts: { active: active.length, archived: archived.length } };
+  return {
+    ok: problems.length === 0,
+    problems,
+    notes: leaseProblems.notes,
+    counts: { active: active.length, archived: archived.length }
+  };
 }
 
 /** 分配下一个 ID：持久高水位与扫描值取大，保证单调不减。 */
@@ -276,6 +270,52 @@ export function readLease(paths, id) {
   } catch {
     return null;
   }
+}
+
+/**
+ * 本工作区是否在跟踪租约。
+ *
+ * `backlog/.locks/` 是**本地运行时目录**（不入仓，见 .gitignore）：租约内容含
+ * pid / session_id / 心跳时间戳，入仓只会带来每次 start 的 diff 噪音与并发冲突，
+ * 因此干净克隆、CI、他人工作区里必然不存在。
+ *
+ * 只有它存在时，「记录为 in_progress 却缺锁文件」才可能是本地手改状态；
+ * 不存在时该信号在干净环境恒为真，会让 governance lint 在任何克隆上恒红（B069）。
+ */
+export function isLeaseTrackingActive(paths) {
+  return fs.existsSync(paths.locksDir);
+}
+
+/**
+ * 记录状态与本地租约的一致性校验。
+ *
+ * 返回 `{ problems, notes }`：`problems` 阻断门禁，`notes` 只提示不阻断。
+ * owner 冲突是硬错（两侧数据都在手，可比对）；锁文件缺失在无租约跟踪的工作区
+ * 只能是提示——否则干净克隆恒红。
+ */
+export function leaseConsistency(paths, rows) {
+  const problems = [];
+  const notes = [];
+  const tracking = isLeaseTrackingActive(paths);
+  for (const row of rows) {
+    if (row.status !== 'in_progress') continue;
+    const lease = readLease(paths, row.id);
+    if (lease) {
+      if (row.owner && lease.owner !== row.owner) {
+        problems.push(`tasks.jsonl (${row.id}) 租约与记录 owner 冲突：记录=${row.owner} 锁=${lease.owner}`);
+      }
+      continue;
+    }
+    if (!row.heartbeat_at) continue;
+    const beat = Date.parse(row.heartbeat_at);
+    if (!Number.isFinite(beat) || Date.now() - beat >= DEFAULT_LEASE_TTL_MS) continue;
+    if (tracking) {
+      problems.push(`tasks.jsonl (${row.id}) 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
+    } else {
+      notes.push(`tasks.jsonl (${row.id}) in_progress 无本地租约目录（干净克隆/CI 常态：租约不入仓，跳过锁文件校验）`);
+    }
+  }
+  return { problems, notes };
 }
 
 /**
@@ -402,7 +442,29 @@ export function resolve(paths, id, evidence) {
   // `.next-id` 会落后于「活跃∪归档」的最大编号，`lint` 随即判「ID 越过高水位（疑似手工改号）」
   // ——governance CI 因此在每次「闭环最高编号任务且未再开新任务」后恒红（实测 B066 案例）。
   writeHighWater(paths, id);
-  return { row, archiveFile };
+  // 闭环是终态，租约随之失效（B081）：resolve 只归档不清锁，会让 `.locks/` 里的
+  // `<ID>.lock` 一直留到 TTL 被 reap 回收——期间该 ID 对其它会话是「被占用」的假信号，
+  // 且 `isLeaseTrackingActive` 因目录常驻而永久走 lint 严格支。
+  // 释放排在归档落盘之后：反过来（先清锁再归档）一旦中途失败，会留下「仍在活跃池却无人持锁」
+  // 的伪手改态；当前顺序最坏只是多留一个可 reap 的锁，方向安全。
+  const lease = releaseLease(paths, id);
+  return { row, archiveFile, lease };
+}
+
+/**
+ * 残留锁判定：`.locks/<ID>.lock` 存在、但活跃池已无该 id（B081）。
+ *
+ * 正常路径下 `resolve` 归档时会即时释放租约，能走到这里的只剩「会话在归档后崩溃」或
+ * 「本单修复前的历史遗留」。残留锁要等 TTL（默认 2h）才被 reap，期间任何会话复用该 id
+ * 都会撞锁，而空目录 git 不可见 ⇒ 只有 doctor 能提前发现。
+ */
+function orphanLeaseIds(paths, activeRows) {
+  if (!fs.existsSync(paths.locksDir)) return [];
+  const live = new Set(activeRows.map(row => row.id));
+  return fs.readdirSync(paths.locksDir)
+    .filter(name => name.endsWith('.lock'))
+    .map(name => name.replace(/\.lock$/, ''))
+    .filter(id => !live.has(id));
 }
 
 export function doctor(paths) {
@@ -420,27 +482,18 @@ export function doctor(paths) {
     const n = Number.parseInt(id.replace(/^B/, ''), 10);
     return Number.isFinite(n) ? Math.max(max, n) : max;
   }, 0);
-  for (const row of active) {
-    if (row.status !== 'in_progress') continue;
-    const lease = readLease(paths, row.id);
-    if (lease && row.owner && lease.owner !== row.owner) {
-      problems.push(`tasks.jsonl (${row.id}) 租约与记录 owner 冲突：记录=${row.owner} 锁=${lease.owner}`);
-    }
-    if (!lease && row.heartbeat_at) {
-      const beat = Date.parse(row.heartbeat_at);
-      if (Number.isFinite(beat) && Date.now() - beat < DEFAULT_LEASE_TTL_MS) {
-        problems.push(`tasks.jsonl (${row.id}) 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
-      }
-    }
-  }
   const nextId = readHighWater(paths);
   if (nextId === 0 && maxSeen > 0) report.issues.push('高水位文件缺失（.next-id）');
   if (nextId > 0 && nextId <= maxSeen) report.issues.push(`高水位 B${String(nextId).padStart(3, '0')}（下一候选）未越过最大编号 B${String(maxSeen).padStart(3, '0')}`);
   report.leases = active
     .map(row => ({ id: row.id, lease: readLease(paths, row.id) }))
     .filter(item => item.lease);
+  for (const id of orphanLeaseIds(paths, active)) {
+    report.issues.push(`残留租约 ${id}.lock：活跃池无此记录（node scripts/backlog.mjs reap 回收，或 release ${id}）`);
+  }
   const lint = lintAll(paths);
   report.issues.push(...lint.problems);
+  report.notes = lint.notes;
   report.ok = report.issues.length === 0;
   return report;
 }
@@ -578,12 +631,14 @@ export function main(argv = process.argv.slice(2)) {
     }
     case 'resolve': {
       const evidence = arg('evidence', rest.slice(1).filter(x => !x.startsWith('--')).join(' '));
-      const { row, archiveFile } = resolve(paths, rest[0], evidence);
+      const { row, archiveFile, lease } = resolve(paths, rest[0], evidence);
       console.log(`[backlog] ${row.id} 已闭环并归档 → ${path.relative(root, archiveFile)}`);
+      if (lease.released) console.log(`[backlog] 租约已释放（原持有者 @${lease.previous.owner}）`);
       return 0;
     }
     case 'lint': {
       const res = lintAll(paths);
+      for (const n of res.notes) console.error(`[backlog-lint] NOTE ${n}`);
       if (!res.ok) {
         for (const p of res.problems) console.error(`[backlog-lint] ${p}`);
         console.error(`[backlog-lint] FAIL（${res.problems.length} 项）`);
