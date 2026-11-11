@@ -35,7 +35,13 @@ const SPEC_VERSION = "pa090.v1";
 const DRY_RUN = process.argv.includes("--dry-run");
 const FORCE = process.argv.includes("--force");
 
-const dbPath = join(process.env.LOCALAPPDATA ?? "", "PonyAgent", "sessions.db");
+const dbArgIdx = process.argv.indexOf("--db");
+const dbPath = dbArgIdx !== -1 && process.argv[dbArgIdx + 1]
+  ? process.argv[dbArgIdx + 1]
+  : (process.platform === "win32"
+      ? join(process.env.LOCALAPPDATA ?? "", "PonyAgent", "sessions.db")
+      : join(process.env.HOME ?? "", ".local", "share", "PonyAgent", "sessions.db"));
+
 if (!existsSync(dbPath)) {
   console.error(`sessions.db 不存在: ${dbPath}`);
   process.exit(1);
@@ -43,9 +49,13 @@ if (!existsSync(dbPath)) {
 
 // ── 0. 进程检测（Pony Agent 必须退出，fail-closed）─────────
 function detectRunningApp() {
+  if (process.argv.includes("--skip-process-check")) return null;
   try {
+    const isWin = process.platform === "win32";
     const out = execSync(
-      'powershell -NoProfile -Command "Get-Process pony-agent -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"',
+      isWin
+        ? 'powershell -NoProfile -Command "Get-Process pony-agent,pony -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"'
+        : 'pgrep -x "pony" 2>/dev/null || true',
       { encoding: "utf8", timeout: 10000 }
     );
     const pids = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
