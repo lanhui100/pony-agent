@@ -25,9 +25,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const DASHBOARD_REL = "management/task-system/00_DASHBOARD.md";
+const DASHBOARD_REL = "docs/archive/task-system/00_DASHBOARD.md";
 const IDENTIFIER = "MAX_SUBAGENT_DEPTH";
-const TASK_CARD_PREFIX = "management/task-system/03_TASKS/";
+const TASK_CARD_PREFIX = "docs/archive/task-system/03_TASKS/";
 
 /** `git grep -n <IDENTIFIER> [-- pathspec...]`，归一化为 `path:lineno` 位置集合。
  * 显式排除 `tests/**`，消除本测试套件自身作为 `.ts` 包含该标识符时的自我污染（HARNESS 缺陷修复）。

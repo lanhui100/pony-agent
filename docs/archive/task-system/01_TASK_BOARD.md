@@ -1,6 +1,12 @@
-# Pony Agent Task Board
+# Pony Agent Task Board（已退役 / RETIRED）
 
-## Roadmap Layers
+> **⚠️ 注意：本任务看板已于 2026-11-11 正式退役并冻结为只读历史档案。**  
+> **退役依据与完整对账见 [RETIRED.md](RETIRED.md) 及 ADR [`.agents/notes/implemented/process/2026-11-11-retire-legacy-task-system.md`](../../.agents/notes/implemented/process/2026-11-11-retire-legacy-task-system.md)。**  
+> - **微观执行真源**：移交至 [`backlog/tasks.jsonl`](../../backlog/tasks.jsonl)（活跃待办已迁入，分配 `backlog:B083~B101`）；  
+> - **宏观决策真源**：移交至 [`.agents/notes/`](../../.agents/notes/) 与 [`docs/decisions/`](../../docs/decisions/)（ADR 体系）；  
+> - 本文件不再接收新任务，亦不再更新状态流。
+
+## Roadmap Layers（历史路线图分层）
 
 - 宿主与入口：`PA-015 / PA-023` / **交付形态四件套：`PA-164`(Headless) → `PA-165`(ACP) / `PA-166`(SDK)**
 - graph 编排：`PA-012 / PA-013 / PA-014 / PA-019`
@@ -11,87 +17,46 @@
 - 观测与监控：`PA-024`
 - core 基础设施边界：`PA-044`
 
-## Backlog
+## Legacy Backlog（历史待办分流与迁移记录）
 
-- **交付形态四件套登记（2026-11-02）**：TUI 已完全具备；Headless 部分具备；SDK / ACP 完全缺失。三张卡如下，**串行依赖**（PA-164 先冻结事件契约与退出码，否则 165/166 会催生第二套事件 schema）。
-- `PA-164` Headless 交付形态补全（P1，Complexity B）— **建议优先，约 4~4.5 人日**
-  说明：`bin/cli.rs`（608 行）已有参数面/管道/事件 sink 骨架，但退出码恒 0（`turn:failed` 只 eprintln 不传播）、无 JSONL/SSE 结构化输出、stdout 被横幅污染、`tool_authorization_mode` 恒 None（`ask_user` 无头下可能挂起）、无 timeout/max-turns、无验收与 npm script。**成本低的关键**：`TurnEventSink` seam + `agent/sse_adapter.rs::format_sse_event` 已存在，帧格式无需重造。契约 C1~C6：输出模式 / 退出码分类学（fail-closed，禁 `_ => 0`）/ 结果封套 / 非交互审批策略（默认 deny）/ 有界执行 / 真实进程验收。任务卡：`03_TASKS/PA-164-headless-delivery-form.md`。
-- `PA-165` ACP（Agent Client Protocol）宿主接入（P2，Complexity C，**依赖 PA-164**）— 约 7~8 人日
-  说明：现状三宿主均走 Tauri IPC 专有通道（`src-tauri/src/tauri_adapter.rs:17`），无通用协议面；DSH 已多宿主平铺。实现 JSON-RPC 2.0 over stdio 服务端（initialize / session.new|load|cancel / prompt / request_permission 反向调用 / session-update 事件映射）。卡点：ACP 上游版本漂移须先锁版本；无外部客户端时以手写帧回放为验收真值。任务卡：`03_TASKS/PA-165-acp-host-protocol.md`。
-- `PA-166` 跨进程 SDK 可编程驱动（P2，Complexity C，**依赖 PA-164**）— 约 9~10 人日
-  说明：现状唯一 SDK 是同进程 Rust crate，三宿主编译期直连 core，仓外调用方无法驱动。提供 JSON-RPC over stdio + 薄客户端（`crates/pony-agent-sdk` / `packages/pony-sdk`），覆盖并发会话隔离、流式订阅、审批回调、事件队列有界背压、崩溃传播；同时是 PA-110 跨进程 subagent 委派的地基。任务卡：`03_TASKS/PA-166-cross-process-sdk.md`。
-- `PA-167` Headless 工具级授权与交互应答缺口（P2，Complexity C）— wave-59 撤销项承接
-  说明：PA-164 契约 v3/v4 裁定撤销 `--allow-tools` 与 `--max-turns`，理由是**宿主无接线口**（策略求值器由 runtime 内部注册 `governed_executor.rs:463-469`；跳数上限 `runtime/limits.rs:76` 为 `pub(super)`），声明即静默谎报。本卡补齐 5 项：可注入 `ToolPolicyEvaluator`、无头审批应答协议（fail-closed 默认 deny）、`turn:suspended` 增 `control_reason`、公开 `max_tool_hops`、`host_control_available` 可注入（当前 `runtime/mod.rs:316` 硬编码 true，使 `interaction_unavailable` 逃生口不可达）。需与 PA-165 ACP 的 `session/request_permission` 对齐，避免两套应答机制。任务卡：`03_TASKS/PA-167-headless-authorization-gaps.md`。
+- **交付形态四件套登记（2026-11-02）**：TUI 已完全具备；Headless 部分具备；SDK / ACP 完全缺失。
+- `PA-164` Headless 交付形态补全（P1，Complexity B）— **已完成并合入 main (wave-59，commit `4d8a89db`)，正式结单**
+  说明：C1~C6 契约已完整落地。任务卡：`03_TASKS/PA-164-headless-delivery-form.md`。
+- `PA-165` ACP（Agent Client Protocol）宿主接入（P2，Complexity C）— **已迁移至 `backlog:B084`**
+  说明：JSON-RPC 2.0 over stdio 服务端。任务卡：`03_TASKS/PA-165-acp-host-protocol.md`。
+- `PA-166` 跨进程 SDK 可编程驱动（P2，Complexity C）— **已迁移至 `backlog:B085`**
+  说明：`crates/pony-agent-sdk` / `packages/pony-sdk`。任务卡：`03_TASKS/PA-166-cross-process-sdk.md`。
+- `PA-167` Headless 工具级授权与交互应答缺口（P2，Complexity C）— **已迁移至 `backlog:B086`**
+  说明：5 项无头授权与审批接缝补齐。任务卡：`03_TASKS/PA-167-headless-authorization-gaps.md`。
 
-- **Trace 审核 Loop 三部曲（2026-11-08，ADR 0101 已批准）**：用户唤起 + 持久状态机（`docs/audit/loop-state.json`）+ 确定性脚本骨架 + 单一审批门；中期持续机制（七维度队列 6→1/3→2→5→7→4，走完转 patrol 回归巡检），非一次性任务、不依赖定时器。三卡**串行依赖**：
-- `PA-168` P0 测量地基与维度 6 首轮（P1，Complexity B）
-  说明：loop-state + corpus（≥3 只读任务，hash 冻结）+ skill 唤起入口（`.agents/skills/trace-audit-loop/`）+ 维度 6（上报链路自检）断言立法与首个完整 round（人工驱动各阶段）。维度 6 未过不得自动化其上。任务卡：`03_TASKS/PA-168-trace-audit-loop-p0.md`。
-- `PA-169` P1 确定性节点脚本化（P1，Complexity B，**依赖 PA-168**）— **已完成**
-  说明：`scripts/audit/` replay（scratch worktree 双臂 ×≥3 会话）/ fetch（UNKNOWN=3）/ assertions / ratchet / build-install / verdict；审计臂归因键经 ADR 0068 通道确认。验收：维度 6 完整 round 机械判 pass。任务卡：`03_TASKS/PA-169-trace-audit-loop-p1.md`。
-  结果：`lib.sh` / `state.py`（CAS+lease+freeze）/ `replay.sh` / `fetch.sh` / `assertions/dim6.sh` / `ratchet.sh`+`ratchet_add.py` / `freeze-check.sh`+`scope_check.py` / `build-install.sh` / `verdict.sh` / `selftest.sh` 落地，自测 26/26；**r1-dim6 verdict PASS（exit=0）**，dim6 入棘轮（首个通过维度），未修基线臂复现 REGRESSION exit=1（回执 009–020）。队列已推进 `r2-dim1`（维度 1 时延结构）。
-- `PA-170` P2 一次唤起整轮推进 + patrol（P2，Complexity B，**依赖 PA-169**）
-  说明：单次唤起机械推进至下一停点（含 headless 单命令形态）；队列耗尽转 patrol 巡检、回归自动开新轮。验收：连续 3 次唤起零未批准实施、零假 PASS。定时器为可选演进不列验收。任务卡：`03_TASKS/PA-170-trace-audit-loop-p2.md`。
-- `PA-171` TUI 连环错误根因修复：goal 续轮失败止损 / provider 限流冷却 / 失败轮归因（P1，Complexity B，**独立于 PA-168~170 队列**）
-  说明：TUI 会话 `pa_01a1ba70` 于 2026-11-09 10:29–10:30 出现 16 连败（`goal-8..goal-20` 每轮首调即 429）。根因三层：①上游单 provider 45s 超时 + Kimi 5h 配额 429，无备用链/无冷却/`Retry-After` 死码；②`run_goal_rounds` 不读轮次成败（`start_turn_stream` 丢弃 Result）、失败轮照烧 `rounds_started`、多轮次线程各持一份 8 轮预算 ⇒ 16=2×8；③失败轮 trace 三字段硬编码 null + TUI 把 429 折叠成"重试已用尽"。契约 C1–C6 见任务卡，wave-68 三写域并行（tui/control_plane/goal · provider/retry/errors · turn_flow/turn_stream/turn_persist）。任务卡：`03_TASKS/PA-171-goal-round-failure-resilience.md`。
-  结果：wave-68 已合入主干（红相 `e8c460ab` → a2 `f97b3fdb`）。C1–C5 冻结测试 + 对抗测试全绿（7/3/5/89/89），`--lib` 1404、tui 96/98、`cargo check --all-targets` Exit 0；L3 复审 A/B/P 均 PASS；观测门禁 Exit 0。**遗留 13 条已由 wave-69/PA-172 逐条收口**（见 PA-171 卡「遗留与后续 · 收口状态」）。
-- `PA-172` 跨 provider 自动故障转移 + 上游调用时限/重试配置化（P1，Complexity B，**承接 PA-171 遗留第 1 条**）
-  说明：PA-171 之后仍缺「一次上游失败能否换一条上游」与「45s/5 次/30s 为何硬编码」。本卡在 `providers.json` 增 `upstream_policy`（可配 45s/5 次/30s，默认不变）与 `failover_provider_ids`（有序候选链），实现**有界**换手：仅 `decide_with_tools` 同步决策入口、hop ≤ 2、逐 attempt deadline 120s、冷却候选 0 次 HTTP、全链耗尽返回最后错误 + `failover_exhausted=` 标记。ADR 0104。任务卡：`03_TASKS/PA-172-provider-failover-and-upstream-policy.md`。
-  结果：wave-69 落地（协议 `65a909ba` · 红相 `98730d5d`）。新冻结验收 11/8/6 + 租约锚点 6 + 遗留收口 99 全绿；PA-171 五个冻结文件零改动；`--lib` 1404、tui 96/98、`check --all-targets` Exit 0、TS 契约 39/39 键、`vue-tsc` Exit 0、观测双门禁 Exit 0。**如实登记局限**：流式无总 deadline ⇒ 不换手；followup 的 `accumulated_messages` 语义 ⇒ 不换手；timeout 类不进入冷却（无跨轮 sticky）⇒ 主 provider 持续超时时每轮仍先付其重试预算。详见契约矩阵 `.dev-team/contract-matrix-pa172.md` §11。
+- **Trace 审核 Loop 三部曲（2026-11-08，ADR 0101 已批准）**：用户唤起 + 持久状态机（`docs/audit/loop-state.json`）+ 确定性脚本骨架 + 单一审批门；七维度队列推进。
+- `PA-168` P0 测量地基与维度 6 首轮（P1）— **已完成（commit `354bc1d2`）**
+- `PA-169` P1 确定性节点脚本化（P1）— **已完成（commit `354bc1d2`）**
+- `PA-170` P2 一次唤起整轮推进 + patrol（P2）— **已迁移至 `backlog:B083`（关联 ADR 0101）**
+- `PA-171` TUI 连环错误根因修复（P1）— **已完成并合入 main (wave-68，commit `f97b3fdb`)，正式结单**
+- `PA-172` 跨 provider 自动故障转移（P1）— **已完成并合入 main (wave-69，commit `98730d5d`)，正式结单**
 
-- `PA-119` pony-agent-core 结构化日志迁移（P2，Complexity C）
-  说明：`crates/pony-agent-core` 目前无 tracing/log 依赖，诊断输出统一为裸 `eprintln!`（`history_commands.rs` 实测 12 处），不满足 `.dev-team/nfr-baseline.json` 的 `logging{format:json,trace_id_required}`。本次 PA-118 死锁修复按「最小闭包」原则**未**引入日志框架，改以显式豁免落盘（`logging_legacy_eprintln_exempt=true` + `logging_debt_ref="PA-119"`，见 `.dev-team/contract-matrix-deadlock.md` §3.1）。**到期条款：PA-119 完成时必须重跑 PA-118 波次的 L3-P 五问并关闭该豁免**（将 `logging_legacy_eprintln_exempt` 置 false 并重过 `nfr-lint.py --self-test`）。
-- `PA-115` 启动期 host-read 缺有界超时（P2，Complexity A）
-  说明：`src/stores/runtime.ts:2445`（`initializeSessions` 的 `host-read` 分支）await `loadSessionRuntimeViewState` 时**没有** `withTimeout`，而会话切换分支 `:1895` 已使用 `withTimeout(..., HYDRATION_TIMEOUT_MS)`。一旦宿主读取挂起，界面会永久停在「正在加载最近对话…」而无失败可见性。来源：2026-10-14 卡死诊断的浏览器 stub 复现（SIM_MODE=ipc-hang）。与 PA-118 死锁无因果关联（PA-118 是主线程 futex 自死锁），属独立健壮性缺口。
-- `PA-116` 浏览器预览态会话恢复只还原 ≤8 条消息（P3，Complexity A）
-  说明：`src/lib/runtime/messages.ts:341` `buildTurnHistory()` 末尾 `.slice(-8)` → `sessions.ts:440` 构造 `snapshot.history` → `sessions.ts:805` 兼容性判定又用同一截断长度比对（必然相等），导致无 Tauri 时任何恢复会话只显示最后 4 轮。收据：种子 40 turn/80 条，mounted log `messages:80` 而 `renderedTurnNodes:8`。
-- `PA-117` `[workspace-scroll]` 调试日志无开关且 payload 触发强制布局（P3，Complexity A）
-  说明：`src/components/HomeWorkspace.vue:202` 的 `console.info("[workspace-scroll]", payload)` 无 debug 开关，payload 含 `getBoundingClientRect()` 结果（强制同步布局）。160 turn 实测 387 条日志、挂载期一次性开销约 1s；无事件回环（收敛），但在 devtools 打开的 dev 态是可削常数开销。
-- `PA-120` ask 生产面（composer 卡片）过期态禁用与 error 挂载脱耦（P3，Complexity A）
-  说明：生产用户面 ask 卡片位于 `src/components/chat/WorkspaceComposer.vue`（选项 `:disabled="askIsBusy"`，:866/913/936/949；ADR-0030 已裁定消息流不再渲染 `<AskPanel />`），无 `expiresAtMs` 分支；且其 `:955` 的 `askStore.error` 位于 `v-if="activeAsk"` 内，快照被自动对账清空时卡片与提示文案一同卸载。wave-16 因该文件携带并行会话未提交 WIP（写入无法安全定向提交）**未**纳入本波次，改由 store 兜底（提交时刻过期判定 + `refresh()` 自动对账，卡片 ≤2.5s 内自动移出）。**验收条款**：该文件 WIP 提交后，为 composer ask 卡片补「本地已过期即禁用选项/取消/发送 + 含『过期』提示」，将 error 提示宿主与 `activeAsk` 存活解耦，并新增组件级 vitest（真实断言 disabled 与提示）；重跑 `tests/ask-pending-expiry.spec.ts` 确认 store 兜底未被削弱。
-- `PA-121` `ask_expire` 渲染层可自传宿主时钟（P3，Complexity A，安全加固）
-  说明：`src-tauri/src/lib.rs:243` 的 `ask_expire(now_ms: Option<u64>)` 允许渲染层传入 `now_ms`，把**未过期**的 Pending 请求强制转 `Expired`，且 `expire_control_requests` 为全局（跨 session、kind 无关）。经 wave-16 L3 审查 B 判定**不构成新权限提升**（同一渲染层本可直接 `ask_answer`），故本波次未改（避免夹带）。**验收条款**：将 `now_ms` 收敛为宿主时钟（或加会话/请求范围校验），并补 Rust 契约测试证明渲染层自传时钟不能越过 TTL 语义。
-- `PA-122` `[token-metrics]` 事件折叠重建路径在 TurnEnd 覆盖 per-call duration（P2，Complexity A）
-  说明：`crates/pony-agent-core/src/agent/projection.rs:303-307` 的 `settle_timeline` 在 `turn/end` 结算时把**整轮 elapsed** 无条件写入末条 `call_model` 条目的 `turn_duration_ms`，冲掉 `:569` 已落的 per-call duration（历史 PA-094 P2-3）。wave-15 因最小闭包 + 该改动需同步既有冻结内联断言（`projection.rs:1683-1684`）而未纳入（登记于 `.dev-team/state.json` → `wave15-D1`）。**验收条款**：将 `:305` 改为仅在 `is_none()` 时兜底，新增「事件折叠重建后每条 call_model 的 per-call duration 不被整轮值覆盖」的 Rust 断言，并同步修订既有内联断言；重跑 `cargo test -p pony-agent-core --lib agent::` 全绿。
-- `PA-123` `[token-metrics]` 初始调用完成无 hop 事件导致 S1 展示滞后一跳（P3，Complexity A）
-  说明：`crates/pony-agent-core/src/agent/runtime/turn_stream.rs` 的 `turn:hop_complete` 只在「触发工具后续请求」的调用后发出，初始调用（call #0）没有对应 hop 事件；因此 call #0 完成后到首个 followup 完成前，UI 的「最近一次已完成调用」仍指向上一轮的末次调用（wave-15 契约 §7.10 残余延迟）。**验收条款**：在初始调用完成处（工具执行前）发出带 per-call 记录的载体事件（或让 `turn:tool` 携带 `provider_call_records`），使 S1 在初始调用完成瞬间即时更新；补一条真实多跳对比用例（初始调用完成后 `contextDisplayTokens == call#0 input`）并确认事件序列契约向后兼容。
-- `PA-134` 存量 e2e 基线红灯：`browser-preview` 与 `checkpoint-branch` 共 8 例失败（P2，Complexity A）
-  说明：`npm run test:e2e` 在 wave-17 基线 `5d7d691`（**全新构建后复现**）即 `8 failed / 12 passed`。根因：`tests/e2e/browser-preview.spec.ts` 与 `tests/e2e/checkpoint-branch.spec.ts` 断言 `getByTestId("session-sidebar-session-list")`，而侧栏结构已漂移，该 testid 在浏览器预览模式下 `element(s) not found`（超时 15s）。影响：规范 e2e 门禁长期处于红灯，任何依赖它的波次被迫降级为「独立门禁 spec」。wave-17 未修（最小闭包），已落盘 `.dev-team/state-wave17.json` → `baseline_defects[BASE-E2E-1]`。**验收条款**：按当前侧栏结构重基线这 8 例（或改用稳定的新 testid），`npm run test:e2e` 全绿并留痕。
-- `PA-146` TUI E2E 命令面漂移：`/thinking` 后命令表 8 条 vs 冻结期望 7 条（P2，Complexity A）
-  说明：wave-39 终版二进制（sha256 `f1114e10…`）跑 `tools/tui-audit/run_audit.sh` 得 365/369，4 条失败全部来自命令表：`empty.command_desc_column`（空态 `take(4)` 不含 `/clear`）、`slash.all_commands_listed` / `slash.each_command_once` / `slash.command_desc_column`（`/quit` 被 7 行菜单上限截断）。用 `git archive ba530bd` 构建 pre-wave-39 二进制 1:1 复现同样 4 条失败 → 非 wave-39 回归，根因是 `/thinking`（6429be7）新增命令后 `tools/tui-audit/checks.py` 仍冻结 7 命令期望与固定 `take(4)`/7 行上限假设。**验收条款**：checks.py 的期望改为从命令表推导（或空态引导与菜单上限随命令总数自适应），`run_audit.sh --phase after` 全绿（≥369/369）并留痕；不得以放宽断言方式通过。
-- `PA-147` TUI 渲染测试基线红：`tui_render_layout` 5 例 + `tui_acceptance` 1 例陈旧失败（P2，Complexity A）
-  说明：wave-39 起点基线即 `tui_render_layout` 3 passed/5 failed（`header 下方必须是发丝线` 断言 `'─'` 而实现为 `'▁'`；`cjk_wrap_never_overflows_content_width` 中文正文未渲染；`conversation_hierarchy_and_streaming_render` 用户轮标签缺失；`input_caret_tracks_cursor_position` 偏移不符；`panel_renders_inside_screen_and_keeps_footer` footer 状态行已被 wave-39 移除），以及 `tui_acceptance::test_matching_commands_filter` 1 例失败。wave-39 以「与基线逐项比对、不新增失败」放行（Non-Goals），但长期红灯会掩盖真实回归。**验收条款**：按 ADR 0038/0042 现行契约重写这 6 例断言（不得 `#[ignore]`），`cargo test -p pony-agent-core --test tui_render_layout --test tui_acceptance` 全绿并留痕。
-- `PA-135` `HomeWorkspace.vue` 组合态守卫粒度过宽：吞掉 Ctrl/Cmd+Z 撤销与 Alt+S（P2，Complexity A）
-  说明：`src/components/HomeWorkspace.vue:1367-1370` 的 `handleComposerKeydown` 在 `event.isComposing || event.keyCode === 229` 时**无条件早退**，使其后的 `isUndoShortcut` 分支（`:1372-1379`）与排队切换分支（`:1396`）在组合态下不可达。复现：`new KeyboardEvent("keydown", { key: "z", keyCode: 229, ctrlKey: true })` → `handleUndoLastTurn`（`:1346`）不被调用，撤销静默失效。前提 `[EXTERNAL-KNOWLEDGE]`：Windows 拼音类 IME 组合期对所有按键上报 229。该形状在基线即存在，**非 wave-17 引入**（union diff 未触及该文件），由 wave-17 L3 审查视角 B 发现并登记。**验收条款**：把守卫收敛到 Enter 提交路径（或仅在 `event.key === "Enter"` 时早退），并补「组合态下 Ctrl+Z 仍触发撤销」的 vitest 真实断言。
-- `PA-136` 解析器一致性：`isImeComposingEvent` 严格判定 vs `HomeWorkspace.vue:1369` 真值判定（P3，Complexity A）
-  说明：wave-17 新增接缝 `src/lib/ime.ts:27-28` 使用 `event instanceof KeyboardEvent` + `isComposing === true`（严格判定），而既有内联基准 `src/components/HomeWorkspace.vue:1369` 使用 `event.isComposing || event.keyCode === 229`（真值判定、无类型闸门）。L3 审查视角 B 实测：同 realm 事件两者逐例一致；差异仅在**跨 realm 事件对象**（iframe `contentWindow.KeyboardEvent`）与**真值非布尔 `isComposing`**（如 `1`）两档 —— 当前 `src/` 内 `iframe`/`webview`/`createEvent` 零命中，5 个调用点全为 Vue 原生 `@keydown` 同 realm 事件，**无可达放行路径**。**验收条款**：若未来引入 iframe / webview / 跨 realm 事件源，必须先对齐两处判定集合（改为鸭子类型或统一走 `isImeComposingEvent`）并补跨 realm 用例。
-- `PA-130` 孤儿组件 `src/components/AskPanel.vue` 未被任何生产代码挂载（P3，Complexity A）
-  说明：wave-17 侦察实测 `grep -rn "AskPanel" src/` 零命中（`src/App.vue` 未注册、无动态路由），仅 `tests/workspace-width-alignment.spec.ts`、`tests/ask-panel-expired.spec.ts`、`tests/AskPlanPanel.spec.ts` 三处测试引用；生产 ask 面在 `src/components/chat/WorkspaceComposer.vue`（ADR-0030 已裁定消息流不再渲染 `<AskPanel />`）。wave-17 因最小闭包仅在其中补齐同一缺陷类的 `tabular-nums`，**未删除也未重构**。**验收条款**：交 `code-hygiene` 专项判定删除或重新挂载；删除时须同步清理三个测试文件。
-- `PA-131` 工具级三阶决议动作阵列需跨层新增 Rust 契约（P3，Complexity C）
-  说明：来自 open-claude-ui 借鉴建议 S3-b（仅本次通过 / 永久白名单 / 拒绝）。后端**无工具级持久授权落点**：`crates/pony-agent-core/src/agent/ask_control.rs:74-85` 的 `answer` 为不透明 `Option<serde_json::Value>`（无 verdict 枚举）；`src-tauri/src/lib.rs:1208-1211` 仅注册 `ask_list_pending / ask_answer / ask_cancel / ask_expire`；唯一持久 Store 是**路径域** `path_permission.rs:162` `AuthorizeStore`；`dispatcher.rs:92-97` 的 `PermissionVerdict` 是策略求值结果而非用户决议。前端伪造第三颗按钮会把 `always_allow` 当工具答案回灌模型，形成「UI 承诺了未发生的授权」的静默谎报。**验收条款**：先定义 Rust `verdict` 枚举 + 工具级 allowlist 持久化格式 + 新 IPC 命令，再动前端。
-- `PA-132` Surface 0-3 设计令牌层迁移（P3，Complexity C）
-  说明：来自借鉴建议 S5-a。四层微明度阶梯在本项目**已事实上存在**（`HomeSidebar.vue:67` `bg-white/62`、`HomeStatusPanel.vue:90` `#f6f0e8`、`AskPanel.vue:117` `#fdf6e7`、`WorkspaceTurnItem.vue:737` 0.5px 发丝），缺的是命名而非分层。迁移面实测 **19 文件 / 96 个 hex 字面量**，且会作废 `AgentRuntimeStatusBar.vue:117` 已冻结的「背板 `#f2ede6` 上实测 4.11:1 对比度」门禁测量。**验收条款**：独立立项，附完整迁移清单（文件级 + 字面量级）+ 深色模式可达性设计（当前 `styles.css:5` `color-scheme: light` 使参考常量深色一半无路径）+ 对比度重测门禁。
-- `PA-133` Retina 0.5px 发丝边框变体（P3，Complexity B）
-  说明：来自借鉴建议 S5-b。收益已由仓内 `ring-1` + rgba 达成（`ring-1` 14 处，如 `ui/DropdownMenu.vue:62`、`ProviderConfigPage.vue:1571`）；且 `border-[0.5px]` 在 **DPR=1**（Tauri Windows 100% 缩放，主流配置）会被取整/次像素抗锯齿，边界视觉退化。**验收条款**：若确需能力，只以 `@custom-variant retina (@media (min-resolution: 2dppx))` 形式登记且 1px 为默认回退，**禁止**批量改写既有 276 处 `border`。
-- `PA-022` lifecycle hooks pipeline
-  说明：保留为 post-foundation hooks 总入口与分流说明；下一轮已拆成 `PA-038 / PA-039 / PA-040` 三张可执行卡。
-- `PA-026` workflow mode 与用户自定义流程编排
-  说明：在 agent harness 主线完成并稳定后，基于既有 graph / runtime / checkpoint 底座扩展用户自定义 workflow 模式，支持行业流程节点、条件分支、审批、人机协同、重试与审计恢复；该卡明确属于远期扩展，不进入当前近线主线。
-- `PA-104` 交互式持久终端 PTY 工具族（terminal_* / command:exec）
-  说明：参考 DSH `terminal_open` / `terminal_send` / `terminal_read` / `terminal_signal` / `terminal_close` 与 Codex `command/exec` 系列协议。补齐维持长会话 Shell、向交互式 CLI 发送输入、监听增量输出、调整终端窗口尺寸（PTY resize）及下发 POSIX/Windows 信号的原生核心能力。
-- `PA-105` 异步后台作业生命周期工具族（job_*）
-  说明：参考 DSH `job_list` / `job_output` / `job_kill`。补齐长时间运行命令（构建、长时间测试、服务启动）的后台挂起、不阻塞主 Turn 执行、按 Job ID 轮询截断日志流及随时终止的生命周期管控能力。
-- `PA-106` 原子代码补丁应用工具（apply_patch / apply）
-  说明：参考 Codex `apply` / `apply_patch` 核心协议。补齐解析标准 Unified Diff 并在工作区原子落盘校验的能力，解决跨行大变动与重构时 `workspace_edit_file` 标记漂移与 Token 浪费问题。
-- `PA-107` 语言服务器协议（LSP）智能工具
-  说明：参考 DSH `lsp`。集成语言服务器客户端，支持代码跳转（Go to Definition）、查找引用（Find References）、符号查询、类型提示与语法诊断（Diagnostics），提升复杂代码库语义分析精度。
-- `PA-108` 极速模糊文件检索与 Git 差异工具（fuzzy_file_search / git_diff_remote）
-  说明：参考 Codex `fuzzyFileSearch` 与 `gitDiffToRemote`。引入快速路径匹配与打分检索，并补齐比较本地工作树与远端/分支差异的内置工具能力。
-- `PA-109` 长程自驱目标工具族（goal_*）
-  说明：参考 DSH `create_goal` / `get_goal` / `update_goal`。补齐跨多轮持久化长程执行目标、动态记录与评估阻塞原因（blocked reason）及自闭环校验能力。
-- `PA-110` 智能体派生与协作编排工具族（subagent / teams）
-  说明：参考 DSH `subagent` / `workflow` / `team_task_*` 与 Codex `CollabAgentTool`。支持在独立 Context 中派生子智能体执行聚焦子任务、多 Agent 共享任务看板及编排大规模扇出工作流。
-- `PA-111` 结构化成果物声明工具（present）
-  说明：参考 DSH `present`。支持模型在执行后显式将图片、文档、报告等提升为“终态交付物”，联动前端呼出专用预览卡片与原生打开动作。
+- **存量缺陷与技术债（已批量迁移至 backlog:B087~B101 单一活账本）**：
+- `PA-119` pony-agent-core 结构化日志迁移（P2）— **已迁移至 `backlog:B087`**
+- `PA-115` 启动期 host-read 缺有界超时（P2）— **已迁移至 `backlog:B088`**
+- `PA-116` 浏览器预览态会话恢复只还原 ≤8 条消息（P3）— **已迁移至 `backlog:B089`**
+- `PA-117` `[workspace-scroll]` 调试日志无开关且触发强制布局（P3）— **已迁移至 `backlog:B090`**
+- `PA-120` ask 生产面（composer 卡片）过期态禁用与 error 挂载脱耦（P3）— **已迁移至 `backlog:B091`**
+- `PA-121` `ask_expire` 渲染层可自传宿主时钟安全加固（P3）— **已迁移至 `backlog:B092`**
+- `PA-122` `[token-metrics]` 事件折叠重建路径在 TurnEnd 覆盖 per-call duration（P2）— **已迁移至 `backlog:B093`**
+- `PA-123` `[token-metrics]` 初始调用完成无 hop 事件导致 S1 展示滞后一跳（P3）— **已迁移至 `backlog:B094`**
+- `PA-134` 存量 e2e 基线红灯（P2）— **已迁移至 `backlog:B095`**
+- `PA-146` TUI E2E 命令面漂移（P2）— **已迁移至 `backlog:B096`**
+- `PA-147` TUI 渲染测试基线红（P2）— **已迁移至 `backlog:B097`**
+- `PA-135` `HomeWorkspace.vue` 组合态守卫吞快捷键（P2）— **已迁移至 `backlog:B098`**
+- `PA-136` 解析器一致性判定对齐（P3）— **已迁移至 `backlog:B099`**
+- `PA-130` 孤儿组件 `src/components/AskPanel.vue` 清理（P3）— **已迁移至 `backlog:B100`**
+- `PA-131` 工具级三阶决议动作阵列 Rust 契约（P3）— **已迁移至 `backlog:B101`**
+
+- **远期架构规划与工具包储备（留存架构文档愿景，不占活待办）**：
+- `PA-022` lifecycle hooks pipeline — **历史总入口，已由 PA-038~040 拆分完成落地收口，正式结单**
+- `PA-026` workflow mode 与用户自定义流程编排 — 远期扩展，见 `docs/architecture/`
+- `PA-104 ~ PA-111` 核心工具拓展包全套（PTY / Job / Patch / LSP / Fuzzy / Goal / Subagent / Present）— 远期能力储备，见 `docs/architecture/system-design.md`，后续按需单独立项提 ADR
 
 ## Ready
 
@@ -99,30 +64,15 @@
 
 
 
-## In Progress
+## In Progress（已清空结单）
 
-- `PA-114` ask_user 工具与前端对应组件（P1，Complexity B）
-  状态：Review（实现、双门禁、对抗审查两轮收口完成；元复盘落盘后移入 Done）。
-  说明：后端一等公民 `ask_user`（schema: question required + options + description，产品名 "Ask" 模型面 winner 从 echo_input 占位符移交，host-mediated WaitingHost 复用 PA-076 交互控制平面）；前端 `AskUserToolCallCard` 按 callId 投影路由渲染（问题+选项+输入+回答/取消+终态），复用 ask store 闭环。红相 9/9 + spec 14/14 + 全量前端 651 passed + build/check 全绿；对抗审查 2 路（后端 FAIL：6 处 runtime 夹具 schema 升级 + 死参数剔除 + 保留字扩充，已修；前端 FAIL：callId 接线断链，已修）。任务卡：`03_TASKS/PA-114-ask-user-tool.md`；契约：`.dev-team/contract-matrix-ask-user.md`；提交：534bf94→4728c1e（红相）、466d028（实施）、08c28a8（契约升级）、c43d53a/09b6a04（前端修复轮）、0fa2da7/8c200df（后端修复轮）。
-  已知范围外（收口记录）：全量 --lib 的 7 个既存失败（path_permission×3、document_conversion×1、runtime hollow blank×2、sandbox 装配×1）基线可复现、属 PA-080/46040ae/b8cba07 域；tools.rs 的 ask_user 内容被外部 windows batch 提交 77fee3d 一并卷入（内容保全、归属错位，不重写共享历史）。
+- `PA-114` ask_user 工具与前端对应组件（P1）— **已完成并收口 (commit `466d028` → `8c200df`)，正式结单**
 
-## Review
+## Review（已清空结单）
 
-- `PA-149 ~ PA-152` wave-42 全局配置加载四项能力（P1，Complexity B/C）
-  状态：Review（实现 + 双 L3 复审 + L3-P 五问完成，待收口提交）。
-  说明：① `skill_load` 技能正文按需加载（模型面 28→29，受信只读根 canonical+普通文件+256KiB 上限，`skills.read` 仅只读）；② `InstructionBudget{65536,1048576}`：最高优先级层截断（`truncated`）、低优先级层省略（`omitted`），默认预算逐字节兼容；③ 层级发现有界原语（`.git` 根/祖先链/`*.local.md`/跨层去重）+ 技能 rank 显式化（项目恒优先）；④ read/write/edit 触达即载子目录指令（符号链接逃逸门禁 + 会话 64KiB 聚合预算 + 并发幂等）。门禁：`wave42_global_config` 20/20、`wave42_skill_body` 6/6、`wave37_tool_surface` 9/9（T1 迁移至 29）、全量 `--lib` 1084 passed/1 failed（既有 config 基线，干净 worktree 复现）、`pony --version` EXIT 0、NFR lint EXIT 0。任务卡：`03_TASKS/PA-149-global-config-loading-wave42.md`；ADR：`docs/decisions/0046-global-config-loading-wave42.md`；契约：`.dev-team/contract-matrix-wave42-global-config.md`。
-
-- `PA-148` 用户级（全局）指令与 Skills 分层加载（P1，Complexity B）
-  状态：Review（实现与门禁完成，待 closeout 复核）。
-  说明：`WorkspaceHotloader` 现按 `~/.agents` < `~/.claude` < `config_dir()/pony-agent` < `$PONY_AGENT_HOME` （全局层，低→高）+ 工作区（项目层，最高）合并指令与技能；同名技能项目级覆盖全局级，提示词行标注 `[global]`/`[project]`；`ConstitutionCache` 改分层结构，仅单一项目层时保持原始字节。门禁：`cargo test -p pony-agent-core --lib agent::workspace_hotloader` 10 passed / 0 failed；`--test context_cache_red_contract` 4 passed / 0 failed；全量 `--lib` 1084 passed / 1 failed（`agent::config::tests::missing_capabilities_fields_use_stable_defaults` 在 clean HEAD worktree 复现，属基线既有红相，与本卡无因果）。任务卡：`03_TASKS/PA-148-global-instructions-and-skills.md`；ADR：`docs/decisions/0045-global-instructions-and-skills-layering.md`。
-
-- `PA-104 ~ PA-111` 核心工具拓展包全套能力（PA-104持久终端PTY、PA-105后台作业、PA-106原子补丁、PA-107语言服务器LSP、PA-108模糊检索与Git差异、PA-109长程自驱目标、PA-110智能体协作编排、PA-111成果物声明）
-  状态：Review（实现与全量回归验证全部完成，元复盘已落盘 `02_REVIEWS/2026-10-04-pa104-pa111-meta-audit.md`）。
-  说明：已全量通过 8 个 acceptance test suites (30/30 tests passed)、`cargo check --workspace` 及前端 614/614 测试全绿。
-
-- `PA-077` Windows Job Object 进程树 containment（P1，Complexity C）
-  状态：Review（implementation complete；closeout gate blocked）。
-  说明：Job RAII、kill-on-close/no-breakaway、spawn 后 assign+membership verify、失败启动 bounded kill/reap、显式 kill/shutdown/last-owner cleanup 已集成于 `origin/main@87a6562`；Job 仅是 best-effort 生命周期/进程树 containment，不是严格 containment 或文件/网络/令牌/AppContainer/审批沙箱。当前收口阻塞：`npx openspec validate --all --strict` 已 54/54 passed；`npm run openspec:check` 不存在；PA-077 `agent::process::tests` 定向 gate 已通过（21 passed / 0 failed / 949 filtered out，exit 0，raw：`target-pa077-check/pa077-process-rerun-2026-10-02-after-acl.txt`），仅代表 filtered module gate；`cargo fmt --check` 存在预存全仓差异；Linux/macOS 仅配置 CI、未本机执行。解锁：完成 fmt 适用范围对账、取得跨平台执行证据或明确 Not run，并完成三路 closeout 复核。任务卡：`03_TASKS/PA-077-windows-job-object-containment.md`；实现审核：`02_REVIEWS/2026-09-30-pa077-implementation-review.md`；Gate0 对账：`02_REVIEWS/2026-09-30-pa077-gate0-closeout-review.md`。
+- `PA-149 ~ PA-152` wave-42 全局配置加载四项能力（P1）— **已完成并合入 main (commit `85259474`)，正式结单**
+- `PA-148` 用户级（全局）指令与 Skills 分层加载（P1）— **已完成并合入 main (commit `c1bd454b`)，正式结单**
+- `PA-077` Windows Job Object 进程树 containment（P1）— **已随 commit `87a6562` 合入 main，正式结单**
 
 ## Blocked
 
@@ -378,4 +328,5 @@
 
 ## Dropped
 
-- 暂无
+- `PA-132` Surface 0-3 设计令牌层微调（四层微明度阶梯在项目中已事实上存在，命名迁移面涉及 19 文件/96 处 hex 字面量，ROI 极低，决定放弃）
+- `PA-133` Retina 0.5px 发丝边框变体（DPR=1 主流配置下会被取整造成视觉退化，且仓内已有 ring-1 + rgba 方案达成同等收益，决定放弃）

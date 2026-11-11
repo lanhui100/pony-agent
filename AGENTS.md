@@ -12,14 +12,12 @@
   - 核心架构宪法：[`.meta/constitution/constitution.md`](.meta/constitution/constitution.md)
   - 门禁索引说明：[`.meta/gates/README.md`](.meta/gates/README.md)
   - 文档分层清单：[`.meta/docs-tier/README.md`](.meta/docs-tier/README.md)
-- **技术决策记录 (ADR)**：[`docs/decisions/`](docs/decisions/)（技术方案选型、现在时记录、替代方案考量；废弃方案归档至 `superseded/`）
+- **技术决策记录 (ADR)**：[`docs/decisions/`](docs/decisions/) 与 [`.agents/notes/`](.agents/notes/)（最高优先级决策真源，技术方案选型、现在时记录、替代方案考量；受 `decisions:check` 与 `adr-verify` 强门禁保护）
 - **架构与设计指南**：[`docs/architecture/`](docs/architecture/)（系统拓扑、模块交互、运行时设计）
-- **任务推进与多智能体评审**：[`management/task-system/`](management/task-system/)
-  - 系统总看板：[`00_DASHBOARD.md`](management/task-system/00_DASHBOARD.md)
-  - 任务板：[`01_TASK_BOARD.md`](management/task-system/01_TASK_BOARD.md)
-  - 独立评审记录：[`02_REVIEWS/`](management/task-system/02_REVIEWS/)
-  - 任务卡：[`03_TASKS/`](management/task-system/03_TASKS/)
+- **待办任务与执行账本 (Backlog)**：[`backlog/`](backlog/)（唯一活账本 [`tasks.jsonl`](backlog/tasks.jsonl)，支持任务级并发租约锁与行级强校验，由 `scripts/backlog.mjs` 驱动并由 `backlog lint` 门禁约束）
 - **工程复用技能库**：[`.agents/skills/`](.agents/skills/)
+- **历史归档档案（已冻结退役，只读）**：
+  - OpenSpec 规范归档：[`openspec/`](openspec/)（历史规格与设计草案，见 [`RETIRED.md`](openspec/RETIRED.md)）
 
 ---
 

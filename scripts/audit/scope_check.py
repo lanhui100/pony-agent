@@ -18,7 +18,7 @@ AUDIT_WHITELIST_PREFIXES = (
     "docs/audit/",
     "scripts/audit/",
     ".agents/skills/trace-audit-loop/",
-    "management/task-system/",
+    "docs/archive/task-system/",
     ".agents/notes/",
 )
 

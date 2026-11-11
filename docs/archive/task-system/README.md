@@ -1,8 +1,14 @@
-# Pony Agent 任务系统
+# Pony Agent 任务系统（已退役 / RETIRED）
 
-## 目的
+> **⚠️ 注意：本目录已于 2026-11-11 正式退役并冻结为只读历史档案。**  
+> **详细退役决策与存量任务对账见 [RETIRED.md](RETIRED.md) 及 ADR [`.agents/notes/implemented/process/2026-11-11-retire-legacy-task-system.md`](../../../.agents/notes/implemented/process/2026-11-11-retire-legacy-task-system.md)。**  
+> - **架构决策真源**：移交至 [`.agents/notes/`](../../../.agents/notes/)（ADR 体系）；  
+> - **日常执行账本**：移交至 [`backlog/tasks.jsonl`](../../../backlog/tasks.jsonl)（Backlog CLI）；  
+> - 本目录文件全部保留原样只读，禁止在此新增任务卡或编辑状态。
 
-本目录是 Pony Agent 的正式任务管理系统。
+## 历史目的（已冻结）
+
+本目录曾是 Pony Agent 早期的任务管理系统。
 
 这里负责：
 
