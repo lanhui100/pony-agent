@@ -130,10 +130,21 @@ fn r4_reentry_plan_respects_disabled_mouse_capture() {
 fn r6_suspend_shortcut_matches_only_bare_ctrl_z() {
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    assert!(
-        tui::is_suspend_shortcut(KeyCode::Char('z'), KeyModifiers::CONTROL),
-        "R6: 裸 Ctrl+Z 必须命中（这是用户唯一的挂起入口）"
-    );
+    // 平台分流（Windows 全量首跑暴露）：`tui::input::is_suspend_shortcut` 在非 unix 平台
+    // **恒 false**——Windows 控制台没有 SIGTSTP / `fg` 语义，进程被挂起后没有恢复路径，
+    // 产品侧因此不把 Ctrl+Z 当挂起键。旧断言写死「必须命中」，等于要求一个不存在的平台能力。
+    let hit = tui::is_suspend_shortcut(KeyCode::Char('z'), KeyModifiers::CONTROL);
+    if cfg!(unix) {
+        assert!(
+            hit,
+            "R6: 裸 Ctrl+Z 必须命中（raw mode 下 ISIG 已清，这是用户唯一的挂起入口）"
+        );
+    } else {
+        assert!(
+            !hit,
+            "R6: 非 unix 平台无 SIGTSTP/fg，Ctrl+Z 不得被判成挂起（挂起即无法恢复）"
+        );
+    }
     // 反向对照：任何多余修饰键都不得挂起，否则与将来的重做类快捷键抢键。
     for modifiers in [
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,

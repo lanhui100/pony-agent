@@ -3398,6 +3398,23 @@ impl SessionBackend for SqliteSessionBackend {
     }
 }
 
+/// 数据目录旁路（**测试注入专用**）：`PONY_AGENT_DATA_DIR` 优先于平台默认数据目录。
+///
+/// 动机（Windows 全量首跑）：集成测试无法用环境变量重定向数据目录——
+/// `dirs::data_local_dir()` 在 Windows 走 known-folder API，不读 `LOCALAPPDATA` /
+/// `XDG_DATA_HOME`，于是 `tests/tui_persistence_truthfulness.rs` 的沙箱在 Windows 上失效，
+/// 用例既红又读写真实用户库。本旁路与 backlog CLI 的 `PONY_BACKLOG_ROOT` 同构：
+/// 仅测试注入用；**未设置时行为逐字不变**（不新增默认路径分支）。
+///
+/// `cfg(not(test))`：单元测试构建（`cfg(test)`）走 `unique_test_sqlite_path()` 隔离，
+/// 该旁路在那里既无调用方也无意义，故不编译，避免 dead_code 噪音。
+#[cfg(not(test))]
+pub(crate) fn data_dir_override() -> Option<PathBuf> {
+    std::env::var_os("PONY_AGENT_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|override_dir| !override_dir.as_os_str().is_empty())
+}
+
 /// Returns the default SQLite database path.
 pub fn default_sqlite_path() -> PathBuf {
     #[cfg(test)]
@@ -3408,7 +3425,8 @@ pub fn default_sqlite_path() -> PathBuf {
 
     #[cfg(not(test))]
     {
-        dirs::data_local_dir()
+        data_dir_override()
+            .or_else(dirs::data_local_dir)
             .or_else(dirs::home_dir)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))

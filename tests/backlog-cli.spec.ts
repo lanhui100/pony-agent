@@ -221,6 +221,19 @@ describe('CLI 冒烟', () => {
     });
     expect(readJsonl(paths.tasks)).toHaveLength(1);
   });
+
+  // 回归：governance CI 曾恒红——闭环「最高编号任务」后未回写 `.next-id`，高水位落后于
+  // 「活跃∪归档」最大编号，lint 立刻判「ID 越过高水位（疑似手工改号）」（实测 B066 案例）。
+  it('resolve 闭环最高编号任务后推进高水位，lint 不得判越界', () => {
+    seed([baseRow({ id: 'B066', status: 'in_progress', owner: 'session-A', touched_paths: ['scripts/backlog.mjs'] })]);
+    fs.writeFileSync(paths.nextId, '66\n');
+    expect(lintAll(paths).ok).toBe(false); // 前置：B066 与高水位 66 撞线，先红
+    resolve(paths, 'B066', 'fix(backlog): 演示闭环证据');
+    expect(readHighWater(paths)).toBe(67);
+    const result = lintAll(paths);
+    expect(result.ok).toBe(true);
+    expect(result.problems.join()).not.toMatch(/越过高水位/);
+  });
 });
 
 describe('任务级租约（单任务单会话，不同任务可并行）', () => {

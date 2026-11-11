@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const ID_RE = /^B\d{3,}$/;
 export const CATEGORIES = ['Defect', 'Task', 'Debt'];
@@ -397,6 +398,10 @@ export function resolve(paths, id, evidence) {
   }
   rows.splice(index, 1);
   writeJsonl(paths.tasks, rows);
+  // 闭环同样推进高水位：`.next-id` 是「下一个候选编号」，若闭环最高编号的任务后不回写，
+  // `.next-id` 会落后于「活跃∪归档」的最大编号，`lint` 随即判「ID 越过高水位（疑似手工改号）」
+  // ——governance CI 因此在每次「闭环最高编号任务且未再开新任务」后恒红（实测 B066 案例）。
+  writeHighWater(paths, id);
   return { row, archiveFile };
 }
 
@@ -623,7 +628,33 @@ export function main(argv = process.argv.slice(2)) {
   }
 }
 
-const isDirect = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
+/**
+ * 是否作为 CLI 直接执行（`node scripts/backlog.mjs <cmd>`）而非被 import。
+ *
+ * 旧写法 `path.resolve(new URL(import.meta.url).pathname)` 在 Windows 上把
+ * `/C:/repo/scripts/backlog.mjs` 这类**带前导斜杠的 URL pathname** 交给 `path.resolve`，
+ * 得到一个与 `process.argv[1]`（`C:\repo\scripts\backlog.mjs`）永不相等的结果：
+ * isDirect 恒 false ⇒ CLI 静默不执行（空 stdout、exit 0、账本不落盘），
+ * 这正是 tests/backlog-cli.spec.ts 在 Windows CI 上两例恒红的根因。
+ *
+ * 现口径：两侧都先解析为真实路径再转 file URL 逐字比较；Windows 文件系统大小写
+ * 不敏感，故仅在 win32 下做小写归一（POSIX 保留大小写敏感性）。
+ */
+function isDirectInvocation() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    const entryUrl = pathToFileURL(fs.realpathSync(entry)).href;
+    const selfUrl = pathToFileURL(fs.realpathSync(fileURLToPath(import.meta.url))).href;
+    return process.platform === 'win32'
+      ? entryUrl.toLowerCase() === selfUrl.toLowerCase()
+      : entryUrl === selfUrl;
+  } catch {
+    return false;
+  }
+}
+
+const isDirect = isDirectInvocation();
 if (isDirect) {
   try {
     process.exit(main());

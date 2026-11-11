@@ -146,10 +146,21 @@ fn persistence_evidence_reads_the_real_session_database() {
             .unwrap_or_default()
     ));
     std::fs::create_dir_all(&sandbox).expect("create sandbox");
+    // 反例目录：模拟「只靠平台环境变量重定向」的旧口径。在 Linux 上 `dirs::data_local_dir()`
+    // 会读 `XDG_DATA_HOME` 落进这里；在 Windows 上 known-folder API 不读它们，会落到**真实**
+    // 用户库（见下方 `PONY_AGENT_DATA_DIR` 旁路）。两种情况都必须被下面的「反例目录不得出现」
+    // 断言排除，用例才真正证明沙箱生效，而不是碰巧绿。
+    let decoy = sandbox.join("decoy-platform-default");
+    std::fs::create_dir_all(&decoy).expect("create decoy");
     unsafe {
-        std::env::set_var("XDG_DATA_HOME", &sandbox);
-        std::env::set_var("HOME", &sandbox);
-        std::env::set_var("LOCALAPPDATA", &sandbox);
+        std::env::set_var("XDG_DATA_HOME", &decoy);
+        std::env::set_var("HOME", &decoy);
+        std::env::set_var("LOCALAPPDATA", &decoy);
+        // Windows 上 `dirs::data_local_dir()` 走 known-folder API，**不读**上面三个变量，
+        // 仅靠它们沙箱会失效（本用例在 Windows 全量首跑实测红：真库落在
+        // `%LOCALAPPDATA%\PonyAgent\sessions.db`，沙箱目录里没有）。`PONY_AGENT_DATA_DIR`
+        // 是产品侧为集成测试留的显式旁路（未设置时默认路径行为不变）。
+        std::env::set_var("PONY_AGENT_DATA_DIR", &sandbox);
     }
 
     let session_id = "pa_truthfulness_0001";
@@ -162,6 +173,11 @@ fn persistence_evidence_reads_the_real_session_database() {
         db_path.exists(),
         "前置条件：会话库应落在沙箱里（{}），否则本用例会污染真实库",
         db_path.display()
+    );
+    assert!(
+        !decoy.join("PonyAgent").join("sessions.db").exists(),
+        "PONY_AGENT_DATA_DIR 必须优先于平台默认数据目录（旧口径会把库落进 {}）",
+        decoy.join("PonyAgent").join("sessions.db").display()
     );
     let _ = std::fs::remove_file(sandbox.join("PonyAgent").join("sessions.db.lock"));
 
