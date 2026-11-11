@@ -504,3 +504,27 @@ Lead 用一条「只写一个文件、禁派 subagent、分两步落盘」的重
   Test Agent 主动报告「不是真判别」而不是让它假绿——这条如实登记比再写一条假红相更有价值。
 - 误杀/低价值判定：lean 审查把「分支血缘」判 ADVISORY 且给 PASS，而另两路判 BLOCKING；证据（6 条并集 vs 4 条血缘）
   支持 BLOCKING ⇒ 采用更严判定。多方审查的裁决成本主要在「同一事实不同严重度」，需要 Lead 逐条复核。
+
+---
+
+# 元复盘 · wave-skill-dsh-alignment（pa-issue-triage 技能加载与调用策略四象限对齐）
+
+## 1. 通信拓扑与信噪比
+- **观察**：本波按照 Lead → Protocol Agent / Test Agent / Executor 三常驻模式运行。沟通路径主要集中于 Phase 0 研讨与 Phase 1 纯度审计。
+- **噪声控制**：通过严格遵守 `dev-team` 的 JSON 契约与独立文件写域（`workspace_hotloader.rs` / `scripts/pa-issue-triage.mjs` / `tests/**`），避免了跨成员的脏写和文件版本冲突。
+- **改进点**：在红相测试纯度审计（`dev-red-purity.py`）阶段，因沙盒环境缺少 pytest-json-report 导致报告格式校验失败，引发了一次往返沟通。后续应将测试执行环境与 Runner 格式校验纳入 Phase 0 的前置探活门禁。
+
+## 2. 门禁穿透与误杀率
+- **真实拦截**：
+  - `dev-stub-lint.py` 与 `dev-nfr-lint.py` 有效拦截了非标准契约，确保了空桩代码与商业基准表（`.dev-team/nfr-baseline.json`）的纯度。
+  - `wave42_skill_body.rs` 集成用例在 Join Barrier 前置审查中准确拦截了因 `HotloadedSkill` 增加四象限字段导致的 2 处初始化遗漏，有效防止了向下兼容性断裂。
+- **降级与豁免**：对抗测试由于沙盒缺乏 Python 测试生态支撑，触发了「红相降级协议」，以 `[RED DEGRADED: STATIC-ONLY]` 模式通过一票核准安全落盘，并留存了账本记录，未发生假测试放行。
+
+## 3. 分工契约与隔离有效性
+- **四权分立落地**：Protocol Agent 负责落盘 NFR 与数据结构拓展；Executor 独立实现解析逻辑并修复 CLI ID 碰撞缺陷；Test Agent 独占测试代码与红相锚定提交（`53170e79`）；Lead 负责一票裁决、回归复跑与物理提交。测试代码与业务代码全程由不同角色维护，消除了自证作弊链条。
+- **写域正交**：`scripts/` 与 `crates/` 的物理隔离确保了波次内修改的零冲突。
+
+## 4. 元协议迭代建议
+1. **多语言 Runner 适配**：`dev-red-purity.py` 应当支持原生 `cargo test --format json` 等多语言输出格式，避免在纯 Rust 项目中强行依赖 Python 生态引发无谓的降级。
+2. **CLI 任务序号机械防护**：将“最大序号 + 1”写入框架通用的脚本生成脚手架，从源头上杜绝因归档导致的 ID 碰撞。
+
