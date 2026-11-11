@@ -1,0 +1,55 @@
+{
+  "plan_id": "PLAN-20261111-02",
+  "target_issues": [
+    "ISSUE-20261111-008",
+    "ISSUE-20261111-009"
+  ],
+  "objective": "技能调用策略四象限闸门 + 目录预算保真 + 发现配置化/热刷新，对齐 dsh skill 机制（含 009：目录静默裁剪与新技能会话内不可见）",
+  "status": "in_progress",
+  "steps": [
+    {
+      "step_id": 1,
+      "description": "workspace_hotloader：SkillFrontmatter 解析 disable-model-invocation（bool，缺省 false），HotloadedSkill 增加 model_invocable；user-invocable 确立为本真字段（对齐 dsh parseInvocationPolicy）",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "step_id": 2,
+      "description": "渲染侧：build_cached_prompt_prefix* 只列 model_invocable 技能，被排除者输出 omitted skill:<name> (model_invocation_disabled) 独立标记行",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "step_id": 3,
+      "description": "加载侧：skill_load 对 model_invocable=false 显式返回 skill_not_available_for_model_invocation（summary+definition 双重检查）；TUI /skill:<name> 手势作为人类面唯一入口（user_invocable 消费点，/help 登记）",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "step_id": 4,
+      "description": "目录预算保真：description 目录截断 500 字符；裁剪后保留全部 name 行（最短清单）或独立 skill_search 检索路径，消除「可载而不可知」（009）",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "step_id": 5,
+      "description": "发现配置化：settings.json skillDirs 与 PONY_AGENT_SKILL_DIRS 同一解析入口（env 兜底），跨仓库技能持久可见无需环境变量",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "step_id": 6,
+      "description": "热刷新 watchdog：技能根变更（稳定阈值 ~200ms）走 delta_notice 通道当前会话下一轮生效，替代「新会话才生效」（009）",
+      "status": "pending",
+      "evidence": null
+    },
+    {
+      "step_id": 7,
+      "description": "frontmatter 校验：kebab-case name 校验（非法→omitted skill:<name> (invalid_name)）；契约测试四象限 + 预算保真 + watchdog + wave42/wave58 回归",
+      "status": "pending",
+      "evidence": null
+    }
+  ],
+  "last_session_id": "pa_01a1c884-fc9c-7be2-834e-2d0fa415f5db",
+  "updated_at": "2026-11-11T05:15:50.538Z"
+}

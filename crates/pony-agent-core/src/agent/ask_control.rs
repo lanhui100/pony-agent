@@ -61,8 +61,12 @@ pub fn cancel_ask(
     dispatcher.cancel_control_request(request_id, authorization)
 }
 
-/// Transition every expired pending request to `Expired`, returning the number transitioned.
-/// Expiry is kind-agnostic: an unanswered Ask is just as dead as an unhandled approval.
+/// Retired wall-clock sweep: always returns 0.
+///
+/// ADR 0074 (now extended to Approval): time never reclaims a pending request — an unanswered Ask
+/// *or* approval is session state, reclaimed only by an explicit decision (answer / approve / deny),
+/// a supersede (newer user message) or session-archive GC. Kept for call-site/API stability; it
+/// delegates to the dispatcher's no-op.
 pub fn expire_asks(dispatcher: &GovernedDispatcher, now_ms: u64) -> usize {
     dispatcher.expire_control_requests(now_ms)
 }
@@ -374,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn expire_asks_transitions_expired_requests_and_returns_the_count() {
+    fn expire_asks_never_reclaims_a_pending_request_by_wall_clock() {
         let clock = Arc::new(FakeClock::new(1_000));
         let registry = registry(vec![descriptor_with_declaration(
             "builtin:ask",
@@ -387,15 +391,17 @@ mod tests {
 
         assert_eq!(expire_asks(&dispatcher, 1_000), 0);
         clock.set_now_ms(pending.expires_at_ms + 1);
-        assert_eq!(expire_asks(&dispatcher, pending.expires_at_ms + 1), 1);
+        // 去墙钟：越过旧 TTL 也不得把 Pending 请求置为 Expired。
+        assert_eq!(expire_asks(&dispatcher, pending.expires_at_ms + 1), 0);
         assert_eq!(
             dispatcher.pending_request(&pending.request_id).expect("stored").state,
-            PendingControlRequestState::Expired
+            PendingControlRequestState::Pending
         );
-        // Expired requests can no longer be answered or cancelled.
+        // 仍可正常收口：cancel_ask 是 kind-agnostic 取消，去墙钟后照样消费。
         let authorization = ControlRequestAuthorization::for_request(&pending, None);
-        assert!(answer_ask(&dispatcher, &pending.request_id, &authorization).is_err());
-        assert!(cancel_ask(&dispatcher, &pending.request_id, &authorization).is_err());
+        let consumed = cancel_ask(&dispatcher, &pending.request_id, &authorization)
+            .expect("a pending request must stay cancellable past its legacy deadline");
+        assert_eq!(consumed.request.state, PendingControlRequestState::Cancelled);
     }
 
     /// Full Ask happy path against the real dispatcher store: dispatch a host-mediated (Ask)

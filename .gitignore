@@ -89,3 +89,6 @@ tools/tui-audit/bin/
 # 若不忽略 *.jsonl：`audit-diff.sh` 对每个 >2 MiB 的未跟踪文件发 WARN ⇒ verdict=WARN ⇒ exit 1，
 # 连带打红 wave47-ob2 与 v10 基线冻结门禁（实测 96 条 WARN）。
 docs/audit/rounds/*/replay/**/*.jsonl
+
+# ponygo scratch hygiene: 临时产物统一忽略
+.scratch/

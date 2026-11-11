@@ -1442,22 +1442,20 @@ fn approval_pending_projection(
     })
 }
 
-/// wave-65 R2（F2）+ R3（F2）：待决审批是否**仍可列出**（唯一判据，纯函数便于单测）。
+/// wave-65 R2（F2）+ R3（F2）/ 去墙钟：待决审批是否**仍可列出**（唯一判据，纯函数便于单测）。
 ///
-/// 四个条件缺一不可：仍是 `Pending`、**是路径授权类审批**
-/// （[`PendingControlRequest::is_path_authorization_approval`]，与 runtime 同源）、**且未过期**
-/// （`now_ms <= expires_at_ms`）。
-/// 为什么必须带 TTL：审批的 CAS（`can_consume`）对 `now_ms > expires_at_ms` 一律拒绝，过期请求
-/// 既不能批准也不能取消；若仍被列进快照，TUI 的 500ms 轮询会把它反复「重建成面板」⇒ 面板每 500ms
-/// 弹一次、用户永远点不掉（活锁）。
+/// 两个条件缺一不可：仍是 `Pending`、**是路径授权类审批**
+/// （[`PendingControlRequest::is_path_authorization_approval`]，与 runtime 同源）。
+/// **不再带墙钟判据**：本轮起审批的 CAS（`can_consume`）不再受 `expires_at_ms` 约束，过期时间只是
+/// 惰性留痕，既不会让审批「批不掉」，也不会产生死面板活锁（旧 TTL 分支已随去墙钟退役）。
+/// `now_ms` 保留在签名里只为与既有调用点/单测同形，**不参与**判定。
 /// 为什么必须是路径授权类：非路径审批（`tool_rule_ask` / `external_requires_approval` / 保守抬升）
 /// 在 runtime 侧本就 fail-fast 收口；若仍列进面板，用户批准后只会得到「续轮 → 再审批」的人工循环。
 pub(crate) fn approval_is_listable(
     request: &PendingControlRequest,
-    now_ms: u64,
+    _now_ms: u64,
 ) -> bool {
     request.state == PendingControlRequestState::Pending
-        && now_ms <= request.expires_at_ms
         && request.is_path_authorization_approval()
 }
 
@@ -1481,7 +1479,7 @@ impl HostControlPlane {
     ///
     /// 作用域强制（fail-closed）：空/空白 `session_id` 一律返回空数组并打一条日志 —— 无作用域的
     /// 列举会把别的会话的 `requestId`/`version` 泄漏给当前面板。
-    /// 过期过滤：见 [`approval_is_listable`]（TTL 到期后不可 CAS，不能再列出，否则面板活锁）。
+    /// **不再做过期过滤**：审批去墙钟后 `expires_at_ms` 只是留痕，判据见 [`approval_is_listable`]。
     pub fn list_pending_approvals(&self, session_id: &str) -> serde_json::Value {
         let scope = session_id.trim();
         if scope.is_empty() {
@@ -10632,7 +10630,7 @@ mod wave65_r2_approval_tests {
         }
     }
 
-    /// R2（F2）：TTL 是**列表**判据 —— 过期请求仍 Pending 也不能列出（否则面板每 500ms 重弹）。
+    /// 去墙钟：墙钟不再是**列表**判据 —— 越过旧 TTL 的 Pending 审批仍可列出（CAS 也不再拒绝）。
     #[test]
     fn approval_is_listable_covers_valid_expired_interaction_and_terminal_states() {
         // ① 有效：未过期 + Pending + Approval ⇒ true。
@@ -10659,9 +10657,9 @@ mod wave65_r2_approval_tests {
             ),
             "到期当刻仍可 CAS 消费，必须仍可列出"
         );
-        // ② 过期：now > expiresAtMs ⇒ false（CAS 必拒，列出等于制造活锁）。
+        // ② 越过旧 TTL：now > expiresAtMs 仍是 Pending ⇒ 仍可列出（去墙钟后 CAS 不再按时间拒绝）。
         assert!(
-            !approval_is_listable(
+            approval_is_listable(
                 &pending_request(
                     PendingControlRequestKind::Approval,
                     PendingControlRequestState::Pending,
@@ -10669,7 +10667,7 @@ mod wave65_r2_approval_tests {
                 ),
                 1_001,
             ),
-            "已过期审批不得列入待决列表"
+            "去墙钟后越过旧 TTL 的 Pending 审批仍必须可列出"
         );
         // ③ Interaction（Ask）不是审批 ⇒ false。
         assert!(

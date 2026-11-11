@@ -1,0 +1,7 @@
+{
+  "file": "purity_compatible_report_v3.json",
+  "pure_red": false,
+  "errors": [
+    "红相状态非失败态 (实际 status: None)，测试未有效拦截或提前通过"
+  ]
+}

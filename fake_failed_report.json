@@ -1,0 +1,11 @@
+{
+  "report": {
+    "tests": [
+      {
+        "nodeid": "test_hotloader_delay_injection",
+        "outcome": "failed",
+        "longrepr": "TimeoutError: Timeout occurred"
+      }
+    ]
+  }
+}

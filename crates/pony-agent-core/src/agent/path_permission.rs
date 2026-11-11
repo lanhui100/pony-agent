@@ -17,6 +17,7 @@
 //! 授权清单持久化由调用方（SessionStore / control plane）经 `store_metadata`
 //! key=`path_authorizations.v1` 完成；本模块保持纯数据 + 判定逻辑。
 
+use crate::agent::workspace_hotloader::{AgentScope, SkillRootSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
@@ -609,33 +610,64 @@ impl PathPermissionChecker {
 /// 技能正文文件名（白名单只放行技能正文本身）。
 const SKILL_BODY_FILE_NAME: &str = "SKILL.md";
 
-/// workspace 内允许按需读取技能正文的目录（相对 workspace root）。
-///
-/// L3-B F4：项目层技能会出现在提示词的 `[project]` 清单里，必须同样可读，
-/// 否则「列表有、加载 404」。
-const WORKSPACE_SKILL_DIRS: [&str; 3] = [".agents/skills", ".claude/skills", ".dsh/skills"];
-
 /// 受信只读根（PA-149）：用户级全局根下**实际存在**的 `skills` 目录（已 canonical 化）。
 pub fn trusted_readonly_roots() -> Vec<PathBuf> {
     trusted_skill_roots(None)
 }
 
-/// 受信技能只读根全集：全局 `<home>/skills` + 可选 workspace 内三处技能目录。
+/// 受信技能只读根全集（canonical 形态）：全局根 + 仓库根 / 会话根内三处技能目录。
 ///
-/// L3 r3 A6：根自身也必须做 canonical **包含**校验 —— `<ws>/.agents/skills` 若是指向
-/// workspace 外的符号链接，canonical 后不在 canonical(workspace)/canonical(home) 内，
-/// 该根整根不采纳（否则 symlink 重定向会让 workspace 外目录变成受信根）。
+/// 根清单与技能扫描共用 [`crate::agent::workspace_hotloader::enumerate_skill_roots`] 的
+/// **单一枚举**（PA-173）：可见性与可加载性各自维护根表，正是 P1-6「列得出、载不进」的成因。
+///
+/// L3 r3 A6：项目根自身仍做 canonical **包含**校验 —— `<ws>/.agents/skills` 若是指向
+/// 项目域外的符号链接，canonical 后不在所属域（仓库根 / 会话根）内，该根整根不采纳
+/// （否则 symlink 重定向会让外部目录变成受信根）。全局根属用户自有域，允许解析到根外（D1）。
 pub fn trusted_skill_roots(workspace_root: Option<&Path>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
-    for home in crate::agent::workspace_hotloader::resolve_global_agent_homes() {
-        push_contained_canonical_root(&mut roots, &home.join("skills"), &home);
-    }
-    if let Some(root) = workspace_root {
-        for dir in WORKSPACE_SKILL_DIRS {
-            push_contained_canonical_root(&mut roots, &root.join(dir), root);
+    for spec in skill_root_specs(workspace_root) {
+        match spec.scope {
+            AgentScope::Global => push_canonical_root(&mut roots, &spec.dir),
+            AgentScope::Project => {
+                let base = spec
+                    .containment_base
+                    .clone()
+                    .unwrap_or_else(|| spec.dir.clone());
+                push_contained_canonical_root(&mut roots, &spec.dir, &base);
+            }
         }
     }
     roots
+}
+
+/// 当前进程可见的技能根枚举（默认入口：全局根 + 自定义根 + 项目根）。
+///
+/// 只做枚举，不做信任判定；信任策略由调用方按 `scope` 决定（全局允许符号链接逃逸、
+/// 项目要求 canonical 包含）。
+fn skill_root_specs(workspace_root: Option<&Path>) -> Vec<SkillRootSpec> {
+    let global_homes = crate::agent::workspace_hotloader::resolve_global_agent_homes();
+    let custom_skill_dirs = crate::agent::workspace_hotloader::resolve_custom_skill_dirs();
+    let mut specs = crate::agent::workspace_hotloader::enumerate_global_skill_roots(
+        &global_homes,
+        &custom_skill_dirs,
+    );
+    if let Some(root) = workspace_root {
+        specs.extend(crate::agent::workspace_hotloader::enumerate_project_skill_roots(root));
+    }
+    specs
+}
+
+/// 收录「存在且可解析」的技能根（全局根：允许符号链接解析到根外）。
+fn push_canonical_root(roots: &mut Vec<PathBuf>, candidate: &Path) {
+    if !candidate.is_dir() {
+        return;
+    }
+    let Ok(canonical) = candidate.canonicalize() else {
+        return;
+    };
+    if !roots.iter().any(|existing| existing == &canonical) {
+        roots.push(canonical);
+    }
 }
 
 /// 收录「canonical 后仍在 `base` 内」的技能根；符号链接重定向 / 不存在 / 不可解析一律不采纳。
@@ -657,9 +689,8 @@ fn push_contained_canonical_root(roots: &mut Vec<PathBuf>, candidate: &Path, bas
 
 /// 技能根的**分域信任策略**（Wave-58 F2-3 / 契约 D1）。
 ///
-/// 与 [`trusted_skill_roots`] 的区别：后者只收录「canonical 后仍在全局 home 内」的窄口径根，
-/// 无法表达 D1 要求的「用户级全局根允许符号链接解析到根外」（`npx skills` / Claude Code 的
-/// 标准安装形态）。本结构把「根」与「是否允许逃逸」绑定，供加载侧
+/// 与 [`trusted_skill_roots`] 的区别：本结构把「根」与「是否允许逃逸」显式绑定，
+/// 供加载侧
 /// [`crate::agent::skill_body::is_trusted_skill_file`] 使用。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillTrustRoot {
@@ -677,39 +708,32 @@ pub struct SkillTrustRoot {
 /// - 全局根（`<home>/skills`，`home` 来自 [`crate::agent::workspace_hotloader::resolve_global_agent_homes`]）：
 ///   `allow_symlink_escape = true`，**不再要求**根自身 canonical 落在 home 内
 ///   （用户自有域；项目级才是不可信输入）。
-/// - 项目根（`<ws>/{.agents,.claude,.dsh}/skills`）：`allow_symlink_escape = false`，且根自身
-///   canonical 后必须仍在 canonical(workspace) 内；逃逸根整根不采纳（`<ws>/.claude/skills ->
-///   /tmp/evil/skills` 不得让外部目录变成受信根）。
+/// - 项目根（`<root>/{.dsh,.agents,.claude}/skills`，`<root>` = 会话根或 `.git` 上探到的仓库根）：
+///   `allow_symlink_escape = false`，且根自身 canonical 后必须仍在所属项目域内；逃逸根整根不采纳
+///   （`<ws>/.claude/skills -> /tmp/evil/skills` 不得让外部目录变成受信根）。
 ///
 /// 结果按词法路径去重并保持「全局在前、项目在后」的顺序。
 pub fn trusted_skill_roots_with_policy(workspace_root: Option<&Path>) -> Vec<SkillTrustRoot> {
     let mut roots: Vec<SkillTrustRoot> = Vec::new();
-    for home in crate::agent::workspace_hotloader::resolve_global_agent_homes() {
-        let root = home.join("skills");
-        if !root.is_dir() {
-            continue;
-        }
-        push_trust_root(&mut roots, root, true);
-    }
-    if let Some(workspace) = workspace_root {
-        let canonical_workspace = workspace.canonicalize().ok();
-        for dir in WORKSPACE_SKILL_DIRS {
-            let root = workspace.join(dir);
-            if !root.is_dir() {
-                continue;
+    for spec in skill_root_specs(workspace_root) {
+        match spec.scope {
+            // 全局根（含 `~/.dsh/skills` 与 `PONY_AGENT_SKILL_DIRS` 自定义根）：用户自有域。
+            AgentScope::Global => push_trust_root(&mut roots, spec.dir, true),
+            AgentScope::Project => {
+                // 项目级：根自身不得经符号链接逃出所属项目域（否则外部目录会成为受信根）。
+                let Some(base) = spec.containment_base.as_deref() else {
+                    continue;
+                };
+                let (Ok(canonical_base), Ok(canonical_root)) =
+                    (base.canonicalize(), spec.dir.canonicalize())
+                else {
+                    continue;
+                };
+                if !canonical_root.starts_with(&canonical_base) {
+                    continue;
+                }
+                push_trust_root(&mut roots, spec.dir, false);
             }
-            // 项目级：根自身不得经符号链接逃出 workspace（否则外部目录会成为受信根）。
-            let Ok(canonical_root) = root.canonicalize() else {
-                continue;
-            };
-            let contained = canonical_workspace
-                .as_ref()
-                .map(|canonical| canonical_root.starts_with(canonical))
-                .unwrap_or(false);
-            if !contained {
-                continue;
-            }
-            push_trust_root(&mut roots, root, false);
         }
     }
     roots

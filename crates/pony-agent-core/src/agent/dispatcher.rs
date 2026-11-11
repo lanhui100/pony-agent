@@ -995,30 +995,17 @@ impl GovernedDispatcher {
         )
     }
 
-    /// Transition every expired **Approval** request to `Expired`. Returns the number expired.
+    /// Retired: wall-clock expiry never reclaims a pending control request (ADR 0074, now applied
+    /// to **both** Ask and Approval).
     ///
-    /// ADR 0074: Ask (`Interaction`) requests are no longer expired by wall clock — an unanswered
-    /// Ask is session state, reclaimed only by an explicit ignore (user), supersede (new user
-    /// message) or session archive (GC). Approvals keep their TTL until their own wave.
-    pub fn expire_control_requests(&self, now_ms: u64) -> usize {
-        let mut store = self
-            .inner
-            .pending_requests
-            .lock()
-            .expect("dispatcher pending requests poisoned");
-        let mut expired = 0;
-        for request in store.values_mut() {
-            if request.request_kind != PendingControlRequestKind::Approval {
-                continue;
-            }
-            if request.state == PendingControlRequestState::Pending && now_ms > request.expires_at_ms
-            {
-                request.state = PendingControlRequestState::Expired;
-                request.version = request.version.saturating_add(1);
-                expired += 1;
-            }
-        }
-        expired
+    /// An unanswered Ask *or* approval is session state: it is reclaimed only by an explicit
+    /// decision (answer / approve / deny), a supersede (a newer user message) or session archive
+    /// (GC) — never by the clock. `expires_at_ms` is inert trace metadata only. This method is kept
+    /// as a **no-op** (always returns 0) so host APIs (`ask_expire`), the TUI reconciliation sweep
+    /// and existing callers keep compiling without a semantic cliff; nothing is transitioned to
+    /// `Expired` here.
+    pub fn expire_control_requests(&self, _now_ms: u64) -> usize {
+        0
     }
 
     // ── durable Ask store (ADR 0074) ───────────────────────────────────────────────────────
@@ -2932,7 +2919,7 @@ mod tests {
     }
 
     #[test]
-    fn control_request_rejects_wrong_session_version_nonce_and_expiry() {
+    fn control_request_rejects_wrong_session_version_and_nonce_but_ignores_legacy_expiry() {
         let registry = registry(vec![descriptor_with_declaration(
             "builtin:approve_me",
             ToolKind::Write,
@@ -2964,14 +2951,22 @@ mod tests {
         };
         assert!(dispatcher.approve_control_request(&request_id, &wrong_nonce).is_err());
 
-        // Expiry: advance the clock past `expires_at_ms`, then both approve and expire fail.
+        // Legacy wall clock is retired: advancing the clock past `expires_at_ms` neither expires
+        // the request nor blocks a valid approval — it is still Pending and consumable.
         clock.set_now_ms(pending.expires_at_ms + 1);
-        assert!(dispatcher.approve_control_request(&request_id, &valid_authorization(&pending)).is_err());
-        assert_eq!(dispatcher.expire_control_requests(pending.expires_at_ms + 1), 1);
+        assert_eq!(
+            dispatcher.expire_control_requests(pending.expires_at_ms + 1),
+            0,
+            "expire_control_requests must never reclaim a pending approval by wall clock"
+        );
         assert_eq!(
             dispatcher.pending_request(&request_id).expect("stored").state,
-            PendingControlRequestState::Expired
+            PendingControlRequestState::Pending
         );
+        let consumed = dispatcher
+            .approve_control_request(&request_id, &valid_authorization(&pending))
+            .expect("an approval must stay consumable past its legacy deadline");
+        assert_eq!(consumed.request.state, PendingControlRequestState::Consumed);
     }
 
     #[test]

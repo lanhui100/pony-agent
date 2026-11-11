@@ -476,7 +476,8 @@ impl HostControlPlane {
     ///
     /// Time alone never reclaims a pending Ask: only archived/deleted sessions produce `Orphaned`
     /// records. `now_ms` defaults to the dispatcher clock and is passed to the GC pass as
-    /// bookkeeping only. `expired` still reports Approval TTL reconciliation (unchanged non-goal).
+    /// bookkeeping only. `expired` is now always 0: wall-clock TTL is retired for **both** Ask and
+    /// Approval (this wave) — nothing is transitioned to `Expired` by time.
     pub fn expire_asks(&self, now_ms: Option<u64>) -> Value {
         let now = now_ms.unwrap_or_else(|| self.ask_dispatcher.clock().now_ms());
         let archived = self.archived_session_ids();

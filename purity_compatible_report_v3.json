@@ -1,0 +1,16 @@
+{
+  "tests": [
+    {
+      "nodeid": "test_hotloader_delay_injection",
+      "status": "failed",
+      "outcome": "failed",
+      "traceback": "Traceback (most recent call last):\n  File \"/home/dm/pony-agent/src/sut/business_layer.py\", line 10, in call\n    raise TimeoutError(\"Timeout occurred\")\nTimeoutError: Timeout occurred"
+    },
+    {
+      "nodeid": "test_hotloader_malformed_input",
+      "status": "failed",
+      "outcome": "failed",
+      "traceback": "Traceback (most recent call last):\n  File \"/home/dm/pony-agent/src/sut/business_layer.py\", line 15, in call\n    raise ValueError(\"Invalid configuration\")\nValueError: Invalid configuration"
+    }
+  ]
+}

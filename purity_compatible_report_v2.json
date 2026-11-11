@@ -1,0 +1,5 @@
+{
+  "status": "failed",
+  "test_name": "test_hotloader_delay_injection",
+  "traceback": "Traceback (most recent call last):\n  File \"/home/dm/pony-agent/src/sut/business_layer.py\", line 10, in call\n    raise TimeoutError(\"Timeout occurred\")\nTimeoutError: Timeout occurred"
+}

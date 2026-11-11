@@ -467,11 +467,13 @@ fn matrix_cas_rejects_wrong_session_version_and_nonce() {
     assert!(sessionless.can_consume(None, 7, "nonce-1", 4_000));
 }
 
-/// 1. PendingControlRequest CAS: expiry and final (non-pending) states reject consumption.
+/// 1. PendingControlRequest CAS: wall-clock no longer rejects; only final (non-pending) states do.
 #[test]
-fn matrix_cas_rejects_expired_and_final_states() {
+fn matrix_cas_rejects_final_states_but_not_wall_clock() {
     let request = canonical_pending_request();
-    assert!(!request.can_consume(Some("session-1"), 7, "nonce-1", 5_001));
+    // 去墙钟：越过旧 TTL 仍可消费（ADR 0074 已延伸到 Approval）。
+    assert!(request.can_consume(Some("session-1"), 7, "nonce-1", 5_001));
+    assert!(request.can_consume(Some("session-1"), 7, "nonce-1", u64::MAX));
 
     let cancelled = PendingControlRequest {
         state: PendingControlRequestState::Cancelled,
@@ -563,10 +565,8 @@ fn matrix_turn_view_elevates_only_deferred_descriptors_from_the_registry() {
 fn matrix_turn_view_rejects_stale_registry_snapshot() {
     let registry = ToolRegistrySnapshot::builtin().expect("builtin registry should build");
     let mut view = TurnToolView::from_registry(&registry);
-    let stale = ToolRegistrySnapshot::from_descriptors(
-        "different-snapshot",
-        registry.descriptors.clone(),
-    )
+    let stale =
+        ToolRegistrySnapshot::from_descriptors("different-snapshot", registry.descriptors.clone())
     .expect("same descriptors with a new snapshot id remain valid");
     assert!(view.provider_contract_views(&stale).is_err());
     assert!(view
@@ -997,7 +997,12 @@ fn matrix_origin_internal_descriptor_requires_child_lineage_or_host_system() {
         (InvocationOrigin::Model, "call-1"),
         (InvocationOrigin::Child, "call-4"),
     ] {
-        let outcome = dispatcher.dispatch(request(origin.clone(), "dynamic:internal", call_id, json!({})));
+        let outcome = dispatcher.dispatch(request(
+            origin.clone(),
+            "dynamic:internal",
+            call_id,
+            json!({}),
+        ));
         assert_eq!(
             outcome.execution_status,
             ToolExecutionStatus::Error,
@@ -1015,7 +1020,12 @@ fn matrix_origin_internal_descriptor_requires_child_lineage_or_host_system() {
         (InvocationOrigin::Host, "call-2"),
         (InvocationOrigin::System, "call-3"),
     ] {
-        let outcome = dispatcher.dispatch(request(origin.clone(), "dynamic:internal", call_id, json!({})));
+        let outcome = dispatcher.dispatch(request(
+            origin.clone(),
+            "dynamic:internal",
+            call_id,
+            json!({}),
+        ));
         assert_eq!(
             outcome.execution_status,
             ToolExecutionStatus::Ok,
@@ -1088,7 +1098,11 @@ fn matrix_permission_allow_deny_approval_and_waiting_host() {
         .expect("custom registry should build"),
     );
     let dispatcher = GovernedDispatcher::new(registry.clone(), Arc::new(FakeClock::new(0)));
-    for descriptor_id in ["dynamic:public", "dynamic:sensitive", "dynamic:waiting_host"] {
+    for descriptor_id in [
+        "dynamic:public",
+        "dynamic:sensitive",
+        "dynamic:waiting_host",
+    ] {
         dispatcher.register_handler(descriptor_id, Arc::new(EchoHandler));
     }
 
@@ -1187,7 +1201,12 @@ fn matrix_control_request_cas_approve_answer_cancel_expire() {
     };
 
     let outcome = dispatcher.dispatch_governed(
-        request(InvocationOrigin::Model, "dynamic:sensitive", "call-1", json!({})),
+        request(
+            InvocationOrigin::Model,
+            "dynamic:sensitive",
+            "call-1",
+            json!({}),
+        ),
         &context,
     );
     assert_eq!(
@@ -1226,29 +1245,42 @@ fn matrix_control_request_cas_approve_answer_cancel_expire() {
     assert_eq!(consumed.request.version, pending.version + 1);
 
     // Replay with the identical authorization fails (version bumped).
-    assert!(dispatcher.approve_control_request(&request_id, &authorization).is_err());
+    assert!(dispatcher
+        .approve_control_request(&request_id, &authorization)
+        .is_err());
     // Wrong nonce fails.
     let wrong_nonce = ControlRequestAuthorization {
         nonce: "wrong".to_string(),
         ..authorization.clone()
     };
-    assert!(dispatcher.approve_control_request(&request_id, &wrong_nonce).is_err());
+    assert!(dispatcher
+        .approve_control_request(&request_id, &wrong_nonce)
+        .is_err());
     // Cross-session fails.
     let cross_session = ControlRequestAuthorization {
         session_id: Some("session-2".to_string()),
         ..authorization.clone()
     };
-    assert!(dispatcher.approve_control_request(&request_id, &cross_session).is_err());
+    assert!(dispatcher
+        .approve_control_request(&request_id, &cross_session)
+        .is_err());
     // Descriptor mismatch fails.
     let wrong_descriptor = ControlRequestAuthorization {
         expected_descriptor_id: Some("dynamic:other".to_string()),
         ..authorization.clone()
     };
-    assert!(dispatcher.approve_control_request(&request_id, &wrong_descriptor).is_err());
+    assert!(dispatcher
+        .approve_control_request(&request_id, &wrong_descriptor)
+        .is_err());
 
     // A second pending request can be cancelled via CAS.
     let second = dispatcher.dispatch_governed(
-        request(InvocationOrigin::Model, "dynamic:sensitive", "call-2", json!({})),
+        request(
+            InvocationOrigin::Model,
+            "dynamic:sensitive",
+            "call-2",
+            json!({}),
+        ),
         &context,
     );
     let second_id = second
@@ -1273,12 +1305,22 @@ fn matrix_control_request_cas_approve_answer_cancel_expire() {
     let cancelled = dispatcher
         .cancel_control_request(&second_id, &cancel_auth)
         .expect("cancel succeeds");
-    assert_eq!(cancelled.request.state, PendingControlRequestState::Cancelled);
-    assert!(dispatcher.cancel_control_request(&second_id, &cancel_auth).is_err());
+    assert_eq!(
+        cancelled.request.state,
+        PendingControlRequestState::Cancelled
+    );
+    assert!(dispatcher
+        .cancel_control_request(&second_id, &cancel_auth)
+        .is_err());
 
     // Expiry transitions pending requests and blocks further consumption.
     let third = dispatcher.dispatch_governed(
-        request(InvocationOrigin::Model, "dynamic:sensitive", "call-3", json!({})),
+        request(
+            InvocationOrigin::Model,
+            "dynamic:sensitive",
+            "call-3",
+            json!({}),
+        ),
         &context,
     );
     let third_id = third
@@ -1287,20 +1329,28 @@ fn matrix_control_request_cas_approve_answer_cancel_expire() {
         .expect("third pending request")
         .request_id
         .clone();
-    assert_eq!(dispatcher.expire_control_requests(clock.now_ms() + 61_000), 1);
-    let expired = dispatcher.pending_request(&third_id).expect("expired request retained");
-    assert_eq!(expired.state, PendingControlRequestState::Expired);
-    let expired_auth = ControlRequestAuthorization {
-        session_id: expired.session_id.clone(),
-        expected_version: expired.version,
-        nonce: expired.nonce.clone(),
+    // Wall-clock TTL is retired (this wave): advancing the clock neither expires nor blocks it.
+    assert_eq!(
+        dispatcher.expire_control_requests(clock.now_ms() + 61_000),
+        0
+    );
+    let still_pending = dispatcher
+        .pending_request(&third_id)
+        .expect("pending request retained");
+    assert_eq!(still_pending.state, PendingControlRequestState::Pending);
+    let pending_auth = ControlRequestAuthorization {
+        session_id: still_pending.session_id.clone(),
+        expected_version: still_pending.version,
+        nonce: still_pending.nonce.clone(),
         expected_descriptor_snapshot_id: None,
         expected_descriptor_id: None,
         expected_final_args_digest: None,
         expected_policy_digest: None,
         answer: None,
     };
-    assert!(dispatcher.approve_control_request(&third_id, &expired_auth).is_err());
+    assert!(dispatcher
+        .approve_control_request(&third_id, &pending_auth)
+        .is_ok());
     // TODO(PA-076 3.7): `answer_control_request` (Interaction/Ask kind) is unreachable until the
     // Ask control path lands (task 4.3); the dispatcher currently persists every control request
     // as `Approval`.
@@ -1486,9 +1536,16 @@ fn matrix_cancellation_timeout_and_budget_exhaustion_error_with_reason() {
 
     // Cancellation: the composite cancels the shared token; the next child fails as Cancelled.
     let cancel_dispatcher = GovernedDispatcher::new(registry.clone(), Arc::new(FakeClock::new(0)));
-    cancel_dispatcher.register_handler("dynamic:child_a", Arc::new(FixedValueHandler(json!({"ok": true}))));
-    cancel_dispatcher.register_handler("dynamic:child_b", Arc::new(FixedValueHandler(json!({"ok": true}))));
-    cancel_dispatcher.register_composite_handler("dynamic:composite", Arc::new(CancelAfterFirstHandler));
+    cancel_dispatcher.register_handler(
+        "dynamic:child_a",
+        Arc::new(FixedValueHandler(json!({"ok": true}))),
+    );
+    cancel_dispatcher.register_handler(
+        "dynamic:child_b",
+        Arc::new(FixedValueHandler(json!({"ok": true}))),
+    );
+    cancel_dispatcher
+        .register_composite_handler("dynamic:composite", Arc::new(CancelAfterFirstHandler));
     let cancelled = cancel_dispatcher.dispatch(request(
         InvocationOrigin::Model,
         "dynamic:composite",
@@ -1515,8 +1572,14 @@ fn matrix_cancellation_timeout_and_budget_exhaustion_error_with_reason() {
 
     // Budget exhaustion: one call slot, two children -> the second fails with budget_exhausted.
     let budget_dispatcher = GovernedDispatcher::new(registry.clone(), Arc::new(FakeClock::new(0)));
-    budget_dispatcher.register_handler("dynamic:child_a", Arc::new(FixedValueHandler(json!({"ok": true}))));
-    budget_dispatcher.register_handler("dynamic:child_b", Arc::new(FixedValueHandler(json!({"ok": true}))));
+    budget_dispatcher.register_handler(
+        "dynamic:child_a",
+        Arc::new(FixedValueHandler(json!({"ok": true}))),
+    );
+    budget_dispatcher.register_handler(
+        "dynamic:child_b",
+        Arc::new(FixedValueHandler(json!({"ok": true}))),
+    );
     budget_dispatcher.register_composite_handler(
         "dynamic:composite",
         Arc::new(BatchHandler {
@@ -1578,14 +1641,24 @@ fn matrix_atomic_budget_ledger_exhaustion_and_partial_results() {
         ToolExposure::ModelVisible,
         ToolPermissionDeclaration::default(),
     );
-    composite.composed_descriptor_ids = vec!["dynamic:child_a".to_string(), "dynamic:child_b".to_string()];
+    composite.composed_descriptor_ids =
+        vec!["dynamic:child_a".to_string(), "dynamic:child_b".to_string()];
     let registry = Arc::new(
-        ToolRegistrySnapshot::from_descriptors("budget-v1", vec![child_a.clone(), child_b.clone(), composite])
+        ToolRegistrySnapshot::from_descriptors(
+            "budget-v1",
+            vec![child_a.clone(), child_b.clone(), composite],
+        )
             .expect("custom registry should build"),
     );
     let dispatcher = GovernedDispatcher::new(registry.clone(), Arc::new(FakeClock::new(0)));
-    dispatcher.register_handler("dynamic:child_a", Arc::new(FixedValueHandler(json!({"ok": true}))));
-    dispatcher.register_handler("dynamic:child_b", Arc::new(FixedValueHandler(json!({"ok": true}))));
+    dispatcher.register_handler(
+        "dynamic:child_a",
+        Arc::new(FixedValueHandler(json!({"ok": true}))),
+    );
+    dispatcher.register_handler(
+        "dynamic:child_b",
+        Arc::new(FixedValueHandler(json!({"ok": true}))),
+    );
     dispatcher.register_composite_handler(
         "dynamic:composite",
         Arc::new(BatchHandler {
@@ -1638,14 +1711,20 @@ fn matrix_atomic_budget_ledger_exhaustion_and_partial_results() {
         ToolExposure::ModelVisible,
         ToolPermissionDeclaration::default(),
     );
-    composite2.composed_descriptor_ids = vec!["dynamic:sensitive".to_string(), "dynamic:child_b".to_string()];
+    composite2.composed_descriptor_ids = vec![
+        "dynamic:sensitive".to_string(),
+        "dynamic:child_b".to_string(),
+    ];
     let registry2 = Arc::new(
         ToolRegistrySnapshot::from_descriptors("pending-v1", vec![sensitive, child_b, composite2])
             .expect("custom registry should build"),
     );
     let dispatcher2 = GovernedDispatcher::new(registry2.clone(), Arc::new(FakeClock::new(0)));
     dispatcher2.register_handler("dynamic:sensitive", Arc::new(EchoHandler));
-    dispatcher2.register_handler("dynamic:child_b", Arc::new(FixedValueHandler(json!({"ok": true}))));
+    dispatcher2.register_handler(
+        "dynamic:child_b",
+        Arc::new(FixedValueHandler(json!({"ok": true}))),
+    );
     dispatcher2.register_composite_handler(
         "dynamic:composite2",
         Arc::new(BatchHandler {
@@ -1715,8 +1794,14 @@ fn matrix_child_dispatch_depth_limit_and_cycle_rejection() {
     );
     let dispatcher = GovernedDispatcher::new(registry.clone(), Arc::new(FakeClock::new(0)));
     dispatcher.register_handler("dynamic:leaf", Arc::new(EchoHandler));
-    dispatcher.register_composite_handler("dynamic:a", Arc::new(ChildDispatcher("dynamic:b".to_string())));
-    dispatcher.register_composite_handler("dynamic:b", Arc::new(ChildDispatcher("dynamic:leaf".to_string())));
+    dispatcher.register_composite_handler(
+        "dynamic:a",
+        Arc::new(ChildDispatcher("dynamic:b".to_string())),
+    );
+    dispatcher.register_composite_handler(
+        "dynamic:b",
+        Arc::new(ChildDispatcher("dynamic:leaf".to_string())),
+    );
 
     // Default depth (4): a chain of two composites + a leaf is fine.
     let ok = dispatcher.dispatch(request(

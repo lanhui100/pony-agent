@@ -211,26 +211,24 @@ pub struct PendingControlRequest {
 impl PendingControlRequest {
     /// Compare-and-swap predicate for consuming a pending control request.
     ///
-    /// **Ask (`Interaction`) is not time-bound** (ADR 0074): an unanswered Ask is session state,
-    /// so a wall-clock deadline must never turn a valid answer into a failure. `now_ms` still
-    /// gates `Approval` requests, whose TTL semantics are unchanged by this wave (approvals stay
-    /// a timer resource; Ask leaves product-level expiry entirely).
+    /// **No pending control request is time-bound** (ADR 0074): an unanswered Ask *or* approval is
+    /// session state, so a wall-clock deadline must never turn a valid decision into a failure.
+    /// Both `Interaction` and `Approval` are consumable regardless of `now_ms`; a pending request
+    /// is reclaimed only by an explicit decision (answer / approve / deny), a supersede (a newer
+    /// user message) or session archive — never by the clock. `expires_at_ms` remains inert trace
+    /// metadata only and takes no part in this predicate. `now_ms` stays in the signature so every
+    /// existing CAS call site is unchanged.
     pub fn can_consume(
         &self,
         session_id: Option<&str>,
         expected_version: u64,
         nonce: &str,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> bool {
-        let time_bound = match self.request_kind {
-            PendingControlRequestKind::Interaction => true,
-            PendingControlRequestKind::Approval => now_ms <= self.expires_at_ms,
-        };
         self.state == PendingControlRequestState::Pending
             && self.session_id.as_deref() == session_id
             && self.version == expected_version
             && self.nonce == nonce
-            && time_bound
     }
 
     /// wave-65 R3（F2）：该请求是否为**路径授权类**审批
@@ -715,11 +713,13 @@ mod tests {
             "no wall-clock instant may turn a pending Ask into an unconsumable request"
         );
 
-        // Approval keeps its TTL semantics (non-goal of ADR 0074: approvals are another wave).
+        // Approvals are no longer time-bound either (this wave aligns Approval with Ask): a past
+        // legacy deadline must not block a valid approval decision.
         let mut approval = request.clone();
         approval.request_kind = PendingControlRequestKind::Approval;
         assert!(approval.can_consume(Some("session-1"), 3, "nonce", 100));
-        assert!(!approval.can_consume(Some("session-1"), 3, "nonce", 101));
+        assert!(approval.can_consume(Some("session-1"), 3, "nonce", 101));
+        assert!(approval.can_consume(Some("session-1"), 3, "nonce", u64::MAX));
     }
 
     #[test]
