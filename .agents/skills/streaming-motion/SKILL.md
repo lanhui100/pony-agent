@@ -1,12 +1,18 @@
 ---
 name: streaming-motion
-description: 在实现或评审大模型流式输出的前端动效时使用——包括给流式正文/思考过程/工具调用加入场与揭示动画、消除流式期的闪烁与视口抖动、决定滚动跟随与用户手势的优先级、编写跨框架（Vue/React/Svelte/原生）可复用的动效规范、或为 streaming 渲染层编写可机器验收的门禁。触发词：streaming 动效、流式闪烁、逐字 reveal、流式滚动跟随、打字机效果、消息入场动画、motion token、stale-while-render 动效。
+description: 何时用：在实现或评审大模型流式输出的前端动效时使用——包括给流式正文/思考过程/工具调用加入场与揭示动画、消除流式期的闪烁与视口抖动、决定滚动跟随与用户手势的优先级、编写跨框架（Vue/React/Svelte/原生）可复用的动效规范、或为 streaming 渲染层编写可机器验收的门禁。触发词：streaming 动效、流式闪烁、逐字 reveal、流式滚动跟随、打字机效果、消息入场动画、motion token、stale-while-render 动效。
 ---
 
 # Streaming Motion（PDS-SM）
 
 流式输出的动效设计规范与可复用资产。**框架无关**：动效本体是纯 CSS，节奏与视口逻辑是纯函数，
 框架层只留约 40 行胶水。
+
+## 真相源
+
+- 本文件是规范正文；`tokens.css`（L2 令牌）、`primitives.css`（L3 原语）、`logic/budget.ts` 与 `logic/intent.ts`（L4 reducer）是实现真相源。
+- 验收指标与命令见 `conformance.md`；踩坑与反例见 `anti-patterns.md`；设计依据见 `docs/decisions/0057-streaming-motion-framework-agnostic-spec.md`。
+- 参数以本文件「参数校准记录」为准；上游/宿主差异必须写明前提，不得静默改常量。
 
 ## 何时用
 
@@ -50,7 +56,7 @@ description: 在实现或评审大模型流式输出的前端动效时使用—�
 
 **关键约束**：同一时刻只允许一个"进行中"指示在播报。多一个就等于多一个假任务。
 
-## 接入流程（四步）
+## 步骤（接入流程四步）
 
 1. **引入资源**：`@import tokens.css` + `primitives.css`（全局一次）。
 2. **接释放节奏**：用 `budget.ts` 的 `stepReveal` 驱动可见文本游标。上游 content 长度进，游标出。
@@ -73,12 +79,19 @@ description: 在实现或评审大模型流式输出的前端动效时使用—�
    - 时序不可知（`lastUserInputAtMs` 仍为初值，例如用户只拖滚动条）⇒ **永不自动恢复跟随**；
    - 时间戳非法 ⇒ 判为"冷却中"，不移动视口。
 
-## 验证
+## 验证与报告
 
 - L4 有单测模板：见本项目 `tests/streaming-motion-budget.spec.ts` / `tests/streaming-motion-intent.spec.ts`
   （44 例，含畸形输入对抗与 2 条回归用例）。
 - L2/L3 无逻辑，只需静态约束 C6 + 降级 C7。
 - 渲染层接入后跑 C1/C2/C5（jsdom 即可，一分钟接入）。
+- 报告必须列：验证的命令与 exit code、C1/C2/C5 结果、降级（`animation: none`）核对、未覆盖场景。
+
+## 校准样例
+
+- 正例：`stepReveal` 只移动整数游标，动效挂在单个尾巴节点（`data-pds-reveal`）上；滚动意图由 `reduceScrollIntent` 处理，程序化滚动不进事件流。
+- 反例：为逐字符动效创建 DOM 节点，或在每个 tick 重建的尾巴上使用 `filter` / `will-change`——应改为游标 + `opacity` / `transform`。
+- 反例：用 `behavior: "smooth"` 做流式跟随，或在 `lastUserInputAtMs` 未知时自动恢复跟随——违反红线；应先对齐内容与视口同帧，时序不可知时保持不跟随。
 
 ## 参数校准记录
 

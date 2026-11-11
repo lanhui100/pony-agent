@@ -1,11 +1,17 @@
 ---
 name: pa-issue-triage
-description: 遇到错误异常或用户主动要求时记录当前会话问题（含 session_id 与排查线索）；支持按优先级聚合编排待办、制定可持久化且支持断点续做的执行计划、推进关键进展并在解决闭环后清理待办与临时文档。
+description: 何时用：遇到错误异常或用户主动要求时记录当前会话问题（含 session_id 与排查线索）；支持按优先级聚合编排待办、制定可持久化且支持断点续做的执行计划、推进关键进展并在解决闭环后清理待办与临时文档。
 ---
 
 # pa-issue-triage —— 会话问题分流、断点续做与任务治理
 
 本 Skill 为当前工程在会话中遇到运行时/编译/逻辑错误，或用户下达排查要求时，提供**“捕获 $\to$ 聚合分流 $\to$ 计划与断点续做 $\to$ 证据闭环与清理”**的全生命周期规范。
+
+## 真相源
+
+- `.agents/issue-triage/issues.jsonl`（活动问题，JSONL 单行一条）、`current-plan.json`（计划与断点）、`archive/`（已闭环归档）是状态真源；Schema 见下文 §2。
+- 机器证据（命令、exit code、测试/构建输出）优先于会话叙述；状态文件与证据冲突时先修证据再改状态。
+- 项目既有的测试/构建/运行命令是验证真源；不另造一套。
 
 ---
 
@@ -81,7 +87,7 @@ description: 遇到错误异常或用户主动要求时记录当前会话问题�
 
 ---
 
-## 3. 标准操作流程（SOP）
+## 步骤（标准操作流程 SOP）
 
 ### 阶段一：问题捕获与去重记录（Capture & Fingerprint）
 1. **生成指纹（Fingerprint）**：提取 `[模块/文件路径] + [错误类型/关键报错摘要]`。
@@ -112,3 +118,16 @@ description: 遇到错误异常或用户主动要求时记录当前会话问题�
 3. **环境卫生清理（Anti-Entropy Cleanup）**：
    - 清理排查期间产生的临时日志、dump 文件、无用测试脚本。
    - 确保 `git status` 无残留脏文件。
+
+## 校准样例
+
+- 正例：捕获时记录 `id`、`session_id`、`fingerprint`、`priority`、`context.command` 与 `exit_code`；同 fingerprint 未闭环则递增 `occurred_count`，不新建重复条。
+- 反例：只在聊天里说"已修复"就标 `resolved`；没有测试 Exit 0 / 构建通过 / diff 符合预期的机器证据不算闭环。
+- 正例：恢复时先读 `current-plan.json`，从第一个 `status != completed` 的 step 继续，每步回写 `evidence`。
+- 反例：跨会话重做已完成步骤或覆盖 `current-plan.json` 丢失断点。
+
+## 验证与报告
+
+- 闭环前必须给出物理收据：命令 + Exit Code + 关键断言输出；未验证的条目标 `blocked` 或保持 `in_progress`，不得标 `resolved`。
+- 报告必须含：issue id/优先级/状态、计划 step 与证据、改动文件、剩余风险；归档后确认 `issues.jsonl` 与 `archive/` 一致。
+- 收尾检查 `git status` 无排查残留；临时日志/脚本按 `.scratch/` 规则清理。

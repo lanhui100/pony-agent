@@ -1,6 +1,6 @@
 ---
 name: shadcn-vue
-description: Manages shadcn-vue components and projects — adding, searching, fixing, debugging, styling, and composing UI. Provides project context, component docs, and usage examples. Applies when working with shadcn-vue, component registries, presets, --preset codes, or any project with a components.json file. Also triggers for "shadcn-vue init", "create an app with --preset", or "switch to --preset".
+description: Manages shadcn-vue components and projects — adding, searching, fixing, debugging, styling, and composing UI. Provides project context, component docs, and usage examples. Use when: working with shadcn-vue, component registries, presets, --preset codes, or any project with a components.json file. Also triggers for "shadcn-vue init", "create an app with --preset", or "switch to --preset".
 user-invocable: false
 allowed-tools: Bash(npx shadcn-vue@latest *), Bash(pnpm dlx shadcn-vue@latest *), Bash(bunx --bun shadcn-vue@latest *)
 ---
@@ -8,6 +8,12 @@ allowed-tools: Bash(npx shadcn-vue@latest *), Bash(pnpm dlx shadcn-vue@latest *)
 # shadcn-vue
 
 A framework for building ui, components and design systems. Components are added as source code to the user's project via the CLI.
+
+## 真相源
+
+- 本文件与 `rules/`（styling / forms / composition / icons）是规则正文；`cli.md`、`customization.md`、`mcp.md` 是命令、主题与 MCP 参考。
+- 项目现状以 `npx shadcn-vue@latest info --json` 与项目 `components.json` 为准；组件 API 与示例以 `npx shadcn-vue@latest docs <component>` 抓取的官方页面为准。
+- 冲突时：项目实际配置与 CLI 输出优先于本文件的通用说明。
 
 > **IMPORTANT:** Run all CLI commands using the project's package runner: `npx shadcn-vue@latest`, `pnpm dlx shadcn-vue@latest`, or `bunx --bun shadcn-vue@latest` — based on the project's `packageManager`. Examples below use `npx shadcn-vue@latest` but substitute the correct runner for the project.
 
@@ -161,7 +167,7 @@ npx shadcn-vue@latest docs button dialog select
 
 **When creating, fixing, debugging, or using a component, always run `npx shadcn-vue@latest docs` and fetch the URLs first.** This ensures you're working with the correct API and usage patterns rather than guessing.
 
-## Workflow
+## 步骤（Workflow）
 
 1. **Get project context** — already injected above. Run `npx shadcn-vue@latest info` again if you need to refresh.
 2. **Check installed components first** — before running `add`, always check the `components` list from project context or list the `resolvedPaths.ui` directory. Don't import components that haven't been added, and don't re-add ones already installed.
@@ -229,3 +235,16 @@ npx shadcn-vue@latest view @shadcn/button
 - [rules/styling.md](./rules/styling.md) — Semantic colors, variants, class, spacing, size, truncate, dark mode, cn(), z-index
 - [cli.md](./cli.md) — Commands, flags, presets, templates
 - [customization.md](./customization.md) — Theming, CSS variables, extending components
+
+## 校准样例
+
+- 正例：先用 `search` 确认 registry 有目标组件，再用 `add` 安装；表单按 `FieldGroup` + `Field` 组合，完成后读回新增文件核对 imports 与子组件配对。
+- 反例：用 `<div class="space-y-4">` 手写表单布局——应改为 `FieldGroup` + `Field`（见 `rules/forms.md`）。
+- 正例：用 `variant="outline"`、`size="sm"` 与语义色 `bg-primary` / `text-muted-foreground`。
+- 反例：给组件加 `class="bg-blue-500"` 或 `dark:text-gray-300` 覆盖主题；应使用内置 variant 或语义 token。
+
+## 验证与报告
+
+- 安装或更新后重读新增文件：核对子组件配对、imports、项目 `iconLibrary`，以及 [Critical Rules](#critical-rules)；第三方 registry 的硬编码 `@/components/ui/...` 必须改为项目 alias。
+- 运行项目既有的类型检查、构建与测试命令（以 `package.json` 为准），并在结果中写明：使用的 registry/preset、新增或更新文件、手工修正项、未解决项。
+- 视觉面在受影响页面做一次真实渲染核对（亮/暗色与窄屏）；不以"命令通过"代替界面核对。

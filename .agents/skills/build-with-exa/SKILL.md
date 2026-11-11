@@ -9,6 +9,12 @@ metadata:
 
 # Build with Exa
 
+## 真相源
+
+- `references/` 下的端点参考（search / contents / snapshot / answer / agent / openai-compat / monitors / migrate-websets-to-agent / sdks / http-requests / models-and-modes / prompting-and-patterns / common-mistakes）是 API 契约真源；`## Canonical Docs` 的官方链接是上游真源。
+- SDK 行为以项目实际安装的 `exa-py` / `exa-js` 版本文档与代码为准；本文件只负责端点路由与默认值。
+- 冲突时：官方 API 文档 + 本仓 `references/` 的实测形状优先于本文件的概览。
+
 ## Scope
 
 Included by default:
@@ -63,7 +69,7 @@ The recommended Exa search request is the query plus token-efficient content ext
 - `highlights` should be set to `true` by default for all tasks unless otherwise specified. Do not add `maxCharacters` or other highlight options without an explicit budget requirement in the task.
 - `objective` belongs on every search that is one step of a larger task, such as a search an LLM agent calls as a tool, a query a model writes, or one step of a multi-step pipeline. Set it to the goal that search serves. Say which documents should rank first, which to exclude, and which facts or figures to pull. When an LLM calls search as a tool, the model writes `objective` alongside `query`. See Search as an LLM Tool.
 
-## API Decision Workflow
+## 步骤（API Decision Workflow）
 
 Before picking an endpoint, decide which workflow shape fits:
 
@@ -222,3 +228,16 @@ Full hand-written tool definitions for OpenAI and Anthropic are in [references/p
 - Exa Connect overview: `https://exa.ai/docs/agent/connect/overview`
 - Python SDK spec: `https://exa.ai/docs/sdks/quickstart`
 - TypeScript SDK spec: `https://exa.ai/docs/sdks/quickstart`
+
+## 校准样例
+
+- 正例：一次通用检索用 `/search`，只发 `query` + `contents: { highlights: true }`；当这次检索是 agent/多步任务的子步骤时，再补 `objective` 说明排序与抓取目标。
+- 反例：无任务依据地加 `category`、`includeDomains`、`maxAgeHours`、`numResults` 等 gated 字段；"recent/latest" 应写进 query，而不是用 `maxAgeHours` 当发布时间过滤器。
+- 正例：需要已抓取 URL 的干净正文用 `/contents`；需要异步多步研究用 `/agent` 并显式设 `effort`、检查终止状态。
+- 反例：把 `/agent` 当 `/search` 的替代；或对新增 collection-building 工作继续用 Websets。
+
+## 验证与报告
+
+- 对照 `references/` 检查请求形状（端点、必填字段、gated 字段是否有任务依据）；用实际 SDK 跑一次最小请求，核对结果是否包含预期内容/引用。
+- 报告写明：端点与关键参数、SDK/版本、结果条数与内容形态、ZDR 面选择、失败类别与请求 id（若返回）；不要把"请求成功"当成"结果满足任务"。
+- 涉及抓取页面内容时，同时记录 freshness 前提与降级选择（省略 `contents` 只得到元数据）。
