@@ -18,8 +18,8 @@ use crate::agent::session::{
 };
 
 impl SessionStore {
-    /// PA-088：Authoritative 会话的 trace 表写入（用全量 Union，须在 blob 剥离 trace 前
-    /// 执行；仅写顶层会让 >24 轮会话的旧节点 refs 在重启 materialize 时解析不到）。
+    /// PA-088：Authoritative 会话的 trace 表写入（旧路径，已由 commit_boundary 单一事务内的 write_traces_and_metadata_tx 统一接管）。
+    #[allow(dead_code)]
     pub(super) fn write_trace_tables(&self, sessions: &SessionMap) {
         if !matches!(
             self.backend.trace_storage_mode(),
@@ -47,9 +47,41 @@ impl SessionStore {
         }
     }
 
+    /// 路径授权轻量持久化：仅更新 store_metadata 的 key=`path_authorizations.v1`，
+    /// 避免在授权变更时触发 171 个会话全量重写与 commit_boundary。
+    pub(super) fn save_path_authorizations_to_backend(&self) {
+        if let Ok(value) = serde_json::to_string(&self.path_authorizations.entries()) {
+            let outcome = self.backend.persist_command(
+                crate::agent::session::PersistCommand::PublishMetadata {
+                    epoch: 1,
+                    key: "path_authorizations.v1".to_string(),
+                    value,
+                },
+            );
+            if matches!(
+                outcome,
+                crate::agent::session::PersistCommandOutcome::Succeeded
+            ) {
+                return;
+            }
+        }
+        self.save_to_backend();
+    }
+
     /// 由内存会话集构造提交快照（只留可持久化会话；携带版本侧表）。
     pub(super) fn to_persisted_store(&self, sessions: &SessionMap) -> PersistedStore {
         let trace_mode = self.backend.trace_storage_mode();
+        let mut authoritative_traces = std::collections::HashMap::new();
+        if matches!(trace_mode, SeparateTraceTableMode::WriteSeparate) {
+            for (session_id, session) in sessions {
+                if matches!(
+                    session.trace_migration_state,
+                    TraceMigrationState::TraceTableAuthoritative
+                ) {
+                    authoritative_traces.insert(session_id.clone(), collect_trace_union(session));
+                }
+            }
+        }
         PersistedStore {
             sessions: sessions
                 .iter()
@@ -68,6 +100,7 @@ impl SessionStore {
             workspaces: self.workspaces.clone(),
             path_authorizations: self.path_authorizations.entries(),
             versions: self.versions_of(sessions),
+            authoritative_traces,
         }
     }
 

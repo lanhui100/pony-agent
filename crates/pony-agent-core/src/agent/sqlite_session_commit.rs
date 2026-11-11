@@ -260,19 +260,34 @@ impl SqliteSessionBackend {
     /// （grandfather，行为与停写前逐字节一致）。
     ///
     /// `sessions` 无 `version` 列（PA-089 6a 视图形态）时退化为既有 4 列 `INSERT OR REPLACE`。
-    pub(crate) fn upsert_session_row_bump(
+    pub(crate) fn upsert_session_row_bump_with_log_check(
         &self,
         conn: &Connection,
         session_id: &str,
         session: &SessionState,
+        has_log: bool,
     ) -> Result<(), String> {
-        if self.session_has_log(session_id) {
+        if has_log {
             let payload = index_only_row_payload(session)?;
             return self.write_session_row(conn, session_id, session, &payload);
         }
         let payload =
             serde_json::to_string(session).map_err(|e| format!("serialize session: {e}"))?;
         self.write_session_row(conn, session_id, session, &payload)
+    }
+
+    pub(crate) fn upsert_session_row_bump(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        session: &SessionState,
+    ) -> Result<(), String> {
+        self.upsert_session_row_bump_with_log_check(
+            conn,
+            session_id,
+            session,
+            self.session_has_log(session_id),
+        )
     }
 
     /// **显式整包 blob** 写行：只给「一次性迁移 / 回填」入口用（目前是
@@ -1426,6 +1441,7 @@ impl SqliteSessionBackend {
             workspaces: self.read_metadata(conn, "workspaces"),
             path_authorizations: self.read_metadata(conn, "path_authorizations.v1"),
             versions: load_session_versions(conn),
+            authoritative_traces: HashMap::new(),
         }
     }
 
@@ -1524,9 +1540,11 @@ impl SqliteSessionBackend {
         // 版本侧表只用于一件事——判定「装载时存在、现在行已不存在」的会话是**墓碑**，
         // 跳过且永不 INSERT（I3：旧快照不得复活已删会话）。
         let mut tombstoned: HashSet<String> = HashSet::new();
+        let existing_session_ids = load_existing_session_ids(&tx).map_err(CommitFailure::other)?;
+        let existing_log_encoded_ids = self.session_log_sink.existing_log_encoded_ids();
         for (session_id, session) in &store.sessions {
             if store.versions.contains_key(session_id)
-                && !session_row_exists(&tx, session_id).map_err(CommitFailure::other)?
+                && !existing_session_ids.contains(session_id)
             {
                 tombstoned.insert(session_id.clone());
                 eprintln!(
@@ -1535,7 +1553,10 @@ impl SqliteSessionBackend {
                 continue;
             }
             let prepared = prepare_session_for_row(session_id, session);
-            self.upsert_session_row_bump(&tx, session_id, &prepared)
+            let has_log = crate::agent::session::encode_session_id_segment(session_id)
+                .map(|enc| existing_log_encoded_ids.contains(&enc))
+                .unwrap_or(false);
+            self.upsert_session_row_bump_with_log_check(&tx, session_id, &prepared, has_log)
                 .map_err(CommitFailure::other)?;
         }
         self.write_traces_and_metadata_tx(&tx, store, &tombstoned)
@@ -1555,12 +1576,16 @@ impl SqliteSessionBackend {
         store: &PersistedStore,
         skip: &HashSet<String>,
     ) -> Result<(), String> {
+        let existing_log_encoded_ids = self.session_log_sink.existing_log_encoded_ids();
         for (session_id, session) in &store.sessions {
             if skip.contains(session_id) {
                 continue;
             }
             let prepared = prepare_session_for_row(session_id, session);
-            self.upsert_session_row_bump(tx, session_id, &prepared)?;
+            let has_log = crate::agent::session::encode_session_id_segment(session_id)
+                .map(|enc| existing_log_encoded_ids.contains(&enc))
+                .unwrap_or(false);
+            self.upsert_session_row_bump_with_log_check(tx, session_id, &prepared, has_log)?;
         }
         self.write_traces_and_metadata_tx(tx, store, skip)
     }
@@ -1576,10 +1601,13 @@ impl SqliteSessionBackend {
             if skip.contains(session_id) {
                 continue;
             }
-            // 始终写 trace 表，保持 blob 与 trace 表同步（PA-088：authoritative 会话跳过
-            // ——其 blob 已被 `session_state_for_backend` 剥离 trace，此处若用剥离后的空
-            // trace 替换表会清空数据；表已由 `save_to_backend` 在剥离前写入）。
-            if session.trace_migration_state != TraceMigrationState::TraceTableAuthoritative {
+            // 始终写 trace 表，保持 blob 与 trace 表同步（PA-088：authoritative 会话统一
+            // 在本事务内从 store.authoritative_traces 写入，杜绝 171 次独立小事务与 fsync）。
+            if session.trace_migration_state == TraceMigrationState::TraceTableAuthoritative {
+                if let Some(traces) = store.authoritative_traces.get(session_id) {
+                    self.replace_session_traces_tx(tx, session_id, traces)?;
+                }
+            } else {
                 self.replace_session_traces_tx(tx, session_id, &session.turn_trace_history)?;
             }
         }
@@ -1643,6 +1671,7 @@ fn prepare_session_for_row(session_id: &str, session: &SessionState) -> SessionS
 }
 
 /// `sessions` 是否已有该会话行（墓碑判定的唯一依据）。
+#[allow(dead_code)]
 fn session_row_exists(conn: &Connection, session_id: &str) -> Result<bool, String> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sessions WHERE conversation_id = ?1)",
@@ -1651,6 +1680,21 @@ fn session_row_exists(conn: &Connection, session_id: &str) -> Result<bool, Strin
     )
     .map(|value| value != 0)
     .map_err(|error| format!("check session row: {error}"))
+}
+
+/// 批量加载 `sessions` 现存会话 ID 集合（单次 SQL 查询替代 O(N) 次 `session_row_exists` 往返）。
+fn load_existing_session_ids(conn: &Connection) -> Result<HashSet<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT conversation_id FROM sessions")
+        .map_err(|error| format!("prepare query existing session ids: {error}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("query existing session ids: {error}"))?;
+    let mut ids = HashSet::new();
+    for row in rows {
+        ids.insert(row.map_err(|error| format!("read session id row: {error}"))?);
+    }
+    Ok(ids)
 }
 
 /// 已耗时（毫秒），用于把 busy 重试收敛到 NFR 总预算。

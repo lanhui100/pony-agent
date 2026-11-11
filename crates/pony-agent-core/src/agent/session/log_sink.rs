@@ -142,6 +142,11 @@ impl SessionLogSink {
         self.store.find_log_path(session_id)
     }
 
+    /// 跨所有 cwd 分组扫描全部已有日志的编码 session id 集合（用于批量判定，避免逐个 stat）。
+    pub fn existing_log_encoded_ids(&self) -> std::collections::HashSet<String> {
+        self.store.existing_log_encoded_ids()
+    }
+
     /// 跨分组查找某会话的摘要（迁移解析归属 cwd 用）。
     pub fn find_session_meta(&self, session_id: &str) -> Option<SessionLogMeta> {
         self.store.find_session_meta(session_id)

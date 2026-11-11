@@ -766,6 +766,28 @@ impl SessionLogStore {
         None
     }
 
+    /// 跨所有 cwd 分组扫描全部已有日志的编码 session id 集合（消除 O(N) 跨分组逐个 stat）。
+    pub fn existing_log_encoded_ids(&self) -> std::collections::HashSet<String> {
+        let mut ids = std::collections::HashSet::new();
+        let Ok(groups) = self.cwd_groups() else {
+            return ids;
+        };
+        for group in groups {
+            let Ok(entries) = fs::read_dir(&group) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join(SESSION_LOG_FILE_NAME).is_file() {
+                    if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                        ids.insert(file_name.to_string());
+                    }
+                }
+            }
+        }
+        ids
+    }
+
     /// **跨 cwd 分组**查找会话摘要（`current` header 的第一个命中）。
     ///
     /// 迁移用它解析「该会话已有日志时属于哪个 cwd 分组」，从而把产物写回**原分组**，

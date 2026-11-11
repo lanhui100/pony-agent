@@ -4531,13 +4531,12 @@ fn appending_from_historical_node_creates_a_fork_and_preserves_main_branch_head(
     let fork_base = nodes_before[0].node_id.clone();
 
     store
-        .checkout_history_node(
+        .fork_from_history_node(
             Some("fork-session"),
             fork_base.as_str(),
-            HistoryCheckoutMode::TranscriptOnly,
             None,
         )
-        .expect("checkout should succeed");
+        .expect("fork should succeed");
 
     let fork_snapshot = store.append_turn(
         Some("fork-session"),

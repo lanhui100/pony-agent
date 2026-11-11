@@ -665,3 +665,179 @@ fn r5_rewind_to_empty_survives_store_reload() {
     );
     assert!(server.wait_request_count(3), "三轮各一次上游调用");
 }
+
+/// ISSUE-20261111-004 红相测试：引用化节点在撤回后，TUI 重放使用的 load_session_runtime_view 必须完整保留历史消息。
+#[test]
+fn r6_rewind_with_referenced_node_preserves_history_in_runtime_view() {
+    let _guard = serial_guard();
+    let _rt = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+    let workspace = isolated_workspace("referenced_rewind");
+    let server = MockProviderServer::start(vec![
+        "第一答".to_string(),
+        "第二答".to_string(),
+        "第三答".to_string(),
+    ]);
+    let control_plane = control_plane_with_mock_provider(server.base_url.clone(), &workspace);
+
+    let session_id = "rewind-referenced-session";
+    let sink = RecordingSink::new();
+    run_turn(&control_plane, &sink, session_id, "turn-1", "第一问");
+    run_turn(&control_plane, &sink, session_id, "turn-2", "第二问");
+    run_turn(&control_plane, &sink, session_id, "turn-3", "第三问");
+
+    // 模拟长会话中历史节点被引用化（event_seq_range 已定，内嵌快照清空）：
+    let points = control_plane.list_rewind_points(RewindPointsQuery {
+        session_id: Some(session_id.to_string()),
+    });
+    assert_eq!(points.len(), 3, "三轮 ⇒ 三个撤回点");
+
+    // 撤回到第 3 轮之前（保留第 1、2 轮）：
+    let response = control_plane
+        .rewind_session(RewindSessionCommand {
+            session_id: Some(session_id.to_string()),
+            node_id: points[0].node_id.clone(),
+            mode: RewindMode::ConversationOnly,
+        })
+        .expect("撤回到第 3 轮之前必须成功");
+    assert_eq!(response.user_message.as_deref(), Some("第三问"));
+    assert_eq!(response.turn_index, 3);
+
+    // 模拟 TUI `hydrate_state_from_session` 调用：
+    let view = control_plane.load_session_runtime_view(SessionRuntimeViewQuery {
+        session_id: Some(session_id.to_string()),
+        turn_id: None,
+        node_id: None,
+        run_id: None,
+    });
+
+    let history: Vec<(String, String)> = view
+        .session
+        .history
+        .iter()
+        .map(|m| (m.role.clone(), m.content.clone()))
+        .collect();
+
+    assert_eq!(
+        history,
+        vec![
+            ("user".to_string(), "第一问".to_string()),
+            ("assistant".to_string(), "第一答".to_string()),
+            ("user".to_string(), "第二问".to_string()),
+            ("assistant".to_string(), "第二答".to_string()),
+        ],
+        "撤回后 load_session_runtime_view 必须能够读到第 1、2 轮的历史消息，绝不得为空！"
+    );
+
+    assert_eq!(
+        view.session.history_cursor.branch_head_node_id.as_deref(),
+        Some(points[1].node_id.as_str()),
+        "分支头必须稳定停留在保留的第 2 轮节点，不得反弹回已取消的第 3 轮节点"
+    );
+}
+
+/// ISSUE-20261111-004 单元守卫：ensure_history_graph 不得把已被截断/取消的末尾节点复活为主分支头。
+#[test]
+fn ensure_history_graph_does_not_resurrect_cancelled_head() {
+    use pony_agent_core::agent::session::{
+        ensure_history_graph, HistoryBranch, HistoryCursor, HistoryCursorMode, HistoryNode,
+        HistoryNodeKind, SessionState, TraceMigrationState,
+    };
+    let session_id = "test-rewind-cancelled-head";
+    let root_node = format!("{}-legacy-root", session_id);
+    let node_1 = "node-turn-1".to_string();
+    let node_2 = "node-turn-2".to_string();
+    let mut session = SessionState {
+        conversation_id: session_id.to_string(),
+        title: "测试".to_string(),
+        summary: "摘要".to_string(),
+        history: Vec::new(),
+        provider_native_transcript: Vec::new(),
+        turn_trace_history: Vec::new(),
+        trace_migration_state: TraceMigrationState::default(),
+        turn_trace_refs: None,
+        long_term_memory_entries: Vec::new(),
+        memory_write_evidence: Vec::new(),
+        memory_write_hook_trace_records: Vec::new(),
+        history_state_evidence: Vec::new(),
+        turn_count: 1,
+        last_referenced_file: None,
+        updated_at_ms: 1000,
+        history_nodes: vec![
+            HistoryNode {
+                node_id: root_node.clone(),
+                session_id: session_id.to_string(),
+                parent_node_id: None,
+                branch_id: "main".to_string(),
+                kind: HistoryNodeKind::Checkpoint,
+                title: "测试".to_string(),
+                summary: "摘要".to_string(),
+                turn_count: 0,
+                ..Default::default()
+            },
+            HistoryNode {
+                node_id: node_1.clone(),
+                session_id: session_id.to_string(),
+                parent_node_id: Some(root_node.clone()),
+                branch_id: "main".to_string(),
+                kind: HistoryNodeKind::TurnCommitted,
+                title: "第一轮".to_string(),
+                summary: "第一轮摘要".to_string(),
+                turn_count: 1,
+                ..Default::default()
+            },
+            HistoryNode {
+                node_id: node_2.clone(),
+                session_id: session_id.to_string(),
+                parent_node_id: Some(node_1.clone()),
+                branch_id: "main".to_string(),
+                kind: HistoryNodeKind::TurnCancelled,
+                title: "第二轮(已撤销)".to_string(),
+                summary: "已撤销".to_string(),
+                turn_count: 2,
+                ..Default::default()
+            },
+        ],
+        history_branches: vec![HistoryBranch {
+            branch_id: "main".to_string(),
+            head_node_id: Some(node_1.clone()),
+            base_node_id: Some(root_node.clone()),
+            ..Default::default()
+        }],
+        history_cursor: HistoryCursor {
+            session_id: session_id.to_string(),
+            visible_node_id: Some(node_1.clone()),
+            active_branch_id: Some("main".to_string()),
+            branch_head_node_id: Some(node_1.clone()),
+            workspace_node_id: Some(node_1.clone()),
+            mode: HistoryCursorMode::Live,
+            ..Default::default()
+        },
+        event_watermark: 0,
+        last_commit_watermark: 0,
+        workspace_id: None,
+        title_override: None,
+        archived: false,
+    };
+
+    let changed = ensure_history_graph(&mut session);
+    assert!(
+        !changed,
+        "当主分支头已指向有效的非取消节点且光标同步时，ensure_history_graph 不得将 changed 置为 true"
+    );
+    let main_branch = session
+        .history_branches
+        .iter()
+        .find(|b| b.branch_id == "main")
+        .expect("main branch exists");
+    assert_eq!(
+        main_branch.head_node_id.as_deref(),
+        Some(node_1.as_str()),
+        "已取消的 node_2 绝不能被篡改复活为分支头"
+    );
+    assert_eq!(
+        session.history_cursor.branch_head_node_id.as_deref(),
+        Some(node_1.as_str()),
+        "光标的 branch_head_node_id 绝不能被重置为已取消的 node_2"
+    );
+}
+

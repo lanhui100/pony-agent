@@ -119,6 +119,7 @@ struct CountingBackend {
     commit_boundary: Arc<AtomicUsize>,
     upsert_session: Arc<AtomicUsize>,
     persist_session_with_trace_mutation: Arc<AtomicUsize>,
+    replace_session_traces: Arc<AtomicUsize>,
     attachment_root: PathBuf,
 }
 
@@ -137,6 +138,7 @@ impl CountingBackend {
         let commit_boundary = Arc::new(AtomicUsize::new(0));
         let upsert_session = Arc::new(AtomicUsize::new(0));
         let persist_session_with_trace_mutation = Arc::new(AtomicUsize::new(0));
+        let replace_session_traces = Arc::new(AtomicUsize::new(0));
         (
             Self {
                 inner: open_sqlite(db),
@@ -146,6 +148,7 @@ impl CountingBackend {
                 persist_session_with_trace_mutation: Arc::clone(
                     &persist_session_with_trace_mutation,
                 ),
+                replace_session_traces,
                 attachment_root,
             },
             save_store,
@@ -153,6 +156,15 @@ impl CountingBackend {
             upsert_session,
             persist_session_with_trace_mutation,
         )
+    }
+
+    fn new_with_trace_counter(
+        db: &Path,
+        attachment_root: PathBuf,
+    ) -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (backend, _save, commit, _upsert, _psmtm) = Self::new(db, attachment_root);
+        let traces = Arc::clone(&backend.replace_session_traces);
+        (backend, commit, traces)
     }
 }
 
@@ -250,6 +262,7 @@ impl SessionBackend for CountingBackend {
         session_id: &str,
         traces: &[TurnTraceRecord],
     ) -> SessionBackendMutationResult {
+        self.replace_session_traces.fetch_add(1, Ordering::SeqCst);
         self.inner.replace_session_traces(session_id, traces)
     }
 
@@ -431,4 +444,120 @@ fn full_store_entry_routes_through_commit_boundary_once() {
         store_metadata_contains(&db, "workspaces", "amp-ws"),
         "前提防线：create_workspace 的提交必须真的落盘（store_metadata.workspaces 含 amp-ws）"
     );
+}
+
+/// ISSUE-20261111-003：路径授权/撤销必须走轻量元数据专属落盘通道，绝不得触发 171 会话全量 commit_boundary。
+#[test]
+fn authorize_path_does_not_trigger_full_store_commit() {
+    let dir = TempDir::new("amp-auth");
+    let db = dir.db();
+    let auth_path = dir.path.join("authorized-dir");
+    std::fs::create_dir_all(&auth_path).expect("create dir");
+    let (backend, save_store, commit_boundary, upsert_session, psmtm) =
+        CountingBackend::new(&db, dir.path.join("attachments"));
+    let mut store = SessionStore::with_backend(Box::new(backend));
+    let before = read_counts(&save_store, &commit_boundary, &upsert_session, &psmtm);
+
+    // Act 1: 授权路径
+    let canonical = auth_path.canonicalize().expect("canonicalize");
+    store
+        .authorize_path(
+            canonical.clone(),
+            pony_agent_core::agent::path_permission::PathAuthorizationScope::Read,
+        )
+        .expect("authorize_path 必须成功");
+
+    // Assert 1: 走轻量元数据通道，不触发 commit_boundary 或 save_store
+    let spent = delta(
+        read_counts(&save_store, &commit_boundary, &upsert_session, &psmtm),
+        before,
+    );
+    assert_eq!(
+        spent.commit_boundary, 0,
+        "authorize_path 必须走轻量元数据通道，不得触发 commit_boundary（实际 {spent:?}）"
+    );
+    assert_eq!(
+        spent.save_store, 0,
+        "authorize_path 绝不得触发 save_store 全库落盘（实际 {spent:?}）"
+    );
+    assert!(
+        store_metadata_contains(&db, "path_authorizations.v1", canonical.to_str().unwrap()),
+        "元数据必须已落盘到 store_metadata 的 path_authorizations.v1"
+    );
+
+    // Act 2: 撤销授权
+    let before_revoke = read_counts(&save_store, &commit_boundary, &upsert_session, &psmtm);
+    assert!(store.revoke_authorization(&canonical), "撤销必须返回 true");
+
+    // Assert 2: 同样走轻量元数据通道
+    let spent_revoke = delta(
+        read_counts(&save_store, &commit_boundary, &upsert_session, &psmtm),
+        before_revoke,
+    );
+    assert_eq!(
+        spent_revoke.commit_boundary, 0,
+        "revoke_authorization 必须走轻量元数据通道，不得触发 commit_boundary（实际 {spent_revoke:?}）"
+    );
+    assert_eq!(
+        spent_revoke.save_store, 0,
+        "revoke_authorization 绝不得触发 save_store 全库落盘（实际 {spent_revoke:?}）"
+    );
+}
+
+/// ISSUE-20261111-003：Authoritative 会话的 traces 必须在 commit_boundary 内部统一写入，
+/// 杜绝 save_to_backend 前置遍历 171 个会话逐一调用 replace_session_traces 开启 171 次独立小事务。
+#[test]
+fn authoritative_traces_are_persisted_via_commit_boundary_without_standalone_replace_tx() {
+    let dir = TempDir::new("amp-traces");
+    let db = dir.db();
+    let workspace_root = dir.path.join("workspace-root");
+    std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+    let (backend, commit_boundary, replace_traces) =
+        CountingBackend::new_with_trace_counter(&db, dir.path.join("attachments"));
+    let mut store = SessionStore::with_backend(Box::new(backend));
+
+    let session_id = "authoritative-session-1";
+    let trace_record = TurnTraceRecord {
+        turn_id: "turn-auth-1".to_string(),
+        trace_id: Some("trace-auth-1".to_string()),
+        session_id: Some(session_id.to_string()),
+        title: "测试标题".to_string(),
+        phase: "completed".to_string(),
+        ..Default::default()
+    };
+
+    store.record_turn_trace_in_memory(Some(session_id), trace_record);
+
+    // 重置计数器
+    commit_boundary.store(0, Ordering::SeqCst);
+    replace_traces.store(0, Ordering::SeqCst);
+
+    // Act：触发全库落盘入口
+    store
+        .create_workspace("auth-ws", workspace_root.to_str().expect("utf-8 root"))
+        .expect("create_workspace 必须成功");
+
+    // Assert 1：必须只走 1 次 commit_boundary，且独立的 replace_session_traces 事务为 0！
+    assert_eq!(
+        commit_boundary.load(Ordering::SeqCst),
+        1,
+        "全库落盘必须只穿越 1 次 commit_boundary"
+    );
+    assert_eq!(
+        replace_traces.load(Ordering::SeqCst),
+        0,
+        "Authoritative 会话必须由 commit_boundary 统一落盘，不得调用独立的 replace_session_traces 产生写事务循环！"
+    );
+
+    // Assert 2：库中确实持久化了该 trace
+    let loaded_backend = open_sqlite(&db);
+    let loaded = loaded_backend.load_session_traces(session_id);
+    match loaded {
+        SessionBackendTraceLoadResult::Loaded(traces) => {
+            assert_eq!(traces.len(), 1, "必须读出 1 条 trace");
+            assert_eq!(traces[0].turn_id, "turn-auth-1");
+            assert_eq!(traces[0].trace_id.as_deref(), Some("trace-auth-1"));
+        }
+        other => panic!("expected Loaded, got {other:?}"),
+    }
 }

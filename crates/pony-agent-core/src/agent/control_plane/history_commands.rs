@@ -347,16 +347,23 @@ impl HostControlPlane {
         // node so that checkout_history_node state is preserved across
         // client reconnects / session switches without every client
         // having to track visibleNodeId.
+        // 只读查询：直接从内存 sessions_view 读取 cursor，避免调用带写锁与 ensure/save 副作用的 load_history_cursor。
         let resolved_node_id = query.node_id.clone().or_else(|| {
-            let cursor = self.load_history_cursor(HistoryCursorQuery {
-                session_id: Some(resolved_session_id.clone()),
+            let sessions = self.sessions_rwlock.read().unwrap_or_else(|e| {
+                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                e.into_inner()
             });
-            cursor.visible_node_id.filter(|visible| {
-                cursor
-                    .branch_head_node_id
-                    .as_ref()
-                    .map_or(true, |head| visible != head)
-            })
+            sessions
+                .get_session(resolved_session_id.as_str())
+                .and_then(|session| {
+                    let cursor = &session.history_cursor;
+                    cursor.visible_node_id.as_ref().filter(|visible| {
+                        cursor
+                            .branch_head_node_id
+                            .as_ref()
+                            .map_or(true, |head| *visible != head)
+                    }).cloned()
+                })
         });
 
         let run = self.resolve_graph_run_for_retrieval(

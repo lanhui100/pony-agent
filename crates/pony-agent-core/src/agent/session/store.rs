@@ -176,6 +176,9 @@ pub struct PersistedStore {
     /// [`SessionBackend::commit_boundary`] 以它作期望版本做 CAS。
     #[serde(default)]
     pub(crate) versions: SessionVersionMap,
+    /// Authoritative 会话的全量 traces 集合（由 to_persisted_store 收集，在 commit_boundary 单一事务内统一写入）。
+    #[serde(default)]
+    pub(crate) authoritative_traces: HashMap<String, Vec<TurnTraceRecord>>,
 }
 
 impl PersistedStore {
@@ -274,6 +277,11 @@ impl SessionStore {
         &self,
     ) -> Option<Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>> {
         self.ask_store.clone()
+    }
+
+    /// 只读获取指定会话的引用（不触发任何 ensure 或保存）。
+    pub fn get_session(&self, session_id: &str) -> Option<&SessionState> {
+        self.sessions.get(session_id)
     }
 
     #[cfg(test)]
@@ -480,31 +488,17 @@ impl SessionStore {
         fallback_history: &[TurnHistoryMessage],
     ) -> SessionSnapshot {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID);
-        let Some(session) = self.sessions.get(session_key) else {
+        if !self.sessions.contains_key(session_key) {
             // 会话尚不存在：默认归属（workspace_id=None）解析默认工作区 root。
             return default_snapshot_for_session(
                 session_key,
                 node_id,
                 self.workspace_env_cwd(None),
             );
-        };
-        let attachment_assets = attachment_assets_for_query(
-            &self.sessions,
-            &self.attachment_assets,
-            &self.session_attachment_index,
-            &self.attachment_root,
-            &AttachmentAssetQuery {
-                session_id: Some(session_key.to_string()),
-                ..AttachmentAssetQuery::default()
-            },
-            now_timestamp_ms(),
-        );
-        let mut snapshot = snapshot_from_state(
-            session,
-            attachment_assets,
-            node_id,
-            self.workspace_env_cwd(session.workspace_id.as_deref()),
-        );
+        }
+        // 复用 snapshot_for_session_at：支持引用化节点的时间旅行折叠，
+        // 纯只读（&self），不创建 session、不触发写锁或 save_to_backend。
+        let mut snapshot = self.snapshot_for_session_at(session_key, node_id);
         if snapshot.history.is_empty() && !fallback_history.is_empty() {
             snapshot.history = fallback_history.to_vec();
         }
@@ -2296,7 +2290,7 @@ impl SessionStore {
         scope: crate::agent::path_permission::PathAuthorizationScope,
     ) -> Result<crate::agent::path_permission::AuthorizedPathEntry, String> {
         let entry = self.path_authorizations.grant_with_scope(canonical, scope)?;
-        self.save_to_backend();
+        self.save_path_authorizations_to_backend();
         Ok(entry)
     }
 
@@ -2304,7 +2298,7 @@ impl SessionStore {
     pub fn revoke_authorization(&mut self, canonical: &Path) -> bool {
         let removed = self.path_authorizations.revoke(canonical);
         if removed {
-            self.save_to_backend();
+            self.save_path_authorizations_to_backend();
         }
         removed
     }
@@ -2532,7 +2526,6 @@ impl SessionStore {
     /// ADR 0099 阶段 0（I1 / E4）：**全库落盘入口**——本文件所有全库提交点（建/改/删
     /// 工作区、授权、改名、归档、事件重放等）统一经由它收敛到单一提交边界。
     pub(super) fn save_to_backend(&self) {
-        self.write_trace_tables(&self.sessions);
         self.commit_store(&self.sessions, "save_to_backend");
     }
 
@@ -3201,7 +3194,7 @@ pub fn build_missing_run_control_audit_summary() -> RunControlAuditSummary {
     }
 }
 
-fn ensure_history_graph(session: &mut SessionState) -> bool {
+pub fn ensure_history_graph(session: &mut SessionState) -> bool {
     let mut changed = false;
     if session.history_cursor.session_id.is_empty() {
         session.history_cursor.session_id = session.conversation_id.clone();
@@ -3416,12 +3409,9 @@ fn ensure_history_graph(session: &mut SessionState) -> bool {
         .history_nodes
         .iter()
         .rev()
-        .find(|node| node.branch_id == DEFAULT_HISTORY_BRANCH_ID)
+        .find(|n| n.branch_id == DEFAULT_HISTORY_BRANCH_ID && n.kind != HistoryNodeKind::TurnCancelled)
         .map(|node| node.node_id.clone());
-    let first_node_id = session
-        .history_nodes
-        .first()
-        .map(|node| node.node_id.clone());
+    let first_node_id = session.history_nodes.first().map(|n| n.node_id.clone());
     let updated_at_ms = session.updated_at_ms;
     let has_legacy_root_node = session
         .history_nodes
