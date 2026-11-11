@@ -375,7 +375,7 @@ fn run_export<F: FnOnce()>(budget: Duration, body: F) -> Vec<DecodedSpan> {
 
     body();
 
-    let flushed = otel::force_flush(3_000);
+    let flushed = otel::force_flush(5_000);
     assert!(
         flushed.is_ok(),
         "wave-54：已装配时 force_flush 必须成功（否则下述缺键断言可能只是「没导出」）：{flushed:?}"
@@ -603,7 +603,7 @@ const T1_UNTRUSTED_TTFT_MS: i64 = 800;
 fn t1_llm_chat_call_timing_wire() {
     let _guard = gate_lock();
 
-    let spans = run_export(Duration::from_millis(2_500), || {
+    let spans = run_export(Duration::from_millis(8_000), || {
         let _turn = otel::begin_turn_trace("sess-wave54-t1", "turn-wave54-t1", 1);
 
         // ① stream 调用：有首包（ttft）。
@@ -813,7 +813,7 @@ fn t2_turn_weighted_speed_wire() {
     let turn_ttft_ms = 200u64; // 首个带 ttft 的 per-call 值
     let turn_calls = 1u32; // 参与解码计算的调用数（call2 不可解码，不计入，I7）
 
-    let spans = run_export(Duration::from_millis(2_500), || {
+    let spans = run_export(Duration::from_millis(8_000), || {
         let mut turn = otel::begin_turn_trace("sess-wave54-t2", "turn-wave54-t2", 2);
 
         // call1：有 ttft + 有窗口能力。
@@ -972,7 +972,7 @@ fn t2_turn_weighted_speed_wire() {
 fn t2_turn_speed_not_recorded_when_not_finite_or_non_positive() {
     let _guard = gate_lock();
 
-    let spans = run_export(Duration::from_millis(2_500), || {
+    let spans = run_export(Duration::from_millis(8_000), || {
         // ① 0 速度（Σgen 为 0 时的退化值）⇒ 不得写键。
         let mut zero = otel::begin_turn_trace("sess-wave54-t2b", "turn-wave54-t2b-zero", 1);
         zero.record_turn_speed(Some(0.0));
@@ -1352,7 +1352,7 @@ fn t7_root_span_accumulates_without_explicit_turn_calls() {
         "T7 夹具自检：解码口径速度必须是 99 t/s，实际 {expected_speed}"
     );
 
-    let spans = run_export(Duration::from_millis(2_500), || {
+    let spans = run_export(Duration::from_millis(8_000), || {
         let turn = otel::begin_turn_trace("sess-wave54-t7", "turn-wave54-t7", 7);
 
         // ① 首跳：usage 必须先于 call_timing（后者结算时需要本次 output）。

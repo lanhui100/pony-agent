@@ -10,7 +10,7 @@
 //! - 全局 Mutex 串行化，保证多用例间 otel 单例隔离。
 //! - 绝对零修改 src/ 业务代码。
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
@@ -89,6 +89,13 @@ fn spawn_otlp_sink(budget: Duration) -> (u16, JoinHandle<Vec<CapturedRequest>>) 
             if let Some(h_end) = header_end {
                 let body = buf[h_end..].to_vec();
                 captured.push(CapturedRequest { body });
+            // 回 200：真实 collector 必须应答，否则 OTLP 导出客户端会把本次导出判为失败并重试；
+            // 在慢速 runner（windows-latest）上重试会越过 sink 预算 ⇒ 捕获为空 ⇒ 「resource 缺属性」
+            // 假红（B057）。与 `wave54_metric_truth` 的 sink 同口径。
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/x-protobuf\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            );
+            let _ = stream.flush();
             }
         }
         captured
@@ -212,7 +219,7 @@ fn test_resource_attribution_normal_device_client() {
     otel::shutdown();
     otel::set_reporting_enabled(false);
 
-    let (port, sink) = spawn_otlp_sink(Duration::from_millis(2_000));
+    let (port, sink) = spawn_otlp_sink(Duration::from_millis(8_000));
     let config = make_test_config(port, None);
     otel::init(config).expect("init normal device");
     otel::set_reporting_enabled(true);
@@ -221,7 +228,7 @@ fn test_resource_attribution_normal_device_client() {
     {
         let _turn = otel::begin_turn_trace("sess-device-1", "turn-1", 0);
     }
-    let _ = otel::force_flush(2_000);
+    let _ = otel::force_flush(5_000);
     otel::shutdown();
     otel::set_reporting_enabled(false);
 
@@ -257,7 +264,7 @@ fn test_resource_attribution_probe_client() {
     otel::shutdown();
     otel::set_reporting_enabled(false);
 
-    let (port, sink) = spawn_otlp_sink(Duration::from_millis(2_000));
+    let (port, sink) = spawn_otlp_sink(Duration::from_millis(8_000));
     let config = make_test_config(port, None);
     otel::init(config).expect("init probe client");
     otel::set_reporting_enabled(true);
@@ -266,7 +273,7 @@ fn test_resource_attribution_probe_client() {
     {
         let _turn = otel::begin_turn_trace("sess-probe-1", "turn-1", 0);
     }
-    let _ = otel::force_flush(2_000);
+    let _ = otel::force_flush(5_000);
     otel::shutdown();
     otel::set_reporting_enabled(false);
     std::env::remove_var("PONY_OTEL_PROBE");
@@ -281,7 +288,10 @@ fn test_resource_attribution_probe_client() {
     // 3. Assert: 探针环境导出的 Resource 必须包含 ingest.client.kind = "probe" 且 pony.probe = "true"
     assert!(
         wire.contains("ingest.client.kind"),
-        "探针端导出的 Resource 必须包含属性 ingest.client.kind"
+        "探针端导出的 Resource 必须包含属性 ingest.client.kind（本次捕获 {} 次 POST，body 共 {} 字节；\
+         捕获为空 ⇒ 导出根本没到 sink，而不是属性没拼上）",
+        captured.len(),
+        captured.iter().map(|r| r.body.len()).sum::<usize>()
     );
     assert!(
         wire.contains("probe"),

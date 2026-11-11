@@ -13,7 +13,7 @@
 //! - RUSTFLAGS="-D warnings" 保持 0 warning。
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
@@ -92,6 +92,13 @@ fn spawn_otlp_sink(budget: Duration) -> (u16, JoinHandle<Vec<CapturedRequest>>) 
             if let Some(h_end) = header_end {
                 let body = buf[h_end..].to_vec();
                 captured.push(CapturedRequest { body });
+            // 回 200：真实 collector 必须应答，否则 OTLP 导出客户端会把本次导出判为失败并重试；
+            // 在慢速 runner（windows-latest）上重试会越过 sink 预算 ⇒ 捕获为空 ⇒ 「resource 缺属性」
+            // 假红（B057）。与 `wave54_metric_truth` 的 sink 同口径。
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/x-protobuf\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            );
+            let _ = stream.flush();
             }
         }
         captured
@@ -116,20 +123,19 @@ fn test_deployment_environment_precedence_and_fallback() {
     std::env::set_var("PONY_OTEL_ENVIRONMENT", "staging");
     otel::shutdown();
     otel::set_reporting_enabled(false);
-    let (port1, sink1) = spawn_otlp_sink(Duration::from_millis(2_000));
+    let (port1, sink1) = spawn_otlp_sink(Duration::from_millis(8_000));
     otel::init(make_test_config(port1)).expect("init otel staging");
     otel::set_reporting_enabled(true);
     {
         let _turn = otel::begin_turn_trace("sess-env-1", "turn-1", 0);
     }
-    let _ = otel::force_flush(2_000);
+    let _ = otel::force_flush(5_000);
     otel::shutdown();
     otel::set_reporting_enabled(false);
     std::env::remove_var("PONY_OTEL_ENVIRONMENT");
 
-    let wire1 = sink1
-        .join()
-        .expect("sink1 join")
+    let captured1 = sink1.join().expect("sink1 join");
+    let wire1 = captured1
         .iter()
         .map(|r| String::from_utf8_lossy(&r.body).to_string())
         .collect::<Vec<_>>()
@@ -138,7 +144,10 @@ fn test_deployment_environment_precedence_and_fallback() {
     // 2. Assert: 显式覆盖生效
     assert!(
         wire1.contains("deployment.environment"),
-        "导出的 Resource 必须包含 deployment.environment"
+        "导出的 Resource 必须包含 deployment.environment（本次捕获 {} 次 POST，body 共 {} 字节；\
+         捕获为空 ⇒ 导出根本没到 sink，而不是属性没拼上）",
+        captured1.len(),
+        captured1.iter().map(|r| r.body.len()).sum::<usize>()
     );
     assert!(
         wire1.contains("staging"),
@@ -149,13 +158,13 @@ fn test_deployment_environment_precedence_and_fallback() {
     // 关键断言：即使 release 构建，没有发布标记也必须判 development
     otel::shutdown();
     otel::set_reporting_enabled(false);
-    let (port2, sink2) = spawn_otlp_sink(Duration::from_millis(2_000));
+    let (port2, sink2) = spawn_otlp_sink(Duration::from_millis(8_000));
     otel::init(make_test_config(port2)).expect("init otel default");
     otel::set_reporting_enabled(true);
     {
         let _turn = otel::begin_turn_trace("sess-env-2", "turn-2", 0);
     }
-    let _ = otel::force_flush(2_000);
+    let _ = otel::force_flush(5_000);
     otel::shutdown();
     otel::set_reporting_enabled(false);
 
@@ -186,13 +195,13 @@ fn test_pony_app_name_stable_retrieval_key() {
     std::env::remove_var("PONY_OTEL_PROBE");
     otel::shutdown();
     otel::set_reporting_enabled(false);
-    let (port1, sink1) = spawn_otlp_sink(Duration::from_millis(2_000));
+    let (port1, sink1) = spawn_otlp_sink(Duration::from_millis(8_000));
     otel::init(make_test_config(port1)).expect("init otel normal");
     otel::set_reporting_enabled(true);
     {
         let _turn = otel::begin_turn_trace("sess-app-1", "turn-1", 0);
     }
-    let _ = otel::force_flush(2_000);
+    let _ = otel::force_flush(5_000);
     otel::shutdown();
     otel::set_reporting_enabled(false);
 
@@ -218,13 +227,13 @@ fn test_pony_app_name_stable_retrieval_key() {
     std::env::set_var("PONY_OTEL_PROBE", "1");
     otel::shutdown();
     otel::set_reporting_enabled(false);
-    let (port2, sink2) = spawn_otlp_sink(Duration::from_millis(2_000));
+    let (port2, sink2) = spawn_otlp_sink(Duration::from_millis(8_000));
     otel::init(make_test_config(port2)).expect("init otel probe");
     otel::set_reporting_enabled(true);
     {
         let _turn = otel::begin_turn_trace("sess-app-probe", "turn-probe", 0);
     }
-    let _ = otel::force_flush(2_000);
+    let _ = otel::force_flush(5_000);
     otel::shutdown();
     otel::set_reporting_enabled(false);
     std::env::remove_var("PONY_OTEL_PROBE");
@@ -256,7 +265,7 @@ fn test_agent_turn_root_span_usage_aggregation() {
     otel::shutdown();
     otel::set_reporting_enabled(false);
 
-    let (port, sink) = spawn_otlp_sink(Duration::from_millis(2_000));
+    let (port, sink) = spawn_otlp_sink(Duration::from_millis(8_000));
     let config = make_test_config(port);
     otel::init(config).expect("init otel");
     otel::set_reporting_enabled(true);
@@ -273,7 +282,7 @@ fn test_agent_turn_root_span_usage_aggregation() {
             llm_span2.record_usage(Some(80), Some(55));
         }
     }
-    let _ = otel::force_flush(2_000);
+    let _ = otel::force_flush(5_000);
     otel::shutdown();
     otel::set_reporting_enabled(false);
 
