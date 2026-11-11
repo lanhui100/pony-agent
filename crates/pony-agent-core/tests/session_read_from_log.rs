@@ -142,8 +142,28 @@ impl Fixture {
     }
 
     /// 从日志 fold 出会话状态（真源侧，纯函数口径）。
-    fn folded(&self, session_id: &str) -> SessionState {
-        read_session_state(&SessionLogStore::new(self.log_root()), session_id)
+    ///
+    /// `release` 是「让本进程不再持有该会话日志写者」的动作：Windows `LockFileEx` 是**强制**锁，
+    /// 写者持锁期间 `list_sessions()` 读不了 header 会静默跳过 ⇒ 折叠报
+    /// `no \`current\` session log header in the log root`（B054；B044/B050 同源）。
+    /// 放锁后**当场探测**一次独占锁，让该不变式在 Linux 上也可验。无活写者传 `|| {}`。
+    fn folded(&self, release: impl FnOnce(), session_id: &str) -> SessionState {
+        release();
+        let store = SessionLogStore::new(self.log_root());
+        if let Some(path) = store.find_log_path(session_id) {
+            let probe = std::fs::OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .unwrap_or_else(|error| panic!("打开会话日志 `{}` 失败：{error}", path.display()));
+            probe.try_lock().unwrap_or_else(|error| {
+                panic!(
+                    "会话日志仍被写者独占锁住（Windows `LockFileEx` 为强制锁 ⇒ 折叠必报 \"no current header\"）：`{}`：{error:?}",
+                    path.display()
+                )
+            });
+            let _ = probe.unlock();
+        }
+        read_session_state(&store, session_id)
             .unwrap_or_else(|error| panic!("fold session `{session_id}`: {error}"))
             .state
     }
@@ -395,7 +415,8 @@ fn corrupted_index_blob_does_not_hide_the_session() {
     assert_eq!(contents(session), vec!["u-log", "a-log"]);
 
     // 与 fold 结果逐字节一致（不是「凑了两条」，而是同一份真源）。
-    let folded = fixture.folded(session_id);
+    // 上一 `store` 已在作用域结束时 drop（句柄关闭即放锁），故无需额外释放。
+    let folded = fixture.folded(|| {}, session_id);
     assert_eq!(
         json_of(session),
         json_of(&folded),
@@ -576,7 +597,7 @@ fn hook_records_are_appended_identically_by_log_fold_and_index() {
         );
     }
 
-    let folded = fixture.folded(session_id);
+    let folded = fixture.folded(|| backend.release_log_writers_for_test(), session_id);
     let fold_trace = folded
         .turn_trace_history
         .iter()
