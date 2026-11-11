@@ -3278,7 +3278,7 @@ impl AgentRuntime {
             native_transcript_for_completed_turn(
                 &user_message,
                 &first_decision,
-                provider.requires_provider_native_tool_flow(),
+                provider.persists_native_tool_transcript(),
             ),
             attachments,
             input.workspace_mode.as_deref(),

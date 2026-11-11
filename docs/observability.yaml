@@ -1212,3 +1212,27 @@ note: >-
   (5) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；行为门落在测试层——
       `crates/pony-agent-core/tests/skill_invocation_policy_contract.rs`（7 例，含四象限解析、目录预算保真、
       `skill_load` 闸门、`skillDirs` 合并、kebab-case 校验）。
+
+  【归属登记（2026-11-11）｜跨轮次工具上下文装载与确定性修剪（ADR 0123 / DSH 对齐）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改变**大模型请求体消息序列的跨轮装配拓扑**
+  与本地持久化自愈策略；无新增外部网络 IO、后台常驻任务或 Prometheus pull 指标端点。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
+  (2) 请求体拓扑与成本改变：对于支持 OpenAI 协议且具备工具能力的主流模型，跨轮次上下文从原先的
+      纯文本 FullReplay 扩展为回放修剪后的原生工具流（`ProviderNativeTranscriptReplay`）。写侧同步/流式两条出口
+      共用 `ProviderManager::persists_native_tool_transcript()` 判定，纯文本轮同样落盘，避免后续工具轮前缀失忆。
+      修剪器以 8,192 字符为确定性上限（保留 head 4096 + marker + tail 1024），将单工具 token 消耗封顶，
+      彻底消除长输出引发的上下文爆炸。
+  (3) 持久化自愈与本地取证：`session/store.rs` 改造清洗契约，未闭合工具往返由单一真源状态机就地自愈
+      并丢弃无主孤儿，注入模型可见注记 `[中断轮次检查点: 前序工具调用在返回前被中断]`，仅在不可逆的
+      真实 reasoning 思维链空洞下才降级清空；本地日志输出均不包含凭据。
+  (4) 协议范围与守卫：仅对 OpenAI 家族协议生效（`protocol.is_openai_family()`），Anthropic 协议保持 FullReplay；
+      读侧修剪只挂在 OpenAI 原生回放路径上，Anthropic 请求体不消费修剪结果（修剪函数本身为纯函数，
+      不按协议做分支）。
+  (5) 收口点：不新增 enforcement_point；行为门落在测试层——
+      `crates/pony-agent-core/src/agent/tool_pruner.rs`（修剪纯函数单测）、
+      `crates/pony-agent-core/src/agent/context_window.rs`（窗口装配/尾部锚定对齐单测）、
+      `crates/pony-agent-core/src/agent/session/store.rs`（清洗自愈单测）、
+      `crates/pony-agent-core/src/agent/session/tests/native_context.rs`（清洗契约回归单测）、
+      `crates/pony-agent-core/tests/multi_turn_tool_context_test.rs`（Store 级多轮端到端集成测试）。

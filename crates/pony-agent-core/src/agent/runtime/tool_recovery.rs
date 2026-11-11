@@ -539,8 +539,8 @@ pub(super) fn native_transcript_for_tool_turn(
 /// 末条 assistant 只能由「中断事实上报」构造。三条硬约束：
 ///
 /// 1. **闭合性由构造保证**：`hop_records` 每条都是「调用 + 结果」成对记录，绝不留下孤儿
-///    `tool_calls`——`sanitize_provider_native_transcript` 看到不闭合往返会清空整段
-///    transcript，那比不写更糟。
+///    `tool_calls`——旧逻辑曾对不闭合往返整段清空，现经 ADR 0123 降解为状态机就地自愈；
+///    但构造层仍严格保持闭合性，杜绝把脏数据推给下游自愈。
 /// 2. **末条 assistant 必须补**：transcript 若以 `tool` 消息结尾，下一请求会出现
 ///    「tool 结果后直接接 user」的非法序列（Anthropic 直接 400）。
 /// 3. **末条 assistant 必须带 reasoning**：`has_legacy_reasoning_gap` 把「`tool` 之后的

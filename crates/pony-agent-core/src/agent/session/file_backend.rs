@@ -10,7 +10,7 @@ pub struct FileSessionBackend {
     ledger: std::sync::Mutex<Option<rusqlite::Connection>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct MemorySessionBackend {
     pub(super) attachment_root: PathBuf,
 }
@@ -236,7 +236,7 @@ impl FileSessionBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl SessionBackend for MemorySessionBackend {
     fn load_store(&self) -> Option<PersistedStore> {
         None
@@ -251,7 +251,7 @@ impl SessionBackend for MemorySessionBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for MemorySessionBackend {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.attachment_root);

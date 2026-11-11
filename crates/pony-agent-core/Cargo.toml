@@ -60,7 +60,12 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["linux-native-sync-persistent"] }
 
+[features]
+default = []
+test-support = []
+
 [dev-dependencies]
+pony-agent-core = { path = ".", features = ["test-support"] }
 zip = "8.6"
 
 

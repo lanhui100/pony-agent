@@ -8,6 +8,7 @@ use crate::agent::retry::{
 };
 use crate::agent::runtime_helper::block_on;
 use crate::agent::tools::{builtin_tool_surface, ToolCall, ToolDefinition, ToolResult};
+use crate::agent::tool_pruner::{split_head_tail, PruneBudget};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -1131,6 +1132,18 @@ impl ProviderManager {
 
     pub fn supports_image_input(&self) -> bool {
         self.config.capabilities.supports_image_input
+    }
+
+    pub fn supports_native_tool_transcript_replay(&self) -> bool {
+        // ADR 0123：OpenAI 协议家族且具备工具能力的主流模型支持原生多轮工具流回放
+        self.config.protocol.is_openai_family() && self.config.capabilities.supports_tools
+    }
+
+    /// ADR 0123 写侧唯一判定：本模型是否应把本轮（含纯文本轮）写入
+    /// `provider_native_transcript`。同步与流式两条出口必须共用此判定，否则
+    /// 纯文本轮缺失会造成后续工具轮的前缀失忆。
+    pub fn persists_native_tool_transcript(&self) -> bool {
+        self.requires_provider_native_tool_flow() || self.supports_native_tool_transcript_replay()
     }
 
     pub fn requires_provider_native_tool_flow(&self) -> bool {
@@ -5237,9 +5250,8 @@ fn anthropic_tool_result_content(tool_result: &ToolResult) -> Value {
     }])
 }
 
-const OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS: usize = 12_000;
-const OPENAI_TOOL_RESULT_HEAD_CHARS: usize = 4_500;
-const OPENAI_TOOL_RESULT_TAIL_CHARS: usize = 2_500;
+// 工具结果修剪预算的单一真源在 `crate::agent::tool_pruner::PruneBudget`（ADR 0123），
+// provider 同轮 follow-up 复用其 `PROVIDER_FOLLOWUP` 预设，禁止在此重复硬编码阈值。
 const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
 /// DeepSeek thinking 模式要求带 tool_calls 的 assistant 消息回传非空
 /// reasoning_content（实测 API 只校验非空，不校验内容一致性）。
@@ -5778,21 +5790,15 @@ fn openai_followup_tool_result_message(tool_call: &ToolCall, tool_result: &ToolR
 }
 
 fn openai_followup_tool_result_content(tool_result: &ToolResult) -> String {
-    let output_chars = tool_result.output.chars().count();
-    if output_chars <= OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS {
+    let Some((head, tail, original_chars)) =
+        split_head_tail(&tool_result.output, PruneBudget::PROVIDER_FOLLOWUP)
+    else {
         return tool_result.output.clone();
-    }
+    };
 
+    let included_head_chars = head.chars().count();
+    let included_tail_chars = tail.chars().count();
     let total_lines = tool_result.output.lines().count();
-    let head = take_chars(
-        &tool_result.output,
-        OPENAI_TOOL_RESULT_HEAD_CHARS.min(output_chars),
-    );
-    let remaining_chars = output_chars.saturating_sub(head.chars().count());
-    let tail = take_last_chars(
-        &tool_result.output,
-        OPENAI_TOOL_RESULT_TAIL_CHARS.min(remaining_chars),
-    );
     let payload = json!({
         "tool_name": tool_result.tool_name,
         "status": tool_result.status,
@@ -5800,11 +5806,11 @@ fn openai_followup_tool_result_content(tool_result: &ToolResult) -> String {
             "applied": true,
             "strategy": "head_tail_excerpt",
             "reason": "provider_followup_size_guard",
-            "original_chars": output_chars,
+            "original_chars": original_chars,
             "original_lines": total_lines,
-            "included_head_chars": head.chars().count(),
-            "included_tail_chars": tail.chars().count(),
-            "omitted_chars": output_chars.saturating_sub(head.chars().count() + tail.chars().count())
+            "included_head_chars": included_head_chars,
+            "included_tail_chars": included_tail_chars,
+            "omitted_chars": original_chars.saturating_sub(included_head_chars + included_tail_chars)
         },
         "summary": summarize_large_tool_output(&tool_result.output),
         "head": head,
@@ -5816,7 +5822,7 @@ fn openai_followup_tool_result_content(tool_result: &ToolResult) -> String {
             "{{\"tool_name\":\"{}\",\"status\":\"{}\",\"compression\":{{\"applied\":true,\"reason\":\"provider_followup_size_guard\",\"original_chars\":{}}}}}",
             escape_json_fragment(&tool_result.tool_name),
             escape_json_fragment(&tool_result.status),
-            output_chars
+            original_chars
         )
     })
 }
@@ -5925,15 +5931,6 @@ fn json_value_kind(value: &Value) -> &'static str {
         Value::Bool(_) => "boolean",
         Value::Null => "null",
     }
-}
-
-fn take_chars(text: &str, count: usize) -> String {
-    text.chars().take(count).collect()
-}
-
-fn take_last_chars(text: &str, count: usize) -> String {
-    let total = text.chars().count();
-    text.chars().skip(total.saturating_sub(count)).collect()
 }
 
 fn escape_json_fragment(text: &str) -> String {
@@ -8634,7 +8631,7 @@ mod tests {
         };
         let large_output = format!(
             "{{\"files\":\"{}\",\"tail\":\"{}\"}}",
-            "a".repeat(OPENAI_TOOL_RESULT_INLINE_LIMIT_CHARS),
+            "a".repeat(PruneBudget::PROVIDER_FOLLOWUP.threshold_chars),
             "z".repeat(4_000)
         );
         let tool_result = ToolResult {

@@ -36,6 +36,9 @@ Status: implemented
    - 读侧 `align_native_transcript_with_history` 采用基于 native 尾部 user 内容在 history 中倒序锚定的策略，仅追加锚点后真正未落盘的尾部新轮次，天然免疫 400 条滑动截断与切模型场景下的重复注入。
 5. **生产构建零污染门控**：
    - `MemorySessionBackend` 与 `SessionStore::memory_only()` 严格限定在 `#[cfg(any(test, feature = "test-support"))]` 门控下，生产二进制完全不包含测试桩。
+6. **代码落点（同提交同步）**：
+   - 窗口装配与尾部锚定对齐的纯函数集中在 `crates/pony-agent-core/src/agent/context_window.rs`，`context.rs` 只保留分层装配与提示词渲染；
+   - 会话清洗契约单测在 `crates/pony-agent-core/src/agent/session/tests/native_context.rs`，多轮端到端集成测试在 `crates/pony-agent-core/tests/multi_turn_tool_context_test.rs`。
 
 ## Alternatives considered
 
@@ -48,7 +51,7 @@ Status: implemented
 
 - **正面效果**：
   - 多轮交互下模型能完整查阅前序工具的调用参数与修剪后输出，具备真正连续的工程排障和代码修改能力；
-  - 极端超长工具输出（如数十万字节的日志）被确定性封顶在 ~5KB 以内，不会撑爆上下文；
+  - 极端超长工具输出（如数十万字节的日志）被确定性封顶在 ~5K 字符以内（head 4096 + tail 1024，按字符而非字节计），不会撑爆上下文；
   - 异常中断或取消后，未闭合的工具调用被平滑自愈，孤儿 tool 结果被安全剔除，完全满足 OpenAI 契约，避免上游 API 报 400 错；
   - 400 条滑动截断与模型切换场景下，历史问答不发生重复注入且文本不丢失。
 - **负面与权衡**：

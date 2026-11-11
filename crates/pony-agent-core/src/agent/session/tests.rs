@@ -2842,66 +2842,6 @@ fn removing_session_clears_attachment_catalog_without_full_refresh() {
 }
 
 #[test]
-fn snapshot_clears_legacy_native_transcript_without_reasoning_content() {
-    let session_id = "legacy-reasoning";
-    let mut store = SessionStore::memory_only();
-    store.sessions.insert(
-        session_id.to_string(),
-        SessionState {
-            conversation_id: session_id.to_string(),
-            title: DEFAULT_SESSION_TITLE.to_string(),
-            summary: DEFAULT_SESSION_SUMMARY.to_string(),
-            history: vec![TurnHistoryMessage {
-                role: "user".to_string(),
-                attachments: Vec::new(),
-                content: "继续".to_string(),
-                ..Default::default()
-            }],
-            provider_native_transcript: vec![
-                serde_json::json!({
-                    "role": "user",
-                    "content": "看看文件"
-                }),
-                serde_json::json!({
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": "call_legacy",
-                            "type": "function",
-                            "function": {
-                                "name": "workspace_list_files",
-                                "arguments": "{}"
-                            }
-                        }
-                    ]
-                }),
-            ],
-            turn_trace_history: Vec::new(),
-            trace_migration_state: TraceMigrationState::default(),
-            turn_trace_refs: None,
-            long_term_memory_entries: Vec::new(),
-            memory_write_evidence: Vec::new(),
-            memory_write_hook_trace_records: Vec::new(),
-            history_state_evidence: Vec::new(),
-            turn_count: 1,
-            last_referenced_file: None,
-            updated_at_ms: now_timestamp_ms(),
-            history_nodes: Vec::new(),
-            history_branches: Vec::new(),
-            history_cursor: HistoryCursor::default(),
-            workspace_id: None,
-            title_override: None,
-            archived: false,
-            event_watermark: 0,
-            last_commit_watermark: 0,
-        },
-    );
-
-    let snapshot = store.snapshot(Some(session_id), &[]);
-    assert!(snapshot.provider_native_transcript.is_empty());
-}
-
-#[test]
 fn snapshot_clears_tool_turn_transcript_when_final_assistant_lacks_reasoning() {
     let session_id = "legacy-tool-final";
     let mut store = SessionStore::memory_only();
@@ -2955,96 +2895,6 @@ fn snapshot_clears_tool_turn_transcript_when_final_assistant_lacks_reasoning() {
             history_state_evidence: Vec::new(),
             turn_count: 1,
             last_referenced_file: Some("src-tauri/tauri.conf.json".to_string()),
-            updated_at_ms: now_timestamp_ms(),
-            history_nodes: Vec::new(),
-            history_branches: Vec::new(),
-            history_cursor: HistoryCursor::default(),
-            workspace_id: None,
-            title_override: None,
-            archived: false,
-            event_watermark: 0,
-            last_commit_watermark: 0,
-        },
-    );
-
-    let snapshot = store.snapshot(Some(session_id), &[]);
-    assert!(snapshot.provider_native_transcript.is_empty());
-}
-
-#[test]
-fn snapshot_clears_incomplete_native_tool_roundtrip() {
-    let session_id = "incomplete-tool-roundtrip";
-    let mut store = SessionStore::memory_only();
-    store.sessions.insert(
-        session_id.to_string(),
-        SessionState {
-            conversation_id: session_id.to_string(),
-            title: DEFAULT_SESSION_TITLE.to_string(),
-            summary: DEFAULT_SESSION_SUMMARY.to_string(),
-            history: vec![
-                TurnHistoryMessage {
-                    role: "user".to_string(),
-                    attachments: Vec::new(),
-                    content: "请记住 tauri.conf.json".to_string(),
-                    ..Default::default()
-                },
-                TurnHistoryMessage {
-                    role: "assistant".to_string(),
-                    attachments: Vec::new(),
-                    content: "搜索没有直接命中，让我查看一下工作区的文件结构。".to_string(),
-                    ..Default::default()
-                },
-            ],
-            provider_native_transcript: vec![
-                serde_json::json!({
-                    "role": "user",
-                    "content": "请记住 tauri.conf.json"
-                }),
-                serde_json::json!({
-                    "role": "assistant",
-                    "content": "先搜索文件",
-                    "reasoning_content": "先搜索一下。",
-                    "tool_calls": [
-                        {
-                            "id": "call_search",
-                            "type": "function",
-                            "function": {
-                                "name": "workspace_search_text",
-                                "arguments": "{\"query\":\"tauri.conf.json\"}"
-                            }
-                        }
-                    ]
-                }),
-                serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": "call_search",
-                    "content": "{\"matchCount\":0}"
-                }),
-                serde_json::json!({
-                    "role": "assistant",
-                    "content": "搜索没有直接命中，让我查看一下工作区的文件结构。",
-                    "reasoning_content": "继续列目录。",
-                    "tool_calls": [
-                        {
-                            "id": "call_list",
-                            "type": "function",
-                            "function": {
-                                "name": "workspace_list_files",
-                                "arguments": "{\"path\":\".\"}"
-                            }
-                        }
-                    ]
-                }),
-            ],
-            turn_trace_history: Vec::new(),
-            trace_migration_state: TraceMigrationState::default(),
-            turn_trace_refs: None,
-            long_term_memory_entries: Vec::new(),
-            memory_write_evidence: Vec::new(),
-            memory_write_hook_trace_records: Vec::new(),
-            history_state_evidence: Vec::new(),
-            turn_count: 1,
-            last_referenced_file: Some("tauri.conf.json".to_string()),
             updated_at_ms: now_timestamp_ms(),
             history_nodes: Vec::new(),
             history_branches: Vec::new(),
@@ -6884,3 +6734,6 @@ fn checkpoint_text_collapses_steps_beyond_limit() {
     );
 }
 
+
+
+mod native_context;

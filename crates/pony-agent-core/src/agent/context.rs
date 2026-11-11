@@ -1,4 +1,6 @@
 use crate::agent::capability_bridge::SkillDescriptor;
+use crate::agent::context_window;
+use crate::agent::context_window::should_use_native_tool_flow as native_tool_flow;
 use crate::agent::compression::{
     estimate_native_message_tokens, estimate_text_tokens, FALLBACK_INPUT_BUDGET_TOKENS,
 };
@@ -541,7 +543,7 @@ fn build_layered_turn_context(
         planner_skills,
         image_note.as_deref(),
         history_truncation_note.as_deref(),
-        provider.requires_provider_native_tool_flow(),
+        native_tool_flow(provider, retrieved),
     );
     let mut native_base_system_messages = Vec::new();
     let mut native_domain_profile_messages = Vec::new();
@@ -550,7 +552,7 @@ fn build_layered_turn_context(
     let mut native_conversation_carry_messages = Vec::new();
     let mut native_volatile_context_messages = Vec::new();
     let mut native_volatile_input_messages = Vec::new();
-    let conversation_carry_mode = if provider.requires_provider_native_tool_flow() {
+    let conversation_carry_mode = if native_tool_flow(provider, retrieved) {
         let native_memory = build_native_memory_messages(retrieved);
         // Wave-61 C3.3：native 路径与 normalized-input 路径保持同构（策略段紧跟 BASE）。
         let mut reserved_native_messages: Vec<Value> = vec![json!({
@@ -609,7 +611,7 @@ fn build_layered_turn_context(
             });
 
             if should_truncate {
-                truncate_native_messages(
+                context_window::truncate_native_messages(
                     retrieved.transcript.provider_native_messages.clone(),
                     &reserved_native_messages,
                     input_budget_tokens,
@@ -819,8 +821,9 @@ fn build_domain_profile_messages(
 
 impl ContextStateRetriever for DefaultContextStateRetriever {
     fn retrieve(&self, query: ContextStateQuery<'_>) -> RetrievedContextState {
-        let recent_history = trim_turn_history_to_turn_boundary(query.session.history.clone());
-        let recent_attachment_assets = recent_attachment_assets(
+        let recent_history =
+            context_window::trim_turn_history_to_turn_boundary(query.session.history.clone());
+        let recent_attachment_assets = context_window::recent_attachment_assets(
             &query.session.attachment_assets,
             SESSION_CONTEXT_ATTACHMENT_LIMIT,
         );
@@ -830,11 +833,13 @@ impl ContextStateRetriever for DefaultContextStateRetriever {
         let provider_native_messages = if query.session.provider_native_transcript.is_empty()
             && !recent_history.is_empty()
         {
-            history_to_native_messages(&recent_history)
+            context_window::history_to_native_messages(&recent_history)
         } else {
-            recent_transcript_slice(
+            // ADR 0123：切窗 → 就地修剪 → 脏数据自愈 → 与纯文本历史尾部对齐
+            context_window::load_native_transcript_messages(
                 &query.session.provider_native_transcript,
                 TRANSCRIPT_CONTEXT_MESSAGE_LIMIT,
+                &recent_history,
             )
         };
         let transcript = TranscriptContext {
@@ -1595,31 +1600,6 @@ fn graph_run_phase_label(run: &GraphRun) -> String {
     .to_string()
 }
 
-fn trim_turn_history_to_turn_boundary(
-    mut history: Vec<TurnHistoryMessage>,
-) -> Vec<TurnHistoryMessage> {
-    match history.iter().position(|message| message.role == "user") {
-        Some(0) => history,
-        Some(index) => {
-            history.drain(0..index);
-            history
-        }
-        None => Vec::new(),
-    }
-}
-
-fn recent_attachment_assets(assets: &[AttachmentAsset], limit: usize) -> Vec<AttachmentAsset> {
-    let mut recent = assets.to_vec();
-    recent.sort_by(|left, right| right.created_at_ms.cmp(&left.created_at_ms));
-    recent.truncate(limit);
-    recent
-}
-
-fn recent_transcript_slice(transcript: &[Value], limit: usize) -> Vec<Value> {
-    let start = transcript.len().saturating_sub(limit);
-    trim_native_to_turn_boundary(transcript[start..].to_vec())
-}
-
 fn text_mentions_image(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let keywords = [
@@ -1700,107 +1680,10 @@ fn truncate_history_messages(
     }
 
     kept.reverse();
-    let kept = trim_history_to_turn_boundary(kept);
+    let kept = context_window::trim_history_to_turn_boundary(kept);
     let truncated_count = original_len.saturating_sub(kept.len());
 
     (kept, truncated_count)
-}
-
-fn truncate_native_messages(
-    transcript: Vec<Value>,
-    reserved_messages: &[Value],
-    input_budget_tokens: Option<usize>,
-) -> (Vec<Value>, usize) {
-    let Some(input_budget_tokens) = input_budget_tokens else {
-        return (transcript, 0);
-    };
-    let reserved_tokens = reserved_messages
-        .iter()
-        .map(estimate_native_message_tokens)
-        .sum::<usize>();
-
-    if reserved_tokens >= input_budget_tokens {
-        return (Vec::new(), transcript.len());
-    }
-
-    let transcript = trim_native_to_turn_boundary(transcript);
-    let original_len = transcript.len();
-    let mut remaining_budget = input_budget_tokens - reserved_tokens;
-    let mut kept_turns = Vec::new();
-
-    for turn in split_native_turns(transcript).into_iter().rev() {
-        let turn_tokens = estimate_native_turn_tokens(&turn);
-        if turn_tokens > remaining_budget {
-            break;
-        }
-
-        remaining_budget -= turn_tokens;
-        kept_turns.push(turn);
-    }
-
-    kept_turns.reverse();
-    let kept = kept_turns.into_iter().flatten().collect::<Vec<_>>();
-    let truncated_count = original_len.saturating_sub(kept.len());
-
-    (kept, truncated_count)
-}
-
-fn trim_history_to_turn_boundary(mut history: Vec<ProviderMessage>) -> Vec<ProviderMessage> {
-    match history
-        .iter()
-        .position(|message| matches!(message.role, ProviderRole::User))
-    {
-        Some(0) => history,
-        Some(index) => {
-            history.drain(0..index);
-            history
-        }
-        None => Vec::new(),
-    }
-}
-
-fn trim_native_to_turn_boundary(mut transcript: Vec<Value>) -> Vec<Value> {
-    match transcript.iter().position(is_native_user_message) {
-        Some(0) => transcript,
-        Some(index) => {
-            transcript.drain(0..index);
-            transcript
-        }
-        None => Vec::new(),
-    }
-}
-
-fn split_native_turns(transcript: Vec<Value>) -> Vec<Vec<Value>> {
-    let mut turns = Vec::new();
-    let mut current_turn = Vec::new();
-
-    for message in transcript {
-        if is_native_user_message(&message) {
-            if !current_turn.is_empty() {
-                turns.push(current_turn);
-            }
-            current_turn = vec![message];
-            continue;
-        }
-
-        if !current_turn.is_empty() {
-            current_turn.push(message);
-        }
-    }
-
-    if !current_turn.is_empty() {
-        turns.push(current_turn);
-    }
-
-    turns
-}
-
-fn estimate_native_turn_tokens(turn: &[Value]) -> usize {
-    turn.iter().map(estimate_native_message_tokens).sum()
-}
-
-fn is_native_user_message(message: &Value) -> bool {
-    message.get("role").and_then(Value::as_str) == Some("user")
 }
 
 fn truncation_note(truncated_count: usize, label: &str) -> Option<String> {
@@ -1835,23 +1718,6 @@ fn to_provider_history_message(message: &TurnHistoryMessage) -> Option<ProviderM
         }),
         _ => None,
     }
-}
-
-/// 将 TurnHistoryMessage 列表转为 provider-native 格式的消息列表。
-/// 用于在 provider_native_transcript 为空时，从 history 构建 fallback 上下文，
-/// 确保切换到 native-tool-flow 模型时不会丢失此前标准模型轮次的历史对话。
-fn history_to_native_messages(history: &[TurnHistoryMessage]) -> Vec<Value> {
-    history
-        .iter()
-        .map(|msg| {
-            // wave-3 L3-B：native transcript 同样不得携带已落盘的 DSML 协议原文。
-            let content = sanitize_dsml_protocol_text(msg.content.trim());
-            json!({
-                "role": msg.role,
-                "content": content,
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -3026,5 +2892,112 @@ mod tests {
         assert!(linux.contains("shell=bash"), "{linux}");
         assert!(linux.contains("POSIX shell"), "{linux}");
         assert!(!linux.contains("findstr"), "{linux}");
+    }
+    fn provider_with(
+        protocol: ProviderProtocol,
+        capabilities: ProviderModelCapabilities,
+    ) -> ProviderManager {
+        ProviderManager::new(ResolvedProviderSelection {
+            requested_name: "test-provider".to_string(),
+            provider_name: "test-provider".to_string(),
+            protocol,
+            base_url: "https://example.com/v1".to_string(),
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "TEST_PROVIDER_API_KEY".to_string(),
+            api_key: Some("test".to_string()),
+            model: "test-model".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 4096,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities,
+            thinking_param_pattern: ThinkingParamPattern::None,
+        })
+    }
+
+    #[test]
+    fn test_persists_native_tool_transcript_predicate_covers_protocol_and_reasoning() {
+        let tool_caps = ProviderModelCapabilities {
+            supports_tools: true,
+            supports_streaming: true,
+            supports_reasoning: false,
+            ..Default::default()
+        };
+        // 非 reasoning OpenAI 工具模型：ADR 0123 写侧必须落盘（流式/同步共用本判定）。
+        assert!(
+            provider_with(ProviderProtocol::OpenAiCompletions, tool_caps.clone())
+                .persists_native_tool_transcript()
+        );
+        // reasoning 模式仍由 requires_provider_native_tool_flow 兜底。
+        assert!(provider_with(
+            ProviderProtocol::OpenAiCompletions,
+            ProviderModelCapabilities {
+                supports_reasoning: true,
+                ..tool_caps.clone()
+            }
+        )
+        .persists_native_tool_transcript());
+        // Anthropic 保持 FullReplay，写侧不得落 token 级原生工具转录。
+        assert!(
+            !provider_with(ProviderProtocol::AnthropicMessages, tool_caps.clone())
+                .persists_native_tool_transcript()
+        );
+        // 无工具能力模型不落原生工具转录。
+        assert!(!provider_with(
+            ProviderProtocol::OpenAiCompletions,
+            ProviderModelCapabilities {
+                supports_tools: false,
+                ..tool_caps
+            }
+        )
+        .persists_native_tool_transcript());
+    }
+
+    #[test]
+    fn test_anthropic_provider_keeps_full_replay_even_with_native_tool_history() {
+        let provider = provider_with(
+            ProviderProtocol::AnthropicMessages,
+            ProviderModelCapabilities {
+                supports_tools: true,
+                supports_streaming: true,
+                supports_reasoning: false,
+                ..Default::default()
+            },
+        );
+        let session = session_snapshot(
+            vec![
+                TurnHistoryMessage {
+                    role: "user".to_string(),
+                    content: "查目录".to_string(),
+                    ..Default::default()
+                },
+                TurnHistoryMessage {
+                    role: "assistant".to_string(),
+                    content: "已查完".to_string(),
+                    ..Default::default()
+                },
+            ],
+            vec![
+                json!({ "role": "user", "content": "查目录" }),
+                json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{ "id": "call_a", "type": "function", "function": { "name": "ls", "arguments": "{}" } }]
+                }),
+                json!({ "role": "tool", "tool_call_id": "call_a", "content": "a.txt" }),
+                json!({ "role": "assistant", "content": "已查完" }),
+            ],
+            None,
+        );
+
+        let builder = DefaultTurnContextBuilder;
+        let retrieved = builder.retrieve_context_state("继续", &[], None, &session, None, None);
+        let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
+
+        // ADR 0123 协议守卫：Anthropic 不消费修剪后的原生工具转录，保持 FullReplay。
+        assert_eq!(
+            request.observation.conversation_carry_mode,
+            Some(ConversationCarryMode::FullReplay)
+        );
     }
 }

@@ -3774,6 +3774,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "pony-agent-core",
  "ratatui",
  "ratatui-image",
  "regex",

@@ -988,7 +988,7 @@ impl AgentRuntime {
                 native_transcript_for_completed_turn(
                     &user_message,
                     &first_decision,
-                    provider.requires_provider_native_tool_flow(),
+                    provider.persists_native_tool_transcript(),
                 ),
                 first_decision.provider_source.clone(),
                 first_decision.provider_mode.clone(),

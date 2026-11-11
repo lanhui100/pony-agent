@@ -3,7 +3,7 @@ use super::backend::{
     SessionBackendMutationResult, SessionMetaPatch, SessionTraceMutation, TraceMigrationState,
     TraceTerminalPatch, report_index_deferred,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::file_backend::MemorySessionBackend;
 use super::types::{
     collect_env_info, collect_env_info_for_workspace, session_workspace_cwd, AttachmentAsset,
@@ -284,7 +284,7 @@ impl SessionStore {
         self.sessions.get(session_id)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn memory_only() -> Self {
         Self::with_backend(Box::new(MemorySessionBackend {
             attachment_root: unique_test_session_dir("pony-agent-memory-attachments"),
@@ -4994,18 +4994,44 @@ fn contains_any_phrase(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| text.contains(phrase))
 }
 
-fn sanitize_provider_native_transcript(session: &mut SessionState) -> bool {
-    if !has_legacy_reasoning_gap(&session.provider_native_transcript)
-        && !has_incomplete_tool_roundtrip(&session.provider_native_transcript)
-    {
+pub(crate) fn sanitize_provider_native_transcript(session: &mut SessionState) -> bool {
+    let mut mutated = false;
+
+    // 1. 若存在未闭合的工具调用或孤儿 tool 结果，在持久化层执行就地自愈与过滤（单一真源状态机），
+    // 补齐 synthetic 取消占位并闭合工具往返，丢弃无主孤儿，杜绝 HTTP 400（ADR 0123）。
+    let (healed, roundtrip_mutated) = crate::agent::tool_pruner::repair_and_filter_tool_roundtrips(
+        &session.provider_native_transcript,
+    );
+    if roundtrip_mutated {
+        session.provider_native_transcript = healed;
+        mutated = true;
+    }
+
+    // 2. 检查 reasoning 模型的思维链缺口。仅当属于 reasoning 模型上下文且确实存在推理空洞时清空降级。
+    if has_legacy_reasoning_gap(&session.provider_native_transcript) {
+        session.provider_native_transcript.clear();
+        return true;
+    }
+
+    mutated
+}
+
+pub(crate) fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
+    // 只有当 transcript 中至少有一条【非中断检查点】的消息带有非空的 reasoning_content 时，
+    // 该 transcript 才属于真正的 reasoning 模型上下文；纯工具模型直接豁免！
+    let is_reasoning_transcript = transcript.iter().any(|msg| {
+        let content_str = msg.get("content").and_then(Value::as_str).unwrap_or("");
+        if content_str.contains("[中断轮次检查点") {
+            return false;
+        }
+        msg.get("reasoning_content")
+            .map(|val| !reasoning_content_missing(val))
+            .unwrap_or(false)
+    });
+    if !is_reasoning_transcript {
         return false;
     }
 
-    session.provider_native_transcript.clear();
-    true
-}
-
-fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
     let mut awaiting_tool_turn_reasoning = false;
 
     for message in transcript {
@@ -5017,6 +5043,11 @@ fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
                 awaiting_tool_turn_reasoning = true;
             }
             Some("assistant") => {
+                let content_str = message.get("content").and_then(Value::as_str).unwrap_or("");
+                if content_str.contains("[中断轮次检查点") {
+                    awaiting_tool_turn_reasoning = false;
+                    continue;
+                }
                 let has_tool_calls = message
                     .get("tool_calls")
                     .and_then(Value::as_array)
@@ -5050,51 +5081,6 @@ fn reasoning_content_missing(value: &Value) -> bool {
         Value::Object(map) => map.is_empty(),
         _ => false,
     }
-}
-
-fn has_incomplete_tool_roundtrip(transcript: &[Value]) -> bool {
-    let mut pending_tool_call_ids: Vec<String> = Vec::new();
-
-    for message in transcript {
-        match message.get("role").and_then(Value::as_str) {
-            Some("assistant") => {
-                let tool_call_ids = message
-                    .get("tool_calls")
-                    .and_then(Value::as_array)
-                    .map(|calls| {
-                        calls
-                            .iter()
-                            .filter_map(|call| call.get("id").and_then(Value::as_str))
-                            .map(str::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-                if !tool_call_ids.is_empty() {
-                    pending_tool_call_ids = tool_call_ids;
-                }
-            }
-            Some("tool") => {
-                let Some(tool_call_id) = message.get("tool_call_id").and_then(Value::as_str) else {
-                    return true;
-                };
-
-                if pending_tool_call_ids.is_empty() {
-                    return true;
-                }
-
-                pending_tool_call_ids.retain(|id| id != tool_call_id);
-            }
-            Some("user") => {
-                if !pending_tool_call_ids.is_empty() {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    !pending_tool_call_ids.is_empty()
 }
 
 fn session_is_persistable(session: &SessionState) -> bool {
@@ -5292,7 +5278,7 @@ fn default_attachment_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("attachments"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn unique_test_session_dir(prefix: &str) -> PathBuf {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
