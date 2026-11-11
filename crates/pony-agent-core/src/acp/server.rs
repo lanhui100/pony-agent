@@ -2,6 +2,8 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use serde_json::Value;
 use crate::agent::control_plane::HostControlPlane;
+use crate::agent::ask_control::{self, answer_ask, list_pending_asks};
+use crate::agent::dispatcher::ControlRequestAuthorization;
 use super::protocol::{Request, Response, RpcError};
 
 pub struct AcpServer {
@@ -56,7 +58,8 @@ impl AcpServer {
                     "protocolVersion": "0.1",
                     "agentCapabilities": {
                         "loadSession": true,
-                        "promptCapabilities": true
+                        "promptCapabilities": true,
+                        "permissionRequest": true
                     }
                 })),
                 error: None,
@@ -76,6 +79,77 @@ impl AcpServer {
                     id: req.id,
                     result: Some(serde_json::json!({ "cancelled": true })),
                     error: None,
+                }
+            },
+            "session/request_permission" => {
+                // ACP 反向权限审批请求处理：对接 ask_control 授权机制
+                // 期望入参包含 request_id 与 decision (allow / deny / answer)
+                if let Some(params) = req.params {
+                    let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or_default();
+                    let decision = params.get("decision").and_then(|v| v.as_str()).unwrap_or("deny");
+                    
+                    if request_id.is_empty() {
+                        return Response {
+                            id: req.id,
+                            result: None,
+                            error: Some(RpcError {
+                                code: -32602,
+                                message: "Missing requestId in params".to_string(),
+                                data: None,
+                            }),
+                        };
+                    }
+
+                    // 检索待消费的 ask
+                    let asks = list_pending_asks(&self.control_plane.ask_dispatcher);
+                    if let Some(pending) = asks.iter().find(|a| a.request_id == request_id) {
+                        let answer_val = if decision == "allow" {
+                            Some(serde_json::json!({ "approved": true }))
+                        } else {
+                            Some(serde_json::json!({ "approved": false }))
+                        };
+                        let auth = ControlRequestAuthorization::for_request(pending, answer_val);
+                        match answer_ask(&self.control_plane.ask_dispatcher, request_id, &auth) {
+                            Ok(consumed) => Response {
+                                id: req.id,
+                                result: Some(serde_json::json!({
+                                    "status": "consumed",
+                                    "requestId": request_id,
+                                    "state": format!("{:?}", consumed.request.state)
+                                })),
+                                error: None,
+                            },
+                            Err(e) => Response {
+                                id: req.id,
+                                result: None,
+                                error: Some(RpcError {
+                                    code: -32001,
+                                    message: format!("CAS verification failed: {e}"),
+                                    data: None,
+                                }),
+                            },
+                        }
+                    } else {
+                        Response {
+                            id: req.id,
+                            result: None,
+                            error: Some(RpcError {
+                                code: -32004,
+                                message: format!("Pending request {request_id} not found or expired"),
+                                data: None,
+                            }),
+                        }
+                    }
+                } else {
+                    Response {
+                        id: req.id,
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32602,
+                            message: "Missing params object".to_string(),
+                            data: None,
+                        }),
+                    }
                 }
             },
             _ => Response {
