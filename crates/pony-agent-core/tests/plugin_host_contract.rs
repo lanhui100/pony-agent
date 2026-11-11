@@ -313,13 +313,26 @@ fn t3_plugin_child_env_is_exactly_the_allowlist() {
     // 哨兵值：`sk-mock-` 前缀仅为满足敏感信息门禁的良性占位符约定（scripts/check-secrets.mjs:73-76）。
     let secret_value = "sk-mock-pony-plugin-contract-dummy";
     std::env::set_var(secret_name, secret_value);
+
+    // 环境变量名的大小写语义按平台归一：Windows 大小写不敏感（父进程里常见 `Path`、`SystemRoot`、
+    // `ProgramFiles(x86)` 这类混合拼写），POSIX 敏感。宿主按 `ENV_ALLOWLIST` 的全大写拼写下发
+    // （`child_env`「白名单键名按名单拼写原样透传」的既有约定），若这里按父进程原始拼写建集合比较，
+    // 会把 `Path`/`ComSpec`/`SystemRoot` 等 9 个变量误判成「未透传」——这正是 B045 二次暴露的红。
+    fn env_key(key: &str) -> String {
+        if cfg!(windows) {
+            key.to_ascii_uppercase()
+        } else {
+            key.to_string()
+        }
+    }
+    let normalized_secret = env_key(secret_name);
     assert!(
-        !ENV_ALLOWLIST.contains(&secret_name),
+        !ENV_ALLOWLIST.iter().any(|name| env_key(name) == normalized_secret),
         "测试前提不成立：哨兵变量 `{secret_name}` 不得出现在 ENV_ALLOWLIST 中"
     );
     // Arrange — 父进程自身必须存在白名单之外的变量（否则"清空"断言会空转）
-    let parent_keys: BTreeSet<String> = std::env::vars().map(|(key, _)| key).collect();
-    let allowlist: BTreeSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
+    let parent_keys: BTreeSet<String> = std::env::vars().map(|(key, _)| env_key(&key)).collect();
+    let allowlist: BTreeSet<String> = ENV_ALLOWLIST.iter().map(|name| env_key(name)).collect();
     let outside_allowlist: Vec<&String> = parent_keys
         .iter()
         .filter(|key| !allowlist.contains(key.as_str()))
@@ -343,7 +356,7 @@ fn t3_plugin_child_env_is_exactly_the_allowlist() {
         .and_then(Value::as_array)
         .expect("fixture 必须回传 env 键集合")
         .iter()
-        .map(|key| key.as_str().unwrap_or_default().to_string())
+        .map(|key| env_key(key.as_str().unwrap_or_default()))
         .collect();
     let child_set: BTreeSet<String> = child_keys.iter().cloned().collect();
 
@@ -356,7 +369,7 @@ fn t3_plugin_child_env_is_exactly_the_allowlist() {
         "插件子进程继承了白名单之外的环境变量（多一个即 fail）：{leaked:?}"
     );
     assert!(
-        !child_set.contains(secret_name),
+        !child_set.contains(&normalized_secret),
         "哨兵变量 `{secret_name}` 泄漏进插件子进程（env_clear 未生效）"
     );
 
