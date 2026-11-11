@@ -47,36 +47,32 @@ pub(crate) struct MissingNameDiagnostics {
 }
 
 impl MissingNameDiagnostics {
-    /// 判定本次观测是否必须输出诊断行：首次为 `true`，重复为 `false` 并累计抑制计数。
-    pub(crate) fn observe(&mut self, index: usize) -> bool {
-        if self.seen_indexes.insert(index) {
-            return true;
-        }
-        self.suppressed_total = self.suppressed_total.saturating_add(1);
-        self.suppressed_indexes.insert(index);
-        false
-    }
-
-    /// 流结束时的汇总判定：存在被抑制的重复时返回 `(抑制总数, 受抑制 index 数)`，
-    /// 且只返回一次（二次调用返回 `None`）。
-    pub(crate) fn take_summary(&mut self) -> Option<(u32, usize)> {
-        if self.summary_taken || self.suppressed_total() == 0 {
-            return None;
-        }
-        self.summary_taken = true;
-        Some((self.suppressed_total(), self.suppressed_indexes.len()))
-    }
-
     /// B060 R2：构造本次观测的诊断行文本——首见返回 `Some(line)`（前缀与字段逐字保持），
     /// 重复返回 `None` 并累计抑制计数。
     pub(crate) fn diagnostic_line(&mut self, index: usize, item_preview: &str) -> Option<String> {
-        unimplemented!("B060 R2: MissingNameDiagnostics::diagnostic_line pending implementation")
+        if !self.seen_indexes.insert(index) {
+            self.suppressed_total = self.suppressed_total.saturating_add(1);
+            self.suppressed_indexes.insert(index);
+            return None;
+        }
+        Some(format!(
+            "provider:sse-tool-call-missing-name index={} item_preview={}",
+            index, item_preview
+        ))
     }
 
     /// B060 R2：构造流结束汇总行文本——存在被抑制的重复时返回 `Some(line)` 且只返回一次；
     /// 文本前缀必须**不含** `sse-tool-call-missing-name` 子串（巡检针口径隔离，契约 C7）。
     pub(crate) fn summary_line(&mut self) -> Option<String> {
-        unimplemented!("B060 R2: MissingNameDiagnostics::summary_line pending implementation")
+        if self.summary_taken || self.suppressed_total() == 0 {
+            return None;
+        }
+        self.summary_taken = true;
+        Some(format!(
+            "provider:sse-missing-name-suppressed suppressed_total={} suppressed_indexes={}",
+            self.suppressed_total(),
+            self.suppressed_indexes.len()
+        ))
     }
 
     /// 已抑制的累计条数（只读，供测试与汇总使用）。
@@ -177,13 +173,9 @@ impl OpenAiSseAccumulator {
         } = self;
 
         // B060：流结束至多输出 1 条降噪汇总行（存在被抑制的重复诊断时才输出）。
-        if let Some((suppressed_total, suppressed_indexes)) =
-            missing_name_diagnostics.take_summary()
-        {
-            provider_log(format!(
-                "provider:sse-tool-call-missing-name-suppressed suppressed_total={} suppressed_indexes={}",
-                suppressed_total, suppressed_indexes
-            ));
+        // 汇总行前缀与诊断巡检针口径隔离（不含 `sse-tool-call-missing-name`，契约 C7）。
+        if let Some(line) = missing_name_diagnostics.summary_line() {
+            provider_log(line);
         }
 
         if !saw_data {
@@ -497,12 +489,10 @@ fn merge_openai_stream_tool_calls(
         if has_arguments && !has_name_via_function && !has_name_direct {
             // B060 降噪：同一 index 每流只输出 1 条诊断行，重复观测仅累计计数
             // （汇总由 `finish()` 至多输出 1 条）。前缀/字段/preview 上限保持不变。
-            if missing_name_diagnostics.observe(index) {
-                provider_log(format!(
-                    "provider:sse-tool-call-missing-name index={} item_preview={}",
-                    index,
-                    preview_text(&item.to_string(), 400)
-                ));
+            if let Some(line) = missing_name_diagnostics
+                .diagnostic_line(index, &preview_text(&item.to_string(), 400))
+            {
+                provider_log(line);
             }
         }
     }

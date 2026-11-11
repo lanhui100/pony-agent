@@ -1,0 +1,56 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+    "crates/pony-agent-core/src/agent/provider/openai_sse_diag_tests.rs"
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-mwbxmu0q8xm7b9",
+    "fresh_context": true
+  },
+  "executed_by": "session-mwbxmu0q8xm7b9",
+  "reviewed_commit": "a72ccc7d",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "line": 172,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'provider:sse-tool-call-missing-name' crates/pony-agent-core/src/agent/provider/openai_sse.rs | grep -c 'sse-tool-call-missing-name'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "line": 305,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '302,316p' crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/openai_sse_diag_tests.rs",
+      "line": 1,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -c 'item_preview=\\|missing-name-suppressed' crates/pony-agent-core/src/agent/provider/openai_sse_diag_tests.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "line": 488,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '485,496p' crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "line": 445,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '440,446p;485,496p' crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}

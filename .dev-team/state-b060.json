@@ -22,8 +22,13 @@
       "crates/pony-agent-core/src/agent/provider/openai_sse_diag_tests.rs",
       "crates/pony-agent-core/src/agent/runtime/tests.rs"
     ],
-    "executor": ["crates/pony-agent-core/src/agent/provider/openai_sse.rs"],
-    "lead": [".dev-team/contract-matrix-b060.md", "openai_sse.rs 空桩与 mod 挂载"]
+    "executor": [
+      "crates/pony-agent-core/src/agent/provider/openai_sse.rs"
+    ],
+    "lead": [
+      ".dev-team/contract-matrix-b060.md",
+      "openai_sse.rs 空桩与 mod 挂载"
+    ]
   },
   "contract": ".dev-team/contract-matrix-b060.md",
   "non_goals": [
@@ -31,5 +36,39 @@
     "不改 SSE 解析/合并语义",
     "不引入日志级别框架",
     "不改 runtime/stream_support 修复逻辑"
-  ]
+  ],
+  "protocol_commit": "3c650425",
+  "contract_amend_commit": "e09861c7",
+  "red_commit": "a72ccc7d",
+  "red_commit_r2": "86321ed7",
+  "green_commit": "待提交（openai_sse.rs + note）",
+  "rounds": [
+    {
+      "round": 1,
+      "impl": "observe/take_summary + 汇总行前缀复用巡检针",
+      "review": {
+        "a": "PASS(2 ADVISORY)",
+        "b": "FAIL(1 BLOCKING CONTRACT_BREAK + 4 ADVISORY)"
+      },
+      "verdict": "打回 R2"
+    },
+    {
+      "round": 2,
+      "impl": "diagnostic_line/summary_line，汇总前缀 provider:sse-missing-name-suppressed",
+      "review": {
+        "r2": "PASS(3 ADVISORY, F1/F2 CLOSED)"
+      },
+      "verdict": "接受，2 条 ADVISORY 记录为已知限制"
+    }
+  ],
+  "gates": {
+    "openai_sse_diag_tests": "10 passed / exit 0",
+    "openai_sse": "19 passed / exit 0",
+    "empty_tool_call": "3 passed / exit 0",
+    "agent::provider": "105 passed / exit 0",
+    "cargo_check_warnings": "0",
+    "full_lib_suite": "1482 passed / 1 failed — 失败用例 control_plane::tests::history_commands_and_runtime_view_follow_persisted_history_graph 在 HEAD 干净工作树同样失败，已登记 B068（与 B060 无关）",
+    "decisions_check": "通过（120 篇）",
+    "observability": "N/A — 未新增/修改对外接口、无新增网络 IO、无新增后台任务/LLM 调用/UI 交互；仅改既有 SSE 诊断日志的条数与命名，docs/observability.yaml 四维归属无需变更"
+  }
 }

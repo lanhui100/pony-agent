@@ -1,0 +1,33 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/provider/openai_sse.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "line": 305,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && cargo test -p pony-agent-core --lib t9_stream_guard_cancel_mid_stream_is_observed 2>&1 | tail -3 && grep -n 'read_result?\\|acc.finish(response_preview)' crates/pony-agent-core/src/agent/provider/openai_sse.rs   # 帧循环因取消/超限/网络中断返回 Err 时，line 305 的 read_result? 先于 line 307 的 finish() 退出，line 168 的 -suppressed 汇总行永不打印，该流的抑制计数被静默丢弃（本 diff 新增的汇总只在正常收尾路径可见）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "line": 55,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'saturating_add' crates/pony-agent-core/src/agent/provider/openai_sse.rs   # 同一流内第 4_294_967_296 次被抑制观测起 suppressed_total 饱和在 u32::MAX，C3「精确等于被静默次数」在该点后失真；生产不可达（受 max_elapsed 与响应体规模约束），仅记录口径上限",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "455b3851-bbe0-4062-869c-7b181e06d0fb",
+    "fresh_context": true
+  },
+  "executed_by": "455b3851-bbe0-4062-869c-7b181e06d0fb",
+  "reviewed_commit": "a72ccc7d0976143a0b0710bbed12231a4ed7a15b",
+  "attestation": {
+    "self_signed": false
+  }
+}
