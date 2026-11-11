@@ -63,8 +63,15 @@ export function recordIssue({ sessionId = 'unknown', priority = 'P1', title = '�
     return { type: 'dedup', issue: existing };
   }
 
+  // 修正：从所有 issue 中找最大数字序号，避免归档后序号断层导致碰撞
+  const maxIdx = issues.reduce((max, it) => {
+    const parts = it.id.split('-');
+    const num = parseInt(parts[parts.length - 1], 10);
+    return isNaN(num) ? max : Math.max(max, num);
+  }, 0);
+
   const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const id = `ISSUE-${datePart}-${String(issues.length + 1).padStart(3, '0')}`;
+  const id = `ISSUE-${datePart}-${String(maxIdx + 1).padStart(3, '0')}`;
   const newIssue = {
     id,
     session_id: sessionId,
