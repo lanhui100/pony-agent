@@ -54,6 +54,7 @@
 
 ### 活跃
 
+- [0120 插件宿主的 Windows 脚本命令解析（shebang → 解释器）](0120-plugin-host-script-command-on-windows.md)
 - [0117 TUI Ask 面板多选与版式重构（内边距 / 问题独占一行 / 选项折行）](0117-tui-ask-panel-multiselect-and-layout.md)
 - [0116 会话时间线键盘导航（Ctrl+T/Ctrl+B 顶部/底部 + Alt+↑/↓ 按轮跳转）](0116-workbench-timeline-keyboard-navigation.md)
 - [0107 会话级写者租约与日志优先持久化（多窗口/多智能体并发，预留远程 agent）](0107-session-scoped-writer-lease-and-log-first-durability.md)

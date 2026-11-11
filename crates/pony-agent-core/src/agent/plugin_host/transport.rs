@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -68,6 +68,70 @@ fn spawn_tolerating_etxtbsy(process: &mut Command) -> std::io::Result<Child> {
     process.spawn()
 }
 
+/// 解析「脚本命令」的启动方式：返回（实际启动的程序，交给它的前置参数）。
+///
+/// Unix 原样返回：内核按 `#!` 起解释器，执行位校验本身也是契约的一部分，宿主不介入。
+/// Windows 没有 shebang 机制（`CreateProcess` 只认 PE）⇒ 读首行 `#!` 取解释器名按 `PATH`
+/// 解析，以「解释器 脚本 …调用方参数」启动。ADR 0067 决策 1 的「插件 = 可执行程序」
+/// 因此在 Windows 上对脚本插件同样成立（此前恒报 `%1 is not a valid Win32 application`）。
+fn resolve_script_command(command: &Path, args: &[String]) -> (PathBuf, Vec<String>) {
+    let Some((interpreter, shebang_args)) = script_launcher(command) else {
+        return (command.to_path_buf(), args.to_vec());
+    };
+    let mut resolved: Vec<String> = shebang_args;
+    resolved.push(command.to_string_lossy().into_owned());
+    resolved.extend(args.iter().cloned());
+    (PathBuf::from(interpreter), resolved)
+}
+
+/// 错误信息里的启动目标：脚本与解释器不同时同时给出——诊断平台级 spawn 错误时，
+/// 必须知道到底启动了哪个程序，否则「%1 is not a valid Win32 application」无从定位。
+fn describe_launch_target(command: &Path, program: &Path) -> String {
+    if program == command {
+        command.display().to_string()
+    } else {
+        format!("{}（解释器 {}）", command.display(), program.display())
+    }
+}
+
+#[cfg(windows)]
+fn script_launcher(command: &Path) -> Option<(String, Vec<String>)> {
+    use std::io::Read;
+    let mut head = [0u8; 256];
+    let mut file = std::fs::File::open(command).ok()?;
+    let read = file.read(&mut head).ok()?;
+    let text = String::from_utf8_lossy(&head[..read]);
+    parse_shebang_launcher(text.lines().next().unwrap_or(""))
+}
+
+#[cfg(not(windows))]
+fn script_launcher(_command: &Path) -> Option<(String, Vec<String>)> {
+    None
+}
+
+/// 纯解析 shebang 行：`#!/usr/bin/env python3 -u` → (`python3`, `["-u"]`)；
+/// `#!/usr/bin/python3` → (`python3`, `[]`)——Windows 没有该路径，取文件名后交给 `PATH` 解析。
+/// `env` 形态会跳过 env 自身旗标（如 `-S`）。非 `#!` 开头 / 取不到解释器 ⇒ `None`
+/// （调用方回落为直接启动，保持既有错误语义）。
+#[cfg(any(windows, test))]
+fn parse_shebang_launcher(first_line: &str) -> Option<(String, Vec<String>)> {
+    let rest = first_line.strip_prefix("#!")?.trim();
+    let mut tokens = rest.split_whitespace();
+    let first = tokens.next()?;
+    let program = if first.rsplit(['/', '\\']).next() == Some("env") {
+        tokens.by_ref().find(|token| !token.starts_with('-'))?
+    } else {
+        first.rsplit(['/', '\\']).next()?
+    };
+    if program.is_empty() {
+        return None;
+    }
+    Some((
+        program.to_string(),
+        tokens.map(str::to_string).collect::<Vec<_>>(),
+    ))
+}
+
 /// 一个已经 spawn 起来的插件子进程 + stdio JSON-RPC 通道。
 pub struct PluginTransport {
     child: Child,
@@ -98,15 +162,21 @@ impl PluginTransport {
     ///
     /// 隔离面全部在此收口：`env_clear()` + 白名单、`current_dir = workspace_root`、
     /// Unix 独立进程组。调用方必须先校验 `command` 与 `workspace_root`。
+    ///
+    /// Windows 上带 shebang 的脚本命令由 [`resolve_script_command`] 换成「解释器 + 脚本」启动
+    /// （CreateProcess 只认 PE，不会像 Unix 内核那样按 `#!` 起解释器；ADR 0067 决策 1 的
+    /// 「插件 = 可执行程序」因此需要这条平台适配，否则 `.py` 插件在 Windows 恒 `%1 is not a
+    /// valid Win32 application`）。
     pub fn spawn(
         command: &Path,
         args: &[String],
         workspace_root: &Path,
         extra_env: &[(String, String)],
     ) -> Result<Self, PluginHostError> {
-        let mut process = Command::new(command);
+        let (program, resolved_args) = resolve_script_command(command, args);
+        let mut process = Command::new(&program);
         process
-            .args(args)
+            .args(&resolved_args)
             .current_dir(workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -123,7 +193,7 @@ impl PluginTransport {
         let mut child = spawn_tolerating_etxtbsy(&mut process).map_err(|err| {
             PluginHostError::Spawn(format!(
                 "启动插件进程 {} 失败：{err}。",
-                command.display()
+                describe_launch_target(command, &program)
             ))
         })?;
 
@@ -520,5 +590,81 @@ printf '{"jsonrpc":"2.0","id":1,"result":{"answered":%s}}\n' "$ok"
         );
         transport.terminate();
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// shebang 解析的纯函数验收（平台无关：解析逻辑与 spawn 平台分支解耦）。
+///
+/// 对应 B045：Windows 上 `.py` 插件夹具此前恒 `%1 is not a valid Win32 application`，
+/// 因为宿主把脚本路径直接交给 `CreateProcess`。解析器是这条平台适配的唯一判定点，
+/// 故用值级断言把「env 形态 / 绝对路径 / 前置旗标 / 非 shebang 回落」逐例冻结。
+#[cfg(test)]
+mod shebang_parse_tests {
+    use super::parse_shebang_launcher;
+
+    fn parsed(line: &str) -> Option<(String, Vec<String>)> {
+        parse_shebang_launcher(line)
+    }
+
+    #[test]
+    fn env_form_yields_interpreter_name() {
+        assert_eq!(
+            parsed("#!/usr/bin/env python3"),
+            Some(("python3".to_string(), Vec::new())),
+            "`env` 形态必须取 env 之后的解释器名（Windows 交给 PATH 解析）"
+        );
+    }
+
+    #[test]
+    fn env_form_skips_env_own_flags() {
+        assert_eq!(
+            parsed("#!/usr/bin/env -S python3 -u"),
+            Some(("python3".to_string(), vec!["-u".to_string()])),
+            "`env -S` 是 env 的旗标，不得被当成解释器；解释器之后的参数必须保留"
+        );
+    }
+
+    #[test]
+    fn absolute_path_form_uses_file_name() {
+        assert_eq!(
+            parsed("#!/usr/bin/python3"),
+            Some(("python3".to_string(), Vec::new())),
+            "绝对路径解释器必须取文件名（Windows 无 /usr/bin 前缀）"
+        );
+    }
+
+    #[test]
+    fn interpreter_arguments_are_preserved() {
+        assert_eq!(
+            parsed("#!/usr/bin/python3 -u"),
+            Some(("python3".to_string(), vec!["-u".to_string()])),
+            "解释器旗标必须保留并排在脚本路径之前"
+        );
+    }
+
+    #[test]
+    fn windows_style_path_is_split_on_backslashes() {
+        assert_eq!(
+            parsed(r"#!C:\Python312\python.exe -u"),
+            Some(("python.exe".to_string(), vec!["-u".to_string()])),
+            "反斜杠路径同样要取文件名（Windows 上的原生写法）"
+        );
+    }
+
+    #[test]
+    fn bare_interpreter_name_is_accepted() {
+        assert_eq!(
+            parsed("#!python"),
+            Some(("python".to_string(), Vec::new())),
+            "无路径的 `#!python` 合法，按 PATH 解析"
+        );
+    }
+
+    #[test]
+    fn missing_or_empty_shebang_falls_back_to_none() {
+        assert_eq!(parsed("print('no shebang')"), None, "首行不是 shebang ⇒ None");
+        assert_eq!(parsed("#!"), None, "空 shebang ⇒ None");
+        assert_eq!(parsed("#!/usr/bin/env"), None, "env 后缺解释器 ⇒ None");
+        assert_eq!(parsed(""), None, "空行 ⇒ None");
     }
 }
