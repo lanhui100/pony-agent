@@ -1,0 +1,73 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [".dev-team/contract-matrix-b060.md"],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-b060.md",
+      "line": 13,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show 3c650425:.dev-team/contract-matrix-b060.md | grep -n 'sse-tool-call-missing-name\\|grep' && grep -rn \"grep -c 'sse-tool-call-missing-name'\" backlog/archive/tasks-2026.jsonl | cut -c1-200   # 计划阶段漏项1：v1.0 的 C6 只冻结「诊断行前缀不变」，全文从未冻结验收探针口径（探针=任务卡里已存在的 grep -c 子串计数，计划时即可见），也未写「新增日志行不得含该子串」；C6 的承载写「既有测试 + grep 复核」却没有任何可执行命令 ⇒ 表头承诺的「机器可判」在 C6 上不成立，直接放行 R1 缺陷①（汇总行复用巡检针）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-b060.md",
+      "line": 8,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show a72ccc7d:crates/pony-agent-core/src/agent/provider/openai_sse_diag_tests.rs | grep -c 'provider_log\\|item_preview=\\|suppressed_total='   # 计划阶段漏项2（日志文本可测性）：C1–C4 四行全部只断言返回值（bool/u32/Option<tuple>），R1 冻结测试对日志文本的断言数为 0 ⇒ `let _ = diagnostic_line(...)` 或删掉 provider_log 调用点仍全绿，即 R1 缺陷②在契约层就注定不可判；契约应要求「每行验收的断言对象是待打印文本」而非「降噪器内部返回值」",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-b060.md",
+      "line": 11,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '176,179p;304,309p' crates/pony-agent-core/src/agent/provider/openai_sse.rs   # 计划阶段漏项3（错误路径）：汇总行唯一发射点在 finish()（:177），而取消/超时/帧解析失败经 read_result?（:306-307）先返回，抑制计数被静默丢弃；C4/C4r 对此零行、既未把「异常流丢弃计数」冻结为接受行为，也未要求异常流用例，行为变更无红灯",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-b060.md",
+      "line": 21,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '488,496p' crates/pony-agent-core/src/agent/provider/openai_sse.rs   # 计划阶段漏项4（热路径）：C1r 要求「逐字保留 preview」，却无一条 NFR 行约束被抑制观测的开销——每个被抑制的重复仍先 item.to_string() + preview_text(_,400) 再丢弃（:492-494）；降噪任务的作用域就是逐分片热循环，契约本应写「抑制分支不得构造字符串/preview 必须惰性求值」",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-b060.md",
+      "line": 9,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '445,449p' crates/pony-agent-core/src/agent/provider/openai_sse.rs   # 计划阶段漏项5（index 缺省与规模）：C2 只冻结「显式不同 index 互不吞噬」，未冻结 index 缺失时 unwrap_or(0) 把多个无名分片折叠进 index 0（少打诊断、只留首个 preview、抑制数被合并），也未给 index 规模上界（BTreeSet 由上游可控字段增长）；两者都是 HEAD 既有语义，属于计划阶段就该写进契约的可预见项",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-b060.md",
+      "line": 23,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && echo \"probe_literal=$(grep -c '\"provider:sse-tool-call-missing-name' crates/pony-agent-core/src/agent/provider/openai_sse.rs) provider_log_callsites=$(grep -c 'provider_log(line)' crates/pony-agent-core/src/agent/provider/openai_sse.rs)\"   # v1.1 仍缺的机械约束（本仓当前取值 1 / 2，可直接冻结为断言）：C7 只约束 summary_line 的返回文本，未约束（a）provider 目录内 '\"provider:sse-tool-call-missing-name' 字面量恰 1 处——否则别处新增日志行仍可再污染巡检针而 C7 全绿；（b）两条 provider_log(line) 调用点（:494 诊断、:178 汇总）存在——否则 let _ = 仍全绿；（c）grep -c 'sse-missing-name-suppressed' 的发射点上界 1 条。另 v1.1 表删掉了「承载测试」列，断言→用例映射不可核",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-b060.md",
+      "line": 27,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'provider_log\\|靠 review\\|注入点' .dev-team/contract-matrix-b060.md .agents/notes/implemented/bug-fix/2026-11-11-sse-missing-name-log-denoise.md   # 非目标只写「不改 provider_log 实现」，未按常载命约 2「机器到不了的显式标注靠 review」把「打印接线不可机器验证」登记为契约已知限制；该声明仅存在于 note:49-51，单读契约无法判断残余不可测面是否已被接受（契约层与 note 层不一致）",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".agents/notes/implemented/bug-fix/2026-11-11-sse-missing-name-log-denoise.md",
+      "line": 9,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent && wc -c ~/.pony-agent/tui-logs/tui-runtime.log && grep -c 'sse-tool-call-missing-name' ~/.pony-agent/tui-logs/tui-runtime.log   # 文档一致性：实际 525,803,457 B / 1,705,040 条，与 note 的「近 30MB / 104,328 条」不符（抄自任务卡历史快照且未标时点）⇒ 规模论据不可复现；note:25 的「≤1+2×index 数」实际收口为 1+N（宽松上界，非虚假）。另 note:49-51 明确承认「调用点改 let _ 仍会全绿」，与实测一致，无过度声称；「接线可测」限定为规格层（文本构造），表述准确",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "plan-audit-b060",
+    "fresh_context": true
+  },
+  "executed_by": "plan-audit-b060",
+  "reviewed_commit": "f5a53351",
+  "attestation": {
+    "self_signed": false
+  }
+}
