@@ -5,12 +5,12 @@ description: 何时用：用户要启动/继续 trace 审核 loop、推进审核
 
 # Trace 审核 Loop 程序
 
-真值源：`docs/audit/loop-state.json`。设计正典：`docs/decisions/0101-trace-audit-loop-automation.md`。人读契约：`docs/audit/README.md`。
+真值源：`docs/audit/loop-state.json`。设计正典：`docs/archive/decisions/0101-trace-audit-loop-automation.md`。人读契约：`docs/audit/README.md`。
 
 ## 真相源
 
 - 状态真值：`docs/audit/loop-state.json`（lease / phase / round / budget）。
-- 设计正典：`docs/decisions/0101-trace-audit-loop-automation.md`；人读契约：`docs/audit/README.md`。
+- 设计正典：`docs/archive/decisions/0101-trace-audit-loop-automation.md`；人读契约：`docs/audit/README.md`。
 - 机器证据：`scripts/audit/*` 的实际输出，以及 `docs/audit/rounds/<round>/receipts/` 下的逐阶段回执；叙述与状态文件冲突时以回执和退出码为准。
 
 ## 步骤（入口程序）

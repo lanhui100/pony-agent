@@ -5,16 +5,7 @@ if [ -f "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" ]; then
 fi
 # <<< ponygo-gate: adr-verify v1 <<<
 # L1 pre-commit：秒级预算——暂存卫生 + 决策记录校验。不跑类型/测试/构建。
-# 决策记录门直接调 node 判定真源（跨平台）：本机没有 pwsh，旧写法 `if command -v pwsh`
-# 让这道门在 Linux 开发机上整段不存在——目录/状态漂移（ADR 0107）就是这么漏出去的。
-if command -v node >/dev/null 2>&1; then
-  node "$(dirname "$0")/../scripts/check-decisions.mjs" || exit $?
-elif command -v pwsh >/dev/null 2>&1; then
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/verify-decisions.ps1" || exit $?
-else
-  echo "[pre-commit] 拒绝：既无 node 也无 pwsh，决策记录门无法执行（fail-closed）" >&2
-  exit 1
-fi
+# 决策记录门由上文 ponygo-gate (adr-verify.sh) 统一真源保障（校验 .agents/notes/）。
 # 暂存卫生与版本 bump 仍只在 Windows（pwsh）侧生效。
 if command -v pwsh >/dev/null 2>&1; then
   pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/git-guard.ps1" pre-commit || exit $?

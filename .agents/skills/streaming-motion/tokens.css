@@ -5,7 +5,7 @@
  * 契约：本文件只声明变量，不声明任何 animation / transition。
  *       消费方 @import 后即可被 primitives.css 与宿主样式引用。
  *
- * 参数来源与适用前提（见 docs/decisions/0057）：
+ * 参数来源与适用前提（见 docs/archive/decisions/0057）：
  * - 缓动曲线与时长来自 Claude Desktop 逆向还原方案，经本项目校准；
  * - `--pds-pin-tolerance` / `--pds-input-cooldown` 是 intent.ts 默认值的 CSS 镜像，
  *   两者必须同步修改（改一处不改另一处 = 静默分裂）。

@@ -12,12 +12,13 @@
   - 核心架构宪法：[`.meta/constitution/constitution.md`](.meta/constitution/constitution.md)
   - 门禁索引说明：[`.meta/gates/README.md`](.meta/gates/README.md)
   - 文档分层清单：[`.meta/docs-tier/README.md`](.meta/docs-tier/README.md)
-- **技术决策记录 (ADR)**：[`docs/decisions/`](docs/decisions/) 与 [`.agents/notes/`](.agents/notes/)（最高优先级决策真源，技术方案选型、现在时记录、替代方案考量；受 `decisions:check` 与 `adr-verify` 强门禁保护）
+- **技术决策记录 (ADR)**：[`.agents/notes/`](.agents/notes/)（最高优先级决策真源，技术方案选型、现在时记录、替代方案考量；受 `adr-verify` 强门禁保护）
 - **架构与设计指南**：[`docs/architecture/`](docs/architecture/)（系统拓扑、模块交互、运行时设计）
 - **待办任务与执行账本 (Backlog)**：[`backlog/`](backlog/)（唯一活账本 [`tasks.jsonl`](backlog/tasks.jsonl)，支持任务级并发租约锁与行级强校验，由 `scripts/backlog.mjs` 驱动并由 `backlog lint` 门禁约束）
 - **工程复用技能库**：[`.agents/skills/`](.agents/skills/)
 - **历史归档档案（已冻结退役，只读）**：
   - OpenSpec 规范归档：[`openspec/`](openspec/)（历史规格与设计草案，见 [`RETIRED.md`](openspec/RETIRED.md)）
+  - 历史决策归档：[`docs/archive/decisions/`](docs/archive/decisions/)（早期 0001~0123 篇 ADR，见 [`RETIRED.md`](docs/archive/decisions/RETIRED.md)）
 
 ---
 
@@ -37,7 +38,7 @@
 ## 3. 本地与 CI 门禁命令速查
 
 - **全量合规自检**：`npm run verify`（依次校验版本同步、决策记录、前端单测、构建、Rust 检查）
-- **决策记录校验**：`npm run decisions:check`（判定真源 `scripts/check-decisions.mjs`，pre-commit 调同一入口）
+- **决策记录校验**：`npm run adr:check`（判定真源 `.agents/skills/write-adr/verify-note.sh`，pre-commit 调 `adr-verify.sh`）
 - **版本同步校验**：`npm run version:check`
 - **前端测试**：`npm test`
 - **Rust 编译检查**：`npm run cargo:check:shared`

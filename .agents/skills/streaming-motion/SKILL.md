@@ -11,7 +11,7 @@ description: 何时用：在实现或评审大模型流式输出的前端动效�
 ## 真相源
 
 - 本文件是规范正文；`tokens.css`（L2 令牌）、`primitives.css`（L3 原语）、`logic/budget.ts` 与 `logic/intent.ts`（L4 reducer）是实现真相源。
-- 验收指标与命令见 `conformance.md`；踩坑与反例见 `anti-patterns.md`；设计依据见 `docs/decisions/0057-streaming-motion-framework-agnostic-spec.md`。
+- 验收指标与命令见 `conformance.md`；踩坑与反例见 `anti-patterns.md`；设计依据见 `docs/archive/decisions/0057-streaming-motion-framework-agnostic-spec.md`。
 - 参数以本文件「参数校准记录」为准；上游/宿主差异必须写明前提，不得静默改常量。
 
 ## 何时用
@@ -42,7 +42,7 @@ description: 何时用：在实现或评审大模型流式输出的前端动效�
 | L6 胶水 | 挂 tick / 挂监听 / 写属性（**不在本规范内**） | [`adapters/vue.md`](adapters/vue.md) · [`adapters/react.md`](adapters/react.md) | 每框架重写 |
 
 配套：[`anti-patterns.md`](anti-patterns.md) —— 八条踩过的坑，动手前先读。
-决策依据：[`docs/decisions/0057`](../../../docs/decisions/0057-streaming-motion-framework-agnostic-spec.md)。
+决策依据：[`docs/archive/decisions/0057`](../../../docs/archive/decisions/0057-streaming-motion-framework-agnostic-spec.md)。
 
 ## 阶段模型（L1）
 

@@ -52,7 +52,7 @@ function runCli(args: string[]) {
 
 describe("决策记录门禁 check-decisions", () => {
   it("真实仓：除编号唯一性外无其它违规（状态/目录/索引三项闭合）", () => {
-    const verdict = checkDecisions("docs/decisions");
+    const verdict = checkDecisions("docs/archive/decisions");
     expect(verdict.checked).toBeGreaterThan(100);
     expect(verdict.violations.filter((v) => !v.startsWith("R6"))).toEqual([]);
   });

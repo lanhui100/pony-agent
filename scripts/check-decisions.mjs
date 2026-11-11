@@ -26,7 +26,7 @@ const ADR_FILE = /^\d{4}-.+\.md$/;
 const LINK = /\]\(([^)\s]+\.md)\)/g;
 
 function parseArgs(argv) {
-  const opts = { decisions: "docs/decisions", fixIndex: false, json: false };
+  const opts = { decisions: "docs/archive/decisions", fixIndex: false, json: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--fix-index") opts.fixIndex = true;

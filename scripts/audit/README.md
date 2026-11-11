@@ -1,6 +1,6 @@
 # scripts/audit/ —— trace 审核 loop 确定性节点（PA-169）
 
-设计正典：[ADR 0101](../../docs/decisions/0101-trace-audit-loop-automation.md) §确定性节点。
+设计正典：[ADR 0101](../../docs/archive/decisions/0101-trace-audit-loop-automation.md) §确定性节点。
 本目录只做**机械可查**的部分；判断节点（audit / propose / implement）由 Agent 按
 `.agents/skills/trace-audit-loop/SKILL.md` 执行。**verdict 只认退出码，禁止口头判 pass。**
 

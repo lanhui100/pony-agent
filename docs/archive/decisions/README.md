@@ -1,6 +1,14 @@
-# Pony Agent 决策记录
+# Pony Agent 决策记录（已退役 / RETIRED）
 
-本目录记录 Pony Agent 的重要技术决策（ADR）。
+> **⚠️ 注意：本目录已于 2026-11-11 正式退役并冻结为只读历史档案。**  
+> **详细退役决策见 [RETIRED.md](RETIRED.md) 及 ADR [`.agents/notes/implemented/simplification/2026-11-11-retire-docs-decisions-to-notes.md`](../../../.agents/notes/implemented/simplification/2026-11-11-retire-docs-decisions-to-notes.md)。**  
+> - **现行决策唯一真源**：全面移交至 [`.agents/notes/`](../../../.agents/notes/)；  
+> - **后续重构待办**：`backlog:B102`（逐篇审核归档中的 ADR 并按 notes 规范迁移）；  
+> - 本目录文件全部保留原样只读，禁止在此新增或编辑 ADR。
+
+---
+
+本目录曾记录 Pony Agent 早期的重要技术决策（ADR 0001~0123）。
 
 ## 状态枚举
 
@@ -57,6 +65,7 @@
 - [0122 IME 组合态守卫改按事件品牌串判定（跨 realm 事件不再漏拦）](0122-ime-guard-event-brand-across-realms.md) —— 修订 [0036](0036-ime-composition-enter-guard-and-numeric-width-stability.md) 决策 1 的判定口径，其余决定仍现行
 - [0120 插件宿主的 Windows 脚本命令解析（shebang → 解释器）](0120-plugin-host-script-command-on-windows.md)
 - [0121 Windows 全量集成测试常开 `--no-fail-fast`（首错即停的代价与替代）](0121-windows-ci-no-fail-fast.md)
+- [0123 借鉴 DeepSeek Harness 跨轮次工具上下文装载与确定性修剪](0123-multi-turn-tool-context-pruning-dsh.md)
 - [0117 TUI Ask 面板多选与版式重构（内边距 / 问题独占一行 / 选项折行）](0117-tui-ask-panel-multiselect-and-layout.md)
 - [0116 会话时间线键盘导航（Ctrl+T/Ctrl+B 顶部/底部 + Alt+↑/↓ 按轮跳转）](0116-workbench-timeline-keyboard-navigation.md)
 - [0107 会话级写者租约与日志优先持久化（多窗口/多智能体并发，预留远程 agent）](0107-session-scoped-writer-lease-and-log-first-durability.md)
