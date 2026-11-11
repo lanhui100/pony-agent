@@ -128,7 +128,7 @@ impl AgentRuntimeBuilder {
         let shared_authorizations = sessions_arc
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .path_authorizations();

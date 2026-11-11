@@ -89,7 +89,7 @@ impl ExecutionControlRegistry {
     pub fn register_turn(&self, turn_id: &str, session_id: Option<&str>, run_id: Option<&str>) {
         let now = now_timestamp_ms();
         let mut state = self.state.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] execution control lock poisoned");
             e.into_inner()
         });
         // PA-095 #3：重注册保留已设置的停止请求——turn 开始前 request_stop
@@ -154,7 +154,7 @@ impl ExecutionControlRegistry {
         F: FnOnce(&mut ExecutionCheckpoint),
     {
         let mut state = self.state.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] execution control lock poisoned");
             e.into_inner()
         });
         let Some(checkpoint) = state.turns.get_mut(turn_id) else {
@@ -180,7 +180,7 @@ impl ExecutionControlRegistry {
     /// 观测的唯一取消源（不新建第二套取消状态）。
     pub fn request_stop(&self, turn_id: &str, stop_reason: StopReason) -> StopTurnResponse {
         let mut state = self.state.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] execution control lock poisoned");
             e.into_inner()
         });
         // wave-62 C1：只有**被接受**的停止才 cancel 该 turn 的取消令牌（拒绝路径不得置位，
@@ -251,7 +251,7 @@ impl ExecutionControlRegistry {
     /// registry 内一致；`request_stop` 被接受时由本表唯一置位。
     pub fn cancellation_token(&self, turn_id: &str) -> Option<Arc<CancellationToken>> {
         let state = self.state.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] execution control lock poisoned");
             e.into_inner()
         });
         state.tokens.get(turn_id).cloned()
@@ -259,7 +259,7 @@ impl ExecutionControlRegistry {
 
     pub fn is_stop_requested(&self, turn_id: &str) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] execution control lock poisoned");
             e.into_inner()
         });
         state
@@ -275,7 +275,7 @@ impl ExecutionControlRegistry {
         session_id: Option<&str>,
     ) -> Option<ExecutionCheckpoint> {
         let state = self.state.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] execution control lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] execution control lock poisoned");
             e.into_inner()
         });
         if let Some(turn_id) = turn_id {

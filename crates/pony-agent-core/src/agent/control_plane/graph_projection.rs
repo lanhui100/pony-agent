@@ -96,7 +96,7 @@ impl HostControlPlane {
             .sessions_rwlock
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .snapshot_at_readonly(Some(session_id.as_str()), None, &[]);
@@ -204,7 +204,7 @@ impl HostControlPlane {
             .sessions_rwlock
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .snapshot_at_readonly(Some(session_id), None, &[]);
@@ -383,7 +383,7 @@ impl HostControlPlane {
             .map(str::trim)
             .filter(|session_id| !session_id.is_empty())?;
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
         });
         graph_runs.list_runs().into_iter().find(|run| {
@@ -554,7 +554,7 @@ impl HostControlPlane {
                 self.sessions_rwlock
                     .read()
                     .unwrap_or_else(|e| {
-                        eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                        tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                         e.into_inner()
                     })
                     .snapshot_at_readonly(None, None, &[])

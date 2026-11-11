@@ -451,7 +451,7 @@ impl ProcessManager {
             // 先留证再杀：Run 侧 poll 到 Exited 时据此判定「这是超时被杀，不是自然退出」。
             this.mark_kill_after_fired(&session_id, &handle);
             if let Err(error) = this.kill_if_exists(&session_id, &handle) {
-                eprintln!("[process] kill_after cleanup failed for `{handle}`: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[process] kill_after cleanup failed for `{handle}`");
             }
         });
     }

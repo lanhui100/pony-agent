@@ -136,7 +136,7 @@ impl StopEscalation {
     /// 时被**取走**并由监督线程独占持有，因此表项不随 turn 数量无限增长。
     pub fn register_emitter(&self, turn_id: &str, emitter: Arc<dyn TerminalEmitter>) {
         let mut emitters = self.emitters.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] stop escalation emitter lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] stop escalation emitter lock poisoned");
             e.into_inner()
         });
         emitters.insert(turn_id.to_string(), emitter);
@@ -211,7 +211,7 @@ impl StopEscalation {
     /// 时回收（否则 emitter 表按 turn 无界增长）。
     pub fn unregister_emitter(&self, turn_id: &str) {
         let mut emitters = self.emitters.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] stop escalation emitter lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] stop escalation emitter lock poisoned");
             e.into_inner()
         });
         emitters.remove(turn_id);
@@ -220,7 +220,7 @@ impl StopEscalation {
     /// 取走（并从表中移除）该 turn 的发射器：监督线程独占持有，表项随取随清。
     fn take_emitter(&self, turn_id: &str) -> Option<Arc<dyn TerminalEmitter>> {
         let mut emitters = self.emitters.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] stop escalation emitter lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] stop escalation emitter lock poisoned");
             e.into_inner()
         });
         emitters.remove(turn_id)

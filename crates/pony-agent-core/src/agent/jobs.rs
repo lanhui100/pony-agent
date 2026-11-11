@@ -361,7 +361,7 @@ impl JobSession {
         let mut released = false;
         for _ in 0..20 {
             if let Err(error) = manager.kill_if_exists(session_id, handle) {
-                eprintln!("[jobs] promoted entry release failed for `{handle}`: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[jobs] promoted entry release failed for `{handle}`");
             }
             if !manager.is_tracked(session_id, handle) {
                 released = true;

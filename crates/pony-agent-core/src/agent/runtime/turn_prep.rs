@@ -31,7 +31,7 @@ impl AgentRuntime {
         // 迟早分叉。
         let compression_candidate = {
             let sessions = self.sessions.read().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             });
             let current = sessions.snapshot_at_readonly(
@@ -74,7 +74,7 @@ impl AgentRuntime {
         // 获取最终（可能已压缩）的快照
         let session = {
             let mut sessions = self.sessions.write().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             });
             sessions.snapshot_at(
@@ -655,7 +655,7 @@ impl AgentRuntime {
                 .sessions
                 .read()
                 .unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                     e.into_inner()
                 })
                 .load_recent_images(input.session_id.as_deref(), recall_limit);

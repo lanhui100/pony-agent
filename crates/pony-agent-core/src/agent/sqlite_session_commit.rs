@@ -904,7 +904,7 @@ fn checkpoint_after_write_with_threshold(conn: &Connection, db_path: &Path, thre
     if wal_bytes < threshold {
         if let Err(error) = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);") {
             // checkpoint 失败不影响数据正确性（只是 WAL 回收），保持既有「仅记录」语义。
-            eprintln!("[pony-agent][session] SQLite checkpoint error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite checkpoint error");
         }
         return;
     }
@@ -1383,7 +1383,7 @@ pub(crate) fn persist_commands_once(
             if is_busy_error(&error) {
                 return BatchAttempt::Busy(format!("begin tx: {error}"));
             }
-            eprintln!("[pony-agent][session] SQLite batch command begin tx error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite batch command begin tx error");
             return BatchAttempt::Done(PersistCommandOutcome::Failed);
         }
     };
@@ -1406,7 +1406,7 @@ pub(crate) fn persist_commands_once(
             if is_busy_error(&error) {
                 return BatchAttempt::Busy(format!("commit: {error}"));
             }
-            eprintln!("[pony-agent][session] SQLite batch command commit error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite batch command commit error");
             BatchAttempt::Done(PersistCommandOutcome::Failed)
         }
     }

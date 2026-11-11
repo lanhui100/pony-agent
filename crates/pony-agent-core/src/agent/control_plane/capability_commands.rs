@@ -7,7 +7,7 @@ impl HostControlPlane {
         self.capability_registry
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] capability registry lock poisoned");
                 e.into_inner()
             })
             .list_sources()
@@ -17,7 +17,7 @@ impl HostControlPlane {
         self.capability_registry
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] capability registry lock poisoned");
                 e.into_inner()
             })
             .list_capabilities(query.source_id.as_deref(), query.kind.as_deref())
@@ -27,7 +27,7 @@ impl HostControlPlane {
         self.capability_registry
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] capability registry lock poisoned");
                 e.into_inner()
             })
             .inspect_capability(&query.capability_id)
@@ -40,7 +40,7 @@ impl HostControlPlane {
         self.capability_registry
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] capability registry lock poisoned");
                 e.into_inner()
             })
             .inspect_source(&query.source_id)
@@ -53,7 +53,7 @@ impl HostControlPlane {
         self.capability_registry
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] capability registry lock poisoned");
                 e.into_inner()
             })
             .inspect_skill_source(&query.source_id)
@@ -63,7 +63,7 @@ impl HostControlPlane {
         self.capability_registry
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] capability registry lock poisoned");
                 e.into_inner()
             })
             .list_skills(query.source_id.as_deref())
@@ -73,7 +73,7 @@ impl HostControlPlane {
         self.capability_registry
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] capability registry lock poisoned");
                 e.into_inner()
             })
             .inspect_skill(&query.skill_id)
@@ -161,7 +161,7 @@ impl HostControlPlane {
 
         let normalized_snapshot = {
             let registry = self.capability_registry.read().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] capability registry lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] capability registry lock poisoned");
                 e.into_inner()
             });
             normalize_skill_source_snapshot_against_capabilities(

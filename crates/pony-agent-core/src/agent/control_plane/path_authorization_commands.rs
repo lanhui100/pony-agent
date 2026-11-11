@@ -22,7 +22,7 @@ impl HostControlPlane {
         self.sessions_rwlock
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .authorize_path(canonical, normalized_scope)
@@ -41,7 +41,7 @@ impl HostControlPlane {
             .sessions_rwlock
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .revoke_authorization(&canonical))
@@ -52,7 +52,7 @@ impl HostControlPlane {
         self.sessions_rwlock
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .list_authorizations()

@@ -170,7 +170,7 @@ pub(crate) fn compact_session_with_sessions(
 
     // 5) 短写锁：回写。压缩期间并发追加的消息必须保留，绝不被覆盖丢失。
     let mut store = sessions.write().unwrap_or_else(|e| {
-        eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+        tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
         e.into_inner()
     });
     let current = store.snapshot_at_readonly(Some(session_id), None, &[]);
@@ -234,7 +234,7 @@ fn read_session_snapshot(
     session_id: &str,
 ) -> crate::agent::session::SessionSnapshot {
     let store = sessions.read().unwrap_or_else(|e| {
-        eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+        tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
         e.into_inner()
     });
     store.snapshot_at_readonly(Some(session_id), None, &[])

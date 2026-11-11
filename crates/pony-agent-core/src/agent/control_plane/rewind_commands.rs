@@ -84,7 +84,7 @@ impl HostControlPlane {
         let session_id = self.normalize_history_session_id(query.session_id);
         let turns = {
             let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             });
             sessions.rewind_turns(Some(session_id.as_str()))
@@ -96,7 +96,7 @@ impl HostControlPlane {
             .map(|(index, node)| {
                 let user_message = {
                     let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
-                        eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                        tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                         e.into_inner()
                     });
                     sessions
@@ -131,7 +131,7 @@ impl HostControlPlane {
         let session_id = self.normalize_history_session_id(command.session_id);
         let plan = {
             let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             });
             sessions.rewind_plan(Some(session_id.as_str()), &command.node_id)?
@@ -140,7 +140,7 @@ impl HostControlPlane {
             Some(node_id) => node_id,
             None => {
                 let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                     e.into_inner()
                 });
                 sessions.ensure_rewind_root_checkpoint(Some(session_id.as_str()))?

@@ -216,7 +216,7 @@ impl AgentRuntime {
     fn turn_outcome_persisted(&self, session_id: Option<&str>, turn_id: &str) -> bool {
         let session_key = session_id.unwrap_or(crate::agent::session::DEFAULT_SESSION_ID);
         let store = self.sessions.read().unwrap_or_else(|error| {
-            eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+            tracing::warn!(target: "control_plane", error = %error, "[pony-agent] sessions rwlock poisoned");
             error.into_inner()
         });
         let Some(session) = store.get_session(session_key) else {
@@ -481,7 +481,7 @@ impl AgentRuntime {
             created_at_ms: runtime_now_ms(),
         };
         let mut store = store_arc.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run store poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run store poisoned");
             e.into_inner()
         });
         match GraphRunner::new()

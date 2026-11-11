@@ -822,7 +822,7 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         fallback_session_summary: String,
     ) -> Option<TurnResult> {
         let terminal = self.terminal.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] recording sink lock poisoned");
             e.into_inner()
         });
         let phase = terminal.phase.clone()?;
@@ -873,7 +873,7 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
 
     fn record_terminal_payload(&self, payload: &TurnStreamEvent) {
         let mut terminal = self.terminal.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] recording sink lock poisoned");
             e.into_inner()
         });
         terminal.event_id = payload.event_id.clone();
@@ -914,7 +914,7 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
     /// `None` ⇒ 本轮**没有可采终态**（视为 `Unknown`，绝不当成功）。
     fn recorded_terminal_outcome(&self) -> Option<(String, Option<String>)> {
         let terminal = self.terminal.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] recording sink lock poisoned");
             e.into_inner()
         });
         let phase = terminal.phase.clone()?;
@@ -933,7 +933,7 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         Option<u64>,
     )> {
         let terminal = self.terminal.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] recording sink lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] recording sink lock poisoned");
             e.into_inner()
         });
         Some((
@@ -1232,7 +1232,7 @@ impl HostControlPlaneBuilder {
             // 阻塞式 write 会自锁死锁——锁忙时返回 Err（fail loud）而非挂死。
             let flush_requester = move |session_id: &str| -> Result<usize, String> {
                 let mut buf = buffer_for_flush.lock().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent][runtime] event buffer lock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent][runtime] event buffer lock poisoned");
                     e.into_inner()
                 });
                 let keys: Vec<(String, String)> = buf
@@ -1289,7 +1289,7 @@ impl HostControlPlaneBuilder {
             sessions_rwlock
                 .read()
                 .unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                     e.into_inner()
                 })
                 .ask_store()
@@ -1402,7 +1402,7 @@ fn flush_events(
     // worker 的毫秒级锁竞争等待即可；同线程自锁面已由 emit_global_event 改
     // 仅入缓冲（history 命令路径）结构性消除，此处不再需要 try_write。
     let mut sessions = sessions.write().unwrap_or_else(|e| {
-        eprintln!("[pony-agent][runtime] sessions lock poisoned: {e}, recovering");
+        tracing::warn!(target: "control_plane", error = %e, "[pony-agent][runtime] sessions lock poisoned");
         e.into_inner()
     });
     commit_event_batch(&mut sessions, session_id, turn_id, events)
@@ -1539,7 +1539,7 @@ impl HostControlPlane {
     pub fn get_workspace_root(&self) -> String {
         // 毒锁恢复（与本文件其他 sessions 读取点一致）：poison 时取内部 guard 继续读注册表。
         let sessions = self.sessions_rwlock.read().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
             e.into_inner()
         });
         if let Ok(root) = sessions.resolve_workspace_root(None) {
@@ -1577,7 +1577,7 @@ impl HostControlPlane {
             Some(value) if !value.trim().is_empty() => std::path::PathBuf::from(value),
             _ => {
                 let sessions = self.sessions_rwlock.read().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                     e.into_inner()
                 });
                 std::path::PathBuf::from(sessions.resolve_workspace_root(workspace_id)?)
@@ -1626,7 +1626,7 @@ impl HostControlPlane {
         self.sessions_rwlock
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .load_turn_events_checked(session_id, up_to_seq)
@@ -1660,7 +1660,7 @@ impl HostControlPlane {
 
         {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             if graph_runs.load_run(&run_id).is_some() {
@@ -1678,7 +1678,7 @@ impl HostControlPlane {
     ) -> Result<GraphRunTurnResponse, String> {
         let input = {
             let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             let run = graph_runs
@@ -1721,7 +1721,7 @@ impl HostControlPlane {
     ) -> Result<GraphRunTurnResponse, String> {
         let input = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             let lifecycle = self
@@ -1796,7 +1796,7 @@ impl HostControlPlane {
 
         {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             if graph_runs.load_run(&run_id).is_some() {
@@ -1814,7 +1814,7 @@ impl HostControlPlane {
     ) -> Result<(GraphRunStreamStartResponse, PreparedGraphRunStream), String> {
         let input = {
             let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             let run = graph_runs
@@ -1863,7 +1863,7 @@ impl HostControlPlane {
     ) -> Result<(GraphRunStreamStartResponse, PreparedGraphRunStream), String> {
         let (input, control_boundary_evidence) = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             let lifecycle = self
@@ -2051,7 +2051,7 @@ impl HostControlPlane {
                 .load_checkpoint(Some(prepared.turn_id.as_str()), None);
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                     e.into_inner()
                 });
                 graph_runs.load_run(&prepared.run_id).ok_or_else(|| {
@@ -2159,7 +2159,7 @@ impl HostControlPlane {
             // via `has_unresolved_ask_waits`), so return the suspension snapshot directly.
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                     e.into_inner()
                 });
                 graph_runs.load_run(&prepared.run_id).ok_or_else(|| {
@@ -2194,7 +2194,7 @@ impl HostControlPlane {
 
         let advance = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             self.graph_runner
@@ -2267,7 +2267,7 @@ impl HostControlPlane {
     /// `decide_after_turn` 落库）+ `last_completed_turn_id` 定位本轮。
     fn turn_graph_decision_for(&self, turn_id: &str) -> Option<GraphDecisionKind> {
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
         });
         graph_runs
@@ -2296,7 +2296,7 @@ impl HostControlPlane {
     {
         {
             let mut sinks = self.turn_event_sinks.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] turn event sink lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] turn event sink lock poisoned");
                 e.into_inner()
             });
             sinks.insert(
@@ -2318,7 +2318,7 @@ impl HostControlPlane {
     pub fn unregister_turn_event_sink(&self, turn_id: &str) {
         {
             let mut sinks = self.turn_event_sinks.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] turn event sink lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] turn event sink lock poisoned");
                 e.into_inner()
             });
             sinks.remove(turn_id);
@@ -2385,7 +2385,7 @@ impl HostControlPlane {
         turn_id: &str,
     ) -> Option<Arc<dyn crate::agent::turn_flow::TurnEventSink + Send + Sync>> {
         let sinks = self.turn_event_sinks.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] turn event sink lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] turn event sink lock poisoned");
             e.into_inner()
         });
         sinks.get(turn_id).cloned()
@@ -2508,7 +2508,7 @@ impl HostControlPlane {
             return WATCHDOG_USER_MESSAGE_PLACEHOLDER.to_string();
         };
         let sessions = self.sessions_rwlock.read().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
             e.into_inner()
         });
         let snapshot = sessions.snapshot_at_readonly(Some(session_id), None, &[]);
@@ -2558,7 +2558,7 @@ impl HostControlPlane {
         // ① 锁内只读快照：只取判定结果与活跃 turn id（克隆后立即出锁）。
         let active_turn_id = {
             let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             let run = graph_runs
@@ -2582,7 +2582,7 @@ impl HostControlPlane {
         //    （wave-64 A3：快照与受理之间 run 可能已转终态，此时必须保持"Err ⇒ 无事件"）。
         let (lifecycle, control_boundary_evidence) = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             let lifecycle = self
@@ -2684,7 +2684,7 @@ impl HostControlPlane {
 
         let lifecycle = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             self.graph_runner
@@ -2825,7 +2825,7 @@ impl HostControlPlane {
         let turn_id = {
             let next_turn_id = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                     e.into_inner()
                 });
                 let run = graph_runs
@@ -2834,7 +2834,7 @@ impl HostControlPlane {
                 format!("{}-turn-{}", run.id, run.steps.len() + 1)
             };
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             let lifecycle = self
@@ -2861,7 +2861,7 @@ impl HostControlPlane {
             );
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                     e.into_inner()
                 });
                 graph_runs
@@ -2939,7 +2939,7 @@ impl HostControlPlane {
         if turn_result.phase == SUSPENDED_TURN_PHASE {
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                     e.into_inner()
                 });
                 graph_runs.load_run(&run_id).ok_or_else(|| {
@@ -2968,7 +2968,7 @@ impl HostControlPlane {
 
         let advance = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             self.graph_runner

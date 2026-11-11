@@ -8,7 +8,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .persist_mcp_source_snapshot(snapshot.clone());
@@ -43,7 +43,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .persist_skill_source_snapshot(snapshot.clone());
@@ -98,7 +98,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .set_history_state_hook_executor_for_test(hook_executor);
@@ -109,7 +109,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .record_turn_trace(session_id, trace);

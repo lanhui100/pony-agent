@@ -235,7 +235,7 @@ impl HostControlPlane {
         // would fail ("run already exists"). Disambiguate against the live run store.
         let fresh_run_id = {
             let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                 e.into_inner()
             });
             let base = next_graph_run_id();
@@ -278,7 +278,7 @@ impl HostControlPlane {
     fn resolve_reusable_ask_resume_run_id(&self, session_id: Option<&str>) -> Option<String> {
         let session_id = session_id?;
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
         });
         // `GraphRunStore::list_runs` 已按 `updated_at_ms` 倒序（最近更新在前）。

@@ -254,7 +254,7 @@ impl AuthorizeStore {
         if let Some(persist) = &self.persist {
             let snapshot = self.snapshot_map();
             if let Err(error) = persist(&snapshot) {
-                eprintln!("[pony-agent] path authorization persist failed: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent] path authorization persist failed");
             }
         }
         Ok(entry)
@@ -273,7 +273,7 @@ impl AuthorizeStore {
             if let Some(persist) = &self.persist {
                 let snapshot = self.snapshot_map();
                 if let Err(error) = persist(&snapshot) {
-                    eprintln!("[pony-agent] path authorization persist failed: {error}");
+                    tracing::error!(target: "pony_core", error = %error, "[pony-agent] path authorization persist failed");
                 }
             }
         }

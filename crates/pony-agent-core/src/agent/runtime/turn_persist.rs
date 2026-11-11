@@ -114,7 +114,7 @@ impl AgentRuntime {
             .sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .append_turn_with_kind(
@@ -269,7 +269,7 @@ impl AgentRuntime {
             .sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .record_turn_trace_in_memory(
@@ -370,7 +370,7 @@ impl AgentRuntime {
             crate::agent::usage_ledger::now_epoch_ms(),
         );
         let store = self.sessions.read().unwrap_or_else(|error| {
-            eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+            tracing::warn!(target: "control_plane", error = %error, "[pony-agent] sessions rwlock poisoned");
             error.into_inner()
         });
         // 失败已在 append_entry_resilient 内降级（warn + spool），这里只吞掉结果。
@@ -674,7 +674,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .save_input_attachments(session_id, images)
@@ -852,7 +852,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .append_failed_turn(
@@ -971,7 +971,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .record_turn_trace(

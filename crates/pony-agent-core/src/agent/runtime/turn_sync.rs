@@ -712,7 +712,7 @@ impl AgentRuntime {
         {
             let governance = {
                 let store = self.sessions.read().unwrap_or_else(|error| {
-                    eprintln!("[pony-agent] sessions rwlock poisoned: {error}, recovering");
+                    tracing::warn!(target: "control_plane", error = %error, "[pony-agent] sessions rwlock poisoned");
                     error.into_inner()
                 });
                 crate::agent::usage_governance::evaluate_with_store(

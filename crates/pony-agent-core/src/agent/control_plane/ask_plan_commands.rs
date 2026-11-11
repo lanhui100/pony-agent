@@ -312,7 +312,7 @@ impl HostControlPlane {
         answer: &Value,
     ) -> AskLanding {
         let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
         });
         // The durable record's `run_id` may be the turn's run context, not the run that owns the
@@ -370,7 +370,7 @@ impl HostControlPlane {
             }
             let landing = {
                 let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-                    eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
                     e.into_inner()
                 });
                 let binding = self.find_ask_wait_binding(&graph_runs, &record.request_id);
@@ -491,7 +491,7 @@ impl HostControlPlane {
                 match store.gc_terminal_records(before_ms) {
                     Ok(count) => count,
                     Err(error) => {
-                        eprintln!("[pony-agent] ask terminal GC failed: {error}");
+                        tracing::error!(target: "pony_core", error = %error, "[pony-agent] ask terminal GC failed");
                         0
                     }
                 }
@@ -621,7 +621,7 @@ impl HostControlPlane {
         self.sessions_rwlock
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .list_sessions()
@@ -733,7 +733,7 @@ impl HostControlPlane {
     /// Snapshot of every Ask wait currently bound to a graph run.
     pub fn graph_list_ask_waits(&self, run_id: &str) -> Value {
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
         });
         let waits = self.graph_runner.list_ask_waits(&graph_runs, run_id);
@@ -747,7 +747,7 @@ impl HostControlPlane {
         binding: GraphAskWaitBinding,
     ) -> Result<Value, String> {
         let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
         });
         let run = self
@@ -795,7 +795,7 @@ impl HostControlPlane {
             ));
         }
         let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
         });
         // ADR 0074: an answered Ask with no graph wait binding does not resume a run — the answer

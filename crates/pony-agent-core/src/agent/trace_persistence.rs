@@ -61,7 +61,7 @@ fn trace_persistence_worker_loop(
 ) {
     for command in receiver.iter() {
         let mut store = sessions.write().unwrap_or_else(|e| {
-            eprintln!("[pony-agent][trace-persist] sessions rwlock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent][trace-persist] sessions rwlock poisoned");
             e.into_inner()
         });
         store.persist_trace_mutation_from_worker(&command.session_id, command.mutation);

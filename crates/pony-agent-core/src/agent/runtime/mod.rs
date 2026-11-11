@@ -225,7 +225,7 @@ impl AgentRuntime {
     ) -> Self {
         let (persisted_mcp_snapshots, persisted_skill_snapshots) = {
             let store = sessions.read().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             });
             (
@@ -300,7 +300,7 @@ impl AgentRuntime {
     ) -> Option<AskInjectionLease> {
         let store_arc = self.graph_run_store()?;
         let store = store_arc.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run store poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run store poisoned");
             e.into_inner()
         });
         if let Some(run_id) = run_id {
@@ -334,7 +334,7 @@ impl AgentRuntime {
             return;
         };
         let mut store = store_arc.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run store poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run store poisoned");
             e.into_inner()
         });
         let acked = match &lease.key {
@@ -391,7 +391,7 @@ impl AgentRuntime {
                 break 'stamp None;
             };
             let mut sessions = self.sessions.write().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             });
             if let Some(workspace_id) = input
@@ -417,7 +417,7 @@ impl AgentRuntime {
             Some(root)
         } else if let Some(owner) = stamped_owner.as_deref() {
             let sessions = self.sessions.read().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             });
             // W1（PA-114 workspace-cwd 第二轮）：死 id 归属按归一后的 default id 解析 root
@@ -479,7 +479,7 @@ impl AgentRuntime {
             .sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .annotate_turn_trace_terminal_event_in_memory(
@@ -510,7 +510,7 @@ impl AgentRuntime {
             .sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .append_turn_trace_hook_records_in_memory(session_id, turn_id, hook_trace_records);
@@ -542,7 +542,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .persist_trace_mutation_from_worker(&session_id, mutation);

@@ -21,7 +21,7 @@ impl HostControlPlane {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID);
         let provider = {
             let runtime = self.runtime.read().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] runtime rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] runtime rwlock poisoned");
                 e.into_inner()
             });
             runtime.compaction_provider()

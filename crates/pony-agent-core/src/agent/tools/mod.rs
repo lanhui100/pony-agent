@@ -187,7 +187,7 @@ pub(crate) fn capture_rewind_pre_image(context: &ToolExecutionContext, target: &
     if let Err(error) =
         crate::agent::session::RewindFileStore::shared().record_pre_image(session_id, turn_id, target)
     {
-        eprintln!("[pony-agent] rewind pre-image skipped: {error}");
+        tracing::error!(target: "pony_core", error = %error, "[pony-agent] rewind pre-image skipped");
     }
 }
 

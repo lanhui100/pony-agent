@@ -17,7 +17,7 @@ impl AgentRuntime {
         self.sessions
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .list_sessions()
@@ -27,7 +27,7 @@ impl AgentRuntime {
         self.sessions
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .load_turn_traces(session_id)
@@ -44,7 +44,7 @@ impl AgentRuntime {
             .sessions
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .turn_trace_count(session_key);
@@ -63,7 +63,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .snapshot_at(session_id, node_id, &[])
@@ -190,7 +190,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .remove_session(session_id)
@@ -203,7 +203,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .load_history_graph(session_id)
@@ -213,7 +213,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .load_history_cursor(session_id)
@@ -229,7 +229,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .checkout_history_node(session_id, node_id, mode, expected_cursor_version)
@@ -244,7 +244,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .restore_branch_head(session_id, branch_id, expected_cursor_version)
@@ -259,7 +259,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .fork_from_history_node(session_id, node_id, expected_cursor_version)
@@ -274,7 +274,7 @@ impl AgentRuntime {
         self.sessions
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .switch_history_branch(session_id, branch_id, expected_cursor_version)

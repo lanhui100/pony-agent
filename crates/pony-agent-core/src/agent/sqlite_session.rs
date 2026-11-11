@@ -2690,7 +2690,7 @@ impl SessionBackend for SqliteSessionBackend {
                 let slot = match self.connection() {
                     Ok(slot) => slot,
                     Err(error) => {
-                        eprintln!("[pony-agent][session] SQLite open error: {error}");
+                        tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                         return commit::index_failure_after_log(PersistCommandOutcome::Failed, log_written);
                     }
                 };
@@ -2854,7 +2854,7 @@ impl SessionBackend for SqliteSessionBackend {
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return None;
             }
         };
@@ -2876,7 +2876,7 @@ impl SessionBackend for SqliteSessionBackend {
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return false;
             }
         };
@@ -2884,7 +2884,7 @@ impl SessionBackend for SqliteSessionBackend {
         let tx = match conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite delete begin tx error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite delete begin tx error");
                 return false;
             }
         };
@@ -2893,14 +2893,14 @@ impl SessionBackend for SqliteSessionBackend {
             "DELETE FROM sessions WHERE conversation_id = ?1",
             params![session_id],
         ) {
-            eprintln!("[pony-agent][session] SQLite delete session error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite delete session error");
             return false;
         }
         if let Err(error) = tx.execute(
             "DELETE FROM session_turn_traces WHERE session_id = ?1",
             params![session_id],
         ) {
-            eprintln!("[pony-agent][session] SQLite delete session traces error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite delete session traces error");
             return false;
         }
         // ADR 0094：显式删除必须连规范化行一起删，否则 `load_normalized_session`
@@ -2909,7 +2909,7 @@ impl SessionBackend for SqliteSessionBackend {
             "DELETE FROM normalized_sessions WHERE session_id = ?1",
             params![session_id],
         ) {
-            eprintln!("[pony-agent][session] SQLite delete normalized session error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite delete normalized session error");
             return false;
         }
 
@@ -2937,7 +2937,7 @@ impl SessionBackend for SqliteSessionBackend {
             {
                 Ok(stmt) => stmt,
                 Err(error) => {
-                    eprintln!("[pony-agent][session] SQLite prepare metadata delete-upsert error: {error}");
+                    tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite prepare metadata delete-upsert error");
                     return false;
                 }
             };
@@ -2954,7 +2954,7 @@ impl SessionBackend for SqliteSessionBackend {
         }
 
         if let Err(error) = tx.commit() {
-            eprintln!("[pony-agent][session] SQLite delete commit error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite delete commit error");
             return false;
         }
         // ADR 0099 阶段 1-B：索引行已删成功，再删该会话的日志目录（真源同步清理）。
@@ -2966,7 +2966,7 @@ impl SessionBackend for SqliteSessionBackend {
         let mut slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return SessionBackendTraceLoadResult::Loaded(Vec::new());
             }
         };
@@ -2974,7 +2974,7 @@ impl SessionBackend for SqliteSessionBackend {
         match self.read_session_traces(conn, session_id) {
             Ok(traces) => SessionBackendTraceLoadResult::Loaded(traces),
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite load session traces error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite load session traces error");
                 SessionBackendTraceLoadResult::Loaded(Vec::new())
             }
         }
@@ -3028,7 +3028,7 @@ impl SessionBackend for SqliteSessionBackend {
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return Vec::new();
             }
         };
@@ -3046,7 +3046,7 @@ impl SessionBackend for SqliteSessionBackend {
         let mut stmt = match conn.prepare(&sql) {
             Ok(stmt) => stmt,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite load turn events prepare error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite load turn events prepare error");
                 return Vec::new();
             }
         };
@@ -3059,7 +3059,7 @@ impl SessionBackend for SqliteSessionBackend {
         }) {
             Ok(rows) => rows,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite load turn events query error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite load turn events query error");
                 return Vec::new();
             }
         };
@@ -3099,7 +3099,7 @@ impl SessionBackend for SqliteSessionBackend {
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return 0;
             }
         };
@@ -3129,7 +3129,7 @@ impl SessionBackend for SqliteSessionBackend {
     ) -> SessionBackendMutationResult {        let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3137,16 +3137,16 @@ impl SessionBackend for SqliteSessionBackend {
         let tx = match conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite replace traces begin tx error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite replace traces begin tx error");
                 return SessionBackendMutationResult::Failed;
             }
         };
         if let Err(error) = self.replace_session_traces_tx(&tx, session_id, traces) {
-            eprintln!("[pony-agent][session] SQLite replace traces error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite replace traces error");
             return SessionBackendMutationResult::Failed;
         }
         if let Err(error) = tx.commit() {
-            eprintln!("[pony-agent][session] SQLite replace traces commit error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite replace traces commit error");
             return SessionBackendMutationResult::Failed;
         }
         SessionBackendMutationResult::Succeeded
@@ -3161,7 +3161,7 @@ impl SessionBackend for SqliteSessionBackend {
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3169,7 +3169,7 @@ impl SessionBackend for SqliteSessionBackend {
         let tx = match conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite trace upsert begin tx error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite trace upsert begin tx error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3183,11 +3183,11 @@ impl SessionBackend for SqliteSessionBackend {
             // refs 保护 prune 归 PA-090 迁移阶段实现。
             false,
         ) {
-            eprintln!("[pony-agent][session] SQLite trace upsert error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite trace upsert error");
             return SessionBackendMutationResult::Failed;
         }
         if let Err(error) = tx.commit() {
-            eprintln!("[pony-agent][session] SQLite trace upsert commit error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite trace upsert commit error");
             return SessionBackendMutationResult::Failed;
         }
         SessionBackendMutationResult::Succeeded
@@ -3207,7 +3207,7 @@ impl SessionBackend for SqliteSessionBackend {
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3215,7 +3215,7 @@ impl SessionBackend for SqliteSessionBackend {
         let tx = match conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite terminal event begin tx error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite terminal event begin tx error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3230,7 +3230,7 @@ impl SessionBackend for SqliteSessionBackend {
         }) {
             Ok(updated) => updated,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite terminal event update error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite terminal event update error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3238,7 +3238,7 @@ impl SessionBackend for SqliteSessionBackend {
             return SessionBackendMutationResult::NotFound;
         }
         if let Err(error) = tx.commit() {
-            eprintln!("[pony-agent][session] SQLite terminal event commit error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite terminal event commit error");
             return SessionBackendMutationResult::Failed;
         }
         SessionBackendMutationResult::Succeeded
@@ -3254,7 +3254,7 @@ impl SessionBackend for SqliteSessionBackend {
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3262,7 +3262,7 @@ impl SessionBackend for SqliteSessionBackend {
         let tx = match conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite hook append begin tx error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite hook append begin tx error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3275,7 +3275,7 @@ impl SessionBackend for SqliteSessionBackend {
         }) {
             Ok(updated) => updated,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite hook append error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite hook append error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3283,7 +3283,7 @@ impl SessionBackend for SqliteSessionBackend {
             return SessionBackendMutationResult::NotFound;
         }
         if let Err(error) = tx.commit() {
-            eprintln!("[pony-agent][session] SQLite hook append commit error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite hook append commit error");
             return SessionBackendMutationResult::Failed;
         }
         SessionBackendMutationResult::Succeeded
@@ -3298,7 +3298,7 @@ impl SessionBackend for SqliteSessionBackend {
         let slot = match self.connection() {
             Ok(slot) => slot,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite open error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3306,13 +3306,13 @@ impl SessionBackend for SqliteSessionBackend {
         let tx = match conn.unchecked_transaction() {
             Ok(tx) => tx,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite combined persist begin tx error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite combined persist begin tx error");
                 return SessionBackendMutationResult::Failed;
             }
         };
 
         if let Err(error) = self.upsert_session_row_tx(&tx, session_id, session) {
-            eprintln!("[pony-agent][session] SQLite combined session upsert error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite combined session upsert error");
             return SessionBackendMutationResult::Failed;
         }
 
@@ -3372,7 +3372,7 @@ impl SessionBackend for SqliteSessionBackend {
         let mutation_result = match mutation_result {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("[pony-agent][session] SQLite combined trace mutation error: {error}");
+                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite combined trace mutation error");
                 return SessionBackendMutationResult::Failed;
             }
         };
@@ -3386,7 +3386,7 @@ impl SessionBackend for SqliteSessionBackend {
         }
 
         if let Err(error) = tx.commit() {
-            eprintln!("[pony-agent][session] SQLite combined persist commit error: {error}");
+            tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite combined persist commit error");
             return SessionBackendMutationResult::Failed;
         }
 
