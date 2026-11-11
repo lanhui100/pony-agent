@@ -522,20 +522,32 @@ fn c3_team_policy_absent_when_unwired() {
 /// C5-A3：策略段门控与 10 处 fail-closed 门必须复用**同一**判定 `subagent_runtime_wired()`。
 ///
 /// 源码级判定（等价于契约的 `grep -n "subagent_runtime_wired()"` 覆盖 11 处）：
-/// 1. `agent/tools.rs` 内 `subagent_runtime_wired()` 出现次数 == 11（1 处定义 + 10 处 fail-closed 门）；
+/// 1. `agent/tools/` 子树内 `subagent_runtime_wired()` 出现次数 == 11（1 处定义 + 10 处 fail-closed 门）；
 /// 2. 承载策略段锚串的源文件必须**同时**引用同一判定函数（同源注册，禁止第二套接线判定）；
 /// 3. 策略段组装点 `agent/context.rs` 必须引用同一判定函数（C3.3 落层位置）。
 #[test]
 fn c5_same_gate_source() {
     let src_root = crate_src_root();
-    let tools_src = read_src(&src_root, "agent/tools.rs");
+    // `agent/tools.rs` 已拆成 `agent/tools/` 目录（`mod.rs` 放定义、`orchestration.rs` 等放门控），
+    // 判定口径不变：按**该子树**汇总同一判定的出现次数（1 处定义 + 10 处 fail-closed 门 == 11）。
+    let tools_root = src_root.join("agent/tools");
+    assert!(
+        tools_root.is_dir(),
+        "工具面源码目录不存在：{}（断言不得跳过）",
+        tools_root.display()
+    );
     let context_src = read_src(&src_root, "agent/context.rs");
 
     // Assert 1：10 处 fail-closed 门 + 1 处定义 == 11。
-    let tools_hits = tools_src.matches("subagent_runtime_wired()").count();
+    let mut tools_hits = 0usize;
+    for file in rust_files_under(&tools_root) {
+        let text = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("读取源码失败 {}: {error}", file.display()));
+        tools_hits += text.matches("subagent_runtime_wired()").count();
+    }
     assert_eq!(
         tools_hits, 11,
-        "C5-A3 失败：agent/tools.rs 内 `subagent_runtime_wired()` 必须出现 11 次\
+        "C5-A3 失败：agent/tools/ 子树内 `subagent_runtime_wired()` 必须出现 11 次\
          （1 处定义 + 10 处 fail-closed 门），实际 {tools_hits} 次"
     );
 

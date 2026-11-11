@@ -124,8 +124,21 @@ fn test_matching_commands_filter() {
 
     state.input_buffer = "/re".to_string();
     let re = state.matching_commands();
-    assert_eq!(re.len(), 1);
-    assert_eq!(re[0].0, "/resume");
+    // 与上文同一条纪律：期望值从命令表推导，不写死条数（`/rewind` 落地后「1 条」已过期）。
+    let expected_prefixed: Vec<&str> = tui::AVAILABLE_COMMANDS
+        .iter()
+        .map(|(command, _)| *command)
+        .filter(|command| command.starts_with("/re"))
+        .collect();
+    assert!(
+        expected_prefixed.contains(&"/resume"),
+        "前提：命令表必须包含 `/resume`（本轮断言的对象）"
+    );
+    assert_eq!(
+        re.iter().map(|(command, _)| *command).collect::<Vec<_>>(),
+        expected_prefixed,
+        "前缀过滤结果必须与命令表同源（命令表当前以 `/re` 开头的条目：{expected_prefixed:?}）"
+    );
 }
 
 #[test]

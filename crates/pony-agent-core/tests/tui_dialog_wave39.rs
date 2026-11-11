@@ -409,7 +409,9 @@ fn a4_metrics_row_left_shows_workspace_label() {
 
         let buf = screen(&mut state, 110, 30);
         let ws_part = header_workspace_part(&buf);
-        let expected = format!("~{}pony-agent", std::path::MAIN_SEPARATOR);
+        // 折叠真值源 `tui.rs::fold_home_prefix` 是**展示**口径：统一用 `/` 拼（`format!("~/{name}")`），
+        // 与平台 FS 分隔符无关；用 `MAIN_SEPARATOR` 会在 Windows 上把「展示正确」判成红。
+        let expected = "~/pony-agent";
         assert!(
             ws_part.starts_with(&expected),
             "HOME 下的 workspace 必须折叠为 {expected:?} 并紧跟 header 品牌前缀，实际 header {ws_part:?}"
