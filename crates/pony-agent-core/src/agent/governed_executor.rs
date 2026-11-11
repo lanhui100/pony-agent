@@ -198,16 +198,13 @@ impl GovernedPolicyEvaluator {
                     }
                 }();
                 if requires_execution_approval == Some(true) {
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(u64::MAX);
+                    // ISSUE-20261111-002: 对齐 ADR 0074 全面去墙钟原则，已批准的审批凭据由显式决策与会话状态管理，
+                    // 消费侧不再受 expires_at_ms 墙钟到期限制，避免慢人工决策被误拒。
                     let valid = plan_execution_approval
                         .map(|approval| {
                             approval.session_id == session_id.unwrap_or_default()
                                 && json_arguments.get("plan_id").and_then(Value::as_str)
                                     == Some(approval.plan_id.as_str())
-                                && now_ms < approval.expires_at_ms
                         })
                         .unwrap_or(false);
                     if !valid {
@@ -215,7 +212,7 @@ impl GovernedPolicyEvaluator {
                             verdict: PermissionVerdict::Deny,
                             decision_source: "plan_execution_approval_gate".to_string(),
                             reason: Some(
-                                "host plan execution approval is required to transition a Draft plan to Executing (missing, mismatched, or expired)."
+                                "host plan execution approval is required to transition a Draft plan to Executing (missing or mismatched)."
                                     .to_string(),
                             ),
                         };
@@ -928,6 +925,74 @@ mod tests {
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["successCount"], 2);
         assert_eq!(payload["results"].as_array().map(Vec::len), Some(2));
+    }
+
+    // ── ISSUE-20261111-002: approval no wall-clock expiry ─────────────────────────────────────
+
+    #[test]
+    fn governed_executor_plan_execution_approval_valid_past_wall_clock_expiry() {
+        let workspace = temp_workspace();
+        let governed = build_governed_executor(Some(workspace.clone()), None);
+        let init_context = crate::agent::dispatcher::DispatchContext {
+            session_id: Some("session-1".to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        };
+        let bound = BoundGoverned::new(&governed, init_context);
+
+        let created = bound.execute(&same_call(
+            "Plan",
+            json!({
+                "op": "create",
+                "session_id": "session-1",
+                "payload": {
+                    "kind": "implement",
+                    "summary": "Implement feature",
+                    "steps": [
+                        { "name": "draft", "summary": "Write spec" }
+                    ]
+                },
+                "description": "test",
+            }),
+        ));
+        assert_eq!(created.status, "ok");
+        let payload: serde_json::Value =
+            serde_json::from_str(&created.output).expect("create output json");
+        let plan_id = payload["planId"].as_str().expect("planId");
+        let revision = payload["revision"].as_i64().unwrap_or(1);
+
+        // expires_at_ms 设置为过去的固定时间戳（模拟慢人工决策超过60s）
+        let turn_context = crate::agent::dispatcher::DispatchContext {
+            session_id: Some("session-1".to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            plan_execution_approval: Some(crate::agent::dispatcher::PlanExecutionApproval {
+                session_id: "session-1".to_string(),
+                plan_id: plan_id.to_string(),
+                expires_at_ms: 1000, // 远低于当前 now_ms
+            }),
+            ..Default::default()
+        };
+        let bound_approved = BoundGoverned::new(&governed, turn_context);
+
+        // 尝试执行 start_execution 触发 Draft→Executing 迁移
+        let completed = bound_approved.execute(&same_call(
+            "Plan",
+            json!({
+                "op": "start_execution",
+                "session_id": "session-1",
+                "plan_id": plan_id,
+                "revision": revision,
+                "description": "test",
+            }),
+        ));
+        assert_eq!(
+            completed.status,
+            "ok",
+            "去墙钟后已批准的审批不应因 expires_at_ms 被拒绝: {:?}",
+            completed.output
+        );
     }
 
     // ── PA-076 P2-6: plan_control via governed dispatch ──────────────────────────────────────

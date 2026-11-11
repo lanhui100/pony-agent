@@ -99,9 +99,7 @@ pub(super) fn suspension_is_unrecoverable(
         None => true,
         Some(request) => match request.request_kind {
             PendingControlRequestKind::Approval => {
-                !(host_approval_resume
-                    && request.session_id.is_some()
-                    && request.is_path_authorization_approval())
+                !(host_approval_resume && request.session_id.is_some())
             }
             PendingControlRequestKind::Interaction => request.run_id.is_none(),
         },
@@ -650,23 +648,19 @@ mod w1_approval_unrecoverable_tests {
         ));
     }
 
-    /// wave-65 R2（F1，BLOCKING）：能力位开启但审批**不是路径授权类** ⇒ 仍必须 fail-fast。
-    ///
-    /// 这类审批（`tool_rule_ask` / `external_requires_approval` / 写执行抬升）被消费后不产生任何
-    /// 豁免，续轮必再审批；若放进可恢复分支就成了「批准 → 续轮 → 再审批」死循环。
+    /// ISSUE-20261111-001：能力位开启且请求带会话身份时，非路径授权类审批也必须进入可恢复挂起，
+    /// 否则宿主批准后无法恢复续轮执行。
     #[test]
-    fn approval_suspension_unrecoverable_for_non_path_authorization_when_capability_enabled() {
+    fn approval_suspension_recoverable_for_non_path_authorization_when_capability_enabled() {
         let non_path_forms = [
             // 非路径审批（dispatcher 在无 path 时写 `approvalKind:"approval"`）。
             Some(serde_json::json!({"approvalKind": "approval", "tool": "Bash"})),
-            // 旧宿主/历史请求没有 options ⇒ 不能假定它是路径授权类（fail-closed）。
+            // 旧宿主/历史请求没有 options
             None,
-            // 形状不对（approvalKind 不是字符串）同样不能放过。
-            Some(serde_json::json!({"approvalKind": 42})),
         ];
         for options in non_path_forms {
             assert!(
-                suspension_is_unrecoverable(
+                !suspension_is_unrecoverable(
                     &ToolTurnSuspension {
                         pending_request: Some(request_with_options(
                             PendingControlRequestKind::Approval,
@@ -677,7 +671,7 @@ mod w1_approval_unrecoverable_tests {
                     },
                     true
                 ),
-                "非路径授权类审批（options = {options:?}）不得进入可恢复挂起"
+                "非路径授权类审批（options = {options:?}）必须能够进入可恢复挂起"
             );
         }
     }

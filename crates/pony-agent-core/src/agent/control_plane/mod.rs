@@ -1442,21 +1442,18 @@ fn approval_pending_projection(
     })
 }
 
-/// wave-65 R2（F2）+ R3（F2）/ 去墙钟：待决审批是否**仍可列出**（唯一判据，纯函数便于单测）。
+/// ISSUE-20261111-001 / 去墙钟：待决审批是否**仍可列出**（唯一判据，纯函数便于单测）。
 ///
-/// 两个条件缺一不可：仍是 `Pending`、**是路径授权类审批**
-/// （[`PendingControlRequest::is_path_authorization_approval`]，与 runtime 同源）。
-/// **不再带墙钟判据**：本轮起审批的 CAS（`can_consume`）不再受 `expires_at_ms` 约束，过期时间只是
-/// 惰性留痕，既不会让审批「批不掉」，也不会产生死面板活锁（旧 TTL 分支已随去墙钟退役）。
+/// 判定：只要请求种类为 `Approval` 且状态仍是 `Pending`，即代表该审批仍在等待人类决议，必须向宿主列出。
+/// 消除过度过滤（不再将非路径审批排除），防止前端/TUI 在 500ms 轮询对账中将其误判为 stale 并误报过期收口。
+/// **不再带墙钟判据**：审批的 CAS（`can_consume`）不受 `expires_at_ms` 约束，过期时间只是惰性留痕。
 /// `now_ms` 保留在签名里只为与既有调用点/单测同形，**不参与**判定。
-/// 为什么必须是路径授权类：非路径审批（`tool_rule_ask` / `external_requires_approval` / 保守抬升）
-/// 在 runtime 侧本就 fail-fast 收口；若仍列进面板，用户批准后只会得到「续轮 → 再审批」的人工循环。
 pub(crate) fn approval_is_listable(
     request: &PendingControlRequest,
     _now_ms: u64,
 ) -> bool {
     request.state == PendingControlRequestState::Pending
-        && request.is_path_authorization_approval()
+        && request.request_kind == PendingControlRequestKind::Approval
 }
 
 impl HostControlPlane {
@@ -10701,27 +10698,26 @@ mod wave65_r2_approval_tests {
         }
     }
 
-    /// R3（F2）：**非路径授权类**审批一律不得列出 —— 它们在 runtime 侧 fail-fast，
-    /// 若仍进面板，用户批准后只会得到「续轮 → 再审批」的人工循环。
+    /// ISSUE-20261111-001：非路径授权类审批也必须可列出 —— 否则宿主 500ms 轮询会误判 stale 并误报过期收口。
     #[test]
-    fn approval_is_listable_rejects_non_path_authorization_approval() {
+    fn approval_is_listable_accepts_non_path_authorization_approval() {
         let mut request = pending_request(
             PendingControlRequestKind::Approval,
             PendingControlRequestState::Pending,
             u64::MAX,
         );
-        // 规则类 / 外部来源 / 保守抬升：即使实参里带 path，也**不是**路径授权类。
+        // 规则类 / 外部来源 / 方案审批等非路径审批：必须允许列入待决列表。
         for options in [
             serde_json::json!({"approvalKind": "approval", "tool": "Bash", "path": "/tmp/x"}),
             serde_json::json!({"approvalKind": "approval", "tool": "Bash"}),
         ] {
             request.options = Some(options.clone());
             assert!(
-                !approval_is_listable(&request, 1),
-                "非路径授权类审批（options = {options}）不得列入待决列表"
+                approval_is_listable(&request, 1),
+                "非路径授权类审批（options = {options}）必须列入待决列表"
             );
         }
-        // 反向对照：同一请求标成路径授权类即可列出（证明判据不是「一律拒绝」的假绿）。
+        // 反向对照：路径授权类审批仍必须可列出。
         request.options = Some(serde_json::json!({
             "approvalKind": "path_authorization",
             "tool": "Read",

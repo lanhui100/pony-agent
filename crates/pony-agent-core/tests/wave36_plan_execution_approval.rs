@@ -394,49 +394,51 @@ fn c141_4_approval_is_bound_to_session_and_plan() {
     let _ = fs::remove_dir_all(workspace_b);
 }
 
-// ── C-141-5：TTL（now_ms < expires_at_ms 才有效） ─────────────────────────────────────────
+// ── C-141-5：去墙钟化（ADR 0074 / ISSUE-20261111-002，expires_at_ms 仅作元数据留痕，不阻塞消费） ───────
 
 #[test]
-fn c141_5_approval_ttl_expiry_denies_and_future_expiry_unlocks() {
+fn c141_5_approval_past_wall_clock_expiry_still_unlocks() {
     let workspace = temp_workspace();
     let executor = build_turn_scoped_executor(Some(workspace.clone()), None);
     executor.set_context(context(Some(SESSION_A), None));
     let plan = create_draft(&executor, SESSION_A);
     let plan_id = plan["planId"].as_str().unwrap_or_default().to_string();
 
-    // 过期：expires = now-1 ⇒ Deny 指定码（plan 仍 Draft）。
+    // ADR 0074：去墙钟后，即使 expires_at_ms 小于当前时间，审批凭据仍可合法消费解锁
     executor.set_context(context(
         Some(SESSION_A),
         Some(approval_json(SESSION_A, &plan_id, now_ms().saturating_sub(1))),
     ));
-    let expired = executor.execute(&call(
+    let past_expiry = executor.execute(&call(
         "plan_control",
         start_execution_args(SESSION_A, &plan),
     ));
-    assert_approval_denied(
-        &expired.status,
-        &parse_output(&expired.output),
-        "C-141-5 expired",
+    assert_eq!(
+        past_expiry.status, "ok",
+        "ADR 0074 去墙钟后已批准审批不应因 expires_at_ms 被拒: {}",
+        past_expiry.output
+    );
+    assert_eq!(
+        parse_output(&past_expiry.output)["lifecycle"],
+        "executing",
+        "approved start_execution must transition the plan even if past wall clock deadline"
     );
 
-    // 未过期：expires = now + 1h ⇒ ok 且 lifecycle == executing。
+    // 未过期时间戳同样正常放行（用新的 draft plan 测试）
+    let plan_two = create_draft(&executor, SESSION_A);
+    let plan_two_id = plan_two["planId"].as_str().unwrap_or_default().to_string();
     executor.set_context(context(
         Some(SESSION_A),
-        Some(approval_json(SESSION_A, &plan_id, now_ms() + 3_600_000)),
+        Some(approval_json(SESSION_A, &plan_two_id, now_ms() + 3_600_000)),
     ));
     let started = executor.execute(&call(
         "plan_control",
-        start_execution_args(SESSION_A, &plan),
+        start_execution_args(SESSION_A, &plan_two),
     ));
     assert_eq!(
         started.status, "ok",
         "valid approval must unlock Draft→Executing: {}",
         started.output
-    );
-    assert_eq!(
-        parse_output(&started.output)["lifecycle"],
-        "executing",
-        "approved start_execution must transition the plan"
     );
 
     let _ = fs::remove_dir_all(workspace);
