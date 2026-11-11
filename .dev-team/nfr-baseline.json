@@ -1,136 +1,21 @@
 {
   "external_call_timeout_ms": 3000,
   "retry": {
-    "max_attempts": 1,
+    "max_attempts": 3,
     "backoff_cap_ms": 1000,
     "backoff_ms": 500
   },
-  "concurrency_lock": "mutex",
-  "lock_scope_bounded": true,
-  "lock_reentrancy_forbidden": true,
-  "lock_acquisition_timeout_ms": 2000,
-  "deadlock_watchdog_timeout_ms": 5000,
-  "lock_forbidden_calls": [
-    "resolve_graph_run_for_retrieval",
-    "load_graph_run",
-    "load_execution_checkpoint",
-    "load_active_graph_run_for_session"
-  ],
+  "concurrency_lock": {
+    "type": "mutex",
+    "timeout_ms": 2000
+  },
   "logging": {
     "format": "json",
-    "trace_id": true,
-    "trace_id_required": true,
-    "trace_id_field": "trace_id"
+    "trace_id": "true"
   },
-  "logging_scope": "new_structured_logging_surface_only",
-  "logging_legacy_eprintln_exempt": true,
-  "logging_debt_ref": "PA-119",
-  "logging_eprintln_exempt_scope": "existing_style_non_json_lock_poison_recovery_diagnostics",
-  "logging_eprintln_exempt_covers_new_lines": 5,
-  "logging_compliance_claimed": false,
   "resource_release": [
-    "bounded_queue",
-    "max_queue_capacity_1024",
-    "fire_and_forget",
-    "worker_thread_shutdown",
-    "wave9_timeout_path_idempotent_cleanup_then_liveness_probe",
-    "wave9_job_handle_close_on_terminate_success",
-    "wave9_suspended_process_resume_fail_closed_cleanup",
-    "adr0065_swap_tool_surface_atomic_never_descriptor_visible_without_handler",
-    "adr0066_mcp_child_process_reaped_on_drop_source_replace_and_timeout",
-    "adr0067_plugin_call_deadline_comes_from_budget_ledger_then_kill_process_group",
-    "adr0067_plugin_host_drop_reaps_child_process_group_and_orphans",
-    "adr0067_hooks_child_env_whitelist_cwd_bounded_and_process_group_kill",
-    "adr0068_contract_schema_files_declare_version_and_breaking_additive_change"
-  ],
-  "auto_continue_max": 8,
-  "goal_store_atomic_write": true,
-  "observability": {
-    "exporter_flush_timeout_ms": 3000,
-    "log_file_max_bytes": 524288,
-    "setting_precedence": [
-      "settings",
-      "env",
-      "default"
-    ],
-    "cost_precision_decimals": 6,
-    "cost_budget_semantics": "soft_warn"
-  },
-  "external_call_timeout_exceptions": [
-    {
-      "surface": "provider streaming (SSE) HTTP client",
-      "code": "crates/pony-agent-core/src/agent/provider/mod.rs build_streaming_http_client (L2195-2218)",
-      "semantics": "connect_timeout=15s + read/idle timeout=180s；不再有总 deadline",
-      "why_not_base": "external_call_timeout_ms=3000 描述请求级往返预算；流式总时长由模型生成长度决定，套 3s 或套 180s 总 deadline 都会截断长推理（wave-55 修复的真实缺陷）",
-      "guarantee": "provider 流式：180s 读空闲（idle）断开 + 30min 总时长上界（可注入配置，ProviderStreamGuard::new）+ 每 250ms 观测既有取消源（ExecutionControl::is_stop_requested），超限分别以 `provider_stream_deadline_exceeded` / `provider_stream_cancelled` 带 elapsed 与 parsed_bytes 退出。不再存在'无总时长上界'的缺口（wave-56 闭环）。",
-      "known_gap_ref": "已消解（wave-56）；seam：crates/pony-agent-core/src/agent/provider/mod.rs ProviderStreamGuard (L517-545)，生产接线 runtime/turn_stream.rs:1659",
-      "l3p_blocking_resolution": "wave-55 按方案(b)登记缺口 → wave-56 按方案(a)根治：新增总时长上界与取消观测，并保留可注入 seam 供测试（无需 sleep 30min）。",
-      "registered_at": "2026-11-01",
-      "updated_at": "2026-11-01 wave-56"
-    },
-    {
-      "surface": "subagent turn (HostTurnEngine / orchestration::subagent run_turn / teammate drive drive_teammate_turn_in orchestration.rs:836)",
-      "code": "crates/pony-agent-core/src/agent/orchestration.rs:237 SUBAGENT_TURN_TIMEOUT_MS = 120_000（调用点 :265/:276/:595）",
-      "semantics": "turn 级端到端预算（经 run_turn(prompt, timeout_ms) 注入），非请求级往返预算",
-      "why_not_base": "external_call_timeout_ms=3000 描述单次外部往返预算；120000 覆盖一次子代理 turn 的建栈+provider 生成+工具往返，套 3000ms 会截断任何真实子代理回合（与 provider streaming 例外同性质）",
-      "guarantee": "超时以结构化 `subagent_timeout: orphan session_id=…` 返回；并发许可已 move 进工作线程（wave-61 C6.2 闭环，subagent_runtime.rs:206），超时不再提前归还许可。残余后果：孤儿线程持续占许可直到 provider 通道 30min 上界，期间新 subagent()/drive_teammate_turn_in() 持续命中 subagent_busy（引擎无 stop API，已登记为已知限制）",
-      "known_gap_ref": "L3-P@60e7cb8 Q1 FAIL / finding orchestration.rs:237；基线复登见 wave-61 C6.3（subagent_turn_timeout_ms=120000 / subagent_max_concurrent=2 / subagent_max_prompt_bytes=200000）",
-      "l3p_blocking_resolution": "wave-61 v1.3 按 Lead 裁决：登记 NFR 豁免 + 基线复登；不修改 external_call_timeout_ms=3000，不放宽既有 streaming 例外",
-      "registered_at": "2026-11-03",
-      "updated_at": "2026-11-03 wave-61 v1.4"
-    },
-    {
-      "surface": "hooks 子进程（hooks.command legacy shell 形态 / hooks.argv 形态；载体 <workspace>/.pony/hooks.json，ADR 0067 决策 5）",
-      "code": "crates/pony-agent-core/src/agent/hook_commands.rs:35 DEFAULT_HOOK_TIMEOUT_MS = 5_000（生效点 CommandHookSpec::effective_timeout，配置键 timeoutMs；契约 docs/contracts/hooks.v1.schema.json）",
-      "semantics": "单次**本地子进程**执行预算（timeoutMs <= 5000，缺省 5000），非外部网络往返预算",
-      "why_not_base": "external_call_timeout_ms=3000 描述请求级外部（网络）往返预算；hooks 是本地子进程的启动+执行+回收，套 3000 既会截断合法钩子，也会改变既有配置行为（ADR 0067 决策 5 明确保留 legacy command 形态、不得拒绝存量配置）",
-      "guarantee": "超时到达即以子进程/进程组终止回收（Unix 独立进程组 + SIGKILL 树；Windows 无进程组属已知平台局限，尽力回收）；legacy shell 形态记 hook_deprecated_shell 审计事件；两形态均受 env 白名单、cwd 限定、默认关闭（PONY_HOOKS_ENABLE=1 才启用）约束。网络类出网仍以 external_call_timeout_ms（<=3000）为上限",
-      "known_gap_ref": "已知局限：Windows 无进程组，cmd /C 派生孙进程只能尽力回收（ADR 0067 决策 3 与后果节）",
-      "l3p_blocking_resolution": "Lead 裁决 C（2026-11-05）：为对齐 3000 而砍 hooks 默认超时会破坏既有配置行为，故登记例外；网络类出网仍受 external_call_timeout_ms 约束",
-      "registered_at": "2026-11-05",
-      "updated_at": "2026-11-05 wave-65 裁决 C"
-    }
-  ],
-  "logging_eprintln_exempt_note": "wave-55 新增 5 处生产 eprintln（MCP 环境禁用键丢弃 1、secret store 明文回退 2、save_store/save_session_state 失败 2），均带错误上下文、不含密文；按 L3-P 复审 ADV-1 修正此前高报的 6。JSON+trace_id 结构化收敛仍属 PA-119 债务",
-  "team_tool_surface_exact_count": 38,
-  "subagent_engine_registration_required_in": [
-    "tauri",
-    "harness",
-    "tui"
-  ],
-  "team_policy_prompt_injected_when_wired": true,
-  "subagent_max_concurrent": 2,
-  "subagent_turn_timeout_ms": 120000,
-  "subagent_max_prompt_bytes": 200000,
-  "metrics_snapshot": {
-    "contract": ".dev-team/contract-matrix-metrics-snapshot.md",
-    "single_source_of_truth": "TurnMetricsSnapshot",
-    "wire_field": "TurnStreamEvent.metrics (additive, #[serde(default, skip_serializing_if = \"Option::is_none\")])",
-    "internal_field": "ProviderEventMeta.context_window_tokens (additive, 不上 wire)",
-    "frozen_invariants": [
-      "I1",
-      "I2",
-      "I3",
-      "I4",
-      "I5",
-      "I6",
-      "I7"
-    ],
-    "ratio_unit": "fraction_0_to_1",
-    "percent_render": "round(cacheHitRatio * 100)",
-    "clamp_forbidden": true,
-    "turn_speed_single_source": "crates/pony-agent-core/src/agent/turn_flow.rs::weighted_turn_speed",
-    "external_call": "none: 纯内存结算，无网络 IO / 无子进程 / 无磁盘 IO",
-    "external_call_timeout_ms_for_builder": "n/a (no external call)",
-    "resource_release": "n/a: 纯值对象，无持有资源（无句柄/无锁/无后台任务）",
-    "logging": "沿用上方全局 logging 约定（format=json + trace_id）；本轮不新增日志面",
-    "event_payload_budget_bytes_per_frame": 800,
-    "event_payload_baseline_bytes_per_frame": 517,
-    "event_payload_measured_growth_pct": 36.5,
-    "event_payload_budget_derivation": "517 * 1.365 = 705.71 B（3-record 帧上界）→ 预算取 800 B 留 ~12% 余量；预算尚未接 CI 门禁（B032），当前为人工评审基线",
-    "event_payload_measurement_provenance": "方案级对抗审查实测（serde_json separators=(\",\",\":\") 默认紧凑序列化），测量脚本未入库",
-    "float_wire_hygiene": "non-finite (NaN/Inf) ⇒ null；不进线缆、不丢事件",
-    "ratio_out_of_range_policy": "numerator > denominator ⇒ None（fail-closed），禁止 clamp 成 1.0",
-    "frozen_by": "task-1 / protocol agent"
-  }
+    "file_handles",
+    "network_connections",
+    "subagent_processes"
+  ]
 }

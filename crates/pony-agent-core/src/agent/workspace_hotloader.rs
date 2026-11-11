@@ -50,6 +50,13 @@ const SKILL_FRONTMATTER_READ_LIMIT: usize = 65_536;
 /// 用户级（全局）根目录的环境变量覆盖入口。
 pub const PONY_AGENT_HOME_ENV: &str = "PONY_AGENT_HOME";
 
+/// 用户级「自定义技能根」列表的环境变量入口（路径分隔符分隔：unix `:` / windows `;`）。
+///
+/// 每项都是**技能根目录本身**（其下直接放各技能子目录），不会自动再拼 `skills/`。
+/// 只扩充技能发现面，**不**参与宪法（`AGENTS.md` / `CLAUDE.md`）分层——宪法分层契约仍由
+/// ADR 0045 的四个全局根冻结，避免新增全局指令层导致提示词基线漂移。
+pub const PONY_AGENT_SKILL_DIRS_ENV: &str = "PONY_AGENT_SKILL_DIRS";
+
 /// 指令与技能的作用域（用户级全局 / 项目级）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AgentScope {
@@ -129,6 +136,8 @@ pub struct HotloadedSkill {
     pub description: String,
     pub user_invocable: bool,
     pub allowed_tools: Vec<String>,
+    pub disable_model_invocation: bool,
+    pub model_invocable: bool,
     pub path: PathBuf,
     pub fingerprint: FileFingerprint,
     /// 该 Skill 来自用户级全局根目录还是当前工作区。
@@ -625,6 +634,32 @@ pub fn resolve_global_agent_homes() -> Vec<PathBuf> {
     )
 }
 
+/// 解析 [`PONY_AGENT_SKILL_DIRS_ENV`] 的纯逻辑入口（不读环境，便于用例注入）。
+///
+/// - 空项跳过、重复项按首次出现去重，保持用户书写顺序；
+/// - 不做 `~` 展开、不做存在性检查（不存在的根在枚举期自然缺席）。
+pub fn resolve_custom_skill_dirs_from(raw: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for path in std::env::split_paths(raw) {
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+        if dirs.iter().any(|existing| existing == &path) {
+            continue;
+        }
+        dirs.push(path);
+    }
+    dirs
+}
+
+/// 解析当前进程的自定义技能根（读 [`PONY_AGENT_SKILL_DIRS_ENV`]）。
+pub fn resolve_custom_skill_dirs() -> Vec<PathBuf> {
+    resolve_custom_skill_dirs_from(std::env::var_os(PONY_AGENT_SKILL_DIRS_ENV).as_deref())
+}
+
 /// 返回「当前会参与注入」的指令文件 **canonical 路径**清单（wave-58 契约 F3-4）。
 ///
 /// 用途：会话首轮把根层已注入的来源种子化到 `TouchedInstructionMemory.seen`，
@@ -780,7 +815,22 @@ impl WorkspaceHotloader {
         workspace_root: P,
         global_homes: &[PathBuf],
     ) -> (Vec<HotloadedSkill>, bool) {
-        let (report, hit) = self.scan_skills_internal(workspace_root.as_ref(), global_homes);
+        let custom_skill_dirs = resolve_custom_skill_dirs();
+        self.scan_skills_with_roots(workspace_root, global_homes, &custom_skill_dirs)
+    }
+
+    /// 可注入「全局根 + 自定义技能根」的 Skills 扫描变体（PA-173 / ISSUE-20261111-007）。
+    ///
+    /// 自定义根来自 [`PONY_AGENT_SKILL_DIRS_ENV`]；显式传参入口让用例不依赖进程环境，
+    /// 语义与 [`Self::scan_skills_with_globals`] 完全一致。
+    pub fn scan_skills_with_roots<P: AsRef<Path>>(
+        &self,
+        workspace_root: P,
+        global_homes: &[PathBuf],
+        custom_skill_dirs: &[PathBuf],
+    ) -> (Vec<HotloadedSkill>, bool) {
+        let (report, hit) =
+            self.scan_skills_internal(workspace_root.as_ref(), global_homes, custom_skill_dirs);
         (report.skills, hit)
     }
 
@@ -802,7 +852,18 @@ impl WorkspaceHotloader {
         workspace_root: P,
         global_homes: &[PathBuf],
     ) -> SkillScanReport {
-        self.scan_skills_internal(workspace_root.as_ref(), global_homes)
+        let custom_skill_dirs = resolve_custom_skill_dirs();
+        self.scan_skills_report_with_roots(workspace_root, global_homes, &custom_skill_dirs)
+    }
+
+    /// 可注入「全局根 + 自定义技能根」的带诊断扫描变体（PA-173）。
+    pub fn scan_skills_report_with_roots<P: AsRef<Path>>(
+        &self,
+        workspace_root: P,
+        global_homes: &[PathBuf],
+        custom_skill_dirs: &[PathBuf],
+    ) -> SkillScanReport {
+        self.scan_skills_internal(workspace_root.as_ref(), global_homes, custom_skill_dirs)
             .0
     }
 
@@ -824,6 +885,7 @@ impl WorkspaceHotloader {
         &self,
         workspace_root: &Path,
         global_homes: &[PathBuf],
+        custom_skill_dirs: &[PathBuf],
     ) -> (SkillScanReport, bool) {
         let canonical_workspace = workspace_root.canonicalize().ok();
         // Wave-58 BLOCKING-1：workspace 身份标签（canonical 优先），用于缓存键与合并结果分桶。
@@ -841,18 +903,28 @@ impl WorkspaceHotloader {
         // —— 阶段 1：技能根筛选（分域信任 + canonical 去重）——
         let mut scan_roots: Vec<(AgentScope, PathBuf, u16, bool, bool)> = Vec::new();
         let mut seen_canonical_roots: HashSet<PathBuf> = HashSet::new();
-        for (scope, base_dir, rank) in discover_skill_dirs(workspace_root, global_homes) {
+        for spec in enumerate_skill_roots(workspace_root, global_homes, custom_skill_dirs) {
+            let SkillRootSpec {
+                scope,
+                dir: base_dir,
+                rank,
+                containment_base,
+            } = spec;
             // D1：全局根（用户自有域）允许符号链接解析到根外；项目根保持严格包含。
             let allow_symlink_escape = scope == AgentScope::Global;
             let canonical_root = base_dir.canonicalize().ok();
             let root_trusted = if allow_symlink_escape {
                 true
             } else {
-                // 项目根自身不得经符号链接逃出 workspace（workspace 内容是不可信输入）。
-                match (canonical_workspace.as_ref(), canonical_root.as_ref()) {
-                    (Some(canonical_workspace), Some(canonical_root)) => {
-                        canonical_root.starts_with(canonical_workspace)
-                    }
+                // 项目根自身不得经符号链接逃出**所属项目域**：仓库根技能以仓库根为上界，
+                // 会话根技能以会话根为上界（workspace 内容是不可信输入）。
+                let base = containment_base
+                    .as_deref()
+                    .unwrap_or(workspace_root)
+                    .canonicalize()
+                    .ok();
+                match (base, canonical_root.as_ref()) {
+                    (Some(base), Some(canonical_root)) => canonical_root.starts_with(&base),
                     _ => false,
                 }
             };
@@ -1192,7 +1264,8 @@ impl WorkspaceHotloader {
             .resolve_constitution_with_budget(workspace_root, global_homes, budget)
             .unwrap_or_else(|| (String::new(), true));
         // Wave-58 D2 / L3-B4：走报告通道，omitted 诊断在生产路径不再被丢弃。
-        let (report, _) = self.scan_skills_internal(workspace_root, global_homes);
+        let (report, _) =
+            self.scan_skills_internal(workspace_root, global_homes, &resolve_custom_skill_dirs());
         let current_skills = apply_skill_injection_budget(report.skills, budget);
 
         let const_hash = fnv1a_hash(current_constitution.as_bytes());
@@ -1792,45 +1865,156 @@ fn discover_constitution_sources(
     sources
 }
 
-/// 汇总 Skills 根目录与注入 rank：全局根按顺序在前，项目级目录最后（最高优先级）。
+/// 单个技能根的解析结果——**扫描与加载共用的单一枚举**（PA-173 / ISSUE-20261111-007）。
 ///
-/// rank 数值越小越优先，冻结表见 [`GlobalRootIdentity`] 与项目带常量；
-/// 项目带 rank 恒小于全局带，确保「项目层永远最高优先级」不变量。
-fn discover_skill_dirs(
+/// rank 数值越小越优先；**项目带（100~399）恒小于全局带（400+）**，
+/// 「项目层永远最高优先级」不变量不得被仓库根或自定义根破坏。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillRootSpec {
+    /// 作用域：`Global` = 用户自有域（允许符号链接逃逸）；`Project` = 仓库内（严格 canonical 包含）。
+    pub scope: AgentScope,
+    /// 技能根目录本身（其下直接是各技能子目录）。
+    pub dir: PathBuf,
+    /// 注入与去重优先级。
+    pub rank: u16,
+    /// 项目级根的 canonical 包含上界（仓库根 / 会话根）；全局根为 `None`。
+    pub containment_base: Option<PathBuf>,
+}
+
+/// 项目带 rank：会话根（cwd）三层目录，沿用 ADR 0045 冻结值（`.dsh` → `.agents` → `.claude`）。
+const SKILL_RANK_WORKSPACE_DSH: u16 = 100;
+const SKILL_RANK_WORKSPACE_AGENTS: u16 = 200;
+const SKILL_RANK_WORKSPACE_CLAUDE: u16 = 300;
+/// 项目带 rank：仓库根（`.git` 上探）三层——必须整体劣于会话根三层，
+/// 才满足 dsh 的「近者覆盖远者」（exact scope 优于 ancestor）。
+const SKILL_RANK_REPO_DSH: u16 = 350;
+const SKILL_RANK_REPO_AGENTS: u16 = 360;
+const SKILL_RANK_REPO_CLAUDE: u16 = 370;
+/// 全局带 rank：自定义技能根起始值（`450 + index`，封顶 499）。
+///
+/// 落在全局带兜底段：劣于产品自有根（400），优于 `~/.dsh`(500) / `~/.agents`(510) /
+/// `~/.claude`(520)，即 dsh 的「customSkillDirs 优于用户全局根」语义。
+const SKILL_RANK_CUSTOM_BASE: u16 = 450;
+/// `.git` 上探的最大层数（防御病态深路径上的无界 IO）。
+const SKILL_GIT_ROOT_MAX_ANCESTORS: usize = 32;
+/// 项目内技能目录（相对所属根）：顺序即同层内的优先级。
+const PROJECT_SKILL_DIRS: [&str; 3] = [".dsh/skills", ".agents/skills", ".claude/skills"];
+
+/// 汇总 Skills 根目录与注入 rank：全局根在前，项目级目录在后（更高优先级）。
+///
+/// 这是技能根的**唯一枚举**：`scan_skills*`（可见性）与
+/// [`crate::agent::path_permission::trusted_skill_roots_with_policy`]（可加载性）都消费它，
+/// 不允许任何一侧另建根清单（否则复现「列得出、载不进」的 P1-6 缺陷）。
+pub fn enumerate_skill_roots(
     workspace_root: &Path,
     global_homes: &[PathBuf],
-) -> Vec<(AgentScope, PathBuf, u16)> {
-    let mut dirs: Vec<(AgentScope, PathBuf, u16)> = Vec::new();
-    // 身份解析（env / home_dir / 已知全局根）在一次扫描内只采样一次，
-    // 保证 rank 是本次扫描的纯函数快照，不会在中途因 env 变化而漂移。
+    custom_skill_dirs: &[PathBuf],
+) -> Vec<SkillRootSpec> {
+    let mut specs = enumerate_global_skill_roots(global_homes, custom_skill_dirs);
+    specs.extend(enumerate_project_skill_roots(workspace_root));
+    specs
+}
+
+/// 全局（用户级）技能根：全局根 `skills/` + `~/.dsh/skills` + 自定义技能根。
+///
+/// - 全局根来自调用方给出的 `global_homes`（默认入口为 [`resolve_global_agent_homes`]），
+///   rank 由 [`GlobalRootIdentity::rank`] 决定；
+/// - `~/.dsh/skills` 在此单独补齐：它只作为**技能根**参与发现（rank=500，兑现声明表），
+///   不进入宪法分层，避免既有提示词基线因新增全局指令层而漂移；
+/// - 自定义根（[`PONY_AGENT_SKILL_DIRS_ENV`]）按用户自有域处理（允许符号链接逃逸），rank 落 450+。
+pub fn enumerate_global_skill_roots(
+    global_homes: &[PathBuf],
+    custom_skill_dirs: &[PathBuf],
+) -> Vec<SkillRootSpec> {
+    // 身份解析（env / home_dir / 已知全局根）在一次枚举内只采样一次，
+    // 保证 rank 是本次枚举的纯函数快照，不会在中途因 env 变化而漂移。
     let identity = GlobalRootIdentity::snapshot();
+    let mut specs: Vec<SkillRootSpec> = Vec::new();
     for (index, home) in global_homes.iter().enumerate() {
-        push_skill_dir(
-            &mut dirs,
+        push_skill_root(
+            &mut specs,
             AgentScope::Global,
             home.join("skills"),
             identity.rank(home, index),
+            None,
         );
     }
-    push_skill_dir(
-        &mut dirs,
-        AgentScope::Project,
-        workspace_root.join(".dsh").join("skills"),
-        100,
+    if let Some(home_dir) = identity.home_dir.as_deref() {
+        let dsh_home = home_dir.join(".dsh");
+        push_skill_root(
+            &mut specs,
+            AgentScope::Global,
+            dsh_home.join("skills"),
+            identity.rank(&dsh_home, global_homes.len()),
+            None,
+        );
+    }
+    for (index, dir) in custom_skill_dirs.iter().enumerate() {
+        let rank = SKILL_RANK_CUSTOM_BASE.saturating_add(index.min(49) as u16);
+        push_skill_root(&mut specs, AgentScope::Global, dir.clone(), rank, None);
+    }
+    specs
+}
+
+/// 项目（仓库内）技能根：仓库根（`.git` 上探）三层 + 会话根三层。
+///
+/// 上探只停在**最近的含 `.git` 的目录**（文件形态同样成立，兼容 worktree / submodule），
+/// 命中不到即退回会话根单层——不会把 `~` 或 `/` 当项目根去收罗系统目录。
+pub fn enumerate_project_skill_roots(workspace_root: &Path) -> Vec<SkillRootSpec> {
+    let mut specs: Vec<SkillRootSpec> = Vec::new();
+    if let Some(repo_root) = find_git_root(workspace_root).filter(|root| root != workspace_root) {
+        push_project_level(
+            &mut specs,
+            &repo_root,
+            [
+                SKILL_RANK_REPO_DSH,
+                SKILL_RANK_REPO_AGENTS,
+                SKILL_RANK_REPO_CLAUDE,
+            ],
+        );
+    }
+    push_project_level(
+        &mut specs,
+        workspace_root,
+        [
+            SKILL_RANK_WORKSPACE_DSH,
+            SKILL_RANK_WORKSPACE_AGENTS,
+            SKILL_RANK_WORKSPACE_CLAUDE,
+        ],
     );
-    push_skill_dir(
-        &mut dirs,
-        AgentScope::Project,
-        workspace_root.join(".agents").join("skills"),
-        200,
-    );
-    push_skill_dir(
-        &mut dirs,
-        AgentScope::Project,
-        workspace_root.join(".claude").join("skills"),
-        300,
-    );
-    dirs
+    specs
+}
+
+/// 由 `start` 向上探测最近的 `.git`（目录或文件形态）。
+///
+/// 上探上限 [`SKILL_GIT_ROOT_MAX_ANCESTORS`] 层；未命中返回 `None`。
+pub fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    let mut hops = 0usize;
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        if hops >= SKILL_GIT_ROOT_MAX_ANCESTORS {
+            return None;
+        }
+        hops += 1;
+        current = dir.parent();
+    }
+    None
+}
+
+/// 把一个根的三层目录按给定 rank 追加进枚举（`containment_base` = 该根自身）。
+fn push_project_level(specs: &mut Vec<SkillRootSpec>, base: &Path, ranks: [u16; 3]) {
+    for (dir, rank) in PROJECT_SKILL_DIRS.iter().zip(ranks) {
+        push_skill_root(
+            specs,
+            AgentScope::Project,
+            base.join(dir),
+            rank,
+            Some(base.to_path_buf()),
+        );
+    }
 }
 
 /// 全局根身份快照：`$PONY_AGENT_HOME`、`home_dir` 与已知产品全局根**同一扫描内单次采样**；
@@ -1893,15 +2077,22 @@ impl GlobalRootIdentity {
     }
 }
 
-fn push_skill_dir(
-    dirs: &mut Vec<(AgentScope, PathBuf, u16)>,
+fn push_skill_root(
+    specs: &mut Vec<SkillRootSpec>,
     scope: AgentScope,
     dir: PathBuf,
     rank: u16,
+    containment_base: Option<PathBuf>,
 ) {
-    if dir.is_dir() && !dirs.iter().any(|(_, existing, _)| existing == &dir) {
-        dirs.push((scope, dir, rank));
+    if !dir.is_dir() || specs.iter().any(|existing| existing.dir == dir) {
+        return;
     }
+    specs.push(SkillRootSpec {
+        scope,
+        dir,
+        rank,
+        containment_base,
+    });
 }
 
 /// 按 UTF-8 字符边界截断到不超过 `max_bytes`（避免切裂多字节字符）。
@@ -2133,6 +2324,8 @@ struct SkillFrontmatter {
     description: Option<String>,
     user_invocable: Option<bool>,
     allowed_tools: Vec<String>,
+    disable_model_invocation: Option<bool>,
+    model_invocable: Option<bool>,
 }
 
 /// frontmatter 字段取值的两种形态（标量 / 块列表）。
@@ -2368,12 +2561,18 @@ fn apply_frontmatter_field(parsed: &mut SkillFrontmatter, key: &str, value: Fron
         ("allowed-tools", FrontmatterValue::List(items)) => {
             parsed.allowed_tools = items;
         }
+        ("disable-model-invocation", FrontmatterValue::Scalar(scalar)) => {
+            parsed.disable_model_invocation = Some(scalar.trim().parse().unwrap_or(false));
+        }
         ("allowed-tools", FrontmatterValue::Scalar(scalar)) => {
             parsed.allowed_tools = scalar
                 .split(',')
                 .map(|item| unquote_scalar(item.trim()))
                 .filter(|item| !item.is_empty())
                 .collect();
+        }
+        ("model-invocable", FrontmatterValue::Scalar(scalar)) => {
+            parsed.model_invocable = Some(scalar.trim().parse().unwrap_or(true));
         }
         _ => {}
     }
@@ -2723,6 +2922,34 @@ mod tests {
             resolve_global_agent_homes_from(Some(Path::new("")), None, None).is_empty(),
             "空环境变量不得产生兜底目录"
         );
+    }
+
+    #[test]
+    fn test_dsh_global_root_rank_is_reachable() {
+        // 声明表（GlobalRootIdentity 文档）写了 `~/.dsh/skills`=500；本用例锁死该分支可达，
+        // 否则「声明与实现不一致」会再次出现（PA-173 / ISSUE-20261111-007）。
+        let identity = GlobalRootIdentity {
+            env_home: None,
+            home_dir: Some(PathBuf::from("/home/tester")),
+            known: Vec::new(),
+        };
+        assert_eq!(identity.rank(Path::new("/home/tester/.dsh"), 0), 500);
+        assert_eq!(identity.rank(Path::new("/home/tester/.agents"), 0), 510);
+        assert_eq!(identity.rank(Path::new("/home/tester/.claude"), 0), 520);
+        // 自定义技能根（无身份）落 450+ 兜底段：优于 `~/.dsh`、劣于产品自有根。
+        assert_eq!(identity.rank(Path::new("/opt/skills-a"), 0), 450);
+        assert_eq!(identity.rank(Path::new("/opt/skills-b"), 1), 451);
+    }
+
+    #[test]
+    fn test_custom_skill_dirs_parse_and_dedupe() {
+        let raw = std::env::join_paths(["/a", "/a", "", "/b"]).unwrap();
+        assert_eq!(
+            resolve_custom_skill_dirs_from(Some(raw.as_os_str())),
+            vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            "空项跳过、重复项按首次出现去重且保序"
+        );
+        assert!(resolve_custom_skill_dirs_from(None).is_empty());
     }
 
     #[test]
