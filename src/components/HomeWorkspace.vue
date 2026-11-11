@@ -1862,6 +1862,7 @@ function handleScrollToLatestMouseLeave() {
 }
 
 onMounted(() => {
+  resetState();
   if (typeof window !== "undefined") {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
     loadStreamingRenderConfig();

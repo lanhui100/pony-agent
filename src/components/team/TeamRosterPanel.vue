@@ -35,6 +35,7 @@ function memberDotClass(status: TeammateStatus) {
 }
 
 onMounted(() => {
+  resetState();
   void teamStore.fetchTeamOverview();
 });
 </script>
