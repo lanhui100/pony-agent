@@ -1,0 +1,142 @@
+{
+  "verdict": "PASS",
+  "audited_snapshot": {
+    "checked_at": "2026-11-11T18:09:37+08:00",
+    "head": "a72ccc7d",
+    "note": "Lead 在本单验收期间仍在落盘（18:00-18:06 有 3 次改动）。所有机器收据均取「文件 hash 连续 90s 不变」之后的快照；sha256 见 .dev-team/hash 快照 /tmp/b064b-hash-final.txt（工作区实测一致性复核通过）。",
+    "files_sha256": {
+      "scripts/backlog.mjs": "e87c976ff1d8786c059952ddde5e5d925a4fea379d0e213ec082107f4002e840",
+      "crates/pony-agent-core/tests/tui_dialog_wave39.rs": "7dd57eeebda31065949d029c7fb6d357d891648a2a94ec5071038017cc802683",
+      "crates/pony-agent-core/tests/tui_persistence_truthfulness.rs": "a5540c4e18c7f223ef7fcea6a377dcda497f32e2f903ae77ab167205069e456c",
+      "crates/pony-agent-core/tests/tui_signal_reentry.rs": "c3762d6b8faeeb2e851d8c71327a6e33ee8708d0f15d493c567b490d21e4e3f1",
+      "crates/pony-agent-core/src/agent/sqlite_session.rs": "60848a8ffd18333c74049194e857e27245d880998e8239ec8f012921ed39eb66",
+      "crates/pony-agent-core/src/agent/session/store.rs": "30a56b1ac9188972ee69fa9638bd2d8c33e0c57b184b5d669f83eddf40821296"
+    }
+  },
+  "receipts": [
+    {
+      "cmd": "cargo test --target-dir target-test -p pony-agent-core --test tui_dialog_wave39",
+      "exit_code": 0,
+      "summary": "138 passed; 0 failed; 0 ignored（含 a12 与 a6 相位钉住后全绿）"
+    },
+    {
+      "cmd": "cargo test --target-dir target-test -p pony-agent-core --test tui_signal_reentry",
+      "exit_code": 0,
+      "summary": "131 passed; 0 failed。⚠️ 18:01 首跑曾 exit 101（E0599: MissingNameDiagnostics::take_summary/observe 不存在，见 crates/pony-agent-core/src/agent/provider/openai_sse.rs:177,496）——根因是并发 lane（B060 SSE 诊断）半成品落盘，与本单改动无关；该 lane 补齐后重跑 exit 0。"
+    },
+    {
+      "cmd": "cargo test --target-dir target-test -p pony-agent-core --test tui_persistence_truthfulness",
+      "exit_code": 0,
+      "summary": "132 passed; 0 failed（含新反例断言：decoy 目录下不得出现 sessions.db）"
+    },
+    {
+      "cmd": "cargo test --target-dir target-test -p pony-agent-core --test tui_dialog_wave39 a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface -- --exact",
+      "exit_code": 0,
+      "summary": "1 passed（防 flaky 复跑：同命令连跑 10 次，10/10 passed，0 failed —— 用于证明墙钟相位随机红已消除）"
+    },
+    {
+      "cmd": "cargo test --target-dir target-test -p pony-agent-core --test tui_signal_reentry r6_suspend_shortcut_matches_only_bare_ctrl_z -- --exact",
+      "exit_code": 0,
+      "summary": "1 passed；产品实现 crates/pony-agent-core/src/bin/tui/input.rs:11-16 明确 `if !cfg!(unix) { return false; }`，断言按平台分流与实现一致"
+    },
+    {
+      "cmd": "cargo test --target-dir target-test -p pony-agent-core --test tui_persistence_truthfulness persistence_evidence_reads_the_real_session_database -- --exact",
+      "exit_code": 0,
+      "summary": "1 passed；旁路生效（库落在 sandbox，decoy 无库）"
+    },
+    {
+      "cmd": "npx vitest run tests/backlog-cli.spec.ts",
+      "exit_code": 0,
+      "summary": "23 passed / 23（该 spec 既 `import` backlog.mjs 又用 execFileSync 实跑 `node scripts/backlog.mjs lint`，正反两侧同时覆盖）"
+    },
+    {
+      "cmd": "node scripts/backlog.mjs lint",
+      "exit_code": 0,
+      "summary": "[backlog-lint] PASS（活跃 3 / 归档 9）—— CLI 入口判定为真的物理证据（旧写法在 Windows 会静默不执行、空输出 exit 0）"
+    },
+    {
+      "cmd": "node scripts/backlog.mjs doctor",
+      "exit_code": 0,
+      "summary": "{\"ok\": true, \"issues\": [], counts:{active:3, archived:9, highWater:68}}"
+    },
+    {
+      "cmd": "node -e 'import(\"./scripts/backlog.mjs\").then(m=>console.log(Object.keys(m).length))'",
+      "exit_code": 0,
+      "summary": "输出 28（导出面完好）；被 import 时未执行 main（无 lint 输出、无副作用），入口判定不做误判"
+    },
+    {
+      "cmd": "node -e '用 path.win32 复算旧写法 / 用 win32 file URL 复算新写法'",
+      "exit_code": 0,
+      "summary": "旧写法: path.win32.resolve('/C:/repo/scripts/backlog.mjs') = '\\\\C:\\\\repo\\\\scripts\\\\backlog.mjs' ≠ argv[1] 'C:\\\\repo\\\\scripts\\\\backlog.mjs' -> equal? false；新写法: 两侧 realpath→pathToFileURL 得 'file:///C:/repo/scripts/backlog.mjs' -> equal? true；盘符/目录大小写不同 ('c:\\\\REPO\\\\...') 经 win32 小写归一后 -> true。POSIX 实测：a===b -> true（本机 file:///home/dm/pony-agent/scripts/backlog.mjs）"
+    },
+    {
+      "cmd": "node -e 'pathToFileURL(fs.realpathSync(SCRIPT)) 两侧比较（POSIX 实机）'",
+      "exit_code": 0,
+      "summary": "POSIX equal: true -> file:///home/dm/pony-agent/scripts/backlog.mjs；Linux 语义未被 win32 分支污染（大小写敏感路径不做小写归一）"
+    },
+    {
+      "cmd": "git diff -- crates/pony-agent-core/tests/tui_persistence_truthfulness.rs crates/pony-agent-core/src/agent/sqlite_session.rs crates/pony-agent-core/src/agent/session/store.rs",
+      "exit_code": 0,
+      "summary": "旁路中立性（未设置 env 时默认路径不变）：default_sqlite_path() 与 default_storage_path() 的链仅在最前面插入 `data_dir_override().or_else(...)`；data_dir_override() 在 var_os 为 None 或空串时返回 None，Option::or_else 惰性求值 -> 后续链与 HEAD 逐字一致（dirs::data_local_dir() → home_dir → cwd）；另 #[cfg(not(test))] 使该函数不进单元测试构建，cfg(test) 分支 unique_test_* 逐字未动"
+    },
+    {
+      "cmd": "grep -cE 'assert!|assert_eq!|assert_ne!|assert_matches!' <file> vs git show HEAD:<file>",
+      "exit_code": 0,
+      "summary": "断言数（HEAD→工作区）：tui_dialog_wave39 110→117；tui_signal_reentry 18→19；tui_persistence_truthfulness 16→17；#[test] 数 13/6/7 全不变；#[ignore]/#[should_panic] 计数不变（wave39 0→0、signal 1→1 为既有、persistence 0→0）"
+    },
+    {
+      "cmd": "git diff --stat -- tests/",
+      "exit_code": 0,
+      "summary": "空输出：前端 spec（tests/backlog-cli.spec.ts 等）未被改动，Windows 前端单测转绿只能来自 scripts/backlog.mjs 的入口判定修复，不存在改测试换绿"
+    }
+  ],
+  "assertion_strength_audit": [
+    {
+      "file": "crates/pony-agent-core/tests/tui_dialog_wave39.rs",
+      "change": "新增 pin_carousel_phase() 夹具（:116-134，偏移量取产品常量 STATUS_CAROUSEL_* 并当场 assert_eq! 自证相位生效）；a6 :630、a12 :1029 钉模型相位；a12 追加 Assert 4 权限相位段（:1177-1235，逐字文本「权限 · 工作区」+ 逐列 MUTED/CANVAS + 「不得残留模型身份」）",
+      "weakened": false,
+      "evidence": "git diff 该文件仅含 `+` 行，删行只有注释改写与断言消息文案（如 :1077 \"...（ADR 0119 模型半周期；已钉相位）\"），原 `assert_eq!(bottom.trim(), state.model.trim())` 与 GHOST/CANVAS/指标缺席断言逐条保留；assert 110→117，测试数 13→13"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_signal_reentry.rs",
+      "change": "r6 :136-148 由「无条件断言裸 Ctrl+Z 命中」改为 cfg!(unix) 分支：unix 断言 hit==true（文案加强说明 raw mode 下 ISIG 已清），非 unix 断言 hit==false；反向对照（Ctrl+Shift/Ctrl+Alt/Shift/None、'Z'、Ctrl+C）两平台共用保留",
+      "weakened": false,
+      "evidence": "assert 18→19（+1）；unix 分支断言强度不变；非 unix 期望值与产品实现 crates/pony-agent-core/src/bin/tui/input.rs:11-16 一致（非 unix 无 SIGTSTP/fg，挂起不可恢复），属平台契约修正而非放宽"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_persistence_truthfulness.rs",
+      "change": "沙箱加固：新增 decoy 目录（:153-154）承接旧口径（XDG/HOME/LOCALAPPDATA，:156-158），新增旁路注入 PONY_AGENT_DATA_DIR（:163），并新增反例断言「decoy/PonyAgent/sessions.db 必须不存在」（:177-181）",
+      "weakened": false,
+      "evidence": "原前置断言 `db_path.exists()`（:172-176）与两条 session_persistence_evidence 断言逐字保留；assert 16→17（净增一条反例），测试数 7→7；非放宽而是「旧口径必须失效」的更强约束"
+    },
+    {
+      "file": "scripts/backlog.mjs",
+      "change": "isDirect 由 `path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)`（:627 HEAD 单行）改为 isDirectInvocation()（:639-651）：两侧 fs.realpathSync + pathToFileURL 比较，win32 下 toLowerCase 归一，解析失败保守 false",
+      "weakened": false,
+      "evidence": "该文件无测试断言（脚本入口判定），等价性由物理收据反证：node scripts/backlog.mjs lint PASS/exit 0、doctor ok/exit 0、vitest 23/23（spec 内既有 execFileSync 实跑 CLI 的用例）；import 侧 node -e 导入 exit 0 且未执行 main；win32 旧/新写法复算见 receipts"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/tests/ask_resume_e2e.rs",
+      "line": 92,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "evidence": "同类风险未收口：`grep -n 'set_var(\"' crates/pony-agent-core/tests/ask_resume_e2e.rs` 仅 XDG_DATA_HOME/HOME/LOCALAPPDATA（:90-92），approval_resume_e2e.rs:84-86、stop_graph_run_wave64.rs:79-81 同法；Windows 上 dirs::data_local_dir() 走 known-folder API 不读这三个变量，故这些集成用例在 Windows 仍会读写真实 %LOCALAPPDATA%\\PonyAgent（不红但污染/可能互相干扰），新旁路 `grep -rln PONY_AGENT_DATA_DIR crates/pony-agent-core/tests/` 只覆盖 tui_persistence_truthfulness.rs。建议后续把三处 isolate_process_data_dir() 一并补 PONY_AGENT_DATA_DIR（不属本单必须项）"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_persistence_truthfulness.rs",
+      "line": 156,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "evidence": "进程级环境变量（XDG_DATA_HOME/HOME/LOCALAPPDATA/PONY_AGENT_DATA_DIR，:156-163）设置后未恢复：`grep -c remove_var 该文件` = 0。当前该测试二进制内仅此用例消费存储，故未产生跨用例污染；若后续在同二进制新增 SessionStore 用例会继承沙箱/旁路。属测试卫生建议（可用 Once+串行或结束后 remove_var）"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_signal_reentry.rs",
+      "line": 137,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "evidence": "非 unix 分支（:143-148 `assert!(!hit, ...)`）由 cfg!(unix) 编译期选路，Linux 上永不执行（本机 `cargo test ... r6_suspend_shortcut_matches_only_bare_ctrl_z -- --exact` 只走 unix 分支），该平台分支的真实性只能由 Windows job 举证；本次无合成平台注入手段（产品实现同样用 cfg!），属既有限制，非本单引入"
+    }
+  ]
+}
