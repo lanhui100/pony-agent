@@ -8,7 +8,7 @@ impl HostControlPlane {
         query: GraphRunCheckpointQuery,
     ) -> Option<GraphRunCheckpoint> {
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] graph run lock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
         });
         let run_id = query.run_id?;
@@ -21,7 +21,7 @@ impl HostControlPlane {
             .sessions_rwlock
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .snapshot_at_readonly(query.session_id.as_deref(), None, &[]);
@@ -54,7 +54,7 @@ impl HostControlPlane {
         self.sessions_rwlock
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .recover_session_from_normalized(session_id)
@@ -66,7 +66,7 @@ impl HostControlPlane {
             .sessions_rwlock
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .load_history_graph(Some(session_id.as_str()));
@@ -84,7 +84,7 @@ impl HostControlPlane {
             .sessions_rwlock
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .load_history_cursor(Some(session_id.as_str()));
@@ -107,7 +107,7 @@ impl HostControlPlane {
         let session_id = self.normalize_history_session_id(command.session_id);
         let requested_mode = command.mode;
         let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
             e.into_inner()
         });
         let before_state = Self::project_message_state(&sessions.snapshot_at(
@@ -177,7 +177,7 @@ impl HostControlPlane {
     ) -> Result<RestoreBranchHeadResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
         let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
             e.into_inner()
         });
         let before_state = Self::project_message_state(&sessions.snapshot_at(
@@ -232,7 +232,7 @@ impl HostControlPlane {
     ) -> Result<ForkFromHistoryNodeResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
         let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
             e.into_inner()
         });
         let before_state = Self::project_message_state(&sessions.snapshot_at(
@@ -293,7 +293,7 @@ impl HostControlPlane {
     ) -> Result<SwitchHistoryBranchResponse, String> {
         let session_id = self.normalize_history_session_id(command.session_id);
         let mut sessions = self.sessions_rwlock.write().unwrap_or_else(|e| {
-            eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
             e.into_inner()
         });
         let before_state = Self::project_message_state(&sessions.snapshot_at(
@@ -350,7 +350,7 @@ impl HostControlPlane {
         // 只读查询：直接从内存 sessions_view 读取 cursor，避免调用带写锁与 ensure/save 副作用的 load_history_cursor。
         let resolved_node_id = query.node_id.clone().or_else(|| {
             let sessions = self.sessions_rwlock.read().unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             });
             sessions
@@ -381,7 +381,7 @@ impl HostControlPlane {
             .sessions_rwlock
             .read()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .snapshot_at_readonly(
@@ -581,7 +581,7 @@ impl HostControlPlane {
             .sessions_rwlock
             .write()
             .unwrap_or_else(|e| {
-                eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
             .remove_session(&command.session_id);

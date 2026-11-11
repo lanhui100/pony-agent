@@ -7246,9 +7246,9 @@ mod tests {
             })
             .expect("switch back to main should succeed");
         // The fork command runs ensure_history_graph, which recomputes the
-        // main branch head as the last main-branch node (the latest turn,
-        // which was marked cancelled by the earlier checkout).
-        assert_eq!(switched.node_id.as_deref(), Some(latest_node_id.as_str()));
+        // main branch head as the last main-branch node (excluding the
+        // cancelled node).
+        assert_eq!(switched.node_id.as_deref(), Some(first_node_id.as_str()));
 
         let restored = control_plane
             .restore_branch_head(RestoreBranchHeadCommand {

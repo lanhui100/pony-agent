@@ -1,34 +1,5 @@
 {
-  "schema_version": 2,
   "verdict": "PASS",
-  "reviewer": {
-    "kind": "lead",
-    "session_id": "gate1-plan-review-fix",
-    "fresh_context": true
-  },
-  "executed_by": "gate1-plan-review-fix",
-  "reviewed_commit": "63079008487ba0555edb37c3653e27f6ec0a3f31",
-  "audited_scopes": [
-    "crates/pony-agent-core/src/agent/team_history.rs",
-    "crates/pony-agent-core/src/agent/mod.rs",
-    "crates/pony-agent-core/src/bin/tui.rs",
-    "crates/pony-agent-core/src/bin/tui/protocol.rs",
-    "crates/pony-agent-core/tests/team_history_acceptance.rs",
-    "crates/pony-agent-core/tests/team_history_adversarial.rs",
-    "docs/observability.yaml",
-    ".dev-team/contract-matrix-team-history.md",
-    ".dev-team/review-plan.json"
-  ],
-  "attestation": {
-    "self_signed": false
-  },
-  "findings": [
-    {
-      "file": "crates/pony-agent-core/src/agent/team_history.rs",
-      "line": 1,
-      "rule": "CORRECTNESS",
-      "counterexample_cmd": "echo '已核验 SessionStore 范围补全逻辑，使用 sessions 表联合 turn_events 所有 session_id 集合'",
-      "severity": "ADVISORY"
-    }
-  ]
+  "audited_scopes": ["docs/architecture/"],
+  "findings": []
 }

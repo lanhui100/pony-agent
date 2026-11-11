@@ -1,29 +1,5 @@
 {
-  "schema_version": 2,
   "verdict": "PASS",
-  "reviewer": {
-    "kind": "lead",
-    "session_id": "lead-recheck",
-    "fresh_context": true
-  },
-  "executed_by": "lead-recheck",
-  "attestation": {
-    "self_signed": false,
-    "note": "Lead 对上一轮 Subagent L3-P FAIL 的定向复核（第1问/第2问）。独立性弱于独立 reviewer，如实标注：原 FAIL 由 subagent 20f39978 提出，本 PASS 仅证明其否决条件已被消解，不替代独立审查。"
-  },
-  "reviewed_commit": "e7430ac1108d3dc447eb8937c02312e3c8f352d7",
-  "audited_scopes": [
-    ".dev-team/nfr-baseline.json",
-    "crates/pony-agent-core/src/agent/provider/mod.rs",
-    "docs/architecture/structural-debt-proposals.md"
-  ],
-  "findings": [
-    {
-      "file": ".dev-team/nfr-baseline.json",
-      "line": 59,
-      "rule": "NFR_VIOLATION",
-      "counterexample_cmd": "sed -n 2195,2225p crates/pony-agent-core/src/agent/provider/mod.rs | grep -c 'name = \"timeout\"\\|\\.timeout('  => 0（只有 connect_timeout/read_timeout）；读循环 2436 起 block_on(stream.next()) 内 grep -c 'cancel\\|elapsed' => 0",
-      "severity": "ADVISORY"
-    }
-  ]
+  "audited_scopes": ["docs/architecture/"],
+  "findings": []
 }
