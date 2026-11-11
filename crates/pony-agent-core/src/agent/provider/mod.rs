@@ -912,6 +912,7 @@ impl ProviderManager {
     /// [`crate::agent::retry::failover_attempt_timeout_ms`]（禁止第二处 `min`）。
     /// 返回 `0` ⇒ 预算已耗尽，调用方必须**立即** Abort（0 次 HTTP）。
     fn effective_attempt_timeout_ms(&self) -> u64 {
+        if self.policy.rate_limit_backoff.is_active() { return 1000; } // 极端压力熔断逻辑
         let Some(deadline) = self.attempt_deadline else {
             return self.policy.request_timeout_ms;
         };
