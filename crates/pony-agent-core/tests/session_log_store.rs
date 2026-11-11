@@ -488,10 +488,6 @@ fn second_open_write_for_same_session_is_rejected() {
         other => panic!("第二个 open_write 必须被拒绝为 Locked，实际 {other:?}"),
     }
 
-    // 拒绝不得静默写：文件内容仍是 header + 1 行。
-    let raw = fs::read_to_string(&expected_path).expect("读被锁文件");
-    assert_eq!(raw.lines().count(), 2, "被拒的 writer 不得写入任何字节");
-
     // 持锁期间 delete 也必须被拒（不能从活跃 writer 底下删目录）。
     match store.delete(id) {
         Err(LogStoreError::Locked { .. }) => {}
@@ -501,6 +497,15 @@ fn second_open_write_for_same_session_is_rejected() {
 
     // 锁随句柄关闭释放：drop 后可再次独占打开，seq 接着前缀。
     drop(first);
+
+    // 拒绝不得静默写：文件内容仍是 header + 1 行。
+    //
+    // 必须在**放锁之后**读：Windows 的 `LockFileEx` 是强制锁——写者句柄持锁期间，同进程另一个
+    // 句柄读该文件会拿到 `Os { code: 33, "another process has locked a portion of the file" }`
+    // （B052；B044/B050 同源）。断言强度不变，只是把「读盘」挪到放锁之后。
+    let raw = fs::read_to_string(&expected_path).expect("读被锁文件");
+    assert_eq!(raw.lines().count(), 2, "被拒的 writer 不得写入任何字节");
+
     let mut second = store.open_write(id, &meta).expect("锁释放后可重开");
     assert_eq!(second.next_seq(), 1);
     second

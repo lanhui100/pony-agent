@@ -230,6 +230,10 @@ fn append_turn_writes_header_and_contiguous_command_events() {
     assert!(path.exists(), "日志文件必须存在：{}", path.display());
     assert_eq!(path.file_name().unwrap(), SESSION_LOG_FILE_NAME);
 
+    // Windows `LockFileEx` 是**强制**锁：写者句柄仍缓存时，同进程另一个句柄读不了该文件
+    // （OS error 33；B044/B050/B052 同源）。读盘前显式放锁，断言内容与强度不变。
+    store.release_log_writers_for_test();
+
     // header 正确（自描述块：type/version/id/cwd/createdAt）。
     let header = header_of(&path);
     assert_eq!(header["type"], serde_json::json!("session"));
@@ -282,6 +286,9 @@ fn torn_tail_is_truncated_and_appends_continue_contiguously() {
         .expect("first append_turn");
 
     let path = log_file(&fixture.db(), session_id);
+    // Windows `LockFileEx` 是**强制**锁：写者句柄仍缓存时，同进程另一个句柄读不了该文件
+    // （OS error 33；B044/B050/B052 同源）。读盘前显式放锁，断言内容与强度不变。
+    store.release_log_writers_for_test();
     let committed_prefix = std::fs::read(&path).expect("read committed log");
     let committed_events = command_events(&path);
     assert!(!committed_events.is_empty());
@@ -299,6 +306,9 @@ fn torn_tail_is_truncated_and_appends_continue_contiguously() {
         .append_turn_fallible(Some(session_id), "second", "answer-2", None, Vec::new())
         .expect("append_turn after torn tail must keep writing");
 
+    // Windows `LockFileEx` 是**强制**锁：写者句柄仍缓存时，同进程另一个句柄读不了该文件
+    // （OS error 33；B044/B050/B052 同源）。读盘前显式放锁，断言内容与强度不变。
+    store.release_log_writers_for_test();
     let after = std::fs::read(&path).expect("read log after recovery");
     assert!(
         after.starts_with(&committed_prefix),
