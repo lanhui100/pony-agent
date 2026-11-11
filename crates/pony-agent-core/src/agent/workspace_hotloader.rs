@@ -1073,6 +1073,8 @@ impl WorkspaceHotloader {
                                     fingerprint,
                                     scope,
                                     rank,
+                                    disable_model_invocation: false,
+                                    model_invocable: true,
                                 }
                             }
                             None => {
@@ -2558,11 +2560,11 @@ fn apply_frontmatter_field(parsed: &mut SkillFrontmatter, key: &str, value: Fron
         ("user-invocable", FrontmatterValue::Scalar(scalar)) => {
             parsed.user_invocable = Some(scalar.trim().parse().unwrap_or(true));
         }
-        ("allowed-tools", FrontmatterValue::List(items)) => {
-            parsed.allowed_tools = items;
-        }
         ("disable-model-invocation", FrontmatterValue::Scalar(scalar)) => {
             parsed.disable_model_invocation = Some(scalar.trim().parse().unwrap_or(false));
+        }
+        ("allowed-tools", FrontmatterValue::List(items)) => {
+            parsed.allowed_tools = items;
         }
         ("allowed-tools", FrontmatterValue::Scalar(scalar)) => {
             parsed.allowed_tools = scalar
@@ -3120,6 +3122,8 @@ mod tests {
                 },
                 scope: AgentScope::Global,
                 rank: 0,
+                disable_model_invocation: false,
+                model_invocable: true,
             }],
         );
         assert!(prefix.contains("- `audit` [global]: audit things"));
