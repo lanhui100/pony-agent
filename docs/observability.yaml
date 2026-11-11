@@ -1194,3 +1194,21 @@ note: >-
       `crates/pony-agent-core/src/agent/session/tests.rs`
       （`append_turn_with_kind_marks_synthetic_interruption_row`、`checkpoint_text_collapses_steps_beyond_limit`）、
       `tests/interrupted-record-status.spec.ts`（6 例：kind 优先、旧会话回退、正文逐字保真）。
+
+  【归属登记（2026-11-11）｜技能调用策略四象限 + 目录预算保真 + `skillDirs` 配置面（PLAN-20261111-02）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**模型可见前缀的渲染口径**、
+  本地配置读取，新增一条工具错误码与一条 TUI 斜杠手势；无新增网络 IO、后台任务、LLM 调用或依赖。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
+  (2) 新增对外错误码 `skill_not_available_for_model_invocation`（`agent/tools/orchestration.rs` 的
+      `skill_load` 闸门）：属既有工具错误包络内的分类码，走既有 `ToolResult.status="error"` 通道，
+      不新建异常上报边界、不新增 issue 上报点。
+  (3) 新增本地配置面 `settings.json.skillDirs`（camelCase，缺省空列表）与既有 `PONY_AGENT_SKILL_DIRS`
+      共用合并入口（`agent/workspace_hotloader.rs::resolve_custom_skill_dirs_merged`，store 优先、按首次出现去重）。
+      只读本地文件，不上报、不含凭据。
+  (4) 新增 TUI 交互 `/skill:<name> [额外需求]`（`src/bin/tui.rs`，按 `user-invocable` 放行）：
+      本地终端输入，无遥测出口；`/help` 仅追加文案。
+  (5) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；行为门落在测试层——
+      `crates/pony-agent-core/tests/skill_invocation_policy_contract.rs`（7 例，含四象限解析、目录预算保真、
+      `skill_load` 闸门、`skillDirs` 合并、kebab-case 校验）。

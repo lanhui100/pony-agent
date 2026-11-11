@@ -784,6 +784,17 @@ impl ToolRouter {
             );
         };
 
+        // 四象限策略拦截（ISSUE-20261111-008 / PLAN-20261111-02 Step 3）：
+        // summary 检查：技能声明 disable-model-invocation: true 时禁止模型端工具加载
+        if !skill.model_invocable || skill.disable_model_invocation {
+            return error_result(
+                TOOL_SKILL_LOAD,
+                "skill_not_available_for_model_invocation",
+                format!("技能 `{name}` 已配置为禁止模型直接调用（disable-model-invocation: true）。"),
+                Some("该技能仅供人类用户通过命令显式调用，无法通过 skill_load 工具加载。".to_string()),
+            );
+        }
+
         // L3-B F4：项目层技能（workspace/.agents|.claude|.dsh/skills）同样可读，
         // 因此把会话 workspace root 传给白名单判定（全局根仍然受信）。
         match crate::agent::skill_body::load_skill_body_for_workspace(
@@ -791,12 +802,25 @@ impl ToolRouter {
             crate::agent::skill_body::MAX_SKILL_BODY_BYTES,
             Some(workspace_root.as_path()),
         ) {
-            Ok(body) => ToolResult {
-                tool_name: TOOL_SKILL_LOAD.to_string(),
-                status: "ok".to_string(),
-                output: format!("=== SKILL {} ===\n{}", body.name, body.content),
-                duration_ms: 0,
-            },
+            Ok(body) => {
+                // definition 检查：从读取的正文 frontmatter 二次确认是否禁用模型调用（双重检查）
+                let (_, _, _, _, disable_model, model_inv) =
+                    crate::agent::workspace_hotloader::parse_skill_metadata(&body.content, name);
+                if disable_model || !model_inv {
+                    return error_result(
+                        TOOL_SKILL_LOAD,
+                        "skill_not_available_for_model_invocation",
+                        format!("技能 `{name}` 正文配置为禁止模型直接调用（disable-model-invocation: true）。"),
+                        Some("该技能仅供人类用户通过命令显式调用，无法通过 skill_load 工具加载。".to_string()),
+                    );
+                }
+                ToolResult {
+                    tool_name: TOOL_SKILL_LOAD.to_string(),
+                    status: "ok".to_string(),
+                    output: format!("=== SKILL {} ===\n{}", body.name, body.content),
+                    duration_ms: 0,
+                }
+            }
             Err(error) => error_result(TOOL_SKILL_LOAD, error.code(), error.message(), None),
         }
     }

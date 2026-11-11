@@ -161,6 +161,8 @@ pub enum SkillOmissionReason {
     DuplicateName,
     /// 候选入口不是普通文件（悬空符号链接、目录、FIFO 等）。
     NotAFile,
+    /// 技能明确配置为禁止模型直接调用（disable-model-invocation: true）。
+    ModelInvocationDisabled,
 }
 
 impl SkillOmissionReason {
@@ -171,6 +173,7 @@ impl SkillOmissionReason {
             Self::TooLarge => "too_large",
             Self::DuplicateName => "duplicate_name",
             Self::NotAFile => "not_a_file",
+            Self::ModelInvocationDisabled => "model_invocation_disabled",
         }
     }
 }
@@ -655,9 +658,43 @@ pub fn resolve_custom_skill_dirs_from(raw: Option<&std::ffi::OsStr>) -> Vec<Path
     dirs
 }
 
-/// 解析当前进程的自定义技能根（读 [`PONY_AGENT_SKILL_DIRS_ENV`]）。
+/// 解析自定义技能根的纯逻辑入口（合并 settings.json 的 skillDirs 与环境变量）。
+///
+/// 顺序语义（ISSUE-20261111-009）：
+/// - `store_dirs`（来自 settings.json 的 `skillDirs` 配置项）按声明顺序排前；
+/// - `env_raw`（来自环境变量 `PONY_AGENT_SKILL_DIRS`）按声明顺序兜底追加；
+/// - 空项跳过、按首次出现去重，保持用户书写顺序；
+/// - 不做 `~` 展开、不做存在性检查（不存在的根在枚举期自然缺席）。
+pub fn resolve_custom_skill_dirs_merged(
+    store_dirs: &[PathBuf],
+    env_raw: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for path in store_dirs {
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+        if dirs.iter().any(|existing| existing == path) {
+            continue;
+        }
+        dirs.push(path.clone());
+    }
+    for path in resolve_custom_skill_dirs_from(env_raw) {
+        if dirs.iter().any(|existing| existing == &path) {
+            continue;
+        }
+        dirs.push(path);
+    }
+    dirs
+}
+
+/// 解析当前进程的自定义技能根（合并 settings.json 的 `skillDirs` 与 [`PONY_AGENT_SKILL_DIRS_ENV`]）。
 pub fn resolve_custom_skill_dirs() -> Vec<PathBuf> {
-    resolve_custom_skill_dirs_from(std::env::var_os(PONY_AGENT_SKILL_DIRS_ENV).as_deref())
+    let store_dirs = crate::agent::app_settings::AppSettingsStore::new()
+        .load_view()
+        .skill_dirs;
+    let env_raw = std::env::var_os(PONY_AGENT_SKILL_DIRS_ENV);
+    resolve_custom_skill_dirs_merged(&store_dirs, env_raw.as_deref())
 }
 
 /// 返回「当前会参与注入」的指令文件 **canonical 路径**清单（wave-58 契约 F3-4）。
@@ -1062,8 +1099,14 @@ impl WorkspaceHotloader {
                             SKILL_FRONTMATTER_READ_LIMIT,
                         ) {
                             Some((fingerprint, content)) => {
-                                let (parsed_name, description, user_invocable, allowed_tools) =
-                                    parse_skill_metadata(&content, &folder_name);
+                                let (
+                                    parsed_name,
+                                    description,
+                                    user_invocable,
+                                    allowed_tools,
+                                    disable_model_invocation,
+                                    model_invocable,
+                                ) = parse_skill_metadata(&content, &folder_name);
                                 HotloadedSkill {
                                     name: parsed_name,
                                     description,
@@ -1073,8 +1116,8 @@ impl WorkspaceHotloader {
                                     fingerprint,
                                     scope,
                                     rank,
-                                    disable_model_invocation: false,
-                                    model_invocable: true,
+                                    disable_model_invocation,
+                                    model_invocable,
                                 }
                             }
                             None => {
@@ -1405,6 +1448,17 @@ impl WorkspaceHotloader {
         self.render_prompt_prefix_with_budget(constitution_content, skills, catalog_budget, &[])
     }
 
+    /// 构造静态 Prompt 前缀块，技能清单受 [`SkillCatalogBudget`] 约束，并透传外部 omitted 标记。
+    pub fn build_cached_prompt_prefix_with_omissions(
+        &self,
+        constitution_content: Option<&str>,
+        skills: &[HotloadedSkill],
+        catalog_budget: SkillCatalogBudget,
+        omitted: &[SkillOmission],
+    ) -> String {
+        self.render_prompt_prefix_with_budget(constitution_content, skills, catalog_budget, omitted)
+    }
+
     /// 前缀渲染的唯一实现（wave-58 D5' + D2 / L3-B4）：技能清单预算裁剪 + omitted 标记。
     ///
     /// `omitted` 为扫描阶段被跳过的候选（[`SkillOmission`]），其标记与预算裁剪标记共用
@@ -1426,7 +1480,22 @@ impl WorkspaceHotloader {
             }
         }
 
-        if !skills.is_empty() || !omitted.is_empty() {
+        // 分离 model_invocable 与不可供模型调用的技能（PLAN-20261111-02 Step 2）
+        let mut model_skills: Vec<HotloadedSkill> = Vec::new();
+        let mut effective_omitted: Vec<SkillOmission> = omitted.to_vec();
+        for skill in skills {
+            if skill.model_invocable {
+                model_skills.push(skill.clone());
+            } else {
+                effective_omitted.push(SkillOmission {
+                    name: skill.name.clone(),
+                    reason: SkillOmissionReason::ModelInvocationDisabled,
+                    path: skill.path.clone(),
+                });
+            }
+        }
+
+        if !model_skills.is_empty() || !effective_omitted.is_empty() {
             let header = "=== AVAILABLE REUSABLE SKILLS ===\n\
                           The following project-specific skills are available and loadable on demand:\n";
             let header_bytes = header.len();
@@ -1436,7 +1505,7 @@ impl WorkspaceHotloader {
             }
             // wave-58 F2-1 / F1-2：块标量描述可能含换行，清单必须保持「每个技能一行」，
             // 因此渲染时把描述内的换行压平为空格（`HotloadedSkill.description` 本身保持原文）。
-            let lines: Vec<String> = skills
+            let lines: Vec<String> = model_skills
                 .iter()
                 .map(|skill| {
                     // wave-58 L3-B F-1：name / description 均为不可信文本，进入模型可见清单前转义
@@ -1449,55 +1518,89 @@ impl WorkspaceHotloader {
                     )
                 })
                 .collect();
+            let short_lines: Vec<String> = model_skills
+                .iter()
+                .map(|skill| {
+                    format!(
+                        "- `{}` [{}]: (description truncated, load with skill_load)\n",
+                        manifest_display_name(skill),
+                        skill.scope.as_str()
+                    )
+                })
+                .collect();
 
             // 1) 裁剪优先级（与 `scan_skills_with_budget` 的 `by_priority` 同口径）：
             //    rank 小者优先 → 同 rank 项目层优先 → name 字典序 → 原返回顺序（确定性）。
             //    注意：`scan_skills_internal` 的返回顺序是 name 字典序，**不是**优先级顺序，
             //    因此绝不能用「从尾部丢弃」代替优先级裁剪，否则字典序靠后的项目技能会被
             //    全局技能挤掉（wave-58 F1-6 大窗口分支）。
-            let mut priority: Vec<usize> = (0..skills.len()).collect();
+            let mut priority: Vec<usize> = (0..model_skills.len()).collect();
             priority.sort_by(|&left, &right| {
-                skills[left]
+                model_skills[left]
                     .rank
-                    .cmp(&skills[right].rank)
-                    .then(skills[right].scope.cmp(&skills[left].scope))
-                    .then(skills[left].name.cmp(&skills[right].name))
+                    .cmp(&model_skills[right].rank)
+                    .then(model_skills[right].scope.cmp(&model_skills[left].scope))
+                    .then(model_skills[left].name.cmp(&model_skills[right].name))
                     .then(left.cmp(&right))
             });
 
-            // 2) 按优先级选取保留集合（字节预算 + 条目上限）。
-            let mut kept_flags = vec![false; skills.len()];
-            let mut kept_count = 0usize;
-            let mut used = header_bytes;
+            // 2) 两级保留选取（字节预算 + 条目上限，PLAN-20261111-02 Step 4）：
+            //    - 先为条目分配最短行保真底座（只要预算允许，全部技能名均在目录中可见，消除「可载而不知」）
+            //    - 再用剩余预算按优先级将最短行升级为完整描述行（受 max_entries 与字节上限约束）
+            let max_markers_budget = 512;
+            let available_bytes = catalog_budget
+                .max_bytes
+                .saturating_sub(header_bytes + max_markers_budget);
+
+            let mut full_flags = vec![false; model_skills.len()];
+            let mut short_flags = vec![false; model_skills.len()];
+            let mut short_cost = 0usize;
+
             for &index in &priority {
-                if kept_count >= catalog_budget.max_entries {
-                    break;
+                let s_len = short_lines[index].len();
+                if short_cost + s_len <= available_bytes {
+                    short_flags[index] = true;
+                    short_cost += s_len;
                 }
-                let line_bytes = lines[index].len();
-                if used + line_bytes > catalog_budget.max_bytes {
-                    break;
+            }
+
+            let mut used = header_bytes + short_cost;
+            let mut full_count = 0usize;
+            for &index in &priority {
+                if !short_flags[index] || full_count >= catalog_budget.max_entries {
+                    continue;
                 }
-                used += line_bytes;
-                kept_flags[index] = true;
-                kept_count += 1;
+                let upgrade_delta = lines[index].len().saturating_sub(short_lines[index].len());
+                if used + upgrade_delta + max_markers_budget <= catalog_budget.max_bytes {
+                    used += upgrade_delta;
+                    full_flags[index] = true;
+                    short_flags[index] = false;
+                    full_count += 1;
+                }
             }
 
             // 3) 标记行同样吃预算：放不下时按优先级从低到高继续收缩保留集合（有界收敛）。
             loop {
+                // 「被丢弃」= 既没有完整行、也没有最短行（两级渲染都不成立）。
+                // 只按 `full_flags` 判定会把**已渲染短行**的技能同时计入
+                // `omitted skill:<name> (budget)` 诊断行，导致目录自相矛盾
+                // （同一技能既可见又被报告为预算丢弃）。
                 let dropped: Vec<usize> = priority
                     .iter()
                     .copied()
-                    .filter(|&index| !kept_flags[index])
+                    .filter(|&index| !full_flags[index] && !short_flags[index])
                     .collect();
-                let markers = catalog_marker_lines(omitted, skills, &dropped);
+                let markers = catalog_marker_lines(&effective_omitted, &model_skills, &dropped);
                 let markers_bytes: usize = markers.iter().map(String::len).sum();
                 if used + markers_bytes <= catalog_budget.max_bytes {
-                    // 4) 渲染：保留集合按**原返回顺序**输出（渲染顺序不因裁剪而变，前缀稳定），
+                    // 4) 渲染：保留集合按**原返回顺序**输出（全行或最短行，前缀稳定），
                     //    标记按被丢弃者的同一优先级顺序输出。
                     prefix.push_str(header);
-                    for (index, line) in lines.iter().enumerate() {
-                        if kept_flags[index] {
-                            prefix.push_str(line);
+                    for index in 0..model_skills.len() {
+                        if full_flags[index] {
+                            prefix.push_str(&lines[index]);
+                        } else if short_flags[index] {
+                            prefix.push_str(&short_lines[index]);
                         }
                     }
                     for marker in &markers {
@@ -1506,27 +1609,27 @@ impl WorkspaceHotloader {
                     prefix.push_str("\n");
                     return prefix;
                 }
-                // 丢掉优先级最低的保留项（`priority` 已按高→低排序，取反向首个保留者）。
-                match priority.iter().rev().copied().find(|&index| kept_flags[index]) {
-                    Some(weakest) => {
-                        kept_flags[weakest] = false;
-                        // 收缩只做减法：丢弃条目不会让 kept_count 反过来逼近 max_entries，
-                        // 故此处不再维护 kept_count（避免死赋值）。
-                        used -= lines[weakest].len();
-                    }
-                    None => {
-                        // 已无条目可丢：仍要尽量输出扫描 omitted 标记（预算允许时）。
-                        let fallback = catalog_marker_lines(omitted, skills, &[]);
-                        let fallback_bytes: usize = fallback.iter().map(String::len).sum();
-                        if header_bytes + fallback_bytes <= catalog_budget.max_bytes {
-                            prefix.push_str(header);
-                            for marker in &fallback {
-                                prefix.push_str(marker);
-                            }
-                            prefix.push_str("\n");
+                // 超限收缩：先收缩 short_line，再将 full_line 降级为 short_line
+                if let Some(weakest_short) = priority.iter().rev().copied().find(|&index| short_flags[index]) {
+                    short_flags[weakest_short] = false;
+                    used -= short_lines[weakest_short].len();
+                } else if let Some(weakest_full) = priority.iter().rev().copied().find(|&index| full_flags[index]) {
+                    full_flags[weakest_full] = false;
+                    let downgrade_delta = lines[weakest_full].len().saturating_sub(short_lines[weakest_full].len());
+                    used -= downgrade_delta;
+                    short_flags[weakest_full] = true;
+                } else {
+                    // 已无条目可丢：仍要尽量输出扫描 omitted 标记（预算允许时）。
+                    let fallback = catalog_marker_lines(&effective_omitted, &model_skills, &[]);
+                    let fallback_bytes: usize = fallback.iter().map(String::len).sum();
+                    if header_bytes + fallback_bytes <= catalog_budget.max_bytes {
+                        prefix.push_str(header);
+                        for marker in &fallback {
+                            prefix.push_str(marker);
                         }
-                        return prefix;
+                        prefix.push_str("\n");
                     }
+                    return prefix;
                 }
             }
         }
@@ -1623,11 +1726,14 @@ fn manifest_display_name(skill: &HotloadedSkill) -> String {
     }
 }
 
-/// 清单描述（wave-58 L3-B F-1）：先 sanitize 再按 1024 字符截断。
+/// 清单里技能描述的字符上限（收敛至 500 字符，对齐 dsh catalogDescriptionMaxLength=500，PLAN-20261111-02 Step 4）。
+pub const MAX_SKILL_CATALOG_DESCRIPTION_CHARS: usize = 500;
+
+/// 清单描述（wave-58 L3-B F-1）：先 sanitize 再按 500 字符截断。
 fn manifest_description(skill: &HotloadedSkill) -> String {
     truncate_description(
         &sanitize_manifest_token(&skill.description),
-        MAX_SKILL_DESCRIPTION_CHARS,
+        MAX_SKILL_CATALOG_DESCRIPTION_CHARS,
     )
 }
 
@@ -2542,6 +2648,19 @@ fn unquote_scalar(value: &str) -> String {
     value.to_string()
 }
 
+/// 解析 frontmatter 布尔值（对齐 dsh `frontmatterBoolean` 的宽松口径）。
+///
+/// 缺陷背景：`bool::from_str` 只认小写 `true`/`false`，因此 `disable-model-invocation: True`
+/// 会被 `unwrap_or(false)` 静默吃掉 ⇒ 策略闸门 fail-open（大写首字母即可绕过）。
+/// 口径：大小写不敏感，接受 `true/yes/on/1` 与 `false/no/off/0`；其余（含空值）回退 `default`。
+fn parse_frontmatter_bool(raw: &str, default: bool) -> bool {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => true,
+        "false" | "no" | "off" | "0" => false,
+        _ => default,
+    }
+}
+
 /// 把单个 frontmatter 字段写入解析结果。
 fn apply_frontmatter_field(parsed: &mut SkillFrontmatter, key: &str, value: FrontmatterValue) {
     match (key, value) {
@@ -2558,10 +2677,10 @@ fn apply_frontmatter_field(parsed: &mut SkillFrontmatter, key: &str, value: Fron
             parsed.description = Some(items.join(", "));
         }
         ("user-invocable", FrontmatterValue::Scalar(scalar)) => {
-            parsed.user_invocable = Some(scalar.trim().parse().unwrap_or(true));
+            parsed.user_invocable = Some(parse_frontmatter_bool(&scalar, true));
         }
         ("disable-model-invocation", FrontmatterValue::Scalar(scalar)) => {
-            parsed.disable_model_invocation = Some(scalar.trim().parse().unwrap_or(false));
+            parsed.disable_model_invocation = Some(parse_frontmatter_bool(&scalar, false));
         }
         ("allowed-tools", FrontmatterValue::List(items)) => {
             parsed.allowed_tools = items;
@@ -2574,7 +2693,7 @@ fn apply_frontmatter_field(parsed: &mut SkillFrontmatter, key: &str, value: Fron
                 .collect();
         }
         ("model-invocable", FrontmatterValue::Scalar(scalar)) => {
-            parsed.model_invocable = Some(scalar.trim().parse().unwrap_or(true));
+            parsed.model_invocable = Some(parse_frontmatter_bool(&scalar, true));
         }
         _ => {}
     }
@@ -2684,7 +2803,10 @@ fn flatten_single_line(text: &str) -> String {
 ///   自动剥离公共缩进，`description` 不再退化为字面量 `"|"` / `">"`；
 /// - `allowed-tools` 三形态：块列表（`- item`）、行内数组（`[a, b]`）、逗号分隔；
 /// - `description` 超过 [`MAX_SKILL_DESCRIPTION_CHARS`] 字符时按字符边界截断。
-fn parse_skill_metadata(content: &str, fallback_name: &str) -> (String, String, bool, Vec<String>) {
+pub(crate) fn parse_skill_metadata(
+    content: &str,
+    fallback_name: &str,
+) -> (String, String, bool, Vec<String>, bool, bool) {
     let Some(parsed) = parse_skill_frontmatter(content) else {
         return (
             fallback_name.to_string(),
@@ -2694,6 +2816,8 @@ fn parse_skill_metadata(content: &str, fallback_name: &str) -> (String, String, 
             ),
             true,
             Vec::new(),
+            false,
+            true,
         );
     };
 
@@ -2705,11 +2829,20 @@ fn parse_skill_metadata(content: &str, fallback_name: &str) -> (String, String, 
     if description.trim().is_empty() {
         description = extract_fallback_description(content);
     }
+    let disable_model_invocation = parsed.disable_model_invocation.unwrap_or(false);
+    let model_invocable = if disable_model_invocation {
+        false
+    } else {
+        parsed.model_invocable.unwrap_or(true)
+    };
+    let user_invocable = parsed.user_invocable.unwrap_or(true);
     (
         name,
         truncate_description(description.trim_end(), MAX_SKILL_DESCRIPTION_CHARS),
-        parsed.user_invocable.unwrap_or(true),
+        user_invocable,
         parsed.allowed_tools,
+        disable_model_invocation,
+        model_invocable,
     )
 }
 
@@ -2731,7 +2864,7 @@ fn extract_fallback_description(content: &str) -> String {
 fn skill_name_from_frontmatter_prefix(skill_file: &Path) -> Option<String> {
     let (_fingerprint, content) =
         FileFingerprint::compute_bounded(skill_file, SKILL_FRONTMATTER_READ_LIMIT)?;
-    let (name, _description, _user_invocable, _allowed_tools) =
+    let (name, _description, _user_invocable, _allowed_tools, _disable_model, _model_inv) =
         parse_skill_metadata(&content, "");
     if name.trim().is_empty() {
         None
@@ -3140,11 +3273,14 @@ allowed-tools: Bash, Read
 
 # Details
 "#;
-        let (name, desc, user_invocable, tools) = parse_skill_metadata(sample, "fallback");
+        let (name, desc, user_invocable, tools, disable_model_invocation, model_invocable) =
+            parse_skill_metadata(sample, "fallback");
         assert_eq!(name, "awesome-skill");
         assert_eq!(desc, "Comprehensive auditing tool for code.");
         assert!(!user_invocable);
         assert_eq!(tools, vec!["Bash", "Read"]);
+        assert!(!disable_model_invocation);
+        assert!(model_invocable);
     }
 
     #[test]

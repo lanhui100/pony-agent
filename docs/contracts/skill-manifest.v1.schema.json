@@ -3,9 +3,11 @@
   "$id": "https://pony-agent.local/contracts/skill-manifest.v1.schema.json",
   "version": "pony-skill-manifest-v1",
   "title": "Pony Agent Skill Manifest v1",
-  "description": "ADR 0068 决策 1 的 skill manifest 契约：载体为 SKILL.md 的 YAML frontmatter（由 workspace_hotloader.rs 有界解析后归一为 JSON object），消费方是技能热加载与 D3 同名去重（键 = frontmatter name，缺省回落目录名）。键名沿用 frontmatter 字面写法（kebab-case），未知键容忍（解析器忽略未登记键）。",
+  "description": "ADR 0068 决策 1 的 skill manifest 契约：载体为 SKILL.md 的 YAML frontmatter（由 workspace_hotloader.rs 有界解析后归一为 JSON object），消费方是技能热加载与 D3 同名去重（键 = frontmatter name，缺省回落目录名）。键名沿用 frontmatter 字面写法（kebab-case）。**已登记键之外的键仍被容忍（解析器忽略）**；但 `user-invocable` / `disable-model-invocation` / `model-invocable` 三个键已被**消费**（策略闸门），语义见各自 description。布尔口径：大小写不敏感，接受 true/yes/on/1 与 false/no/off/0（对齐 dsh frontmatterBoolean），非法值回退默认。",
   "type": "object",
-  "required": ["name"],
+  "required": [
+    "name"
+  ],
   "additionalProperties": true,
   "properties": {
     "name": {
@@ -19,14 +21,31 @@
     },
     "user-invocable": {
       "type": "boolean",
-      "description": "是否允许用户直接调用；缺省按解析器语义为 true。"
+      "description": "是否允许**人类**直接调用（TUI `/skill:<name>` 手势的唯一闸门）；缺省 true。布尔口径见顶层 description。"
     },
     "allowed-tools": {
       "anyOf": [
-        { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        { "type": "string", "minLength": 1 }
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
       ],
       "description": "技能可用的工具名单；标量写法按逗号切分（解析器 normalize 后等价于数组）。空数组表示不额外授予任何工具。"
+    },
+    "disable-model-invocation": {
+      "type": "boolean",
+      "description": "是否禁止**模型**通过 `skill_load` 工具直接调用；缺省 false。为 true 时：目录不列该技能、`skill_load` 返回 `skill_not_available_for_model_invocation`、人类面 `/skill:<name>` 仍可调用。布尔口径见顶层 description。"
+    },
+    "model-invocable": {
+      "type": "boolean",
+      "description": "**历史键**：`disable-model-invocation` 的早期等价写法（反向语义），仅为向后兼容保留解析；新技能必须用 `disable-model-invocation`。注意 dsh 侧反向拒收该类旧键。解析优先级：`disable-model-invocation: true` 时恒为不可模型调用，否则取本键（缺省 true）。"
     }
   }
 }

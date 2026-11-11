@@ -1,0 +1,128 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "reviewed_commit": "54794a87+worktree(uncommitted, final review snapshot 2026-11-11T19:31+08:00)",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "diff-reviewer",
+    "fresh_context": false,
+    "round": 3
+  },
+  "executed_by": "diff-reviewer",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false
+  },
+  "release_conditions": [
+    "提交信息必须包含 [decl-change-approved]：docs/observability.yaml 在本变更中被修改，audit-diff 的 D1 规则要求显式批准。实测 `audit-diff.sh --repo . --decl-approved` → exit 0 / OK；不带该标记则 FAIL。",
+    "本收据（.dev-team/review-skill-invocation-diff-reviewer.json）与 crates/pony-agent-core/tests/skill_invocation_policy_contract.rs 现为未跟踪文件，需一并 git add 入库（Lead 已确认会入库）。"
+  ],
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+    "crates/pony-agent-core/src/agent/app_settings.rs",
+    "crates/pony-agent-core/src/agent/tools/orchestration.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/projection.rs",
+    "crates/pony-agent-core/src/bin/tui/tests/unknown_slash_command_tests.rs",
+    "crates/pony-agent-core/tests/skill_invocation_policy_contract.rs",
+    "crates/pony-agent-core/tests/wave58_singleton_isolation.rs",
+    "crates/pony-agent-core/src/bin/conformance.rs",
+    "docs/contracts/skill-manifest.v1.schema.json",
+    "docs/observability.yaml",
+    "backlog/tasks.jsonl",
+    "backlog/legacy/issue-triage/current-plan.json",
+    ".agents/notes/proposed/architecture/2026-11-11-skill-invocation-catalog-dsh-alignment.md"
+  ],
+  "findings": [
+    {
+      "file": "docs/contracts/skill-manifest.v1.schema.json",
+      "line": 48,
+      "rule": "GATE_BREAK",
+      "severity": "BLOCKING",
+      "status": "CLOSED",
+      "detail": "【已闭合·round3】`\"deprecated\": true` 已删除、未扩 conformance 白名单。复核证据：①`grep -c deprecated docs/contracts/skill-manifest.v1.schema.json` = 0；②按 conformance.rs:48-83 白名单遍历 schema 全文（含 properties/anyOf/items 递归）→ 非白名单关键字 = 空集，现只剩 draft-07 标准关键字；③`deprecated` 语义未丢，完整保留在 `model-invocable.description`（历史键／反向语义／仅向后兼容／dsh 侧反向拒收／解析优先级）；④conformance 套件 28 passed / 0 failed（此前 9 passed / 19 failed），exit 0。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -c deprecated docs/contracts/skill-manifest.v1.schema.json; ./target/debug/deps/conformance-4e244249affe097e 2>&1 | tail -2   # test result: ok. 28 passed; 0 failed  (直接跑 cargo 预构建的测试二进制，绕过 release 构建的 cargo 锁)"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave58_singleton_isolation.rs",
+      "line": 316,
+      "rule": "REGRESSION",
+      "severity": "BLOCKING",
+      "status": "CLOSED",
+      "detail": "【已闭合·round2】kebab 硬门禁回退已完成（`is_valid_skill_name` / `SkillOmissionReason::InvalidName` / 扫描期 omit 块全部删除；契约测试的 invalid-name 用例替换为布尔用例）。R3 恢复绿且语义正确：探针复现 R3 fixture → skills=3，hostile 名字以压平形式（`evilskill` / `evilname FAKE2 omitted skill:fake2 (too_large)`）仍保留在清单内，符合「转义不丢弃」冻结契约。取舍登记 backlog B079（含非 ASCII 技能名语义缺失）。最终复核：singleton 4 passed / 0 failed。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && ./target/debug/deps/wave58_singleton_isolation-7f7d9b24f77166f9 2>&1 | tail -2   # ok. 4 passed; 0 failed; /tmp/rv/probe2 | head -3"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 2656,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "status": "CLOSED",
+      "detail": "【已闭合·round2】`parse_frontmatter_bool(raw, default)`（大小写不敏感 + true/yes/on/1 与 false/no/off/0，非法值回退默认）已替换三处 `.parse().unwrap_or(..)`（:2680 user-invocable / :2683 disable-model-invocation / :2696 model-invocable）。探针 11 组复验：`True`/`TRUE`/`yes`/`On`/`1`/`'True'` ⇒ disable=true（原 fail-open 关闭）；`off`/`0` ⇒ user_invocable=false；`model-invocable: No` ⇒ false；`nope`/`??` ⇒ 回退默认（与 dsh frontmatterBoolean 一致，且已在 schema description 登记为契约口径）。契约用例 test_skill_frontmatter_boolean_is_case_and_alias_insensitive 通过。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && /tmp/rv/probe7; ./target/debug/deps/skill_invocation_policy_contract-2fd6125634c10403 2>&1 | tail -2   # ok. 7 passed; 0 failed"
+    },
+    {
+      "file": "docs/contracts/skill-manifest.v1.schema.json",
+      "line": 20,
+      "rule": "DOC_CONTRACT",
+      "severity": "BLOCKING",
+      "status": "CLOSED",
+      "detail": "【已闭合·round3】schema 现登记 6 个键：name / description / user-invocable / allowed-tools / disable-model-invocation（现行闸门键，写明目录不列 + skill_load 返回 skill_not_available_for_model_invocation + 人类面仍可调用）/ model-invocable（历史键，反向语义与解析优先级），顶层 description 声明「已登记键之外仍容忍，但三个策略键已被消费」+ 布尔口径；JSON 合法，键集与解析器（workspace_hotloader.rs:2676-2698）逐项对齐，未知键容忍策略未被收紧。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"import json;d=json.load(open('docs/contracts/skill-manifest.v1.schema.json'));print(list(d['properties']))\"; git diff -- docs/contracts/skill-manifest.v1.schema.json | head -40"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/projection.rs",
+      "line": 465,
+      "rule": "DEAD_CODE",
+      "severity": "ADVISORY",
+      "status": "DEFERRED(B076)",
+      "detail": "`if token.starts_with(\"/skill:\") { return None; }` 是死分支（紧随其后的 command_shaped 判据 :469-473 对含 `:` 的 name 恒 false），配套用例 tests/unknown_slash_command_tests.rs:13 在 HEAD 即绿＝假覆盖，不能作为 /skill: 手势证据。已登记 B076（含 /skill: 端到端覆盖与流式入队不展开）。`--bin pony` 125 passed / 0 failed 确认无功能破坏。不阻塞提交：属覆盖缺口而非行为缺陷，且已挂 P2 待办。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '463,476p' crates/pony-agent-core/src/bin/tui/projection.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 1896,
+      "rule": "CONSISTENCY",
+      "severity": "ADVISORY",
+      "status": "DEFERRED(B080)",
+      "detail": "`build_session_delta_notice` 的 added/removed 基于含 model_invocable=false 的 current_skills，会话中途装入 `disable-model-invocation: true` 技能会播报 `- Newly installed skills: [...]`，与目录过滤 + skill_load 拒绝三面矛盾。已登记 B080。不阻塞：仅影响会话中途新增的 human-only 技能，提示词一致性瑕疵，无数据/安全后果。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'Newly installed skills' -B 12 crates/pony-agent-core/src/agent/workspace_hotloader.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 1561,
+      "rule": "BUDGET",
+      "severity": "ADVISORY",
+      "status": "DEFERRED(B075)",
+      "detail": "`max_markers_budget = 512` 硬编码且无条件从条目预算扣除；`max_entries` 语义变为「只约束 full-line 条数」，与 SkillCatalogBudget.max_entries 文档「最多列出的技能条数」不符；`max_bytes==header_bytes==110` 时产物 111 字节（尾换行未计入 used，**既有缺陷**非本次引入）。生产预算区间 [6553,16384]（窗口 ≥32768 token），15×6 预算矩阵实测 0 panic / 0 越界（除 1B 组）/ 0「既渲染又被标 omitted」/ 收缩循环有界收敛。已登记 B075。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'max_markers_budget' -A 6 crates/pony-agent-core/src/agent/workspace_hotloader.rs | head -12; /tmp/rv/probe6 2>/dev/null | tail -3"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 695,
+      "rule": "TEST_HERMETICITY",
+      "severity": "ADVISORY",
+      "status": "DEFERRED(B080)",
+      "detail": "`resolve_custom_skill_dirs()` 读宿主 settings.json，被 scan_skills*（:858/:895/:1324）与 path_permission.rs:649 的技能受信根枚举共用 ⇒ 用例非 hermetic、技能受信根受 settings.json 影响。已登记 B080，修法：用例走既有 hermetic 入口 `*_with_roots`。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '690,700p' crates/pony-agent-core/src/agent/workspace_hotloader.rs; sed -n '645,655p' crates/pony-agent-core/src/agent/path_permission.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 1109,
+      "rule": "DIAGNOSTICS",
+      "severity": "ADVISORY",
+      "status": "WITHDRAWN",
+      "detail": "【已失效】原 finding「invalid_name 的 omission 记目录名而非真实非法名」随 kebab 门禁回退而消失（SkillOmissionReason::InvalidName 与对应 push 均已删除）。B079 若重新引入该校验，应同时修正诊断口径。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -rn 'InvalidName' crates/pony-agent-core/src/agent/workspace_hotloader.rs; echo \"grep exit=$?\""
+    }
+  ],
+  "notes": [
+    "Round 3 实跑凭证（为避开 release 构建的 cargo 锁，直接执行 cargo 预构建的**测试二进制本体**，等价于 `cargo test --test X` 且 .rs 自 19:20:07 未再变动、二进制构建于 19:20:50+）：conformance-4e244249affe097e → 28 passed/0 failed（exit 0）；skill_invocation_policy_contract-2fd6125634c10403 → 7 passed/0 failed；wave58_singleton_isolation-7f7d9b24f77166f9 → 4 passed/0 failed。Lead 侧独立收据（同一三件套 + `--bin pony` 125 + wave42/wave58_*/skill_root_discovery/hotloader_and_mcp + `cargo check --all-targets` exit 0 + `check-decisions.mjs`）与本次复核一致。",
+    "门禁：`audit-diff.sh --repo . --decl-approved` → [OK] 无越界实现、收口点完整（exit 0，扫描 14 个变更文件 / 1077 行新增）。注意未加 `--decl-approved` 时按 D1 判 FAIL ⇒ 提交信息须含 `[decl-change-approved]`（Lead 已确认）。",
+    "size:check 现状：`node scripts/check-file-size.mjs` exit=1，7 new violation(s)/71 over limit —— 属 B077 的 main 既有红（HEAD 54794a87 上即为 5 条），本波未使其性质改变；建议随 B077 另加一条 `cargo test --test 'wave58_*'` 以便机械捕获同类回归（`npm run verify` 不含 cargo test，是本轮 R3 红未被 verify 发现的根因）。",
+    "TUI /skill: 手势复核（tui.rs:10166-10248）：不绕过 add_user_message（:10254 用原文冒泡；display_message 用原文 :10286，会话日志/TurnResult 消费该字段）；错误四态（空名 / 未找到 / user-invocable:false / 正文加载失败）均 set_input 保留原文并 continue；queue_dispatch_deadline 与 queue_dispatch_payload 在每条 continue 前各清一次，无二次消费；手势位于 `if state.is_streaming { push_queued_message }`（:10118）之后 ⇒ 流式入队不展开（B076）。",
+    "parse_skill_metadata 6 元组：4/4 调用点已更新（workspace_hotloader.rs:1109/:2868/:3277、orchestration.rs:808），`pub(crate)` 无 crate 外契约；orchestration.rs:806-816 的 definition 二次检查是活代码（SkillBody.content 含 frontmatter，skill_body.rs:193-205）；`HotloadedSkill` 字面量构造方（tests/wave42_skill_body.rs:112、tests/wave58_context_skills.rs:235）在 HEAD 已含 model_invocable 字段，无编译破坏。",
+    "同提交义务全部闭环：observability 四维声明 ✓（audit-diff OK，需提交标记）；skill-manifest schema ✓；决策记录 `.agents/notes/proposed/...` 含 ## Alternatives considered ✓（留 proposed/ 有书面理由，属 follow-up）；backlog B074-B080 在库 ✓（B074 watchdog / B075 预算边界 / B076 /skill: 覆盖 / B077 size 门禁 / B078 契约面残余 / B079 kebab 回退授权 / B080 delta_notice+hermeticity）。",
+    "最终结论：无 BLOCKING 残留（4 条 BLOCKING 全部 CLOSED：R3 回归、布尔 fail-open、schema 内容缺失、deprecated 门禁回归），4 条 ADVISORY 全部降级为 backlog 待办（B075/B076/B080 各一条+两条），1 条 WITHDRAWN。verdict = PASS，可提交（提交信息带 [decl-change-approved]，并把未跟踪的契约测试与本收据一并入库）。"
+  ]
+}

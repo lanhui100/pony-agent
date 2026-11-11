@@ -11,6 +11,12 @@ use super::*;
 // ── 正例：形如命令词但不在命令表 → 必须被识别为「拼错」 ──────────────────────────
 
 #[test]
+fn skill_gesture_is_not_unknown_command() {
+    assert_eq!(unknown_slash_command("/skill:review"), None);
+    assert_eq!(unknown_slash_command("/skill:review 这个需求怎么写"), None);
+}
+
+#[test]
 fn unknown_command_detects_typo_of_registered_command() {
     assert_eq!(unknown_slash_command("/cleer"), Some("/cleer"));
     assert_eq!(unknown_slash_command("/thikning"), Some("/thikning"));

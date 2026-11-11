@@ -462,6 +462,9 @@ pub const HISTORIC_COMMAND_ALIASES: &[&str] = &["/exit", "/effort"];
 /// - 已知命令后跟参数（`/clear 这个需求怎么拆`）——首 token 命中命令表。
 pub fn unknown_slash_command(input: &str) -> Option<&str> {
     let token = input.trim().split_whitespace().next()?;
+    if token.starts_with("/skill:") {
+        return None;
+    }
     let name = token.strip_prefix('/')?;
     let command_shaped = !name.is_empty()
         && name

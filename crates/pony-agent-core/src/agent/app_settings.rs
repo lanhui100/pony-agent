@@ -98,6 +98,10 @@ pub struct AppSettings {
     /// 契约 G2：`enforcement` 默认 `false`（纯软告警）；只有用户显式 opt-in 才阻断**新** turn。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_governance_policy: Option<crate::agent::usage_governance::UsagePolicy>,
+    /// 自定义技能发现根列表（落盘键 `skillDirs`，缺省为空列表，ISSUE-20261111-009）。
+    /// 与环境变量 `PONY_AGENT_SKILL_DIRS` 共同组成跨仓库技能发现入口。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_dirs: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for AppSettings {
@@ -123,6 +127,7 @@ impl std::fmt::Debug for AppSettings {
             )
             .field("cost_budget_usd", &self.cost_budget_usd)
             .field("usage_governance_policy", &self.usage_governance_policy)
+            .field("skill_dirs", &self.skill_dirs)
             .finish()
     }
 }
@@ -181,6 +186,8 @@ struct AppSettingsStorage {
     cost_budget_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     usage_governance_policy: Option<crate::agent::usage_governance::UsagePolicy>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skill_dirs: Vec<PathBuf>,
 }
 
 impl From<AppSettingsStorage> for AppSettings {
@@ -197,6 +204,7 @@ impl From<AppSettingsStorage> for AppSettings {
             ponysentry_client_token: value.ponysentry_client_token,
             cost_budget_usd: value.cost_budget_usd,
             usage_governance_policy: value.usage_governance_policy,
+            skill_dirs: value.skill_dirs,
         }
     }
 }
@@ -215,6 +223,7 @@ impl From<AppSettings> for AppSettingsStorage {
             ponysentry_client_token: value.ponysentry_client_token,
             cost_budget_usd: value.cost_budget_usd,
             usage_governance_policy: value.usage_governance_policy,
+            skill_dirs: value.skill_dirs,
         }
     }
 }
@@ -499,6 +508,38 @@ mod tests {
         store
             .save_view(AppSettings::default())
             .expect("无 token 保存必须成功");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_dirs_settings_roundtrip_with_camel_case_key() {
+        let dir = temp_settings_dir("skill_dirs_roundtrip");
+        let path = dir.join("settings.json");
+        let store = AppSettingsStore::with_path(path.clone());
+
+        let target_dirs = vec![
+            PathBuf::from("/custom/skills/team-alpha"),
+            PathBuf::from("/custom/skills/team-beta"),
+        ];
+
+        let saved = store
+            .save_view(AppSettings {
+                skill_dirs: target_dirs.clone(),
+                ..Default::default()
+            })
+            .expect("save_view with skill_dirs should succeed");
+
+        assert_eq!(saved.skill_dirs, target_dirs);
+
+        let content = fs::read_to_string(&path).expect("read settings.json");
+        assert!(
+            content.contains("\"skillDirs\""),
+            "settings.json must serialize skill_dirs as skillDirs: {content}"
+        );
+
+        let loaded = store.load_view();
+        assert_eq!(loaded.skill_dirs, target_dirs);
 
         let _ = fs::remove_dir_all(&dir);
     }

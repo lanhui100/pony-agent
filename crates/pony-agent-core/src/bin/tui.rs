@@ -10054,6 +10054,9 @@ fn tui_event_loop(
                                     for (cmd, desc) in AVAILABLE_COMMANDS.iter() {
                                         help.push_str(&format!("\n{:<11}{}", cmd, desc));
                                     }
+                                    help.push_str(
+                                        "\n/skill:<name> 显式调用本地技能（包含仅供人工调用的技能）",
+                                    );
                                     // C18②：流式期可用性说明（旧文案让人以为生成中键盘全失效）。
                                     // 本轮：补 Ctrl+O（过程显示/隐藏），与 /settings 同字段。
                                     help.push_str(
@@ -10159,6 +10162,89 @@ fn tui_event_loop(
                                     }
                                 }
 
+                                // /skill:<name> [extra prompt] 人类面调用手势（PLAN-20261111-02 Step 3）
+                                let (actual_prompt, turn_display) = if input.trim().starts_with("/skill:") {
+                                    let trimmed = input.trim();
+                                    let token = trimmed.split_whitespace().next().unwrap_or(trimmed);
+                                    let skill_name = token.strip_prefix("/skill:").unwrap_or("").trim();
+                                    let extra_prompt = trimmed.strip_prefix(token).unwrap_or("").trim();
+
+                                    if skill_name.is_empty() {
+                                        state.set_input(&input);
+                                        apply_queue_feedback(
+                                            &mut state,
+                                            QueueFeedbackChannel::SystemMessage,
+                                            "命令格式错误：请使用 /skill:<技能名> [额外需求说明]".to_string(),
+                                        );
+                                        queue_dispatch_deadline = None;
+                                        queue_dispatch_payload = None;
+                                        dirty = true;
+                                        continue;
+                                    }
+
+                                    let skill_opt = pony_agent_core::agent::skill_body::resolve_skill_by_name(&state.workspace, skill_name);
+                                    let Some(skill) = skill_opt else {
+                                        state.set_input(&input);
+                                        apply_queue_feedback(
+                                            &mut state,
+                                            QueueFeedbackChannel::SystemMessage,
+                                            format!("未找到技能「{skill_name}」· 请确认 SKILL.md 存在"),
+                                        );
+                                        queue_dispatch_deadline = None;
+                                        queue_dispatch_payload = None;
+                                        dirty = true;
+                                        continue;
+                                    };
+
+                                    if !skill.user_invocable {
+                                        state.set_input(&input);
+                                        apply_queue_feedback(
+                                            &mut state,
+                                            QueueFeedbackChannel::SystemMessage,
+                                            format!("技能「{skill_name}」已配置为禁止人类直接调用（user-invocable: false）"),
+                                        );
+                                        queue_dispatch_deadline = None;
+                                        queue_dispatch_payload = None;
+                                        dirty = true;
+                                        continue;
+                                    }
+
+                                    let body = match pony_agent_core::agent::skill_body::load_skill_body_for_workspace(
+                                        &skill,
+                                        pony_agent_core::agent::skill_body::MAX_SKILL_BODY_BYTES,
+                                        Some(&state.workspace),
+                                    ) {
+                                        Ok(b) => b,
+                                        Err(e) => {
+                                            state.set_input(&input);
+                                            apply_queue_feedback(
+                                                &mut state,
+                                                QueueFeedbackChannel::SystemMessage,
+                                                format!("加载技能「{skill_name}」正文失败：{}", e.message()),
+                                            );
+                                            queue_dispatch_deadline = None;
+                                            queue_dispatch_payload = None;
+                                            dirty = true;
+                                            continue;
+                                        }
+                                    };
+
+                                    let injected = if extra_prompt.is_empty() {
+                                        format!(
+                                            "[User invoked skill: {}]\n=== SKILL {} ===\n{}\n\n请严格遵循上述技能规范执行。",
+                                            skill.name, skill.name, body.content
+                                        )
+                                    } else {
+                                        format!(
+                                            "[User invoked skill: {}]\n=== SKILL {} ===\n{}\n\n{}",
+                                            skill.name, skill.name, body.content, extra_prompt
+                                        )
+                                    };
+                                    (injected, Some(input.clone()))
+                                } else {
+                                    (input.clone(), None)
+                                };
+
                                 // wave-39 R8：新一轮开始前清空本轮回执，并按当前
                                 // provider/model 解析上下文窗口（解析不到则回退默认值）。
                                 state.begin_turn_usage();
@@ -10196,7 +10282,8 @@ fn tui_event_loop(
                                 // wave-38 R1.4：唯一发送点改用 build_turn_input（携带
                                 // workspace_id / reasoning_effort / session_id）。
                                 // 在 spawn 前组装，避免把整个 TuiState move 进线程。
-                                let turn_input = build_turn_input(&state, input, prov_id, mdl_id);
+                                let mut turn_input = build_turn_input(&state, actual_prompt, prov_id, mdl_id);
+                                turn_input.display_message = turn_display;
                                 // 契约 F-G：把取消令牌与 current_turn_id 句柄带进轮次线程，
                                 // 使 Esc 能取消「下一轮」并把 stop_turn 打到**当前**轮。
                                 let cancel_for_rounds = goal_round_cancel.clone();
