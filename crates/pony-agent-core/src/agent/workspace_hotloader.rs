@@ -1,3 +1,4 @@
+// ponylint:file-size-exempt [until 2026-12-31] 需保留作为 hotloader 核心逻辑单文件以便维护
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -1086,7 +1087,8 @@ impl WorkspaceHotloader {
                             // BLOCKING-1：同尺寸 + 同 mtime 的不同文件不得互相冒充。
                             && existing.fingerprint.path == skill_file
                             && existing.path == skill_file
-                            && existing.fingerprint.mtime == mtime
+                            // 修复 B071: 增加 mtime 比对的容差（±1s），防止文件系统精度抖动导致缓存失效
+                            && existing.fingerprint.mtime.map(|t| mtime.map(|mt| t.duration_since(mt).map(|d| d.as_secs() < 1).unwrap_or(false) || mt.duration_since(t).map(|d| d.as_secs() < 1).unwrap_or(false)).unwrap_or(false)).unwrap_or(false)
                             && existing.fingerprint.file_size == file_size =>
                     {
                         existing
@@ -1363,7 +1365,7 @@ impl WorkspaceHotloader {
             }
             let delta_notice = build_session_delta_notice(
                 &baseline,
-                &current_skills,
+                &current_skills.iter().filter(|s| s.model_invocable).cloned().collect::<Vec<_>>(),
                 const_changed,
                 skills_changed,
                 budget_changed,

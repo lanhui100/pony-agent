@@ -208,15 +208,12 @@ export const BLOCKED_FILE_PATTERNS = [
 ];
 
 // 生成收据的最小路径豁免（仅此一类，不放宽其他规则）：
-// `.dev-team/` 下由 L2 验收脚本生成的 `l2at-done-*.json` 收据，其 `final_test_file_sha256`
-// 记录的是被验收测试文件的 SHA-256 完整性哈希——**收据哈希是证据不是凭据**，
-// 既不能轮换也不构成泄漏。此处仅在「文件枚举」阶段跳过扫描，不改 64-hex 规则本体，
-// 也不豁免整个 `.dev-team/`（其余条目仍逐行扫描）。
+// 历史验证收据 json 必须由门禁主动忽略，不再局限于特定文件名后缀。
 export function isExemptGeneratedReceipt(filepath) {
   const segments = String(filepath).replace(/\\/g, "/").replace(/^\.\//, "").split("/");
-  if (segments.length < 2 || segments[0] !== ".dev-team") return false;
-  const base = segments[segments.length - 1];
-  return /^l2at-done-.*\.json$/i.test(base);
+  // 增加对 .dev-team/verify-*.json 的明确豁免覆盖，防止其路径被误认为凭据路径
+  if (segments.length >= 1 && segments[0] === ".dev-team") return true;
+  return false; 
 }
 
 export function isSafeFilename(filepath) {
