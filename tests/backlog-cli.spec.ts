@@ -4,8 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  acquireLease,
   archiveFileFor,
   doctor,
+  heartbeatLease,
+  reapStaleLeases,
+  releaseLease,
   ledgerPaths,
   lintAll,
   list,
@@ -216,5 +220,63 @@ describe('CLI 冒烟', () => {
       encoding: 'utf8'
     });
     expect(readJsonl(paths.tasks)).toHaveLength(1);
+  });
+});
+
+describe('任务级租约（单任务单会话，不同任务可并行）', () => {
+  it('同一任务被两个会话抢占时第二个失败，同 owner 重入刷新心跳', () => {
+    seed([baseRow()]);
+    const lease = acquireLease(paths, 'B056', { owner: 'session-A' });
+    expect(lease.owner).toBe('session-A');
+    expect(() => acquireLease(paths, 'B056', { owner: 'session-B' })).toThrow(/已被 session-A 持有/);
+    const again = acquireLease(paths, 'B056', { owner: 'session-A', now: Date.now() + 1000 });
+    expect(again.heartbeat_at).not.toBe(lease.heartbeat_at);
+  });
+
+  it('不同任务可被不同会话并行持有', () => {
+    seed([baseRow(), baseRow({ id: 'B057', metadata: { fingerprint: 'fp-2' } })]);
+    expect(acquireLease(paths, 'B056', { owner: 'session-A' }).owner).toBe('session-A');
+    expect(acquireLease(paths, 'B057', { owner: 'session-B' }).owner).toBe('session-B');
+  });
+
+  it('release 只能由持有者执行，释放后锁文件消失', () => {
+    seed([baseRow()]);
+    acquireLease(paths, 'B056', { owner: 'session-A' });
+    expect(() => releaseLease(paths, 'B056', { owner: 'session-B' })).toThrow(/属于 session-A/);
+    expect(releaseLease(paths, 'B056', { owner: 'session-A' }).released).toBe(true);
+    expect(releaseLease(paths, 'B056', { owner: 'session-A' }).released).toBe(false);
+  });
+
+  it('会话停止后租约过期可被 reap 回收（不阻塞其它会话）', () => {
+    seed([baseRow()]);
+    acquireLease(paths, 'B056', { owner: 'dead-session', now: Date.now() - 3 * 60 * 60 * 1000 });
+    const reaped = reapStaleLeases(paths, { maxAgeMs: 60 * 60 * 1000 });
+    expect(reaped).toEqual(['B056']);
+    expect(() => acquireLease(paths, 'B056', { owner: 'new-session' })).not.toThrow();
+  });
+
+  it('lint 发现记录 owner 与租约 owner 冲突时判违规', () => {
+    seed([baseRow({
+      status: 'in_progress',
+      owner: 'session-A',
+      touched_paths: ['crates/x'],
+      leased_at: '2026-11-11T00:00:00.000Z',
+      heartbeat_at: new Date().toISOString()
+    })]);
+    acquireLease(paths, 'B056', { owner: 'session-B' });
+    const res = lintAll(paths);
+    expect(res.ok).toBe(false);
+    expect(res.problems.join('\n')).toMatch(/租约与记录 owner 冲突/);
+  });
+
+  it('in_progress 但缺少租约锁文件（疑似手改状态）判违规', () => {
+    seed([baseRow({
+      status: 'in_progress',
+      owner: 'session-A',
+      touched_paths: ['crates/x'],
+      leased_at: new Date().toISOString(),
+      heartbeat_at: new Date().toISOString()
+    })]);
+    expect(lintAll(paths).problems.join('\n')).toMatch(/缺少租约锁文件/);
   });
 });

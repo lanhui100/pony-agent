@@ -28,7 +28,8 @@ export const STATUSES = ['todo', 'in_progress', 'done'];
 const TOP_KEYS = new Set([
   'id', 'category', 'priority', 'status', 'title', 'description',
   'created_at', 'updated_at', 'owner', 'touched_paths', 'evidence',
-  'closed_at', 'archived_at', 'source_ref', 'metadata'
+  'closed_at', 'archived_at', 'source_ref', 'metadata',
+  'leased_at', 'heartbeat_at'
 ]);
 const META_KEYS = new Set(['fingerprint', 'occurred_count', 'triage_context']);
 const MAX_CONTEXT_BYTES = 8 * 1024;
@@ -49,7 +50,8 @@ export function ledgerPaths(root) {
     root,
     tasks: path.join(root, 'backlog', 'tasks.jsonl'),
     archiveDir: path.join(root, 'backlog', 'archive'),
-    nextId: path.join(root, 'backlog', '.next-id')
+    nextId: path.join(root, 'backlog', '.next-id'),
+    locksDir: path.join(root, 'backlog', '.locks')
   };
 }
 
@@ -186,6 +188,19 @@ export function lintAll(paths) {
       seen.set(row.id, true);
     }
   }
+  for (const row of active) {
+    if (row.status !== 'in_progress') continue;
+    const lease = readLease(paths, row.id);
+    if (lease && row.owner && lease.owner !== row.owner) {
+      problems.push(`tasks.jsonl (${row.id}) 租约与记录 owner 冲突：记录=${row.owner} 锁=${lease.owner}`);
+    }
+    if (!lease && row.heartbeat_at) {
+      const beat = Date.parse(row.heartbeat_at);
+      if (Number.isFinite(beat) && Date.now() - beat < DEFAULT_LEASE_TTL_MS) {
+        problems.push(`tasks.jsonl (${row.id}) 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
+      }
+    }
+  }
   const nextId = readHighWater(paths);
   if (nextId > 0) {
     for (const row of [...active, ...archived]) {
@@ -244,6 +259,96 @@ export function record(paths, { category, priority = 'P1', title, description, f
   return { type: 'created', row };
 }
 
+
+/** 任务级租约：同一任务同时只允许一个会话持有；不同任务可并行。 */
+export const DEFAULT_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
+
+function lockFile(paths, id) {
+  return path.join(paths.locksDir, `${id}.lock`);
+}
+
+export function readLease(paths, id) {
+  const file = lockFile(paths, id);
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 获取任务租约（O_EXCL 原子创建）。
+ * 已有他人租约且未过期 → 抛错；同 owner 重入 → 刷新心跳。
+ */
+export function acquireLease(paths, id, { owner, sessionId, ttlMs = DEFAULT_LEASE_TTL_MS, now = Date.now() } = {}) {
+  if (!owner) throw new Error('租约必须提供 owner（会话标识）');
+  const existing = readLease(paths, id);
+  if (existing) {
+    if (existing.owner !== owner) {
+      throw new Error(`任务 ${id} 已被 ${existing.owner} 持有（${existing.acquired_at}），不得并发编辑；如确认其已失效可先 reap`);
+    }
+    return heartbeatLease(paths, id, { owner, now });
+  }
+  fs.mkdirSync(paths.locksDir, { recursive: true });
+  const payload = {
+    task_id: id,
+    owner,
+    session_id: sessionId ?? owner,
+    pid: process.pid,
+    acquired_at: new Date(now).toISOString(),
+    heartbeat_at: new Date(now).toISOString(),
+    ttl_ms: ttlMs
+  };
+  try {
+    const fd = fs.openSync(lockFile(paths, id), 'wx');
+    try {
+      fs.writeSync(fd, JSON.stringify(payload));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if (error.code === 'EEXIST') throw new Error(`任务 ${id} 的租约被并发抢占，请重试`);
+    throw error;
+  }
+  return payload;
+}
+
+export function heartbeatLease(paths, id, { owner, now = Date.now() } = {}) {
+  const cur = readLease(paths, id);
+  if (!cur) throw new Error(`任务 ${id} 没有活跃租约`);
+  if (owner && cur.owner !== owner) throw new Error(`任务 ${id} 的租约属于 ${cur.owner}`);
+  const next = { ...cur, heartbeat_at: new Date(now).toISOString() };
+  atomicWrite(lockFile(paths, id), JSON.stringify(next));
+  return next;
+}
+
+export function releaseLease(paths, id, { owner } = {}) {
+  const cur = readLease(paths, id);
+  if (!cur) return { released: false };
+  if (owner && cur.owner !== owner) throw new Error(`任务 ${id} 的租约属于 ${cur.owner}，不得释放`);
+  fs.rmSync(lockFile(paths, id), { force: true });
+  return { released: true, previous: cur };
+}
+
+/** 回收过期租约（会话崩溃/无心跳）：返回被回收的任务 id 列表。 */
+export function reapStaleLeases(paths, { maxAgeMs = DEFAULT_LEASE_TTL_MS, now = Date.now(), dryRun = false } = {}) {
+  if (!fs.existsSync(paths.locksDir)) return [];
+  const reaped = [];
+  for (const name of fs.readdirSync(paths.locksDir)) {
+    if (!name.endsWith('.lock')) continue;
+    const file = path.join(paths.locksDir, name);
+    const lease = readLease(paths, name.replace(/\.lock$/, ''));
+    const beat = lease?.heartbeat_at ? Date.parse(lease.heartbeat_at) : fs.statSync(file).mtimeMs;
+    if (Number.isFinite(beat) && now - beat > maxAgeMs) {
+      if (!dryRun) fs.rmSync(file, { force: true });
+      reaped.push(lease?.task_id ?? name.replace(/\.lock$/, ''));
+    }
+  }
+  return reaped;
+}
+
 const TRANSITIONS = new Map([
   ['todo', new Set(['in_progress'])],
   ['in_progress', new Set(['in_progress', 'todo'])]
@@ -263,6 +368,8 @@ export function update(paths, id, { status, owner, touchedPaths }) {
     if (!touchedPaths?.length) throw new Error('进入 in_progress 必须提供 touched_paths');
     row.owner = owner;
     row.touched_paths = [...new Set(touchedPaths)];
+    row.leased_at = row.leased_at ?? new Date().toISOString();
+    row.heartbeat_at = new Date().toISOString();
   }
   row.updated_at = new Date().toISOString();
   const errors = validateRecord(row);
@@ -308,9 +415,25 @@ export function doctor(paths) {
     const n = Number.parseInt(id.replace(/^B/, ''), 10);
     return Number.isFinite(n) ? Math.max(max, n) : max;
   }, 0);
+  for (const row of active) {
+    if (row.status !== 'in_progress') continue;
+    const lease = readLease(paths, row.id);
+    if (lease && row.owner && lease.owner !== row.owner) {
+      problems.push(`tasks.jsonl (${row.id}) 租约与记录 owner 冲突：记录=${row.owner} 锁=${lease.owner}`);
+    }
+    if (!lease && row.heartbeat_at) {
+      const beat = Date.parse(row.heartbeat_at);
+      if (Number.isFinite(beat) && Date.now() - beat < DEFAULT_LEASE_TTL_MS) {
+        problems.push(`tasks.jsonl (${row.id}) 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
+      }
+    }
+  }
   const nextId = readHighWater(paths);
   if (nextId === 0 && maxSeen > 0) report.issues.push('高水位文件缺失（.next-id）');
   if (nextId > 0 && nextId <= maxSeen) report.issues.push(`高水位 B${String(nextId).padStart(3, '0')}（下一候选）未越过最大编号 B${String(maxSeen).padStart(3, '0')}`);
+  report.leases = active
+    .map(row => ({ id: row.id, lease: readLease(paths, row.id) }))
+    .filter(item => item.lease);
   const lint = lintAll(paths);
   report.issues.push(...lint.problems);
   report.ok = report.issues.length === 0;
@@ -401,17 +524,51 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     case 'start': {
-      const row = update(paths, rest[0], {
+      const id = rest[0];
+      const owner = arg('owner', process.env.DSH_SESSION_ID ?? process.env.USER ?? 'me');
+      acquireLease(paths, id, { owner, sessionId: arg('session', owner) });
+      const row = update(paths, id, {
         status: 'in_progress',
-        owner: arg('owner', process.env.USER ?? 'me'),
+        owner,
         touchedPaths: (arg('paths') ?? '').split(',').map(s => s.trim()).filter(Boolean)
       });
-      console.log(`[backlog] ${row.id} → in_progress @${row.owner}`);
+      console.log(`[backlog] ${row.id} → in_progress @${row.owner}（租约已获取）`);
       return 0;
     }
     case 'release': {
-      const row = update(paths, rest[0], { status: 'todo' });
-      console.log(`[backlog] ${row.id} → todo`);
+      const id = rest[0];
+      releaseLease(paths, id, { owner: arg('owner') });
+      const row = update(paths, id, { status: 'todo' });
+      console.log(`[backlog] ${row.id} → todo（租约已释放）`);
+      return 0;
+    }
+    case 'heartbeat': {
+      const lease = heartbeatLease(paths, rest[0], { owner: arg('owner') });
+      console.log(`[backlog] ${lease.task_id} 心跳 ${lease.heartbeat_at}`);
+      return 0;
+    }
+    case 'reap': {
+      const reaped = reapStaleLeases(paths, {
+        maxAgeMs: Number(arg('minutes', '120')) * 60_000,
+        dryRun: rest.includes('--dry-run')
+      });
+      console.log(reaped.length ? `[backlog] 回收过期租约：${reaped.join(', ')}` : '[backlog] 无过期租约');
+      return 0;
+    }
+    case 'annotate': {
+      const id = rest[0];
+      const rows = readJsonl(paths.tasks);
+      const row = rows.find(r => r.id === id);
+      if (!row) throw new Error(`未找到 ${id}`);
+      const description = arg('description');
+      if (description !== undefined) row.description = description;
+      const priority = arg('priority');
+      if (priority !== undefined) row.priority = priority;
+      row.updated_at = new Date().toISOString();
+      const errors = validateRecord(row);
+      if (errors.length) throw new Error(`记录非法：${errors.join('；')}`);
+      writeJsonl(paths.tasks, rows);
+      console.log(`[backlog] ${row.id} 已更新注释`);
       return 0;
     }
     case 'resolve': {
@@ -461,7 +618,7 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     default:
-      console.log('用法: backlog {record|list|start|release|resolve|lint|doctor|import-triage}');
+      console.log('用法: backlog {record|list|start|heartbeat|release|resolve|annotate|lint|doctor|reap|import-triage}');
   return 1;
   }
 }
