@@ -1,0 +1,15 @@
+{
+  "wave": "adr0123-supplement",
+  "captured_at": "2026-11-12T02:41:00+08:00",
+  "baseline_commit": "d5fa1673",
+  "scope": "pony-agent-core 跨轮工具上下文（ADR 0123）既有测试",
+  "command": "cargo test -p pony-agent-core --features test-support --test multi_turn_tool_context_test",
+  "exit_code": 0,
+  "elapsed": "0.51s (cargo 已预热)",
+  "cases": [
+    {"name": "test_store_level_e2e_append_snapshot_and_retrieve_multiturn_flow", "result": "ok"},
+    {"name": "test_multi_turn_tool_transcript_retained_and_pruned_in_new_turn", "result": "ok"},
+    {"name": "test_incomplete_tool_roundtrip_is_safely_recovered_not_wiped", "result": "ok"}
+  ],
+  "conclusion": "绿相基线成立；本波任何「基线绿→现红」判为回归（IMPL-DEFECT）"
+}
