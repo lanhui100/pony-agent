@@ -19,7 +19,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 3030
+      "value": 3003
     },
     {
       "path": "crates/pony-agent-core/src/agent/context.rs",
@@ -33,7 +33,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 10780
+      "value": 10774
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
@@ -89,14 +89,14 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 4235
+      "value": 4230
     },
     {
       "path": "crates/pony-agent-core/src/agent/governed_executor.rs",
       "kind": "fn-lines",
       "name": "decide_with_context",
       "occurrence": 0,
-      "value": 209
+      "value": 206
     },
     {
       "path": "crates/pony-agent-core/src/agent/hook_commands.rs",
@@ -145,7 +145,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 9771
+      "value": 9768
     },
     {
       "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
@@ -166,7 +166,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 13845
+      "value": 13896
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
@@ -264,21 +264,21 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 5776
+      "value": 5801
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
       "kind": "fn-lines",
       "name": "ensure_history_graph",
       "occurrence": 0,
-      "value": 275
+      "value": 272
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/tests.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6887
+      "value": 6739
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/tests.rs",
@@ -292,7 +292,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6249
+      "value": 6267
     },
     {
       "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
@@ -393,60 +393,11 @@
       "value": 3601
     },
     {
-      "path": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
-      "kind": "fn-lines",
-      "name": "scan_skills_internal",
-      "occurrence": 0,
-      "value": 292
-    },
-    {
       "path": "crates/pony-agent-core/src/bin/conformance.rs",
       "kind": "fn-lines",
       "name": "validate",
       "occurrence": 0,
       "value": 286
-    },
-    {
-      "path": "crates/pony-agent-core/src/bin/tui.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 11629
-    },
-    {
-      "path": "crates/pony-agent-core/src/bin/tui.rs",
-      "kind": "fn-depth",
-      "name": "hydrate_state_from_session",
-      "occurrence": 0,
-      "value": 9
-    },
-    {
-      "path": "crates/pony-agent-core/src/bin/tui.rs",
-      "kind": "fn-depth",
-      "name": "tui_event_loop",
-      "occurrence": 0,
-      "value": 16
-    },
-    {
-      "path": "crates/pony-agent-core/src/bin/tui.rs",
-      "kind": "fn-lines",
-      "name": "message_lines_with_ctx",
-      "occurrence": 0,
-      "value": 258
-    },
-    {
-      "path": "crates/pony-agent-core/src/bin/tui.rs",
-      "kind": "fn-lines",
-      "name": "tui_event_loop",
-      "occurrence": 0,
-      "value": 2566
-    },
-    {
-      "path": "crates/pony-agent-core/src/bin/tui.rs",
-      "kind": "fn-lines",
-      "name": "ui",
-      "occurrence": 0,
-      "value": 873
     },
     {
       "path": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
@@ -468,6 +419,13 @@
       "name": "spawn_otlp_sink",
       "occurrence": 0,
       "value": 10
+    },
+    {
+      "path": "crates/pony-agent-core/tests/tui_dialog_wave39.rs",
+      "kind": "fn-lines",
+      "name": "a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface",
+      "occurrence": 0,
+      "value": 221
     },
     {
       "path": "crates/pony-agent-core/tests/wave48_otel_export_diagnostics.rs",
