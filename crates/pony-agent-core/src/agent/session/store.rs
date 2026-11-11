@@ -9,7 +9,8 @@ use super::types::{
     collect_env_info, collect_env_info_for_workspace, session_workspace_cwd, AttachmentAsset,
     AttachmentAssetMap, AttachmentAssetQuery, AttachmentCleanupRequest, AttachmentCleanupResult,
     AttachmentLifecycleStatus, EnvironmentInfo, HistoryBranch, HistoryCheckoutMode,
-    HistoryCheckoutStatus, HistoryCursor, HistoryCursorMode, HistoryNode, HistoryNodeKind,
+    HistoryCheckoutStatus, HistoryCursor, HistoryCursorMode, HistoryMessageKind, HistoryNode,
+    HistoryNodeKind, CANCELLED_TURN_SENTINEL,
     HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext, HistoryStateAuditSummary,
     LongTermMemoryRecord, MessageStatus, RunControlAuditActionSummary,
     RunControlAuditCurrentContext, RunControlAuditSummary, SessionAttachment,
@@ -68,8 +69,24 @@ fn reject_stale_cursor_version(
     ))
 }
 
+/// 检查点里最多列出多少条工具步骤：一轮 90+ 个 hop 全列会把检查点本身变成新的
+/// 上下文炸弹（我们正是在修「上下文里塞了太多东西」），超出部分折叠成一行省略标记。
+///
+/// **唯一真源**：事件投影（`agent::projection`）与 TUI 一律经本函数格式化，不得自留副本
+/// 与自有阈值（同一事实一个家）。
+pub const CHECKPOINT_TOOL_LINE_LIMIT: usize = 20;
+
 /// wave-tui-session-resilience C5：中断轮次检查点的唯一持久化投影纯函数。
 /// 旧会话无检查点内容（空正文/空工具活动）⇒ `None`，读取方逐字回放既有历史。
+///
+/// 形态约定（写路径与事件投影**逐字同构**）：
+/// ```text
+/// [中断轮次检查点]
+/// <已渲染正文，可缺省>
+/// 已执行的工具步骤：
+/// - Run 检查端口监听与进程
+/// - （其余 3 步已省略）
+/// ```
 pub fn interrupted_turn_checkpoint_text(
     prior_assistant_text: &str,
     tool_activities: &[String],
@@ -90,9 +107,15 @@ pub fn interrupted_turn_checkpoint_text(
     }
     if !tools.is_empty() {
         checkpoint.push_str("\n已执行的工具步骤：");
-        for tool in tools {
+        for tool in tools.iter().take(CHECKPOINT_TOOL_LINE_LIMIT) {
             checkpoint.push_str("\n- ");
             checkpoint.push_str(tool);
+        }
+        if tools.len() > CHECKPOINT_TOOL_LINE_LIMIT {
+            checkpoint.push_str(&format!(
+                "\n- （其余 {} 步已省略）",
+                tools.len() - CHECKPOINT_TOOL_LINE_LIMIT
+            ));
         }
     }
     Some(checkpoint)
@@ -496,6 +519,27 @@ impl SessionStore {
         provider_native_transcript: Option<Vec<Value>>,
         attachments: Vec<SessionAttachment>,
     ) -> Result<SessionSnapshot, SessionError> {
+        self.append_turn_fallible_with_kind(
+            session_id,
+            user_message,
+            assistant_message,
+            provider_native_transcript,
+            attachments,
+            None,
+        )
+    }
+
+    /// 同 [`SessionStore::append_turn_fallible`]，但显式声明 assistant 行的合成种类
+    /// （成功轮 `None`；取消/失败轮传 [`HistoryMessageKind`]）。
+    pub fn append_turn_fallible_with_kind(
+        &mut self,
+        session_id: Option<&str>,
+        user_message: &str,
+        assistant_message: &str,
+        provider_native_transcript: Option<Vec<Value>>,
+        attachments: Vec<SessionAttachment>,
+        kind: Option<HistoryMessageKind>,
+    ) -> Result<SessionSnapshot, SessionError> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         // PA-095 #2：事件源物化——事件能力后端先请求提交本会话缓冲（commit 先于
         // 清空，由注册闭包保证），再按事件表物化本 turn 的消息文本；消息文本以
@@ -544,6 +588,12 @@ impl SessionStore {
         let before_state = self.ensure_session(&session_key).clone();
         let mut staged_session = before_state.clone();
         let transcript_delta: Vec<Value> = provider_native_transcript.clone().unwrap_or_default();
+        // 合成记录（取消/中断）在历史图上即「未完成轮」：`TurnCancelled` 是既有分类口径
+        // （见 `classify_turn_node_kind`），kind 与文本嗅探必须同判，不得分叉。
+        let node_kind = match kind {
+            Some(_) => HistoryNodeKind::TurnCancelled,
+            None => HistoryNodeKind::TurnCommitted,
+        };
         {
             ensure_history_graph(&mut staged_session);
             prepare_session_for_new_turn(&mut staged_session);
@@ -559,6 +609,7 @@ impl SessionStore {
                 content: assistant_content,
                 attachments: Vec::new(),
                 reasoning_content: assistant_reasoning,
+                kind,
                 ..Default::default()
             });
             if staged_session.history.len() > HISTORY_EMERGENCY_LIMIT {
@@ -575,7 +626,9 @@ impl SessionStore {
                 memory_write_hook_executor.as_ref(),
             );
             refresh_session_metadata(&mut staged_session, true);
-            commit_history_node_from_live_state(&mut staged_session, HistoryNodeKind::TurnCommitted, None);
+            // 合成记录（取消/中断）在历史图上就是「未完成轮」，与文本嗅探同口径；
+            // 成功轮恒为 TurnCommitted。
+            commit_history_node_from_live_state(&mut staged_session, node_kind, None);
             let window_start = history_len_before.min(staged_session.history.len());
             appended_user = staged_session.history.get(window_start).cloned();
             appended_assistant = staged_session.history.get(window_start + 1).cloned();
@@ -669,12 +722,35 @@ impl SessionStore {
         provider_native_transcript: Option<Vec<Value>>,
         attachments: Vec<SessionAttachment>,
     ) -> SessionSnapshot {
-        match self.append_turn_fallible(
+        self.append_turn_with_kind(
             session_id,
             user_message,
             assistant_message,
             provider_native_transcript,
             attachments,
+            None,
+        )
+    }
+
+    /// 同 [`SessionStore::append_turn`]，但显式声明 assistant 行是否为**运行时合成的
+    /// 中断记录**（[`HistoryMessageKind`]）。成功轮传 `None`；取消/失败轮由运行时传入，
+    /// 展示层据此渲染一行状态条而不是把过程清单当模型正文直出。
+    pub fn append_turn_with_kind(
+        &mut self,
+        session_id: Option<&str>,
+        user_message: &str,
+        assistant_message: &str,
+        provider_native_transcript: Option<Vec<Value>>,
+        attachments: Vec<SessionAttachment>,
+        kind: Option<HistoryMessageKind>,
+    ) -> SessionSnapshot {
+        match self.append_turn_fallible_with_kind(
+            session_id,
+            user_message,
+            assistant_message,
+            provider_native_transcript,
+            attachments,
+            kind,
         ) {
             Ok(snapshot) => snapshot,
             Err(e) => {
@@ -4055,9 +4131,10 @@ fn classify_turn_node_kind(assistant_message: &str) -> HistoryNodeKind {
     let trimmed = assistant_message.trim();
     // wave-3 L3-B：中断轮次检查点文本属于 cancelled 终态的 additive 投影，
     // 不得因不再是精确占位文案而把失败轮改判为正常完成轮。
-    if trimmed == "用户终止，发送消息可继续。"
-        || trimmed.contains("[中断轮次检查点]")
-    {
+    //
+    // 该文本嗅探**只服务无 kind 的写入路径**（`append_failed_turn*` 与旧会话回放）；
+    // 主对话热路径（`append_turn_with_kind`）按结构化 kind 分类，不猜文本。
+    if trimmed == CANCELLED_TURN_SENTINEL || trimmed.contains("[中断轮次检查点]") {
         HistoryNodeKind::TurnCancelled
     } else {
         HistoryNodeKind::TurnCommitted

@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::session::{TraceTimelineEntry, TurnHistoryMessage, TurnTraceRecord};
+use crate::agent::session::{
+    HistoryMessageKind, TraceTimelineEntry, TurnHistoryMessage, TurnTraceRecord,
+};
 use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity};
 use crate::agent::turn_event::{TurnEndReason, TurnEvent};
 
@@ -58,10 +60,6 @@ struct PendingTurnArtifacts {
     has_assistant_message: bool,
 }
 
-/// 检查点里最多列出多少条工具步骤：一轮 90+ 个 hop 全列会把检查点本身变成新的
-/// 上下文炸弹（我们正是在修「上下文里塞了太多东西」），超出部分折叠成一行省略标记。
-const CHECKPOINT_TOOL_LINE_LIMIT: usize = 20;
-
 impl PendingTurnArtifacts {
     fn begin(turn_id: &str) -> Self {
         Self {
@@ -71,23 +69,11 @@ impl PendingTurnArtifacts {
     }
 
     /// 与运行时同构的中断检查点文本；无正文且无工具步骤 ⇒ `None`（不造空壳消息）。
+    ///
+    /// 步骤条数与省略标记**由纯函数本身决定**（`CHECKPOINT_TOOL_LINE_LIMIT` 只有一个家），
+    /// 投影侧不得自留阈值副本——两处阈值分居是「改一处漏一处」的温床。
     fn checkpoint_text(&self) -> Option<String> {
-        let tools: Vec<String> = if self.tool_names.len() > CHECKPOINT_TOOL_LINE_LIMIT {
-            let mut kept: Vec<String> = self
-                .tool_names
-                .iter()
-                .take(CHECKPOINT_TOOL_LINE_LIMIT)
-                .cloned()
-                .collect();
-            kept.push(format!(
-                "（其余 {} 步已省略）",
-                self.tool_names.len() - CHECKPOINT_TOOL_LINE_LIMIT
-            ));
-            kept
-        } else {
-            self.tool_names.clone()
-        };
-        crate::agent::session::interrupted_turn_checkpoint_text(&self.chunks, &tools)
+        crate::agent::session::interrupted_turn_checkpoint_text(&self.chunks, &self.tool_names)
     }
 }
 
@@ -145,6 +131,7 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                             model_name: None,
                             token_count: None,
                             reasoning_content: None,
+                            kind: None,
                         },
                     ));
                 }
@@ -194,6 +181,7 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                             // usage 仅消息元数据展示（不参与 MetricsProjection totals，防双计数）。
                             token_count: usage.as_ref().and_then(|u| u.total_tokens),
                             reasoning_content: reasoning_content.clone(),
+                            kind: None,
                         },
                     ));
                 }
@@ -204,6 +192,12 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                 // 失败/中断轮：事件流没有 assistant/message，此处用过程累积合成一条
                 // 中断检查点，等价于 dsh 的 `assistant/message{interrupted:true}`。
                 if !matches!(reason, TurnEndReason::Completed) {
+                    // 合成记录的结构化身份：终态决定 kind。在结构体字面量**之外**求值，
+                    // 避免把展示语义的 match 埋到嵌套深处（也是 file-size 门禁要的形状）。
+                    let checkpoint_kind = match reason {
+                        TurnEndReason::Cancelled => HistoryMessageKind::Cancelled,
+                        _ => HistoryMessageKind::Interrupted,
+                    };
                     if let Some(pending) = state.pending.take() {
                         if pending.turn_id == *turn_id && !pending.has_assistant_message {
                             if let Some(text) = pending.checkpoint_text() {
@@ -218,6 +212,7 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                                         model_name: None,
                                         token_count: None,
                                         reasoning_content: None,
+                                        kind: Some(checkpoint_kind),
                                     },
                                 ));
                             }
@@ -261,6 +256,7 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                             model_name: None,
                             token_count: None,
                             reasoning_content: None,
+                            kind: None,
                         },
                     ),
                 );

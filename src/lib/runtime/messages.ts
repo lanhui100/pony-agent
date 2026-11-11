@@ -18,7 +18,10 @@ import {
   traceReasoningContent,
   traceToolActivities
 } from "./trace";
-import { stripCancelledTurnSentinel } from "./cancelled-turn";
+import {
+  interruptedRecordStatusLine,
+  stripCancelledTurnSentinel
+} from "./cancelled-turn";
 
 export function cloneMessages(messages?: ChatMessage[] | null) {
   return (messages ?? []).map((message) => ({ ...message }));
@@ -473,12 +476,16 @@ export function hydrateMessagesFromHistory(
     const hasTraceError = currentTrace?.phase === "failed" || Boolean(traceError);
     const hasErrorState = item.status === "error" || hasTraceError || (!currentTrace && restoredMessage?.status === "error");
     const errorDetail = hasTraceError ? (traceError || restoredErrorDetail) : (currentTrace ? null : restoredErrorDetail);
+    // L2（dsh 对齐）：合成中断记录（取消/失败轮）的历史 content 是**模型上下文载体**
+    // （已渲染正文 + 过程清单），不是给人看的正文。信息流只出一行状态；步骤明细由
+    // trace 派生的工具消息承载（见下方 appendToolMessagesForTurn）。
+    const interruptedLine = interruptedRecordStatusLine(item.content, item.kind);
     messages.push({
       id: restoredMessage?.id ?? `history-assistant-${turnIndex}`,
       turnId: currentTurnId,
       role: "assistant",
       // PA-118：取消回合哨兵句仅作展示层清洗（历史语义/分类不变）
-      content: stripCancelledTurnSentinel(item.content),
+      content: interruptedLine ?? stripCancelledTurnSentinel(item.content),
       attachments: [],
       status: hasErrorState ? "error" : "done",
       reasoningContent: item.reasoningContent ?? restoredMessage?.reasoningContent ?? traceReasoningContent(currentTrace),

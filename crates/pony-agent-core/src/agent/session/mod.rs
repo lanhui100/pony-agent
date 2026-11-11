@@ -111,7 +111,7 @@ pub use types::{
     collect_env_info, AttachmentAsset, AttachmentAssetQuery, AttachmentCleanupRequest,
     AttachmentCleanupResult, AttachmentLifecycleStatus, AttachmentReference, EnvironmentInfo,
     HistoryBranch, HistoryCheckoutMode, HistoryCheckoutStatus, HistoryCursor, HistoryCursorMode,
-    HistoryNode, HistoryNodeKind, HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext,
+    CANCELLED_TURN_SENTINEL, HistoryMessageKind, HistoryNode, HistoryNodeKind, HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext,
     HistoryStateAuditSummary, LongTermMemoryRecord, MessageStatus, RunControlAuditActionSummary,
     RunControlAuditCurrentContext, RunControlAuditSummary, SessionAttachment, SessionError,
     SessionOverview, SessionSnapshot, SessionState, SessionVersion, SessionVersionMap,

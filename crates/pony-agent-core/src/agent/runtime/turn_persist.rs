@@ -95,6 +95,9 @@ impl AgentRuntime {
         provider_native_transcript: Option<Vec<Value>>,
         attachments: Vec<SessionAttachment>,
         workspace_mode: Option<&str>,
+        // L2：本轮的 assistant 行是否为运行时合成的中断记录（取消/失败）。
+        // 成功轮传 `None`；它坐实「载体种类」，展示层不再嗅探文本。
+        assistant_kind: Option<HistoryMessageKind>,
     ) -> PersistedTurnOutcome {
         // PA-095 #2：物化前置——在获取 sessions 写锁之前请求提交本会话缓冲事件
         // （flush 闭包需要 sessions 写锁；持锁调用会自锁死锁）。提交后 append_turn
@@ -114,12 +117,13 @@ impl AgentRuntime {
                 eprintln!("[pony-agent] sessions rwlock poisoned: {e}, recovering");
                 e.into_inner()
             })
-            .append_turn(
+            .append_turn_with_kind(
                 session_id,
                 user_message,
                 assistant_message,
                 provider_native_transcript,
                 attachments,
+                assistant_kind,
             );
         let retrieved = self.context_builder.retrieve_context_state(
             user_message,
@@ -721,6 +725,7 @@ impl AgentRuntime {
             provider_native_transcript,
             Vec::new(),
             None,
+            Some(HistoryMessageKind::Interrupted),
         );
     }
 
@@ -733,6 +738,8 @@ impl AgentRuntime {
         workspace_mode: Option<&str>,
         prior_assistant_text: &str,
         tool_activities: Vec<String>,
+        // L1：本轮已闭合的工具往返 → native transcript 片段（无往返 ⇒ `None`）。
+        provider_native_transcript: Option<Vec<Value>>,
     ) -> PersistedTurnOutcome {
         // wave-tui-session-resilience C5：中断轮次把已落盘正文 + 工具步骤一并投影为
         // additive 检查点；旧会话无步骤时回落既有占位文案，读取方按历史文本回放。
@@ -750,9 +757,10 @@ impl AgentRuntime {
                 .unwrap_or("runtime"),
             "cancelled",
             None,
-            None,
+            provider_native_transcript,
             attachments,
             workspace_mode,
+            Some(HistoryMessageKind::Cancelled),
         )
     }
 

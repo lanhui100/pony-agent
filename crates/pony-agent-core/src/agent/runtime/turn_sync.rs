@@ -1063,6 +1063,7 @@ impl AgentRuntime {
             provider_native_transcript,
             attachments,
             input.workspace_mode.as_deref(),
+            None,
         );
         let turn_duration_ms = Some(turn_started_at.elapsed().as_millis() as u64);
         let checkpoint_hook_outcome =

@@ -553,6 +553,44 @@ pub(super) fn native_transcript_for_failed_turn(
     user_message: &str,
     hop_records: &[ToolTurnHopRecord],
 ) -> Option<Vec<Value>> {
+    native_transcript_with_interrupt_note(
+        protocol,
+        user_message,
+        hop_records,
+        UPSTREAM_INTERRUPTED_NOTE,
+    )
+}
+
+/// 取消轮的 native transcript 片段：与失败轮**同构**，差别只在中断事实的措辞
+/// （「用户终止」而不是「上游中断」）——模型需要区分「我要不要再试」与「用户不想继续」。
+///
+/// 存在意义：取消轮此前不写 transcript，只能退回文本检查点把过程清单当成
+/// assistant 正文塞进上下文；有本函数后 openai 家族会话的取消轮与失败轮同构，
+/// 文本检查点退化为**非 native provider 的兼容载体**。
+pub(super) fn native_transcript_for_cancelled_turn(
+    protocol: &crate::agent::provider::ProviderProtocol,
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+) -> Option<Vec<Value>> {
+    native_transcript_with_interrupt_note(
+        protocol,
+        user_message,
+        hop_records,
+        USER_CANCELLED_NOTE,
+    )
+}
+
+const UPSTREAM_INTERRUPTED_NOTE: &str =
+    "（本轮上游调用中断，未产出最终回复；上面的工具往返是已执行的真实步骤。）";
+const USER_CANCELLED_NOTE: &str =
+    "（本轮由用户终止，未产出最终回复；上面的工具往返是已执行的真实步骤。）";
+
+fn native_transcript_with_interrupt_note(
+    protocol: &crate::agent::provider::ProviderProtocol,
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+    interrupt_note: &str,
+) -> Option<Vec<Value>> {
     if hop_records.is_empty() {
         return None;
     }
@@ -565,11 +603,9 @@ pub(super) fn native_transcript_for_failed_turn(
             &hop.tool_result,
         ));
     }
-    const INTERRUPTED_NOTE: &str =
-        "（本轮上游调用中断，未产出最终回复；上面的工具往返是已执行的真实步骤。）";
     transcript.push(provider_native_assistant_message_with_reasoning_value(
-        INTERRUPTED_NOTE,
-        Some(&Value::String(INTERRUPTED_NOTE.to_string())),
+        interrupt_note,
+        Some(&Value::String(interrupt_note.to_string())),
     ));
     Some(transcript)
 }
@@ -758,5 +794,40 @@ mod failed_turn_transcript_tests {
     fn failed_turn_without_hops_writes_nothing() {
         let protocol = crate::agent::provider::ProviderProtocol::OpenAiCompletions;
         assert!(native_transcript_for_failed_turn(&protocol, "hi", &[]).is_none());
+    }
+
+    /// L1：取消轮与失败轮**结构同构**（闭合往返 + 带 reasoning 的 assistant 收尾），
+    /// 差别只在中断事实的措辞——模型必须能区分「上游挂了（可重试）」与「用户不想继续」。
+    #[test]
+    fn cancelled_turn_transcript_keeps_failed_shape_with_its_own_note() {
+        let protocol = crate::agent::provider::ProviderProtocol::OpenAiCompletions;
+        let hops = vec![hop("call-1", Some("thinking-1"))];
+        let cancelled = native_transcript_for_cancelled_turn(&protocol, "停一下", &hops)
+            .expect("有工具往返就必须产出 transcript");
+        let failed = native_transcript_for_failed_turn(&protocol, "停一下", &hops)
+            .expect("有工具往返就必须产出 transcript");
+
+        // 结构同构。
+        assert_eq!(cancelled.len(), failed.len());
+        let last = cancelled.last().unwrap();
+        assert_eq!(last["role"], "assistant");
+        assert!(
+            last.get("tool_calls").is_none(),
+            "末条不得带 tool_calls：孤儿调用会让闭合校验失败"
+        );
+        assert!(
+            last.get("reasoning_content").is_some(),
+            "末条必须带 reasoning_content"
+        );
+
+        // 措辞不同（同一事实的两种终态不得互相冒充）。
+        let cancelled_note = cancelled.last().unwrap()["content"].as_str().unwrap();
+        let failed_note = failed.last().unwrap()["content"].as_str().unwrap();
+        assert_ne!(cancelled_note, failed_note);
+        assert!(cancelled_note.contains("用户终止"), "实际：{cancelled_note}");
+        assert!(failed_note.contains("上游调用中断"), "实际：{failed_note}");
+
+        // 无往返 ⇒ 不写（由文本检查点兜底）。
+        assert!(native_transcript_for_cancelled_turn(&protocol, "hi", &[]).is_none());
     }
 }

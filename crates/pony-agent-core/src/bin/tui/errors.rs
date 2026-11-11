@@ -233,33 +233,53 @@ pub fn should_fold_error_detail(error: &str) -> bool {
 }
 
 /// C5/C6：把中断 turn 的已落盘步骤投影为可续传检查点（向后兼容：空输入返回 None）。
-#[allow(unused_variables)]
+///
+/// **不得在此复制实现**：真值源是 `pony_agent_core::agent::session::interrupted_turn_checkpoint_text`
+/// （`session/store.rs`）。此处曾有一份逐字复制品，「改一处漏一处」的风险由 L2 收口
+/// （同一事实一个家）。保留本入口只为 C1–C8 契约测试的调用面稳定。
 pub fn interrupted_turn_checkpoint(
     prior_assistant_text: &str,
     tool_activities: &[String],
 ) -> Option<String> {
-    let text = prior_assistant_text.trim();
-    let tools: Vec<&str> = tool_activities
-        .iter()
-        .map(|tool| tool.trim())
-        .filter(|tool| !tool.is_empty())
-        .collect();
-    if text.is_empty() && tools.is_empty() {
-        return None;
-    }
-    let mut checkpoint = String::from("[中断轮次检查点]");
-    if !text.is_empty() {
-        checkpoint.push('\n');
-        checkpoint.push_str(text);
-    }
-    if !tools.is_empty() {
-        checkpoint.push_str("\n已执行的工具步骤：");
-        for tool in tools {
-            checkpoint.push_str("\n- ");
-            checkpoint.push_str(tool);
+    pony_agent_core::agent::session::interrupted_turn_checkpoint_text(
+        prior_assistant_text,
+        tool_activities,
+    )
+}
+
+/// 取消终态的**一行状态**（面向用户；过程清单不进正文）。
+pub const INTERRUPTED_CANCELLED_LINE: &str = "上一轮已停止，发送消息可继续。";
+
+/// 上游中断/崩溃收口的**一行状态**（面向用户；步骤明细由 trace 工具行承载）。
+pub const INTERRUPTED_FAILED_LINE: &str = "上一轮中断，已保留已执行的步骤记录。";
+
+const CHECKPOINT_MARKER: &str = "[中断轮次检查点]";
+
+/// L2（dsh 对齐）：合成中断记录的一行状态文案。
+///
+/// 判定顺序：结构化 `kind` **优先**；旧会话无 kind ⇒ 回退 `content` 标记嗅探。
+/// 两条路径给出同一句文案——这正是「载体种类」成为结构化事实后，展示层不再猜文本的理由。
+///
+/// `None` ⇒ 这是模型真实产出，调用方按正文渲染。
+pub fn interrupted_record_status_line(
+    content: &str,
+    kind: Option<pony_agent_core::agent::session::HistoryMessageKind>,
+) -> Option<&'static str> {
+    use pony_agent_core::agent::session::HistoryMessageKind;
+    match kind {
+        Some(HistoryMessageKind::Cancelled) => Some(INTERRUPTED_CANCELLED_LINE),
+        Some(HistoryMessageKind::Interrupted) => Some(INTERRUPTED_FAILED_LINE),
+        None => {
+            let trimmed = content.trim();
+            if trimmed == pony_agent_core::agent::session::CANCELLED_TURN_SENTINEL {
+                Some(INTERRUPTED_CANCELLED_LINE)
+            } else if trimmed.starts_with(CHECKPOINT_MARKER) {
+                Some(INTERRUPTED_FAILED_LINE)
+            } else {
+                None
+            }
         }
     }
-    Some(checkpoint)
 }
 
 /// C6：resume 时从检查点接续，返回应追加到已完成历史之后的可见文本；不重复已完成 turn。
@@ -279,4 +299,51 @@ pub fn resume_from_checkpoint(completed_history: &str, checkpoint: Option<&str>)
     }
     resumed.push_str(checkpoint);
     resumed
+}
+
+#[cfg(test)]
+mod interrupted_record_status_tests {
+    use super::*;
+    use pony_agent_core::agent::session::HistoryMessageKind;
+
+    const CHECKPOINT: &str = "[中断轮次检查点]\n已执行的工具步骤：\n- Run 探测";
+
+    /// 结构化 `kind` 优先：同一段落库文本，两种终态给出不同的一句话。
+    #[test]
+    fn kind_takes_precedence_over_text() {
+        assert_eq!(
+            interrupted_record_status_line(CHECKPOINT, Some(HistoryMessageKind::Cancelled)),
+            Some(INTERRUPTED_CANCELLED_LINE)
+        );
+        assert_eq!(
+            interrupted_record_status_line(CHECKPOINT, Some(HistoryMessageKind::Interrupted)),
+            Some(INTERRUPTED_FAILED_LINE)
+        );
+    }
+
+    /// 旧会话无 `kind`：按落库标记回退，文案与 kind 路径一致（零迁移）。
+    #[test]
+    fn legacy_rows_fall_back_to_marker_sniffing() {
+        assert_eq!(
+            interrupted_record_status_line(CHECKPOINT, None),
+            Some(INTERRUPTED_FAILED_LINE)
+        );
+        assert_eq!(
+            interrupted_record_status_line(
+                pony_agent_core::agent::session::CANCELLED_TURN_SENTINEL,
+                None
+            ),
+            Some(INTERRUPTED_CANCELLED_LINE)
+        );
+    }
+
+    /// 普通正文不得被改写（前缀判定，不是包含判定）。
+    #[test]
+    fn plain_answer_and_marker_suffix_are_untouched() {
+        assert_eq!(interrupted_record_status_line("正常的模型回答", None), None);
+        assert_eq!(
+            interrupted_record_status_line(&format!("前置说明\n{CHECKPOINT}"), None),
+            None
+        );
+    }
 }

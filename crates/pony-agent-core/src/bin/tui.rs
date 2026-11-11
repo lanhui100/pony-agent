@@ -7939,6 +7939,13 @@ fn hydrate_state_from_session(
                 }
 
                 // wave-tui-session-resilience C2：assistant 历史同样经 S1 清洗。
+                //
+                // L2（dsh 对齐）：合成中断记录（取消/失败轮）的落库文本是**模型上下文载体**
+                // （已渲染正文 + 过程清单），不是给人看的正文——跳过它，只由末尾的单行状态
+                // 承载展示；步骤明细已由上方 trace 工具行逐条渲染。
+                if interrupted_record_status_line(&hist.content, hist.kind).is_some() {
+                    continue;
+                }
                 let (content, _) = sanitize_model_protocol_text(&hist.content);
                 state.messages.push(ChatMessage {
                     role: MessageRole::Assistant,
@@ -7950,32 +7957,36 @@ fn hydrate_state_from_session(
         }
     }
 
-    // wave-tui-session-resilience C6：未完成 turn 的 additive 检查点随历史回放接续展示；
-    // 旧会话无检查点字段 ⇒ None ⇒ 逐字回放既有历史，不重复已完成 turn。
-    let mut resumed_checkpoint: Option<String> = None;
-    for hist in &session_snapshot.history {
-        if hist.role == "assistant" && hist.content.contains("[中断轮次检查点]") {
-            resumed_checkpoint = Some(hist.content.clone());
-            break;
-        }
-    }
-    if let Some(checkpoint) = resumed_checkpoint.as_deref() {
+    // L2（dsh 对齐）：中断轮只留**一行状态**（"上一轮已停止/中断"），不再把检查点原文
+    // 当正文回放。判定顺序：结构化 `kind` 优先，旧会话回退标记嗅探
+    // （`interrupted_record_status_line`）。只取最后一条——更早的中断轮之后既然还有对话，
+    // 就说明会话已经继续过。
+    let last_interrupted_line = session_snapshot
+        .history
+        .iter()
+        .rev()
+        .find_map(|hist| {
+            if hist.role != "assistant" {
+                return None;
+            }
+            interrupted_record_status_line(&hist.content, hist.kind)
+        });
+    if let Some(line) = last_interrupted_line {
+        // `resume_from_checkpoint` 的幂等判据（已完成文本里已含该行则不重复）在这里就是
+        // 「同一条状态不得出现两次」的守卫。
         let completed = state
             .messages
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let continued = resume_from_checkpoint(&completed, Some(checkpoint));
+        let continued = resume_from_checkpoint(&completed, Some(line));
         if continued.len() > completed.len() {
-            let tail = continued[completed.len()..].trim_start_matches('\n');
-            if !tail.is_empty() {
-                state.messages.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: format!("已接续中断轮次：\n{tail}"),
-                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                });
-            }
+            state.messages.push(ChatMessage {
+                role: MessageRole::System,
+                content: line.to_string(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            });
         }
     }
 

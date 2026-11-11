@@ -7,6 +7,21 @@ use crate::agent::turn_flow::emit_stream_failed_attributed;
 /// 仅在本模块内用作标记（绝不下发到宿主表面，也不进入任何落库字段）。
 const STREAM_CANCELLED_HANDLED_SENTINEL: &str = "__wave64_stream_cancelled_handled__";
 
+/// L1（dsh 对齐）：取消轮的 native transcript 片段——**只在已闭合的工具往返存在时**生成。
+///
+/// 取消轮没有 `assistant/message`，此前只能靠「文本检查点」把过程清单当成 assistant
+/// 正文塞进下一轮上下文。dsh 的做法是「在中断处补齐调用/结果配对」，本函数即那一步：
+/// 已完成的 hop 原样保留（调用与结果成对），末条用中断事实收口（带 reasoning，
+/// 见 `native_transcript_for_cancelled_turn`）。无往返 ⇒ `None`，由文本检查点为
+/// 非 native provider 兜底。
+fn cancelled_turn_native_transcript(
+    provider: &ProviderManager,
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+) -> Option<Vec<Value>> {
+    native_transcript_for_cancelled_turn(provider.protocol(), user_message, hop_records)
+}
+
 /// wave-64 R1（BLOCKING）：终态失败派发的 **terminal-once 闸门**（内联 failed 派发块共用）。
 ///
 /// `false` ⇒ 该轮已有终态派发者（C5 宽限监督已收口 cancelled / 已派发过 failed）：
@@ -163,6 +178,9 @@ impl AgentRuntime {
             Some(turn_started_at.elapsed().as_millis() as u64),
             build_context_observation,
             partial_assistant_text,
+            // 本调用面的三个调用点都在**工具阶段之前**：本轮没有已闭合的工具往返，
+            // 因此不写 transcript，由文本检查点承载（与失败轮同一口径）。
+            None,
         );
     }
 
@@ -296,7 +314,8 @@ impl AgentRuntime {
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
-                        accumulated_turn_text.as_str());
+                        accumulated_turn_text.as_str(),
+                        cancelled_turn_native_transcript(provider, user_message, &hop_records));
                     return;
                 }
                 emit_stream_event(
@@ -500,7 +519,8 @@ impl AgentRuntime {
                         first_token_latency.get(),
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
-                        accumulated_turn_text.as_str());
+                        accumulated_turn_text.as_str(),
+                        cancelled_turn_native_transcript(provider, user_message, &hop_records));
                     return;
                 }
 
@@ -1235,6 +1255,7 @@ impl AgentRuntime {
                     Some(turn_started_at.elapsed().as_millis() as u64),
                     Some(context_observation.clone()),
                     accumulated_turn_text.as_str(),
+                    cancelled_turn_native_transcript(provider, user_message, &hop_records),
                 );
                 return;
             }
@@ -1489,6 +1510,7 @@ impl AgentRuntime {
                 ),
                 attachments,
                 input.workspace_mode.as_deref(),
+                None,
             );
             emit_stream_event(
                 sink,
@@ -1980,6 +2002,8 @@ impl AgentRuntime {
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(prepared.build_context_observation.clone()),
                 "",
+                // 决策阶段之前取消：本轮没有已闭合的工具往返。
+                None,
             );
             otel_turn_scope.set_phase("cancelled");
             return;
@@ -3023,6 +3047,8 @@ impl AgentRuntime {
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
                 first_decision.output_text.as_str(),
+                // 工具分派失败：没有任何已闭合的工具往返。
+                None,
             );
             otel_turn_scope.set_phase("cancelled");
             return;
@@ -3124,6 +3150,8 @@ impl AgentRuntime {
                 Some(turn_started_at.elapsed().as_millis() as u64),
                 Some(build_context_observation.clone()),
                 first_decision.output_text.as_str(),
+                // 无工具返回分支取消：本轮没有已闭合的工具往返。
+                None,
             );
             // wave-54 C2：取消轮同样落已发生调用的加权速度真值（records 为空 ⇒ 仅 calls=0）。
             crate::agent::turn_flow::record_turn_speed_truth(
@@ -3254,6 +3282,7 @@ impl AgentRuntime {
             ),
             attachments,
             input.workspace_mode.as_deref(),
+            None,
         );
         emit_stream_event(
             sink,

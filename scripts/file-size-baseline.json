@@ -229,21 +229,21 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 3549
+      "value": 3578
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
       "kind": "fn-lines",
       "name": "handle_stream_tool_turn",
       "occurrence": 0,
-      "value": 1584
+      "value": 1588
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
       "kind": "fn-lines",
       "name": "start_turn_stream_with_control_and_facts",
       "occurrence": 0,
-      "value": 1728
+      "value": 1735
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
@@ -257,14 +257,14 @@
       "kind": "fn-lines",
       "name": "run_turn_inner",
       "occurrence": 0,
-      "value": 620
+      "value": 621
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 5699
+      "value": 5776
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
@@ -278,7 +278,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6820
+      "value": 6887
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/tests.rs",
@@ -292,7 +292,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6239
+      "value": 6249
     },
     {
       "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
@@ -313,7 +313,7 @@
       "kind": "fn-lines",
       "name": "load_store_normalized",
       "occurrence": 0,
-      "value": 483
+      "value": 486
     },
     {
       "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
@@ -411,7 +411,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 11618
+      "value": 11629
     },
     {
       "path": "crates/pony-agent-core/src/bin/tui.rs",

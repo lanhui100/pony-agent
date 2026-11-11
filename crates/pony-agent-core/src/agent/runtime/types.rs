@@ -210,7 +210,9 @@ pub struct TurnStreamEvent {
 }
 
 
-pub(super) const CANCELLED_TURN_MESSAGE: &str = "用户终止，发送消息可继续。";
+/// 取消回合哨兵句：字符串真源在 `session::CANCELLED_TURN_SENTINEL`（这里只是本模块别名，
+/// 避免同一条线协议出现第二个字面量）。
+pub(super) const CANCELLED_TURN_MESSAGE: &str = crate::agent::session::CANCELLED_TURN_SENTINEL;
 
 pub(super) const HOOK_FAILTURN_HANDLED_SENTINEL: &str = "__hook_failturn_handled__";
 

@@ -71,8 +71,10 @@ Status: implemented
   - `runtime/tests.rs::fail_stream_turn_with_hook_dispatch_forwards_partial_text`：失败后
     `snapshot.history` 必须含该轮 user 原话与已产出正文。
 - 残余风险（靠 review / 下一步）：
-  1. **取消路径仍未写 transcript**（`persist_cancelled_turn_outcome` 传 `None`），native 会话的取消轮
-     依旧是「上下文隐身」；同一套 `native_transcript_for_failed_turn` 可直接复用，属下一步。
+  1. ~~**取消路径仍未写 transcript**（`persist_cancelled_turn_outcome` 传 `None`），native 会话的取消轮
+     依旧是「上下文隐身」；同一套 `native_transcript_for_failed_turn` 可直接复用，属下一步。~~
+     **已闭环**（2026-11-11）：取消轮复用同一构造（措辞区分「用户终止」），见
+     [`2026-11-11-interrupted-turn-context-vs-display.md`](2026-11-11-interrupted-turn-context-vs-display.md)。
   2. **压缩对 native 会话基本失效**：`should_compress` 只看文本历史、压缩后也只
      `replace_session_history`，transcript 完全不动 ⇒ 92 hop 的轮次增长不触发压缩。已在方案中列为 P1。
   3. **双 24 条滑窗**（`store.rs` 的 `DEFAULT_HISTORY_LIMIT` 与 `context.rs` 的

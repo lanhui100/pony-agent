@@ -223,6 +223,30 @@ pub struct HistoryCursor {
     pub checkout_status: HistoryCheckoutStatus,
 }
 
+/// 取消回合的哨兵句（PA-118）：后端把它作为取消轮的消息文本落库，历史分类
+/// （`classify_turn_node_kind`）、TUI 与桌面端展示清洗都以它为准——**唯一真源**。
+///
+/// 改这句话等于改一条线上协议：历史里已有的旧句不会跟着变，因此读取方必须仍然
+/// 认得旧句（见 `stripCancelledTurnSentinel` / `interrupted_record_status_line`）。
+pub const CANCELLED_TURN_SENTINEL: &str = "用户终止，发送消息可继续。";
+
+/// 历史行「载体种类」：区分**模型真实产出**与**运行时合成的中断记录**。
+///
+/// 为什么需要它：中断/失败轮没有任何 `assistant/message`，历史里必须补一条 assistant 行
+/// 才能让下一轮模型知道「做过什么、停在哪」。但这条行不是模型说的话，它同时被信息流
+/// （人读）消费——一份字符串服务两个诉求必然有一方受损。因此把「这是合成记录」变成
+/// **结构化事实**（本枚举），展示层据此渲染一行状态条，读写语义不变。
+///
+/// 旧会话无该字段（`None`）⇒ 消费者按 `content` 回退既有判定（标记嗅探），零迁移。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryMessageKind {
+    /// 用户主动终止：`content` = 已渲染正文 + 已执行步骤清单。
+    Cancelled,
+    /// 上游失败 / 崩溃收口：`content` 形态同上，错误细节由 trace 承载。
+    Interrupted,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnHistoryMessage {
@@ -242,6 +266,9 @@ pub struct TurnHistoryMessage {
     pub token_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// 合成记录种类（见 [`HistoryMessageKind`]）。`None` = 模型真实产出或旧会话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<HistoryMessageKind>,
 }
 
 impl TurnHistoryMessage {

@@ -70,6 +70,7 @@ fn serde_roundtrip_enriched_metadata() {
         model_name: Some("gpt-5".to_string()),
         token_count: Some(42),
         reasoning_content: Some("thinking...".to_string()),
+        kind: None,
     };
     let json = serde_json::to_string(&msg).expect("serialize");
     let deserialized: TurnHistoryMessage = serde_json::from_str(&json).expect("deserialize");
@@ -180,6 +181,7 @@ fn snapshot_mixed_metadata_preserves_existing() {
         model_name: Some("existing-model".to_string()),
         token_count: Some(99),
         reasoning_content: Some("existing".to_string()),
+        kind: None,
     };
     let empty_trace: Vec<TurnTraceRecord> = Vec::new();
     let mut history = vec![msg];
@@ -6816,5 +6818,70 @@ fn continuation_only_turns_do_not_pollute_title_turn_count_or_resume_list() {
         .find(|item| item.conversation_id == session_id)
         .expect("会话应出现在列表");
     assert!(!overview.continuation_only);
+}
+
+/// L2：合成中断记录必须落成**结构化事实**（`kind`），展示层因此不必嗅探文案；
+/// 同时历史图仍按「未完成轮」分类（`kind` 与文本判定同判，不得分叉）。
+#[test]
+fn append_turn_with_kind_marks_synthetic_interruption_row() {
+    let mut store = SessionStore::memory_only();
+    let session_id = "kind-session";
+    let checkpoint = interrupted_turn_checkpoint_text("已做一半", &["Run 探测".to_string()])
+        .expect("有正文与步骤就必须产出检查点");
+    let snapshot = store.append_turn_with_kind(
+        Some(session_id),
+        "继续",
+        &checkpoint,
+        None,
+        Vec::new(),
+        Some(HistoryMessageKind::Cancelled),
+    );
+
+    let assistant = snapshot.history.last().expect("必须落一条 assistant 行");
+    assert_eq!(assistant.role, "assistant");
+    assert_eq!(
+        assistant.kind,
+        Some(HistoryMessageKind::Cancelled),
+        "取消轮必须带结构化 kind（展示层唯一判据）"
+    );
+    // 历史图分类：合成记录落地即「未完成轮」，与文本判定同判（不得分叉）。
+    let interrupted_node = store
+        .sessions
+        .get(session_id)
+        .and_then(|session| session.history_nodes.last())
+        .expect("历史图必须存在");
+    assert_eq!(interrupted_node.kind, HistoryNodeKind::TurnCancelled);
+
+    // 成功轮的 kind 恒为 None（不得被合成记录污染）。
+    let committed = store.append_turn_with_kind(
+        Some(session_id),
+        "再来",
+        "好的",
+        None,
+        Vec::new(),
+        None,
+    );
+    assert_eq!(
+        committed.history.last().unwrap().kind,
+        None,
+        "模型真实产出不得带 kind"
+    );
+}
+
+/// L3：步骤上限与省略标记由纯函数**唯一**决定（投影侧不再自留阈值副本）。
+#[test]
+fn checkpoint_text_collapses_steps_beyond_limit() {
+    let tools: Vec<String> = (0..25).map(|index| format!("Run 步骤{index}")).collect();
+    let text = interrupted_turn_checkpoint_text("", &tools).expect("步骤非空");
+
+    assert_eq!(
+        text.matches("\n- ").count(),
+        store::CHECKPOINT_TOOL_LINE_LIMIT + 1,
+        "必须列出上限条数 + 一行省略标记，实际：{text}"
+    );
+    assert!(
+        text.contains("（其余 5 步已省略）"),
+        "超出部分必须折叠成一行，实际：{text}"
+    );
 }
 

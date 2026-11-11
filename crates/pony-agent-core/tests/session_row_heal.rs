@@ -76,6 +76,7 @@ fn append_message(
             model_name: None,
             token_count: None,
             reasoning_content: None,
+            kind: None,
         },
         ordinal,
     });

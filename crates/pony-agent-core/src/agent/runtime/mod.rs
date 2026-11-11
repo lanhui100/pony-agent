@@ -39,9 +39,9 @@ use crate::agent::provider::{
 };
 use crate::agent::session::SessionTraceMutation;
 use crate::agent::session::{
-    HistoryBranch, HistoryCheckoutMode, HistoryCursor, HistoryNode, SessionAttachment,
-    SessionOverview, SessionSnapshot, SessionStore, TraceTimelineEntry, TurnHistoryMessage,
-    TurnTraceRecord,
+    HistoryBranch, HistoryCheckoutMode, HistoryCursor, HistoryMessageKind, HistoryNode,
+    SessionAttachment, SessionOverview, SessionSnapshot, SessionStore, TraceTimelineEntry,
+    TurnHistoryMessage, TurnTraceRecord,
 };
 use crate::agent::telemetry::{
     DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,

@@ -224,6 +224,7 @@ mod tests {
             model_name: None,
             token_count: None,
             reasoning_content: None,
+            kind: None,
         }];
         assert!(session_has_indexed_content(&session));
         assert!(

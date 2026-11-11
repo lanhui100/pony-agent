@@ -1170,3 +1170,27 @@ note: >-
       `tests/storage_stage0_recover_trace.rs::legacy_only_traces_are_still_recovered_by_the_narrowed_fallback`
       （反向守卫：收窄兜底不得丢 legacy 独有 trace）、`tests/session_read_from_log.rs`（8 例，含
       `fifty_logged_sessions_load_within_budget_and_degrade_keeps_the_index_complete`）。
+
+  【归属登记（2026-11-11）｜中断轮：上下文载体与展示载体分层（`HistoryMessageKind`）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次给**既有会话历史消息**增加一个
+  additive 字段 `kind`（`cancelled` / `interrupted`，`serde(default)` + `skip_serializing_if`）并让
+  取消轮写既有 native transcript；无新增网络 IO、后台任务、LLM 调用或依赖；
+  不新增 enforcement_point，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（理由与
+      本文档维度声明同源）。
+  (2) 对外接口的**加性**变更（唯一一条）：`TurnHistoryMessage.kind`（`agent/session/types.rs`）。
+      旧读取方无该字段即按 `content` 的检查点标记回退判定，`normalized_messages` 表不加列、不做迁移；
+      线上语义因此「有则结构化、无则回退」，不存在必须同步升级的对端。
+  (3) 本轮 N-A 的结构性理由：变更面在本地轮次收口与本地展示——取消轮把**已闭合**的工具往返
+      （`ToolTurnHopRecord`）交给既有 `native_transcript_for_failed_turn` 同构构造
+      （`native_transcript_for_cancelled_turn`），落盘仍走既有 `persist_turn_outcome` / `append_turn`
+      通道；TUI 与桌面端只改变**渲染口径**（一行状态而非检查点原文），不产生新的遥测事实。
+      输入输出只有本地会话与本地终端，不引入 Prometheus pull 或日志采集的结构前提。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 本次未改动。行为门的机械收口落在测试层——
+      `crates/pony-agent-core/src/agent/runtime/tool_recovery.rs::failed_turn_transcript_tests`
+      （`cancelled_turn_transcript_keeps_failed_shape_with_its_own_note`：闭合 + 带 reasoning + 措辞区分）、
+      `crates/pony-agent-core/src/agent/session/tests.rs`
+      （`append_turn_with_kind_marks_synthetic_interruption_row`、`checkpoint_text_collapses_steps_beyond_limit`）、
+      `tests/interrupted-record-status.spec.ts`（6 例：kind 优先、旧会话回退、正文逐字保真）。

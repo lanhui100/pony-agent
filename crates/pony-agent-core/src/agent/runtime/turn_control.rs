@@ -220,6 +220,11 @@ impl AgentRuntime {
         // 累积正文）。它是取消轮检查点的正文来源：硬编码空串会让中断轮只剩占位文案，
         // 被中断那轮的真实产出随之从下一轮上下文里消失（与失败路径 B017 同口径）。
         partial_assistant_text: &str,
+        // L1（dsh 对齐）：本轮**已闭合**的工具往返 → native transcript 片段
+        // （`native_transcript_for_cancelled_turn`）。取消轮此前恒传 `None`，模型只能靠
+        // 「文本检查点」回忆过程事实；有它之后 native 家族会话的取消轮与失败轮同构，
+        // 文本检查点退化为非 native provider 的兼容载体。调用点无已闭合往返时传 `None`。
+        provider_native_transcript: Option<Vec<Value>>,
     ) {
         // wave-64 R1（BLOCKING，terminal-once）：C5 宽限监督可能已先行收口并派发了一条
         // `turn:cancelled`；此时 in-band 循环再命中停止位必须**静默退出**，禁止第二条终态、
@@ -251,6 +256,7 @@ impl AgentRuntime {
             None,
             partial_assistant_text,
             checkpoint_tools,
+            provider_native_transcript,
         );
         self.update_execution_checkpoint(
             control,

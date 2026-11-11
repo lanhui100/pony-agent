@@ -2055,6 +2055,9 @@ impl SqliteSessionBackend {
                     model_name,
                     token_count: token_count.map(|v| v as u64),
                     reasoning_content,
+                    // `normalized_messages` 表没有 kind 列（不为此加迁移）：读取方按
+                    // `content` 的检查点标记回退判定，展示结果与 kind 路径一致。
+                    kind: None,
                 });
             }
 
@@ -4658,6 +4661,7 @@ mod tests {
                 model_name: None,
                 token_count: None,
                 reasoning_content: None,
+                kind: None,
             },
             ordinal: 0,
         });
@@ -4694,6 +4698,7 @@ mod tests {
                 model_name: None,
                 token_count: None,
                 reasoning_content: None,
+                kind: None,
             },
             ordinal: 1,
         });
@@ -4716,6 +4721,7 @@ mod tests {
                 model_name: None,
                 token_count: None,
                 reasoning_content: None,
+                kind: None,
             },
             ordinal: 1,
         });
@@ -5207,6 +5213,7 @@ mod tests {
                 model_name: None,
                 token_count: None,
                 reasoning_content: None,
+                kind: None,
             }];
             assert!(backend.upsert_session(sid, &session));
         }
@@ -5305,6 +5312,7 @@ mod tests {
             model_name: None,
             token_count: None,
             reasoning_content: None,
+            kind: None,
         }];
         // trace：tool_activities（running + done）+ provider_call_records
         let mut trace = trace("turn-1", "first", 100);
@@ -5410,6 +5418,7 @@ mod tests {
                 model_name: None,
                 token_count: None,
                 reasoning_content: None,
+                kind: None,
             },
             crate::agent::session::TurnHistoryMessage {
                 role: "assistant".to_string(),
@@ -5420,6 +5429,7 @@ mod tests {
                 model_name: None,
                 token_count: None,
                 reasoning_content: None,
+                kind: None,
             },
         ];
         assert!(backend.upsert_session("s1", &session));
