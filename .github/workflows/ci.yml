@@ -65,8 +65,11 @@ jobs:
       - name: Python 审计依赖（tools/tui-audit：Pillow + fontTools）
         run: python3 -m pip install --disable-pip-version-check pillow fonttools
 
+      # 首错即停会掩盖整批平台缺口：cargo test 默认首个失败用例即中止，
+      # 同 runner 上后续用例根本不会执行，缺口只能靠多轮 CI 逐层剥出。
+      # 代价已知：Windows 全量首跑十连红即为代价（B050–B066）。
       - name: Core 单元与集成测试（含 Windows Job 生命周期）
-        run: npm run cargo:test:shared -- --package=pony-agent-core
+        run: npm run cargo:test:shared -- --package=pony-agent-core --no-fail-fast
 
   core-platform-check:
     strategy:
@@ -92,3 +95,10 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test --package=pony-agent-core --lib
+
+      # PTY 族 4 例在 Windows 上已被 #[cfg_attr(windows, ignore)] 平台 gating（Windows 无
+      # PTY 驱动，缺口 B067）⇒ 若 Linux 侧没有执行点，gating 直接等于「覆盖消失」。
+      # 故在 ubuntu 分支补一个真实执行点。本步骤只挂 Linux：macOS 分支未覆盖，是待办而非已覆盖。
+      - name: Core Linux 集成：PTY 族（Windows 上已平台 gating）
+        if: runner.os == 'Linux'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test --package=pony-agent-core --test tui_startup_input_guard --test tui_overlay_cancel_acceptance

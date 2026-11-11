@@ -1,0 +1,50 @@
+{
+  "wave": "w1-pty-status",
+  "started_at": "2026-11-11T17:52:59+08:00",
+  "baseline_commit": "89e2ec80343562e757f6804090161138e08dd718",
+  "tier": "B",
+  "trigger": "Windows 全量首跑扫尾：PTY 覆盖 + ADR 0078/0119 状态行契约冲突 + CI 首错即停",
+  "members": {
+    "lead": "Lead",
+    "test_agent": "test-agent-w1",
+    "executor": "executor-ci-w1",
+    "reviewer": "subagent×2"
+  },
+  "tasks": [
+    {
+      "id": "task-2",
+      "branch": "main",
+      "write_scopes": [
+        "crates/pony-agent-core/tests/tui_startup_input_guard.rs",
+        "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs"
+      ],
+      "status": "in_progress"
+    },
+    {
+      "id": "task-3",
+      "branch": "main",
+      "write_scopes": [
+        "crates/pony-agent-core/tests/tui_render_layout.rs",
+        "docs/decisions/"
+      ],
+      "status": "in_progress"
+    },
+    {
+      "id": "task-4",
+      "branch": "main",
+      "write_scopes": [
+        ".github/workflows/ci.yml"
+      ],
+      "status": "completed"
+    }
+  ],
+  "counters": {
+    "l2t_failures": {},
+    "l2at_failures": {},
+    "retry_storm": 0
+  },
+  "red_phase": "RED DEGRADED: STATIC-ONLY（PTY/状态行红相只在 windows-latest 可复现；本机以「相位不确定性 + 平台依赖」静态证据 + CI 定向验证替代）",
+  "evidence": {
+    "baseline": ".dev-team/regression-baseline-w1.json"
+  }
+}

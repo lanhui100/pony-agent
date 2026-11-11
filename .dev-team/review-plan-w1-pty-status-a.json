@@ -1,0 +1,50 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/tests/tui_startup_input_guard.rs",
+    "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+    "crates/pony-agent-core/tests/tui_render_layout.rs",
+    ".github/workflows/ci.yml"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/tests/tui_startup_input_guard.rs",
+      "line": 28,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "grep -nE \"runs-on:|cargo:test:shared|--lib\" .github/workflows/ci.yml",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_dialog_wave39.rs",
+      "line": 1015,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "for i in 1 2 3 4 5 6 7 8; do cargo test -q -p pony-agent-core --test tui_dialog_wave39 a12_metrics_row_is_ghost_on_canvas 2>&1 | grep -E 'test result'; done",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_render_layout.rs",
+      "line": 198,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "python3 -c \"g=lambda s:''.join(s.split());print(g('权限·工作区')==g('权限 · 工作区'))\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_overlay_cancel_acceptance.rs",
+      "line": 1057,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rn \"tui-snap\" --include=*.rs --include=*.mjs --include=*.ps1 --include=*.yml . | grep -v tests/tui_render_layout.rs | wc -l",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "22467a83-981d-4b6d-b32c-0884f78d0f37",
+    "fresh_context": true
+  },
+  "executed_by": "22467a83-981d-4b6d-b32c-0884f78d0f37",
+  "reviewed_commit": "a72ccc7d0976143a0b0710bbed12231a4ed7a15b",
+  "attestation": {
+    "self_signed": false
+  }
+}

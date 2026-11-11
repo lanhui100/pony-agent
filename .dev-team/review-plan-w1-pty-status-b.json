@@ -1,0 +1,49 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "docs/decisions/",
+    "backlog/tasks.jsonl",
+    ".github/workflows/ci.yml"
+  ],
+  "findings": [
+    {
+      "file": "docs/decisions/0078-tui-header-workspace-and-metrics-layering.md",
+      "line": 84,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "git diff --unified=0 -- docs/decisions/0078-tui-header-workspace-and-metrics-layering.md | grep '^+' | grep -v '^+++'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "backlog/tasks.jsonl",
+      "line": 3,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "node -e 'const r=require(\"fs\").readFileSync(\"backlog/tasks.jsonl\",\"utf8\").trim().split(\"\\n\").map(JSON.parse).find(o=>o.id===\"B067\");console.log(Object.keys(r).join(\"|\"))'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": ".github/workflows/ci.yml",
+      "line": 72,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -rln 'no-fail-fast' docs/decisions .agents/notes || echo NO-ADR-OR-NOTE",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/decisions/README.md",
+      "line": 124,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "grep -n '0078-tui-header\\|0053-token-speed' docs/decisions/README.md",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "a488f37a-efb7-4641-b48a-8a3c7c6d3224",
+    "fresh_context": true
+  },
+  "executed_by": "a488f37a-efb7-4641-b48a-8a3c7c6d3224",
+  "reviewed_commit": "a72ccc7d0976143a0b0710bbed12231a4ed7a15b",
+  "attestation": {
+    "self_signed": false
+  }
+}

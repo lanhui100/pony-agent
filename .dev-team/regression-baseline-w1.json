@@ -1,0 +1,24 @@
+{
+  "wave": "w1-pty-and-status-line",
+  "recorded_at": "2026-11-11T17:52:36+08:00",
+  "platform": "linux (local)",
+  "baseline_commit": "89e2ec80343562e757f6804090161138e08dd718",
+  "bins": [
+    {
+      "binary": "tui_startup_input_guard",
+      "exit_code": 0,
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.19s"
+    },
+    {
+      "binary": "tui_overlay_cancel_acceptance",
+      "exit_code": 0,
+      "result": "test result: ok. 141 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.72s"
+    },
+    {
+      "binary": "tui_render_layout",
+      "exit_code": 0,
+      "result": "test result: ok. 135 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.65s"
+    }
+  ],
+  "note": "红相锚定前必须与基线逐项对照：基线绿→现红 即判回归"
+}

@@ -4,6 +4,7 @@ Status: implemented
 
 日期：2026-11-10
 实施说明：[`.agents/notes/implemented/feature/2026-11-10-tui-permission-mode-governance.md`](../../.agents/notes/implemented/feature/2026-11-10-tui-permission-mode-governance.md)。
+取代：[ADR 0078](0078-tui-header-workspace-and-metrics-layering.md) 决策 6 的「底面行右槽只承载模型身份」口径（改为模型身份 ⇄ 权限模式 3s 轮播；底面行左槽优先级/几何/底色契约不变）。
 关联：与内核态 `PermissionMode`（`crates/pony-agent-core/src/agent/headless.rs` 与 `governed_executor.rs`）及桌面端权限通道完全对齐。
 
 ## 背景
@@ -24,6 +25,14 @@ Status: implemented
   移动端/窄终端下排版容易挤爆，与已有指标/排队提示产生冲突；时分复用（分时轮播）在保留全部信息的同时不占用横向空间。
 
 ## 决策
+
+1. **状态行相位是显式状态，不是墙钟巧合**：`status_carousel_phase(state)` 以
+   `state.status_carousel_started_at: Option<Instant>` 为唯一相位源（`None` 时退化用墙钟毫秒取模）。
+   **所有断言必须钉住该字段**（例如 `Some(Instant::now() - 偏移)`，周期常量取
+   `STATUS_CAROUSEL_PERIOD_MS / STATUS_CAROUSEL_MODEL_HOLD_MS`），否则相位随机、断言必偶发红
+   （Linux 从不执行集成测试，该不确定性只在 windows-latest 全量首跑暴露）。
+2. **右槽两相位逐字断言**：模型相位 = `model`（有思考强度时 `model · <档位>`）；权限相位 =
+   `权限 · 只读 / 权限 · 工作区 / 权限 · 完全访问`（对应 `PermissionMode` 三态）。
 
 1. **权限契约统一**：直接复用 `pony_agent_core::agent::headless::PermissionMode`，通过 `TurnInput.tool_authorization_mode` 透传至执行内核。
 2. **偏好持久化**：`TuiPreferences` 扩展 `default_permission_mode`（默认 `WorkspaceWrite`），支持向前兼容反序列化。

@@ -1052,6 +1052,16 @@ fn run_pty_flow(flow: &str) -> PtyFlow {
     }
 }
 
+// Windows 不可用：本用例的可达性判据只能由真实二进制 + 真实伪终端给出，而驱动脚本
+// `PTY_DRIVER_PY` 依赖 Python 的 `pty` / `termios`（Unix-only；Windows 等价能力需 ConPTY，未接线）。
+// 缺口归属（如实登记）：Windows 上本用例 = **已知缺口 B067，无等价替代覆盖** —— 渲染层用例
+// 只覆盖字符缓冲，「turn event sink 每轮注册」的真实进程可达性没有任何替代观测面；
+// `TUI_SNAPSHOT=1` 的快照 dump 是 opt-in 过程产物、库内无消费者/比对脚本，不算覆盖。
+// 缺口恢复条件与登记见 B067（backlog 账本 + `backlog/tasks.jsonl`）。
+#[cfg_attr(
+    windows,
+    ignore = "Windows 无 PTY 驱动（Python pty 仅 Unix）；已知缺口 B067（无等价替代覆盖）"
+)]
 #[test]
 fn c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable() {
     // Arrange / Act：真实二进制 + 真实伪终端；流式中双击 Esc。
@@ -1123,6 +1133,15 @@ fn c9_each_turn_registers_turn_event_sink_so_stop_lifecycle_is_reachable() {
     );
 }
 
+// Windows 不可用：`pony resume` 恢复视图的判据经同一 Python PTY 驱动（`pty/termios` Unix-only）
+// 跑真实二进制后抓屏，Windows 上无法建立伪终端，判据不可信（不得降级为「跑起来就算过」）。
+// 缺口归属（如实登记）：Windows 上本用例 = **已知缺口 B067，无等价替代覆盖** —— 渲染层用例
+// 只能喂合成 trace，「resume 真实链路摘要取 description」无替代观测面；`TUI_SNAPSHOT=1`
+// 的 dump 是 opt-in 过程产物、无消费者，不算覆盖。缺口恢复条件与登记见 B067。
+#[cfg_attr(
+    windows,
+    ignore = "Windows 无 PTY 驱动（Python pty 仅 Unix）；已知缺口 B067（无等价替代覆盖）"
+)]
 #[test]
 fn j1_resume_summary_prefers_description_and_hides_structured_json() {
     // Arrange / Act：真实二进制造一轮带工具调用的会话，再 `pony resume` 恢复视图。

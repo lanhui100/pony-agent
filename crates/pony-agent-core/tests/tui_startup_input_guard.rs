@@ -21,6 +21,15 @@ use std::process::Command;
 /// 会话结束后交给 Rust 侧断言的 JSON 结果行前缀。
 const RESULT_MARKER: &str = "RESULT_JSON ";
 
+// Windows 不可用：驱动依赖 Python 的 `pty` / `termios`（Unix-only，Windows 无这两个模块；
+// 等价能力需 ConPTY，当前未接线），且判据只能由真实伪终端字节流给出。
+// 缺口归属（如实登记）：Windows 上本用例 = **已知缺口 B067，无等价替代覆盖** —— 渲染层用例
+// 不产生 stdin 读，无法替代「真实 PTY 启动期零 stdin 读」；`TUI_SNAPSHOT=1` 的 dump 是
+// opt-in 过程产物、无消费者，不算覆盖。缺口恢复条件与登记见 B067。
+#[cfg_attr(
+    windows,
+    ignore = "Windows 无 PTY 驱动（Python pty 仅 Unix）；已知缺口 B067（无等价替代覆盖）"
+)]
 #[test]
 fn g1_no_capability_query_and_g2_early_typing_survives() {
     let result = run_driver(Path::new(env!("CARGO_BIN_EXE_pony")));
@@ -48,6 +57,15 @@ fn g1_no_capability_query_and_g2_early_typing_survives() {
 }
 
 /// 负向对照：故意发能力查询的假程序必须被 `g1` 判定抓到，证明守卫不是空转。
+///
+/// Windows 不可用：负向对照同样经 Python PTY 驱动（`pty/termios` Unix-only）跑假终端程序，
+/// 无伪终端则无从采集查询字节，判定不可信。
+/// 缺口归属（如实登记）：Windows 上本用例 = **已知缺口 B067，无等价替代覆盖** —— 负向对照的
+/// 判别力证明只能由真实 PTY 字节流给出，渲染层用例无从替代。恢复条件与登记见 B067。
+#[cfg_attr(
+    windows,
+    ignore = "Windows 无 PTY 驱动（Python pty 仅 Unix）；已知缺口 B067（无等价替代覆盖）"
+)]
 #[test]
 fn g0_harness_detects_capability_probe() {
     let work = scratch_dir("fake-probe");

@@ -2,6 +2,12 @@
 
 Status: implemented
 
+> **部分取代（2026-11-11）**：[ADR 0119](0119-tui-permission-mode-governance-and-carousel.md) 取代本文件**决策 6 的右槽口径**
+> ——「底面行右槽只承载模型身份」改为「模型身份 ⇄ 权限模式」3 秒时分轮播（`status_carousel_phase` 由
+> `TuiState::status_carousel_started_at` 驱动）。本文件其余决策与验收项（C1/C3/C4/C6/C7，以及 C2/C5 的
+> 「底面行 = 左槽提示 + 右槽槽位、工作区路径不进底面行、浮层态为空行、关闭后恢复」语义）仍然现行；
+> 相位钉住等新断言口径写在 0119。
+
 日期：2026-11-07
 契约真值源：`crates/pony-agent-core/tests/tui_render_layout.rs`（`layout_invariants_hold_on_standard_terminal`、
 `panel_renders_inside_screen_and_keeps_footer`、`header_workspace_label_is_home_folded_folder_name`）与

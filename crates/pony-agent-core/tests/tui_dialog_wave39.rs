@@ -11,8 +11,13 @@
 // 消除 bin-as-module 固有的 dead_code 噪声，不放宽任何断言。
 //
 // ADR 0078（implemented）口径迁移：数值指标簇已从「composer 下方最后一行」上移到
-// **header(row 0) 右槽**，底面最后一行改为右对齐模型身份。故本文件的「指标行」断言一律读
-// `metrics_row()`（= row 0），「最后一行」只用于证明底面不再承载工作区/指标（ADR 0078 §决策 6/8）。
+// **header(row 0) 右槽**。故本文件的「指标行」断言一律读 `metrics_row()`（= row 0），
+// 「最后一行」只用于证明底面不再承载工作区/指标（ADR 0078 §决策 6/8）。
+//
+// ADR 0119（implemented，取代 0078 的「最后一行只承载模型身份」）：底面最后一行是**状态行
+// 右槽**，按 3s 时分轮播「模型身份」与「权限 · <级别>」。故凡断言底面行**内容/前景色**的用例
+// 必须先 `pin_carousel_phase()` 钉住相位——否则 `status_carousel_started_at = None` 时相位取
+// 墙钟毫秒 % 周期，断言会随机红（模型相位 GHOST / 权限相位 MUTED）。
 
 #[path = "../src/bin/tui.rs"]
 #[allow(dead_code, unused_imports, unused_variables, unused_mut)]
@@ -22,6 +27,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
+use std::time::{Duration, Instant};
 
 // 与 tui.rs 保持一致的布局常量（只在断言里复算几何，不参与实现）。
 const GUTTER: u16 = 3;
@@ -100,6 +106,30 @@ fn all_text(buf: &Buffer) -> String {
         .join("\n")
 }
 
+/// 把状态行右槽轮播**显式钉在指定相位**（ADR 0119：模型身份与「权限 · <级别>」按时分交替）。
+///
+/// 为什么必须钉：`status_carousel_phase` 在 `status_carousel_started_at = None` 时退化为
+/// **墙钟毫秒 % 周期**，底面行（y=29）落在哪个半周期不可控 —— 断言「底面行 == 模型身份且字形
+/// 全为 GHOST」会随真实时间随机红（权限相位用 MUTED，颜色断言先挂）。这里把起点回拨到目标窗口
+/// **正中**，偏移量全部取自产品常量（不写死毫秒数），并当场断言相位已生效，防止夹具失效后
+/// 静默假绿。
+fn pin_carousel_phase(state: &mut tui::TuiState, model_phase: bool) {
+    let offset_ms = if model_phase {
+        tui::STATUS_CAROUSEL_MODEL_HOLD_MS / 2
+    } else {
+        tui::STATUS_CAROUSEL_MODEL_HOLD_MS + tui::STATUS_CAROUSEL_PERM_HOLD_MS / 2
+    };
+    state.status_carousel_started_at = Some(Instant::now() - Duration::from_millis(offset_ms));
+    let (is_model, _) = tui::status_carousel_phase(state);
+    assert_eq!(
+        is_model, model_phase,
+        "夹具失效：期望相位 {}，实际 {}（offset={offset_ms}ms，周期={}ms）",
+        if model_phase { "模型" } else { "权限" },
+        if is_model { "模型" } else { "权限" },
+        tui::STATUS_CAROUSEL_PERIOD_MS
+    );
+}
+
 /// 每个 cell 一个 String（宽字符右半格是空格），用于按「列」而不是「字符」定位。
 fn row_cells(buf: &Buffer, y: u16) -> Vec<String> {
     (0..buf.area.width)
@@ -117,9 +147,9 @@ fn content_geometry(terminal_width: u16) -> (u16, u16) {
 
 /// 数值指标簇所在行 = **header(row 0)**。
 ///
-/// ADR 0078（implemented）把「cwd + 指标」的底面行契约修订为：指标簇锚定 header
-/// 右槽，底面最后一行只剩右对齐模型身份。故本文件「指标行」断言一律读 row 0，
-/// 「最后一行」只用于证明底面不再承载指标。
+/// ADR 0078（implemented）把「cwd + 指标」的底面行契约修订为：指标簇锚定 header 右槽；
+/// ADR 0119 起底面最后一行是状态行右槽（模型身份 / 权限 · 级别 时分轮播）。
+/// 故本文件「指标行」断言一律读 row 0，「最后一行」只用于证明底面不再承载指标。
 fn metrics_row(buf: &Buffer) -> String {
     row_text(buf, 0)
 }
@@ -595,6 +625,10 @@ fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
         .unwrap_or_default()
         .to_string();
 
+    // 相位显式钉住（ADR 0119）：底面行是「模型身份 / 权限 · 级别」的时分轮播槽，
+    // 不钉则下面 y=29 的前景与内容断言会随墙钟相位随机红。
+    pin_carousel_phase(&mut state, true);
+
     // Act
     let buf = screen(&mut state, 110, 30);
 
@@ -656,7 +690,8 @@ fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
         "输入正文行与底面行之间必须只隔 1 行（呼吸行 28），实际 prompt_y={prompt_y}"
     );
 
-    // Assert 4（ADR 0078）：指标簇已锚定 header(row 0)，底面最后一行只剩模型身份。
+    // Assert 4（ADR 0078 + ADR 0119）：指标簇已锚定 header(row 0)；底面最后一行是状态行右槽，
+    // 本帧已钉在**模型相位**，故只剩模型身份（权限相位见 A12 的第二段断言）。
     let metrics = metrics_row(&buf);
     assert!(
         !metrics.trim().is_empty(),
@@ -930,8 +965,9 @@ fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// A12（ADR 0078 §决策 1/6/8）：header 右簇 = FAINT 前景（品牌 ACCENT+BOLD、工作区 MUTED）；
-// 底面行 = GHOST 模型身份 on CANVAS；呼吸行 28 = 色带内 SURFACE 空白。
+// A12（ADR 0078 §决策 1/6/8 + ADR 0119）：header 右簇 = FAINT 前景（品牌 ACCENT+BOLD、
+// 工作区 MUTED）；底面行 = 状态行右槽 on CANVAS：模型相位 = GHOST 模型身份、
+// 权限相位 = 「权限 · 工作区」MUTED；呼吸行 28 = 色带内 SURFACE 空白。
 // ---------------------------------------------------------------------------
 
 /// v3 R11：段间分隔符必须恰好是 `" · "`；只检测**真正的孤立分隔符**。
@@ -987,11 +1023,17 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
     state.context_window_tokens = 200_000;
     let (cx, cw) = content_geometry(110);
 
+    // 相位显式钉住（ADR 0119）：底面行是「模型身份 / 权限 · 级别」的时分轮播槽。不钉时
+    // `status_carousel_phase` 用墙钟毫秒取模，本用例会在「字形前景必须是 GHOST」处随机红
+    // （权限相位用 MUTED）。权限相位另渲一帧在 Assert 4 断言。
+    pin_carousel_phase(&mut state, true);
+
     // Act
     let buf = screen(&mut state, 110, 30);
 
-    // Assert 1（ADR 0078 §决策 6/8）：底面行单一职责 = 右对齐模型身份（GHOST on CANVAS），
-    // 不再承载工作区标签或数值指标（二者分别迁到 header 左槽 / 右槽）。
+    // Assert 1（ADR 0078 §决策 6/8 + ADR 0119 模型半周期）：底面行右槽在本相位只承载
+    // 右对齐模型身份（GHOST on CANVAS），不再承载工作区标签或数值指标（二者分别迁到
+    // header 左槽 / 右槽）。
     //
     // 只断言内容列（`content.x..content.x+content.width`）：沟槽纪律见 Assert 3；
     // 宽字符续格跳过逻辑保留（ratatui 0.29 `Buffer::diff` 对续格置 to_skip，
@@ -1032,7 +1074,7 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
     assert_eq!(
         bottom.trim(),
         state.model.trim(),
-        "底面行只能承载模型身份（ADR 0078 §决策 6），实际 {bottom:?}"
+        "底面行只能承载模型身份（ADR 0119 模型半周期；已钉相位），实际 {bottom:?}"
     );
     for needle in ["↑", "↓", "缓存", "上下文", "—"] {
         assert!(
@@ -1131,6 +1173,66 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
             );
         }
     }
+
+    // Assert 4（ADR 0119 权限半周期）：同一底面行改由状态行承担 —— 逐字为「权限 · 工作区」
+    // （默认 `PermissionMode::WorkspaceWrite`），字形色为 MUTED（= 产品 `theme::MUTED`，
+    // 本文件顶部已按现实现值冻结），背景仍为 CANVAS。相位必须显式钉住，否则墙钟相位会让
+    // 本段断言随机失败。
+    assert_eq!(
+        state.permission_mode,
+        pony_agent_core::agent::headless::PermissionMode::WorkspaceWrite,
+        "夹具失效：默认权限模式应为「工作区写入」（决定权限相位文本），实际 {:?}",
+        state.permission_mode
+    );
+    pin_carousel_phase(&mut state, false);
+    let perm_buf = screen(&mut state, 110, 30);
+    let perm_bottom = row_text(&perm_buf, 29);
+    assert_eq!(
+        perm_bottom.trim(),
+        "权限 · 工作区",
+        "权限相位下底面行必须承载状态行右槽，期望 {:?}，实际 {:?}",
+        "权限 · 工作区",
+        perm_bottom.trim()
+    );
+    let mut perm_glyph_cells = 0usize;
+    let mut perm_skip_continuation = false;
+    for x in cx..cx + cw {
+        if perm_skip_continuation {
+            perm_skip_continuation = false;
+            continue;
+        }
+        let cell = &perm_buf[(x, 29)];
+        assert_eq!(
+            cell.bg, CANVAS,
+            "权限相位底面行内容列第 {x} 列背景必须是 CANVAS（不在色带内），实际 {:?}",
+            cell.bg
+        );
+        let symbol = cell.symbol();
+        if !symbol.trim().is_empty() {
+            perm_glyph_cells += 1;
+            assert_eq!(
+                cell.fg, MUTED,
+                "权限相位底面行字形前景必须是 MUTED Rgb(162,155,146)（theme::MUTED），\
+                 实际 {:?}（symbol={:?}）",
+                cell.fg, symbol
+            );
+        }
+        let mut chars = symbol.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            if disp_width(ch) == 2 {
+                perm_skip_continuation = true;
+            }
+        }
+    }
+    assert!(
+        perm_glyph_cells > 0,
+        "权限相位底面行必须至少渲染一个字形（权限状态行）"
+    );
+    assert!(
+        !perm_bottom.contains(&state.model),
+        "权限相位底面行不得同时残留模型身份（轮播是分时二选一），实际 {:?}",
+        perm_bottom.trim()
+    );
 }
 
 // ---------------------------------------------------------------------------

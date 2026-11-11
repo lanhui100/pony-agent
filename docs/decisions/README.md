@@ -55,6 +55,7 @@
 ### 活跃
 
 - [0120 插件宿主的 Windows 脚本命令解析（shebang → 解释器）](0120-plugin-host-script-command-on-windows.md)
+- [0121 Windows 全量集成测试常开 `--no-fail-fast`（首错即停的代价与替代）](0121-windows-ci-no-fail-fast.md)
 - [0117 TUI Ask 面板多选与版式重构（内边距 / 问题独占一行 / 选项折行）](0117-tui-ask-panel-multiselect-and-layout.md)
 - [0116 会话时间线键盘导航（Ctrl+T/Ctrl+B 顶部/底部 + Alt+↑/↓ 按轮跳转）](0116-workbench-timeline-keyboard-navigation.md)
 - [0107 会话级写者租约与日志优先持久化（多窗口/多智能体并发，预留远程 agent）](0107-session-scoped-writer-lease-and-log-first-durability.md)
@@ -121,7 +122,7 @@
 - [0073 token 速度口径 v2：解码窗口分母 + 物理下限 + basis 自描述](0073-token-speed-decode-basis.md)
 - [0075 TUI 键盘协议还原加固：显式置零、复用器最小化 push、失败可告知](0075-tui-kitty-keyboard-protocol-restore-hardening.md)
 - [0076 TUI 思考（reasoning）消息可见与消息区底部呼吸间距](0076-tui-thinking-message-and-chat-bottom-gap.md)
-- [0078 TUI header 承载工作区标签与数值指标，底面行回归模型身份](0078-tui-header-workspace-and-metrics-layering.md)
+- [0078 TUI header 承载工作区标签与数值指标，底面行回归模型身份](0078-tui-header-workspace-and-metrics-layering.md) —— 右槽「只承载模型身份」口径已被 [0119](0119-tui-permission-mode-governance-and-carousel.md) 取代（改为模型身份 ⇄ 权限模式时分轮播），其余条款仍现行
 - [0079 TUI 右侧滚动条、思考折叠、`/settings` 面板与 Agent 过程默认隐藏](0079-tui-process-fold-scroll-settings.md)
 - [0080 TUI 品牌标图形协议改为零 I/O 环境判定：禁止启动期 stdio 能力查询](0080-tui-splash-protocol-env-only-detection.md)
 - [0081 Ask 内联面板高度随问题换行增长，硬上限按终端宽度分档（40 / 24）](0081-tui-inline-ask-height-adaptive.md)
