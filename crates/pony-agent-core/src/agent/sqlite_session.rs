@@ -322,11 +322,15 @@ impl SqliteSessionBackend {
             // `PRAGMA journal_mode=WAL` 本身要拿写锁；多进程同时冷启时，若此时还没设
             // `busy_timeout`，就会直接返回 `database is locked`（响亮失败但不丢数据）。
             // 先把等待预算钉上，后面所有 pragma / 建表 / 迁移都在预算内排队。
+            // `journal_size_limit`：checkpoint 后把 `-wal` 截断到 64MB。现有回收逻辑依赖
+            // `wal_checkpoint(TRUNCATE)`，多进程并发读时必然 busy 而退化为 PASSIVE，实测
+            // WAL 曾积到 1.5GB；该 pragma 不依赖 TRUNCATE 成功与否。
             conn.execute_batch(
                 "PRAGMA busy_timeout=5000;
                  PRAGMA journal_mode=WAL;
                  PRAGMA synchronous=NORMAL;
-                 PRAGMA wal_autocheckpoint=256;",
+                 PRAGMA wal_autocheckpoint=256;
+                 PRAGMA journal_size_limit=67108864;",
             )
             .map_err(|e| format!("pragma: {e}"))?;
             self.ensure_schema(&conn)?;
