@@ -228,6 +228,7 @@ describe('CLI 冒烟', () => {
       ['reap', '--ide', 'B056', '--minutes', '0'],
       ['reap', '-id', 'B056', '--minutes', '0'],
       ['reap', 'B056', '--minutes', '0'],
+      ['reap', '--ID', 'B056', '--minutes', '0'],
       ['reap', '--minutes', 'abc']
     ]) {
       let code = 0;

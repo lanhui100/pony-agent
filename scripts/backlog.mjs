@@ -642,7 +642,13 @@ export function main(argv = process.argv.slice(2)) {
         onlyId
       });
       const scope = onlyId ? `（仅 ${onlyId}）` : '（全部租约）';
-      console.log(reaped.length ? `[backlog] 回收超龄租约${scope}：${reaped.join(', ')}` : `[backlog] 无超龄租约${scope}`);
+      if (reaped.length) {
+        console.log(dryRun
+          ? `[backlog] [dry-run] 将回收超龄租约${scope}（未执行，未删除任何锁）：${reaped.join(', ')}`
+          : `[backlog] 回收超龄租约${scope}：${reaped.join(', ')}`);
+      } else {
+        console.log(`[backlog] 无超龄租约${scope}`);
+      }
       return 0;
     }
     case 'annotate': {

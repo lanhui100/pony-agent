@@ -31,13 +31,15 @@
 ## 租约（并发控制）
 
 - `start` 以 `O_EXCL` 原子获取 `<ID>.lock`：同一任务同时只允许一个会话持有；`heartbeat` 刷新；
-  `release` 显式释放；`reap --id <ID> --minutes N` 回收指定任务的超龄租约。`reap` 走参数白名单：
+  `release` 显式释放；`reap --id <ID> --minutes N [--dry-run]` 回收指定任务的超龄租约
+  （`--dry-run` 只打印将回收的 ID、不删锁）。`reap` 走参数白名单：
   未知 token（`--id=B056` / `--ide` / `-id` / 位置参数 / 非法分钟值）一律 exit 2，**不会**回落为全局清理；
   只有「参数合法且不带 `--id`」才会清达到阈值的全部租约（并发 lane 下慎用）。
 - `.locks/` 是**本地运行时状态**，不入仓：干净克隆/CI 上缺锁只提示（`NOTE`），不阻断；只有在
   「本工作区确实存在 `.locks/`」时才把缺锁判为手改状态的强信号（见 B069 决策）。
 - 缺锁判定的前提是记录带**新鲜的** `heartbeat_at`（< TTL）；缺 `heartbeat_at` 时静默跳过
-  （已知 fail-open，记于 `backlog:B107`）。反向组合「锁在、记录不是 `in_progress`」一律判违规。
+  （已知 fail-open，判定口径与复活条件见 ADR `2026-11-12-backlog-followup-cleanup.md`）。
+  反向组合「锁在、记录不是 `in_progress`」一律判违规。
 - 租约只保护「同一任务」，不保护账本追加：并发 `record` 仍可能丢行，靠「record 后立即提交 +
   冲突人工合并」兜底。
 

@@ -24,11 +24,11 @@ Status: implemented
    误清其它会话的锁（实测全局 `reap --minutes 0` 会把 B056/B057 一起回收）。`--id` 缺值 / 空值 /
    不合 `^B\d{3,}$` 一律 exit 2 fail-closed，**不回落为全局清理**；不带 `--id` 仍清达到阈值的全部租约并打印范围。
 3. 该判定同时覆盖两类现场：手改状态降级、`start` 取锁后中断。它不替代 `start` 的失败回滚
-   （回滚仍未做，记于 `backlog:B108`），但让泄漏在提交前可见、可恢复。
+   （回滚仍未做；复活条件见 `2026-11-12-backlog-followup-cleanup.md`），但让泄漏在提交前可见、可恢复。
 4. 负样本补齐：`backlog-gate.spec.sh` 增 N7（锁在、记录 todo → 必须拒），spec 由 N1–N6 扩为 N1–N7。
 5. 文档口径纠偏（本次自造的两处过度承诺）：门禁文案不再声称 lint 校验「状态机」（实际只有状态枚举 +
    条件必填），改为「状态字段合法性 + 条件必填 + 租约-状态互斥」；契约补上「缺锁判定需新鲜
-   `heartbeat_at`」这一前提（无 heartbeat 时静默跳过，属已知 fail-open，记于 `backlog:B107`）。
+   `heartbeat_at`」这一前提（无 heartbeat 时静默跳过，属已知 fail-open；判定口径与复活条件见 `2026-11-12-backlog-followup-cleanup.md`）。
 
 ## Alternatives considered
 
@@ -53,5 +53,6 @@ Status: implemented
 - **提交后复核收据**（HEAD 5e4cb558 之后新增第二次提交）：`backlog-gate` 0 / `backlog-gate.spec` 0 /
   `adr:check` 0 / `ci-verify` 0 / `upgrade --check` 0 / vitest 34 passed。B106 归档证据里的
   「31 passed」是提交前时点回执，最终以本条为准。
-- 仍未修的已知缺口：`start` 取锁失败的原子回滚（B108）、缺 `heartbeat_at` 时的静默跳过（B107）。
+- 仍未修的已知缺口：`start` 取锁失败的原子回滚、缺 `heartbeat_at` 时的静默跳过；两者均已按
+  `2026-11-12-backlog-followup-cleanup.md` 的复活条件清收（不再作为活跃待办）。
 - 诚实边界：这道判据只能证明「锁与状态不矛盾」，不能证明「状态是经 CLI 改的」；迁移历史正确性靠 review。
