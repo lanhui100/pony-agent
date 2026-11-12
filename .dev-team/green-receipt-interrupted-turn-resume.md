@@ -4,7 +4,7 @@
 - 基线提交：`57df981d`（= 红相冻结 tag `wave-interrupted-turn-resume-red` 的父链末端；业务基线 `a7393954`）
 - 构建约定：`export CARGO_TARGET_DIR=/home/dm/pony-agent/target`（所有门禁命令均在上述 worktree 内执行）
 - 契约真值源：`.dev-team/contract-matrix-interrupted-turn-resume.md` §2（C1–C8）+ `.dev-team/red-phase-interrupted-turn-resume.json`
-- 验收测试：**只读**（`tests/interrupted_turn_resume_acceptance.rs`、`tests/acceptance/adversarial/interrupted_turn_resume/`），本波未修改一字
+- 验收测试：**实施者只读**（`tests/interrupted_turn_resume_acceptance.rs`、`tests/acceptance/adversarial/interrupted_turn_resume/`）。测试面在本波内共有 **3 次 Lead 授权的断言面修订**（AMEND-1 C6 分通道计数、AMEND-2 C9 接线守卫、AMEND-3/4 C10 真实 sqlite 重启 + AT2 分通道计数），全部由 **test-agent** 执行并单独提交（`f7647bc7` 等），**Executor 未编辑任何测试文件**（见 `git diff --name-status 57df981d` 口径）。
 
 ---
 
@@ -138,3 +138,55 @@ AUDIT_WORKTREE_EXIT=0
 4. **`pending_calls` 覆盖范围**：仅"批内已宣告未执行"（`turn_stream.rs` 批执行循环）与 API 入参支持；三个"工具阶段之前取消"的调用点恒传空列表（该时点本无已宣告调用），失败轮恒传空列表（被中止调用已作为 `status="aborted"` 的闭合 hop 进 `tool_activities`）。
 5. **基线计数口径**：见 §3 G2 说明（1518 = 主工作树 `verify/long-running-stress` 的口径；本 worktree 口径 1510 = 1509 + 1）。
 6. **过程偏差（自报）**：定位挂起测试时曾有一次 `cargo test --lib` 因未显式指定 workdir 而在默认目录（主工作树）下启动；发现后立即终止（`job_kill`），未提交、未改主工作树任何文件、未产生 commit；所有入账门禁均已在 worktree 内以显式 workdir 重跑（本收据数字均来自重跑）。
+
+---
+
+# 修正轮（Join Barrier FAIL 后，按 Lead 裁决重做）
+
+执行时间：2026-11-12（第二轮）。基线：`16b1798d`（第一轮交付提交）+ 测试冻结 `f7647bc7`。
+测试文件仍**只读**（Executor 未编辑 `tests/interrupted_turn_resume_acceptance.rs` 与 adversarial 目录；本轮测试面若有变化，均出自 test-agent 的 Lead 授权修订提交）。
+
+## R1. 必修项（4 条 BLOCKING）——修复 + 反例消失证据
+
+| # | 缺陷（L3 编号） | 修法 | 反例复验 |
+|---|---|---|---|
+| 1 | L3-A B1：`TurnCancelled` 不推进 head 后，`finalize_event_watermark`/`sync_latest_history_node`/`session_state_for_backend` 仍用入参/trace 尾回填 head 节点 ⇒ 上一轮节点被错标；**根因**是 `ensure_history_graph` 把 head 重算为"最后一个非 TurnCancelled 节点" | **单一真源**：head = 该分支**最后一条节点**（`TurnCancelled` 同样参与，`store.rs` head 重算与 `commit_history_node_from_live_state` 写入同一套）；删除 `advances_branch_head` 分叉；三处 turn_id 回填统一走 `history_node_turn_id`，**历史腿优先**、trace 尾只作旧数据回退；`TurnCancelled` 节点与已有归属不被后续轮改写 | 反例脚本 PASS（`L3-A B1 PASS: 中断节点 turn_id 不被后续轮改写；head 含 TurnCancelled`）；C10（真实 sqlite 重启）由"中断轮 0 条"转为**143/143 全绿** |
+| 2 | L3-A B2：批内**预阶段**取消点 `executed_calls.len()+1` 多跳一个 ⇒ 当前调用既不在 activities 也不在 pending | 预阶段改 `executed_calls.len()`（post 阶段保留 `+1`）；`pending_calls_after_batch_index` 覆盖所有"已宣告未执行" | 反例脚本 PASS（`L3-A B2 PASS: pre 阶段 pending 覆盖 ['Bash', 'Write']`） |
+| 3 | L3-C H2：普通流式轮的折叠结果仍写回 `output_text` → `assistant/chunk|message` → `normalized_messages`；`strip_dsml_protocol_text` 零生产调用 | **落库边界 strip**（不改 `sanitize` 语义）：`control_plane::flush_events` 对 `AssistantChunk`/`AssistantMessage` 载荷剥离；`store::append_turn_fallible_with_kind` 对历史正文剥离。展示侧仍走折叠 | L3-C 反例命令：`H2 GONE: 反例命令不再成立`；生产调用点：`control_plane/mod.rs:1429,1436,1438`、`session/store.rs:691,693` |
+| 4 | L3-B BLOCKING：`is_dsml_fragment_line` 按行首前缀误删**已交付正文**（含 fenced code block 内） | 引入 `DsmlScanState` 单遍状态机：fenced 块内一律逐字保真；协议块由带标记的开标签进入、闭标签/正文退出，块内才丢残片；块外"孤立残片"仍按旧脏行只读清理 | rustc 反例复跑：`strip/display` 均保留 `parameter name="command">cargo test` ⇒ `L3-B BLOCKING PASS: fenced code block 逐字保真` |
+
+## R2. 一起修项（5 条 ADVISORY）
+
+| # | 缺陷 | 修法 | 证据 |
+|---|---|---|---|
+| 5 | `closure.or(legacy)` 让 240 字符截断的合成摘要覆盖真实 hop 结果 | **legacy 优先**：有真实 hop 片段时保留它，仅用 `append_pending_closures_to_transcript` 补"未开始"调用（末条 assistant 收口）；无 legacy 才用合成闭合片段 | `turn_persist.rs` 中 `closure.or(legacy_transcript)` 已消失；新 helper `interrupted_turn.rs:262` |
+| 6 | 失败面 pending 恒 `Vec::new()` | 失败派发 impl 增加 `pending_calls` 参数；新增 `fail_stream_turn_with_hook_dispatch_pending` / `fail_stream_turn_gated_dispatch_pending`；**批内中止**分支（`turn_stream.rs:826`）透传被跳过的调用 | 三个生产调用面均为显式参数（`turn_persist.rs:606,653,792`） |
+| 7 | 存量事故光标（visible 落在 TurnCancelled 节点）装载后仍隐式 fork | 由 #1 的统一 head 口径根治（head 含 TurnCancelled ⇒ `visible == head` 恒成立）；额外的"归一化 visible"补丁已**删除**（避免遮蔽真因） | C3 仍绿；C10 绿 |
+| 8 | 引用化节点经 `fold_session_views` 装载后中断轮正文回落旧形态（丢结果） | 投影改走**同一闭合结构出口** `interrupted_turn_assistant_text_with_header_steps`；`PendingTurnArtifacts` 新增 additive `tool_results`（`#[serde(default)]`，旧快照兼容），仅对**确有结果**的步骤产结果段 | `projection.rs:72,115,119,245`；`projection::tests` 25/25 绿（旧日志逐字等价仍成立） |
+| 9 | 声明声称"折叠只发生展示侧" | 改写为**三处分工**：展示折叠 `display_*` / 请求组装 `sanitize_*`（模型可见，含占位与 tail，语义不变）/ 持久化落库边界 `strip_*` | `docs/observability.yaml` §(3a/3b/3c) |
+| 10 | 收据绝对化表述 | 本文件顶部已改为"验收测试只读；测试面修订仅 AMEND-1/AMEND-2/AMEND-3（Lead 授权，test-agent 执行）" | 见 §0 措辞更正 |
+| 11 | hotloader 通知移除后零门禁 | 新增 `#[cfg(test)] test_session_baseline_miss_never_injects_prompt_notice`（turn_count>1 + 进程重启面无通知、前缀仍重新固化） | `cargo test --lib test_session_baseline_miss...` → `1 passed`；总 `--lib` 1511 全绿 |
+
+## R3. 门禁（修正轮，原始 Exit code）
+
+| # | 命令 | Exit | 输出片段 |
+|---|---|---|---|
+| G1 | `cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance` | **0** | `test result: ok. 143 passed; 0 failed; 0 ignored` |
+| G2 | `cargo test -p pony-agent-core --lib` | **0** | `test result: ok. 1511 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.58s` |
+| G3 | `cargo check -p pony-agent-core --all-targets` | **0** | `Finished dev profile … in 3m 21s`（仅验收测试文件 2 条 `unused_mut` warning） |
+| G4 | `git diff --check` | **0** | 无输出 |
+| G5 | hotloader 11 个测试文件（逐个） | **0 ×11** | 4/1/1/7/9/1/25/7/12/4/9 passed（合计 80，见 §4 表） |
+| G6 | `audit-diff.sh --base 57df981d --decl-approved` | **0** | `[OK] audit-diff: 无越界实现、收口点完整`（21 文件 / 1439 行；不加 `--decl-approved` 时因"D1 声明被改"为 2，属既定批准机制） |
+| G7 | AT2 连跑 10 次（`at2_repeated_recovery`） | **0 ×10** | 每次 `1 passed; 0 failed`（`finished in 0.05-0.11s`）；本轮**无法复现** Lead 记录的 4/5 非确定性，未改测试 |
+
+## R4. 本轮改动文件（相对 `16b1798d`）
+
+`provider/mod.rs`（协议块状态机 + strip/display）、`control_plane/mod.rs`（落库边界 strip + 1 条基线断言语义更新）、`session/store.rs`（head 单一真源 + 三处 turn_id 回填 + 落库 strip）、`session/interrupted_turn.rs`（`…_with_header_steps` / `…_with_reason` / `append_pending_closures_to_transcript`）、`runtime/turn_persist.rs`（legacy 优先 + pending 通道）、`runtime/turn_stream.rs`（预阶段 off-by-one + pending 透传 + gated pending 入口）、`agent/projection.rs`（同闭合结构出口 + `tool_results`）、`workspace_hotloader.rs`（新增门禁单测）、`runtime/tests.rs`（接线自证）、`docs/observability.yaml`（三处分工）。
+
+## R5. 显式披露（不藏）
+
+1. **基线单测语义更新 1 处**：`control_plane::tests::history_commands_and_runtime_view_follow_persisted_history_graph` 原断言切回 `branch-main` 落点是**首轮节点**（注释明写"excluding the cancelled node"），这正是本轮被判 RC2 根因的旧口径。按 Lead 裁决（head 含 `TurnCancelled`）改为"落点 = 该分支头"，并加一条 `assert_ne!(… first_node_id)` 固定新语义。**这是语义变更的同步断言更新，不是降级**；未改任何验收测试。
+2. **已知边界**：legacy `SessionStore::append_turn`（无 `turn_id` 形参的直连签名）不绑定历史行轮次身份；重启后由 `enrich_history_from_traces` 末端对齐回填。**生产路径不经过该签名**：`persist_turn_outcome` 恒走 `append_turn_with_kind(..., turn_id)`（`turn_persist.rs:150-158`），`src/**` 中其余 `append_turn(` 调用点全部位于 `#[cfg(test)]`（`history_compaction_tests.rs`、`sqlite_session.rs` 测试模块、`control_plane/mod.rs` 3736 起的 `#[cfg(test)]` 块）。故"把 `record_turn_trace` 当回填器"属行为变更、不在本波闭包（Lead 裁决选 A/测试侧）。
+3. **O2 残留**（同上一轮）：`has_legacy_reasoning_gap` 的整段 `clear()` 未收口（基线用例钉死），本轮以"闭合片段每条 assistant 都带 reasoning"缓解。
+4. **桌面端措辞漂移**（`src/lib/runtime/cancelled-turn.ts:23`，跨端 C4 门未开）、`display_assistant_text` 与 `display_dsml_protocol_text` 两条展示腿并存、C6 的 `PreloadedBackend` 属"内存假重启"（真实重启由 C10 覆盖）——**登记即止**，本波不修。
+5. **过程偏差**：修正轮期间 `git stash` 三次（用于归因实验），均已 `git stash pop` 复原；工作树最终态以 `git status` 为准，无残留 stash。

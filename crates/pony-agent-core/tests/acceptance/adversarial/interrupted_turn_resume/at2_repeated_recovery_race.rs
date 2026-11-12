@@ -13,8 +13,8 @@ use pony_agent_core::agent::session::interrupted_turn::{
 };
 
 use crate::{
-    assert_roundtrips_closed, build_request, closed, interrupted_history, native_provider,
-    request_body, snapshot_of, DELIVERED_TEXT, INTERRUPTED_USER, NEXT_USER,
+    assert_roundtrips_closed, build_request, closed, interrupted_history, isolate_process_data_dir,
+    native_provider, snapshot_of, DELIVERED_TEXT, INTERRUPTED_USER, NEXT_USER,
 };
 
 const THREADS: usize = 4;
@@ -88,7 +88,18 @@ fn recovery_body(round: usize, draw: u64) -> RecoveryArtifacts {
 
 #[test]
 fn at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates() {
-    // Arrange：单线程参考序列（同一固定种子）
+    // Arrange
+    //
+    // 确定性防抖（AMEND-3 根因定位）：请求组装依赖**进程级**门控
+    // `agent::context::agent_team_policy_enabled()`（OnceLock，见 context.rs:461），它可能被
+    // 同进程其它用例的 bootstrap 在运行期间懒初始化 ⇒ "先算参考序列、后跑线程"会因为参考
+    // 序列看到旧门控值而误判不确定。这里先做一次 warm-up 强制懒初始化落地，再算参考序列；
+    // 同时把 env 沙箱提前锁定（避免 HOME/XDG 变化影响装载路径）。种子/迭代数/Barrier 语义不变。
+    isolate_process_data_dir();
+    let _warmup = recovery_body(0, 0);
+    let gate_before = pony_agent_core::agent::context::agent_team_policy_enabled();
+
+    // 单线程参考序列（同一固定种子）
     let mut reference_rng = Lcg::new(SEED);
     let reference: Vec<RecoveryArtifacts> = (0..ITERATIONS)
         .map(|round| recovery_body(round, reference_rng.next()))
@@ -122,6 +133,13 @@ fn at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates() {
         .map(|handle| handle.join().expect("AT2：恢复线程不得 panic（SUT 栈 panic 即红相判据）"))
         .collect();
 
+    // Assert 0：门控在参考序列与并发阶段之间不得变化（否则本次测量无效，属环境抖动而非 SUT 竞态）
+    assert_eq!(
+        gate_before,
+        pony_agent_core::agent::context::agent_team_policy_enabled(),
+        "AT2：进程级团队策略门控在用例期间发生变化 ⇒ 测量环境被其它用例污染（非 SUT 竞态）"
+    );
+
     // Assert 1：跨线程逐轮逐字确定（无共享状态污染）
     for (thread_index, bodies) in observed.iter().enumerate() {
         assert_eq!(
@@ -134,6 +152,13 @@ fn at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates() {
                 body, &reference[round].body,
                 "AT2：线程 {thread_index} 第 {round} 轮恢复请求必须与参考序列逐字一致"
             );
+            // 线程间互证：同种子下所有线程每一轮必须逐字相同（不依赖参考序列的时序）
+            if thread_index > 0 {
+                assert_eq!(
+                    body, &observed[0][round],
+                    "AT2：线程 {thread_index} 与线程 0 的第 {round} 轮必须逐字一致"
+                );
+            }
         }
     }
 

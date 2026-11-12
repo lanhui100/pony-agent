@@ -1249,10 +1249,16 @@ note: >-
       `provider_native_transcript` 以 tool_calls/tool 成对回放，非 native 家族经历史承载文本
       （`Previous assistant reply:`）读取同一结构。工具结果摘要由既有 `TurnToolActivity.result_text`
       （`crates/pony-agent-core/src/agent/telemetry.rs`）投影，不新增采集点、不新增网络调用。
-  (3) 展示与持久化分层（对外可见行为）：DSML 折叠只发生展示侧
-      （`provider::display_dsml_protocol_text` / `bin/tui/errors.rs::sanitize_model_protocol_text`）；
-      持久化侧 `provider::strip_dsml_protocol_text` 整块丢弃协议文本且**不写占位符**。旧库既有脏行只在
-      读取/展示时清洗，不回写、不再放大（无迁移、无新列）。本地日志均不含凭据。
+  (3) 协议文本的**三处分工**（不是"折叠只发生展示侧"）：
+      (3a) 展示折叠：`provider::display_dsml_protocol_text`（→ `bin/tui/errors.rs::sanitize_model_protocol_text`）
+           折叠协议块、丢弃孤立残片行、把连排占位符收敛为一个；fenced 代码块内一律逐字保真。
+      (3b) 请求组装：`provider::sanitize_dsml_protocol_text`（SSE 解析层，**模型可见请求体**）
+           语义保持不变（含 `［工具调用］` 占位与半截 tails），既有 replay/协议族断言依赖它。
+      (3c) 持久化（落库边界）：`provider::strip_dsml_protocol_text` 在
+           `control_plane::flush_events`（事件载荷 → `normalized_messages`）与
+           `session::store::append_turn_fallible_with_kind`（历史正文）两处整块丢弃协议文本，
+           **不写占位符**；旧库既有脏行只在读取/落库时清洗，不回写、不再放大（无迁移、无新列）。
+      本地日志均不含凭据。
   (4) 历史图与归属（本地取证相关）：中断收口不再因 `visible ≠ branch_head` 触发隐式 fork，
       `TurnCancelled` 节点让位于统一的分支头口径；历史节点 `turn_id` 显式取本轮。纯本地状态机变更。
   (5) 收口点：不新增 enforcement_point（无新网络出口、无新异常边界可机械拦截）；行为门落在测试层——

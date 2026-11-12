@@ -64,6 +64,12 @@ struct PendingTurnArtifacts {
     /// 旧快照无此键 ⇒ 空 ⇒ 回落 `tool_names`。
     #[serde(default)]
     tool_lines: Vec<String>,
+    /// 该轮工具结果摘要（按 `tool_result` 事件顺序；与 `tool_lines` 按下标对位）。
+    ///
+    /// L3-B #8：引用化节点折叠装载后，中断轮正文也要能带上"已完成的结果"——否则非 native 族
+    /// 续跑再次只剩工具名清单（与本波 RC1 同一个病）。旧快照无该键 ⇒ 空 ⇒ 结果段缺省。
+    #[serde(default)]
+    tool_results: Vec<String>,
     /// `turn/end.error`：失败原因（与写路径 `error` 同源）。
     /// 旧事件无该键 ⇒ None ⇒ 检查点退化为既有中断形态（不得 panic、不改已有文本）。
     #[serde(default)]
@@ -97,11 +103,39 @@ impl PendingTurnArtifacts {
     /// 投影侧不得自留阈值副本——两处阈值分居是「改一处漏一处」的温床。
     /// 失败原因非空时同样由该纯函数追加「失败原因：<单行>」行（单一真源，投影不自行拼接）。
     fn checkpoint_text(&self) -> Option<String> {
-        crate::agent::session::failed_turn_checkpoint_text(
+        // L3-B #8：与运行时收口**同一个闭合结构出口**（`interrupted_turn`），不再只产旧形态
+        // 检查点——否则引用化节点折叠装载后，中断轮的过程事实（已完成结果）丢失。
+        let tool_lines = self.checkpoint_tool_lines();
+        // 只有**确有结果摘要**的步骤才进结果段：旧日志/无 `tool_result` 事件的轮次必须逐字
+        // 保持既有检查点形态（基线用例 `history_projection_*` 钉住该逐字等价）。
+        let closed_steps: Vec<crate::agent::session::interrupted_turn::ClosedToolStep> = tool_lines
+            .iter()
+            .enumerate()
+            .filter_map(
+                |(index, line)| {
+                    let result_summary = self
+                        .tool_results
+                        .get(index)
+                        .map(|summary| summary.trim())
+                        .filter(|summary| !summary.is_empty())?
+                        .to_string();
+                    Some(
+                        crate::agent::session::interrupted_turn::ClosedToolStep {
+                            name: line.clone(),
+                            result_summary,
+                        },
+                    )
+                },
+            )
+            .collect();
+        let text = crate::agent::session::interrupted_turn::interrupted_turn_assistant_text_with_header_steps(
             &self.chunks,
-            self.checkpoint_tool_lines(),
-            self.failure_reason.as_deref().unwrap_or_default(),
-        )
+            tool_lines,
+            &closed_steps,
+            &[],
+            self.failure_reason.as_deref(),
+        );
+        (!text.trim().is_empty()).then_some(text)
     }
 }
 
@@ -194,6 +228,33 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                         if !pending.tool_lines.iter().any(|known| known == &line) {
                             pending.tool_lines.push(line);
                         }
+                    }
+                }
+            }
+            TurnEvent::ToolResult {
+                turn_id,
+                result,
+                error,
+                ..
+            } => {
+                // L3-B #8：历史投影留住结果摘要（与 `tool_lines` 按下标对位），
+                // 供中断轮承载文本的结果段使用（旧事件无 result ⇒ 空摘要）。
+                if let Some(pending) = state.pending.as_mut() {
+                    if pending.turn_id == *turn_id {
+                        let summary = result
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                error
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|text| !text.is_empty())
+                                    .map(|text| format!("error: {text}"))
+                            })
+                            .unwrap_or_default();
+                        pending.tool_results.push(summary);
                     }
                 }
             }

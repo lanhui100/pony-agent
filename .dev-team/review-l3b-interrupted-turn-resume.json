@@ -1,0 +1,85 @@
+{
+  "schema_version": 2,
+  "wave": "interrupted-turn-resume",
+  "lens": "L3-B 契约一致性 / 持久化 / 展示分离",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-681ef0be-08cb-440b-ae8d-431cc72221ec/l3b-auditor",
+    "fresh_context": true
+  },
+  "executed_by": "session-681ef0be-08cb-440b-ae8d-431cc72221ec/l3b-auditor",
+  "reviewed_commit": "16b1798d",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "只读审核：未修改仓库任何文件；反例经 rustc 以 stdin 源码链接已构建 rlib 在 /tmp 复现；audited_scopes 末项为 --scopes 逗号合并形态，兼容逗号/空格两种调用；审阅对象 = 16b1798d（工作区内容与该提交逐字一致，审阅时已用 git diff 复核）"
+  },
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/session/interrupted_turn.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/bin/tui/errors.rs",
+    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+    "docs/observability.yaml",
+    "crates/pony-agent-core/src/agent/session/interrupted_turn.rs,crates/pony-agent-core/src/agent/provider/mod.rs,crates/pony-agent-core/src/bin/tui/errors.rs,crates/pony-agent-core/src/agent/workspace_hotloader.rs,docs/observability.yaml"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/mod.rs",
+      "line": 5371,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && printf '%s\\n' 'use pony_agent_core::agent::provider::{strip_dsml_protocol_text as strip, display_dsml_protocol_text as disp};' 'fn main(){ let t = \"说明如下：\\n```\\nparameter name=\\\"command\\\">cargo test\\n```\\n完成。\"; println!(\"strip={:?}\\ndisplay={:?}\", strip(t), disp(t)); }' | rustc - --edition 2021 -L dependency=/home/dm/pony-agent/target/debug/deps --extern pony_agent_core=$(ls /home/dm/pony-agent/target/debug/deps/libpony_agent_core-*.rlib | head -1) -o /tmp/l3b-ce && /tmp/l3b-ce",
+      "detail": "is_dsml_fragment_line 只按『行首前缀』判协议残片，不识别 fenced code block 与协议块状态：`parameter name=` / `invoke name=` / `antml:parameter` / `antml:invoke` / `</…dsml…` 开头的**已交付正文**被整行丢弃，持久化侧（strip）与展示侧（display→tui/errors.rs::sanitize_model_protocol_text，且该入口对每个流式 delta 独立调用，delta 起点会被当成行首）双双静默丢内容，直接违反 strip 自身声明的『块外正文逐字保真』与 provider 既有教义『不误伤 markdown 代码块』，也违反 C5『持久化只留已交付正文』。反例输出：strip/display 均把 ``` 内的 `parameter name=\"command\">cargo test` 删除，只剩空代码块。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs",
+      "line": 348,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && printf '%s\\n' 'use pony_agent_core::agent::provider::{strip_dsml_protocol_text as strip, sanitize_dsml_protocol_text as san, display_dsml_protocol_text as disp};' 'use pony_agent_core::agent::session::interrupted_turn::display_assistant_text as it_disp;' 'fn main(){ let legacy = \"正文\\nparameter name=\\\"x\\\">残片\\n后续\"; let dsml = \"<｜｜DSML｜｜ calls>\\n正文\"; println!(\"strip={:?}\\nsanitize={:?}\\nprovider_display={:?}\\nit_display={:?}\", strip(legacy), san(legacy), disp(dsml), it_disp(dsml)); }' | rustc - --edition 2021 -L dependency=/home/dm/pony-agent/target/debug/deps --extern pony_agent_core=$(ls /home/dm/pony-agent/target/debug/deps/libpony_agent_core-*.rlib | head -1) -o /tmp/l3b-ce && /tmp/l3b-ce",
+      "detail": "两条『展示腿』对同一输入给出不同折叠结果：provider::display_dsml_protocol_text 保留占位符（`正文［工具调用］`），而 interrupted_turn::display_assistant_text 实际委派 strip（`正文`，无占位符），与其 docstring『与 TUI 的 sanitize_model_protocol_text 同源折叠』自相矛盾。同名 display_* 两个出口语义分叉，后续调用方极易挂错腿；应在常量/函数名上区分（display-folded vs display-stripped）或让 docstring 与实现一致。"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 1252,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && printf '%s\\n' 'use pony_agent_core::agent::provider::{strip_dsml_protocol_text as strip, sanitize_dsml_protocol_text as san, display_dsml_protocol_text as disp};' 'use pony_agent_core::agent::session::interrupted_turn::display_assistant_text as it_disp;' 'fn main(){ let legacy = \"正文\\nparameter name=\\\"x\\\">残片\\n后续\"; let dsml = \"<｜｜DSML｜｜ calls>\\n正文\"; println!(\"strip={:?}\\nsanitize={:?}\\nprovider_display={:?}\\nit_display={:?}\", strip(legacy), san(legacy), disp(dsml), it_disp(dsml)); }' | rustc - --edition 2021 -L dependency=/home/dm/pony-agent/target/debug/deps --extern pony_agent_core=$(ls /home/dm/pony-agent/target/debug/deps/libpony_agent_core-*.rlib | head -1) -o /tmp/l3b-ce && /tmp/l3b-ce",
+      "detail": "归属声明 (3)『DSML 折叠只发生展示侧』不成立：请求组装仍走 sanitize_dsml_protocol_text（agent/context.rs:1707、agent/context_window.rs:177/193/207、provider/openai_sse.rs:117/219/371/421），该腿既**保留**参数残片又**注入** `［工具调用］` 占位符到模型可见请求体。故同一输入存在三种折叠结果（持久化 strip 无占位符、展示 display 带占位符、请求 sanitize 保留残片），旧库脏行续跑时请求体仍可含 `parameter name=`，与 AT3『协议片段绝不出现在下一轮请求体』的判据在 legacy 数据上不成立。声明应按实际写『折叠/丢弃共三处，职责分别为持久化/展示/请求组装』。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs",
+      "line": 134,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && grep -c 'INTERRUPTED_RESULT_SECTION_HEADER\\|INTERRUPTED_PENDING_SECTION_HEADER' crates/pony-agent-core/src/agent/projection.rs; grep -n 'failed_turn_checkpoint_text' crates/pony-agent-core/src/agent/projection.rs",
+      "detail": "闭合结构只进了写路径，事件投影腿没跟进：agent/projection.rs:100 仍只用 failed_turn_checkpoint_text(chunks, tool_lines, reason) 合成中断/失败轮正文，产不出 `已完成的工具结果：` / `未完成的工具调用：` 两段（grep 计数 0）。projection.rs 文档承诺『与运行时写历史共用同一纯函数…保证两层文本同构』，现已不成立。可达路径：引用化节点装载走 fold_session_views（store.rs:1407/1600/1738/1873、2962 fold_node_views 命中 event_seq_range），重建出的中断轮正文回到只有检查点头+工具行的旧形态；非 native 家族续跑因此再次丢掉工具结果，正是本波要修的 RC1 形态（native 家族因 transcript 从节点拷贝而不受影响）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+      "line": 1396,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && grep -rn 'baseline was not retained' crates/pony-agent-core/src/agent/workspace_hotloader.rs crates/pony-agent-core/tests",
+      "detail": "去掉 baseline-miss 的通知后，新契约『请求体不得含 Notice: Session baseline was not retained』**无任何机器门禁**：全仓只有本文件的注释提到该句，11 个集成测试（hotloader_and_mcp_contract / wave2_b080_delta_notice / wave58_singleton_isolation / skill_invocation_policy_contract）无一条覆盖 turn>1 且基线未命中这一面，回归时无人报警。同时原 Wave-58 L3-B4『不得静默改写前缀』的可观测性降级为 TUI 下不可见的 eprintln（alternate screen 后 stderr 用户看不到）。建议在同波补一条断言（turn>1 + 冷启动 ⇒ volatile 段无 Notice）+ 保留结构化日志落文件。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/errors.rs",
+      "line": 261,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && grep -n 'INTERRUPTED_FAILED_LINE' src/lib/runtime/cancelled-turn.ts crates/pony-agent-core/src/bin/tui/errors.rs",
+      "detail": "同一事实两处文案已漂移：Rust 改成『上一轮**已中断**，已保留已执行的步骤记录。』，桌面端镜像常量 src/lib/runtime/cancelled-turn.ts:23 仍是『上一轮中断，已保留已执行的步骤记录。』。契约 C4 只把门开在 TUI 信息流，故不判 BLOCKING；但同一中断轮在 TUI 与桌面给出不同一句话，属本次展示改道留下的跨端不一致，应与 Rust 同提交对齐（或把 C4 判据扩到桌面端并加对照测试）。"
+    },
+    {
+      "file": ".dev-team/green-receipt-interrupted-turn-resume.md",
+      "line": 7,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && git diff --name-status 57df981d -- crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/",
+      "detail": "收据写『验收测试：只读…本波未修改一字』，但相对基线 57df981d 这两个测试文件均为 M（AMEND-1 收敛 AT2 计数面、AMEND-2 新增 C9）。改动本身有 Lead 裁决与 red-phase amendments 背书，不是伪造凭证；但收据的绝对化表述与 diff 事实冲突，最终报告应改为『本波测试改动仅限 AMEND-1/AMEND-2 授权项』，否则会被下一级审计判为凭证不实。"
+    }
+  ],
+  "baseline_commit": "57df981d"
+}

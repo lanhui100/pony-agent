@@ -252,6 +252,44 @@ pub fn interrupted_turn_transcript_closure(
     Some(messages)
 }
 
+/// 把「已宣告未执行」的调用以**闭合对**追加到既有协议族 transcript 尾部（L3-A #5）。
+///
+/// 背景：调用方已有真实 hop 片段（真实 `call_id` / `arguments` / 完整结果）时，**必须优先
+/// 保留真实片段**；合成片段只补它没有的信息（被取消跳过的调用）。追加后仍以 assistant 收口，
+/// 保证 `tool` 消息不是末条（否则下一请求非法）。
+///
+/// 返回是否发生了追加（`pending_calls` 为空 ⇒ `false`，调用方保持原片段逐字不变）。
+pub fn append_pending_closures_to_transcript(
+    transcript: &mut Vec<Value>,
+    delivered_text: &str,
+    pending_calls: &[PendingToolCall],
+) -> bool {
+    if pending_calls.is_empty() {
+        return false;
+    }
+    for (index, call) in pending_calls
+        .iter()
+        .filter(|call| !pending_call_is_blank(call))
+        .enumerate()
+    {
+        let call_id = format!("interrupted_pending_{index}");
+        transcript.push(tool_call_message(&call_id, &call.name));
+        transcript.push(json!({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": pending_tool_result_note(&call.name),
+        }));
+    }
+    let interrupt_note = crate::agent::session::UPSTREAM_INTERRUPTED_NOTE;
+    let delivered = persisted_assistant_text(delivered_text);
+    transcript.push(json!({
+        "role": "assistant",
+        "content": if delivered.is_empty() { interrupt_note.to_string() } else { delivered },
+        "reasoning_content": interrupt_note,
+    }));
+    transcript.len() > 1
+}
+
 /// 单条 assistant 工具调用消息（OpenAI 家族形态：`tool_calls[].function.name/arguments`）。
 ///
 /// 必须同时写 `reasoning_content`：`session::store::has_legacy_reasoning_gap` 把

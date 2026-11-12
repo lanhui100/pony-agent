@@ -295,28 +295,317 @@
       "rerun_result": "141 passed; 1 failed; 0 ignored; finished in 8.04s",
       "log_receipt": "/tmp/amend2-c9.log",
       "note": "写入时 executor 尚未补接线，故 C9 按预期红（真实断言失败）；按 Lead 指示未改任何实现。executor 接线完成后本用例应自行转绿，届时复跑记录 exit code。"
+    },
+    {
+      "id": "AMEND-3a",
+      "scope": "AT2 非确定性根因定位与测试侧加固",
+      "file": "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/at2_repeated_recovery_race.rs",
+      "verdict": "测试侧（进程级 OnceLock 门控的懒初始化时序），非 SUT 竞态",
+      "assertion_strength": "未放宽：新增 Assert 0（门控稳定性）与线程间互证，判据更强",
+      "rerun_exit_code": 101,
+      "rerun_note": "全量 10/10 仍 101，但失败用例是新增 C10（见 AMEND-3b）；AT2 10/10 ok",
+      "log_receipt": "/tmp/flake2-run-*.log"
+    },
+    {
+      "id": "AMEND-3b",
+      "scope": "新增 C10：真实 sqlite load_store 重启路径（补 C6 假重启盲区）",
+      "file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+      "fixture": "临时目录真实 sqlite（SqliteSessionBackend::new_with_trace_mode(path, WriteSeparate)，XDG 沙箱）；写入后 release_log_writers_for_test() 关闭句柄，再以新连接 load_store 重新装载",
+      "case": "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication",
+      "red_assertion_message": "C10：turn-2 必须恰好 user+assistant 两条（持久化后仍完整），实际 = [(user,None),(assistant,None)] | left: 0 right: 2",
+      "red_primitive": "真实断言失败（确定性：全量 10/10 复现）",
+      "finding": {
+        "summary": "真实 sqlite 重启后内存 history 只剩上一轮（turn-1）两行且 turn_id 全为 None；中断轮 turn-2 两行只存在于 normalized_messages（turn_id=turn-2 正确），中断节点在 normalized_history_nodes 存在（kind=turn_cancelled, turn_id=turn-2）但分支头/可见光标未前移到它 ⇒ 重启视图中断轮不可见（与原事故症状同类，发生在持久化/装载路径）。",
+        "db_evidence": {
+          "sessions.session_data": "{__index_only:true, history:0, historyNodes:0}",
+          "normalized_history_cursor": "visible=branch_head=node-…486-1（turn-1 节点），active_branch=branch-main",
+          "normalized_history_branches": "head_node_id=node-…486-1（未前移）",
+          "normalized_history_nodes": "node-…486-1(turn_id=null) / node-…500-3(turn_id=turn-2, kind=turn_cancelled, snapshot 1736B)；节点 id 1→3 跳号，暗示中间节点被替换/丢弃",
+          "normalized_messages": "user(null)/assistant(null)/user(turn-2)/assistant(turn-2)：索引侧 turn_id 正确"
+        },
+        "hypothesis": "sqlite 批写入路径中 cursor/branch head 命令与被提交节点不一致（append 后内存光标已到 turn-2 节点，落库仍是上一轮节点）；node id 跳号说明有节点被二次提交覆盖。需 executor 在 session/store.rs（commit/cursor 批命令）与事件 flush 时序上核对。",
+        "note": "本用例未写 turn 事件（直连 store），生产路径 persist_turn_outcome 会先 flush 事件；若判定该缺陷只影响无事件路径，需 Lead 裁决：① executor 修 cursor/head 落库；② 将 C10 夹具改为事件驱动（persist_events）后复评。我未改任何实现。"
+      },
+      "rerun_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+      "rerun_exit_code": 101,
+      "rerun_result": "142 passed; 1 failed (仅 C10，仍先在 Assert 1「turn-2 两行缺失」失败；交叉断言待装载修复后生效)",
+      "log_receipt": "/tmp/flake2-run-*.log, /tmp/c10-cross.log",
+      "cross_assertion_added": "装载侧交叉断言（Lead 裁决追加，不新增用例）：重启后的中断轮 assistant 正文必须仍含 INTERRUPTED_RESULT_SECTION_HEADER + INTERRUPTED_PENDING_NOTE_PREFIX + 每条结果摘要 —— 同时挡「行在但内容丢」的回归。",
+      "lead_ruling": "C10 保留原夹具（真实 sqlite load_store 为最硬证据）；executor 修 ensure_history_graph 的 head 口径（含 TurnCancelled）+ 统一 turn_id 回填，不改夹具绕过"
+    },
+    {
+      "id": "AMEND-4",
+      "scope": "C10 夹具第一轮改用带轮次身份的写入口",
+      "file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+      "change": "`store.append_turn(SID, \"第一轮问题\", \"第一轮回答\", None, Vec::new())` → `store.append_turn_with_kind(SID, ..., None, None, Some(\"turn-1\"))`；保留 `record_turn_trace_in_memory(trace(\"turn-1\"))`",
+      "why": "`append_turn` 是无 turn_id 的 legacy 直连签名；真实 sqlite 取证显示该轮两行 turn_id 写入时即为 NULL。生产路径 `persist_turn_outcome` 恒传 turn_id，故夹具应显式声明轮次身份，否则测的是伪造场景（且会把 NULL turn_id 误判成装载侧缺陷）。",
+      "lead_ruling": "不修生产侧：回填历史行会改变 `turn_outcome_persisted` 幂等闸门与 cancel 补写语义，超出本波最小闭包。",
+      "rerun_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+      "rerun_exit_code": 0,
+      "rerun_result": "143 passed; 0 failed; 0 ignored; 0 filtered; 3.10s；连续 4 次复跑全绿（/tmp/amend4.log、/tmp/amend4-run-1..3.log）",
+      "attribution": "转绿为**两侧共同结果**：① 夹具侧（本条）补齐 turn-1 轮次身份；② 实现侧 executor 同期改 `agent/session/store.rs`（git diff +71/−23，含 head 口径与 turn_id 回填）。C1–C8/AT1–AT3/C9 全部保持绿。",
+      "status": "kept_after_control_experiment",
+      "control_experiment": {
+        "question": "AMEND-4（C10 第一轮显式 turn_id）是否冗余？Lead 假设：executor 修正后 sync_latest_history_node 历史腿优先 + enrich_history_from_traces 末端对齐回填，可让 legacy 夹具也转绿。",
+        "variant_A_legacy": "C10 第一轮改回 store.append_turn(Some(SID), \"第一轮问题\", \"第一轮回答\", None, Vec::new())",
+        "variant_A_exit_code": 101,
+        "variant_A_result": "142 passed; 1 failed（仅 C10）；失败原文 = `C10：turn-1 必须恰好 user+assistant 两条（不得被重启复制），实际 0 条`（left: 2 right: 0）。注意 Assert 1（turn-2 两行）在 legacy 夹具下**通过** ⇒ 中断轮装载本身已修好；失败点是 turn-1 两行在真实 sqlite 里的 turn_id 写入时即 NULL，回填/末端对齐在该路径未生效。",
+        "variant_B_explicit_turn_id": "C10 第一轮用 store.append_turn_with_kind(..., None, Some(\"turn-1\"))（AMEND-4 原写法）",
+        "variant_B_exit_code": 0,
+        "variant_B_result": "143 passed; 0 failed; 0 ignored；3.09s",
+        "verdict": "AMEND-4 不冗余：legacy 无 turn_id 写入口会让 C10 的轮次身份断言（C2 口径的 turn_id 正确性）不可满足；回填路径未覆盖 legacy 直连写入的两行，故保留显式 turn_id 夹具。",
+        "log_receipts": {
+          "variant_A": "/tmp/amend4-control.log",
+          "variant_B": "/tmp/amend4-restored.log"
+        }
+      }
     }
   ],
   "current_state": {
-    "phase": "post_implementation_rerun",
-    "checked_at": "2026-11-12T14:33:05+08:00",
-    "command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+    "phase": "final_green_after_control_experiment",
+    "checked_at": "2026-11-12T16:58:06+08:00",
+    "command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
     "exit_code": 0,
-    "summary": "141 passed; 0 failed; 0 ignored; 0 filtered; 8.47s —— 冻结验收用例在实现落地后全部转绿（红相期 Exit 101 的逐条证据见 `test_cases` 与 `baseline_defects_confirmed`，保持原样不改写）。",
-    "log_receipt": "/tmp/red-interrupted-turn-v2.log",
-    "tests_migrated": [
-      "AT2 Assert 2（native 通道计数 + carry ≤1 旁证）"
+    "summary": "143 passed / 0 failed / 0 ignored；C1–C10 + AT1–AT3 全绿。AMEND-4 经对照实验判定**保留**（legacy 夹具 variant A = Exit 101）。",
+    "log_receipts": [
+      "/tmp/amend4-control.log",
+      "/tmp/amend4-restored.log"
     ],
     "not_changed": [
-      "C1–C8 断言面",
-      "AT1/AT3 断言面",
+      "C1–C9 断言面",
+      "AT1–AT3 断言面",
       "任何 src/** 实现"
+    ]
+  },
+  "flakiness": {
+    "reported_by": "L3-C（独立复跑）：at2_repeated_recovery_race 首次全量 FAILED(141/1)，随后 3 次全量 + 1 次单跑全绿（4/5）",
+    "checks": [
+      {
+        "label": "全量 ×10（AMEND-1 后、C10 前）",
+        "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+        "runs": [
+          {
+            "run": 1,
+            "exit_code": 0,
+            "failed": [],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 2,
+            "exit_code": 0,
+            "failed": [],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 3,
+            "exit_code": 0,
+            "failed": [],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 4,
+            "exit_code": 0,
+            "failed": [],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 5,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 6,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 7,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 8,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 9,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 10,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          }
+        ],
+        "at2_failures": 0,
+        "conclusion": "AT2 10/10 绿；run5-10 的失败全是本次新增 C10（真实 sqlite），与 AT2 无关"
+      },
+      {
+        "label": "全量 ×10（AT2 加固后，含 C10）",
+        "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+        "runs": [
+          {
+            "run": 1,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 2,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 3,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 4,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 5,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 6,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 7,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 8,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 9,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 10,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          }
+        ],
+        "at2_failures": 0,
+        "conclusion": "AT2 10/10 绿（并行全量，与 c3b/c6/c10 等改 env 的用例同进程并发）"
+      },
+      {
+        "label": "AT2 单跑 ×10",
+        "command": "cargo test ... -- --exact adversarial::at2_repeated_recovery_race::at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates",
+        "runs": [
+          {
+            "run": 1,
+            "exit_code": 101
+          },
+          {
+            "run": 2,
+            "exit_code": 101
+          },
+          {
+            "run": 3,
+            "exit_code": 101
+          },
+          {
+            "run": 4,
+            "exit_code": 101
+          },
+          {
+            "run": 5,
+            "exit_code": 101
+          },
+          {
+            "run": 6,
+            "exit_code": 101
+          },
+          {
+            "run": 7,
+            "exit_code": 101
+          },
+          {
+            "run": 8,
+            "exit_code": 0
+          },
+          {
+            "run": 9,
+            "exit_code": 0
+          },
+          {
+            "run": 10,
+            "exit_code": 0
+          }
+        ],
+        "conclusion": "run1-7 EXIT=101 全是编译错误（executor 并发编辑 provider/mod.rs 时 collapse_dsml_placeholders 未定义 E0425），非 AT2 失败；run8-10 绿。该 7 次不计入 AT2 稳定性样本。"
+      }
     ],
-    "amend2_state": {
-      "checked_at": "2026-11-12T14:34:57+08:00",
-      "exit_code": 101,
-      "summary": "C9 接线守卫红（turn_persist.rs 未接线），其余 141 条通过",
-      "log_receipt": "/tmp/amend2-c9.log"
+    "root_cause": {
+      "classification": "测试侧（非 SUT 竞态）",
+      "mechanism": "请求组装读取进程级 OnceLock 门控 agent::context::agent_team_policy_enabled()（context.rs:82/461），它可能被同进程其它用例懒初始化；原实现『先算参考序列 → 再起线程』会在门控初始化前后各取一次值 ⇒ System 消息条数变化 ⇒ full-body 逐字比对偶发失败。固定种子/Barrier/迭代数本身无不确定性。",
+      "evidence": "AT2 断言面无共享可变状态；同进程并行全量 20/20 绿（加固前后各 10 次）；有效单跑 3/3 绿；未复现与种子相关的差异。",
+      "fix": "测试侧加固（未放宽任何断言）：① 用例起始 isolate_process_data_dir() 锁 env 沙箱；② 先做一次 warm-up 请求强制 OnceLock 落地，再算参考序列；③ 新增 Assert 0：门控在用例期间必须不变（否则判为环境被污染而非 SUT 竞态）；④ 线程间互证（同种子所有线程逐轮逐字相同）。固定种子 + 显式 Barrier + 固定迭代语义全部保留。"
+    },
+    "log_receipts": {
+      "full_pre": "/tmp/flake-run-*.log",
+      "full_post": "/tmp/flake2-run-*.log",
+      "at2_single": "/tmp/at2-run-*.log"
     }
   }
 }

@@ -1,0 +1,101 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3c-adversarial-interrupted-turn-resume-20261112",
+    "fresh_context": true
+  },
+  "executed_by": "l3c-adversarial-interrupted-turn-resume-20261112",
+  "reviewed_commit": "57df981d",
+  "attestation": {
+    "self_signed": false,
+    "degraded": false,
+    "note": "只读审核：未修改工作树任何文件（唯一写入本 JSON）；命令均在 worktree 内 CARGO_TARGET_DIR=/home/dm/pony-agent/target 下执行。"
+  },
+  "verdict": "FAIL",
+  "hypotheses": {
+    "H1_branch_head_not_advanced_loses_interrupted_turn": {
+      "verdict": "FALSE_AS_STATED_PARTIALLY_TRUE_IN_RESIDUAL",
+      "answer_1_restart_rebuild_path": "重启后 history 不来自 branch head 节点快照：sqlite 运行时读路径 load_store 以 append-only 命令日志 fold 为真源（sqlite_session.rs:2738-2806 调 fold::merge_log_truth_into_sessions），再叠加索引 normalized_* 投影回填与 PA-174 durable turn_events 重建；中断轮的 user/assistant 行以 PersistCommand::AppendMessage 落日志（store.rs:786-796 / 822-834），故重启后仍在 history 里。TUI resume 走 hydrate_state_from_session → control_plane.load_session_runtime_view（tui.rs:7868-7900），读的是内存态 session.history；节点快照/节点折叠只在显式传 node_id 或 checkout/restore/fork/switch 时发生（store.rs:2953-3005、1407/1600/1738/1873）。⇒ H1 声称的「重启即消失」不成立。",
+      "answer_2_would_rows_be_lost": "重启不丢。残留风险在「中断轮之后的节点被 fold 重建」：TurnCancelled 节点因不推进分支头而成为非祖先悬挂兄弟，projection.rs:1269-1276 会把它的 turn_id 放进 excluded_turn_ids，:1295 据此丢弃该轮全部事件 ⇒ 显式 rewind/checkout/fork/switch/时间旅行折叠后续节点时，中断轮的行与工具往返会从视图（进而从后续上下文）里消失。",
+      "answer_3_two_interrupts_or_interrupt_rewind_interrupt": "visible/branch_head 基本自洽：kind.is_some() 路径先 visible←branch_head 再原地续写，commit 里 advances_branch_head=false 只把 visible 置回 head（store.rs:704-718、3743-3749），ensure_history_graph 的 head 口径（store.rs:3544-3548，排除 TurnCancelled）与之同源，不会自造对齐漂移。两处不自洽见 findings：首轮即中断时 head/visible 双双为 None（store.rs:711）；每次中断新增一个悬挂节点，节点表随中断次数无界增长且不参与任何分支祖先链。"
+    },
+    "H2_ordinary_stream_turn_fold_still_written_back": {
+      "verdict": "TRUE",
+      "evidence": "git diff 57df981d -- src/agent/provider/openai_sse.rs 为空；SSE 解析层仍 output_text: super::sanitize_dsml_protocol_text(...)（openai_sse.rs:117/219/371/421），占位符 ［工具调用］ 由 provider/mod.rs:5466-5467 注入；新增的持久化侧 strip_dsml_protocol_text（provider/mod.rs:5417）只有 interrupted_turn.rs:143/291/349 三个消费者，runtime/control_plane 零调用 ⇒ 普通轮「展示折叠写回持久化正文」仍开着，C5 只在纯函数层绿（acceptance c5 测的是 persisted_assistant_text 而非落库链路）。"
+    }
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/session/fold.rs",
+    "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/agent/projection.rs",
+    "crates/pony-agent-core/src/agent/provider/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/session/interrupted_turn.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/bin/tui/errors.rs",
+    "crates/pony-agent-core/src/agent/workspace_hotloader.rs",
+    "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+    "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume",
+    "crates/pony-agent-core/src/agent/session/store.rs,crates/pony-agent-core/src/agent/session/fold.rs,crates/pony-agent-core/src/agent/provider/openai_sse.rs,crates/pony-agent-core/src/bin/tui.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/provider/openai_sse.rs",
+      "line": 219,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && grep -q 'output_text: super::sanitize_dsml_protocol_text' crates/pony-agent-core/src/agent/provider/openai_sse.rs && ! grep -rq 'strip_dsml_protocol_text' crates/pony-agent-core/src/agent/runtime crates/pony-agent-core/src/agent/control_plane crates/pony-agent-core/src/agent/provider/openai_sse.rs && echo 'H2 CONFIRMED: 普通轮折叠结果仍写回 output_text -> assistant/chunk|message -> normalized_messages'",
+      "detail": "C5（折叠不写回）在普通流式轮未接线：SSE 解析层把展示折叠结果（含占位符 ［工具调用］，provider/mod.rs:5466-5467）写进 output_text/delta，经 on_delta（openai_sse.rs:133/379）→ assistant/chunk → assistant/message → AppendMessage → normalized_messages 正文；strip_dsml_protocol_text（provider/mod.rs:5417）只被中断收口（interrupted_turn.rs:143/291/349）使用。绿相收据 §1「持久化侧整块丢弃协议文本」对普通轮不成立。修法约束：不得改 sanitize_dsml_protocol_text 语义（会破 tests/tui_session_resilience_chunk_split.rs:63-67 的 acc.contains(\"工具调用\") 与 tests/tui_session_resilience_acceptance.rs:52-56 的 out.contains(\"工具调用\")，两者钉住流式清洗必须保留一个占位符）；应在持久化边界（assistant/message 与历史正文落库处）改走 strip，展示侧继续用 display_dsml_protocol_text（bin/tui/errors.rs:51）。at3_dirty_dsml_body_injection.rs:111 与 interrupted_turn_resume_acceptance.rs:983/991 用 `<=1`，收口后仍会通过（不构成阻塞，但也说明这些用例对收口无判别力）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 3738,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && sed -n 3736,3750p crates/pony-agent-core/src/agent/session/store.rs && sed -n 1268,1297p crates/pony-agent-core/src/agent/projection.rs",
+      "detail": "H1 的残留真面：TurnCancelled 不推进分支头 ⇒ 该节点是「父=上一 committed 节点」的悬挂兄弟，不在此后任何节点的祖先链上；projection.rs:1269-1276 把非祖先节点的 turn_id 塞进 excluded_turn_ids，:1295 丢弃该轮全部事件。因此凡是走 fold 重建、且目标是**中断轮之后**的节点（store.rs:1407 checkout、1600 restore_branch_head、1738 fork、1873 switch、2962 时间旅行 snapshot）都会把中断轮 user/assistant 行与工具往返折掉——即同一条缺陷的反向面，只是触发条件是显式 rewind/checkout 而非重启（重启走日志 fold ∪ normalized 投影，不受影响）。最小复现（无需真实库）：SessionStore::memory_only → append_turn(turn-1) → append_turn_with_kind(kind=Some(Cancelled), turn-2) → append_turn(turn-3) → 给 node-3 置 event_seq_range=(1,n) 并 load_turn_events 有 turn-2 事件 → restore_branch_head/checkout_history_node(node-3) 后断言 history 仍含 turn-2 两行；当前预期失败（被 excluded_turn_ids 折掉）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 711,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && sed -n 704,720p crates/pony-agent-core/src/agent/session/store.rs && sed -n 3738,3750p crates/pony-agent-core/src/agent/session/store.rs && sed -n 3544,3549p crates/pony-agent-core/src/agent/session/store.rs",
+      "detail": "首轮即被中断（用户第一条消息按 Ctrl+C，属高概率路径）时：append 的 kind.is_some() 分支 `if branch_head.is_some()` 守卫不生效（head 尚为 None），commit 又因 advances_branch_head=false 把 visible 置回 None ⇒ 收口后 branch.head_node_id 与 cursor.visible/branch_head 全是 None；下一轮节点 parent=None，历史图出现两个根，且同步写入的分支 base_node_id=中断节点、head 与其无祖先关系（store.rs:3550-3568 的 head 重算在出现成功轮前恒为 None）。既有 store 单测 append_turn_with_kind_marks_synthetic_interruption_row（session/tests.rs:6677-6720）正是「首轮中断」形态，但只断言节点 kind，未断言 cursor/分支头，故该破口目前无断言覆盖。最小复现：空 memory store → append_turn_with_kind(Some(Cancelled)) → snapshot 断言 history_cursor.visible_node_id.is_some() / branch.head_node_id.is_some()（预期失败）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 2540,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && sed -n 2534,2550p crates/pony-agent-core/src/agent/session/store.rs && sed -n 1268,1297p crates/pony-agent-core/src/agent/projection.rs",
+      "detail": "flush 恒先于 commit（turn_persist.rs:136-151 flush_session_buffered_events → append_turn_with_kind），finalize_event_watermark 会把「当前 branch head 节点」的 turn_id 无条件改成本次 flush 的 turn_id（store.rs:2539-2541）。中断轮不再推进分支头后，这次覆盖落在上一 turn_committed 节点上 ⇒ 已提交节点被改标成中断轮（C2/F7 的反方向错标：不是「中断节点标成上一轮」，而是「上一轮标成中断轮」；checkpoint 列表按 node.turnId 展示会错位），并直接改变 projection.rs:1272 的 ancestor_turn_ids —— 决定中断轮事件是否被 exclude，结果依赖 flush 次数/顺序（上面 ADVISORY 的 folded-view 丢失因此是顺序敏感的，而非纯粹确定）。属既有代码，但本波改变了它命中的节点，建议随本波一并收口（`if !_turn_id.is_empty()` 只在 advances_branch_head 时生效）。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+      "line": 294,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && sed -n 262,305p crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs && grep -n 'fn runtime_view' -A6 crates/pony-agent-core/tests/session_read_from_log.rs",
+      "detail": "C6「恢复幂等」的「重启」是假重启：PreloadedBackend::load_store 直接把内存 dump 的 SessionState 原样回吐（tests:293-299 的 take()），既不走 sqlite load_store 的日志 fold，也不走 normalized 投影或节点折叠。故 H1 的「节点快照 hydrate」假设无法被现有红/绿相证伪，C2/C6 也只证明「同一份内存态重放两次逐字一致」。建议补一条用既有 SessionHarness（tests/session_read_from_log.rs:77-85 runtime_view = load_store）的真重启断言：中断收口 → drop store → 重新 load_store → history 仍含中断轮两行且 turn_id 为本轮。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/at2_repeated_recovery_race.rs",
+      "line": 100,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && export CARGO_TARGET_DIR=/home/dm/pony-agent/target && for i in $(seq 1 10); do cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance > /tmp/at2_$i.log 2>&1 || echo \"FAILED run $i\"; grep -h '^test result' /tmp/at2_$i.log; done",
+      "detail": "实测非确定性：本轮首次全量运行结果为 FAILED（141 passed / 1 failed，失败项 = at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates），随后同一 worktree 连续 3 次全量运行与 1 次单独运行均 ok（142 passed / 0 failed）⇒ 4/5 通过。该用例自称「确定性：固定种子 + 固定线程数 + Barrier」，一次性失败说明影响请求体的分片里仍有进程级共享状态（与 workspace_hotloader 基线通知同类：非会话事实进入请求体）。未定位到具体漂移字段（失败输出被巨型 request dump 截断），故记 ADVISORY 而非 BLOCKING，需 executor 用上面循环命令复现并 diff 首个不等分片。"
+    }
+  ],
+  "notes": [
+    "H2 = 真（BLOCKING，C5 范围/接线缺口，可机械收口）。",
+    "H1 = 按题面判据为假（重启不丢：日志 fold ∪ normalized 投影，非节点快照），但留下两条 ADVISORY 真风险：悬挂 TurnCancelled 节点被 fold 排除（显式 rewind/checkout 后消失）与首轮中断的 None 分支头。",
+    "已跑门禁（物理收据）：cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance = 142 passed / 0 failed（3 次连跑）；tui_session_resilience_chunk_split = 2 passed；tui_session_resilience_acceptance = 137 passed。"
+  ]
+}

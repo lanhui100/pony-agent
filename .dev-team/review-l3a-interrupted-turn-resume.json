@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "57df981d",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a-concurrency-scheduler-state",
+    "fresh_context": true
+  },
+  "executed_by": "l3a-concurrency-scheduler-state",
+  "attestation": {
+    "self_signed": true
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_control.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_persist.rs,crates/pony-agent-core/src/agent/runtime/turn_control.rs,crates/pony-agent-core/src/agent/runtime/turn_stream.rs,crates/pony-agent-core/src/agent/session/store.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 3743,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && python3 - <<'PY'\nimport re,sys\n# 复现：TurnCancelled 不推进 branch head 之后，所有\"回填 head 节点 turn_id\"的点都写到上一轮节点\np='crates/pony-agent-core/src/agent/session/store.rs'\ns=open(p).read()\nprem={\n 'head-not-advanced': r'let advances_branch_head = !matches!\\(kind, HistoryNodeKind::TurnCancelled\\);',\n 'finalize-writes-turn-id-into-head': r'node\\.turn_id = Some\\(_turn_id\\.to_string\\(\\)\\);',      # store.rs:2540\n 'sync/persist-recompute-from-trace-tail': r'node\\.turn_id = node\\s*\\.turn_trace_history\\s*\\.last\\(\\)',  # store.rs:3792 / 4053\n}\nfor name,pat in prem.items():\n    if not re.search(pat,s,re.S):\n        print('[STALE premise]',name); sys.exit(2)\nnodes=[{'id':'node-1','kind':'TurnCommitted','turn_id':'turn-1'}]\nhead='node-1'                                    # branch head 停在上一轮（store.rs:3738 不推进）\nnodes.append({'id':'node-2','kind':'TurnCancelled','turn_id':'turn-2'})\nfor n in nodes:                                  # 终态 flush -> commit_event_batch -> finalize_event_watermark(session,'turn-2')\n    if n['id']==head: n['turn_id']='turn-2'\nhits=[n['id'] for n in nodes if n['turn_id']=='turn-2']\nprint('nodes after cancel + terminal flush:',nodes)\nassert len(hits)==1, f'C2 violated: turn-2 held by {len(hits)} nodes {hits}'\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+      "line": 341,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && python3 - <<'PY'\ns=open('crates/pony-agent-core/src/agent/runtime/turn_stream.rs').read()\npre=s.index('macro_rules! stream_tool_call_pre'); post=s.index('macro_rules! stream_tool_call_post')\npost_end=s.index('loop {',post)\nif s.count('pending_calls_after_batch_index(&current_tool_calls, executed_calls.len() + 1)')!=2:\n    print('[STALE premise]'); raise SystemExit(2)\nif 'executed_calls.push(current_tool_call.clone());' not in s[post:post_end]:\n    print('[STALE premise] push 不在 post 阶段'); raise SystemExit(2)\nif 'executed_calls.clear();' not in s[post_end:post_end+400]:\n    print('[STALE premise] clear 不在 hop 循环头'); raise SystemExit(2)\ncalls=['Read','Bash','Write']     # 一个 hop 宣告 3 个调用（串行段：段 k == 单调用 k）\nexecuted=['Read']                 # 调用 0 已完全收尾并 push；预阶段进入调用 1 时取消\ni=len(executed)                   # 当前调用 calls[1]=Bash，**尚未执行**\npending=calls[len(executed)+1:]   # 代码：start_index = executed_calls.len()+1 = 2\nprint('declared =',calls,'| cancel in pre-phase of',calls[i],'| executed =',executed,'| pending =',pending)\nmissing=[c for c in calls[i:] if c not in pending]\nassert not missing, f'{missing} 已宣告但未执行，既不在 pending 也不在 tool_activities（静默消失）'\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+      "line": 824,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && python3 - <<'PY'\ns=open('crates/pony-agent-core/src/agent/runtime/turn_persist.rs').read()\nfor pat in ['let transcript = closure.or(legacy_transcript);','TOOL_RESULT_SUMMARY_MAX_CHARS: usize = 240']:\n    if pat not in s:\n        print('[STALE premise]',pat); raise SystemExit(2)\ndef summarize(raw):\n    c=' '.join(raw.split())\n    return c if len(c)<=240 else c[:239]+'\\u2026'\nreal='X'*400+'SENTINEL_RESULT'          # 真实 tool 结果（legacy hop_records 里逐字存在）\nclosed=[{'name':'Read','result_summary':summarize(real)}]\nclosure=[{'role':'tool','content':closed[0]['result_summary']}]  # closed_steps 非空 ⇒ closure=Some\nlegacy=[{'role':'tool','content':real}]                          # 被 closure.or() 丢弃\nfinal=closure if closure else legacy\nok=any('SENTINEL_RESULT' in m['content'] for m in final)\nprint('summary len =',len(closed[0]['result_summary']),'| sentinel kept =',ok)\nassert ok, '真实结果尾部被 240 字符截断（真实 hop 往返被合成 closure 覆盖）'\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_persist.rs",
+      "line": 630,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && python3 - <<'PY'\ns=open('crates/pony-agent-core/src/agent/runtime/turn_persist.rs').read()\ni=s.index('fn fail_stream_turn_with_hook_dispatch_impl(')\nif 'pending_calls' in s[i:s.index(') {',i)]:\n    print('[STALE premise] 失败面已支持 pending'); raise SystemExit(2)\nj=s.index('self.persist_failed_turn_context(')\nif not s[j:s.index(');',j)].rstrip().endswith('Vec::new(),'):\n    print('[STALE premise] 末位实参不是 Vec::new()'); raise SystemExit(2)\ndeclared=['Read','Bash','Write']      # 模型一次宣告 3 个调用\nclosed_or_aborted=['Read','Bash']     # 前两个已进 tool_activities（第三个从未开始）\npending_passed=[]                     # turn_persist.rs:630 硬编码\nrendered=closed_or_aborted+pending_passed\nmissing=[c for c in declared if c not in rendered]\nprint('declared =',declared,'| rendered =',rendered,'| dropped =',missing)\nassert not missing, f'失败轮 {missing} 已宣告但从未开始，收口结构里完全消失'\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 3594,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && python3 - <<'PY'\ns=open('crates/pony-agent-core/src/agent/session/store.rs').read()\nfor name,pat in [('只修 visible is None','if session.history_cursor.visible_node_id.is_none() {'),\n                 ('head 重算排除 TurnCancelled','&& n.kind != HistoryNodeKind::TurnCancelled'),\n                 ('成功轮仍走 prepare','prepare_session_for_new_turn(&mut staged_session);')]:\n    if pat not in s:\n        print('[STALE premise]',name); raise SystemExit(2)\nnodes=[{'id':'node-1','kind':'TurnCommitted'},{'id':'node-2','kind':'TurnCancelled'}]\nhead=[n['id'] for n in nodes if n['kind']!='TurnCancelled'][-1]   # 重算后的 branch head\nvisible='node-2'                                                  # 事故库持久化 cursor 的 visible\nbranches=['branch-main']\nif visible is None: visible=head                                  # ensure_history_graph 只修 None\nif visible!=head: branches.append('-branch-2')                    # 下一次成功轮 append\nprint('legacy load + 1 successful turn: head =',head,'visible =',visible,'branches =',branches)\nassert len(branches)==1, 'legacy 事故光标装载后第一次成功轮仍隐式 fork'\nPY"
+    }
+  ]
+}

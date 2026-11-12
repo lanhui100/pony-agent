@@ -523,6 +523,7 @@ impl AgentRuntime {
             partial_text,
             failed_turn_native_transcript,
             None,
+            Vec::new(),
         );
     }
 
@@ -573,6 +574,57 @@ impl AgentRuntime {
             partial_text,
             failed_turn_native_transcript,
             Some(trigger),
+            Vec::new(),
+        );
+    }
+
+    /// R3（L3-A #6）：失败面**带未执行调用列表**的派发入口（与取消面同构）。
+    ///
+    /// 只被"批内中止"这一处调用：同一响应里模型宣告了 N 个调用、执行中途被中止/取消时，
+    /// 其后的调用既不在 `tool_activities`（没执行）也不在执行栈上——必须显式透传，
+    /// 否则它们从续跑上下文里静默消失（"补齐优先于截断"）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn fail_stream_turn_with_hook_dispatch_pending(
+        &self,
+        sink: &impl TurnEventSink,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        completed_hops: usize,
+        error: String,
+        partial_text: Option<String>,
+        failed_turn_native_transcript: Option<Vec<Value>>,
+        pending_calls: Vec<PendingToolCall>,
+    ) {
+        self.fail_stream_turn_with_hook_dispatch_impl(
+            sink,
+            control,
+            session_id,
+            turn_id,
+            user_message,
+            provider_meta,
+            build_context_observation,
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            first_token_latency_ms,
+            turn_duration_ms,
+            completed_hops,
+            error,
+            partial_text,
+            failed_turn_native_transcript,
+            None,
+            pending_calls,
         );
     }
 
@@ -597,6 +649,8 @@ impl AgentRuntime {
         partial_text: Option<String>,
         failed_turn_native_transcript: Option<Vec<Value>>,
         trigger: Option<&'static str>,
+        // R3（L3-A #6）：失败面同样承接"已宣告未执行"调用（同一次响应里被取消跳过的调用）。
+        pending_calls: Vec<PendingToolCall>,
     ) {
         let attribution = match trigger {
             Some(trigger) => FailedTurnAttribution {
@@ -624,10 +678,9 @@ impl AgentRuntime {
             &error,
             provider_meta,
             failed_turn_native_transcript,
-            // 失败轮的在飞调用已作为 `status="aborted"` 的闭合 hop 落进 `tool_activities`，
-            // 故此处无需再补"已宣告未执行"列表（取消轮的批内跳过路径由
-            // `cancel_stream_turn` 显式透传）。
-            Vec::new(),
+            // R3：失败面与取消面同构——"已宣告未执行"的调用同样入闭合结构
+            // （默认入口传空列表；批内中止路径经 `..._with_pending` 显式透传）。
+            pending_calls,
         );
         self.update_execution_checkpoint(
             control,
@@ -813,15 +866,28 @@ impl AgentRuntime {
                 pending_calls,
                 failure_reason,
             );
-        // transcript：闭合片段优先（它同时覆盖"已宣告未执行"的调用）；无任何步骤时
-        // 才回落到调用方按协议族的既有片段，保证老路径逐字不变。
-        let closure = crate::agent::session::interrupted_turn::interrupted_turn_transcript_closure(
-            "",
-            prior_assistant_text,
-            &closed_steps,
-            pending_calls,
-        );
-        let transcript = closure.or(legacy_transcript);
+        // transcript 取用顺序（L3-A #5）：
+        // 1) 调用方已有**真实闭合 hop 片段**（协议族原生形态，含真实 call_id / arguments /
+        //    完整结果）⇒ 优先保留，只用合成片段补齐它没有的"已宣告未执行"调用；
+        // 2) 没有真实片段 ⇒ 用合成闭合片段（含已闭合步骤与未开始调用）；
+        // 3) 两者皆无 ⇒ None（由文本承载回退）。
+        // 反例（修正前）：`closure.or(legacy)` 会让 240 字符截断的合成摘要覆盖真实结果尾部。
+        let transcript = match legacy_transcript {
+            Some(mut legacy) => {
+                crate::agent::session::interrupted_turn::append_pending_closures_to_transcript(
+                    &mut legacy,
+                    prior_assistant_text,
+                    pending_calls,
+                );
+                Some(legacy)
+            }
+            None => crate::agent::session::interrupted_turn::interrupted_turn_transcript_closure(
+                "",
+                prior_assistant_text,
+                &closed_steps,
+                pending_calls,
+            ),
+        };
         (assistant_text, transcript)
     }
 

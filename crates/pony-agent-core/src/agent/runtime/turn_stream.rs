@@ -110,6 +110,57 @@ impl AgentRuntime {
         );
     }
 
+    /// R3（L3-A #6）：失败面的**带未执行调用**版本（与取消面同构）。
+    ///
+    /// 唯一调用点：批内「工具被中止 + 用户已请求停止」分支——那一刻同一响应里被跳过的
+    /// 调用必须一起收口，否则续跑上下文里它们彻底消失。
+    #[allow(clippy::too_many_arguments)]
+    fn fail_stream_turn_gated_dispatch_pending(
+        &self,
+        sink: &impl TurnEventSink,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        completed_hops: usize,
+        error: String,
+        partial_text: Option<String>,
+        failed_turn_native_transcript: Option<Vec<serde_json::Value>>,
+        pending_calls: Vec<crate::agent::session::interrupted_turn::PendingToolCall>,
+    ) {
+        if !claim_failed_terminal(control, turn_id) {
+            return;
+        }
+        self.fail_stream_turn_with_hook_dispatch_pending(
+            sink,
+            control,
+            session_id,
+            turn_id,
+            user_message,
+            provider_meta,
+            build_context_observation,
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            first_token_latency_ms,
+            turn_duration_ms,
+            completed_hops,
+            error,
+            partial_text,
+            failed_turn_native_transcript,
+            pending_calls,
+        );
+    }
+
     /// PA-171 C4：带**触发方标签**的过闸门失败派发（仅 provider 类失败使用）。
     ///
     /// 与 [`Self::fail_stream_turn_gated_dispatch`] 逐字等价，只多一个 `trigger`
@@ -322,6 +373,9 @@ impl AgentRuntime {
                     Some("running"),
                     None,
                 );
+                // R3（L3-A #2）：**预阶段**取消——当前调用尚未执行，必须与其余未执行调用一起进
+                // pending（`executed_calls.len()` 就是当前调用序号）；用 `+1` 会把这一个调用
+                // 静默丢掉（既不在 tool_activities，也不在 pending）。
                 if self.should_cancel_turn(control, turn_id) {
                     self.cancel_stream_turn(
                         sink,
@@ -338,7 +392,7 @@ impl AgentRuntime {
                         Some(context_observation.clone()),
                         accumulated_turn_text.as_str(),
                         cancelled_turn_native_transcript(provider, user_message, &hop_records),
-                        pending_calls_after_batch_index(&current_tool_calls, executed_calls.len() + 1));
+                        pending_calls_after_batch_index(&current_tool_calls, executed_calls.len()));
                     return;
                 }
                 emit_stream_event(
@@ -767,7 +821,9 @@ impl AgentRuntime {
                             &current_tool_call.name,
                             tool_result.output.as_str(),
                         );
-                        self.fail_stream_turn_gated_dispatch(
+                        // R3（L3-A #6）：中止发生在批内 ⇒ 同一响应里**尚未执行**的调用
+                        // 也要进失败收口（本轮工具被中止，其后调用从未开始）。
+                        self.fail_stream_turn_gated_dispatch_pending(
                             sink,
                             control,
                             input.session_id.as_deref(),
@@ -787,6 +843,10 @@ impl AgentRuntime {
                             Some(accumulated_turn_text.clone()),
 
                             native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
+                            pending_calls_after_batch_index(
+                                &current_tool_calls,
+                                executed_calls.len() + 1,
+                            ),
                         );
                         return;
                     }

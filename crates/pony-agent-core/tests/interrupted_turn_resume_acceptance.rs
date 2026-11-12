@@ -48,8 +48,9 @@ use pony_agent_core::agent::session::{
     build_missing_run_control_audit_summary, failed_turn_checkpoint_text,
     interrupted_turn_checkpoint_text, HistoryBranch, HistoryCursor, HistoryMessageKind,
     HistoryNode, HistoryNodeKind, PersistedStore, SessionBackend, SessionSnapshot, SessionState,
-    SessionStore, TurnHistoryMessage, TurnTraceRecord,
+    SessionStore, SeparateTraceTableMode, TurnHistoryMessage, TurnTraceRecord,
 };
+use pony_agent_core::agent::sqlite_session::SqliteSessionBackend;
 
 // ---------------------------------------------------------------------------
 // 夹具（沙箱 / provider / 请求组装 / 会话快照）
@@ -1412,6 +1413,171 @@ fn c9_runtime_close_out_path_actually_uses_closed_structure() {
         assert!(
             serialized.contains(&step.name) && serialized.contains(&step.result_summary),
             "C9：闭合片段必须携带 {:?} 的调用与结果，实际 = {serialized}",
+            step.name
+        );
+    }
+}
+
+// ===========================================================================
+// C10（AMEND-3）：真实 sqlite `load_store` 重启路径（不是内存 dump 的"假重启"）
+// ===========================================================================
+
+/// C6 的重启走的是 `PreloadedBackendGuard`（把内存 dump 回吐给 `with_backend`），
+/// 未覆盖真实落盘 → `SqliteSessionBackend::load_store` 的装载路径。本用例补上：
+/// 用真实 sqlite 库（临时目录，绝不触碰用户库）落一次中断收口，关闭后**重新打开**装载，
+/// 断言中断轮行仍在、`turn_id` 归属本轮、历史无重复轮。
+#[test]
+fn c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication() {
+    // Arrange：真实 sqlite 落盘（XDG 沙箱内临时库）
+    let sandbox = isolate_process_data_dir();
+    let db_path = sandbox.join("c10-interrupted-turn.db");
+    let closed_steps = closed_steps();
+    let pending = pending_calls();
+    let assistant_text = interrupted_turn_assistant_text(DELIVERED_TEXT, &closed_steps, &pending);
+    let closure = interrupted_turn_transcript_closure(INTERRUPTED_USER, DELIVERED_TEXT, &closed_steps, &pending)
+        .expect("C10：已闭合步骤非空 ⇒ 必须产出 native 闭合片段");
+    {
+        let backend = SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let mut store = SessionStore::with_backend(Box::new(backend));
+        // AMEND-4：夹具第一轮改用**带轮次身份**的写入口。`append_turn` 是无 turn_id 的
+        // legacy 直连签名（真实 sqlite 取证显示该轮两行 turn_id 写入时即 NULL），而生产路径
+        // `persist_turn_outcome` 恒传 turn_id ⇒ 夹具必须显式声明轮次身份，否则测的是伪造场景。
+        store.append_turn_with_kind(
+            Some(SID),
+            "第一轮问题",
+            "第一轮回答",
+            None,
+            Vec::new(),
+            None,
+            Some("turn-1"),
+        );
+        store.record_turn_trace_in_memory(Some(SID), trace("turn-1"));
+        let written = store.append_turn_with_kind(
+            Some(SID),
+            INTERRUPTED_USER,
+            &assistant_text,
+            Some(closure),
+            Vec::new(),
+            Some(HistoryMessageKind::Cancelled),
+            Some("turn-2"),
+        );
+        assert!(
+            written
+                .history
+                .iter()
+                .any(|message| message.turn_id.as_deref() == Some("turn-2")),
+            "C10 夹具自检：写入后本进程视图里必须能看到 turn-2，实际 = {:?}",
+            written.history.iter().map(|m| (m.role.clone(), m.turn_id.clone())).collect::<Vec<_>>()
+        );
+        store.release_log_writers_for_test();
+    }
+
+    // Act：走真实 `load_store`（新句柄、新连接、从磁盘读）
+    let reopened_backend = SqliteSessionBackend::new_with_trace_mode(
+        db_path.clone(),
+        SeparateTraceTableMode::WriteSeparate,
+    );
+    let mut reopened = SessionStore::with_backend(Box::new(reopened_backend));
+    let state = reopened
+        .get_session(SID)
+        .expect("C10：真实 sqlite 重启后会话必须仍可装载（load_store 路径）")
+        .clone();
+
+    // Assert 1：中断轮行仍在，且 kind/turn_id 归属本轮
+    let interrupted_rows: Vec<&TurnHistoryMessage> = state
+        .history
+        .iter()
+        .filter(|message| message.turn_id.as_deref() == Some("turn-2"))
+        .collect();
+    assert_eq!(
+        interrupted_rows.len(),
+        2,
+        "C10：turn-2 必须恰好 user+assistant 两条（持久化后仍完整），实际 = {:?}",
+        state.history.iter().map(|m| (m.role.clone(), m.turn_id.clone())).collect::<Vec<_>>()
+    );
+    let interrupted_assistant = interrupted_rows
+        .iter()
+        .find(|message| message.role == "assistant")
+        .expect("C10：turn-2 的 assistant 合成行必须存在");
+    assert_eq!(
+        interrupted_assistant.kind,
+        Some(HistoryMessageKind::Cancelled),
+        "C10：重启后合成行的 kind 必须保真（否则展示层退化为文本嗅探）"
+    );
+    assert!(
+        interrupted_assistant.content.contains("[中断轮次检查点]"),
+        "C10：重启后承载文本必须仍带检查点头，实际 = {:?}",
+        interrupted_assistant.content
+    );
+
+    // Assert 1b（装载侧交叉断言，AMEND-3 补强）：「行在但内容丢」也必须挡——
+    // 重启后的中断轮 assistant 正文必须仍带结果段与未开始注记，而不只是"两行存在"。
+    assert!(
+        interrupted_assistant.content.contains(INTERRUPTED_RESULT_SECTION_HEADER),
+        "C10：重启后中断轮正文必须含结果段标题 {INTERRUPTED_RESULT_SECTION_HEADER:?}（内容不得丢），实际 = {:?}",
+        interrupted_assistant.content
+    );
+    assert!(
+        interrupted_assistant.content.contains(INTERRUPTED_PENDING_NOTE_PREFIX),
+        "C10：重启后中断轮正文必须含未开始注记 {INTERRUPTED_PENDING_NOTE_PREFIX:?}，实际 = {:?}",
+        interrupted_assistant.content
+    );
+    for step in &closed_steps {
+        assert!(
+            interrupted_assistant.content.contains(&step.result_summary),
+            "C10：重启后中断轮正文必须仍携带结果摘要 {:?}（装载不得裁掉过程事实），实际 = {:?}",
+            step.result_summary,
+            interrupted_assistant.content
+        );
+    }
+
+    // Assert 2：无重复轮（同一 assistant 合成正文只出现一次；turn-1 也未被复制）
+    let duplicated = state
+        .history
+        .iter()
+        .filter(|message| message.content == interrupted_assistant.content)
+        .count();
+    assert_eq!(
+        duplicated, 1,
+        "C10：中断轮合成正文在历史里必须恰好一条（重启不得重复注入），实际 {duplicated} 条"
+    );
+    let turn_one_rows = state
+        .history
+        .iter()
+        .filter(|message| message.turn_id.as_deref() == Some("turn-1"))
+        .count();
+    assert_eq!(
+        turn_one_rows, 2,
+        "C10：turn-1 必须恰好 user+assistant 两条（不得被重启复制），实际 {turn_one_rows} 条"
+    );
+
+    // Assert 3：历史节点 turn_id 归属本轮（真实库也要正确）
+    if let Some(node) = state
+        .history_nodes
+        .iter()
+        .find(|node| node.turn_id.as_deref() == Some("turn-2"))
+    {
+        assert_eq!(
+            node.turn_id.as_deref(),
+            Some("turn-2"),
+            "C10：重启后节点 turn_id 必须仍是 turn-2，实际 = {:?}",
+            node.turn_id
+        );
+    }
+
+    // Assert 4：重启后的下一轮请求仍携带工具往返（上下文真值不因重启丢失）
+    let snapshot = snapshot_from_state(&state);
+    let body = serde_json::to_string(
+        &build_request(&native_provider(), &snapshot, NEXT_USER).native_messages,
+    )
+    .expect("C10：native_messages 必须可序列化");
+    for step in &closed_steps {
+        assert!(
+            body.contains(&step.name) && body.contains(&step.result_summary),
+            "C10：重启后 native 通道必须仍带 {:?} 的调用与结果，实际 = {body}",
             step.name
         );
     }
