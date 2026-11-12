@@ -14,7 +14,7 @@
   - 文档分层清单：[`.meta/docs-tier/README.md`](.meta/docs-tier/README.md)
 - **技术决策记录 (ADR)**：[`.agents/notes/`](.agents/notes/)（最高优先级决策真源，技术方案选型、现在时记录、替代方案考量；受 `adr-verify` 强门禁保护）
 - **架构与设计指南**：[`docs/architecture/`](docs/architecture/)（系统拓扑、模块交互、运行时设计）
-- **待办任务与执行账本 (Backlog)**：[`backlog/`](backlog/)（唯一活账本 [`tasks.jsonl`](backlog/tasks.jsonl)，支持任务级并发租约锁与行级强校验，由 `scripts/backlog.mjs` 驱动并由 `backlog lint` 门禁约束）
+- **待办任务与执行账本 (Backlog)**：[`backlog/`](backlog/)（唯一活账本 [`tasks.jsonl`](backlog/tasks.jsonl)，支持任务级并发租约锁与行级强校验；契约见 [`backlog/README.md`](backlog/README.md)，由 `scripts/backlog.mjs` 驱动、`backlog-gate`（lint + doctor）门禁约束）
 - **工程复用技能库**：[`.agents/skills/`](.agents/skills/)
 - **历史归档档案（已冻结退役，只读）**：
   - OpenSpec 规范归档：[`openspec/`](openspec/)（历史规格与设计草案，见 [`RETIRED.md`](openspec/RETIRED.md)）
@@ -37,7 +37,7 @@
 
 ## 3. 本地与 CI 门禁命令速查
 
-- **全量合规自检**：`npm run verify`（依次校验版本同步、决策记录、前端单测、构建、Rust 检查）
+- **全量合规自检**：`npm run verify`（依次校验版本同步、决策记录、账本门、前端单测、构建、Rust 检查）
 - **决策记录校验**：`npm run adr:check`（判定真源 `.agents/skills/write-adr/verify-note.sh`，pre-commit 调 `adr-verify.sh`）
 - **版本同步校验**：`npm run version:check`
 - **前端测试**：`npm test`
@@ -52,5 +52,6 @@
 2. 凡机械可查的承诺，配一条非零退出的命令；机器到不了的，显式标注「靠 review」。
 3. 删除代码前先搜消费者；恢复条件立法，拒绝「以后可能用得上」式怀旧。
 4. 每个事实一个家：文档治理规则的家是 `docs/AGENTS.md`（agent 自动加载），人读契约是 README；改行为/契约的那次提交同步更新对应文档。
+5. 非平凡交付必须在 backlog 账本留痕（record / start / resolve）；账本一致性与租约对账由 `backlog-gate`（lint + doctor）机械校验，证据成立性靠 review。
 <!-- END constitution -->
 

@@ -48,7 +48,7 @@
     "test:tauri:smoke": "node scripts/tauri-smoke.js",
     "secrets:check": "node scripts/check-secrets.mjs --staged",
     "secrets:check:all": "node scripts/check-secrets.mjs --all",
-    "verify": "npm run version:check && npm run adr:check && npm run secrets:check && npm run test:unit && npm run build && npm run contract:check && npm run contract:cli && npm run size:check && npm run cargo:check:shared && npm run ext:check",
+    "verify": "npm run version:check && npm run adr:check && npm run secrets:check && npm run backlog:gate && npm run test:unit && npm run build && npm run contract:check && npm run contract:cli && npm run size:check && npm run cargo:check:shared && npm run ext:check",
     "preview": "vite preview",
     "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri",
@@ -64,6 +64,8 @@
     "ext:check": "node scripts/gen-extension-points.mjs --check",
     "conformance:test": "cargo test -p pony-agent-core --test conformance",
     "backlog:lint": "node scripts/backlog.mjs lint",
+    "backlog:doctor": "node scripts/backlog.mjs doctor",
+    "backlog:gate": "node scripts/backlog.mjs lint && node scripts/backlog.mjs doctor",
     "backlog:list": "node scripts/backlog.mjs list"
   },
   "devDependencies": {

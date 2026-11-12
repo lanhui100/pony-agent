@@ -322,6 +322,15 @@ describe('任务级租约（单任务单会话，不同任务可并行）', () =
     expect(lintAll(paths).problems.join('\n')).toMatch(/缺少租约锁文件/);
   });
 
+  it('锁存在但记录不是 in_progress 判违规（手改降级 / start 中断）', () => {
+    seed([baseRow()]);
+    acquireLease(paths, 'B056', { owner: 'session-A' });
+    const res = lintAll(paths);
+    expect(res.ok).toBe(false);
+    expect(res.problems.join('\n')).toMatch(/存在租约锁但记录状态/);
+    expect(doctor(paths).ok).toBe(false);
+  });
+
   it('干净克隆（无 .locks 目录）下同一记录只提示不阻断（B069）', () => {
     seed([baseRow({
       status: 'in_progress',

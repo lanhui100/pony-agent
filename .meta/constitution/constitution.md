@@ -11,8 +11,9 @@
    - 桌面打开外部链接统一走 `src/lib/open-external-url.ts` 并在 Rust 端实施严格协议（HTTPS）与域名白名单，Windows 下强制使用 `ShellExecuteW`，禁止使用命令拼接或回退。
 3. **版本四处同步与发版契约**：
    - `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`.version.json` 保持严格一致，由 CI 与本地脚本双重锁定。
-4. **决策与规范先导**：
-   - 非平凡功能改动必须有 OpenSpec 规范与对应 ADR 架构决策支持。
+4. **决策与执行先导（backlog-first）**：
+   - 非平凡改动必须有 `.agents/notes/` 下的 ADR 决策记录（为什么/为什么不那样）。
+   - 执行拆分与闭环记入 `backlog/tasks.jsonl`：`record` 立项 → `start` 声明 owner 与 touched_paths → `resolve` 写入证据。
    - 弃用或被替代的设计必须移入 `superseded/` 或 `archive/`。
 
 <!-- sync-body -->
@@ -23,3 +24,4 @@
 2. 凡机械可查的承诺，配一条非零退出的命令；机器到不了的，显式标注「靠 review」。
 3. 删除代码前先搜消费者；恢复条件立法，拒绝「以后可能用得上」式怀旧。
 4. 每个事实一个家：文档治理规则的家是 `docs/AGENTS.md`（agent 自动加载），人读契约是 README；改行为/契约的那次提交同步更新对应文档。
+5. 非平凡交付必须在 backlog 账本留痕（record / start / resolve）；账本一致性与租约对账由 `backlog-gate`（lint + doctor）机械校验，证据成立性靠 review。

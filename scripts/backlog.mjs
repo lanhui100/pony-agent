@@ -298,8 +298,15 @@ export function leaseConsistency(paths, rows) {
   const notes = [];
   const tracking = isLeaseTrackingActive(paths);
   for (const row of rows) {
-    if (row.status !== 'in_progress') continue;
     const lease = readLease(paths, row.id);
+    if (row.status !== 'in_progress') {
+      // 反向缺口（D1/D2）：锁还在、记录却不是 in_progress——手改状态降级，或 start 取锁后 update 失败。
+      // 只在本工作区确有租约目录时判硬错；干净克隆 .locks/ 不存在，lease 恒为 null。
+      if (lease && tracking) {
+        problems.push(`tasks.jsonl (${row.id}) 存在租约锁但记录状态为 ${row.status}（疑似手改状态或 start 中断；确认后 reap --minutes 0 清锁，或手动删除 .locks/${row.id}.lock）`);
+      }
+      continue;
+    }
     if (lease) {
       if (row.owner && lease.owner !== row.owner) {
         problems.push(`tasks.jsonl (${row.id}) 租约与记录 owner 冲突：记录=${row.owner} 锁=${lease.owner}`);
