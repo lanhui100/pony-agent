@@ -87,7 +87,7 @@
    "line": 1430,
    "rule": "NFR_VIOLATION",
    "severity": "ADVISORY",
-   "detail": "冻结验收测试被修正轮改动（治理底线『验收测试只读』）。已逐字核对：验收文件仅 +1 导入行改动与纯**新增** C10（:1430 真实 sqlite load_store 重启用例），无任何断言删除/放宽（删除行仅 2 行 use 重写）；adversarial at2（:90）为**加强**（新增 isolate_process_data_dir + warm-up + Assert 0 门控不变断言 + 线程互证）。不构成阻塞，但需 Lead 在台账显式追认『AMEND-3/AMEND-4 授权的测试增补』，否则视为违反测试分权。",
+   "detail": "冻结验收测试被修正轮改动（治理底线『验收测试只读』）。已逐字核对：验收文件改动仅为 use 重写（-1/+2 行）+ 纯**新增** C10（:1430 真实 sqlite load_store 重启用例），无任何断言删除/放宽；adversarial at2（:90）为**加强**（新增 isolate_process_data_dir + warm-up + Assert 0 门控不变断言 + 线程互证）。不构成阻塞，但需 Lead 在台账显式追认『AMEND-3/AMEND-4 授权的测试增补』，否则视为违反测试分权。",
    "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/interrupted-turn-resume && git diff 16b1798d --stat -- crates/pony-agent-core/tests && git diff 16b1798d -- crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs | grep -cE '^-[^-]' "
   }
  ]
