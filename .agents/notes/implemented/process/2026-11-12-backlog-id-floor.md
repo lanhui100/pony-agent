@@ -17,7 +17,7 @@ pony-agent 2026-11-11 从 legacy triage 迁移、避开旧 `B001–B055` 编号�
    兼容保留，并在函数注释中写明用途）。起始号是迁移决策，应出现在命令与 ADR 里，而不是藏在通用代码里。
 3. 迁移入口 `import-triage` 参数先校验再动手：`--start` 不是 ≥1 的整数、或 `--from` 指向的旧账本不存在
    → `exit 2` 且不写账本；`--help`/`-h` 只打印用法、**不静默执行迁移**；usage 行补齐 `--from/--start`。
-4. 同步更新全局技能 `pg-backlog/references/onboarding.md` 的「编号下限」注意事项：新仓从 `B001` 起；
+5. 同步更新全局技能 `pg-backlog/references/onboarding.md` 的「编号下限」注意事项：新仓从 `B001` 起；
    迁移仓用 `--start` 显式指定。
 4. pony-agent 现账本 `.next-id = 112`，高于任何历史编号，本次改动对它零影响（无重编号、无迁移）。
 
