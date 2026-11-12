@@ -18,8 +18,9 @@ Status: implemented
 
 ## Decision
 
-1. 新增项目技能 `.agents/skills/backlog-onboarding/SKILL.md`，按 `.agents/skills/README.md` 的五要素契约
-   组织：触发式 description / 真相源 / 步骤 / 注意事项 / 校验 + 校准样例。
+1. 技能放**全局技能目录** `~/.agents/skills/backlog-onboarding/SKILL.md`（跨仓可路由），仓内不保留副本；
+   按 `.agents/skills/README.md` 的五要素契约组织：触发式 description / 真相源 / 步骤 / 注意事项 /
+   校准样例 / 验证与报告。目标仓的契约、CLI、门禁仍是各仓版本控制资产，技能只提供程序。
 2. 技能覆盖三类接入判定：**同仓新 worktree**（共享，只做校验）、**新仓 init**（数据骨架 + 接线）、
    **旧体系迁移**（盘点 → 转换 → 冻结 → 验账 → 留痕）。
 3. 「注意事项」显式登记五条实测坑：worktree 共享账本、`.locks` 不入仓、编号下限 56、只经 CLI 改账本、
@@ -32,6 +33,8 @@ Status: implemented
 
 - **写进 `backlog/README.md`**：契约仓放的是「模型/判定口径」，放流程会让「步骤改动」与「契约改动」纠缠；
   README 也不进技能路由，agent 不会在「要接新仓」时自动读到 → 落选。
+- **放仓内 `.agents/skills/backlog-onboarding/`**：只对 pony-agent 及其 worktree 生效，复用到别的仓要再
+  复制一份（复制即漂移），且会被 ponygo 计入「实例自有」资产（形状判据 3.4 还需额外维护）→ 落选。
 - **做成 ponygo 模板库技能（`.meta/skills-library/pg-*`）**：这是跨仓通用程序、未来可能值得进库，但当前
   仍含 pony-agent 特化事实（仓库路径、gate 脚本名），先做实例自有技能；进库需先剥离特化 → 落选。
 - **写成一键 shell 脚本**：安装是破坏性动作（hook 接线、gitignore、CI 编辑），跨仓差异大；本轮用户明确
@@ -40,7 +43,10 @@ Status: implemented
 
 ## Consequences
 
-- 新增技能一篇（实例自有，计入 L3 流程资产证据）；新增账本待办一条（编号下限参数化）。
+- 全局新增技能一篇（不进本仓版本控制，`ponygo audit` 的实例自有仍为 4 篇）；新增账本待办一条
+  （编号下限参数化）。
 - 复用方式：接新仓时加载该技能，按「第 0 步判定 → 对应分支 → 校验」执行；不满足校验即停。
+- 已知风险：全局目录不在任何 git 仓内，技能演进不可审计——与 2026-11-12 讨论的「全局资产应有独立
+  git 仓」同源，后续应把 `~/.agents/skills/{backlog-onboarding,pg-backlog}` 收敛到该仓。
 - 诚实边界：技能里的命令是已在 pony-agent 实测过的路径；其它仓的 CI 平台（非 GitHub）与 Windows
   hook 行为未在技能中验证，需在目标仓补一次端到端；自动化安装仍未实现。
