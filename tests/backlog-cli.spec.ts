@@ -223,7 +223,12 @@ describe('CLI 冒烟', () => {
     for (const args of [
       ['reap', '--id', '', '--minutes', '0'],
       ['reap', '--id', '--minutes', '0'],
-      ['reap', '--id', 'B9', '--minutes', '0']
+      ['reap', '--id', 'B9', '--minutes', '0'],
+      ['reap', '--id=B056', '--minutes', '0'],
+      ['reap', '--ide', 'B056', '--minutes', '0'],
+      ['reap', '-id', 'B056', '--minutes', '0'],
+      ['reap', 'B056', '--minutes', '0'],
+      ['reap', '--minutes', 'abc']
     ]) {
       let code = 0;
       try {

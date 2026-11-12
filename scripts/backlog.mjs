@@ -614,16 +614,31 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     case 'reap': {
-      // `--id` 是破坏性清理的范围限定：缺失/空/非法一律 fail-closed，绝不回落到「清全部」。
-      const idIndex = rest.indexOf('--id');
-      const onlyId = idIndex === -1 ? undefined : rest[idIndex + 1];
-      if (idIndex !== -1 && (!onlyId || !ID_RE.test(onlyId))) {
-        console.error('用法: backlog reap [--id <B###>] [--minutes N]（--id 缺值或格式非法一律拒绝，不会回落为全局清理）');
+      // 破坏性清理：参数白名单解析。未知 token（--id=B056 / --ide / -id / 位置参数）一律 exit 2，
+      // 绝不静默回落为「清全部」。
+      const usage = '用法: backlog reap [--id <B###>] [--minutes N] [--dry-run]（未知参数一律拒绝，不会回落为全局清理）';
+      let onlyId;
+      let minutes = '120';
+      let dryRun = false;
+      for (let i = 0; i < rest.length; i += 1) {
+        const token = rest[i];
+        if (token === '--dry-run') { dryRun = true; continue; }
+        if (token === '--id') {
+          const value = rest[i + 1];
+          if (!value || !ID_RE.test(value)) { console.error(usage); return 2; }
+          onlyId = value; i += 1; continue;
+        }
+        if (token === '--minutes') {
+          const value = rest[i + 1];
+          if (!value || !/^\d+$/.test(value)) { console.error(usage); return 2; }
+          minutes = value; i += 1; continue;
+        }
+        console.error(usage);
         return 2;
       }
       const reaped = reapStaleLeases(paths, {
-        maxAgeMs: Number(arg('minutes', '120')) * 60_000,
-        dryRun: rest.includes('--dry-run'),
+        maxAgeMs: Number(minutes) * 60_000,
+        dryRun,
         onlyId
       });
       const scope = onlyId ? `（仅 ${onlyId}）` : '（全部租约）';
