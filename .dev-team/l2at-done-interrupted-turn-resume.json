@@ -2,7 +2,7 @@
   "wave": "interrupted-turn-resume",
   "ticket": "B113",
   "owner": "test-agent (independent L2-T / L2-AT author)",
-  "status": "l2at-red-phase-frozen",
+  "status": "l2at-green-after-implementation",
   "frozen_at": "2026-11-12T14:19:44+08:00",
   "contract": ".dev-team/contract-matrix-interrupted-turn-resume.md",
   "nfr_baseline": ".dev-team/nfr-baseline-interrupted-turn-resume.json",
@@ -130,5 +130,21 @@
     "fixed_seed": true,
     "sandbox": "XDG_DATA_HOME/HOME/LOCALAPPDATA 指向 temp 沙箱，夹具 Drop 清理"
   },
-  "readonly_notice": "本文件与测试文件红相冻结后只读：Executor 不得修改 tests/**；实现改动后由同一条命令复跑转绿。"
+  "readonly_notice": "本文件与测试文件红相冻结后只读：Executor 不得修改 tests/**；实现改动后由同一条命令复跑转绿。",
+  "amendments": [
+    {
+      "id": "AMEND-1",
+      "scope": "AT2 Assert 2 计数面迁移",
+      "red_phase_receipt": ".dev-team/red-phase-interrupted-turn-resume.json#amendments",
+      "revised": "native 通道 ==1；carry 通道 <=1；禁止全局计数",
+      "rerun_exit_code": 0,
+      "rerun_result": "141 passed; 0 failed",
+      "reason": "同一工具往返在 ProviderRequest 内必然出现 3 处（native_messages / input carry / observation carry），全局 ==1 不可满足；observation 渲染被 1518 --lib 基线钉住"
+    }
+  ],
+  "post_implementation_rerun": {
+    "exit_code": 0,
+    "result": "141 passed; 0 failed; 8.47s",
+    "log_receipt": "/tmp/red-interrupted-turn-v2.log"
+  }
 }

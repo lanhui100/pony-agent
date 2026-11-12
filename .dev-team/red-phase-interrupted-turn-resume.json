@@ -264,5 +264,59 @@
       "assertion": "C3c：中断收口不得隐式 fork … 实际分支 = [(\"branch-main\", None, Some(\"node-1\")), (\"…-branch-2\", Some(\"branch-main\"), Some(\"node-1\"))]",
       "cause": "store.rs prepare_session_for_new_turn 在 visible≠head 时建分支"
     }
-  ]
+  ],
+  "amendments": [
+    {
+      "id": "AMEND-1",
+      "scope": "L2-AT AT2 Assert 2（结果哨兵计数面）",
+      "file": "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/at2_repeated_recovery_race.rs",
+      "original_assertion": "对 `request_body(&ProviderRequest)` 的整段 JSON 计 `RESULT_*` 出现次数，断言 `== 1`（不重复注入 transcript）",
+      "impossibility_proof": "native 工具往返在同一个 `ProviderRequest` JSON 里必然出现 3 次：① `native_messages`（role=tool / tool_calls）② `input` 的 conversation carry（`Previous assistant reply:` 承载文本）③ `observation.semi_stable_context_text`（同一 carry 的观察快照）。⇒ 全局计数下界 = 2（部分 provider 下 3），`== 1` 数学不可能；且 ③ 的渲染被 1518 条 `--lib` 基线断言钉住（`crates/pony-agent-core/src/agent/context.rs:2047-2051`），禁止为过门禁改基线。",
+      "lead_ruling": "计数面收敛到 native 通道（与 C6 同口径）；可加 carry 通道 ≤1 次作更严旁证；**禁止**全局计数。",
+      "revised_assertion": "① `serde_json::to_string(&request.native_messages)` 内每个结果哨兵出现次数 `== 1`；② `serde_json::to_string(&request.input)`（carry 通道）内出现次数 `<= 1`；③ 闭合片段非空；④ 跨线程 full-body 逐字确定性保持不变。",
+      "assertion_strength_change": "不降级：原断言不可满足（伪判据），新断言把判据放在'重复注入只可能发生'的通道上，并额外新增 carry ≤1 的旁证断言。",
+      "rerun_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+      "rerun_exit_code": 0,
+      "rerun_result": "141 passed; 0 failed; 0 ignored; 8.47s",
+      "note": "本次重跑时 Executor 的实现已部分/全部落地，AT2 及全部冻结用例均转绿 —— 按 Lead 指示**记录实际结果**，未回退实现、未制造人工红相。原红相证据（Exit 101 段落）保持冻结不改。"
+    },
+    {
+      "id": "AMEND-2",
+      "scope": "新增接线守卫用例 C9（冻结文件的一次授权扩展）",
+      "file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+      "why": "Lead 发现生产调用点缺失：agent/runtime/turn_persist.rs 的收口路径仍只写检查点文本，未调用冻结纯函数 interrupted_turn_assistant_text / interrupted_turn_transcript_closure。纯函数级行为断言（C1/C5/C7 等）在函数内部全绿也无法暴露「实现存在但生产未接线」，故需要结构性守卫（wiring guard）避免假绿。",
+      "case": "c9_runtime_close_out_path_actually_uses_closed_structure",
+      "assertion_design": "前半段 = 结构性守卫（include_str!(\"../src/agent/runtime/turn_persist.rs\") 必须含两个纯函数调用名，注释显式声明是 wiring guard 而非行为断言）；后半段 = 行为断言（承载文本复用 [中断轮次检查点] 头 + 每条结果摘要 + 未开始注记；闭合片段 tool_calls↔tool 成对，悬空调用必须有 pending_tool_result_note 合成 error 结果）",
+      "red_primitive": "真实断言失败（非空桩 panic、非编译错误、非 harness 超时）",
+      "red_assertion_location": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs:1346:5",
+      "red_assertion_message": "C9：生产收口路径（agent/runtime/turn_persist.rs）必须调用 interrupted_turn_assistant_text，否则纯函数实现不接线（假绿）——检查 persist_cancelled_turn_outcome / persist_turn_outcome",
+      "rerun_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+      "rerun_exit_code": 101,
+      "rerun_result": "141 passed; 1 failed; 0 ignored; finished in 8.04s",
+      "log_receipt": "/tmp/amend2-c9.log",
+      "note": "写入时 executor 尚未补接线，故 C9 按预期红（真实断言失败）；按 Lead 指示未改任何实现。executor 接线完成后本用例应自行转绿，届时复跑记录 exit code。"
+    }
+  ],
+  "current_state": {
+    "phase": "post_implementation_rerun",
+    "checked_at": "2026-11-12T14:33:05+08:00",
+    "command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+    "exit_code": 0,
+    "summary": "141 passed; 0 failed; 0 ignored; 0 filtered; 8.47s —— 冻结验收用例在实现落地后全部转绿（红相期 Exit 101 的逐条证据见 `test_cases` 与 `baseline_defects_confirmed`，保持原样不改写）。",
+    "log_receipt": "/tmp/red-interrupted-turn-v2.log",
+    "tests_migrated": [
+      "AT2 Assert 2（native 通道计数 + carry ≤1 旁证）"
+    ],
+    "not_changed": [
+      "C1–C8 断言面",
+      "AT1/AT3 断言面",
+      "任何 src/** 实现"
+    ],
+    "amend2_state": {
+      "checked_at": "2026-11-12T14:34:57+08:00",
+      "exit_code": 101,
+      "summary": "C9 接线守卫红（turn_persist.rs 未接线），其余 141 条通过",
+      "log_receipt": "/tmp/amend2-c9.log"
+    }
+  }
 }

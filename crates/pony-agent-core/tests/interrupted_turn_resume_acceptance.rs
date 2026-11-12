@@ -1329,3 +1329,90 @@ fn c8_legacy_session_loads_and_successful_turn_context_stays_verbatim() {
         "C8：干净正文必须逐字保真（C5 修法不得误伤成功轮）"
     );
 }
+
+// ===========================================================================
+// C9（AMEND-2）：生产收口路径接线守卫 + 闭合结构行为断言
+// ===========================================================================
+
+/// **wiring guard，不是行为断言**：本用例前半段只检查"生产收口代码真的调用了冻结纯函数"。
+///
+/// 存在理由（Lead 发现）：纯函数实现完整、单元级断言全绿，但 `persist_cancelled_turn_outcome` /
+/// `persist_turn_outcome` 仍然只写检查点文本 ⇒ 生产语义未变（假绿）。行为断言在函数内部全绿
+/// 也无法暴露"没接线"，只有对收口入口源码做结构性检查才能挡住。
+#[test]
+fn c9_runtime_close_out_path_actually_uses_closed_structure() {
+    // ── 结构性守卫（wiring guard）──────────────────────────────────────────
+    let close_out_source = include_str!("../src/agent/runtime/turn_persist.rs");
+    assert!(
+        close_out_source.contains("interrupted_turn_assistant_text"),
+        "C9：生产收口路径（agent/runtime/turn_persist.rs）必须调用 interrupted_turn_assistant_text，\
+         否则纯函数实现不接线（假绿）——检查 persist_cancelled_turn_outcome / persist_turn_outcome"
+    );
+    assert!(
+        close_out_source.contains("interrupted_turn_transcript_closure"),
+        "C9：生产收口路径（agent/runtime/turn_persist.rs）必须调用 interrupted_turn_transcript_closure，\
+         否则中断轮工具往返仍无 native 载体（上下文丢失根因未解决）"
+    );
+
+    // ── 行为断言：真实形态活动 → 承接文本 + 闭合片段 ───────────────────────
+    let closed_steps = vec![
+        closed("Read", "C9_RESULT_READ 配置里 port=8080"),
+        closed("Bash", "C9_RESULT_BASH systemctl restart staging 已执行"),
+    ];
+    let pending = vec![PendingToolCall {
+        name: "Write".to_string(),
+    }];
+    let assistant_text = interrupted_turn_assistant_text(DELIVERED_TEXT, &closed_steps, &pending);
+    let closure = interrupted_turn_transcript_closure(INTERRUPTED_USER, DELIVERED_TEXT, &closed_steps, &pending)
+        .expect("C9：已闭合步骤非空 ⇒ 必须产出 native 闭合片段");
+
+    // Assert 1：承载文本复用既有检查点头（1518 基线逐字格式不得改）
+    assert!(
+        assistant_text.starts_with("[中断轮次检查点]"),
+        "C9：承载文本必须逐字复用既有检查点头 `[中断轮次检查点]`，实际 = {assistant_text:?}"
+    );
+    assert!(
+        assistant_text.contains(DELIVERED_TEXT),
+        "C9：承载文本必须保留已交付正文，实际 = {assistant_text:?}"
+    );
+    // Assert 2：每条结果摘要可查（过程事实不是可选装饰）
+    for step in &closed_steps {
+        assert!(
+            assistant_text.contains(&step.result_summary),
+            "C9：承载文本必须逐条携带结果摘要 {:?}，实际 = {assistant_text:?}",
+            step.result_summary
+        );
+    }
+    // Assert 3：未开始调用必须带显式"结果未知/未开始"注记
+    assert!(
+        assistant_text.contains(INTERRUPTED_PENDING_NOTE_PREFIX),
+        "C9：未开始调用必须带注记 {INTERRUPTED_PENDING_NOTE_PREFIX:?}，实际 = {assistant_text:?}"
+    );
+    assert!(
+        assistant_text.contains(&pending[0].name),
+        "C9：未开始调用必须点名工具 {:?}，实际 = {assistant_text:?}",
+        pending[0].name
+    );
+
+    // Assert 4：native 闭合片段严格配对，悬空调用必须有 error 结果
+    assert_roundtrips_closed(&closure, "C9");
+    let serialized = serde_json::to_string(&closure).expect("C9：闭合片段必须可序列化");
+    let pending_note = pending_tool_result_note(&pending[0].name);
+    assert!(
+        serialized.contains(&pending_note),
+        "C9：悬空调用必须以合成的 error 结果闭合（内容 = pending_tool_result_note），实际 = {serialized}"
+    );
+    let tool_messages = closure.iter().filter(|message| role_of(message) == "tool").count();
+    assert_eq!(
+        tool_messages,
+        closed_steps.len() + pending.len(),
+        "C9：tool 结果数必须等于已闭合步骤 + 未开始调用（补齐优先于截断），实际 {tool_messages}"
+    );
+    for step in &closed_steps {
+        assert!(
+            serialized.contains(&step.name) && serialized.contains(&step.result_summary),
+            "C9：闭合片段必须携带 {:?} 的调用与结果，实际 = {serialized}",
+            step.name
+        );
+    }
+}
