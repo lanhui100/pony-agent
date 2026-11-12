@@ -647,7 +647,7 @@ export function main(argv = process.argv.slice(2)) {
           ? `[backlog] [dry-run] 将回收超龄租约${scope}（未执行，未删除任何锁）：${reaped.join(', ')}`
           : `[backlog] 回收超龄租约${scope}：${reaped.join(', ')}`);
       } else {
-        console.log(`[backlog] 无超龄租约${scope}`);
+        console.log(dryRun ? `[backlog] [dry-run] 无超龄租约${scope}` : `[backlog] 无超龄租约${scope}`);
       }
       return 0;
     }
@@ -716,7 +716,7 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     default:
-      console.log('用法: backlog {record|list|start|heartbeat|release|resolve|annotate|lint|doctor|reap [--id <ID>] [--minutes N]|import-triage}');
+      console.log('用法: backlog {record|list|start|heartbeat|release|resolve|annotate|lint|doctor|reap [--id <ID>] [--minutes N] [--dry-run]|import-triage}');
   return 1;
   }
 }

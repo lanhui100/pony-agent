@@ -247,6 +247,27 @@ describe('CLI 冒烟', () => {
     expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
   });
 
+  it('reap --dry-run 只演练不删锁，输出自证 dry-run', () => {
+    seed([baseRow()]);
+    acquireLease(paths, 'B056', { owner: 'lane-A' });
+    const out = execFileSync(process.execPath, [SCRIPT, 'reap', '--dry-run', '--minutes', '0'], {
+      cwd: path.resolve('.'),
+      env: { ...process.env, PONY_BACKLOG_ROOT: root },
+      encoding: 'utf8'
+    });
+    expect(out).toMatch(/\[dry-run\]/);
+    expect(out).toMatch(/未执行|无超龄租约/);
+    expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
+
+    const real = execFileSync(process.execPath, [SCRIPT, 'reap', '--minutes', '0'], {
+      cwd: path.resolve('.'),
+      env: { ...process.env, PONY_BACKLOG_ROOT: root },
+      encoding: 'utf8'
+    });
+    expect(real).not.toMatch(/\[dry-run\]/);
+    expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
+  });
+
   it('record 命令写入后可被 list 读出', () => {
     execFileSync(process.execPath, [SCRIPT, 'record', '--category', 'Task', '--title', '冒烟任务', '--fingerprint', 'smoke'], {
       cwd: path.resolve('.'),
