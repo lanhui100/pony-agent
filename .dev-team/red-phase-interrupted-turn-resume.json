@@ -607,5 +607,18 @@
       "full_post": "/tmp/flake2-run-*.log",
       "at2_single": "/tmp/at2-run-*.log"
     }
+  },
+  "lead_concurrence": {
+    "authorized_by": "lead",
+    "authorized_at": "2026-11-12T17:10:00+08:00",
+    "items": {
+      "AMEND-1": "C6/AT2 哨兵计数面收敛为 native 通道内 ==1（全局计数数学不可能；observation carry 被 1518 基线钉住）",
+      "AMEND-2": "新增 C9 wiring guard（挡『纯函数实现但生产未接线』假绿）",
+      "AMEND-3a": "AT2 测试侧确定性加固（OnceLock 门控 warm-up，未放宽断言）",
+      "AMEND-3b": "C10 真实 sqlite load_store 重启用例 + 装载侧交叉断言（抓出真实缺陷：中断轮重启不可见）",
+      "AMEND-4": "C10 夹具显式 turn_id，经对照实验（legacy 变体 Exit 101）确认非冗余后保留"
+    },
+    "no_assertion_weakened": true,
+    "note": "冻结验收文件的全部改动均经 Lead 一票裁决并留痕；无 BLOCKING 放宽。"
   }
 }

@@ -1257,7 +1257,9 @@ note: >-
       (3c) 持久化（落库边界）：`provider::strip_dsml_protocol_text` 在
            `control_plane::flush_events`（事件载荷 → `normalized_messages`）与
            `session::store::append_turn_fallible_with_kind`（历史正文）两处整块丢弃协议文本，
-           **不写占位符**；旧库既有脏行只在读取/落库时清洗，不回写、不再放大（无迁移、无新列）。
+           **不新增占位符**（既有 `［工具调用］` 脏行原样保留、不回写、不清洗逐字态）；旧库既有脏行只在读取/落库时
+           丢弃协议碎片，不回写、不再放大（无迁移、无新列）。边界：落库侧按 chunk 流式清洗，fenced 代码块跨 chunk 时
+           与整段清洗不等价；非 fenced 的孤立协议残片行仍按既定取舍丢弃（冻结验收 at3/acceptance 用例钉住该口径）。
       本地日志均不含凭据。
   (4) 历史图与归属（本地取证相关）：中断收口不再因 `visible ≠ branch_head` 触发隐式 fork，
       `TurnCancelled` 节点让位于统一的分支头口径；历史节点 `turn_id` 显式取本轮。纯本地状态机变更。
