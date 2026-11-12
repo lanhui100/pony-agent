@@ -21,7 +21,8 @@ Status: implemented
    → 判 `problem`（文案含「存在租约锁但记录状态」，并提示 `reap --id <ID> --minutes 0` 只清该锁或手动删锁文件）。
    干净克隆 `.locks/` 不存在时锁恒为 null，判定不触发——不引入「干净环境恒红」。
 2. `reap` 增加 `--id <ID>` 过滤：修复建议从「全局 reap」收窄为「只清该任务」，避免并发 lane 下
-   误清其它会话的锁（实测全局 `reap --minutes 0` 会把 B056/B057 一起回收）。不带 `--id` 仍清全部并打印范围。
+   误清其它会话的锁（实测全局 `reap --minutes 0` 会把 B056/B057 一起回收）。`--id` 缺值 / 空值 /
+   不合 `^B\d{3,}$` 一律 exit 2 fail-closed，**不回落为全局清理**；不带 `--id` 仍清达到阈值的全部租约并打印范围。
 3. 该判定同时覆盖两类现场：手改状态降级、`start` 取锁后中断。它不替代 `start` 的失败回滚
    （回滚仍未做，记于 `backlog:B108`），但让泄漏在提交前可见、可恢复。
 4. 负样本补齐：`backlog-gate.spec.sh` 增 N7（锁在、记录 todo → 必须拒），spec 由 N1–N6 扩为 N1–N7。
@@ -47,9 +48,10 @@ Status: implemented
   `release` 不可用：它会先删锁、再以「非法跃迁 todo → todo」exit 1，副作用与失败混在一起）。
   已验证 D1 夹具 `lint` exit 1、D2 泄漏夹具同样 exit 1。
 - spec 自检 N1–N7 与 H（pre-commit 接线：门在场放行 / 门缺失 fail-closed）全过；
-  `tests/backlog-cli.spec.ts` 增 2 例（锁-状态错配、reap `--id` 过滤），共 33 例全绿，既有用例语义不变。
+  `tests/backlog-cli.spec.ts` 增 3 例（锁-状态错配、reap `--id` 过滤、reap `--id` 参数 fail-closed），
+  共 34 例全绿，既有用例语义不变。
 - **提交后复核收据**（HEAD 5e4cb558 之后新增第二次提交）：`backlog-gate` 0 / `backlog-gate.spec` 0 /
-  `adr:check` 0 / `ci-verify` 0 / `upgrade --check` 0 / vitest 33 passed。B106 归档证据里的
+  `adr:check` 0 / `ci-verify` 0 / `upgrade --check` 0 / vitest 34 passed。B106 归档证据里的
   「31 passed」是提交前时点回执，最终以本条为准。
 - 仍未修的已知缺口：`start` 取锁失败的原子回滚（B108）、缺 `heartbeat_at` 时的静默跳过（B107）。
 - 诚实边界：这道判据只能证明「锁与状态不矛盾」，不能证明「状态是经 CLI 改的」；迁移历史正确性靠 review。

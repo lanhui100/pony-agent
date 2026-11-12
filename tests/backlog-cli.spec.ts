@@ -217,6 +217,30 @@ describe('CLI 冒烟', () => {
     expect(code).toBe(1);
   });
 
+  it('reap --id 缺值/空值/非法值 fail-closed，不回落为全局清锁', () => {
+    seed([baseRow({ status: 'in_progress', owner: 'lane-A', touched_paths: ['crates/x'] })]);
+    acquireLease(paths, 'B056', { owner: 'lane-A' });
+    for (const args of [
+      ['reap', '--id', '', '--minutes', '0'],
+      ['reap', '--id', '--minutes', '0'],
+      ['reap', '--id', 'B9', '--minutes', '0']
+    ]) {
+      let code = 0;
+      try {
+        execFileSync(process.execPath, [SCRIPT, ...args], {
+          cwd: path.resolve('.'),
+          env: { ...process.env, PONY_BACKLOG_ROOT: root },
+          encoding: 'utf8',
+          stdio: 'pipe'
+        });
+      } catch (error: any) {
+        code = error.status;
+      }
+      expect(code).toBe(2);
+    }
+    expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
+  });
+
   it('record 命令写入后可被 list 读出', () => {
     execFileSync(process.execPath, [SCRIPT, 'record', '--category', 'Task', '--title', '冒烟任务', '--fingerprint', 'smoke'], {
       cwd: path.resolve('.'),

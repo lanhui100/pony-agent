@@ -614,7 +614,13 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     case 'reap': {
-      const onlyId = arg('id');
+      // `--id` 是破坏性清理的范围限定：缺失/空/非法一律 fail-closed，绝不回落到「清全部」。
+      const idIndex = rest.indexOf('--id');
+      const onlyId = idIndex === -1 ? undefined : rest[idIndex + 1];
+      if (idIndex !== -1 && (!onlyId || !ID_RE.test(onlyId))) {
+        console.error('用法: backlog reap [--id <B###>] [--minutes N]（--id 缺值或格式非法一律拒绝，不会回落为全局清理）');
+        return 2;
+      }
       const reaped = reapStaleLeases(paths, {
         maxAgeMs: Number(arg('minutes', '120')) * 60_000,
         dryRun: rest.includes('--dry-run'),
