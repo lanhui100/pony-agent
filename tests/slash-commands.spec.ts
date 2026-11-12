@@ -240,9 +240,11 @@ describe("T6 parseSlashCommand 命中矩阵", () => {
     expect(parseSlashCommand("hello /plan")).toBeNull();
   });
 
-  it("命令元数据：恰好三条，usage 与 name 一一对应，描述非空", () => {
+  // wave goal-1 / C-5：命令清单由三条扩为四条（新增 /goal），本断言由 Lead 原地改写，
+  // 流水登记见 .dev-team/contract-matrix-goal-command.md §3。
+  it("命令元数据：恰好四条，usage 与 name 一一对应，描述非空", () => {
     const names = DESKTOP_SLASH_COMMANDS.map((item) => item.name);
-    expect(names).toEqual(["plan", "tasks", "compact"]);
+    expect(names).toEqual(["plan", "tasks", "compact", "goal"]);
     for (const item of DESKTOP_SLASH_COMMANDS) {
       expect(item.usage).toBe(`/${item.name}`);
       expect(typeof item.description).toBe("string");

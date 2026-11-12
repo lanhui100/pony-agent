@@ -498,6 +498,8 @@ mod input;
 pub use self::input::*;
 #[path = "tui/queue.rs"]
 mod queue;
+#[path = "tui/goal_command.rs"]
+mod goal_command;
 pub use self::queue::*;
 
 #[path = "tui/errors.rs"]
@@ -594,11 +596,12 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "选择并恢复历史会话"),
     ("/rewind", "撤回到某个用户轮次（会话 + 已写文件）"),
     ("/provider", "管理与切换模型提供商"),
-    ("/models", "切换当前活跃模型"),
+    ("/models", "切换当前活跃模型（Ctrl+R / Ctrl+M）"),
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
     ("/permission", "查看或切换工具执行权限级别"),
     ("/settings", "设置 TUI 显示与交互偏好"),
     ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
+    ("/goal", "设置或查看当前会话目标"),
     ("/approve", "批准当前会话的草稿计划（解除写保护）"),
     ("/tasks", "切换/查看 Team 任务看板（Ctrl+T）"),
     ("/agents", "查看 Team 角色与状态"),
@@ -2468,6 +2471,14 @@ impl TuiState {
             self.goal_banner_since = Some(std::time::Instant::now());
         }
         self.goal_state = Some(goal);
+    }
+
+    /// C-6：清除 goal 横幅（`/goal clear` 之后必须立刻消失）。
+    ///
+    /// 与 `active_goal_for_session` 同源：core 已删记录，UI 不得残留「已清除的目标」。
+    pub fn clear_goal_banner(&mut self) {
+        self.goal_state = None;
+        self.goal_banner_since = None;
     }
 
     pub fn next_session(&mut self) {
@@ -9624,6 +9635,7 @@ fn tui_event_loop(
                                     if is_session_mutating_command(&composer_text) {
                                         disposition = StreamingKeyDisposition::Reject;
                                     } else if is_panel_command(&composer_text)
+                                        || is_local_control_command(&composer_text)
                                         || parse_command_input(&composer_text).is_some()
                                         || input_is_alias(&composer_text, "/exit")
                                         || input_is_alias(&composer_text, "/effort")
@@ -9782,7 +9794,12 @@ fn tui_event_loop(
                             }
                             // wave-35b：Ctrl+R 打开模型面板并远程刷新（与 /models 同路径）。
                             // 不占用裸 `r`，避免无法输入以 r 开头的消息。
-                            KeyCode::Char('r') => {
+                            // 别名：Ctrl+M 与 Ctrl+R 同语义。终端层把 Ctrl+M（0x0D）与 Enter
+                            // 区分成 `Char('m')`+CONTROL 上报，只在支持 kitty 键盘协议
+                            // （DISAMBIGUATE_ESCAPE_CODES）的终端生效；其余终端会把 Ctrl+M
+                            // 降级为 Enter（＝提交输入，与按 Enter 等价）——这是接受的回退，
+                            // 不会凭空吞键。不占用裸 `m`，避免无法输入以 m 开头的消息。
+                            KeyCode::Char('r') | KeyCode::Char('m') => {
                                 let registry = ProviderRegistryStore::new();
                                 let view = registry.load_view();
                                 let active_id = resolve_active_provider_id(&state);
@@ -9871,6 +9888,15 @@ fn tui_event_loop(
                                             serde_json::json!("unknown_slash_command"),
                                         )],
                                     );
+                                    dirty = true;
+                                    continue;
+                                }
+
+                                // C-6：`/goal` 是唯一「允许带参数且仍算命令」的斜杠命令，
+                                // 故在**整串匹配**的 `known_command` 之前判定；解析/执行/回执全在
+                                // `tui::goal_command`（真值源为 core `agent::goal_command`），
+                                // 不消耗模型轮次、不发起 turn。
+                                if goal_command::handle_goal_command(&mut state, &input) {
                                     dirty = true;
                                     continue;
                                 }
@@ -10061,7 +10087,7 @@ fn tui_event_loop(
                                     // C18②：流式期可用性说明（旧文案让人以为生成中键盘全失效）。
                                     // 本轮：补 Ctrl+O（过程显示/隐藏），与 /settings 同字段。
                                     help.push_str(
-                                        "\n流式期仍可输入 · Enter 排队（本轮结束后自动发送） · Ctrl+T/Ctrl+R 可用 · Ctrl+O 过程显示/隐藏 · Ctrl+P 切换权限",
+                                        "\n流式期仍可输入 · Enter 排队（本轮结束后自动发送） · Ctrl+T/Ctrl+R 可用（Ctrl+M 同 Ctrl+R，需 kitty 协议终端） · Ctrl+O 过程显示/隐藏 · Ctrl+P 切换权限",
                                     );
                                     // W3b：子会话语境下的唯一逃逸/切换路径（徽标同文案）。
                                     help.push_str(

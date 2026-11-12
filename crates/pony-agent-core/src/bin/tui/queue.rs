@@ -245,6 +245,16 @@ pub fn is_session_mutating_command(command: &str) -> bool {
         .any(|cmd| cmd.eq_ignore_ascii_case(trimmed))
 }
 
+/// C-6：**本地控制类**斜杠命令（不拆在飞轮次、不改会话历史；流式期允许就地执行）：
+/// `/goal` 为其唯一成员。
+///
+/// 判定复用 [`goal_command::goal_command_args`]（首 token 口径），不另写一份字面量表——
+/// 因此 `/goal` 与带参形态 `/goal <目标>`、`/goal clear` 同为控制命令；
+/// **不得**把它并入 [`is_session_mutating_command`]（它不拆在飞轮次）。
+pub fn is_local_control_command(command: &str) -> bool {
+    goal_command::goal_command_args(command).is_some()
+}
+
 /// C7：排队数量的可见文案（`count == 0` ⇒ `None`，不渲染）。
 ///
 /// 渲染点：`status_word` 把它追加到流式活动行（流式期 `status_notice` 按契约 P-5 让位，

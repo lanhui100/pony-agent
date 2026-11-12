@@ -465,6 +465,13 @@ fn goal_update(
     serde_json::to_value(res.goal).map_err(|e| e.to_string())
 }
 
+/// Execute a `/goal` slash command for a session (syntax/state machine lives in core).
+#[tauri::command]
+fn goal_command(session_id: String, args: String) -> Result<Value, String> {
+    let outcome = pony_agent_core::agent::goal_command::execute_goal_command(&session_id, &args)?;
+    serde_json::to_value(outcome).map_err(|e| e.to_string())
+}
+
 // ── Team Control Surface ────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1528,6 +1535,7 @@ pub fn run() {
             goal_get,
             goal_create,
             goal_update,
+            goal_command,
             team_get_roster,
             team_get_tasks,
             team_claim_task,

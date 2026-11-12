@@ -1236,3 +1236,34 @@ note: >-
       `crates/pony-agent-core/src/agent/session/store.rs`（清洗自愈单测）、
       `crates/pony-agent-core/src/agent/session/tests/native_context.rs`（清洗契约回归单测）、
       `crates/pony-agent-core/tests/multi_turn_tool_context_test.rs`（Store 级多轮端到端集成测试）。
+  【归属登记（2026-11-12）｜TUI 模型面板快捷键 Ctrl+M 别名（ADR：.agents/notes/implemented/feature/2026-11-12-ctrl-m-model-panel-alias.md）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地终端按键语义**，无新增遥测出口。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
+  (2) 纯交互变更（仅登记）：`crates/pony-agent-core/src/bin/tui.rs` 的「面板类快捷键」分支把
+      `KeyCode::Char('r') | KeyCode::Char('m')` 归一到模型面板打开动作（与 `/models` 同路径）。
+      `Ctrl+M` 仅在终端上报为 `Char('m')`+CONTROL（kitty 协议 `DISAMBIGUATE_ESCAPE_CODES`）时生效；
+      其余终端按 0x0D = Enter 走既有提交/排队语义（回退）。不新增网络 IO、后台任务、环境变量、
+      依赖、指标或日志出口。
+  (3) 收口点：不新增 enforcement_point；行为门落在测试层——
+      `crates/pony-agent-core/tests/tui_streaming_input_acceptance.rs`（C3 断言扩展为 `['t','r','m']`）。
+
+  【归属登记（2026-11-12）｜`/goal` 斜杠命令 + goal `clear`（ADR：.agents/notes/implemented/feature/2026-11-12-goal-slash-command-and-clear.md）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次新增的是**本地命令面与本地持久化操作**，
+  无新增外部网络 IO、无后台常驻任务、无 `/metrics` 出口。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
+  (2) 新增对外接口（仅 Tauri 本地 IPC，不出网）：`src-tauri/src/lib.rs` 的 `goal_command` 命令，
+      语义为「执行一条 `/goal` 人类命令」，底层 `crates/pony-agent-core/src/agent/goal_command.rs`
+      只读写 goal sidecar（`crates/pony-agent-core/src/agent/goal.rs` 的 `goal_store_path` 单文件），
+      不读会话历史、不发起模型请求；`clear_goal` 的落盘失败会回滚内存并原样上抛错误（不吞错、不谎报成功）。
+      桌面 UI 交互（`src/components/HomeWorkspace.vue` 的 `command === "goal"` 分支、`src/lib/chat/slash-commands.ts`
+      的 `goalCommandArgs`/`describeGoalOutcome`）走既有 info 状态通道，不新增遥测出口。
+      TUI 侧（`crates/pony-agent-core/src/bin/tui/goal_command.rs`）回执走 System 消息 + 本地状态行。
+  (3) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；行为门落在测试层——
+      `crates/pony-agent-core/src/agent/goal_command.rs`（解析/状态机/clear 幂等与落盘失败回滚 8 例）、
+      `crates/pony-agent-core/src/bin/tui/goal_command.rs`（参数口径与单行折叠 3 例）、
+      `tests/slash-commands-goal.spec.ts`（桌面纯函数 9 例）、
+      `tests/slash-commands.spec.ts`（命令清单扩为四条）。

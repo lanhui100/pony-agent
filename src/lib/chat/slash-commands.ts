@@ -7,7 +7,9 @@
  *   允许尾随空白/参数；未知或非命令一律返回 null（由调用方保持“按普通消息发送”的既有行为）。
  */
 
-export type DesktopSlashCommand = "plan" | "tasks" | "compact";
+import type { GoalData } from "@/types/goal";
+
+export type DesktopSlashCommand = "plan" | "tasks" | "compact" | "goal";
 
 export interface DesktopSlashCommandSpec {
   name: DesktopSlashCommand;
@@ -18,7 +20,8 @@ export interface DesktopSlashCommandSpec {
 export const DESKTOP_SLASH_COMMANDS: ReadonlyArray<DesktopSlashCommandSpec> = [
   { name: "plan", usage: "/plan", description: "查看并展开当前会话计划" },
   { name: "tasks", usage: "/tasks", description: "查看 Team 任务看板" },
-  { name: "compact", usage: "/compact", description: "压缩当前会话上下文" }
+  { name: "compact", usage: "/compact", description: "压缩当前会话上下文" },
+  { name: "goal", usage: "/goal", description: "设置或查看当前会话目标" }
 ];
 
 /**
@@ -32,6 +35,18 @@ export interface ManualCompactionOutcome {
   keptCount: number;
   beforeTokens: number;
   afterTokens: number;
+}
+
+/**
+ * `/goal` 命令结果（对应 Rust `GoalCommandOutcome`，`serde(rename_all = "camelCase")`）。
+ *
+ * `message` 是后端渲染好的中文回执（语法/状态机真值源在 Rust，前端不得自行编造语义）；
+ * `goal` 是变更后的目标快照，`clear` 与「无目标 show」为 `null`。
+ */
+export interface GoalCommandOutcome {
+  action: string;
+  message: string;
+  goal: GoalData | null;
 }
 
 const KNOWN_COMMAND_NAMES: ReadonlySet<string> = new Set(
@@ -83,4 +98,49 @@ export function describeCompactionOutcome(
   const keptCount = Number.isFinite(outcome.keptCount) ? outcome.keptCount : 0;
   // 文案必须与可见状态一致：压缩的是**后端上下文**，转录区（前端消息列表）保留原始历史。
   return `已压缩上下文：压缩 ${compressedCount} 条，保留 ${keptCount} 条；后端上下文已压缩，转录区保留原始历史`;
+}
+
+/**
+ * `/goal` 之后的参数文本（未命中 `/goal` ⇒ 空串）。
+ *
+ * 口径（契约 C-5）：`trim()` 后必须以 `/` 开头、首 token 大小写不敏感等于 `goal`；
+ * 返回首个空白之后的原文（仅做首尾空白裁剪，正文不做任何改写）；`/goa`、`/goalx` 一律不命中。
+ */
+export function goalCommandArgs(input: string): string {
+  if (typeof input !== "string") {
+    return "";
+  }
+
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) {
+    return "";
+  }
+
+  const match = /^\/goal(?:\s+([\s\S]*))?$/i.exec(trimmed);
+  if (!match) {
+    return "";
+  }
+
+  return (match[1] ?? "").trim();
+}
+
+/**
+ * `/goal` 结果的状态条文案（C-9 info 通道是**单行**截断渲染，多行回执必须折叠）。
+ *
+ * 只在渲染层折叠空白，不改写语义：`null`/空文案属「后端未返回结果」，必须如实说明，
+ * 不得谎报命令成功。
+ */
+export function describeGoalOutcome(
+  outcome: GoalCommandOutcome | null | undefined
+): string {
+  if (!outcome || typeof outcome.message !== "string") {
+    return "目标命令已执行，但未返回结果";
+  }
+
+  const message = outcome.message.trim();
+  if (!message) {
+    return "目标命令已执行，但未返回结果";
+  }
+
+  return message.replace(/\s*\n+\s*/g, " · ");
 }

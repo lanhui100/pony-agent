@@ -22,7 +22,8 @@ pub fn is_suspend_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool {
 ///
 /// **全局语义**：本判定不依赖 `InteractionMode`。事件循环把它放在**所有模态分支之前**
 /// （与 F2/F3 同级），因此设置面板、各选择器、审批/问答等模态打开时同样生效——
-/// 这正是它与“面板内才可用”的 `Ctrl+T`/`Ctrl+R` 的关键区别。与 `/settings` 读写
+/// 这正是它与“面板内才可用”的 `Ctrl+T`/`Ctrl+R` 的关键区别（模型面板另有 `Ctrl+M` 别名，
+/// 见 `tui.rs` 面板快捷键分支，仅 kitty 协议终端生效）。与 `/settings` 读写
 /// 同一 `hide_process` 字段并共用同一落盘点（契约 C12）。
 pub fn is_hide_process_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bool {
     modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('o')
@@ -94,7 +95,8 @@ pub fn should_skip_while_streaming(key: &crossterm::event::KeyEvent) -> bool {
 ///   （流式中排队，绝不并发 spawn 第二个 turn）；无正文 ⇒ `Reject`（不入队空气泡）。
 /// - **Shift/Alt+Enter** ＝ 换行（编辑动作）⇒ `Forward`。
 /// - 其余按键（可打印字符、Backspace/Delete、方向键、Home/End、Tab 补全、
-///   Ctrl+U/J/W/A/E 编辑快捷键、Ctrl+T/Ctrl+R 面板快捷键、F2/F3、Esc）一律 `Forward`
+///   Ctrl+U/J/W/A/E 编辑快捷键、Ctrl+T/Ctrl+R 面板快捷键（模型面板另有 Ctrl+M 别名，
+///   仅 kitty 协议终端上报为 `Char('m')`+CONTROL；其余终端降级为 Enter）、F2/F3、Esc）一律 `Forward`
 ///   —— 流式守卫不再吞键（C1/C3）。Esc / Ctrl+C / 面板模态分支在调用点**先于**本裁决生效。
 pub fn streaming_key_disposition(
     key: &crossterm::event::KeyEvent,

@@ -218,7 +218,9 @@ fn a3_panel_and_session_mutating_command_classification() {
     }
 
     // C3：Ctrl+T（任务板）/ Ctrl+R（模型面板）不得被流式守卫拦掉（必须 Forward 才能到达面板分支）。
-    for c in ['t', 'r'] {
+    // Ctrl+M 是模型面板的别名：非 kitty 协议终端由终端层降级为 Enter（既有提交行为），
+    // 但只要上报为 Char('m')+CONTROL，流式守卫同样必须 Forward（不得被当作提交/换行吞掉）。
+    for c in ['t', 'r', 'm'] {
         let shortcut = key(KeyCode::Char(c), KeyModifiers::CONTROL);
         assert_eq!(
             tui::streaming_key_disposition(&shortcut, false),

@@ -677,6 +677,34 @@ pub fn update_goal(args: UpdateGoalArgs) -> Result<UpdateGoalResult, String> {
     Ok(UpdateGoalResult { goal: updated })
 }
 
+/// 契约 C-3：删除该 session 的目标记录并原子持久化；返回是否真的删掉了记录。
+///
+/// - `session_id` 去空白后为空 ⇒ `Err`；
+/// - 无记录 ⇒ `Ok(false)`（幂等，不落盘）；
+/// - 有记录 ⇒ 内存删除 + `persist_goal_store`；落盘失败则把原记录放回并原样返回 `Err`。
+///   （不新增 `UpdateGoalAction` 变体：避免枚举扩散到模型工具 schema 与 `src/types/goal.ts`。）
+pub fn clear_goal(session_id: &str) -> Result<bool, String> {
+    let session = session_id.trim();
+    if session.is_empty() {
+        return Err("Session ID cannot be empty".to_string());
+    }
+
+    let mut guard = goal_store_guard();
+    ensure_goal_store_loaded(&mut guard);
+    let goals = guard.as_mut().expect("goal store must be loaded");
+    let previous = match goals.remove(session) {
+        Some(goal) => goal,
+        None => return Ok(false),
+    };
+
+    if let Err(error) = persist_goal_store(goals) {
+        goals.insert(session.to_string(), previous);
+        return Err(error);
+    }
+
+    Ok(true)
+}
+
 /// 进程级 goal store 的测试串行化接缝（lib 单测跨模块共享同一 store，必须互斥）。
 #[cfg(test)]
 pub(crate) mod test_support {

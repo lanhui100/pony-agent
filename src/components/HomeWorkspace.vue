@@ -12,8 +12,11 @@ import { useWorkspacePanelsStore } from "@/stores/workspace-panels";
 import { safeInvoke } from "@/lib/tauri";
 import {
   describeCompactionOutcome,
+  describeGoalOutcome,
+  goalCommandArgs,
   parseSlashCommand,
   type DesktopSlashCommand,
+  type GoalCommandOutcome,
   type ManualCompactionOutcome
 } from "@/lib/chat/slash-commands";
 import { extractErrorMessage } from "@/lib/error-utils";
@@ -1518,7 +1521,7 @@ const SLASH_COMMAND_BUSY_NOTICE = "当前正在运行，请等待本轮结束后
 /**
  * C-8：桌面端斜杠命令通道 —— **唯一入口**，Enter 与发送按钮共用。
  *
- * 命中已知命令（`/plan`、`/tasks`、`/compact`）时不进入 `submitTurn`：
+ * 命中已知命令（`/plan`、`/tasks`、`/compact`、`/goal`）时不进入 `submitTurn`：
  * 先清空文本草稿（不动待发送附件），再按命令执行动作，反馈统一走
  * `runtimeStore.setSessionNotice()`（C-9，info 模式），不复用 sessionError。
  *
@@ -1527,6 +1530,9 @@ const SLASH_COMMAND_BUSY_NOTICE = "当前正在运行，请等待本轮结束后
  * 守卫只在此处存在一份，禁止在调用方重复判定。
  */
 async function executeSlashCommand(command: DesktopSlashCommand) {
+  // `/goal` 是唯一带语义参数的命令：必须在清空草稿**之前**留住原文（其余命令不用参数）。
+  const commandInput = runtimeStore.draftMessage;
+
   if (isSubmitting.value) {
     runtimeStore.setSessionNotice(SLASH_COMMAND_BUSY_NOTICE);
     return;
@@ -1554,6 +1560,24 @@ async function executeSlashCommand(command: DesktopSlashCommand) {
       return;
     }
     workspacePanelsStore.togglePanel("tasks");
+    return;
+  }
+
+  // /goal：目标命令（语法/状态机真值源在 Rust `agent::goal_command`，前端只接线与渲染）。
+  // 不消耗模型轮次、不写会话历史：草稿已清空且不调用 submitTurn。
+  if (command === "goal") {
+    try {
+      const outcome = await safeInvoke<GoalCommandOutcome>("goal_command", {
+        sessionId: runtimeStore.sessionId,
+        args: goalCommandArgs(commandInput)
+      });
+      runtimeStore.setSessionNotice(describeGoalOutcome(outcome));
+      // 目标条以后端快照为准（`clear` 后必须归零，续轮随之停止）。
+      await goalStore.fetchGoal(runtimeStore.sessionId);
+    } catch (error) {
+      const reason = extractErrorMessage(String(error)) ?? String(error);
+      runtimeStore.setSessionNotice(`目标命令执行失败：${reason}`);
+    }
     return;
   }
 
