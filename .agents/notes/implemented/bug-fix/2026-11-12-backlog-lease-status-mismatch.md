@@ -18,12 +18,14 @@ Status: implemented
 ## Decision
 
 1. `leaseConsistency` 增加**反向**判定：本工作区存在 `.locks/` 且记录持锁、但 `status ≠ in_progress`
-   → 判 `problem`（文案含「存在租约锁但记录状态」，并提示 `reap --minutes 0` 清锁或手动删锁文件）。
+   → 判 `problem`（文案含「存在租约锁但记录状态」，并提示 `reap --id <ID> --minutes 0` 只清该锁或手动删锁文件）。
    干净克隆 `.locks/` 不存在时锁恒为 null，判定不触发——不引入「干净环境恒红」。
-2. 该判定同时覆盖两类现场：手改状态降级、`start` 取锁后中断。它不替代 `start` 的失败回滚
+2. `reap` 增加 `--id <ID>` 过滤：修复建议从「全局 reap」收窄为「只清该任务」，避免并发 lane 下
+   误清其它会话的锁（实测全局 `reap --minutes 0` 会把 B056/B057 一起回收）。不带 `--id` 仍清全部并打印范围。
+3. 该判定同时覆盖两类现场：手改状态降级、`start` 取锁后中断。它不替代 `start` 的失败回滚
    （回滚仍未做，记于 `backlog:B108`），但让泄漏在提交前可见、可恢复。
-3. 负样本补齐：`backlog-gate.spec.sh` 增 N7（锁在、记录 todo → 必须拒），spec 由 N1–N6 扩为 N1–N7。
-4. 文档口径纠偏（本次自造的两处过度承诺）：门禁文案不再声称 lint 校验「状态机」（实际只有状态枚举 +
+4. 负样本补齐：`backlog-gate.spec.sh` 增 N7（锁在、记录 todo → 必须拒），spec 由 N1–N6 扩为 N1–N7。
+5. 文档口径纠偏（本次自造的两处过度承诺）：门禁文案不再声称 lint 校验「状态机」（实际只有状态枚举 +
    条件必填），改为「状态字段合法性 + 条件必填 + 租约-状态互斥」；契约补上「缺锁判定需新鲜
    `heartbeat_at`」这一前提（无 heartbeat 时静默跳过，属已知 fail-open，记于 `backlog:B107`）。
 
@@ -41,9 +43,13 @@ Status: implemented
 ## Consequences
 
 - `scripts/backlog.mjs::leaseConsistency` 行为变更：持锁记录非 `in_progress` 时 `lint`/`doctor` 非零；
-  修复动作是 `reap --minutes 0` 清锁或手动删除 `.locks/<ID>.lock`（该状态下 `release` 不可用：
-  记录已是 `todo`，会撞 `todo → todo` 非法跃迁）。已验证 D1 夹具 `lint` exit 1、D2 泄漏夹具同样 exit 1。
+  修复动作是 `reap --id <ID> --minutes 0` 只清该锁，或手动删除 `.locks/<ID>.lock`（该状态下
+  `release` 不可用：它会先删锁、再以「非法跃迁 todo → todo」exit 1，副作用与失败混在一起）。
+  已验证 D1 夹具 `lint` exit 1、D2 泄漏夹具同样 exit 1。
 - spec 自检 N1–N7 与 H（pre-commit 接线：门在场放行 / 门缺失 fail-closed）全过；
-  `tests/backlog-cli.spec.ts` 增 1 例覆盖新判据（共 32 例全绿，既有用例语义不变）。
+  `tests/backlog-cli.spec.ts` 增 2 例（锁-状态错配、reap `--id` 过滤），共 33 例全绿，既有用例语义不变。
+- **提交后复核收据**（HEAD 5e4cb558 之后新增第二次提交）：`backlog-gate` 0 / `backlog-gate.spec` 0 /
+  `adr:check` 0 / `ci-verify` 0 / `upgrade --check` 0 / vitest 33 passed。B106 归档证据里的
+  「31 passed」是提交前时点回执，最终以本条为准。
 - 仍未修的已知缺口：`start` 取锁失败的原子回滚（B108）、缺 `heartbeat_at` 时的静默跳过（B107）。
 - 诚实边界：这道判据只能证明「锁与状态不矛盾」，不能证明「状态是经 CLI 改的」；迁移历史正确性靠 review。

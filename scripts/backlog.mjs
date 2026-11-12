@@ -303,7 +303,7 @@ export function leaseConsistency(paths, rows) {
       // 反向缺口（D1/D2）：锁还在、记录却不是 in_progress——手改状态降级，或 start 取锁后 update 失败。
       // 只在本工作区确有租约目录时判硬错；干净克隆 .locks/ 不存在，lease 恒为 null。
       if (lease && tracking) {
-        problems.push(`tasks.jsonl (${row.id}) 存在租约锁但记录状态为 ${row.status}（疑似手改状态或 start 中断；确认后 reap --minutes 0 清锁，或手动删除 .locks/${row.id}.lock）`);
+        problems.push(`tasks.jsonl (${row.id}) 存在租约锁但记录状态为 ${row.status}（疑似手改状态或 start 中断；确认后 reap --id ${row.id} --minutes 0 只清该锁，或手动删除 .locks/${row.id}.lock）`);
       }
       continue;
     }
@@ -380,12 +380,13 @@ export function releaseLease(paths, id, { owner } = {}) {
   return { released: true, previous: cur };
 }
 
-/** 回收过期租约（会话崩溃/无心跳）：返回被回收的任务 id 列表。 */
-export function reapStaleLeases(paths, { maxAgeMs = DEFAULT_LEASE_TTL_MS, now = Date.now(), dryRun = false } = {}) {
+/** 回收超龄租约（会话崩溃/无心跳）：返回被回收的任务 id 列表。`onlyId` 限定单个任务（并发 lane 安全）。 */
+export function reapStaleLeases(paths, { maxAgeMs = DEFAULT_LEASE_TTL_MS, now = Date.now(), dryRun = false, onlyId } = {}) {
   if (!fs.existsSync(paths.locksDir)) return [];
   const reaped = [];
   for (const name of fs.readdirSync(paths.locksDir)) {
     if (!name.endsWith('.lock')) continue;
+    if (onlyId && name !== `${onlyId}.lock`) continue;
     const file = path.join(paths.locksDir, name);
     const lease = readLease(paths, name.replace(/\.lock$/, ''));
     const beat = lease?.heartbeat_at ? Date.parse(lease.heartbeat_at) : fs.statSync(file).mtimeMs;
@@ -496,7 +497,7 @@ export function doctor(paths) {
     .map(row => ({ id: row.id, lease: readLease(paths, row.id) }))
     .filter(item => item.lease);
   for (const id of orphanLeaseIds(paths, active)) {
-    report.issues.push(`残留租约 ${id}.lock：活跃池无此记录（node scripts/backlog.mjs reap 回收，或 release ${id}）`);
+    report.issues.push(`残留租约 ${id}.lock：活跃池无此记录（node scripts/backlog.mjs reap --id ${id} --minutes 0 清理，或手动删除 .locks/${id}.lock）`);
   }
   const lint = lintAll(paths);
   report.issues.push(...lint.problems);
@@ -613,11 +614,14 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     case 'reap': {
+      const onlyId = arg('id');
       const reaped = reapStaleLeases(paths, {
         maxAgeMs: Number(arg('minutes', '120')) * 60_000,
-        dryRun: rest.includes('--dry-run')
+        dryRun: rest.includes('--dry-run'),
+        onlyId
       });
-      console.log(reaped.length ? `[backlog] 回收过期租约：${reaped.join(', ')}` : '[backlog] 无过期租约');
+      const scope = onlyId ? `（仅 ${onlyId}）` : '（全部租约）';
+      console.log(reaped.length ? `[backlog] 回收超龄租约${scope}：${reaped.join(', ')}` : `[backlog] 无超龄租约${scope}`);
       return 0;
     }
     case 'annotate': {
@@ -685,7 +689,7 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     default:
-      console.log('用法: backlog {record|list|start|heartbeat|release|resolve|annotate|lint|doctor|reap|import-triage}');
+      console.log('用法: backlog {record|list|start|heartbeat|release|resolve|annotate|lint|doctor|reap [--id <ID>] [--minutes N]|import-triage}');
   return 1;
   }
 }

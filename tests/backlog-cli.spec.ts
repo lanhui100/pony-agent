@@ -296,6 +296,15 @@ describe('任务级租约（单任务单会话，不同任务可并行）', () =
     expect(() => acquireLease(paths, 'B056', { owner: 'new-session' })).not.toThrow();
   });
 
+  it('reap --id 只回收指定任务，不误伤其它并发租约', () => {
+    seed([baseRow(), baseRow({ id: 'B057', title: '另一任务' })]);
+    acquireLease(paths, 'B056', { owner: 'lane-A', now: Date.now() - 3 * 60 * 60 * 1000 });
+    acquireLease(paths, 'B057', { owner: 'lane-B' });
+    const reaped = reapStaleLeases(paths, { maxAgeMs: 60 * 60 * 1000, onlyId: 'B056' });
+    expect(reaped).toEqual(['B056']);
+    expect(fs.existsSync(lockFileOf('B057'))).toBe(true);
+  });
+
   it('lint 发现记录 owner 与租约 owner 冲突时判违规', () => {
     seed([baseRow({
       status: 'in_progress',

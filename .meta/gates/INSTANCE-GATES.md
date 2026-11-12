@@ -13,7 +13,7 @@
 | 承诺 | 命令 | 命中判据 |
 |---|---|---|
 | 账本记录合法且跨归档/租约对账干净 | `bash .meta/gates/backlog-gate.sh` | `lint`（必填字段/条件必填/状态字段合法性/租约-状态互斥/活跃池 done 残留/ID 唯一/高水位）+ `doctor`（ID 重复/高水位/孤儿租约/租约-状态互斥） |
-| 门自己会拒绝非法样本 | `bash .meta/gates/backlog-gate.spec.sh` | P1 放行 + N1–N7（缺 fingerprint / 活跃 done / 孤儿租约 / 高水位越界 / 无账本跳过 / 无 node 拒绝 / 锁存而记录非 in_progress） |
+| 门自己会拒绝非法样本 | `bash .meta/gates/backlog-gate.spec.sh` | P1 放行 + N1–N7（缺 fingerprint / 活跃 done / 孤儿租约 / 高水位越界 / 无账本跳过 / 无 node 拒绝 / 锁存而记录非 in_progress）+ H（pre-commit 接线：门在场放行 / 门缺失 fail-closed） |
 
 ## 契约与真源
 
@@ -21,3 +21,5 @@
 - 判定真源：`scripts/backlog.mjs`（`validateRecord` / `lint` / `doctor`）——本目录脚本只编排，不复刻判据
 - 诚实边界：spec 只证明「门会拒非法样本」；账本内容真实性靠 review。`doctor` 不解析 git 历史，
   无法识别「同时改记录与高水位」的伪装。
+- 本地钩子前提：`git config core.hooksPath .githooks`（git 不克隆该配置；新 clone 跑
+  `npm run hooks:install`）。未装配时本地门禁静默失效、CI 仍兜底——这是 git 的机制限制，不是门禁缺陷。

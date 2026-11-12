@@ -31,7 +31,8 @@
 ## 租约（并发控制）
 
 - `start` 以 `O_EXCL` 原子获取 `<ID>.lock`：同一任务同时只允许一个会话持有；`heartbeat` 刷新；
-  `release` 显式释放；`reap --minutes N` 回收异常退出的过期租约。
+  `release` 显式释放；`reap --id <ID> --minutes N` 回收指定任务的超龄租约（不带 `--id` 会清全部租约，
+  并发 lane 下慎用）。
 - `.locks/` 是**本地运行时状态**，不入仓：干净克隆/CI 上缺锁只提示（`NOTE`），不阻断；只有在
   「本工作区确实存在 `.locks/`」时才把缺锁判为手改状态的强信号（见 B069 决策）。
 - 缺锁判定的前提是记录带**新鲜的** `heartbeat_at`（< TTL）；缺 `heartbeat_at` 时静默跳过
@@ -55,5 +56,7 @@ node scripts/backlog.mjs doctor               # 跨归档/高水位/孤儿租约
 - 门禁：`bash .meta/gates/backlog-gate.sh`（= `lint` + `doctor`），已接 pre-commit、CI 与
   `npm run verify`；负样本自检：`bash .meta/gates/backlog-gate.spec.sh`；登记见
   `.meta/gates/INSTANCE-GATES.md`。
+- 本地钩子前提：`git config core.hooksPath .githooks`。git **不会克隆**该配置，新 clone 需跑一次
+  `npm run hooks:install`（ponygo init 已装配的仓库无需重复）；未装配时本地门禁静默失效，仅 CI 兜底。
 - 本契约的变更属非平凡改动：改判据要同步改 CLI + 本文 + spec，并按 `.agents/notes/` 写 ADR。
 - 编码约定：提交信息/文档引用账本任务写 `backlog:B106`；裸 `B106` 视为 legacy 历史编号。
