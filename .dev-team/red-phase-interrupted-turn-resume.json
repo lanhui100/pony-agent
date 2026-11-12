@@ -1,0 +1,268 @@
+{
+  "wave": "interrupted-turn-resume",
+  "ticket": "B113",
+  "phase": "red",
+  "owner": "test-agent (independent L2-T / L2-AT author)",
+  "worktree": "/home/dm/pony-agent-worktrees/interrupted-turn-resume",
+  "branch": "fix/interrupted-turn-resume",
+  "contract": ".dev-team/contract-matrix-interrupted-turn-resume.md",
+  "nfr_baseline": ".dev-team/nfr-baseline-interrupted-turn-resume.json",
+  "test_file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+  "adversarial_dir": "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/",
+  "red_primitive_seam": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs (T0 空桩；只读，禁改签名)",
+  "frozen_at": "2026-11-12T14:19:44+08:00",
+  "command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+  "overall_exit_code": 101,
+  "suite_counts": {
+    "total": 141,
+    "passed": 126,
+    "failed": 15,
+    "ignored": 0,
+    "filtered": 0,
+    "note": "失败的 15 条全部是冻结验收用例；通过的 126 条全部是 `#[path]` 引入的 bin/tui.rs 既有单元测试（非本套用例）。"
+  },
+  "failure_primitive": "SUT 栈 panic/断言：13 条为 interrupted_turn.rs 空桩 unimplemented! panic（已按 Lead 裁决注明消息），2 条为真实断言失败（C2b/C3c，复现 RC2 缺陷原文）",
+  "purity": {
+    "compile_errors": 0,
+    "ignored_tests": 0,
+    "filtered_tests": 0,
+    "harness_timeouts": 0,
+    "swallowed_exceptions": 0,
+    "fake_assertions": 0
+  },
+  "log_receipt": "/tmp/red-interrupted-turn.log",
+  "assertion_surface": {
+    "C1": "请求组装层（DefaultContextStateRetriever + DefaultTurnContextBuilder，零网络）",
+    "C2": "store history_nodes.turn_id + history 行数",
+    "C3": "store history_branches/active_branch_id",
+    "C4": "bin/tui/errors.rs 展示入口 + 纯函数渲染",
+    "C5": "persisted_assistant_text / display_assistant_text / 事件载荷等价体",
+    "C6": "两次重启后的 native 通道逐字比对",
+    "C7": "三条 cause 的闭合结构同构 + 失败原因保留",
+    "C8": "旧 JSON 装载 + 成功轮上下文逐字不变"
+  },
+  "test_cases": [
+    {
+      "id": "C1/S1-T01",
+      "name": "c1_native_next_request_carries_closed_tool_roundtrip",
+      "mode": "L2-T",
+      "contract": [
+        "C1"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c1_native_next_request_carries_closed_tool_roundtrip",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:78:5",
+      "failure_message": "not implemented: interrupted_turn_transcript_closure"
+    },
+    {
+      "id": "C1/S1-T02",
+      "name": "c1_text_family_next_request_carries_visible_step_results",
+      "mode": "L2-T",
+      "contract": [
+        "C1"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c1_text_family_next_request_carries_visible_step_results",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C2/S2-T03",
+      "name": "c2_history_has_exactly_one_interrupted_turn_labelled_with_its_own_turn_id",
+      "mode": "L2-T",
+      "contract": [
+        "C2"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c2_history_has_exactly_one_interrupted_turn_labelled_with_its_own_turn_id",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C2/S2-T04",
+      "name": "c2b_store_close_legacy_path_labels_node_with_current_turn_id",
+      "mode": "L2-T (baseline regression leg)",
+      "contract": [
+        "C2"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c2b_store_close_legacy_path_labels_node_with_current_turn_id",
+      "exit_code": 101,
+      "failure_classification": "assertion_failure",
+      "failure_location": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs:695:5",
+      "failure_message": "C2b：收口节点 turn_id 必须是本轮 turn-2（现状借 turn_trace_history.last() 错标成上一轮），实际 = Some(\"turn-1\") | left=Some(\"turn-1\") right=Some(\"turn-2\")"
+    },
+    {
+      "id": "C3/S3-T05",
+      "name": "c3_interrupted_resume_on_accident_shaped_cursor_does_not_fork_implicitly",
+      "mode": "L2-T",
+      "contract": [
+        "C3"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c3_interrupted_resume_on_accident_shaped_cursor_does_not_fork_implicitly",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C3/S3-T06",
+      "name": "c3b_explicit_fork_path_still_creates_a_branch",
+      "mode": "L2-T (positive control)",
+      "contract": [
+        "C3"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c3b_explicit_fork_path_still_creates_a_branch",
+      "exit_code": 0,
+      "failure_classification": "passed_control",
+      "failure_message": ""
+    },
+    {
+      "id": "C3/S3-T07",
+      "name": "c3c_legacy_interrupted_append_does_not_fork_on_accident_shaped_cursor",
+      "mode": "L2-T (baseline regression leg)",
+      "contract": [
+        "C3"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c3c_legacy_interrupted_append_does_not_fork_on_accident_shaped_cursor",
+      "exit_code": 101,
+      "failure_classification": "assertion_failure",
+      "failure_location": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs:827:5",
+      "failure_message": "C3c：中断收口不得隐式 fork（现状会建 …-branch-2），实际分支 = [(\"branch-main\", None, Some(\"node-1\")), (\"pa_interrupted_turn_resume_acceptance-branch-2\", Some(\"branch-main\"), Some(\"node-1\"))] | left=2 right=1"
+    },
+    {
+      "id": "C4/S4-T08",
+      "name": "c4_interrupted_turn_renders_one_status_line_and_keeps_steps_in_detail",
+      "mode": "L2-T",
+      "contract": [
+        "C4"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c4_interrupted_turn_renders_one_status_line_and_keeps_steps_in_detail",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C5/S5-T09",
+      "name": "c5_folding_never_writes_back_into_persisted_body",
+      "mode": "L2-T",
+      "contract": [
+        "C5"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c5_folding_never_writes_back_into_persisted_body",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:91:5",
+      "failure_message": "not implemented: persisted_assistant_text"
+    },
+    {
+      "id": "C6/S6-T10",
+      "name": "c6_repeated_recovery_is_idempotent_and_does_not_duplicate_turns",
+      "mode": "L2-T",
+      "contract": [
+        "C6"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c6_repeated_recovery_is_idempotent_and_does_not_duplicate_turns",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C7/S7-T11",
+      "name": "c7_failed_turn_is_isomorphic_to_user_cancelled_and_keeps_reason",
+      "mode": "L2-T",
+      "contract": [
+        "C7"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c7_failed_turn_is_isomorphic_to_user_cancelled_and_keeps_reason",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:78:5",
+      "failure_message": "not implemented: interrupted_turn_transcript_closure"
+    },
+    {
+      "id": "C8/S8-T12",
+      "name": "c8_legacy_session_loads_and_successful_turn_context_stays_verbatim",
+      "mode": "L2-T",
+      "contract": [
+        "C8"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c8_legacy_session_loads_and_successful_turn_context_stays_verbatim",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:91:5",
+      "failure_message": "not implemented: persisted_assistant_text"
+    },
+    {
+      "id": "AT1/A11",
+      "name": "adversarial::at1_oversized_malformed_event_sequence::at1_oversized_and_malformed_step_sequence_stays_closed_bounded_and_deterministic",
+      "mode": "L2-AT",
+      "contract": [
+        "C1/C2"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact adversarial::at1_oversized_malformed_event_sequence::at1_oversized_and_malformed_step_sequence_stays_closed_bounded_and_deterministic",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "AT1/A12",
+      "name": "adversarial::at1_oversized_malformed_event_sequence::at1_empty_and_blank_steps_never_fabricate_success",
+      "mode": "L2-AT",
+      "contract": [
+        "C7"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact adversarial::at1_oversized_malformed_event_sequence::at1_empty_and_blank_steps_never_fabricate_success",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "AT2/A13",
+      "name": "adversarial::at2_repeated_recovery_race::at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates",
+      "mode": "L2-AT",
+      "contract": [
+        "C6"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact adversarial::at2_repeated_recovery_race::at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "AT3/A14",
+      "name": "adversarial::at3_dirty_dsml_body_injection::at3_dirty_dsml_never_reaches_persisted_body_display_or_next_request",
+      "mode": "L2-AT",
+      "contract": [
+        "C5"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact adversarial::at3_dirty_dsml_body_injection::at3_dirty_dsml_never_reaches_persisted_body_display_or_next_request",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    }
+  ],
+  "deferred": [],
+  "baseline_defects_confirmed": [
+    {
+      "id": "RC2-a",
+      "case": "c2b_store_close_legacy_path_labels_node_with_current_turn_id",
+      "assertion": "C2b：收口节点 turn_id 必须是本轮 turn-2 … 实际 = Some(\"turn-1\")",
+      "cause": "store.rs commit_history_node_from_live_state 取 turn_trace_history.last()"
+    },
+    {
+      "id": "RC2-b",
+      "case": "c3c_legacy_interrupted_append_does_not_fork_on_accident_shaped_cursor",
+      "assertion": "C3c：中断收口不得隐式 fork … 实际分支 = [(\"branch-main\", None, Some(\"node-1\")), (\"…-branch-2\", Some(\"branch-main\"), Some(\"node-1\"))]",
+      "cause": "store.rs prepare_session_for_new_turn 在 visible≠head 时建分支"
+    }
+  ]
+}
