@@ -51,11 +51,27 @@ turn/end{interrupted}` 并写进日志（`packages/core/session/src/repair.ts`�
 5. **展示一行状态 + 步骤可展开**：中断轮在信息流只出一行状态（复用既有 `kind` 结构化判定），
    过程明细不直出正文。
 
+实施落点（同提交，供复核）：
+
+- 纯函数出口：`crates/pony-agent-core/src/agent/session/interrupted_turn.rs`
+  （`interrupted_turn_assistant_text*` / `interrupted_turn_transcript_closure` /
+  `pending_tool_result_note` / `history_node_turn_id` / `persisted_assistant_text`）。
+- 生产接线：`agent/runtime/turn_persist.rs` 的唯一收口出口 `build_interrupted_turn_close_out`
+  （中断/失败两路同构）；`turn_control.rs`、`turn_stream.rs` 透传全量活动与"已宣告未执行"调用。
+- 历史图一致性：`agent/session/store.rs`（`TurnCancelled` 不推进分支头、收口后 visible 与 head 一致、
+  中断收口不走隐式 fork、节点 `turn_id` 显式取本轮）。
+- 折叠分离：`agent/provider/mod.rs` 的 `strip_dsml_protocol_text`（持久化，整块丢弃、无占位符）与
+  `display_dsml_protocol_text`（展示，折叠 + 碎片丢弃 + 占位符收敛）；`bin/tui/errors.rs` 改走展示侧。
+- 请求体确定性：`agent/workspace_hotloader.rs` 的"基线未命中"通知只进结构化日志，不再注入模型可见
+  请求体（进程本地缓存状态不得决定请求体，否则同一落盘会话两次恢复不幂等）。
+- 接线守卫：验收套件 C9 用结构性断言挡住"纯函数实现但生产未接线"的假绿，并有运行时单测
+  真实调用生产入口（`agent/runtime/tests.rs`）。
+
 机械证据（可复跑，收据见 `.dev-team/green-receipt-interrupted-turn-resume.md`）：
 
 - `cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance`（C1–C8 验收，含 C1
   "工具往返必须出现在下一请求里"、C3 "正常续跑不 fork"、C5 "折叠不写回"）。
-- `cargo test -p pony-agent-core --lib`（回归基线 1518 passed / 0 failed 对照）。
+- `cargo test -p pony-agent-core --lib`（本 worktree 口径 1510 passed / 0 failed；主工作树 1518 为另一 HEAD 口径，无删测/跳过）。
 - `.dev-team/red-phase-interrupted-turn-resume.json`（红相冻结：断言失败而非编译失败）。
 
 ## Alternatives considered

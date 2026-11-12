@@ -5363,6 +5363,89 @@ fn is_dsml_protocol_line(line: &str) -> bool {
     dsml_signature(line).contains("|dsml|")
 }
 
+/// 协议**碎片**行判定（RC3 / C5）：跨 chunk 或截断折叠后可能残留不带 `|dsml|` 标记的
+/// 纯参数/标签残片（如 `parameter name="command">cargo test`）。
+///
+/// 只认「行首就是协议语法」的形态：正文里讨论 `parameter name=` 只要不在行首即逐字保真，
+/// 不引入宽松子串匹配（避免误伤真实正文）。
+fn is_dsml_fragment_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    const FRAGMENT_PREFIXES: [&str; 4] = [
+        "parameter name=",
+        "invoke name=",
+        "antml:parameter",
+        "antml:invoke",
+    ];
+    FRAGMENT_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+        || (lower.starts_with("</") && lower.contains("dsml"))
+}
+
+/// 占位符最多出现一次（C5：旧脏行的占位符不得被放大/连排）。
+///
+/// 判据是「**连续**的占位符段」而非整行相等：旧库脏行既有整行 `［工具调用］` 的重复行，
+/// 也有 `［工具调用］［工具调用］` 这种行内连排（同一行重复出现）——两者都必须收敛为一个。
+/// 占位符之间只允许空白（含换行），遇到其它正文即视为新的一段。
+fn collapse_dsml_placeholders(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut previous_was_placeholder = false;
+    while let Some(index) = rest.find(DSML_PLACEHOLDER) {
+        let (before, after) = rest.split_at(index);
+        let after = &after[DSML_PLACEHOLDER.len()..];
+        kept.push_str(before);
+        if before.chars().any(|ch| !ch.is_whitespace()) {
+            previous_was_placeholder = false;
+        }
+        if !previous_was_placeholder {
+            kept.push_str(DSML_PLACEHOLDER);
+            previous_was_placeholder = true;
+        }
+        rest = after;
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// 持久化侧清洗（RC3 / C5）：**整块丢弃** DSML 协议行与协议碎片行，且**不补占位符**——
+/// 折叠只发生在展示侧，落库正文只留已交付正文。
+///
+/// 与 [`sanitize_dsml_protocol_text`] 的差别只有两点：不注入占位符、额外丢弃碎片行；
+/// 块外正文逐字保真，故对干净正文幂等（`strip(strip(x)) == strip(x)`）。
+pub fn strip_dsml_protocol_text(text: &str) -> String {
+    let body = match dsml_partial_tail_len(text) {
+        Some(len) => &text[..text.len() - len],
+        None => text,
+    };
+    let mut cleaned = String::with_capacity(body.len());
+    for line in body.split_inclusive('\n') {
+        if is_dsml_protocol_line(line) || is_dsml_fragment_line(line) {
+            continue;
+        }
+        cleaned.push_str(line);
+    }
+    if let Some(len) = dsml_partial_tail_len(&cleaned) {
+        cleaned.truncate(cleaned.len() - len);
+    }
+    collapse_dsml_placeholders(&cleaned)
+}
+
+/// 展示侧清洗（C4/C5 展示腿）：沿用既有折叠（保留一个占位符），额外丢弃协议碎片行，
+/// 并把连排占位符收敛为一个。持久化正文**不得**经本函数（那会把占位符写回落库）。
+pub fn display_dsml_protocol_text(text: &str) -> String {
+    let folded = sanitize_dsml_protocol_text(text);
+    let mut kept = String::with_capacity(folded.len());
+    for line in folded.split_inclusive('\n') {
+        if is_dsml_fragment_line(line) {
+            continue;
+        }
+        kept.push_str(line);
+    }
+    collapse_dsml_placeholders(&kept)
+}
+
 pub fn sanitize_dsml_protocol_text(text: &str) -> String {
     // 跨 chunk 被切断的半截标记先截掉：分片累加时不得残留 `<｜` / `｜DSML` 等前缀。
     let body = match dsml_partial_tail_len(text) {

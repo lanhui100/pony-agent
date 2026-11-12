@@ -3,6 +3,33 @@
 use super::*;
 // PA-171 C4：失败轮归因（`runtime/mod.rs` 的 glob 未覆盖新增旁路，故在此显式引入）。
 use crate::agent::turn_flow::{emit_stream_failed_attributed, FailedTurnAttribution};
+// wave-interrupted-turn-resume C1/R3：中断/失败轮收口的闭合结构载体。
+use crate::agent::session::interrupted_turn::{ClosedToolStep, PendingToolCall};
+
+/// 工具活动的结果摘要（进闭合结构的结果段 / native tool 结果）：单行、有界。
+///
+/// 优先取 `result_text`（真实结果），缺失时回落到 `description`（工具自述）；
+/// 折叠空白并按 `char` 截断到 [`TOOL_RESULT_SUMMARY_MAX_CHARS`]，避免长输出把承载文本
+/// 变成新的上下文炸弹（同一波 NFR：单会话有界）。
+fn summarize_tool_activity_result(activity: &TurnToolActivity) -> String {
+    const TOOL_RESULT_SUMMARY_MAX_CHARS: usize = 240;
+    let raw = activity
+        .result_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| activity.description.trim());
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= TOOL_RESULT_SUMMARY_MAX_CHARS {
+        return collapsed;
+    }
+    let mut truncated: String = collapsed
+        .chars()
+        .take(TOOL_RESULT_SUMMARY_MAX_CHARS - 1)
+        .collect();
+    truncated.push('…');
+    truncated
+}
 
 /// Wave-7 B001/B003：构造一条账本记录（纯函数，可单测）。
 ///
@@ -597,6 +624,10 @@ impl AgentRuntime {
             &error,
             provider_meta,
             failed_turn_native_transcript,
+            // 失败轮的在飞调用已作为 `status="aborted"` 的闭合 hop 落进 `tool_activities`，
+            // 故此处无需再补"已宣告未执行"列表（取消轮的批内跳过路径由
+            // `cancel_stream_turn` 显式透传）。
+            Vec::new(),
         );
         self.update_execution_checkpoint(
             control,
@@ -704,6 +735,8 @@ impl AgentRuntime {
         error: &str,
         provider_meta: Option<&ProviderEventMeta>,
         provider_native_transcript: Option<Vec<Value>>,
+        // R3：模型已宣告但未执行/未返回的调用（失败轮同样补齐，不截断）。
+        pending_calls: Vec<PendingToolCall>,
     ) {
         let checkpoint_tools: Vec<String> = tool_activities
             .iter()
@@ -715,15 +748,21 @@ impl AgentRuntime {
                 }
             })
             .collect();
-        // A2（ADR 0123 补充）：失败轮一律经 A1 的唯一投影产检查点文本——**不得**因为
-        // 本轮存在工具步骤就丢弃 `error`：`failed_turn_checkpoint_text` 在既有检查点
-        // 文本后追加「失败原因：<reason>」，无步骤/无正文时同样保留原因。
-        let assistant_message = crate::agent::session::failed_turn_checkpoint_text(
+        // C7（同构）：失败轮与取消轮走**同一个**闭合出口——差别只在头部携带失败原因
+        // （`failed_turn_checkpoint_text` 逐字保留 `<reason>`），结果段/未开始段完全同形。
+        let (assistant_message, transcript) = Self::build_interrupted_turn_close_out(
             partial_text.unwrap_or_default(),
             &checkpoint_tools,
-            error,
-        )
-        .unwrap_or_else(|| error.to_string());
+            &tool_activities,
+            &pending_calls,
+            Some(error),
+            provider_native_transcript,
+        );
+        let assistant_message = if assistant_message.trim().is_empty() {
+            error.to_string()
+        } else {
+            assistant_message
+        };
         self.persist_turn_outcome(
             session_id,
             turn_id,
@@ -734,11 +773,56 @@ impl AgentRuntime {
                 .unwrap_or("runtime"),
             "failed",
             None,
-            provider_native_transcript,
+            transcript,
             Vec::new(),
             None,
             Some(HistoryMessageKind::Interrupted),
         );
+    }
+
+    /// 中断/失败轮收口的**唯一生产出口**（C1/C7 + RC1 的写侧接线）。
+    ///
+    /// 返回 `(assistant 承载正文, native transcript 片段)`：
+    /// - 正文 = 已交付正文 + 已闭合步骤（名称 → 结果摘要）+ 未开始调用的事实注记；
+    ///   失败轮由 `failure_reason` 把原因逐字带进头部（`failed_turn_checkpoint_text`）。
+    /// - transcript = 闭合片段（tool_calls ↔ tool 成对、末条 assistant 带 reasoning），
+    ///   使 native 家族续跑请求**读得到**这一轮的过程事实；无步骤时回落既有协议族片段
+    ///   （`native_transcript_for_cancelled_turn` / `native_transcript_for_failed_turn`）。
+    ///
+    /// 事故 `pa_01a1ce16` 的 RC1 正是这里：收口只写一条检查点句，工具往返与结果没有载体。
+    fn build_interrupted_turn_close_out(
+        prior_assistant_text: &str,
+        header_step_lines: &[String],
+        tool_activities: &[TurnToolActivity],
+        pending_calls: &[PendingToolCall],
+        failure_reason: Option<&str>,
+        legacy_transcript: Option<Vec<Value>>,
+    ) -> (String, Option<Vec<Value>>) {
+        let closed_steps: Vec<ClosedToolStep> = tool_activities
+            .iter()
+            .map(|activity| ClosedToolStep {
+                name: activity.name.clone(),
+                result_summary: summarize_tool_activity_result(activity),
+            })
+            .collect();
+        let assistant_text =
+            crate::agent::session::interrupted_turn::interrupted_turn_assistant_text_with_header_steps(
+                prior_assistant_text,
+                header_step_lines,
+                &closed_steps,
+                pending_calls,
+                failure_reason,
+            );
+        // transcript：闭合片段优先（它同时覆盖"已宣告未执行"的调用）；无任何步骤时
+        // 才回落到调用方按协议族的既有片段，保证老路径逐字不变。
+        let closure = crate::agent::session::interrupted_turn::interrupted_turn_transcript_closure(
+            "",
+            prior_assistant_text,
+            &closed_steps,
+            pending_calls,
+        );
+        let transcript = closure.or(legacy_transcript);
+        (assistant_text, transcript)
     }
 
     pub(crate) fn persist_cancelled_turn_outcome(
@@ -751,17 +835,40 @@ impl AgentRuntime {
         attachments: Vec<SessionAttachment>,
         workspace_mode: Option<&str>,
         prior_assistant_text: &str,
-        tool_activities: Vec<String>,
+        // C1（接线）：本轮的**全量工具活动**（含 `result_text`）——结果不再是装饰。
+        tool_activities: Vec<TurnToolActivity>,
+        // R3（接线）：模型已宣告但未执行/未返回的调用（补 error 结果，显式"结果未知"）。
+        pending_calls: Vec<PendingToolCall>,
         // L1：本轮已闭合的工具往返 → native transcript 片段（无往返 ⇒ `None`）。
         provider_native_transcript: Option<Vec<Value>>,
     ) -> PersistedTurnOutcome {
-        // wave-tui-session-resilience C5：中断轮次把已落盘正文 + 工具步骤一并投影为
-        // additive 检查点；旧会话无步骤时回落既有占位文案，读取方按历史文本回放。
-        let assistant_message = crate::agent::session::interrupted_turn_checkpoint_text(
+        // wave-tui-session-resilience C5 + wave-interrupted-turn-resume C1/R3：中断轮次把
+        // 已落盘正文 + 已闭合结果 + 未开始事实投影为闭合结构；全空时回落既有占位文案。
+        // 头部步骤行沿用既有「name + description」检查点格式（历史断言依赖该格式），
+        // 结果段/未开始段由同一批活动与 pending 列表投影。
+        let header_step_lines: Vec<String> = tool_activities
+            .iter()
+            .map(|activity| {
+                if activity.description.trim().is_empty() {
+                    activity.name.clone()
+                } else {
+                    format!("{} {}", activity.name, activity.description.trim())
+                }
+            })
+            .collect();
+        let (assistant_message, transcript) = Self::build_interrupted_turn_close_out(
             prior_assistant_text,
+            &header_step_lines,
             &tool_activities,
-        )
-        .unwrap_or_else(|| CANCELLED_TURN_MESSAGE.to_string());
+            &pending_calls,
+            None,
+            provider_native_transcript,
+        );
+        let assistant_message = if assistant_message.trim().is_empty() {
+            CANCELLED_TURN_MESSAGE.to_string()
+        } else {
+            assistant_message
+        };
         self.persist_turn_outcome(
             session_id,
             turn_id,
@@ -772,7 +879,7 @@ impl AgentRuntime {
                 .unwrap_or("runtime"),
             "cancelled",
             None,
-            provider_native_transcript,
+            transcript,
             attachments,
             workspace_mode,
             Some(HistoryMessageKind::Cancelled),

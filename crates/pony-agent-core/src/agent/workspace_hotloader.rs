@@ -1382,16 +1382,18 @@ impl WorkspaceHotloader {
             &report.omitted,
         );
         // L3 BLOCKING-2：中途未命中基线（LRU 淘汰 / 进程重启）必须可观测，不得静默改写前缀。
-        let notice = if turn_count > 1 {
+        //
+        // wave-interrupted-turn-resume C6：可观测性**只走结构化日志**，不注入模型可见请求体。
+        // 原实现额外把 `Notice: Session baseline was not retained …` 塞进 volatile 段，而"基线
+        // 是否还在进程内缓存"是**进程本地状态**：同一份已落盘会话在同一进程里恢复两次时，
+        // 第一次命中本分支（无基线）、第二次命中回放分支（有基线）⇒ 两次恢复的请求体不逐字
+        // 相同（C6 判据）。请求体只能由会话事实决定，进程缓存状态一律不外泄到模型侧。
+        if turn_count > 1 {
             eprintln!(
                 "[pony-agent][hotloader] session baseline missing: session={session_id} turn={turn_count} reason=not_retained (lru_capacity={MAX_SESSION_BASELINES} or process restart); prefix re-baselined"
             );
-            Some(String::from(
-                "Notice: Session baseline was not retained (capacity or process restart); prompt prefix re-baselined.\n",
-            ))
-        } else {
-            None
-        };
+        }
+        let notice: Option<String> = None;
 
         let baseline = SessionBaselineSnapshot {
             constitution_hash: const_hash,

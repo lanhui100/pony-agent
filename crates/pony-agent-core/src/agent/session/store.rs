@@ -701,7 +701,20 @@ impl SessionStore {
         };
         {
             ensure_history_graph(&mut staged_session);
-            prepare_session_for_new_turn(&mut staged_session);
+            if kind.is_some() {
+                // C3 / RC2：中断收口**不降级成隐式 fork**。`prepare_session_for_new_turn` 会在
+                // `visible ≠ branch_head` 时新建 `…-branch-N` 并把 cursor 置 `HistoricalDirty`
+                // （事故现场 `…-branch-2` 的来历）。收口只是把本轮的闭合事实挂到**当前分支头**，
+                // 因此先把漂移的 visible 拉回 head（写路径与 `ensure_history_graph` 的 head 口径
+                // 一致），再原地续写；只有显式 rewind/checkout/fork 才允许增加分支。
+                let branch_head = staged_session.history_cursor.branch_head_node_id.clone();
+                if branch_head.is_some() {
+                    staged_session.history_cursor.visible_node_id = branch_head;
+                }
+                staged_session.history_cursor.mode = HistoryCursorMode::Live;
+            } else {
+                prepare_session_for_new_turn(&mut staged_session);
+            }
             history_len_before = staged_session.history.len();
             staged_session.history.push(TurnHistoryMessage {
                 role: "user".to_string(),
@@ -3658,6 +3671,23 @@ pub(super) fn commit_history_node_from_live_state(
             }
         });
     let node_id = new_history_node_id(session, session.history_nodes.len() + 1, created_at_ms);
+    // F7 / C2（事故 node-5 被错标成上一轮）：节点轮次身份必须取**本轮**。
+    // 取消/失败轮的历史消息先于 trace 落库（`persist_cancelled_turn_outcome` →
+    // `persist_turn_trace`），`turn_trace_history.last()` 此时仍是上一轮 ⇒ 只在历史腿缺失时回退。
+    let history_turn_id = session
+        .history
+        .iter()
+        .rev()
+        .find_map(|message| message.turn_id.as_deref());
+    let trace_turn_id = session
+        .turn_trace_history
+        .last()
+        .map(|trace| trace.turn_id.as_str());
+    let node_turn_id = crate::agent::session::interrupted_turn::history_node_turn_id(
+        history_turn_id,
+        trace_turn_id,
+    );
+    let advances_branch_head = !matches!(kind, HistoryNodeKind::TurnCancelled);
     session.history_nodes.push(HistoryNode {
         node_id: node_id.clone(),
         session_id: session.conversation_id.clone(),
@@ -3672,10 +3702,7 @@ pub(super) fn commit_history_node_from_live_state(
         history: session.history.clone(),
         provider_native_transcript: session.provider_native_transcript.clone(),
         turn_trace_history: session.turn_trace_history.clone(),
-        turn_id: session
-            .turn_trace_history
-            .last()
-            .map(|trace| trace.turn_id.clone()),
+        turn_id: node_turn_id,
         turn_trace_refs: Some(
             session
                 .turn_trace_history
@@ -3703,12 +3730,25 @@ pub(super) fn commit_history_node_from_live_state(
         if branch.base_node_id.is_none() {
             branch.base_node_id = Some(node_id.clone());
         }
-        branch.head_node_id = Some(node_id.clone());
+        // 未完成轮（`TurnCancelled`）不推进分支头：`ensure_history_graph` 计算 head 时
+        // 本就排除 `TurnCancelled` 节点（`store.rs` 的 head 重算口径）。若此处推进 head，
+        // 装载时 head 会被重算回上一 `turn_committed`，而 `visible` 停在本轮节点 ⇒
+        // `visible ≠ branch_head` 的漂移态，下一次 append 就在 `prepare_session_for_new_turn`
+        // 里被隐式 fork 成 `…-branch-2`（RC2 / 事故 F6）。写路径与重算口径必须同一套。
+        if advances_branch_head {
+            branch.head_node_id = Some(node_id.clone());
+        }
         branch.updated_at_ms = created_at_ms;
     }
-    session.history_cursor.visible_node_id = Some(node_id.clone());
-    session.history_cursor.branch_head_node_id = Some(node_id.clone());
-    session.history_cursor.workspace_node_id = Some(node_id.clone());
+    if advances_branch_head {
+        session.history_cursor.visible_node_id = Some(node_id.clone());
+        session.history_cursor.branch_head_node_id = Some(node_id.clone());
+        session.history_cursor.workspace_node_id = Some(node_id.clone());
+    } else {
+        // 收口后光标自洽：visible 与分支头一致地停在上一 `turn_committed` 节点。
+        let branch_head = session.history_cursor.branch_head_node_id.clone();
+        session.history_cursor.visible_node_id = branch_head;
+    }
     session.history_cursor.mode = HistoryCursorMode::Live;
     session.history_cursor.checkout_mode = HistoryCheckoutMode::TranscriptOnly;
     session.history_cursor.checkout_status = HistoryCheckoutStatus::NotRequested;
