@@ -268,6 +268,37 @@ describe('CLI 冒烟', () => {
     expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
   });
 
+  it('import-triage 参数校验与 --help 不迁移（--start 缺失/非法/旧账本不存在均 exit 2）', () => {
+    seed([]);
+    const run = (args: string[]) => {
+      try {
+        execFileSync(process.execPath, [SCRIPT, ...args], {
+          cwd: path.resolve('.'),
+          env: { ...process.env, PONY_BACKLOG_ROOT: root },
+          encoding: 'utf8',
+          stdio: 'pipe'
+        });
+        return 0;
+      } catch (error: any) {
+        return error.status;
+      }
+    };
+    const before = fs.readFileSync(paths.tasks, 'utf8');
+    expect(run(['import-triage', '--start', 'abc'])).toBe(2);
+    expect(run(['import-triage', '--start', '0'])).toBe(2);
+    expect(run(['import-triage', '--from', path.join(root, 'nope.jsonl')])).toBe(2);
+    expect(run(['import-triage', '--help'])).toBe(0);
+    expect(fs.readFileSync(paths.tasks, 'utf8')).toBe(before);
+
+    const legacy = path.join(root, 'legacy.jsonl');
+    fs.writeFileSync(
+      legacy,
+      JSON.stringify({ title: '旧事项', status: 'todo', priority: 'P1', metadata: { fingerprint: 'legacy-1' } }) + '\n'
+    );
+    expect(run(['import-triage', '--from', legacy, '--start', '1'])).toBe(0);
+    expect(readJsonl(paths.tasks).map(row => row.id)).toEqual(['B001']);
+  });
+
   it('record 命令写入后可被 list 读出', () => {
     execFileSync(process.execPath, [SCRIPT, 'record', '--category', 'Task', '--title', '冒烟任务', '--fingerprint', 'smoke'], {
       cwd: path.resolve('.'),

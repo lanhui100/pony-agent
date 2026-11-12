@@ -693,9 +693,23 @@ export function main(argv = process.argv.slice(2)) {
       return report.ok ? 0 : 1;
     }
     case 'import-triage': {
+      // 迁移是变更型命令：参数先校验再动手；--help 只打印用法，绝不静默执行迁移。
+      if (rest.includes('--help') || rest.includes('-h')) {
+        console.log('用法: backlog import-triage [--from <旧账本.jsonl>] [--start <N>]（--start 必须是 ≥1 的整数）');
+        return 0;
+      }
+      const startRaw = arg('start', '56');
+      if (!/^\d+$/.test(String(startRaw)) || Number(startRaw) < 1) {
+        console.error('import-triage: FAIL --start 必须是 ≥1 的整数（新仓建议 --start 1）');
+        return 2;
+      }
       const legacyFile = path.resolve(arg('from', '.agents/backlog/tasks.jsonl'));
+      if (!fs.existsSync(legacyFile)) {
+        console.error(`import-triage: FAIL 旧账本不存在：${legacyFile}`);
+        return 2;
+      }
       const legacyRows = readJsonl(legacyFile);
-      const normalized = normalizeLegacy(legacyRows, { startId: Number(arg('start', '56')) });
+      const normalized = normalizeLegacy(legacyRows, { startId: Number(startRaw) });
       const doneRows = normalized.filter(r => r.status === 'done');
       const activeRows = normalized.filter(r => r.status !== 'done');
       const existingArchive = readArchives(paths);
@@ -718,7 +732,7 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     default:
-      console.log('用法: backlog {record|list|start|heartbeat|release|resolve|annotate|lint|doctor|reap [--id <ID>] [--minutes N] [--dry-run]|import-triage}');
+      console.log('用法: backlog {record|list|start|heartbeat|release|resolve|annotate|lint|doctor|reap [--id <ID>] [--minutes N] [--dry-run]|import-triage [--from <旧账本.jsonl>] [--start <N>]}');
   return 1;
   }
 }
