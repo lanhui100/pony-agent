@@ -4779,6 +4779,7 @@ fn pa093_turn_events(turn_id: &str, user_text: &str, assistant_text: &str) -> Ve
             turn_id: turn_id.to_string(),
             reason: TurnEndReason::Completed,
             turn_duration_ms: None,
+            error: None,
         },
     ]
 }
@@ -5086,6 +5087,7 @@ fn pa093_fold_10k_events_stays_under_budget() {
                 turn_id: tid.clone(),
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
+                error: None,
             },
         ));
     }
@@ -5153,6 +5155,7 @@ fn pa094_trace_and_message_views_same_source() {
                 name: "bash".into(),
                 arguments: "{}".into(),
                 started_at_ms: None,
+                description: None,
             },
         ),
         (
@@ -5216,6 +5219,7 @@ fn pa094_trace_and_message_views_same_source() {
                 turn_id: "turn-1".into(),
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1200),
+                error: None,
             },
         ),
     ];
@@ -6684,6 +6688,8 @@ fn append_turn_with_kind_marks_synthetic_interruption_row() {
         None,
         Vec::new(),
         Some(HistoryMessageKind::Cancelled),
+        // A1 机械适配：本用例不关心轮次身份，沿用直连 store 的老行为（`turn_id=None`）。
+        None,
     );
 
     let assistant = snapshot.history.last().expect("必须落一条 assistant 行");
@@ -6708,6 +6714,8 @@ fn append_turn_with_kind_marks_synthetic_interruption_row() {
         "好的",
         None,
         Vec::new(),
+        None,
+        // A1 机械适配：同上，直连 store 的老行为。
         None,
     );
     assert_eq!(

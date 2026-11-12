@@ -1,4 +1,7 @@
 use super::*;
+// D1-1（ADR 0123 补充 r2）：中断注记的**单一真源**在 `agent::session::store`——
+// 与 `is_interrupt_placeholder_text` 的整句判据共用同一字面量，本模块不再保留私有副本。
+use crate::agent::session::{UPSTREAM_INTERRUPTED_NOTE, USER_CANCELLED_NOTE};
 
 pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::ProviderClient>(
     provider: &P,
@@ -579,11 +582,6 @@ pub(super) fn native_transcript_for_cancelled_turn(
         USER_CANCELLED_NOTE,
     )
 }
-
-const UPSTREAM_INTERRUPTED_NOTE: &str =
-    "（本轮上游调用中断，未产出最终回复；上面的工具往返是已执行的真实步骤。）";
-const USER_CANCELLED_NOTE: &str =
-    "（本轮由用户终止，未产出最终回复；上面的工具往返是已执行的真实步骤。）";
 
 fn native_transcript_with_interrupt_note(
     protocol: &crate::agent::provider::ProviderProtocol,

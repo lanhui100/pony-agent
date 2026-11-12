@@ -121,49 +121,106 @@ pub fn interrupted_turn_checkpoint_text(
     Some(checkpoint)
 }
 
-/// ADR 0123 补充（A1）：失败轮检查点文本的唯一投影纯函数。
+/// ADR 0123 补充（D1-1）：上游中断时工具往返自愈补的注记（**整句**，单一真源）。
 ///
-/// 与 [`interrupted_turn_checkpoint_text`] 同形，只在**失败原因非空**时于既有检查点文本
-/// 末尾追加一行 `失败原因：<trim 后的 reason>`：
+/// 原为 `runtime/tool_recovery.rs` 的私有 const，上移本模块是为了让判据
+/// [`is_interrupt_placeholder_text`] 与写路径**共用同一字面量**：注记文本一旦分两处
+/// 复制，判据就会随文案微调而漂移（裸子串匹配更是会把正文引用误判成注记）。
+pub const UPSTREAM_INTERRUPTED_NOTE: &str =
+    "（本轮上游调用中断，未产出最终回复；上面的工具往返是已执行的真实步骤。）";
+
+/// ADR 0123 补充（D1-1）：用户终止时的同类注记（**整句**，单一真源）。
+pub const USER_CANCELLED_NOTE: &str =
+    "（本轮由用户终止，未产出最终回复；上面的工具往返是已执行的真实步骤。）";
+
+/// B2-1：失败原因行（含截断省略号）允许的最大字符数，按 `char` 计。
+const FAILURE_REASON_MAX_CHARS: usize = 200;
+
+/// B2-1：把失败原因折叠成**告警单行**——换行/制表/连续空白统一折叠为单空格并去首尾空白，
+/// 再按 `char`（而非字节）截断，**最终总长（含 `…`）≤ [`FAILURE_REASON_MAX_CHARS`]**：
+/// 超限时取前 `MAX - 1` 个字符再补 `…`（故省略号不额外撑长该行）。
+///
+/// 字符安全是硬要求：`char` 迭代绝不切断 UTF-8 码点；多段 HTML/堆栈类 reason 因此不会把
+/// 检查点撑成多行，也不会在 TUI 逐字回放里破坏段落结构。
+fn normalize_failure_reason_line(failure_reason: &str) -> String {
+    let collapsed = failure_reason
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.chars().count() <= FAILURE_REASON_MAX_CHARS {
+        return collapsed;
+    }
+    let mut truncated: String = collapsed
+        .chars()
+        .take(FAILURE_REASON_MAX_CHARS - 1)
+        .collect();
+    truncated.push('…');
+    truncated
+}
+
+/// ADR 0123 补充（A1 + B2）：失败轮检查点文本的唯一投影纯函数。
+///
+/// 基础形态与 [`interrupted_turn_checkpoint_text`] 同构（前缀恒为 `[中断轮次检查点`），
+/// 只在**失败原因非空**时追加一行 `失败原因：<折叠单行>`：
 /// - `failure_reason` 去空白后为空 ⇒ 逐字返回 [`interrupted_turn_checkpoint_text`] 的结果
 ///   （既有调用点行为不变，格式禁止改写）；
-/// - 既有文本为 `None`（无正文也无工具步骤）而失败原因非空 ⇒
-///   `[中断轮次检查点]\n失败原因：<reason>`，前缀契约不变。
+/// - 非空 ⇒ 该行**插在「已执行的工具步骤：」段之前**（工具段仍居末，TUI 逐字回放依赖
+///   其格式与位置），无工具段时追加到末尾；
+/// - reason 先折叠空白（`\r\n` / `\n` / 连续空格 ⇒ 单空格）再按 `char` 截断，
+///   超限时**含 `…` 总长仍 ≤200 字符**；
+/// - 既有文本为 `None`（无正文也无工具步骤）而原因非空 ⇒
+///   `[中断轮次检查点]\n失败原因：<line>`，前缀契约不变。
 ///
-/// **唯一真源**：失败轮（`persist_failed_turn_context`）一律经本函数产检查点文本——
-/// 禁止因「本轮存在工具步骤」而丢弃 `error`（否则失败原因在有步骤的轮次里永久丢失）。
+/// **唯一真源**：失败轮（`persist_failed_turn_context`）与事件重投影一律经本函数产检查点
+/// 文本——禁止因「本轮存在工具步骤」而丢弃 `error`（否则失败原因在有步骤的轮次里永久丢失）。
 pub fn failed_turn_checkpoint_text(
     prior_assistant_text: &str,
     tool_activities: &[String],
     failure_reason: &str,
 ) -> Option<String> {
     let checkpoint = interrupted_turn_checkpoint_text(prior_assistant_text, tool_activities);
-    let reason = failure_reason.trim();
+    let reason = normalize_failure_reason_line(failure_reason);
     if reason.is_empty() {
         return checkpoint;
     }
+    let reason_line = format!("\n失败原因：{reason}");
     Some(match checkpoint {
-        Some(text) => format!("{text}\n失败原因：{reason}"),
-        None => format!("[中断轮次检查点]\n失败原因：{reason}"),
+        Some(text) => {
+            // B2-2：只在工具段标题的**字节索引**处插入（`find` 返回字符边界，切片安全）；
+            // 不重写 base 的构造，工具段逐字保留。
+            const TOOLS_HEADER: &str = "\n已执行的工具步骤：";
+            match text.find(TOOLS_HEADER) {
+                Some(index) => {
+                    let mut merged = String::with_capacity(text.len() + reason_line.len());
+                    merged.push_str(&text[..index]);
+                    merged.push_str(&reason_line);
+                    merged.push_str(&text[index..]);
+                    merged
+                }
+                None => format!("{text}{reason_line}"),
+            }
+        }
+        None => format!("[中断轮次检查点]{reason_line}"),
     })
 }
 
-/// ADR 0123 补充（D1）：「本轮被中断」类注记文本的唯一判定。
+/// ADR 0123 补充（D1-2）：「本轮被中断」类注记文本的唯一判定。
 ///
-/// 命中任一前缀即 `true`：
-/// - `[中断轮次检查点`——中断轮的合成检查点（A1 与既有中断投影的唯一前缀）；
-/// - `（本轮上游调用中断`——上游中断时工具往返自愈补的注记；
-/// - `（本轮由用户终止`——用户终止注记。
+/// 先把入参 `trim()`（尾随空白不得导致漏判），再按**整句/前缀**判据命中任一即 `true`：
+/// - `[中断轮次检查点`——中断轮的合成检查点（A1/B2 的唯一前缀，后接正文与工具段）；
+/// - [`UPSTREAM_INTERRUPTED_NOTE`]——上游中断注记，**整句相等**（正文引用不算）；
+/// - [`USER_CANCELLED_NOTE`]——用户终止注记，**整句相等**（正文引用不算）。
 ///
-/// 消费方是 `has_legacy_reasoning_gap` 的豁免判定：中断轮 transcript 由这些注记承载
+/// 禁止裸子串匹配：模型正文里引用「（本轮由用户终止的原因见 trace）」不是注记，
+/// 误判会让真实 reasoning 空洞逃过清洗（不变量 2）。
+///
+/// 消费方：`has_legacy_reasoning_gap` 的豁免判定——中断轮 transcript 由这些注记承载
 /// 「本轮未产出最终回复」的事实，**不得**被 reasoning 缺口清洗整段清空。
 pub fn is_interrupt_placeholder_text(text: &str) -> bool {
-    const INTERRUPT_PLACEHOLDER_PHRASES: [&str; 3] = [
-        "[中断轮次检查点",
-        "（本轮上游调用中断",
-        "（本轮由用户终止",
-    ];
-    contains_any_phrase(text, &INTERRUPT_PLACEHOLDER_PHRASES)
+    let trimmed = text.trim();
+    trimmed.starts_with("[中断轮次检查点")
+        || trimmed == UPSTREAM_INTERRUPTED_NOTE
+        || trimmed == USER_CANCELLED_NOTE
 }
 
 pub struct SessionStore {
@@ -565,11 +622,19 @@ impl SessionStore {
             provider_native_transcript,
             attachments,
             None,
+            // 薄封装的历史直连用法不带轮次身份（老行为不变）：消息 `turn_id=None`。
+            None,
         )
     }
 
     /// 同 [`SessionStore::append_turn_fallible`]，但显式声明 assistant 行的合成种类
-    /// （成功轮 `None`；取消/失败轮传 [`HistoryMessageKind`]）。
+    /// （成功轮 `None`；取消/失败轮传 [`HistoryMessageKind`]）与本轮 `turn_id`。
+    ///
+    /// `turn_id` 是写进 user/assistant 两条历史消息的**轮次身份**（PA-059 字段）：
+    /// - 生产路径（`persist_turn_outcome`）恒传真实 `turn_id`，使 `turn_outcome_persisted`
+    ///   能以「历史里有本轮消息」作为**唯一**持久化真值源（watchdog/监督者只写 trace，
+    ///   不写历史，故 trace 不能当判据）；
+    /// - `None` 仅用于直连 store 的老用法/老会话，读取侧逐字回放不变。
     pub fn append_turn_fallible_with_kind(
         &mut self,
         session_id: Option<&str>,
@@ -578,6 +643,7 @@ impl SessionStore {
         provider_native_transcript: Option<Vec<Value>>,
         attachments: Vec<SessionAttachment>,
         kind: Option<HistoryMessageKind>,
+        turn_id: Option<&str>,
     ) -> Result<SessionSnapshot, SessionError> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
         // PA-095 #2：事件源物化——事件能力后端先请求提交本会话缓冲（commit 先于
@@ -641,6 +707,8 @@ impl SessionStore {
                 role: "user".to_string(),
                 content: user_content,
                 attachments,
+                // A1：轮次身份落进消息本体（其余字段保持默认）。
+                turn_id: turn_id.map(str::to_string),
                 ..Default::default()
             });
             staged_session.history.push(TurnHistoryMessage {
@@ -649,6 +717,7 @@ impl SessionStore {
                 attachments: Vec::new(),
                 reasoning_content: assistant_reasoning,
                 kind,
+                turn_id: turn_id.map(str::to_string),
                 ..Default::default()
             });
             if staged_session.history.len() > HISTORY_EMERGENCY_LIMIT {
@@ -768,12 +837,14 @@ impl SessionStore {
             provider_native_transcript,
             attachments,
             None,
+            // 薄封装的历史直连用法不带轮次身份（老行为不变）。
+            None,
         )
     }
 
     /// 同 [`SessionStore::append_turn`]，但显式声明 assistant 行是否为**运行时合成的
-    /// 中断记录**（[`HistoryMessageKind`]）。成功轮传 `None`；取消/失败轮由运行时传入，
-    /// 展示层据此渲染一行状态条而不是把过程清单当模型正文直出。
+    /// 中断记录**（[`HistoryMessageKind`]）与本轮 `turn_id`。成功轮传 `None`；
+    /// 取消/失败轮由运行时传入，展示层据此渲染一行状态条而不是把过程清单当模型正文直出。
     pub fn append_turn_with_kind(
         &mut self,
         session_id: Option<&str>,
@@ -782,6 +853,7 @@ impl SessionStore {
         provider_native_transcript: Option<Vec<Value>>,
         attachments: Vec<SessionAttachment>,
         kind: Option<HistoryMessageKind>,
+        turn_id: Option<&str>,
     ) -> SessionSnapshot {
         match self.append_turn_fallible_with_kind(
             session_id,
@@ -790,6 +862,7 @@ impl SessionStore {
             provider_native_transcript,
             attachments,
             kind,
+            turn_id,
         ) {
             Ok(snapshot) => snapshot,
             Err(e) => {
@@ -807,6 +880,9 @@ impl SessionStore {
         mut trace: TurnTraceRecord,
     ) -> Result<SessionSnapshot, SessionError> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
+        // A1：本路径同批写 trace + 历史，轮次身份直接取自 trace 行——历史消息必须同样
+        // 携带 `turn_id`，否则 `turn_outcome_persisted` 的历史腿会误判「未持久化」而重复写。
+        let turn_id = Some(trace.turn_id.clone());
         let mut staged_session = self.ensure_session(&session_key).clone();
         {
             ensure_history_graph(&mut staged_session);
@@ -815,12 +891,14 @@ impl SessionStore {
                 role: "user".to_string(),
                 content: user_message.to_string(),
                 attachments: Vec::new(),
+                turn_id: turn_id.clone(),
                 ..Default::default()
             });
             staged_session.history.push(TurnHistoryMessage {
                 role: "assistant".to_string(),
                 content: assistant_message.to_string(),
                 attachments: Vec::new(),
+                turn_id,
                 ..Default::default()
             });
             trace.updated_at = now_timestamp_ms();

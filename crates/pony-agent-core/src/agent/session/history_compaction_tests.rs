@@ -295,6 +295,7 @@ fn materialize_last_turn_messages_picks_latest_turn() {
             turn_id: "t1".into(),
             reason: TurnEndReason::Completed,
             turn_duration_ms: Some(10),
+            error: None,
         },
         TurnEvent::TurnStart {
             turn_id: "t2".into(),
@@ -336,6 +337,7 @@ fn materialize_last_turn_messages_picks_latest_turn() {
             turn_id: "t3".into(),
             reason: TurnEndReason::Error,
             turn_duration_ms: None,
+            error: None,
         },
     ]);
     let (user, assistant) = materialize_last_turn_messages(&failed_turn, 0).expect("materialized");

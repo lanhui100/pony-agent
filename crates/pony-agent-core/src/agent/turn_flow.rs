@@ -1539,6 +1539,7 @@ fn build_turn_end_event(
         turn_id: payload.turn_id.clone(),
         reason: TurnEndReason::Completed,
         turn_duration_ms: payload.turn_duration_ms,
+        error: None,
     })
 }
 
@@ -1576,11 +1577,16 @@ fn build_turn_event(
             turn_id: payload.turn_id.clone(),
             reason: TurnEndReason::Error,
             turn_duration_ms: payload.turn_duration_ms,
+            // B1：失败原因随事件落盘——事件重投影据此产与写路径同源的检查点文本
+            // （此前 error 在事件层被丢弃，重启重建的文本永久缺「失败原因」行）。
+            error: payload.error.clone(),
         }),
         "turn:cancelled" => Some(TurnEvent::TurnEnd {
             turn_id: payload.turn_id.clone(),
             reason: TurnEndReason::Cancelled,
             turn_duration_ms: payload.turn_duration_ms,
+            // 取消轮无失败原因（cancel 的 error 是停止原因，不是失败归因）。
+            error: None,
         }),
         "turn:tool" => build_tool_event(payload),
         _ => None,
@@ -1616,6 +1622,12 @@ fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_even
     let activity = payload.tool_activities.as_deref()?.last()?;
     let step = payload.sequence.unwrap_or(0) as u32;
     if activity.status == "running" {
+        // B1：工具描述随 ToolCall 落盘（重投影拼检查点工具行用 `name + " " + description`，
+        // 与 turn_persist 写路径同形）；空描述 ⇒ None ⇒ 工具行只含 name（兼容旧形态）。
+        let description = {
+            let trimmed = activity.description.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
         Some(TurnEvent::ToolCall {
             turn_id: payload.turn_id.clone(),
             step,
@@ -1623,6 +1635,7 @@ fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_even
             name: activity.name.clone(),
             arguments: activity.arguments_text.clone().unwrap_or_default(),
             started_at_ms: None,
+            description,
         })
     } else {
         Some(TurnEvent::ToolResult {
@@ -2134,6 +2147,68 @@ mod tests {
         }
     }
 
+    /// B1：失败原因随 `turn/end` 事件落盘——事件重投影据此产与写路径同源的检查点文本
+    /// （此前 `error` 在事件层被丢弃，重启/重投影出的文本永久缺「失败原因」行）。
+    #[test]
+    fn failed_turn_end_event_carries_error_reason() {
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let mut payload = sample_payload("turn-1", "turn:failed", None);
+        payload.error = Some("provider 502 bad gateway".to_string());
+        match build_turn_event("turn:failed", &payload).expect("failed event") {
+            TurnEvent::TurnEnd { reason, error, .. } => {
+                assert_eq!(reason, TurnEndReason::Error);
+                assert_eq!(error.as_deref(), Some("provider 502 bad gateway"));
+            }
+            other => panic!("expected TurnEnd, got {}", other.type_name()),
+        }
+        // 无 error 载荷：保持 None（不得编造失败原因）。
+        match build_turn_event("turn:failed", &sample_payload("t1", "turn:failed", None))
+            .expect("failed event")
+        {
+            TurnEvent::TurnEnd { error, .. } => assert!(error.is_none()),
+            other => panic!("expected TurnEnd, got {}", other.type_name()),
+        }
+    }
+
+    /// B1：工具描述随 `tool/call` 事件落盘（检查点工具行 `name + " " + description` 的载体）。
+    #[test]
+    fn tool_call_event_carries_description_and_degrades_when_blank() {
+        use crate::agent::telemetry::TurnToolActivity;
+        use crate::agent::turn_event::TurnEvent;
+        let activity = |description: &str| TurnToolActivity {
+            id: "act-1".to_string(),
+            name: "bash".to_string(),
+            canonical_tool_name: None,
+            display_name_zh: None,
+            status: "running".to_string(),
+            description: description.to_string(),
+            arguments_text: Some("{}".to_string()),
+            result_text: None,
+            duration_seconds: None,
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        };
+        let mut payload = sample_payload("turn-1", "turn:tool", None);
+        payload.tool_activities = Some(vec![activity("  检查端口监听  ")]);
+        match build_turn_event("turn:tool", &payload).expect("tool call event") {
+            TurnEvent::ToolCall {
+                name, description, ..
+            } => {
+                assert_eq!(name, "bash");
+                assert_eq!(description.as_deref(), Some("检查端口监听"));
+            }
+            other => panic!("expected ToolCall, got {}", other.type_name()),
+        }
+        // 空白描述 ⇒ None（检查点工具行只含 name，与旧日志形态一致）。
+        payload.tool_activities = Some(vec![activity("   ")]);
+        match build_turn_event("turn:tool", &payload).expect("tool call event") {
+            TurnEvent::ToolCall { description, .. } => assert!(description.is_none()),
+            other => panic!("expected ToolCall, got {}", other.type_name()),
+        }
+    }
+
     #[test]
     fn event_mapping_completed_carries_usage() {
         use crate::agent::turn_event::TurnEvent;
@@ -2304,6 +2379,7 @@ mod tests {
                 turn_id,
                 reason,
                 turn_duration_ms,
+                ..
             } => {
                 assert_eq!(turn_id, "turn-1");
                 assert_eq!(reason, TurnEndReason::Completed);

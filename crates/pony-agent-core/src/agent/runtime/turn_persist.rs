@@ -87,6 +87,9 @@ impl AgentRuntime {
     pub(crate) fn persist_turn_outcome(
         &self,
         session_id: Option<&str>,
+        // A1：本轮 `turn_id` —— 写进 user/assistant 两条历史消息的轮次身份，使
+        // `turn_outcome_persisted` 能以历史作为唯一持久化真值源（watchdog 只写 trace）。
+        turn_id: Option<&str>,
         user_message: &str,
         assistant_message: &str,
         provider_name: &str,
@@ -124,6 +127,7 @@ impl AgentRuntime {
                 provider_native_transcript,
                 attachments,
                 assistant_kind,
+                turn_id,
             );
         let retrieved = self.context_builder.retrieve_context_state(
             user_message,
@@ -586,6 +590,7 @@ impl AgentRuntime {
         // 只写历史等于没写；遗留会话反之。两层都写才是「两条 provider 路径都续得上」。
         self.persist_failed_turn_context(
             session_id,
+            Some(turn_id),
             user_message,
             &tool_activities,
             partial_text.as_deref(),
@@ -691,6 +696,8 @@ impl AgentRuntime {
     fn persist_failed_turn_context(
         &self,
         session_id: Option<&str>,
+        // A1：失败轮同样把 `turn_id` 写进历史消息（gate 的历史腿唯一判据）。
+        turn_id: Option<&str>,
         user_message: &str,
         tool_activities: &[TurnToolActivity],
         partial_text: Option<&str>,
@@ -719,6 +726,7 @@ impl AgentRuntime {
         .unwrap_or_else(|| error.to_string());
         self.persist_turn_outcome(
             session_id,
+            turn_id,
             user_message,
             &assistant_message,
             provider_meta
@@ -736,6 +744,8 @@ impl AgentRuntime {
     pub(crate) fn persist_cancelled_turn_outcome(
         &self,
         session_id: Option<&str>,
+        // A1：取消轮同样把 `turn_id` 写进历史消息（gate 的历史腿唯一判据）。
+        turn_id: Option<&str>,
         user_message: &str,
         provider_meta: Option<&ProviderEventMeta>,
         attachments: Vec<SessionAttachment>,
@@ -754,6 +764,7 @@ impl AgentRuntime {
         .unwrap_or_else(|| CANCELLED_TURN_MESSAGE.to_string());
         self.persist_turn_outcome(
             session_id,
+            turn_id,
             user_message,
             &assistant_message,
             provider_meta

@@ -45,6 +45,10 @@ pub enum TurnEvent {
         turn_id: String,
         reason: TurnEndReason,
         turn_duration_ms: Option<u64>,
+        /// 失败原因（与写路径 `persist_failed_turn_context` 的 `error` 同源）。
+        /// additive：旧日志无该键 ⇒ None ⇒ 检查点文本退化为既有中断形态。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     StepStart {
         turn_id: String,
@@ -88,6 +92,10 @@ pub enum TurnEvent {
         /// TurnToolActivity.duration_seconds 重建所需。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_at_ms: Option<u64>,
+        /// 工具步骤的人类可读描述（检查点工具行 `name + " " + description` 的载体，
+        /// 与 turn_persist 写路径同形）。additive：旧日志无该键 ⇒ None ⇒ 工具行只含 name。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
     },
     ToolResult {
         turn_id: String,
@@ -254,6 +262,7 @@ mod tests {
                 turn_id: "t1".into(),
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1234),
+                error: None,
             },
             TurnEvent::StepStart {
                 turn_id: "t1".into(),
@@ -289,6 +298,7 @@ mod tests {
                 name: "bash".into(),
                 arguments: "{}".into(),
                 started_at_ms: Some(1000),
+                description: None,
             },
             TurnEvent::ToolResult {
                 turn_id: "t1".into(),

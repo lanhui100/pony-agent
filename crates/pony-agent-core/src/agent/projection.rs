@@ -33,8 +33,9 @@ pub trait Projection<S> {
 /// `assistant/chunk` + `turn/end{error|aborted|cancelled}`，**没有** `assistant/message`。
 /// 只折叠后者会让失败轮变成「悬空的 user」——重启后模型看不到自己做过什么、卡在哪，
 /// 这正是 `pa_01a1c4d0` 事故重启后的形态。因此 `turn/end` 非正常结束时，本投影用该轮
-/// chunk 文本 + 工具名合成中断检查点，与运行时写历史**共用**同一个纯函数
-/// （`session::interrupted_turn_checkpoint_text`），保证两层文本同构。
+/// chunk 文本 + 工具步骤（`name + description`）+ `turn/end.error` 合成中断/失败检查点，
+/// 与运行时写历史**共用**同一个纯函数（`session::failed_turn_checkpoint_text`），
+/// 保证两层文本同构；`error` 缺失（旧日志）时该函数逐字退化为中断形态。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HistoryProjectionState {
     /// (事件 seq, 消息)。squash 后保留 seq > base_seq 的部分。
@@ -55,7 +56,18 @@ struct PendingTurnArtifacts {
     /// 该轮全部 `assistant/chunk` 按事件顺序拼接（含每个 hop 的部分正文）。
     chunks: String,
     /// 该轮已发出的工具名（按调用顺序，去重保序）。
+    ///
+    /// 兼容载体：旧状态快照只存名字（无 `tool_lines`）⇒ 检查点工具行退化取本字段。
     tool_names: Vec<String>,
+    /// 该轮工具步骤的检查点展示行（`name + " " + description`，与写路径
+    /// `turn_persist::persist_failed_turn_context` 同形；去重保序）。
+    /// 旧快照无此键 ⇒ 空 ⇒ 回落 `tool_names`。
+    #[serde(default)]
+    tool_lines: Vec<String>,
+    /// `turn/end.error`：失败原因（与写路径 `error` 同源）。
+    /// 旧事件无该键 ⇒ None ⇒ 检查点退化为既有中断形态（不得 panic、不改已有文本）。
+    #[serde(default)]
+    failure_reason: Option<String>,
     /// 该轮是否已有 `assistant/message`；有则不得再合成，避免同一轮两条 assistant。
     has_assistant_message: bool,
 }
@@ -68,12 +80,28 @@ impl PendingTurnArtifacts {
         }
     }
 
-    /// 与运行时同构的中断检查点文本；无正文且无工具步骤 ⇒ `None`（不造空壳消息）。
+    /// 检查点工具行的取值载体：有描述载体（新状态）用 `tool_lines`，否则回落旧快照的
+    /// `tool_names`——两条读路径产同一形态的行，不因状态版本分叉。
+    fn checkpoint_tool_lines(&self) -> &[String] {
+        if self.tool_lines.is_empty() {
+            &self.tool_names
+        } else {
+            &self.tool_lines
+        }
+    }
+
+    /// 与运行时同构的中断/失败检查点文本；无正文、无工具步骤且无失败原因 ⇒ `None`
+    /// （不造空壳消息）。
     ///
     /// 步骤条数与省略标记**由纯函数本身决定**（`CHECKPOINT_TOOL_LINE_LIMIT` 只有一个家），
     /// 投影侧不得自留阈值副本——两处阈值分居是「改一处漏一处」的温床。
+    /// 失败原因非空时同样由该纯函数追加「失败原因：<单行>」行（单一真源，投影不自行拼接）。
     fn checkpoint_text(&self) -> Option<String> {
-        crate::agent::session::interrupted_turn_checkpoint_text(&self.chunks, &self.tool_names)
+        crate::agent::session::failed_turn_checkpoint_text(
+            &self.chunks,
+            self.checkpoint_tool_lines(),
+            self.failure_reason.as_deref().unwrap_or_default(),
+        )
     }
 }
 
@@ -143,12 +171,29 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                     }
                 }
             }
-            TurnEvent::ToolCall { turn_id, name, .. } => {
+            TurnEvent::ToolCall {
+                turn_id,
+                name,
+                description,
+                ..
+            } => {
                 if let Some(pending) = state.pending.as_mut() {
-                    if pending.turn_id == *turn_id
-                        && !pending.tool_names.iter().any(|known| known == name)
-                    {
-                        pending.tool_names.push(name.clone());
+                    if pending.turn_id == *turn_id {
+                        if !pending.tool_names.iter().any(|known| known == name) {
+                            pending.tool_names.push(name.clone());
+                        }
+                        // 检查点工具行与写路径同形：`name + " " + description`（空描述 ⇒ 只含
+                        // name，即旧日志的既有形态）。去重键取拼好的整行——同一工具不同描述
+                        // 是不同步骤，不得折成一行。
+                        let line = match description.as_deref().map(str::trim) {
+                            Some(trimmed) if !trimmed.is_empty() => {
+                                format!("{name} {trimmed}")
+                            }
+                            _ => name.clone(),
+                        };
+                        if !pending.tool_lines.iter().any(|known| known == &line) {
+                            pending.tool_lines.push(line);
+                        }
                     }
                 }
             }
@@ -187,7 +232,10 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                 }
             }
             TurnEvent::TurnEnd {
-                turn_id, reason, ..
+                turn_id,
+                reason,
+                error,
+                ..
             } => {
                 // 失败/中断轮：事件流没有 assistant/message，此处用过程累积合成一条
                 // 中断检查点，等价于 dsh 的 `assistant/message{interrupted:true}`。
@@ -198,7 +246,12 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                         TurnEndReason::Cancelled => HistoryMessageKind::Cancelled,
                         _ => HistoryMessageKind::Interrupted,
                     };
-                    if let Some(pending) = state.pending.take() {
+                    if let Some(mut pending) = state.pending.take() {
+                        if pending.turn_id == *turn_id {
+                            // 失败原因随 turn/end 事件到达（写路径同源载体）；仅本轮采纳。
+                            // 旧日志无该字段 ⇒ None ⇒ 文本逐字退化为既有中断形态。
+                            pending.failure_reason = error.clone();
+                        }
                         if pending.turn_id == *turn_id && !pending.has_assistant_message {
                             if let Some(text) = pending.checkpoint_text() {
                                 state.messages.push((
@@ -1353,6 +1406,7 @@ mod tests {
                     turn_id: "t1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(500),
+                    error: None,
                 },
             ),
         ]
@@ -1382,6 +1436,7 @@ mod tests {
             turn_id: "t1".into(),
             reason: TurnEndReason::Error,
             turn_duration_ms: None,
+            error: None,
         };
         let state = fold_all::<_, HistoryProjectionState>(&events);
         let messages = state.messages();
@@ -1389,6 +1444,110 @@ mod tests {
             messages[1].status,
             Some(crate::agent::session::MessageStatus::Error)
         );
+    }
+
+    /// B1 回归夹具：一轮失败的事件流（user + chunk + tool/call + turn/end{error}）。
+    fn failed_turn_events(error: Option<&str>, description: Option<&str>) -> Vec<(u64, TurnEvent)> {
+        vec![
+            (
+                0,
+                TurnEvent::TurnStart {
+                    turn_id: "t9".into(),
+                },
+            ),
+            (
+                1,
+                TurnEvent::UserMessage {
+                    turn_id: "t9".into(),
+                    text: "跑一下".into(),
+                    attachments: Vec::new(),
+                },
+            ),
+            (
+                2,
+                TurnEvent::AssistantChunk {
+                    turn_id: "t9".into(),
+                    step: 0,
+                    text: "半截正文".into(),
+                },
+            ),
+            (
+                3,
+                TurnEvent::ToolCall {
+                    turn_id: "t9".into(),
+                    step: 1,
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    started_at_ms: None,
+                    description: description.map(str::to_string),
+                },
+            ),
+            (
+                4,
+                TurnEvent::TurnEnd {
+                    turn_id: "t9".into(),
+                    reason: TurnEndReason::Error,
+                    turn_duration_ms: Some(1200),
+                    error: error.map(str::to_string),
+                },
+            ),
+        ]
+    }
+
+    /// B1：失败轮重投影的检查点文本必须与写路径**同源**——与
+    /// `session::failed_turn_checkpoint_text(正文, 工具行, 原因)` 逐字相等，
+    /// 工具行形如 `name + " " + description`，且「失败原因」行在工具段之前。
+    #[test]
+    fn history_projection_failed_turn_rebuilds_write_path_checkpoint() {
+        let events = failed_turn_events(Some("provider 502 bad gateway"), Some("检查端口监听"));
+        let state = fold_all::<_, HistoryProjectionState>(&events);
+        let messages = state.messages();
+        let rebuilt = messages.last().expect("checkpoint message").content.clone();
+        let expected = crate::agent::session::failed_turn_checkpoint_text(
+            "半截正文",
+            &["bash 检查端口监听".to_string()],
+            "provider 502 bad gateway",
+        )
+        .expect("checkpoint text");
+        assert_eq!(rebuilt, expected, "重投影文本必须与写路径同源");
+        assert!(rebuilt.starts_with("[中断轮次检查点]"));
+        assert!(rebuilt.contains("\n失败原因：provider 502 bad gateway"));
+        assert!(rebuilt.contains("\n- bash 检查端口监听"));
+        let reason_at = rebuilt.find("失败原因：").expect("reason line");
+        let tools_at = rebuilt.find("已执行的工具步骤：").expect("tools header");
+        assert!(reason_at < tools_at, "失败原因行必须在工具段之前");
+    }
+
+    /// B1 兼容：旧日志（事件无 `error` / `description`）⇒ 文本逐字退化为既有中断形态。
+    #[test]
+    fn history_projection_legacy_events_degrade_to_interrupted_checkpoint() {
+        let events = failed_turn_events(None, None);
+        let state = fold_all::<_, HistoryProjectionState>(&events);
+        let messages = state.messages();
+        let rebuilt = messages.last().expect("checkpoint message").content.clone();
+        let legacy = crate::agent::session::interrupted_turn_checkpoint_text(
+            "半截正文",
+            &["bash".to_string()],
+        )
+        .expect("legacy checkpoint text");
+        assert_eq!(rebuilt, legacy, "旧日志不得改变既有文本");
+        assert!(!rebuilt.contains("失败原因："));
+    }
+
+    /// B1 兼容：旧**状态快照**（`pending` 只含 `tool_names`，无 `tool_lines`/`failure_reason`）
+    /// 反序列化后仍能产同一文本（退化取名字列表，不 panic）。
+    #[test]
+    fn pending_artifacts_legacy_snapshot_degrades_to_tool_names() {
+        let json = r#"{"turn_id":"t9","chunks":"半截正文","tool_names":["bash"],"has_assistant_message":false}"#;
+        let pending: PendingTurnArtifacts =
+            serde_json::from_str(json).expect("旧快照必须可反序列化");
+        let legacy = crate::agent::session::interrupted_turn_checkpoint_text(
+            "半截正文",
+            &["bash".to_string()],
+        )
+        .expect("legacy checkpoint text");
+        assert_eq!(pending.checkpoint_text(), Some(legacy));
     }
 
     #[test]
@@ -1465,6 +1624,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                     started_at_ms: None,
+                    description: None,
                 },
             ),
             (
@@ -1507,6 +1667,7 @@ mod tests {
             name: "bash".into(),
             arguments: "{}".into(),
             started_at_ms: None,
+            description: None,
         };
         let mut state = TraceProjectionState::init();
         TraceProjectionState::apply(&mut state, 5, &event);
@@ -1737,6 +1898,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                     started_at_ms: Some(1000),
+                    description: None,
                 },
             ),
             (
@@ -1785,6 +1947,7 @@ mod tests {
                     turn_id: "t1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(1200),
+                    error: None,
                 },
             ),
         ];
@@ -1868,6 +2031,7 @@ mod tests {
                     turn_id: "t1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(300),
+                    error: None,
                 },
             ),
         ];
@@ -1889,6 +2053,7 @@ mod tests {
             name: "bash".into(),
             arguments: "{}".into(),
             started_at_ms: None,
+            description: None,
         };
         let mut state = TraceProjectionState::init();
         TraceProjectionState::apply(&mut state, 5, &event);
@@ -1914,6 +2079,7 @@ mod tests {
             name: "bash".into(),
             arguments: "{}".into(),
             started_at_ms: None,
+            description: None,
         };
         let mut state = TraceProjectionState::init();
         TraceProjectionState::apply(&mut state, 0, &event);
@@ -1992,6 +2158,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                     started_at_ms: None,
+                    description: None,
                 },
             ),
             // turn:tool(completed) → seq 5（ToolResult step=5，与 ToolCall 不同）
@@ -2015,6 +2182,7 @@ mod tests {
                     turn_id: "t1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(800),
+                    error: None,
                 },
             ),
         ];
@@ -2074,6 +2242,7 @@ mod tests {
                     turn_id: "t1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: None,
+                    error: None,
                 },
             ),
         ];
@@ -2144,6 +2313,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                     started_at_ms: None,
+                    description: None,
                 },
             ),
             (
@@ -2166,6 +2336,7 @@ mod tests {
                     turn_id: "t1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(800),
+                    error: None,
                 },
             ),
         ];
@@ -2236,6 +2407,7 @@ mod tests {
                     turn_id: "t1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(1200),
+                    error: None,
                 },
             ),
         ];

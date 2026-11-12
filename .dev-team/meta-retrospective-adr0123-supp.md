@@ -40,3 +40,22 @@
 3. **并发提交探测**：进入波次前探测「近 30 分钟是否有其他会话提交」，有则本波一律 `git add <显式路径>` + 提交信息带波次标识。
 4. **ADR 双真源**：本波只改 implemented 修订版（archived 冻结版按封印不动），建议 `write-adr` 增「implemented 与 archived 标题/章节漂移」检测。
 5. **残留待办**：`turn_stream.rs:30-37` 的 `claim_failed_terminal` suppressed 分支存在同类「终态已收口但无持久化」口子，概率低于本波场景，应登记 backlog 并补一条「0 步取消/失败轮 history 必有 user 消息且 turn 数恰为 1」的断言。
+
+---
+
+## 第二轮（同日 08:36–09:05）：审查缺陷收口
+
+| 项 | 值 |
+|---|---|
+| 基线 | `bd4c8de1`（上一轮交付 `a5634316` 已在其中） |
+| 阻塞处置 | HEAD 因跨会话提交 `ac3fc970` 引入 E0609 不可编译 → Lead 独立提交 `5dd814c8` 删除死守卫恢复可编译 |
+| 修复 | B2（原因行前置+折叠+截断≤200）/ D1（常量上移+整句等值）/ A1（history 携带 turn_id、闸门只认历史腿）/ B1（TurnEnd.error + ToolCall.description → 投影同源） |
+| 用例 | `adr0123_supplement_r2_test` 9 例（B2×3 / D1×3 / A1×2 / B1×1） |
+| 收据 | check exit 0；r1 6 passed；r2 9 passed；multi_turn 3 passed；lib session 273 passed；lib projection 31 passed |
+| 机械补行 | TurnEvent 新字段导致 22 处构造点补 `None`（5 文件，diff 校验仅两类行），经 Lead 授权为编译衍生 |
+
+**本轮新增校准**：
+1. 并行会话提交可能**直接打挂 HEAD**（`ac3fc970` E0609 存活 4h 未发现）。波次开始前应强制跑一次 `cargo check`，把「HEAD 可编译」作为入口门禁。
+2. 侦察（E2）结论「砍 trace 腿前必须先落 turn_id，否则重复写」被严格执行，避免了 A1 改造顺序错误。
+3. 共享 target 目录会制造 stale artifact 假红（test-agent 复跑时命中），红相已改为 `git archive + 隔离 target`，但需 `CARGO_TARGET_DIR` 真正隔离，否则仍会互相污染。
+4. 测试暴露真实语义：store 层不按 turn_id 去重（幂等只在运行时闸门），该边界已写入 ADR 已知边界而非隐藏。

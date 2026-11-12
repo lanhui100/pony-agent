@@ -73,3 +73,16 @@ Status: implemented
    - `cargo test -p pony-agent-core --features test-support --test adr0123_supplement_test` → 6 passed / 0 failed（T-A×3、T-D×2、T-C×1）；
    - `cargo test -p pony-agent-core --features test-support --test multi_turn_tool_context_test` → 回归见本波基线 `.dev-team/regression-baseline-wave-adr0123-supp.json`。
 6. **已知限制**：Anthropic 家族协议仍不适用（沿用前文）；`tool_pruner` 的孤儿判定仍以前缀 `[中断轮次检查点` 为准，与第 3 条的三类注记判据保持「保守不删」语义，未做合并。
+
+## Supplement 2（2026-11-12 第二轮）：审查缺陷收口
+
+> 触发：L3-A（并发/幂等）与 L3-B（契约/格式）对 `a5634316` 的审查，合计 1 项 BLOCKING + 3 项风险。
+
+1. **B2（失败原因行格式）**：`failed_turn_checkpoint_text` 的原因行改为 ①置于「已执行的工具步骤：」段**之前**（在 `"\n已执行的工具步骤："` 处插入，无该段则追加末尾）；②`trim` + 换行/连续空白折叠为单空格；③按 `char` 截断，**含 `…` 总长 ≤200**。`reason` 为空仍逐字委托 `interrupted_turn_checkpoint_text`。理由：上游 `provider_status_error` 正文可能内嵌 HTML/多段 body，不折叠会让检查点退化成多段正文，并与工具行 `- ` 同形。
+2. **D1（中断注记判据唯一化）**：`UPSTREAM_INTERRUPTED_NOTE` / `USER_CANCELLED_NOTE` 两个常量从 `runtime/tool_recovery.rs` 上移到 `session/store.rs`（`pub const`，字符串逐字不变），`is_interrupt_placeholder_text` 改为「前缀 `[中断轮次检查点`」**或**「与两常量整句相等」。裸子串匹配会让「正文引用注记」被误判为中断注记，从而跳过真实 reasoning 空洞检查。
+3. **A1（持久化痕迹单值真源）**：历史消息现携带 `turn_id`（`append_turn*` 增加 `turn_id: Option<&str>` 并透传；`persist_turn_outcome` / `persist_failed_turn_context` / `persist_cancelled_turn_outcome` 同步透传）。`turn_outcome_persisted` **只认历史腿**，删除 trace 腿——先 claim 方可能是 C5 宽限监督者或 watchdog 兜底，二者都只写 trace/checkpoint、不写历史，trace 腿会使闸门恒真，0 步取消轮的用户消息便永远补不回来。
+4. **B1（重投影与写路径同源）**：`TurnEvent::TurnEnd` 增加 `error`、`TurnEvent::ToolCall` 增加 `description`（additive + `#[serde(default)]`，不 bump `EVENT_SCHEMA_VERSION`）；`turn_flow` 落盘真实值；`projection` 的检查点文本改走 `failed_turn_checkpoint_text`，工具行 `name + description` 与写路径同形。旧事件/旧快照缺字段 ⇒ 退化为改动前文本（有专测逐字断言）。
+5. **验收（真实退出码，2026-11-12 09:05）**：
+   - `cargo check -p pony-agent-core --features test-support` → exit 0
+   - `--test adr0123_supplement_test` → 6 passed；`--test adr0123_supplement_r2_test` → 9 passed（含 T-A1a/T-A1b/T-B1a）；`--test multi_turn_tool_context_test` → 3 passed；`--lib -- session` → 273 passed；`--lib -- projection` → 31 passed
+6. **已知边界**：①store 层不按 turn_id 去重（幂等由运行时闸门保证），同 turn 双写仍可能并列，属 TOCTOU 残留；②若某轮事件流无 `user/message` 导致投影 `pending` 未建立，失败轮合成检查点仍不产生（与改动前同形）。

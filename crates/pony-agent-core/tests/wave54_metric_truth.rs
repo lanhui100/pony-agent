@@ -1101,6 +1101,7 @@ fn t3_trace_projection_keeps_per_call_duration() {
                 turn_id: T3_TURN_ID.to_string(),
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1_200),
+                error: None,
             },
         ),
     ];
@@ -1211,6 +1212,7 @@ fn t3_settle_timeline_does_not_overwrite_existing_per_call_duration() {
                 turn_id: "turn-wave54-t3-single".to_string(),
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1_200),
+                error: None,
             },
         ),
     ];

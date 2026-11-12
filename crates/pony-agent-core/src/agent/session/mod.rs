@@ -106,7 +106,7 @@ pub use store::{
     interrupted_turn_checkpoint_text, is_interrupt_placeholder_text, is_host_continuation_prompt,
     session_is_continuation_fragment, PersistedStore, SessionStore,
     APPROVAL_APPROVED_CONTINUATION_PROMPT, APPROVAL_DENIED_CONTINUATION_PROMPT,
-    ASK_RESUME_CONTINUATION_PROMPT,
+    ASK_RESUME_CONTINUATION_PROMPT, UPSTREAM_INTERRUPTED_NOTE, USER_CANCELLED_NOTE,
 };
 pub use types::{
     collect_env_info, AttachmentAsset, AttachmentAssetQuery, AttachmentCleanupRequest,

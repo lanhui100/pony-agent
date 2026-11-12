@@ -73,6 +73,7 @@ fn derive_events_from_session(
                         turn_id,
                         reason: TurnEndReason::Completed,
                         turn_duration_ms: None,
+                        error: None,
                     });
                 }
                 let turn_id = message
@@ -110,6 +111,7 @@ fn derive_events_from_session(
             turn_id,
             reason: TurnEndReason::Completed,
             turn_duration_ms: None,
+            error: None,
         });
     }
     // trace 反推 tool / provider 事件
@@ -135,6 +137,7 @@ fn derive_events_from_session(
                     name: activity.name.clone(),
                     arguments: activity.arguments_text.clone().unwrap_or_default(),
                     started_at_ms: None,
+                    description: None,
                 });
             } else {
                 events.push(TurnEvent::ToolResult {
@@ -4955,6 +4958,7 @@ mod tests {
                 turn_id: "turn-1".into(),
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(100),
+                error: None,
             },
         ];
         let outcome = backend.persist_command(PersistCommand::FlushEvents {
@@ -5058,6 +5062,7 @@ mod tests {
                     turn_id: "turn-1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: None,
+                    error: None,
                 },
             ],
         });
@@ -5698,6 +5703,7 @@ mod tests {
                     turn_id: "turn-1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: None,
+                    error: None,
                 },
             ],
         });
@@ -6018,6 +6024,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                     started_at_ms: None,
+                    description: None,
                 },
             ),
             (
@@ -6040,6 +6047,7 @@ mod tests {
                     turn_id: "turn-1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(800),
+                    error: None,
                 },
             ),
         ];
@@ -6169,6 +6177,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                     started_at_ms: None,
+                    description: None,
                 },
             ),
             (
@@ -6191,6 +6200,7 @@ mod tests {
                     turn_id: "turn-1".into(),
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(800),
+                    error: None,
                 },
             ),
         ];

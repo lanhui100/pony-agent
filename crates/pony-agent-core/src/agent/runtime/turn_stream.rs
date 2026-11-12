@@ -1497,6 +1497,8 @@ impl AgentRuntime {
             };
             let persisted = self.persist_turn_outcome(
                 input.session_id.as_deref(),
+                // A1：成功轮同样写轮次身份（gate 历史腿对任意轮一致成立）。
+                Some(turn_id),
                 display_message,
                 &completed_text,
                 provider.name(),
@@ -3270,6 +3272,8 @@ impl AgentRuntime {
         };
         let persisted = self.persist_turn_outcome(
             input.session_id.as_deref(),
+            // A1：成功轮同样写轮次身份（gate 历史腿对任意轮一致成立）。
+            Some(turn_id.as_str()),
             &display_message,
             &completed_text,
             provider.name(),

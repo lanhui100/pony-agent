@@ -198,21 +198,21 @@ impl AgentRuntime {
         control.is_stop_requested(turn_id)
     }
 
-    /// B1（ADR 0123 补充）幂等闸门：该 turn 是否已有持久化痕迹。
+    /// A1/B1（ADR 0123 补充）幂等闸门：该 turn 是否已有持久化痕迹。
     ///
-    /// 判据（只读；任一命中即「已持久化」）：
-    /// - `turn_trace_history` 中已有同 `turn_id` 的 trace 行——`record_turn_trace_in_memory`
-    ///   以 `turn_id` 为键 upsert，任何 in-band 终态收口（成功/失败/取消）落盘即留下该行；
-    /// - 历史消息中已有同 `turn_id` 的消息（PA-059 起历史消息携带 `turn_id`）。
+    /// **单值真源 = 历史腿**：只看 live `session.history` 中是否已有同 `turn_id` 的消息
+    ///（PA-059 起历史消息携带 `turn_id`；写路径见 `persist_turn_outcome` → `append_turn_with_kind`，
+    /// 以及同批写 trace 的 `append_failed_turn_fallible`）。
     ///
-    /// C5 宽限监督者只改 checkpoint 并派发事件，**不写**以上任一载体 ⇒ 返回 `false`，
-    /// 调用方（`cancel_stream_turn` 的 claim 失败分支）据此补齐历史而不产生重复。
+    /// 为什么**不能**再用 trace 腿（本轮已删除）：先 claim 方可能是
+    /// 1. C5 宽限监督者（`stop_escalation::escalate_now` → `turn_flow::emit_supervisor_cancelled`），或
+    /// 2. watchdog 兜底（`persist_watchdog_failed_turn` → `record_turn_trace_in_memory`）；
+    /// 二者都**不写历史**，其中 watchdog 会留下 trace 行 ⇒ trace 腿会让本闸门恒真，
+    /// 0 步取消轮的用户消息便再也补不回来。
     ///
-    /// 先 claim 方对账（turn-c603e22a 实测）：`agent::stop_escalation::escalate_now`
-    /// （`stop_escalation.rs:272-296`，锁内置 `status="cancelled"`）→ 出锁后经
-    /// `TerminalEmitter` 走 `turn_flow::emit_supervisor_cancelled`（`turn_flow.rs:828`）
-    /// 派发终态；该模块**零** `persist` / `append_message` / `turn_trace_history` 写入，
-    /// 故「已终态 + 零持久化」正是本函数返回 `false` 的唯一生产场景。
+    /// 于是「已有终态 + 无历史消息」= 真正的持久化缺口 ⇒ 返回 `false`，
+    /// 调用方（`cancel_stream_turn` 的 claim 失败分支）据此补齐历史而不产生重复；
+    /// in-band 自己先 claim 成功并落历史后，任何第二入口都会在此返回 `true` 而静默退出。
     fn turn_outcome_persisted(&self, session_id: Option<&str>, turn_id: &str) -> bool {
         let session_key = session_id.unwrap_or(crate::agent::session::DEFAULT_SESSION_ID);
         let store = self.sessions.read().unwrap_or_else(|error| {
@@ -223,13 +223,9 @@ impl AgentRuntime {
             return false;
         };
         session
-            .turn_trace_history
+            .history
             .iter()
-            .any(|trace| trace.turn_id == turn_id)
-            || session
-                .history
-                .iter()
-                .any(|message| message.turn_id.as_deref() == Some(turn_id))
+            .any(|message| message.turn_id.as_deref() == Some(turn_id))
     }
 
 
@@ -297,6 +293,8 @@ impl AgentRuntime {
             .unwrap_or_default();
         let persisted = self.persist_cancelled_turn_outcome(
             session_id,
+            // A1：取消轮写轮次身份——history 腿是 gate 的唯一真值源。
+            Some(turn_id),
             user_message,
             provider_meta,
             attachments,

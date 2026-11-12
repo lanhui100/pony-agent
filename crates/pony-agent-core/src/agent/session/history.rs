@@ -110,6 +110,7 @@ mod tests {
                 turn_id: "turn-1".to_string(),
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
+                error: None,
             },
         ]);
 
@@ -187,11 +188,13 @@ mod tests {
                 name: "search".to_string(),
                 arguments: "{}".to_string(),
                 started_at_ms: None,
+                description: None,
             },
             TurnEvent::TurnEnd {
                 turn_id: "t1".to_string(),
                 reason: TurnEndReason::Error,
                 turn_duration_ms: None,
+                error: None,
             },
         ]);
 
@@ -243,6 +246,7 @@ mod tests {
                 turn_id: "t1".to_string(),
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
+                error: None,
             },
         ]);
 
