@@ -215,7 +215,9 @@ function allocateId(paths) {
     const n = Number.parseInt(String(row?.id ?? '').replace(/^B/, ''), 10);
     return Number.isFinite(n) ? Math.max(max, n) : max;
   }, 0);
-  const candidate = Math.max(readHighWater(paths), maxSeen + 1, 56);
+  // 下限是 1：`.next-id` 存在则以它为准。旧的 56 是 pony-agent 迁移 legacy B001–B055 的一次性事实，
+  // 迁移起点应由 `import-triage --start <N>` 在命令里显式声明，不写进通用工具。
+  const candidate = Math.max(readHighWater(paths), maxSeen + 1, 1);
   atomicWrite(paths.nextId, `${candidate + 1}\n`);
   return `B${String(candidate).padStart(3, '0')}`;
 }
@@ -506,7 +508,7 @@ export function doctor(paths) {
   return report;
 }
 
-/** 一次性迁移：把旧 triage 账本的 7 条记录重编号为高水位段并规范化字段。 */
+/** 一次性迁移：把旧 triage 账本的记录重编号并规范化字段（起始号默认 56 仅为 pony-agent legacy 兼容，可显式 --start）。 */
 export function normalizeLegacy(legacyRows, { startId = 56 } = {}) {
   return legacyRows.map((row, index) => {
     const created = row.created_at ?? row.metadata?.created_at ?? new Date().toISOString();

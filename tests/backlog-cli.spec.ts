@@ -87,18 +87,18 @@ describe('schema 与状态机（AC1）', () => {
 });
 
 describe('ID 分配与高水位（AC2）', () => {
-  it('首条从 B056 起分配，且高水位单调不减', () => {
+  it('新账本首条从 B001 起分配（无硬编码下限），且高水位单调不减', () => {
     const first = record(paths, { category: 'Task', title: 'a', fingerprint: 'f1' });
-    expect(first.row.id).toBe('B056');
+    expect(first.row.id).toBe('B001');
     const second = record(paths, { category: 'Task', title: 'b', fingerprint: 'f2' });
-    expect(second.row.id).toBe('B057');
-    expect(readHighWater(paths)).toBe(58);
+    expect(second.row.id).toBe('B002');
+    expect(readHighWater(paths)).toBe(3);
   });
 
   it('归档后再分配不复用退役编号（负例）', () => {
     const { row } = record(paths, { category: 'Task', title: 'a', fingerprint: 'f1' });
     resolve(paths, row.id, 'done');
-    expect(readHighWater(paths)).toBe(57);
+    expect(readHighWater(paths)).toBe(2);
     // 只删归档文件（高水位必须独立于归档存在，这是不复用的唯一前提）
     fs.rmSync(archiveFileFor(paths), { force: true });
     seed([]);
