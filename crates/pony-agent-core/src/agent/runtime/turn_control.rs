@@ -253,20 +253,10 @@ impl AgentRuntime {
         // 「文本检查点」回忆过程事实；有它之后 native 家族会话的取消轮与失败轮同构，
         // 文本检查点退化为非 native provider 的兼容载体。调用点无已闭合往返时传 `None`。
         provider_native_transcript: Option<Vec<Value>>,
+        // R3（dsh 对齐）：模型已宣告但**未执行/未返回**的调用（批内被取消而跳过的剩余调用）。
+        // 它们必须以 error 结果闭合进闭合结构，不得从上下文里静默消失。
+        pending_calls: Vec<crate::agent::session::interrupted_turn::PendingToolCall>,
     ) {
-        // wave-tui-session-resilience C5：把本轮已产生的工具活动投影为检查点步骤。
-        // （B1 的补写分支同样要用它构造检查点文本，故在 claim 之前计算。）
-        let checkpoint_tools: Vec<String> = tool_activities
-            .iter()
-            .map(|activity| {
-                if activity.description.trim().is_empty() {
-                    activity.name.clone()
-                } else {
-                    format!("{} {}", activity.name, activity.description.trim())
-                }
-            })
-            .collect();
-
         // wave-64 R1（BLOCKING，terminal-once）：C5 宽限监督可能已先行收口并派发了一条
         // `turn:cancelled`；此时 in-band 循环再命中停止位必须**静默退出**，禁止第二条终态、
         // 禁止用 in-band 结果覆盖已落盘的终态 checkpoint/trace。
@@ -300,7 +290,9 @@ impl AgentRuntime {
             attachments,
             None,
             partial_assistant_text,
-            checkpoint_tools,
+            // C1/R3：全量工具活动（含 `result_text`）+ 未执行调用一并进闭合结构。
+            tool_activities.clone(),
+            pending_calls,
             provider_native_transcript,
         );
         if claimed {

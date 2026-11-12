@@ -684,6 +684,13 @@ impl SessionStore {
         let user_content = event_user.unwrap_or_else(|| user_message.to_string());
         let (assistant_content, assistant_reasoning) =
             event_assistant.unwrap_or_else(|| (assistant_message.to_string(), None));
+        // RC3/C5（L3-C H2）：**落库边界**清洗——历史正文只留已交付正文（协议块整块丢弃、
+        // 不写占位符）。展示侧的折叠语义（含 `［工具调用］` 占位）不动；事件载荷的同类清洗
+        // 在 `control_plane::flush_events` 的同一口径里完成。
+        let assistant_content =
+            crate::agent::provider::strip_dsml_protocol_text(&assistant_content);
+        let assistant_reasoning = assistant_reasoning
+            .map(|reasoning| crate::agent::provider::strip_dsml_protocol_text(&reasoning));
         let memory_write_hook_executor = Arc::clone(&self.memory_write_hook_executor);
         let history_len_before;
         let mut appended_user: Option<TurnHistoryMessage>;
@@ -701,7 +708,20 @@ impl SessionStore {
         };
         {
             ensure_history_graph(&mut staged_session);
-            prepare_session_for_new_turn(&mut staged_session);
+            if kind.is_some() {
+                // C3 / RC2：中断收口**不降级成隐式 fork**。`prepare_session_for_new_turn` 会在
+                // `visible ≠ branch_head` 时新建 `…-branch-N` 并把 cursor 置 `HistoricalDirty`
+                // （事故现场 `…-branch-2` 的来历）。收口只是把本轮的闭合事实挂到**当前分支头**，
+                // 因此先把漂移的 visible 拉回 head（写路径与 `ensure_history_graph` 的 head 口径
+                // 一致），再原地续写；只有显式 rewind/checkout/fork 才允许增加分支。
+                let branch_head = staged_session.history_cursor.branch_head_node_id.clone();
+                if branch_head.is_some() {
+                    staged_session.history_cursor.visible_node_id = branch_head;
+                }
+                staged_session.history_cursor.mode = HistoryCursorMode::Live;
+            } else {
+                prepare_session_for_new_turn(&mut staged_session);
+            }
             history_len_before = staged_session.history.len();
             staged_session.history.push(TurnHistoryMessage {
                 role: "user".to_string(),
@@ -2523,8 +2543,18 @@ impl SessionStore {
                 .iter_mut()
                 .find(|n| n.node_id == head_id)
             {
-                if !_turn_id.is_empty() {
-                    node.turn_id = Some(_turn_id.to_string());
+                // C2（L3-A）：**不得**用入参 turn_id 覆盖既有归属——`TurnCancelled` 节点
+                // 不推进分支头后，终态 flush 时的 head 是**上一轮 `turn_committed`** 节点，
+                // 覆盖即把上一轮错标成本轮（事故 node-5 的同类错标）。
+                // 归属口径统一走 `history_node_turn_id`（本轮优先、缺失回退），且只在缺失时填充。
+                if !_turn_id.is_empty()
+                    && node.turn_id.is_none()
+                    && !matches!(node.kind, HistoryNodeKind::TurnCancelled)
+                {
+                    node.turn_id = crate::agent::session::interrupted_turn::history_node_turn_id(
+                        None,
+                        Some(_turn_id),
+                    );
                 }
                 if node.event_seq_range.is_none() && new_watermark > session.last_commit_watermark {
                     node.event_seq_range = Some((session.last_commit_watermark, new_watermark - 1));
@@ -3528,11 +3558,16 @@ pub fn ensure_history_graph(session: &mut SessionState) -> bool {
         .history_nodes
         .last()
         .map(|node| node.node_id.clone());
+    // RC2 单一真源（Lead 裁决 / C10）：分支头 = 该分支**最后一条节点**，`TurnCancelled` 同样
+    // 参与。历史上这里排除 `TurnCancelled`，导致"中断节点成了悬挂兄弟"：`commit` 把 head 指到
+    // 中断节点，而装载/投影时 head 又被回算到上一 `turn_committed` ⇒ `visible ≠ head` 漂移
+    // → 下一次 append 隐式 fork（事故 `…-branch-2`），且重启后中断轮行随悬挂节点一起不可见。
+    // `TurnCancelled` 只作为**分类**保留（`kind` / rewind 目标识别），不再参与"是否推进 head"。
     let main_branch_head_node_id = session
         .history_nodes
         .iter()
         .rev()
-        .find(|n| n.branch_id == DEFAULT_HISTORY_BRANCH_ID && n.kind != HistoryNodeKind::TurnCancelled)
+        .find(|node| node.branch_id == DEFAULT_HISTORY_BRANCH_ID)
         .map(|node| node.node_id.clone());
     let first_node_id = session.history_nodes.first().map(|n| n.node_id.clone());
     let updated_at_ms = session.updated_at_ms;
@@ -3582,6 +3617,7 @@ pub fn ensure_history_graph(session: &mut SessionState) -> bool {
         session.history_cursor.visible_node_id = active_branch_head_node_id.clone();
         changed = true;
     }
+    // (removed: head 口径已包含 TurnCancelled，无需归一化 visible)
     if session.history_cursor.workspace_node_id.is_none() {
         session.history_cursor.workspace_node_id = active_branch_head_node_id.or(latest_node_id);
         changed = true;
@@ -3658,6 +3694,22 @@ pub(super) fn commit_history_node_from_live_state(
             }
         });
     let node_id = new_history_node_id(session, session.history_nodes.len() + 1, created_at_ms);
+    // F7 / C2（事故 node-5 被错标成上一轮）：节点轮次身份必须取**本轮**。
+    // 取消/失败轮的历史消息先于 trace 落库（`persist_cancelled_turn_outcome` →
+    // `persist_turn_trace`），`turn_trace_history.last()` 此时仍是上一轮 ⇒ 只在历史腿缺失时回退。
+    let history_turn_id = session
+        .history
+        .iter()
+        .rev()
+        .find_map(|message| message.turn_id.as_deref());
+    let trace_turn_id = session
+        .turn_trace_history
+        .last()
+        .map(|trace| trace.turn_id.as_str());
+    let node_turn_id = crate::agent::session::interrupted_turn::history_node_turn_id(
+        history_turn_id,
+        trace_turn_id,
+    );
     session.history_nodes.push(HistoryNode {
         node_id: node_id.clone(),
         session_id: session.conversation_id.clone(),
@@ -3672,10 +3724,7 @@ pub(super) fn commit_history_node_from_live_state(
         history: session.history.clone(),
         provider_native_transcript: session.provider_native_transcript.clone(),
         turn_trace_history: session.turn_trace_history.clone(),
-        turn_id: session
-            .turn_trace_history
-            .last()
-            .map(|trace| trace.turn_id.clone()),
+        turn_id: node_turn_id,
         turn_trace_refs: Some(
             session
                 .turn_trace_history
@@ -3703,6 +3752,9 @@ pub(super) fn commit_history_node_from_live_state(
         if branch.base_node_id.is_none() {
             branch.base_node_id = Some(node_id.clone());
         }
+        // 写路径与 `ensure_history_graph` 的 head 口径**同一套**：任何节点（含
+        // `TurnCancelled`）都推进分支头。中断轮据此成为分支上的正常一站：
+        // `visible == head` 恒成立（不触发隐式 fork），节点快照包含中断轮的行（重启可见）。
         branch.head_node_id = Some(node_id.clone());
         branch.updated_at_ms = created_at_ms;
     }
@@ -3749,10 +3801,29 @@ fn sync_latest_history_node(session: &mut SessionState, run_id: Option<String>) 
         node.turn_trace_history = turn_trace_history;
         // PA-088：同步更新 turn_id 与 refs，保持内存态与持久化重算一致
         // （前端 checkpoint 列表直接读 node.turnId）。
-        node.turn_id = node
+        //
+        // C2（L3-A）：`record_turn_trace_in_memory` 会以**新轮 trace** 触发本函数，而 head
+        // 可能仍是上一轮节点（`TurnCancelled` 不推进 head）——此时按 trace 尾回填会把上一轮
+        // 错标成本轮。故统一走 `history_node_turn_id`：节点既有归属优先，缺失才回退 trace 尾。
+        // C2（L3-A B1）：轮次身份以**历史腿**为准（本轮消息的 turn_id）——它由
+        // `commit_history_node_from_live_state` 在同一写入事务里落定；trace 尾只作旧数据回退。
+        // 不能反过来用节点既有值优先：`append_turn` 的 legacy 用法不带 turn_id，节点在 commit
+        // 时只能回退到**上一条** trace（陈旧值），再用它优先就会把新轮 trace 边缘化
+        // （sqlite 分支用例实测丢一条顶层 trace）。
+        let history_turn_id = node
+            .history
+            .iter()
+            .rev()
+            .find_map(|message| message.turn_id.clone());
+        let trace_last_turn_id = node
             .turn_trace_history
             .last()
             .map(|trace| trace.turn_id.clone());
+        let resolved_turn_id = crate::agent::session::interrupted_turn::history_node_turn_id(
+            history_turn_id.as_deref(),
+            trace_last_turn_id.as_deref(),
+        );
+        node.turn_id = resolved_turn_id;
         node.turn_trace_refs = Some(
             node.turn_trace_history
                 .iter()
@@ -4010,10 +4081,17 @@ pub(super) fn session_state_for_backend(
                     })
                     .collect(),
             );
-            node.turn_id = node
+            // C2（L3-A）：同口径——既有归属优先，缺失才回退 trace 尾；不得用陈旧 trace
+            // 列表把中断/失败轮节点覆盖回上一轮。
+            let trace_last_turn_id = node
                 .turn_trace_history
                 .last()
                 .map(|trace| trace.turn_id.clone());
+            let resolved_turn_id = crate::agent::session::interrupted_turn::history_node_turn_id(
+                node.turn_id.as_deref(),
+                trace_last_turn_id.as_deref(),
+            );
+            node.turn_id = resolved_turn_id;
             node.turn_trace_history.clear();
         }
     }

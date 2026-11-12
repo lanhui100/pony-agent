@@ -28,6 +28,8 @@ mod host_continuation_goal_round_tests;
 #[cfg(test)]
 mod history_compaction_tests;
 mod types;
+// 中断/失败轮次的闭合真值（补齐优先于截断；事故 pa_01a1ce16）：纯函数出口。
+pub mod interrupted_turn;
 pub mod usage;
 pub mod workspace_snapshot;
 // 「撤回」：轮次级文件回滚快照（写工具落盘前的 pre-image，契约见模块文档）。

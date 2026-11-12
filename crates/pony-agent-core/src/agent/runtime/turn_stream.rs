@@ -22,6 +22,25 @@ fn cancelled_turn_native_transcript(
     native_transcript_for_cancelled_turn(provider.protocol(), user_message, hop_records)
 }
 
+/// R3（dsh 对齐）：批内取消时"**已宣告但未执行/未返回**"的调用列表。
+///
+/// 判据用**批内序号**而不是 call_id：同一批调用可能来自上游但 `call_id` 缺失（`None`），
+/// 按 id 比较会把不同调用误判成同一个。`executed_calls` 只在每次调用**完全**收尾后追加，
+/// 故取消点上的当前调用序号 = `executed_calls.len()`，其后（`start_index..`）即被跳过的调用。
+/// 这些调用必须以"结果未知/未开始"的 error 结果闭合进收口结构，不得静默消失（不截断在飞工作）。
+fn pending_calls_after_batch_index(
+    all_calls: &[ToolCall],
+    start_index: usize,
+) -> Vec<crate::agent::session::interrupted_turn::PendingToolCall> {
+    all_calls
+        .iter()
+        .skip(start_index)
+        .map(|call| crate::agent::session::interrupted_turn::PendingToolCall {
+            name: call.name.clone(),
+        })
+        .collect()
+}
+
 /// wave-64 R1（BLOCKING）：终态失败派发的 **terminal-once 闸门**（内联 failed 派发块共用）。
 ///
 /// `false` ⇒ 该轮已有终态派发者（C5 宽限监督已收口 cancelled / 已派发过 failed）：
@@ -88,6 +107,57 @@ impl AgentRuntime {
             error,
             partial_text,
             failed_turn_native_transcript,
+        );
+    }
+
+    /// R3（L3-A #6）：失败面的**带未执行调用**版本（与取消面同构）。
+    ///
+    /// 唯一调用点：批内「工具被中止 + 用户已请求停止」分支——那一刻同一响应里被跳过的
+    /// 调用必须一起收口，否则续跑上下文里它们彻底消失。
+    #[allow(clippy::too_many_arguments)]
+    fn fail_stream_turn_gated_dispatch_pending(
+        &self,
+        sink: &impl TurnEventSink,
+        control: &ExecutionControlRegistry,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        tool_activities: Vec<TurnToolActivity>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        completed_hops: usize,
+        error: String,
+        partial_text: Option<String>,
+        failed_turn_native_transcript: Option<Vec<serde_json::Value>>,
+        pending_calls: Vec<crate::agent::session::interrupted_turn::PendingToolCall>,
+    ) {
+        if !claim_failed_terminal(control, turn_id) {
+            return;
+        }
+        self.fail_stream_turn_with_hook_dispatch_pending(
+            sink,
+            control,
+            session_id,
+            turn_id,
+            user_message,
+            provider_meta,
+            build_context_observation,
+            trace_steps,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            first_token_latency_ms,
+            turn_duration_ms,
+            completed_hops,
+            error,
+            partial_text,
+            failed_turn_native_transcript,
+            pending_calls,
         );
     }
 
@@ -163,6 +233,8 @@ impl AgentRuntime {
         build_context_observation: Option<BuildContextObservation>,
         // 同 [`AgentRuntime::cancel_stream_turn`]：本轮已渲染给用户的正文（可为空）。
         partial_assistant_text: &str,
+        // R3：模型已宣告但未执行/未返回的调用（本调用面的三个点都在工具阶段之前 ⇒ 恒空）。
+        pending_calls: Vec<crate::agent::session::interrupted_turn::PendingToolCall>,
     ) {
         self.cancel_stream_turn(
             sink,
@@ -181,6 +253,7 @@ impl AgentRuntime {
             // 本调用面的三个调用点都在**工具阶段之前**：本轮没有已闭合的工具往返，
             // 因此不写 transcript，由文本检查点承载（与失败轮同一口径）。
             None,
+            pending_calls,
         );
     }
 
@@ -300,6 +373,9 @@ impl AgentRuntime {
                     Some("running"),
                     None,
                 );
+                // R3（L3-A #2）：**预阶段**取消——当前调用尚未执行，必须与其余未执行调用一起进
+                // pending（`executed_calls.len()` 就是当前调用序号）；用 `+1` 会把这一个调用
+                // 静默丢掉（既不在 tool_activities，也不在 pending）。
                 if self.should_cancel_turn(control, turn_id) {
                     self.cancel_stream_turn(
                         sink,
@@ -315,7 +391,8 @@ impl AgentRuntime {
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
                         accumulated_turn_text.as_str(),
-                        cancelled_turn_native_transcript(provider, user_message, &hop_records));
+                        cancelled_turn_native_transcript(provider, user_message, &hop_records),
+                        pending_calls_after_batch_index(&current_tool_calls, executed_calls.len()));
                     return;
                 }
                 emit_stream_event(
@@ -520,7 +597,8 @@ impl AgentRuntime {
                         Some(turn_started_at.elapsed().as_millis() as u64),
                         Some(context_observation.clone()),
                         accumulated_turn_text.as_str(),
-                        cancelled_turn_native_transcript(provider, user_message, &hop_records));
+                        cancelled_turn_native_transcript(provider, user_message, &hop_records),
+                        pending_calls_after_batch_index(&current_tool_calls, executed_calls.len() + 1));
                     return;
                 }
 
@@ -743,7 +821,9 @@ impl AgentRuntime {
                             &current_tool_call.name,
                             tool_result.output.as_str(),
                         );
-                        self.fail_stream_turn_gated_dispatch(
+                        // R3（L3-A #6）：中止发生在批内 ⇒ 同一响应里**尚未执行**的调用
+                        // 也要进失败收口（本轮工具被中止，其后调用从未开始）。
+                        self.fail_stream_turn_gated_dispatch_pending(
                             sink,
                             control,
                             input.session_id.as_deref(),
@@ -763,6 +843,10 @@ impl AgentRuntime {
                             Some(accumulated_turn_text.clone()),
 
                             native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records),
+                            pending_calls_after_batch_index(
+                                &current_tool_calls,
+                                executed_calls.len() + 1,
+                            ),
                         );
                         return;
                     }
@@ -1256,6 +1340,7 @@ impl AgentRuntime {
                     Some(context_observation.clone()),
                     accumulated_turn_text.as_str(),
                     cancelled_turn_native_transcript(provider, user_message, &hop_records),
+                    Vec::new(),
                 );
                 return;
             }
@@ -2006,6 +2091,7 @@ impl AgentRuntime {
                 "",
                 // 决策阶段之前取消：本轮没有已闭合的工具往返。
                 None,
+                Vec::new(),
             );
             otel_turn_scope.set_phase("cancelled");
             return;
@@ -2491,7 +2577,8 @@ impl AgentRuntime {
                                 None,
                                 &turn_started_at,
                                 Some(prepared.build_context_observation.clone()),
-                                streamed_assistant_text.borrow().as_str());
+                                streamed_assistant_text.borrow().as_str(),
+                                Vec::new());
                             return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
                         }
                         // 仅诊断：不改变控制流（失败仍然 fallback 到同步决策），
@@ -2538,7 +2625,8 @@ impl AgentRuntime {
                                         None,
                                         &turn_started_at,
                                         Some(prepared.build_context_observation.clone()),
-                                        streamed_assistant_text.borrow().as_str());
+                                        streamed_assistant_text.borrow().as_str(),
+                                        Vec::new());
                                     return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
                                 }
                                 // 同 1855 处：仅记录根因，控制流不变（失败即 fallback）。
@@ -2623,6 +2711,7 @@ impl AgentRuntime {
                         &turn_started_at,
                         Some(prepared.build_context_observation.clone()),
                         streamed_assistant_text.borrow().as_str(),
+                        Vec::new(),
                     );
                     otel_turn_scope.set_phase("cancelled");
                     return;
@@ -3051,6 +3140,7 @@ impl AgentRuntime {
                 first_decision.output_text.as_str(),
                 // 工具分派失败：没有任何已闭合的工具往返。
                 None,
+                Vec::new(),
             );
             otel_turn_scope.set_phase("cancelled");
             return;
@@ -3154,6 +3244,7 @@ impl AgentRuntime {
                 first_decision.output_text.as_str(),
                 // 无工具返回分支取消：本轮没有已闭合的工具往返。
                 None,
+                Vec::new(),
             );
             // wave-54 C2：取消轮同样落已发生调用的加权速度真值（records 为空 ⇒ 仅 calls=0）。
             crate::agent::turn_flow::record_turn_speed_truth(

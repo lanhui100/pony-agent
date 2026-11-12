@@ -1267,3 +1267,34 @@ note: >-
       `crates/pony-agent-core/src/bin/tui/goal_command.rs`（参数口径与单行折叠 3 例）、
       `tests/slash-commands-goal.spec.ts`（桌面纯函数 9 例）、
       `tests/slash-commands.spec.ts`（命令清单扩为四条）。
+
+  【归属登记（2026-11-12）｜中断/失败轮次内容保真：闭合结构 + 上下文投影 + 折叠分离（DSH 对齐）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改变**中断/失败轮收口时写入本地会话的
+  闭合结构**、**续跑请求体如何读取该结构**、以及**DSML 折叠在展示侧/持久化侧的分离**；无新增外部
+  网络 IO、后台常驻任务、Prometheus pull 端点或异常上报边界。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
+  (2) 请求体拓扑改变（无新出口）：中断轮的在飞工作不再被压成一条检查点句，而是落成**闭合结构**
+      （已交付正文 + 已闭合步骤名称/结果摘要 + 未开始调用的事实注记），native 家族经
+      `provider_native_transcript` 以 tool_calls/tool 成对回放，非 native 家族经历史承载文本
+      （`Previous assistant reply:`）读取同一结构。工具结果摘要由既有 `TurnToolActivity.result_text`
+      （`crates/pony-agent-core/src/agent/telemetry.rs`）投影，不新增采集点、不新增网络调用。
+  (3) 协议文本的**三处分工**（不是"折叠只发生展示侧"）：
+      (3a) 展示折叠：`provider::display_dsml_protocol_text`（→ `bin/tui/errors.rs::sanitize_model_protocol_text`）
+           折叠协议块、丢弃孤立残片行、把连排占位符收敛为一个；fenced 代码块内一律逐字保真。
+      (3b) 请求组装：`provider::sanitize_dsml_protocol_text`（SSE 解析层，**模型可见请求体**）
+           语义保持不变（含 `［工具调用］` 占位与半截 tails），既有 replay/协议族断言依赖它。
+      (3c) 持久化（落库边界）：`provider::strip_dsml_protocol_text` 在
+           `control_plane::flush_events`（事件载荷 → `normalized_messages`）与
+           `session::store::append_turn_fallible_with_kind`（历史正文）两处整块丢弃协议文本，
+           **不新增占位符**（既有 `［工具调用］` 脏行原样保留、不回写、不清洗逐字态）；旧库既有脏行只在读取/落库时
+           丢弃协议碎片，不回写、不再放大（无迁移、无新列）。边界：落库侧按 chunk 流式清洗，fenced 代码块跨 chunk 时
+           与整段清洗不等价；非 fenced 的孤立协议残片行仍按既定取舍丢弃（冻结验收 at3/acceptance 用例钉住该口径）。
+      本地日志均不含凭据。
+  (4) 历史图与归属（本地取证相关）：中断收口不再因 `visible ≠ branch_head` 触发隐式 fork，
+      `TurnCancelled` 节点让位于统一的分支头口径；历史节点 `turn_id` 显式取本轮。纯本地状态机变更。
+  (5) 收口点：不新增 enforcement_point（无新网络出口、无新异常边界可机械拦截）；行为门落在测试层——
+      `crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs`（C1–C8 功能契约 +
+      `tests/acceptance/adversarial/interrupted_turn_resume/` 三类确定性破坏注入），
+      以及 `cargo test -p pony-agent-core --lib` 的既有回归基线。

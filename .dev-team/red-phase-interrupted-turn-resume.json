@@ -1,0 +1,624 @@
+{
+  "wave": "interrupted-turn-resume",
+  "ticket": "B113",
+  "phase": "red",
+  "owner": "test-agent (independent L2-T / L2-AT author)",
+  "worktree": "/home/dm/pony-agent-worktrees/interrupted-turn-resume",
+  "branch": "fix/interrupted-turn-resume",
+  "contract": ".dev-team/contract-matrix-interrupted-turn-resume.md",
+  "nfr_baseline": ".dev-team/nfr-baseline-interrupted-turn-resume.json",
+  "test_file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+  "adversarial_dir": "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/",
+  "red_primitive_seam": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs (T0 空桩；只读，禁改签名)",
+  "frozen_at": "2026-11-12T14:19:44+08:00",
+  "command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+  "overall_exit_code": 101,
+  "suite_counts": {
+    "total": 141,
+    "passed": 126,
+    "failed": 15,
+    "ignored": 0,
+    "filtered": 0,
+    "note": "失败的 15 条全部是冻结验收用例；通过的 126 条全部是 `#[path]` 引入的 bin/tui.rs 既有单元测试（非本套用例）。"
+  },
+  "failure_primitive": "SUT 栈 panic/断言：13 条为 interrupted_turn.rs 空桩 unimplemented! panic（已按 Lead 裁决注明消息），2 条为真实断言失败（C2b/C3c，复现 RC2 缺陷原文）",
+  "purity": {
+    "compile_errors": 0,
+    "ignored_tests": 0,
+    "filtered_tests": 0,
+    "harness_timeouts": 0,
+    "swallowed_exceptions": 0,
+    "fake_assertions": 0
+  },
+  "log_receipt": "/tmp/red-interrupted-turn.log",
+  "assertion_surface": {
+    "C1": "请求组装层（DefaultContextStateRetriever + DefaultTurnContextBuilder，零网络）",
+    "C2": "store history_nodes.turn_id + history 行数",
+    "C3": "store history_branches/active_branch_id",
+    "C4": "bin/tui/errors.rs 展示入口 + 纯函数渲染",
+    "C5": "persisted_assistant_text / display_assistant_text / 事件载荷等价体",
+    "C6": "两次重启后的 native 通道逐字比对",
+    "C7": "三条 cause 的闭合结构同构 + 失败原因保留",
+    "C8": "旧 JSON 装载 + 成功轮上下文逐字不变"
+  },
+  "test_cases": [
+    {
+      "id": "C1/S1-T01",
+      "name": "c1_native_next_request_carries_closed_tool_roundtrip",
+      "mode": "L2-T",
+      "contract": [
+        "C1"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c1_native_next_request_carries_closed_tool_roundtrip",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:78:5",
+      "failure_message": "not implemented: interrupted_turn_transcript_closure"
+    },
+    {
+      "id": "C1/S1-T02",
+      "name": "c1_text_family_next_request_carries_visible_step_results",
+      "mode": "L2-T",
+      "contract": [
+        "C1"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c1_text_family_next_request_carries_visible_step_results",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C2/S2-T03",
+      "name": "c2_history_has_exactly_one_interrupted_turn_labelled_with_its_own_turn_id",
+      "mode": "L2-T",
+      "contract": [
+        "C2"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c2_history_has_exactly_one_interrupted_turn_labelled_with_its_own_turn_id",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C2/S2-T04",
+      "name": "c2b_store_close_legacy_path_labels_node_with_current_turn_id",
+      "mode": "L2-T (baseline regression leg)",
+      "contract": [
+        "C2"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c2b_store_close_legacy_path_labels_node_with_current_turn_id",
+      "exit_code": 101,
+      "failure_classification": "assertion_failure",
+      "failure_location": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs:695:5",
+      "failure_message": "C2b：收口节点 turn_id 必须是本轮 turn-2（现状借 turn_trace_history.last() 错标成上一轮），实际 = Some(\"turn-1\") | left=Some(\"turn-1\") right=Some(\"turn-2\")"
+    },
+    {
+      "id": "C3/S3-T05",
+      "name": "c3_interrupted_resume_on_accident_shaped_cursor_does_not_fork_implicitly",
+      "mode": "L2-T",
+      "contract": [
+        "C3"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c3_interrupted_resume_on_accident_shaped_cursor_does_not_fork_implicitly",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C3/S3-T06",
+      "name": "c3b_explicit_fork_path_still_creates_a_branch",
+      "mode": "L2-T (positive control)",
+      "contract": [
+        "C3"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c3b_explicit_fork_path_still_creates_a_branch",
+      "exit_code": 0,
+      "failure_classification": "passed_control",
+      "failure_message": ""
+    },
+    {
+      "id": "C3/S3-T07",
+      "name": "c3c_legacy_interrupted_append_does_not_fork_on_accident_shaped_cursor",
+      "mode": "L2-T (baseline regression leg)",
+      "contract": [
+        "C3"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c3c_legacy_interrupted_append_does_not_fork_on_accident_shaped_cursor",
+      "exit_code": 101,
+      "failure_classification": "assertion_failure",
+      "failure_location": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs:827:5",
+      "failure_message": "C3c：中断收口不得隐式 fork（现状会建 …-branch-2），实际分支 = [(\"branch-main\", None, Some(\"node-1\")), (\"pa_interrupted_turn_resume_acceptance-branch-2\", Some(\"branch-main\"), Some(\"node-1\"))] | left=2 right=1"
+    },
+    {
+      "id": "C4/S4-T08",
+      "name": "c4_interrupted_turn_renders_one_status_line_and_keeps_steps_in_detail",
+      "mode": "L2-T",
+      "contract": [
+        "C4"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c4_interrupted_turn_renders_one_status_line_and_keeps_steps_in_detail",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C5/S5-T09",
+      "name": "c5_folding_never_writes_back_into_persisted_body",
+      "mode": "L2-T",
+      "contract": [
+        "C5"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c5_folding_never_writes_back_into_persisted_body",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:91:5",
+      "failure_message": "not implemented: persisted_assistant_text"
+    },
+    {
+      "id": "C6/S6-T10",
+      "name": "c6_repeated_recovery_is_idempotent_and_does_not_duplicate_turns",
+      "mode": "L2-T",
+      "contract": [
+        "C6"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c6_repeated_recovery_is_idempotent_and_does_not_duplicate_turns",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "C7/S7-T11",
+      "name": "c7_failed_turn_is_isomorphic_to_user_cancelled_and_keeps_reason",
+      "mode": "L2-T",
+      "contract": [
+        "C7"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c7_failed_turn_is_isomorphic_to_user_cancelled_and_keeps_reason",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:78:5",
+      "failure_message": "not implemented: interrupted_turn_transcript_closure"
+    },
+    {
+      "id": "C8/S8-T12",
+      "name": "c8_legacy_session_loads_and_successful_turn_context_stays_verbatim",
+      "mode": "L2-T",
+      "contract": [
+        "C8"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact c8_legacy_session_loads_and_successful_turn_context_stays_verbatim",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:91:5",
+      "failure_message": "not implemented: persisted_assistant_text"
+    },
+    {
+      "id": "AT1/A11",
+      "name": "adversarial::at1_oversized_malformed_event_sequence::at1_oversized_and_malformed_step_sequence_stays_closed_bounded_and_deterministic",
+      "mode": "L2-AT",
+      "contract": [
+        "C1/C2"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact adversarial::at1_oversized_malformed_event_sequence::at1_oversized_and_malformed_step_sequence_stays_closed_bounded_and_deterministic",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "AT1/A12",
+      "name": "adversarial::at1_oversized_malformed_event_sequence::at1_empty_and_blank_steps_never_fabricate_success",
+      "mode": "L2-AT",
+      "contract": [
+        "C7"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact adversarial::at1_oversized_malformed_event_sequence::at1_empty_and_blank_steps_never_fabricate_success",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "AT2/A13",
+      "name": "adversarial::at2_repeated_recovery_race::at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates",
+      "mode": "L2-AT",
+      "contract": [
+        "C6"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact adversarial::at2_repeated_recovery_race::at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    },
+    {
+      "id": "AT3/A14",
+      "name": "adversarial::at3_dirty_dsml_body_injection::at3_dirty_dsml_never_reaches_persisted_body_display_or_next_request",
+      "mode": "L2-AT",
+      "contract": [
+        "C5"
+      ],
+      "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1 --exact adversarial::at3_dirty_dsml_body_injection::at3_dirty_dsml_never_reaches_persisted_body_display_or_next_request",
+      "exit_code": 101,
+      "failure_classification": "sut_unimplemented_panic",
+      "failure_location": "crates/pony-agent-core/src/agent/session/interrupted_turn.rs:60:5",
+      "failure_message": "not implemented: interrupted_turn_assistant_text"
+    }
+  ],
+  "deferred": [],
+  "baseline_defects_confirmed": [
+    {
+      "id": "RC2-a",
+      "case": "c2b_store_close_legacy_path_labels_node_with_current_turn_id",
+      "assertion": "C2b：收口节点 turn_id 必须是本轮 turn-2 … 实际 = Some(\"turn-1\")",
+      "cause": "store.rs commit_history_node_from_live_state 取 turn_trace_history.last()"
+    },
+    {
+      "id": "RC2-b",
+      "case": "c3c_legacy_interrupted_append_does_not_fork_on_accident_shaped_cursor",
+      "assertion": "C3c：中断收口不得隐式 fork … 实际分支 = [(\"branch-main\", None, Some(\"node-1\")), (\"…-branch-2\", Some(\"branch-main\"), Some(\"node-1\"))]",
+      "cause": "store.rs prepare_session_for_new_turn 在 visible≠head 时建分支"
+    }
+  ],
+  "amendments": [
+    {
+      "id": "AMEND-1",
+      "scope": "L2-AT AT2 Assert 2（结果哨兵计数面）",
+      "file": "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/at2_repeated_recovery_race.rs",
+      "original_assertion": "对 `request_body(&ProviderRequest)` 的整段 JSON 计 `RESULT_*` 出现次数，断言 `== 1`（不重复注入 transcript）",
+      "impossibility_proof": "native 工具往返在同一个 `ProviderRequest` JSON 里必然出现 3 次：① `native_messages`（role=tool / tool_calls）② `input` 的 conversation carry（`Previous assistant reply:` 承载文本）③ `observation.semi_stable_context_text`（同一 carry 的观察快照）。⇒ 全局计数下界 = 2（部分 provider 下 3），`== 1` 数学不可能；且 ③ 的渲染被 1518 条 `--lib` 基线断言钉住（`crates/pony-agent-core/src/agent/context.rs:2047-2051`），禁止为过门禁改基线。",
+      "lead_ruling": "计数面收敛到 native 通道（与 C6 同口径）；可加 carry 通道 ≤1 次作更严旁证；**禁止**全局计数。",
+      "revised_assertion": "① `serde_json::to_string(&request.native_messages)` 内每个结果哨兵出现次数 `== 1`；② `serde_json::to_string(&request.input)`（carry 通道）内出现次数 `<= 1`；③ 闭合片段非空；④ 跨线程 full-body 逐字确定性保持不变。",
+      "assertion_strength_change": "不降级：原断言不可满足（伪判据），新断言把判据放在'重复注入只可能发生'的通道上，并额外新增 carry ≤1 的旁证断言。",
+      "rerun_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+      "rerun_exit_code": 0,
+      "rerun_result": "141 passed; 0 failed; 0 ignored; 8.47s",
+      "note": "本次重跑时 Executor 的实现已部分/全部落地，AT2 及全部冻结用例均转绿 —— 按 Lead 指示**记录实际结果**，未回退实现、未制造人工红相。原红相证据（Exit 101 段落）保持冻结不改。"
+    },
+    {
+      "id": "AMEND-2",
+      "scope": "新增接线守卫用例 C9（冻结文件的一次授权扩展）",
+      "file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+      "why": "Lead 发现生产调用点缺失：agent/runtime/turn_persist.rs 的收口路径仍只写检查点文本，未调用冻结纯函数 interrupted_turn_assistant_text / interrupted_turn_transcript_closure。纯函数级行为断言（C1/C5/C7 等）在函数内部全绿也无法暴露「实现存在但生产未接线」，故需要结构性守卫（wiring guard）避免假绿。",
+      "case": "c9_runtime_close_out_path_actually_uses_closed_structure",
+      "assertion_design": "前半段 = 结构性守卫（include_str!(\"../src/agent/runtime/turn_persist.rs\") 必须含两个纯函数调用名，注释显式声明是 wiring guard 而非行为断言）；后半段 = 行为断言（承载文本复用 [中断轮次检查点] 头 + 每条结果摘要 + 未开始注记；闭合片段 tool_calls↔tool 成对，悬空调用必须有 pending_tool_result_note 合成 error 结果）",
+      "red_primitive": "真实断言失败（非空桩 panic、非编译错误、非 harness 超时）",
+      "red_assertion_location": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs:1346:5",
+      "red_assertion_message": "C9：生产收口路径（agent/runtime/turn_persist.rs）必须调用 interrupted_turn_assistant_text，否则纯函数实现不接线（假绿）——检查 persist_cancelled_turn_outcome / persist_turn_outcome",
+      "rerun_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+      "rerun_exit_code": 101,
+      "rerun_result": "141 passed; 1 failed; 0 ignored; finished in 8.04s",
+      "log_receipt": "/tmp/amend2-c9.log",
+      "note": "写入时 executor 尚未补接线，故 C9 按预期红（真实断言失败）；按 Lead 指示未改任何实现。executor 接线完成后本用例应自行转绿，届时复跑记录 exit code。"
+    },
+    {
+      "id": "AMEND-3a",
+      "scope": "AT2 非确定性根因定位与测试侧加固",
+      "file": "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/at2_repeated_recovery_race.rs",
+      "verdict": "测试侧（进程级 OnceLock 门控的懒初始化时序），非 SUT 竞态",
+      "assertion_strength": "未放宽：新增 Assert 0（门控稳定性）与线程间互证，判据更强",
+      "rerun_exit_code": 101,
+      "rerun_note": "全量 10/10 仍 101，但失败用例是新增 C10（见 AMEND-3b）；AT2 10/10 ok",
+      "log_receipt": "/tmp/flake2-run-*.log"
+    },
+    {
+      "id": "AMEND-3b",
+      "scope": "新增 C10：真实 sqlite load_store 重启路径（补 C6 假重启盲区）",
+      "file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+      "fixture": "临时目录真实 sqlite（SqliteSessionBackend::new_with_trace_mode(path, WriteSeparate)，XDG 沙箱）；写入后 release_log_writers_for_test() 关闭句柄，再以新连接 load_store 重新装载",
+      "case": "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication",
+      "red_assertion_message": "C10：turn-2 必须恰好 user+assistant 两条（持久化后仍完整），实际 = [(user,None),(assistant,None)] | left: 0 right: 2",
+      "red_primitive": "真实断言失败（确定性：全量 10/10 复现）",
+      "finding": {
+        "summary": "真实 sqlite 重启后内存 history 只剩上一轮（turn-1）两行且 turn_id 全为 None；中断轮 turn-2 两行只存在于 normalized_messages（turn_id=turn-2 正确），中断节点在 normalized_history_nodes 存在（kind=turn_cancelled, turn_id=turn-2）但分支头/可见光标未前移到它 ⇒ 重启视图中断轮不可见（与原事故症状同类，发生在持久化/装载路径）。",
+        "db_evidence": {
+          "sessions.session_data": "{__index_only:true, history:0, historyNodes:0}",
+          "normalized_history_cursor": "visible=branch_head=node-…486-1（turn-1 节点），active_branch=branch-main",
+          "normalized_history_branches": "head_node_id=node-…486-1（未前移）",
+          "normalized_history_nodes": "node-…486-1(turn_id=null) / node-…500-3(turn_id=turn-2, kind=turn_cancelled, snapshot 1736B)；节点 id 1→3 跳号，暗示中间节点被替换/丢弃",
+          "normalized_messages": "user(null)/assistant(null)/user(turn-2)/assistant(turn-2)：索引侧 turn_id 正确"
+        },
+        "hypothesis": "sqlite 批写入路径中 cursor/branch head 命令与被提交节点不一致（append 后内存光标已到 turn-2 节点，落库仍是上一轮节点）；node id 跳号说明有节点被二次提交覆盖。需 executor 在 session/store.rs（commit/cursor 批命令）与事件 flush 时序上核对。",
+        "note": "本用例未写 turn 事件（直连 store），生产路径 persist_turn_outcome 会先 flush 事件；若判定该缺陷只影响无事件路径，需 Lead 裁决：① executor 修 cursor/head 落库；② 将 C10 夹具改为事件驱动（persist_events）后复评。我未改任何实现。"
+      },
+      "rerun_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+      "rerun_exit_code": 101,
+      "rerun_result": "142 passed; 1 failed (仅 C10，仍先在 Assert 1「turn-2 两行缺失」失败；交叉断言待装载修复后生效)",
+      "log_receipt": "/tmp/flake2-run-*.log, /tmp/c10-cross.log",
+      "cross_assertion_added": "装载侧交叉断言（Lead 裁决追加，不新增用例）：重启后的中断轮 assistant 正文必须仍含 INTERRUPTED_RESULT_SECTION_HEADER + INTERRUPTED_PENDING_NOTE_PREFIX + 每条结果摘要 —— 同时挡「行在但内容丢」的回归。",
+      "lead_ruling": "C10 保留原夹具（真实 sqlite load_store 为最硬证据）；executor 修 ensure_history_graph 的 head 口径（含 TurnCancelled）+ 统一 turn_id 回填，不改夹具绕过"
+    },
+    {
+      "id": "AMEND-4",
+      "scope": "C10 夹具第一轮改用带轮次身份的写入口",
+      "file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+      "change": "`store.append_turn(SID, \"第一轮问题\", \"第一轮回答\", None, Vec::new())` → `store.append_turn_with_kind(SID, ..., None, None, Some(\"turn-1\"))`；保留 `record_turn_trace_in_memory(trace(\"turn-1\"))`",
+      "why": "`append_turn` 是无 turn_id 的 legacy 直连签名；真实 sqlite 取证显示该轮两行 turn_id 写入时即为 NULL。生产路径 `persist_turn_outcome` 恒传 turn_id，故夹具应显式声明轮次身份，否则测的是伪造场景（且会把 NULL turn_id 误判成装载侧缺陷）。",
+      "lead_ruling": "不修生产侧：回填历史行会改变 `turn_outcome_persisted` 幂等闸门与 cancel 补写语义，超出本波最小闭包。",
+      "rerun_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+      "rerun_exit_code": 0,
+      "rerun_result": "143 passed; 0 failed; 0 ignored; 0 filtered; 3.10s；连续 4 次复跑全绿（/tmp/amend4.log、/tmp/amend4-run-1..3.log）",
+      "attribution": "转绿为**两侧共同结果**：① 夹具侧（本条）补齐 turn-1 轮次身份；② 实现侧 executor 同期改 `agent/session/store.rs`（git diff +71/−23，含 head 口径与 turn_id 回填）。C1–C8/AT1–AT3/C9 全部保持绿。",
+      "status": "kept_after_control_experiment",
+      "control_experiment": {
+        "question": "AMEND-4（C10 第一轮显式 turn_id）是否冗余？Lead 假设：executor 修正后 sync_latest_history_node 历史腿优先 + enrich_history_from_traces 末端对齐回填，可让 legacy 夹具也转绿。",
+        "variant_A_legacy": "C10 第一轮改回 store.append_turn(Some(SID), \"第一轮问题\", \"第一轮回答\", None, Vec::new())",
+        "variant_A_exit_code": 101,
+        "variant_A_result": "142 passed; 1 failed（仅 C10）；失败原文 = `C10：turn-1 必须恰好 user+assistant 两条（不得被重启复制），实际 0 条`（left: 2 right: 0）。注意 Assert 1（turn-2 两行）在 legacy 夹具下**通过** ⇒ 中断轮装载本身已修好；失败点是 turn-1 两行在真实 sqlite 里的 turn_id 写入时即 NULL，回填/末端对齐在该路径未生效。",
+        "variant_B_explicit_turn_id": "C10 第一轮用 store.append_turn_with_kind(..., None, Some(\"turn-1\"))（AMEND-4 原写法）",
+        "variant_B_exit_code": 0,
+        "variant_B_result": "143 passed; 0 failed; 0 ignored；3.09s",
+        "verdict": "AMEND-4 不冗余：legacy 无 turn_id 写入口会让 C10 的轮次身份断言（C2 口径的 turn_id 正确性）不可满足；回填路径未覆盖 legacy 直连写入的两行，故保留显式 turn_id 夹具。",
+        "log_receipts": {
+          "variant_A": "/tmp/amend4-control.log",
+          "variant_B": "/tmp/amend4-restored.log"
+        }
+      }
+    }
+  ],
+  "current_state": {
+    "phase": "final_green_after_control_experiment",
+    "checked_at": "2026-11-12T16:58:06+08:00",
+    "command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+    "exit_code": 0,
+    "summary": "143 passed / 0 failed / 0 ignored；C1–C10 + AT1–AT3 全绿。AMEND-4 经对照实验判定**保留**（legacy 夹具 variant A = Exit 101）。",
+    "log_receipts": [
+      "/tmp/amend4-control.log",
+      "/tmp/amend4-restored.log"
+    ],
+    "not_changed": [
+      "C1–C9 断言面",
+      "AT1–AT3 断言面",
+      "任何 src/** 实现"
+    ]
+  },
+  "flakiness": {
+    "reported_by": "L3-C（独立复跑）：at2_repeated_recovery_race 首次全量 FAILED(141/1)，随后 3 次全量 + 1 次单跑全绿（4/5）",
+    "checks": [
+      {
+        "label": "全量 ×10（AMEND-1 后、C10 前）",
+        "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+        "runs": [
+          {
+            "run": 1,
+            "exit_code": 0,
+            "failed": [],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 2,
+            "exit_code": 0,
+            "failed": [],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 3,
+            "exit_code": 0,
+            "failed": [],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 4,
+            "exit_code": 0,
+            "failed": [],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 5,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 6,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 7,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 8,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 9,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          },
+          {
+            "run": 10,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "note": "run1-4 早于 C10 落地（142 tests），run5-10 含 C10（143 tests）；AT2 全程 ok"
+          }
+        ],
+        "at2_failures": 0,
+        "conclusion": "AT2 10/10 绿；run5-10 的失败全是本次新增 C10（真实 sqlite），与 AT2 无关"
+      },
+      {
+        "label": "全量 ×10（AT2 加固后，含 C10）",
+        "command": "cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance",
+        "runs": [
+          {
+            "run": 1,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 2,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 3,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 4,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 5,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 6,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 7,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 8,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 9,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          },
+          {
+            "run": 10,
+            "exit_code": 101,
+            "failed": [
+              "c10_real_sqlite_load_store_preserves_interrupted_turn_without_duplication"
+            ],
+            "at2": "ok"
+          }
+        ],
+        "at2_failures": 0,
+        "conclusion": "AT2 10/10 绿（并行全量，与 c3b/c6/c10 等改 env 的用例同进程并发）"
+      },
+      {
+        "label": "AT2 单跑 ×10",
+        "command": "cargo test ... -- --exact adversarial::at2_repeated_recovery_race::at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates",
+        "runs": [
+          {
+            "run": 1,
+            "exit_code": 101
+          },
+          {
+            "run": 2,
+            "exit_code": 101
+          },
+          {
+            "run": 3,
+            "exit_code": 101
+          },
+          {
+            "run": 4,
+            "exit_code": 101
+          },
+          {
+            "run": 5,
+            "exit_code": 101
+          },
+          {
+            "run": 6,
+            "exit_code": 101
+          },
+          {
+            "run": 7,
+            "exit_code": 101
+          },
+          {
+            "run": 8,
+            "exit_code": 0
+          },
+          {
+            "run": 9,
+            "exit_code": 0
+          },
+          {
+            "run": 10,
+            "exit_code": 0
+          }
+        ],
+        "conclusion": "run1-7 EXIT=101 全是编译错误（executor 并发编辑 provider/mod.rs 时 collapse_dsml_placeholders 未定义 E0425），非 AT2 失败；run8-10 绿。该 7 次不计入 AT2 稳定性样本。"
+      }
+    ],
+    "root_cause": {
+      "classification": "测试侧（非 SUT 竞态）",
+      "mechanism": "请求组装读取进程级 OnceLock 门控 agent::context::agent_team_policy_enabled()（context.rs:82/461），它可能被同进程其它用例懒初始化；原实现『先算参考序列 → 再起线程』会在门控初始化前后各取一次值 ⇒ System 消息条数变化 ⇒ full-body 逐字比对偶发失败。固定种子/Barrier/迭代数本身无不确定性。",
+      "evidence": "AT2 断言面无共享可变状态；同进程并行全量 20/20 绿（加固前后各 10 次）；有效单跑 3/3 绿；未复现与种子相关的差异。",
+      "fix": "测试侧加固（未放宽任何断言）：① 用例起始 isolate_process_data_dir() 锁 env 沙箱；② 先做一次 warm-up 请求强制 OnceLock 落地，再算参考序列；③ 新增 Assert 0：门控在用例期间必须不变（否则判为环境被污染而非 SUT 竞态）；④ 线程间互证（同种子所有线程逐轮逐字相同）。固定种子 + 显式 Barrier + 固定迭代语义全部保留。"
+    },
+    "log_receipts": {
+      "full_pre": "/tmp/flake-run-*.log",
+      "full_post": "/tmp/flake2-run-*.log",
+      "at2_single": "/tmp/at2-run-*.log"
+    }
+  },
+  "lead_concurrence": {
+    "authorized_by": "lead",
+    "authorized_at": "2026-11-12T17:10:00+08:00",
+    "items": {
+      "AMEND-1": "C6/AT2 哨兵计数面收敛为 native 通道内 ==1（全局计数数学不可能；observation carry 被 1518 基线钉住）",
+      "AMEND-2": "新增 C9 wiring guard（挡『纯函数实现但生产未接线』假绿）",
+      "AMEND-3a": "AT2 测试侧确定性加固（OnceLock 门控 warm-up，未放宽断言）",
+      "AMEND-3b": "C10 真实 sqlite load_store 重启用例 + 装载侧交叉断言（抓出真实缺陷：中断轮重启不可见）",
+      "AMEND-4": "C10 夹具显式 turn_id，经对照实验（legacy 变体 Exit 101）确认非冗余后保留"
+    },
+    "no_assertion_weakened": true,
+    "note": "冻结验收文件的全部改动均经 Lead 一票裁决并留痕；无 BLOCKING 放宽。"
+  }
+}

@@ -35,6 +35,11 @@ pub fn dsml_partial_tail_len(text: &str) -> Option<usize> {
 
 /// C1/C2：清洗上游模型输出内的 DSML 工具调用协议原文（流式与历史回放共用）。
 /// 返回：清洗后的用户可见文本；`incomplete=true` 表示尾部可能是被 chunk 切断的协议片段。
+///
+/// C4/C5（wave-interrupted-turn-resume）：展示侧走 [`display_dsml_protocol_text`] —— 除既有
+/// 折叠外，还丢弃行首就是协议语法的碎片行（`parameter name=…` 之类），并把连排占位符收敛为
+/// 一个。**持久化正文不得经本入口**（占位符会写回落库），落库侧走
+/// [`pony_agent_core::agent::session::interrupted_turn::persisted_assistant_text`]。
 #[allow(unused_variables)]
 pub fn sanitize_model_protocol_text(text: &str) -> (String, bool) {
     // 半截标记先截掉（流式 chunk 边界），再交给 provider 层同一纯函数做块级折叠；
@@ -43,7 +48,7 @@ pub fn sanitize_model_protocol_text(text: &str) -> (String, bool) {
         Some(len) => (&text[..text.len() - len], true),
         None => (text, false),
     };
-    let cleaned = pony_agent_core::agent::provider::sanitize_dsml_protocol_text(body);
+    let cleaned = pony_agent_core::agent::provider::display_dsml_protocol_text(body);
     (cleaned, incomplete)
 }
 
@@ -251,7 +256,9 @@ pub fn interrupted_turn_checkpoint(
 pub const INTERRUPTED_CANCELLED_LINE: &str = "上一轮已停止，发送消息可继续。";
 
 /// 上游中断/崩溃收口的**一行状态**（面向用户；步骤明细由 trace 工具行承载）。
-pub const INTERRUPTED_FAILED_LINE: &str = "上一轮中断，已保留已执行的步骤记录。";
+///
+/// C4：措辞必须显式表达"**已中断**"（与取消轮的"已停止"可区分，且是单行一句话）。
+pub const INTERRUPTED_FAILED_LINE: &str = "上一轮已中断，已保留已执行的步骤记录。";
 
 const CHECKPOINT_MARKER: &str = "[中断轮次检查点]";
 

@@ -1398,6 +1398,16 @@ fn flush_events(
     if events.is_empty() {
         return true;
     }
+    // wave-interrupted-turn-resume RC3/C5（L3-C H2）：**落库边界**清洗。
+    //
+    // 解析层 `sanitize_dsml_protocol_text` 的语义（含 `［工具调用］` 占位）是给**展示**用的，
+    // 不能改（`tui_session_resilience_chunk_split.rs` / `tui_session_resilience_acceptance.rs`
+    // 钉住该断言）。但事件是持久化真源（→ `normalized_messages` / 折叠历史 / 续跑上下文），
+    // 因此在此处把 assistant 正文的协议文本按持久化口径整块剥离：事件里不留占位符与残片。
+    let events = events
+        .into_iter()
+        .map(strip_protocol_from_persisted_event)
+        .collect();
     // PA-095 #3：阻塞式写锁（基线语义）——终态内联 flush 与 trace 持久化
     // worker 的毫秒级锁竞争等待即可；同线程自锁面已由 emit_global_event 改
     // 仅入缓冲（history 命令路径）结构性消除，此处不再需要 try_write。
@@ -1406,6 +1416,31 @@ fn flush_events(
         e.into_inner()
     });
     commit_event_batch(&mut sessions, session_id, turn_id, events)
+}
+
+/// RC3/C5（落库边界）：把事件里的 assistant 正文换成**持久化口径**（整块丢弃协议文本、
+/// 不注入占位符）。只动 `text` / `reasoning_content` 载荷，事件类型与字段形状不变。
+fn strip_protocol_from_persisted_event(
+    mut event: crate::agent::turn_event::TurnEvent,
+) -> crate::agent::turn_event::TurnEvent {
+    use crate::agent::turn_event::TurnEvent;
+    match &mut event {
+        TurnEvent::AssistantChunk { text, .. } => {
+            *text = crate::agent::provider::strip_dsml_protocol_text(text);
+        }
+        TurnEvent::AssistantMessage {
+            text,
+            reasoning_content,
+            ..
+        } => {
+            *text = crate::agent::provider::strip_dsml_protocol_text(text);
+            if let Some(reasoning) = reasoning_content.as_mut() {
+                *reasoning = crate::agent::provider::strip_dsml_protocol_text(reasoning);
+            }
+        }
+        _ => {}
+    }
+    event
 }
 
 pub struct DesktopHostPreset;
@@ -7248,7 +7283,26 @@ mod tests {
         // The fork command runs ensure_history_graph, which recomputes the
         // main branch head as the last main-branch node (excluding the
         // cancelled node).
-        assert_eq!(switched.node_id.as_deref(), Some(first_node_id.as_str()));
+        // RC2 新口径（wave-interrupted-turn-resume，Lead 裁决）：分支头 = 该分支**最后一条节点**，
+        // `TurnCancelled` 同样参与（与 `commit_history_node_from_live_state` 的写入一致）。
+        // 旧口径把未完成轮排除在 head 之外，于是"中断节点成了悬挂兄弟"：装载/投影时被排除、
+        // 重启后不可见，且 `visible ≠ head` 漂移会触发下一次隐式 fork。因此切回 main 的落点
+        // 是 main 分支的**最新节点**（本例为分叉前那次未完成轮提交），不再是首轮节点。
+        let expected_main_head = post_fork_graph
+            .branches
+            .iter()
+            .find(|branch| branch.branch_id == "branch-main")
+            .and_then(|branch| branch.head_node_id.clone());
+        assert_eq!(
+            switched.node_id, expected_main_head,
+            "切回 main 必须落在该分支头（含 TurnCancelled 节点），实际 = {:?}",
+            switched.node_id
+        );
+        assert_ne!(
+            switched.node_id.as_deref(),
+            Some(first_node_id.as_str()),
+            "新口径下 main head 已推进到未完成轮节点，不再是首轮节点"
+        );
 
         let restored = control_plane
             .restore_branch_head(RestoreBranchHeadCommand {

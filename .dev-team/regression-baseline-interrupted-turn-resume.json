@@ -1,0 +1,14 @@
+{
+  "wave": "interrupted-turn-resume",
+  "cmd": "cargo test -p pony-agent-core --lib",
+  "exit_code": 0,
+  "result_line": "test result: ok. 1518 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 795.84s",
+  "log_path_host": "/home/dm/pony-agent/.dev-team/regression/baseline-lib.log",
+  "log_sha256": "a1a45de7e1109c0e7d4dc82ee0904f28dec8f688a22651f8c0d9d30975a9dc2e",
+  "log_tail": [
+    "{\"decision\":\"Fail\",\"level\":\"debug\",\"message\":\"ask-aware turn finished inside a real graph run\",\"run_id\":\"run-1794461602505\",\"run_phase\":\"Failed\",\"trace_id\":null,\"ts\":\"2026-11-12T05:46:38.211Z\",\"turn_id\":\"turn-ask-resume-fallback-unit-1\"}",
+    ".",
+    "test result: ok. 1518 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 795.84s"
+  ],
+  "note": "日志文件被 .gitignore 忽略，故以 JSON 收据入库；原件留主工作树 .dev-team/regression/（只读对照）。"
+}
