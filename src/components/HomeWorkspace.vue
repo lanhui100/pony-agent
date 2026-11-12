@@ -1862,7 +1862,8 @@ function handleScrollToLatestMouseLeave() {
 }
 
 onMounted(() => {
-  resetState();
+  // B098/B105「UI 状态恢复」尚未实现：e3bfca93 只落了本调用而无 resetState 定义，
+  // 运行期会抛 ReferenceError 打断挂载。此处按「挂载即初始态」处理，语义与未实现一致。
   if (typeof window !== "undefined") {
     showReasoningContent.value = window.localStorage.getItem(SHOW_REASONING_STORAGE_KEY) === "true";
     loadStreamingRenderConfig();
