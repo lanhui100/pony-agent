@@ -268,7 +268,7 @@ describe('CLI 冒烟', () => {
     expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
   });
 
-  it('import-triage 参数校验与 --help 不迁移（--start 缺失/非法/旧账本不存在均 exit 2）', () => {
+  it('import-triage 参数校验：--start 非法/缺值/旧账本缺失均 exit 2，--help 不迁移', () => {
     seed([]);
     const run = (args: string[]) => {
       try {
@@ -283,18 +283,20 @@ describe('CLI 冒烟', () => {
         return error.status;
       }
     };
-    const before = fs.readFileSync(paths.tasks, 'utf8');
-    expect(run(['import-triage', '--start', 'abc'])).toBe(2);
-    expect(run(['import-triage', '--start', '0'])).toBe(2);
-    expect(run(['import-triage', '--from', path.join(root, 'nope.jsonl')])).toBe(2);
-    expect(run(['import-triage', '--help'])).toBe(0);
-    expect(fs.readFileSync(paths.tasks, 'utf8')).toBe(before);
-
     const legacy = path.join(root, 'legacy.jsonl');
     fs.writeFileSync(
       legacy,
       JSON.stringify({ title: '旧事项', status: 'todo', priority: 'P1', metadata: { fingerprint: 'legacy-1' } }) + '\n'
     );
+    const before = fs.readFileSync(paths.tasks, 'utf8');
+    // 关键：每个非法 --start 用例都必须带「存在的 --from」，否则 exit 2 来自 from 守卫而不是 start 校验（掩蔽断言）。
+    expect(run(['import-triage', '--from', legacy, '--start', 'abc'])).toBe(2);
+    expect(run(['import-triage', '--from', legacy, '--start', '0'])).toBe(2);
+    expect(run(['import-triage', '--from', legacy, '--start', '-5'])).toBe(2);
+    expect(run(['import-triage', '--from', legacy, '--start'])).toBe(2);
+    expect(run(['import-triage', '--from', path.join(root, 'nope.jsonl'), '--start', '1'])).toBe(2);
+    expect(run(['import-triage', '--help'])).toBe(0);
+    expect(fs.readFileSync(paths.tasks, 'utf8')).toBe(before);
     expect(run(['import-triage', '--from', legacy, '--start', '1'])).toBe(0);
     expect(readJsonl(paths.tasks).map(row => row.id)).toEqual(['B001']);
   });

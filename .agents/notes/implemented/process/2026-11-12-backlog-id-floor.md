@@ -15,7 +15,9 @@ pony-agent 2026-11-11 从 legacy triage 迁移、避开旧 `B001–B055` 编号�
    仍由 `.next-id` 高水位保证，不依赖任何常量。
 2. 迁移旧账本的起始号改由**命令显式声明**：`import-triage --start <N>`（默认 56 仅为 pony-agent legacy
    兼容保留，并在函数注释中写明用途）。起始号是迁移决策，应出现在命令与 ADR 里，而不是藏在通用代码里。
-3. 同步更新全局技能 `pg-backlog/references/onboarding.md` 的「编号下限」注意事项：新仓从 `B001` 起；
+3. 迁移入口 `import-triage` 参数先校验再动手：`--start` 不是 ≥1 的整数、或 `--from` 指向的旧账本不存在
+   → `exit 2` 且不写账本；`--help`/`-h` 只打印用法、**不静默执行迁移**；usage 行补齐 `--from/--start`。
+4. 同步更新全局技能 `pg-backlog/references/onboarding.md` 的「编号下限」注意事项：新仓从 `B001` 起；
    迁移仓用 `--start` 显式指定。
 4. pony-agent 现账本 `.next-id = 112`，高于任何历史编号，本次改动对它零影响（无重编号、无迁移）。
 
@@ -28,7 +30,10 @@ pony-agent 2026-11-11 从 legacy triage 迁移、避开旧 `B001–B055` 编号�
 
 ## Consequences
 
-- 改 1 行分配逻辑 + 2 条单测期望（`B056/B057` → `B001/B002`、高水位 `57` → `2`）；`vitest` 35 例全绿。
+- 改 1 行分配逻辑 + 2 条单测期望（`B056/B057` → `B001/B002`、高水位 `57` → `2`），并补 `import-triage`
+  参数校验用例（非法/缺值 `--start`、缺失 `--from`、`--help` 不迁移、`--start 1` 迁移出 `B001`）；
+  `vitest` 36 例全绿。非法 `--start` 断言必须带**存在的** `--from`，否则 exit 2 会来自 from 守卫、
+  令 `--start` 校验的变异测试假绿（本 ADR 记录该测试陷阱）。
 - 新仓接入从 `B001` 起；pony-agent 后续分配仍从 `B112` 继续，无重编号。
 - `normalizeLegacy`/`import-triage` 的默认起始号 56 保留，但定位为「pony-agent legacy 兼容默认」，
   文档与注释写明可显式覆盖；新仓若要走该入口，应传 `--start 1`。
