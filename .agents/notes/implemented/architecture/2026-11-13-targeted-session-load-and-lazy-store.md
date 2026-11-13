@@ -169,4 +169,11 @@ blob」为实现前提，必须走 SQL 投影。
   只在 `turn_trace_history` 为空时触发，避免覆盖投影补全已给出的结果。
 - **回归守护**：上述 PTY 用例（真实二进制 + 真实伪终端）留在 `cargo test` 全量里；
   另用 `d18bde15` worktree 复现「修复前红、修复后绿」的对照读数。
+- **修复后 release 复测**（1.48 GB 真实库副本 / 227 会话 / legacy 相位，`perf_lazy` 3 轮）：
+  `open_lazy` Ready **3.17–3.61 ms**、Ready 时 RSS **17.8–19.9 MB**、
+  定向 hydrate 最大会话（41 轮 / 98 条历史）**150–191 ms**、同库全量装 **5030 ms**、
+  快照等价抽样 **8/8 identical**。
+- 已知残留复现：`D_list_parity` 仍为 `identical=false`（227/227 条，差异全部落在
+  **毫秒并列**会话的先后，即下文 Consequences 已登记的口径，非新增缺陷）。
+
 
