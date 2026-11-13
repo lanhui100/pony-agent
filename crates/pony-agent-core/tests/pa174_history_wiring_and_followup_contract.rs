@@ -1299,8 +1299,8 @@ fn f3_upstream_policy_report_exposes_disk_and_effective() {
     let legal_report = upstream_policy_report(&raw_legal, &effective_legal);
     assert_eq!(
         policy_triple(&legal_report, "disk_policy"),
-        (45_000, 5, 30_000),
-        "PA-174 F3：合法配置的 `disk_policy` 必须原样暴露，实际 {legal_report}"
+        (45_000, 10, 60_000),
+        "PA-174 F3：合法配置的 `disk_policy` 必须原样暴露（2026-11-14 默认值 45000/10/60000），实际 {legal_report}"
     );
     assert_eq!(
         legal_report.get("clamped_fields").and_then(Value::as_array),

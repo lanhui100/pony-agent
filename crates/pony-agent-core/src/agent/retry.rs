@@ -1299,6 +1299,120 @@ pub fn note_provider_attempt_backoff_slept(slept_ms: u64) {
     });
 }
 
+// ── 上游重试的**实时**观测出口（2026-11-14） ─────────────────────────────────
+//
+// 需求：重试进度必须出现在界面的状态消息里（此前只有 `provider_log` 落盘，界面 0 信号；
+// 历史上界面曾伪造「重试中(1/5)」，因为拿不到真实分母）。
+//
+// 为什么是 thread_local 观察者而不是事件 sink：重试循环在库层深处，拿不到 turn 层的
+// `TurnEventSink`（sink 以 `&impl TurnEventSink` 逐层传参，无法存进 'static 的
+// thread_local），而一次 provider 调用（含其内部重试与换手）与 `on_delta` 回调都在
+// **同一线程同步执行** —— 与本文件 `ATTEMPT_WINDOW` 完全同一取舍。故由宿主（TUI 轮次
+// 线程 / 桌面端 spawn_blocking 任务）安装一个通知闭包即可拿到实时进度；
+// 未安装 ⇒ 静默 no-op（CLI、测试、子代理线程零副作用）。
+thread_local! {
+    static RETRY_OBSERVER: RefCell<Option<RetryObserver>> = const { RefCell::new(None) };
+}
+
+/// 一次「即将重试」的事实。`attempt` = **已失败**的尝试次数（1 起），
+/// `max_attempts` = 本跳允许的尝试总数（含首次）⇒ 界面口径 `attempt/max_attempts`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryNotice {
+    /// provider 调用名（`decision` / `decision_stream` / `followup` …），与 `provider_log` 同源。
+    pub label: String,
+    /// 重试作用域（`decision` / `followup`）。
+    pub scope: &'static str,
+    /// 已失败的尝试次数（含首次失败），1 起。
+    pub attempt: u32,
+    /// 本跳允许的尝试总数（含首次）。
+    pub max_attempts: u32,
+    /// 本次退避将 sleep 的毫秒数（尚未执行）。
+    pub delay_ms: u64,
+    /// 失败分类（`retry::classify_error_class` 口径，用于区分限流/超时/服务端）。
+    pub error_class: String,
+}
+
+/// 重试通知观察者（宿主安装；签名刻意用 `&RetryNotice` 以便零拷贝）。
+pub type RetryObserver = Box<dyn Fn(&RetryNotice)>;
+
+/// 观察者守卫：生命周期 = 宿主轮次线程生命周期，`drop` 即摘除（避免后续调用误投递）。
+pub struct RetryObserverGuard {
+    installed: bool,
+}
+
+impl RetryObserverGuard {
+    /// 未安装任何观察者时的空守卫（便于调用方统一持有）。
+    pub fn idle() -> Self {
+        Self { installed: false }
+    }
+}
+
+impl Drop for RetryObserverGuard {
+    fn drop(&mut self) {
+        if self.installed {
+            RETRY_OBSERVER.with(|slot| {
+                *slot.borrow_mut() = None;
+            });
+        }
+    }
+}
+
+/// 在当前线程安装重试通知观察者（覆盖既有安装；同线程仅需一个）。
+pub fn install_retry_observer(observer: RetryObserver) -> RetryObserverGuard {
+    RETRY_OBSERVER.with(|slot| {
+        *slot.borrow_mut() = Some(observer);
+    });
+    RetryObserverGuard { installed: true }
+}
+
+/// 派发一次「即将重试」通知（未安装观察者 ⇒ 静默 no-op）。
+///
+/// 观察者必须**非阻塞**（生产实现只往 channel 里 `send`），否则会拖慢退避调度。
+pub fn notify_provider_retry(notice: &RetryNotice) {
+    RETRY_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow().as_ref() {
+            observer(notice);
+        }
+    });
+}
+
+/// 「即将重试」通知的装配器：绑定 provider 调用名与作用域，供重试循环逐次派发。
+///
+/// 只报告**真实发生**的重试（调用点都在 `RetryDecision::Retry` 分支内、sleep 之前）；
+/// 分母 `max_attempts` = `max_retries + 1`（含首次），与分子同源，不虚构进度。
+pub struct RetryNotifier {
+    label: String,
+    scope: &'static str,
+}
+
+impl RetryNotifier {
+    /// 绑定 provider 调用名（`decision` / `followup` …）与重试作用域。
+    pub fn new(label: &str, scope: &'static str) -> Self {
+        Self {
+            label: label.to_string(),
+            scope,
+        }
+    }
+
+    /// 派发一次通知（未安装观察者 ⇒ no-op）。`attempt` = 已失败次数（1 起）。
+    pub fn notify(
+        &self,
+        attempt: u32,
+        config: &BackoffConfig,
+        last_error: &str,
+        next_attempt: u32,
+    ) {
+        notify_provider_retry(&RetryNotice {
+            label: self.label.clone(),
+            scope: self.scope,
+            attempt,
+            max_attempts: config.max_retries.saturating_add(1),
+            delay_ms: compute_delay(next_attempt, config, 0.5).as_millis() as u64,
+            error_class: classify_error_class(last_error).to_string(),
+        });
+    }
+}
+
 /// 纯净 per-call 窗口的结算结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PureCallWindow {

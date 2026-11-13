@@ -5284,14 +5284,7 @@ const OPENAI_TOOL_RESULT_SUMMARY_PREVIEW_CHARS: usize = 240;
 /// reasoning_content（实测 API 只校验非空，不校验内容一致性）。
 /// 本地 planner 决策等来源没有该字段时用此占位文本兜底。
 const TOOL_CALL_REASONING_PLACEHOLDER: &str = "工具调用前的思考过程已省略。";
-// PA-172 §2.1：尝试次数与退避预算不再是硬编码常量 —— 取值来自 `UpstreamPolicy`
-// （默认 `UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT = 5` / `UPSTREAM_RETRY_BUDGET_MS_DEFAULT = 30_000`，
-// 与基线 `PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS = 5` + `total_budget_ms = 30_000` 逐字节等价，G2）。
-/// 短退避曲线的固定形状（初始延迟 / 倍率 / 单次上限 / 无抖动），与基线一致；
-/// 只有 `max_retries` 与 `total_budget_ms` 由策略驱动。
-const PROVIDER_TIMEOUT_BACKOFF_INITIAL_DELAY_MS: u64 = 500;
-const PROVIDER_TIMEOUT_BACKOFF_MULTIPLIER: f64 = 2.0;
-const PROVIDER_TIMEOUT_BACKOFF_MAX_DELAY_MS: u64 = 8_000;
+/// 短退避曲线的形状与「策略驱动」取舍：见 `config::UpstreamPolicy::short_backoff_config`。
 
 /// PA-171 C3-S4/C3-P1：非 2xx 错误文本的**唯一装配点**。
 ///
@@ -5571,25 +5564,10 @@ enum ProviderRetryScope {
     Followup,
 }
 
-/// PA-172 §2.1：短退避配置由 [`UpstreamPolicy`] 驱动。
-///
-/// `decision_max_attempts` 是"含首次"的尝试次数 ⇒ `max_retries = attempts - 1`
-/// （基线 5 ⇒ 4，逐字节等价）；`retry_budget_ms` 是 sleep-only 预算（基线 30_000ms）。
-fn provider_timeout_backoff_config_for(policy: &UpstreamPolicy) -> BackoffConfig {
-    BackoffConfig {
-        max_retries: policy.decision_max_attempts.saturating_sub(1),
-        initial_delay_ms: PROVIDER_TIMEOUT_BACKOFF_INITIAL_DELAY_MS,
-        multiplier: PROVIDER_TIMEOUT_BACKOFF_MULTIPLIER,
-        max_delay_ms: PROVIDER_TIMEOUT_BACKOFF_MAX_DELAY_MS,
-        total_budget_ms: policy.retry_budget_ms,
-        jitter_kind: JitterKind::None,
-    }
-}
-
 /// 基线默认包装（未注入策略的调用点/既有单测保持 `UpstreamPolicy::default()` 语义）。
 #[cfg(test)]
 fn provider_timeout_backoff_config() -> BackoffConfig {
-    provider_timeout_backoff_config_for(&UpstreamPolicy::default())
+    UpstreamPolicy::default().short_backoff_config()
 }
 
 /// rate-limit 专用调度（仅 Followup 作用域）：两次重试 sleep 20s→40s（budget 90s），
@@ -5629,7 +5607,7 @@ where
     retry_provider_scoped_with_sleeper_and_config(
         label,
         ProviderRetryScope::Decision,
-        provider_timeout_backoff_config_for(policy),
+        policy.short_backoff_config(),
         operation,
         &StdThreadSleeper,
         None,
@@ -5675,7 +5653,7 @@ where
     retry_provider_scoped_with_sleeper_and_config(
         label,
         ProviderRetryScope::Decision,
-        provider_timeout_backoff_config_for(policy),
+        policy.short_backoff_config(),
         operation,
         &DeadlineSleeper { deadline },
         None,
@@ -5698,7 +5676,7 @@ where
     retry_provider_scoped_with_sleeper_and_config(
         label,
         ProviderRetryScope::Followup,
-        provider_timeout_backoff_config_for(policy),
+        policy.short_backoff_config(),
         operation,
         &DeadlineSleeper { deadline },
         None,
@@ -5722,7 +5700,7 @@ where
     retry_provider_scoped_with_sleeper_and_config(
         label,
         ProviderRetryScope::Followup,
-        provider_timeout_backoff_config_for(policy),
+        policy.short_backoff_config(),
         operation,
         &StdThreadSleeper,
         Some(no_more_retries_hint),
@@ -5843,6 +5821,8 @@ where
     let mut slept_ms = 0_u64;
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let mut last_failure: Option<String> = None;
+    // 2026-11-14：一次「即将重试」的实时通知（宿主装了观察者才有消费者，否则 no-op）。
+    let retry_notify = crate::agent::retry::RetryNotifier::new(label, scope_label);
 
     loop {
         if attempt > 0 {
@@ -5927,7 +5907,10 @@ where
                          decision={decision:?} scope={scope:?} switch=rate_limit"
                     ));
                     match decision {
-                        RetryDecision::Retry { .. } => continue,
+                        RetryDecision::Retry { .. } => {
+                            retry_notify.notify(attempts_total, &active_config, &err, attempt);
+                            continue;
+                        }
                         _ => {
                             let outcome = report(&budget, attempts_total, slept_ms, rl_active);
                             return (Err(last_error), outcome);
@@ -5949,6 +5932,12 @@ where
                 ));
                 match decision {
                     RetryDecision::Retry { .. } => {
+                        retry_notify.notify(
+                            attempts_total,
+                            &active_config,
+                            &err,
+                            attempt.saturating_add(1),
+                        );
                         attempt += 1;
                     }
                     _ => {

@@ -24,7 +24,7 @@ fn transient_summary_no_longer_claims_retry_is_running() {
 }
 
 #[test]
-fn transient_summary_renders_as_bold_danger() {
+fn transient_summary_renders_as_danger_without_bold() {
     let severity = system_message_severity(ERROR_SUMMARY_TRANSIENT);
     assert_eq!(
         severity,
@@ -35,11 +35,11 @@ fn transient_summary_renders_as_bold_danger() {
     assert_eq!(
         style.fg,
         Some(theme::DANGER),
-        "终态错误必须用 DANGER 前景色"
+        "终态错误必须用 DANGER 前景色（警示色 = 唯一区分手段）"
     );
     assert!(
-        style.add_modifier.contains(Modifier::BOLD),
-        "终态错误必须加粗，与普通 System 提示区分"
+        !style.add_modifier.contains(Modifier::BOLD),
+        "2026-11-14 用户裁决：已有警示色即足够醒目，错误文本**不得**再叠加 BOLD 加重显示"
     );
 }
 

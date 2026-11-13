@@ -1,4 +1,5 @@
 use crate::agent::provider::{ProviderAuthType, ProviderProtocol};
+use crate::agent::retry::{BackoffConfig, JitterKind};
 use crate::agent::secret_store::{default_secret_store, SecretStore};
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
@@ -23,15 +24,26 @@ const DEFAULT_MODERN_MAX_OUTPUT_TOKENS: u32 = 64000;
 
 // ── PA-172 §2：上游调用策略（超时/重试/退避）配置面 ──────────────────────────────
 //
-// 默认值 = PA-171 交付后（基线 `458b952e`）的硬编码真值，逐字节等价（矩阵 G2）：
-// 45s 同步总超时（`provider/mod.rs` 两处内联字面量）、5 次决策尝试、30s 退避预算。
+// 默认值 = PA-171 交付后（基线 `458b952e`）的硬编码真值；2026-11-14 仅调整两个默认值
+// （决策尝试 5 → 10、退避预算 30s → 60s），超时与全部边界不变：
+// 45s 同步总超时（`provider/mod.rs` 两处内联字面量）、10 次决策尝试、60s 退避预算。
 
 /// 同步请求单次 attempt 的总超时（毫秒）。默认 45s（基线内联 `Duration::from_secs(45)`）。
 pub const UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT: u64 = 45_000;
-/// 决策/跟进单跳的最大尝试次数（含首次）。默认 5（基线 `PROVIDER_TIMEOUT_RETRY_MAX_ATTEMPTS`）。
-pub const UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT: u32 = 5;
-/// 单跳短退避的 sleep 预算（毫秒）。默认 30s（基线 `BackoffConfig::total_budget_ms`）。
-pub const UPSTREAM_RETRY_BUDGET_MS_DEFAULT: u64 = 30_000;
+/// 决策/跟进单跳的最大尝试次数（含首次）。默认 **10**（= 首次 + 9 次重试）。
+///
+/// 2026-11-14：由 5（首次 + 4 次重试，参考 dsh 的口径）翻倍到 10 —— 用户要求把上游重试
+/// 提到「10 次」。本配置面历来按**尝试次数（含首次）**计量（`max_retries = attempts - 1`，
+/// 见 `provider::provider_timeout_backoff_config_for`），故 10 次尝试 = 9 次重试；上界
+/// [`UPSTREAM_DECISION_MAX_ATTEMPTS_MAX`] 同为 10 ⇒ 默认值即最大值，用户仍可下调（[2,10]）。
+pub const UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT: u32 = 10;
+/// 单跳短退避的 sleep 预算（毫秒）。默认 **60s**（基线为 30s）。
+///
+/// 2026-11-14：随默认尝试次数 5 → 10 同步上调 30s → 60s。理由是**预算必须装得下曲线**：
+/// 退避形状为 500ms→×2→封顶 8s（`PROVIDER_TIMEOUT_BACKOFF_*`），9 次重试的 sleep 合计
+/// `500+1000+2000+4000+8000×5 = 47_500ms`；沿用 30s 时第 7 次尝试即命中
+/// `elapsed >= total_budget_ms` 提前耗尽，次数上调形同虚设。60s 给 12.5s 余量。
+pub const UPSTREAM_RETRY_BUDGET_MS_DEFAULT: u64 = 60_000;
 /// `requestTimeoutMs` 下界：PA-173 D2 由 1000 上调到 **15000**。
 ///
 /// 依据（实测）：最小同步请求 1.76s、网关 p50 2.2s、模型 p50 4.67s ⇒ 1s 下界**物理上不可达**，
@@ -42,7 +54,7 @@ pub const UPSTREAM_REQUEST_TIMEOUT_MS_MAX: u64 = 300_000;
 /// `decisionMaxAttempts` 下界：PA-173 D2 由 1 上调到 **2**。
 ///
 /// 1 = 「合法零重试」（一次失败即放弃），与「重试预算」配置面语义相悖；抬到 2 保证下界至少
-/// 含一次重试，同时默认值 5 与上界 10 不变。
+/// 含一次重试，同时默认值（10）与上界（10）不变。
 pub const UPSTREAM_DECISION_MAX_ATTEMPTS_MIN: u32 = 2;
 /// `decisionMaxAttempts` 上界。
 pub const UPSTREAM_DECISION_MAX_ATTEMPTS_MAX: u32 = 10;
@@ -55,8 +67,14 @@ pub const UPSTREAM_RETRY_BUDGET_MS_MIN: u64 = 5_000;
 pub const UPSTREAM_RETRY_BUDGET_MS_MAX: u64 = 300_000;
 /// PA-174 F2：同步调用跨 attempt 的**总 deadline 上限**（180s）。
 ///
-/// 「次数 × 单次超时」会线性放大：默认 `45000×5+30000 = 255s` 已远超用户可接受的同步等待；
+/// 「次数 × 单次超时」会线性放大：默认 `45000×10+60000 = 510s` 已远超用户可接受的同步等待；
 /// 故聚合预算必须封顶，见 [`aggregate_sync_call_budget_ms`]。
+///
+/// 2026-11-14（默认尝试次数 → 10）复核后**刻意保持 180s 不变**：该上限约束的是
+/// 「每次 attempt 都吃满 45s 超时」的病态慢路径（上游已挂死，重试只会放大等待）；
+/// 而重试真正救得回来的**快失败**（429/5xx/连接重置，单次约百毫秒级）9 次重试的
+/// sleep 合计仅 47.5s，180s 内可跑满 10 次尝试。即：次数上调对快失败完全生效，
+/// 对慢超时仍由墙钟护栏收口（这正是 PA-174 F2 的立法本意）。
 pub const UPSTREAM_AGGREGATE_DEADLINE_MS_MAX: u64 = 180_000;
 /// PA-172 §2.3 C2-c：显式候选链的长度上限（超出截断并 `warn failover_candidate_ignored`）。
 pub const FAILOVER_CHAIN_MAX_LEN: usize = 8;
@@ -417,6 +435,29 @@ impl Default for UpstreamPolicy {
             request_timeout_ms: default_request_timeout_ms(),
             decision_max_attempts: default_decision_max_attempts(),
             retry_budget_ms: default_retry_budget_ms(),
+        }
+    }
+}
+
+/// 短退避曲线的固定形状（初始延迟 / 倍率 / 单次上限 / 无抖动），与基线一致；
+/// 只有 `max_retries` 与 `total_budget_ms` 由策略驱动。
+const SHORT_BACKOFF_INITIAL_DELAY_MS: u64 = 500;
+const SHORT_BACKOFF_MULTIPLIER: f64 = 2.0;
+const SHORT_BACKOFF_MAX_DELAY_MS: u64 = 8_000;
+
+impl UpstreamPolicy {
+    /// PA-172 §2.1：本策略对应的短退避配置（policy → 重试曲线的唯一映射点）。
+    ///
+    /// `decision_max_attempts` 是「含首次」的尝试次数 ⇒ `max_retries = attempts - 1`；
+    /// `retry_budget_ms` 是 sleep-only 预算。
+    pub fn short_backoff_config(&self) -> BackoffConfig {
+        BackoffConfig {
+            max_retries: self.decision_max_attempts.saturating_sub(1),
+            initial_delay_ms: SHORT_BACKOFF_INITIAL_DELAY_MS,
+            multiplier: SHORT_BACKOFF_MULTIPLIER,
+            max_delay_ms: SHORT_BACKOFF_MAX_DELAY_MS,
+            total_budget_ms: self.retry_budget_ms,
+            jitter_kind: JitterKind::None,
         }
     }
 }
@@ -2149,6 +2190,10 @@ fn default_model(protocol: &ProviderProtocol) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "config_normalize_tests.rs"]
+mod config_normalize_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2531,65 +2576,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn normalize_storage_deduplicates_model_values_within_provider() {
-        let normalized = normalize_storage(ProviderRegistryStorage {
-            upstream_policy: UpstreamPolicyStorage::default(),
-            failover_provider_ids: Vec::new(),
-            providers: vec![ProviderConfigStorage {
-                id: "provider-openai".to_string(),
-                name: "openai".to_string(),
-                protocol: ProviderProtocol::OpenAiCompletions,
-                base_url: "https://api.openai.com/v1".to_string(),
-                auth_type: ProviderAuthType::Auto,
-                api_key_env_var: "OPENAI_API_KEY".to_string(),
-                secret_ref: default_secret_ref("provider-openai"),
-                api_key_value: String::new(),
-                selected_model_id: Some("model-gpt-5-copy".to_string()),
-                models: vec![
-                    ProviderModelConfig {
-                        id: "model-gpt-5".to_string(),
-                        name: "GPT-5".to_string(),
-                        model: "gpt-5".to_string(),
-                        temperature: 0.2,
-                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-                        capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
-                        reasoning_effort: Some(ProviderReasoningEffort::Medium),
-                        reasoning_budget_tokens: None,
-                        protocol: Some(ProviderProtocol::OpenAiCompletions),
-                        base_url: None,
-                        capabilities: ProviderModelCapabilities::default(),
-                    },
-                    ProviderModelConfig {
-                        id: "model-gpt-5-copy".to_string(),
-                        name: "GPT-5 Copy".to_string(),
-                        model: " GPT-5 ".to_string(),
-                        temperature: 0.2,
-                        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-                        capability_preset: ProviderCapabilityPreset::OpenAiReasoning,
-                        reasoning_effort: Some(ProviderReasoningEffort::Medium),
-                        reasoning_budget_tokens: None,
-                        protocol: Some(ProviderProtocol::OpenAiCompletions),
-                        base_url: None,
-                        capabilities: ProviderModelCapabilities::default(),
-                    },
-                ],
-                supported_protocols: vec![ProviderProtocol::OpenAiCompletions],
-                endpoints: vec![ProviderProtocolEndpoint {
-                    protocol: ProviderProtocol::OpenAiCompletions,
-                    enabled: true,
-                    base_url: "https://api.openai.com/v1".to_string(),
-                    auth_type: ProviderAuthType::Auto,
-                }],
-            }],
-            selected_provider_id: Some("provider-openai".to_string()),
-        });
-        let provider = &normalized.providers[0];
-
-        assert_eq!(provider.models.len(), 1);
-        assert_eq!(provider.models[0].id, "model-gpt-5");
-        assert_eq!(provider.selected_model_id.as_deref(), Some("model-gpt-5"));
-    }
 
     fn temp_registry_root(label: &str) -> PathBuf {
         let stamp = std::time::SystemTime::now()

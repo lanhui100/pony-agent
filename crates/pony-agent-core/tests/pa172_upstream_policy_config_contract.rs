@@ -122,7 +122,7 @@ fn policy_of(view_json: &Value) -> Option<&Value> {
 
 // ── §2.1：默认值 + is_default（G2 默认零行为变更） ───────────────────────────────
 
-/// G2：未配置时默认 45000 / 5 / 30000，且 `is_default()` 为真。
+/// G2 / 2026-11-14 默认值调整：未配置时默认 45000 / **10** / **60000**，且 `is_default()` 为真。
 #[test]
 fn upstream_policy_defaults_match_frozen_baseline() {
     // Arrange + Act
@@ -135,13 +135,13 @@ fn upstream_policy_defaults_match_frozen_baseline() {
         policy.request_timeout_ms
     );
     assert_eq!(
-        policy.decision_max_attempts, 5,
-        "G2：默认决策尝试次数必须沿用基线的 5，实际 {}",
+        policy.decision_max_attempts, 10,
+        "2026-11-14：默认决策尝试次数由 5 上调到 10（含首次 ⇒ 9 次重试），实际 {}",
         policy.decision_max_attempts
     );
     assert_eq!(
-        policy.retry_budget_ms, 30_000,
-        "G2：默认退避预算必须沿用基线的 30s，实际 {}",
+        policy.retry_budget_ms, 60_000,
+        "2026-11-14：默认退避预算由 30s 上调到 60s（9 次退避 sleep 合计 47.5s 必须装得下），实际 {}",
         policy.retry_budget_ms
     );
     assert!(policy.is_default(), "G2：`UpstreamPolicy::default()` 必须 `is_default()`");
@@ -161,12 +161,13 @@ fn upstream_policy_defaults_match_frozen_baseline() {
 ///
 /// **PA-173 D2 迁移**（Lead 裁决）：三个下界再上调为 **15000 / 2 / 5000**——
 /// 实测最小同步请求 1.76s、网关 p50 2.2s、模型 p50 4.67s、p99 36s ⇒ 1000ms 下界物理
-/// 不可达；attempts 下界 1 等于「合法的零重试」。默认值 45000/5/30000 与上界不动。
+/// 不可达；attempts 下界 1 等于「合法的零重试」。上界不动；默认值 2026-11-14 调整为
+/// **45000 / 10 / 60000**（用户要求把上游重试提到 10 次，退避预算随之装得下整条曲线）。
 #[test]
 fn upstream_policy_constants_are_frozen() {
     assert_eq!(UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT, 45_000);
-    assert_eq!(UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT, 5);
-    assert_eq!(UPSTREAM_RETRY_BUDGET_MS_DEFAULT, 30_000);
+    assert_eq!(UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT, 10);
+    assert_eq!(UPSTREAM_RETRY_BUDGET_MS_DEFAULT, 60_000);
     assert_eq!(
         UPSTREAM_REQUEST_TIMEOUT_MS_MIN, 15_000,
         "PA-173 D2：请求超时下界 1000 → 15000（1.76s 实测最小完成时间下的 1s 下界物理不可达）"
@@ -338,7 +339,7 @@ fn upstream_policy_wire_defaults_fill_missing_fields() {
     assert_eq!(
         absent,
         UpstreamPolicy::default(),
-        "§2.3 行12：缺省 upstreamPolicy ⇒ 45000/5/30000，实际 {absent:?}"
+        "§2.3 行12：缺省 upstreamPolicy ⇒ 45000/10/60000，实际 {absent:?}"
     );
 
     // 行 13：段内缺字段（只有 requestTimeoutMs）
@@ -707,7 +708,7 @@ fn upstream_policy_tolerates_wrong_types() {
             "decisionMaxAttempts": UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT,
             "retryBudgetMs": UPSTREAM_RETRY_BUDGET_MS_DEFAULT
         })),
-        "v2-3：类型错乱字段必须回落默认 45000/5/30000，实际 {:?}",
+        "v2-3：类型错乱字段必须回落默认 45000/10/60000，实际 {:?}",
         policy_of(&reloaded)
     );
 

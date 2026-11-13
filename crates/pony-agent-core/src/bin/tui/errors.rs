@@ -169,11 +169,13 @@ pub fn system_message_severity(content: &str) -> SystemMessageSeverity {
 ///
 /// `fallback` 供调用方保留原有「无严重级」配色（如消息区 Info 用 `muted()`、
 /// 状态栏 Info 用 `muted()`/`faint()`）。
+///
+/// 2026-11-14（用户裁决）：`Error` **不再叠加 `BOLD`** —— DANGER 前景色本身已是醒目
+/// 警示色，再加字重属于「加重显示」，且与消息区/状态行同时出同一句时更像重复强调。
+/// 区分度靠颜色（Error=DANGER / Warning=WARN / Info=fallback），不靠字重。
 pub fn severity_style(severity: SystemMessageSeverity, fallback: Style) -> Style {
     match severity {
-        SystemMessageSeverity::Error => {
-            Style::default().fg(theme::DANGER).add_modifier(Modifier::BOLD)
-        }
+        SystemMessageSeverity::Error => Style::default().fg(theme::DANGER),
         SystemMessageSeverity::Warning => Style::default().fg(theme::WARN),
         SystemMessageSeverity::Info => fallback,
     }

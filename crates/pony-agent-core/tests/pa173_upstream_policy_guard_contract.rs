@@ -259,8 +259,9 @@ fn d1_clamped_policy_is_not_persisted_but_still_takes_effect() {
     );
 }
 
-/// D1 反向钉子（防过度修复）：**合法**策略 `(45000, 5, 30000)` 走带 env-sync 的公开保存
-/// 入口（`save_view`）往返后，盘上逐字段不变，生效策略等于该值且 `is_default()`。
+/// D1 反向钉子（防过度修复）：**合法**策略 `(45000, 10, 60000)`（= 2026-11-14 起的默认值）
+/// 走带 env-sync 的公开保存入口（`save_view`）往返后，盘上逐字段不变，生效策略等于该值且
+/// `is_default()`。
 #[test]
 fn d1_legal_policy_round_trips_unchanged() {
     // ── Arrange ────────────────────────────────────────────────────────────────
@@ -270,8 +271,8 @@ fn d1_legal_policy_round_trips_unchanged() {
         serde_json::to_value(store.load_view()).expect("PA-173：ProviderRegistryView 必须可序列化");
     view_json["upstreamPolicy"] = json!({
         "requestTimeoutMs": 45_000,
-        "decisionMaxAttempts": 5,
-        "retryBudgetMs": 30_000
+        "decisionMaxAttempts": 10,
+        "retryBudgetMs": 60_000
     });
     let view: ProviderRegistryView =
         serde_json::from_value(view_json).expect("PA-173：视图 JSON 必须可反序列化");
@@ -283,7 +284,7 @@ fn d1_legal_policy_round_trips_unchanged() {
     let first_write = sandbox.read_json();
     assert_eq!(
         policy_triple_on_disk(&first_write),
-        (45_000, 5, 30_000),
+        (45_000, 10, 60_000),
         "PA-173 D1：合法策略必须原样落盘"
     );
 
@@ -298,7 +299,7 @@ fn d1_legal_policy_round_trips_unchanged() {
     // ── Assert ─────────────────────────────────────────────────────────────────
     assert_eq!(
         policy_triple_on_disk(&second_write),
-        (45_000, 5, 30_000),
+        (45_000, 10, 60_000),
         "PA-173 D1：合法策略往返后必须逐字段不变（防「修复钳制时顺手改写合法值」）"
     );
     let effective = sandbox.store().upstream_policy();
@@ -308,7 +309,7 @@ fn d1_legal_policy_round_trips_unchanged() {
             effective.decision_max_attempts,
             effective.retry_budget_ms
         ),
-        (45_000, 5, 30_000),
+        (45_000, 10, 60_000),
         "PA-173 D1：合法策略的生效值必须等于用户值"
     );
     assert!(
@@ -350,8 +351,8 @@ fn d2_policy_floors_are_physically_reachable() {
             UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT,
             UPSTREAM_RETRY_BUDGET_MS_DEFAULT
         ),
-        (45_000, 5, 30_000),
-        "PA-173 D2：下界上调**不得**动默认值（45000 / 5 / 30000）"
+        (45_000, 10, 60_000),
+        "PA-173 D2：下界上调**不得**动默认值；2026-11-14 默认值另行上调为 45000 / 10 / 60000"
     );
 
     // A3：上界不动。

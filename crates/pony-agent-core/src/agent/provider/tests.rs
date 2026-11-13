@@ -2079,15 +2079,19 @@
         );
 
         assert!(result.is_err());
-        // 503 不是限流 ⇒ 维持既有 5 次短退避（0.5+1+2+4=7.5s）。
-        assert_eq!(attempts.get(), 5);
+        // 503 不是限流 ⇒ 走默认短退避曲线。2026-11-14 默认尝试次数 5 → 10（含首次），
+        // 退避 sleep = 0.5+1+2+4+8×5 = 47.5s（默认预算 60s 装得下）。
+        assert_eq!(attempts.get(), 10);
         assert_eq!(
             sleeper
                 .total_slept
                 .load(std::sync::atomic::Ordering::Relaxed),
-            7_500
+            47_500
         );
     }
+
+    #[path = "retry_status_tests.rs"]
+    mod retry_status_tests;
 
     #[test]
     fn followup_timeout_failures_do_not_switch_to_rate_limit_schedule() {
@@ -2105,12 +2109,13 @@
         );
 
         assert!(result.is_err());
-        assert_eq!(attempts.get(), 5);
+        // 2026-11-14：默认尝试次数 5 → 10（含首次）⇒ 10 次调用、退避合计 47.5s。
+        assert_eq!(attempts.get(), 10);
         assert_eq!(
             sleeper
                 .total_slept
                 .load(std::sync::atomic::Ordering::Relaxed),
-            7_500
+            47_500
         );
     }
 

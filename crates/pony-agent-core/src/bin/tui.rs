@@ -205,6 +205,7 @@ pub struct ChatMessage {
     pub timestamp_ms: u64,
 }
 
+#[derive(Debug)]
 pub enum UiEvent {
     InputKey(crossterm::event::KeyEvent),
     /// C21：**合成自动提交**（派发闸门唯一构造点）。
@@ -231,6 +232,13 @@ pub enum UiEvent {
     StreamToolResult(String),
     StreamCompleted,
     StreamFailed(String),
+    /// 2026-11-14：上游重试进度（provider 重试循环**即将重试**时投递）。
+    ///
+    /// 唯一真值来源：`agent::retry::notify_provider_retry`（经
+    /// `install_retry_observer` 装到轮次线程上）——分子 = 已失败次数、分母 = 本跳允许的
+    /// 尝试总数。历史实现曾在 `StreamFailed` 里伪造「重试中（1/5）」（假进度、且那已是终态），
+    /// 本变体替代该伪造路径：只有**真实发生**的重试才有事件。
+    ProviderRetry { attempt: u32, max_attempts: u32 },
     /// wave-39 R1（契约冻结空桩）：本轮 token 用量回执，源自 `turn:output_end` /
     /// `turn:completed` 载荷。变体与穷尽匹配已冻结；发送侧（R8）由 Executor 接线。
     StreamUsage {
@@ -1394,6 +1402,13 @@ pub struct TuiState {
     /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的覆盖层状态（`None` = 未打开）。
     pub rewind_state: Option<rewind::RewindState>,
     pub status_text: String,
+    /// 2026-11-14：上游重试进度 `(已失败次数, 本跳尝试总数)`（`None` = 当前没有重试在跑）。
+    ///
+    /// 唯一写入点是 `UiEvent::ProviderRetry`（真值来自 provider 重试循环的
+    /// `notify_provider_retry`）；清空点是「重试真的恢复了」（首个正文/思考增量）、全部
+    /// 终态事件（完成/失败/停止）与新轮起点（`TurnStarted`，覆盖 goal 续轮）—— 不做 TTL
+    /// 猜测，避免已恢复却还显示「正在重试」。
+    pub provider_retry: Option<(u32, u32)>,
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
     pub mouse_selection: MouseSelectionState,
@@ -1533,6 +1548,7 @@ impl Default for TuiState {
             settings_selected_index: 0,
             rewind_state: None,
             status_text: "Ready".to_string(),
+            provider_retry: None,
             mouse_capture: true,
             mouse_selection: MouseSelectionState::default(),
             scroll_offset: 0,
@@ -1609,6 +1625,19 @@ impl TuiState {
     /// 契约 P-5：写入一次性状态提示（非流式期按 TTL 渲染）。
     pub fn set_status_notice(&mut self, notice: impl Into<String>) {
         self.status_notice = Some((notice.into(), std::time::Instant::now()));
+    }
+
+    /// 2026-11-14：记录一次**真实发生**的上游重试（`attempt` = 已失败次数，`max` = 尝试总数）。
+    ///
+    /// 幂等覆盖：同一跳内的连续重试只保留最新进度（状态行本来就是「当前进度」位，
+    /// 不需要也不应该堆历史）。
+    pub fn note_provider_retry(&mut self, attempt: u32, max_attempts: u32) {
+        self.provider_retry = Some((attempt, max_attempts.max(1)));
+    }
+
+    /// 2026-11-14：清空重试进度（重试恢复或任一终态到达）。
+    pub fn clear_provider_retry(&mut self) {
+        self.provider_retry = None;
     }
 
     /// wave-60 §C9：`turn:stop_requested` 驱动的**纯状态迁移** —— 只进入「正在停止…」。
@@ -3090,6 +3119,27 @@ struct TuiTurnSink {
     tx: Sender<UiEvent>,
 }
 
+/// 2026-11-14：「上游重试进度 → 状态行」的**唯一装配点**。
+///
+/// 为什么不是第二条事件通道：provider 重试循环在库层深处，只经
+/// `agent::retry::install_retry_observer` 的线程局部观察者回报进度（一次 provider 调用
+/// 与其内部重试同步在同一线程执行）。本函数把通知转成 `UiEvent::ProviderRetry`，
+/// 走既有 UI 事件通道 —— 不新增线程、不新增通道、不伪造进度。
+///
+/// **必须**在轮次线程内调用（观察者是 thread_local），返回值守卫的生命周期 = 该轮次。
+fn install_tui_retry_observer(
+    tx: Sender<UiEvent>,
+) -> pony_agent_core::agent::retry::RetryObserverGuard {
+    pony_agent_core::agent::retry::install_retry_observer(Box::new(
+        move |notice: &pony_agent_core::agent::retry::RetryNotice| {
+            let _ = tx.send(UiEvent::ProviderRetry {
+                attempt: notice.attempt,
+                max_attempts: notice.max_attempts,
+            });
+        },
+    ))
+}
+
 /// 每轮 sink/emitter 的成对生命周期；注册发生在 turn id 对事件循环发布之前。
 struct TuiTurnSinkGuard {
     control_plane: Arc<HostControlPlane>,
@@ -4153,6 +4203,47 @@ fn format_speed_segment(
     segment
 }
 
+/// P1 自描述后缀：轮首沿用上一轮末值时，必须让读者知道这不是本轮读数。
+const STALE_MARKER_SEGMENT: &str = "（上轮）";
+
+/// 指标段的**整段让位**优先级（`Ord` 越小越先被丢弃）。
+///
+/// 依据（ADR 2026-11-14-tui-header-metrics-overflow）：宽度不足时先牺牲静态比率
+/// （缓存 → 上下文），再牺牲会话累计 token，最后才动轮级实时读数（速度 → 首token）——
+/// 首 token 是「这一轮有没有卡在 prefill」的唯一读数，必须最后退出。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MetricsKind {
+    Cache,
+    Context,
+    Tokens,
+    Speed,
+    FirstToken,
+    /// 簇级诚实性后缀，固定在右端，不参与让位（单独存在时整簇不渲染）。
+    StaleMarker,
+}
+
+/// 一段指标：文本 + 让位优先级（优先级只用于宽度降级，不改变渲染顺序）。
+struct MetricsSegment {
+    kind: MetricsKind,
+    text: String,
+}
+
+impl MetricsSegment {
+    fn new(kind: MetricsKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+        }
+    }
+}
+
+fn join_metric_texts<'a>(segments: impl Iterator<Item = &'a MetricsSegment>) -> String {
+    segments
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// 数值指标段（**双口径**）：`↑in` = 当前上下文输入，`↓out` / 缓存 = 会话累计。
 ///
 /// 口径矩阵（P0，与桌面端 `HomeSidebar.vue` 同源）：
@@ -4168,8 +4259,8 @@ fn format_speed_segment(
 ///
 /// 交互反馈（排队、一次性提示）**不属于**本函数：它们由输入框下方的状态行
 /// [`status_line`] 承担。header 右侧渲染本簇，见 [`header_metrics_text`]。
-fn metrics_segments(state: &TuiState) -> Vec<String> {
-    let mut segments: Vec<String> = Vec::new();
+fn metrics_segments(state: &TuiState) -> Vec<MetricsSegment> {
+    let mut segments: Vec<MetricsSegment> = Vec::new();
     let snapshot = state.live_metrics.as_ref();
     let session = state.session_usage.totals();
 
@@ -4189,10 +4280,13 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
 
     // 有值才显示（v3 R11：无值不显示、不出占位符）；↑/↓ 成对渲染保持既有版式。
     if current_context > 0 || session_output > 0 {
-        segments.push(format!(
-            "↑{} ↓{}",
-            fmt_token_count(current_context),
-            fmt_token_count(session_output)
+        segments.push(MetricsSegment::new(
+            MetricsKind::Tokens,
+            format!(
+                "↑{} ↓{}",
+                fmt_token_count(current_context),
+                fmt_token_count(session_output)
+            ),
         ));
     }
 
@@ -4213,7 +4307,7 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
             })
     });
     if let Some(text) = cache_ratio.and_then(format_unit_fraction_percent) {
-        segments.push(format!("缓存 {text}%"));
+        segments.push(MetricsSegment::new(MetricsKind::Cache, format!("缓存 {text}%")));
     }
 
     // ---- 上下文占用：快照比 → 快照缺窗口时用解析窗口回退 → legacy 计算 ----
@@ -4232,7 +4326,7 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
         context_ratio_for_window(context_tokens, window_tokens?)
     });
     if let Some(text) = context_ratio.and_then(format_unit_fraction_percent) {
-        segments.push(format!("上下文 {text}%"));
+        segments.push(MetricsSegment::new(MetricsKind::Context, format!("上下文 {text}%")));
     }
 
     // ---- per-call / 轮级快照段（设计上不参与会话累计）----
@@ -4244,22 +4338,31 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
                 Some(TurnSpeedBasis::EndToEnd) => "≈",
                 _ => "",
             };
-            segments.push(format_speed_segment(
-                speed,
-                prefix,
-                metrics.turn_speed_basis,
-                metrics.turn_calls,
-                metrics.turn_burst_excluded.unwrap_or(0),
+            segments.push(MetricsSegment::new(
+                MetricsKind::Speed,
+                format_speed_segment(
+                    speed,
+                    prefix,
+                    metrics.turn_speed_basis,
+                    metrics.turn_calls,
+                    metrics.turn_burst_excluded.unwrap_or(0),
+                ),
             ));
         }
         if let Some(ttft_ms) = metrics.first_token_latency_ms {
-            segments.push(format!("首token {ttft_ms}ms"));
+            segments.push(MetricsSegment::new(
+                MetricsKind::FirstToken,
+                format!("首token {ttft_ms}ms"),
+            ));
         }
     }
 
     // P1：轮首沿用上一轮末值时必须自描述 —— 否则读者会把它当成当前轮读数。
     if state.live_metrics_stale && snapshot.is_some() {
-        segments.push("（上轮）".to_string());
+        segments.push(MetricsSegment::new(
+            MetricsKind::StaleMarker,
+            STALE_MARKER_SEGMENT,
+        ));
     }
     segments
 }
@@ -4268,7 +4371,84 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
 ///
 /// 无任何数值时返回**空串**（v3 R11：无值不显示，也不出占位符），header 只剩品牌 + 工作区。
 fn header_metrics_text(state: &TuiState) -> String {
-    metrics_segments(state).join(" · ")
+    join_metric_texts(metrics_segments(state).iter())
+}
+
+/// 指标簇发生整段让位时补在簇首的省略标记（让位可被看见，而不是静默消失）。
+const OMITTED_HEAD: &str = "… ";
+
+/// header 右槽宽度不足时的**整段**降级（ADR 2026-11-14-tui-header-metrics-overflow）。
+///
+/// 契约：
+/// - 放得下 ⇒ 原样返回；
+/// - 放不下 ⇒ 按 [`MetricsKind`] **整段**让位：先丢缓存/上下文，再丢累计 token，最后才丢
+///   速度；首 token 最后退出。发生让位时在簇首用 `… ` 自描述；
+/// - 绝不输出半段（`首t…`）、也不留悬挂的 ` · `；
+/// - 连最后一段都放不下（极端窄屏）才退回 [`ellipsize_width`] 段内省略，此时省略号自身即标记。
+///
+/// 为什么不能从右往左砍：旧实现 `ellipsize_width` 直接截断整簇，先砍掉的恰好是最右的
+/// `首token`（甚至砍成 `首t…`）；而速度段因 F1 I4 必须自带口径/样本量，砍半还会伪造语义。
+fn header_metrics_text_within(state: &TuiState, budget: usize) -> String {
+    let segments = metrics_segments(state);
+    let full = join_metric_texts(segments.iter());
+    if str_width(&full) <= budget {
+        return full;
+    }
+
+    // 「上轮」是簇级诚实性后缀：固定在右端，不参与让位；没有可修饰的读数时整簇不渲染。
+    let (content, marker) = match segments.last() {
+        Some(last) if last.kind == MetricsKind::StaleMarker => {
+            (&segments[..segments.len() - 1], Some(last.text.as_str()))
+        }
+        _ => (&segments[..], None),
+    };
+    if content.is_empty() {
+        return String::new();
+    }
+    let tail = marker.map(|text| format!(" · {text}")).unwrap_or_default();
+    let content_budget = budget
+        .saturating_sub(str_width(OMITTED_HEAD))
+        .saturating_sub(str_width(&tail));
+
+    let mut keep = vec![true; content.len()];
+    loop {
+        let joined = join_metric_texts(
+            content
+                .iter()
+                .zip(keep.iter())
+                .filter(|(_, live)| **live)
+                .map(|(segment, _)| segment),
+        );
+        if str_width(&joined) <= content_budget {
+            return format!("{OMITTED_HEAD}{joined}{tail}");
+        }
+        let kept = keep.iter().filter(|live| **live).count();
+        if kept <= 1 {
+            // 极端窄屏：最后一段也只能段内省略；省略号自身即让位标记，故不再加 `… `。
+            let available = budget.saturating_sub(str_width(&tail));
+            if available == 0 {
+                return String::new();
+            }
+            let only = content
+                .iter()
+                .zip(keep.iter())
+                .find(|(_, live)| **live)
+                .map(|(segment, _)| segment.text.as_str())
+                .unwrap_or_default();
+            return format!("{}{tail}", ellipsize_width(only, available));
+        }
+        // 丢当前保留段里优先级最低的一段；同优先级丢最左（右侧更新的读数最后退出）。
+        let victim = content
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| keep[*index])
+            .min_by_key(|(index, segment)| (segment.kind, *index))
+            .map(|(index, _)| index);
+        match victim {
+            Some(index) => keep[index] = false,
+            None => return String::new(),
+        }
+    }
 }
 
 pub const STATUS_CAROUSEL_MODEL_HOLD_MS: u64 = 3_000;
@@ -4814,6 +4994,18 @@ fn status_word_base(state: &TuiState) -> (String, StatusTone) {
     }
     // 说明：一次性提示（status_notice）与非流式横幅由 `metrics_line` 渲染 —— 本函数只服务
     // 「流式进行中的那一行状态」，流式期按契约让位给进度短语，故这里不重复判定。
+    //
+    // 2026-11-14：上游重试进度**优先于**「思考中／生成中」——重试期模型并没有在产出，
+    // 含糊的进度短语会让用户以为只是慢；此处用后端真实进度（已失败次数/尝试总数）替代。
+    // 不拿 `is_streaming` 当门：goal 自动续轮等入口在轮次线程内直接开轮，`is_streaming`
+    // 未必为真；进度位的生命周期由「写入 = 真发生重试」「清空 = 增量/终态/新轮」两端钉死，
+    // 不靠派生标志猜测。
+    if let Some((attempt, max_attempts)) = state.provider_retry {
+        return (
+            format!("正在重试（{attempt}/{max_attempts}）…"),
+            StatusTone::Warn,
+        );
+    }
     let transient = compact_status(&state.status_text);
     match &state.runtime_mode {
         RuntimeMode::Ready => {
@@ -4839,7 +5031,10 @@ fn status_word_base(state: &TuiState) -> (String, StatusTone) {
         ),
         RuntimeMode::WaitingApproval => ("待确认".to_string(), StatusTone::Warn),
         RuntimeMode::Completed => ("完成".to_string(), StatusTone::Success),
-        RuntimeMode::Failed(_) => ("失败".to_string(), StatusTone::Danger),
+        // 2026-11-14：终态错误**只**在状态行呈现一次（消息区不再重复同一句 System 消息），
+        // 故这里必须给出受控摘要本体，而不是「失败」占位词 —— 否则错误正文会从界面上
+        // 彻底消失（只剩运行日志）。配色仍是 DANGER，且不再额外加粗（警示色已足够）。
+        RuntimeMode::Failed(summary) => (summary.clone(), StatusTone::Danger),
     }
 }
 
@@ -5506,8 +5701,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             Span::styled(right_meta, faint()),
         ])
     } else if pad > left_w + 12 {
-        // 中等宽度：保留右侧指标簇，截断而不是整块丢弃。
-        let meta = ellipsize_width(&right_meta, pad - left_w - 1);
+        // 中等宽度：保留右侧指标簇，整段让位而不是整块丢弃
+        // （让位从最左开始，右端速度 / 首 token 最后退出；见 `header_metrics_text_within`）。
+        let meta = header_metrics_text_within(state, pad - left_w - 1);
         let gap = pad.saturating_sub(left_w + str_width(&meta));
         Line::from(vec![
             Span::styled(
@@ -10615,6 +10811,10 @@ fn tui_event_loop(
                                 // 杜绝 `is_streaming` 永真导致输入/排队派发永久失效。
                                 let tx_turn = tx.clone();
                                 let turn_thread = std::thread::spawn(move || {
+                                  // 2026-11-14：本线程就是 provider 调用所在线程（库内同步执行），
+                                  // 故在此安装重试观察者 ⇒ 真实重试进度直达状态行。守卫随线程体
+                                  // drop，摘除观察者，不给后续线程留悬挂回调。
+                                  let _retry_observer = install_tui_retry_observer(tx_turn.clone());
                                   // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
                                   // 抢走 outer 的 `tx_turn`（panic 兜底还要用它）。
                                   let tx_session_fail = tx_turn.clone();
@@ -10833,7 +11033,19 @@ fn tui_event_loop(
                     state.insert_paste(&text);
                     dirty = true;
                 }
+                // 2026-11-14：上游重试进度（唯一真值来源，见 `agent::retry::notify_provider_retry`）。
+                // 只落到状态行的一个进度位，不往消息流里追加行 —— 重试是「当前状态」而非
+                // 「历史事实」，堆 9 行会让消息流被噪音占满。
+                UiEvent::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                } => {
+                    state.note_provider_retry(attempt, max_attempts);
+                    dirty = true;
+                }
                 UiEvent::StreamDelta(delta) => {
+                    // 上游已开始产出 ⇒ 重试真的恢复了，进度位立即摘除（不留假状态）。
+                    state.clear_provider_retry();
                     state.append_assistant_chunk(&delta);
                     if !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
                         state.transition_runtime_mode(RuntimeMode::Responding);
@@ -10841,6 +11053,8 @@ fn tui_event_loop(
                 }
                 UiEvent::StreamReasoning(delta) => {
                     // 契约 C1/C5：思考增量走独立入库面（末条 Thinking 续写 + 运行态推进）。
+                    // 思考增量同样证明上游已恢复 ⇒ 一并摘除重试进度位。
+                    state.clear_provider_retry();
                     state.apply_stream_reasoning(&delta);
                 }
                 UiEvent::StreamToolCall(call) => {
@@ -10860,6 +11074,7 @@ fn tui_event_loop(
                     state.is_streaming = false;
                     state.stopping_turn_id = None;
                     state.streaming_turn_id = None;
+                    state.clear_provider_retry();
                     // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
                     state.status_dwell.reset();
                     // wave-60 §C8：本轮结束 ⇒ 双击 Esc 的上膛失效。
@@ -10886,6 +11101,8 @@ fn tui_event_loop(
                         }
                     }
                     state.apply_stop_terminal(&turn_id, stop_reason.as_deref());
+                    // 2026-11-14：取消是终态之一 ⇒ 重试进度位一并摘除（不得随停止残留）。
+                    state.clear_provider_retry();
                     // wave-60 §C8：turn 结束 ⇒ 双击 Esc 的上膛失效。
                     stop_sequence.reset();
                 }
@@ -10893,6 +11110,9 @@ fn tui_event_loop(
                 //（legacy `turn_usage` / `turn_cache_hit_tokens` 与快照 `live_metrics` 同点清空）。
                 // 该闸门覆盖 goal 自动续轮等在轮次线程内直接开轮的入口。
                 UiEvent::TurnStarted => {
+                    // 2026-11-14：新一轮起点 ⇒ 上一轮遗留的重试进度必须摘除（含 goal 续轮
+                    // 这种绕过派发点开轮的入口，本事件是它们的唯一复位点）。
+                    state.clear_provider_retry();
                     state.begin_turn_usage();
                 }
                 // P0：本轮指标快照 → 指标行唯一来源（快照存在时不再读 legacy 计量字段）。
@@ -10920,9 +11140,10 @@ fn tui_event_loop(
                     state.streaming_turn_id = None;
                     // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
                     state.status_dwell.reset();
+                    state.clear_provider_retry();
                     stop_sequence.reset();
-                    // wave-tui-session-resilience C3/C4：消息区只显示一句话摘要，
-                    // 原始 400 字符响应体/堆栈默认折叠，仅留运行日志与 issue 上报通道。
+                    // wave-tui-session-resilience C3/C4：只显示一句话摘要，原始 400 字符
+                    // 响应体/堆栈默认折叠，仅留运行日志与 issue 上报通道。
                     //
                     // 语义澄清：本事件由 `emit_stream_failed` 在 provider 重试预算**终止之后**
                     // 发出 ⇒ 此处是终态，不存在任何进行中的重试。历史实现曾在此伪造
@@ -10930,15 +11151,14 @@ fn tui_event_loop(
                     let summary = user_facing_error_summary(&err);
                     let folded = should_fold_error_detail(&err);
                     eprintln!("[pony-tui] turn failed detail (folded={folded}): {err}");
-                    state.transition_runtime_mode(RuntimeMode::Failed(summary.clone()));
+                    // 2026-11-14（用户裁决）：错误**只在状态消息里出现一次**。
+                    // 旧实现同时写 `status_text`（状态行）与消息区 System 消息（同一句摘要），
+                    // 用户看到两遍，且消息区那份被 `severity_style` 额外加粗 —— 警示色（DANGER）
+                    // 本身已足够醒目，不再叠加字重。故此处只保留状态行这一处可见载体
+                    // （`RuntimeMode::Failed(summary)` 由 `status_word_base` 原样呈现），
+                    // 不再向消息区推重复的 System 消息。
                     state.status_text = summary.clone();
-                    // 终态错误必须持续可见：走消息区（不受 `status_notice` 的 TTL 抑制），
-                    // 由 `system_message_severity` 判为 Error ⇒ DANGER + BOLD。
-                    state.messages.push(ChatMessage {
-                        role: MessageRole::System,
-                        content: summary,
-                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                    });
+                    state.transition_runtime_mode(RuntimeMode::Failed(summary));
                 }
                 UiEvent::ModelsDiscovered { provider_id, ids } => {
                     // 契约 F-J：视图变换收敛进 `apply_models_discovered`（幂等、可单测）；
@@ -11098,6 +11318,9 @@ fn tui_event_loop(
                     let resume_run_id = run_id.clone();
                     let resume_run_for_turn = resume_run_id.clone();
                     let turn_thread = std::thread::spawn(move || {
+                        // 2026-11-14：本线程是 provider 调用所在线程 ⇒ 在此安装重试观察者
+                        // （见 `install_tui_retry_observer`），让真实重试进度直达状态行。
+                        let _retry_observer = install_tui_retry_observer(tx_turn.clone());
                         // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
                         // 抢走 outer 的 `tx_turn`（终态兜底还要用它）。
                         let tx_session_fail = tx_turn.clone();
@@ -11207,6 +11430,9 @@ fn tui_event_loop(
                     let turn_loop_in_flight_for_thread = Arc::clone(&turn_loop_in_flight);
                     let tx_turn = tx.clone();
                     let turn_thread = std::thread::spawn(move || {
+                        // 2026-11-14：本线程是 provider 调用所在线程 ⇒ 在此安装重试观察者
+                        // （见 `install_tui_retry_observer`），让真实重试进度直达状态行。
+                        let _retry_observer = install_tui_retry_observer(tx_turn.clone());
                         // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
                         // 抢走 outer 的 `tx_turn`（终态兜底还要用它）。
                         let tx_session_fail = tx_turn.clone();
@@ -12028,6 +12254,11 @@ mod w3b_sub_session_tests;
 #[cfg(test)]
 #[path = "tui/tests/transient_error_terminal_tests.rs"]
 mod transient_error_terminal_tests;
+
+/// 2026-11-14：上游重试进度的状态行呈现（真值来自 `agent::retry`）+ 终态错误单一可见面。
+#[cfg(test)]
+#[path = "tui/tests/provider_retry_status_tests.rs"]
+mod provider_retry_status_tests;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // wave-67：`pony update` CLI 自更新验收测试（契约矩阵 C2 / C4 / C7；Test Agent 冻结）
