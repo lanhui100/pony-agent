@@ -327,7 +327,8 @@ export type PrefixMutationReason =
   | "image_note_changed"
   | "truncation_note_changed"
   | "history_boundary_shifted"
-  | "native_transcript_boundary_shifted";
+  | "native_transcript_boundary_shifted"
+  | "tool_surface_dynamic";
 
 export type ContextRefreshReason =
   | "initial_build"

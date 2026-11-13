@@ -2957,3 +2957,35 @@
         shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = handle.join();
     }
+
+    // ============================================================
+    // B144：工具面动态来源的缓存突变原因
+    // ============================================================
+
+    /// wire 串必须与 TS 侧 `PrefixMutationReason` 联合成员一致（`tool_surface_dynamic`），
+    /// 且记账接口幂等（同一轮重复调用只留一条）。
+    #[test]
+    fn tool_surface_dynamic_reason_wire_string_and_idempotent_note() {
+        assert_eq!(
+            serde_json::to_string(&PrefixMutationReason::ToolSurfaceDynamic)
+                .expect("枚举必须可序列化"),
+            "\"tool_surface_dynamic\"",
+            "wire 串变更必须同步 src/types/runtime.ts 的联合成员"
+        );
+
+        let mut observation = ProviderRequestObservation::default();
+        observation.note_dynamic_tool_surface(false);
+        assert!(
+            observation.prefix_mutation_reasons.is_empty(),
+            "工具面静态时不得凭空产生突变原因"
+        );
+
+        observation.note_dynamic_tool_surface(true);
+        observation.note_dynamic_tool_surface(true);
+        assert_eq!(
+            observation.prefix_mutation_reasons,
+            vec![PrefixMutationReason::ToolSurfaceDynamic],
+            "同一轮重复记账必须幂等（只留一条）"
+        );
+    }
+

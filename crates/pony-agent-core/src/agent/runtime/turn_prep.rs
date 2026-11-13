@@ -111,12 +111,16 @@ impl AgentRuntime {
                 None,
             )
         };
-        let planning_request = self.context_builder.build_request(
+        let mut planning_request = self.context_builder.build_request(
             self.graph.name(),
             &provider,
             &retrieved,
             &planner_skills,
         );
+        // B144：工具面含跨 turn 可变来源时记账（幂等；只观测，不改请求内容）。
+        planning_request
+            .observation
+            .note_dynamic_tool_surface(crate::agent::mcp_config::tool_surface_is_dynamic());
         let build_context_observation = build_context_observation(&planning_request, &tools);
         let display_message = input
             .display_message
@@ -130,7 +134,6 @@ impl AgentRuntime {
         // completed assistant tool-call + terminal tool-result pair (design.md Decision 5). The
         // pair is inserted immediately before the current user message so the model sees the
         // answer and continues instead of a fresh user turn.
-        let mut planning_request = planning_request;
         if let Some(injection) = ask_injection {
             inject_ask_resume_into_planning_request(&provider, injection, &mut planning_request);
         }

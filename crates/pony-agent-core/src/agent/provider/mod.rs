@@ -152,6 +152,20 @@ pub struct ProviderRequestObservation {
 }
 
 impl ProviderRequestObservation {
+    /// 记录「本轮工具面含跨 turn 可变来源」这一前缀突变原因（幂等）。
+    ///
+    /// 只做记账，不改变任何请求内容；由 `runtime::turn_prep` 在工具面解析后调用。
+    pub fn note_dynamic_tool_surface(&mut self, dynamic: bool) {
+        if dynamic
+            && !self
+                .prefix_mutation_reasons
+                .contains(&PrefixMutationReason::ToolSurfaceDynamic)
+        {
+            self.prefix_mutation_reasons
+                .push(PrefixMutationReason::ToolSurfaceDynamic);
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.stable_prefix_text.is_empty()
             && self.semi_stable_context_text.is_empty()
@@ -201,6 +215,11 @@ pub enum PrefixMutationReason {
     TruncationNoteChanged,
     HistoryBoundaryShifted,
     NativeTranscriptBoundaryShifted,
+    /// 本轮工具面含跨 turn 可变来源（MCP/插件通道），tools 数组可能已变化。
+    ///
+    /// 内建面是编译期常量；外部通道在会话中途连接/重载/断开会改变 tools 数组，
+    /// 而 tools 属于 provider 前缀缓存的一部分 ⇒ 该轮前缀在工具维度不可复现。
+    ToolSurfaceDynamic,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

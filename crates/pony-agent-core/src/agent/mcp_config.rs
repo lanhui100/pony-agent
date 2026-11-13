@@ -1083,6 +1083,17 @@ pub fn install_mcp_tool_channel(channel: Arc<McpToolChannel>) {
 }
 
 /// 当前进程级 MCP 通道。
+/// 本 turn 的工具面是否包含**跨 turn 可变**来源（MCP/插件通道里确有工具）。
+///
+/// 内建面是编译期常量；外部通道在会话中途连接/重载/断开会改变 tools 数组，从而改变
+/// provider 的前缀缓存命中面。这是「工具维度前缀突变」的唯一已知来源，
+/// 也是 `PrefixMutationReason::ToolSurfaceDynamic` 的判定。
+pub fn tool_surface_is_dynamic() -> bool {
+    installed_mcp_tool_channel()
+        .map(|channel| !channel.tool_definitions().is_empty())
+        .unwrap_or(false)
+}
+
 pub fn installed_mcp_tool_channel() -> Option<Arc<McpToolChannel>> {
     channel_slot().lock().ok().and_then(|slot| slot.clone())
 }
