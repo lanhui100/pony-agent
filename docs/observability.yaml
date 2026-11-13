@@ -1356,6 +1356,7 @@ note: >-
       `crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs`（C1–C8 功能契约 +
       `tests/acceptance/adversarial/interrupted_turn_resume/` 三类确定性破坏注入），
       以及 `cargo test -p pony-agent-core --lib` 的既有回归基线。
+
   【宪法预算裁决结构化账（B142 / item-5）归属说明】
   (1) 变更面：`agent/workspace_hotloader.rs` 的预算渲染器新增**返回结构化报告**
       （`ConstitutionBudgetReport`：omitted{path, reason=duplicate_content|oversized_source|budget_exceeded}、

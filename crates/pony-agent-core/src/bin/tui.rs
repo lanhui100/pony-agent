@@ -6912,6 +6912,27 @@ fn tui_runtime_log_path() -> Option<PathBuf> {
     )
 }
 
+/// 运行日志单文件上限：超过就滚动一次（`tui-runtime.log` → `tui-runtime.log.1`）。
+///
+/// 长期运行的 TUI 会话把 stderr 全量落入该文件，实测单个文件曾涨到 552MB 且无上限。
+/// 只保留一个历史文件；多进程同时写入时，已持有旧 inode 的进程会继续写归档文件，
+/// 属已知取舍（避免为此引入跨进程日志框架）。
+const TUI_RUNTIME_LOG_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+fn rotate_runtime_log_if_oversized(path: &std::path::Path) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() <= TUI_RUNTIME_LOG_MAX_BYTES {
+        return;
+    }
+    let mut backup = path.as_os_str().to_os_string();
+    backup.push(".1");
+    let backup = std::path::PathBuf::from(backup);
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::rename(path, &backup);
+}
+
 fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         std::env::remove_var("NO_COLOR");
@@ -6934,6 +6955,11 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     // 防止全屏 TUI 界面被破坏退化为终端滚屏输出。
     // 日志绑定只在 unix 分支使用（dup2 重定向）；非 unix 目标（Windows CI）不进入该分支。
     let runtime_log_path = tui_runtime_log_path();
+    // 轮转必须早于 witness 记录起点：轮转后本次从新文件的 0 偏移起算，
+    // 上次运行残留在旧文件里的失败痕迹不会被误算进本次结论。
+    if let Some(path) = runtime_log_path.as_ref() {
+        rotate_runtime_log_if_oversized(path);
+    }
     // 退出提示要如实说明「本次运行有没有保存失败」：记录日志起点，退出时只看新增段。
     let save_failure_witness =
         persistence_status::SaveFailureWitness::capture(runtime_log_path.as_deref());
@@ -11743,6 +11769,10 @@ mod wave43_unit_tests;
 #[cfg(test)]
 #[path = "tui/tests/composer_history_recall_tests.rs"]
 mod composer_history_recall_tests;
+
+#[cfg(test)]
+#[path = "tui/tests/io_hygiene_tests.rs"]
+mod io_hygiene_tests;
 
 #[cfg(test)]
 #[path = "tui/tests/table_wiring_tests.rs"]

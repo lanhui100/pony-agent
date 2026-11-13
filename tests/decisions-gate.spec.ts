@@ -56,11 +56,22 @@ describe("决策记录门禁 check-decisions", () => {
     expect(existsSync("docs/archive/decisions")).toBe(false);
   });
 
-  it("真实仓：.agents/notes/archived 封印完整性契约（一改即红）", () => {
-    // 封印校验必须通过
-    const verifyRes = execFileSync("bash", [".meta/gates/archive-verify.sh", "check"], { encoding: "utf-8", stdio: "pipe" });
-    expect(verifyRes).toContain("归档封印：通过");
-  });
+  // Windows runner 上 `sha256sum`（Git bash）逐条 117 份归档件的耗时远超默认 5s 用例预算，
+  // 实测 Linux 665ms / Windows runner >5s ⇒ 必须显式给足预算，否则会出现「实现正确但超时红」，
+  // 并连带把 V10-3（实跑全量单测 exit 0）拖红。超时预算不改变任何断言语义。
+  it(
+    "真实仓：.agents/notes/archived 封印完整性契约（一改即红）",
+    () => {
+      // 封印校验必须通过
+      const verifyRes = execFileSync("bash", [".meta/gates/archive-verify.sh", "check"], {
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 120_000,
+      });
+      expect(verifyRes).toContain("归档封印：通过");
+    },
+    120_000,
+  );
 
   it("R1：缺 Status 行", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "decisions-r1-"));
