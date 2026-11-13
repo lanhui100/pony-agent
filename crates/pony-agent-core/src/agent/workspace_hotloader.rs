@@ -1382,16 +1382,18 @@ impl WorkspaceHotloader {
             &report.omitted,
         );
         // L3 BLOCKING-2：中途未命中基线（LRU 淘汰 / 进程重启）必须可观测，不得静默改写前缀。
-        let notice = if turn_count > 1 {
+        //
+        // wave-interrupted-turn-resume C6：可观测性**只走结构化日志**，不注入模型可见请求体。
+        // 原实现额外把 `Notice: Session baseline was not retained …` 塞进 volatile 段，而"基线
+        // 是否还在进程内缓存"是**进程本地状态**：同一份已落盘会话在同一进程里恢复两次时，
+        // 第一次命中本分支（无基线）、第二次命中回放分支（有基线）⇒ 两次恢复的请求体不逐字
+        // 相同（C6 判据）。请求体只能由会话事实决定，进程缓存状态一律不外泄到模型侧。
+        if turn_count > 1 {
             eprintln!(
                 "[pony-agent][hotloader] session baseline missing: session={session_id} turn={turn_count} reason=not_retained (lru_capacity={MAX_SESSION_BASELINES} or process restart); prefix re-baselined"
             );
-            Some(String::from(
-                "Notice: Session baseline was not retained (capacity or process restart); prompt prefix re-baselined.\n",
-            ))
-        } else {
-            None
-        };
+        }
+        let notice: Option<String> = None;
 
         let baseline = SessionBaselineSnapshot {
             constitution_hash: const_hash,
@@ -3316,6 +3318,45 @@ allowed-tools: Bash, Read
         assert!(notice_turn_2
             .unwrap()
             .contains("constitution/rules updated"));
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// C6（L3-B #11）：基线未命中通知**只进结构化日志**，不得注入模型可见请求体。
+    ///
+    /// 反例（修正前）：进程重启后 `turn_count > 1` 会把
+    /// `Notice: Session baseline was not retained …` 作为 `delta_notice` 返回，由
+    /// `context.rs` 追加进 volatile 段 ⇒ 同一份落盘会话两次恢复的请求体不逐字相同。
+    #[test]
+    fn test_session_baseline_miss_never_injects_prompt_notice() {
+        let temp_dir = unique_dir("pony_session_baseline_notice");
+        fs::write(temp_dir.join("AGENTS.md"), "# Baseline Rules").unwrap();
+
+        // 第 1 轮：固化基线，无通知。
+        let hotloader = WorkspaceHotloader::new();
+        let (_, notice_turn_1) = hotloader.resolve_session_prompt_context_with_globals(
+            "session_baseline_notice",
+            1,
+            &temp_dir,
+            &[],
+        );
+        assert!(notice_turn_1.is_none(), "首轮固化基线不产生通知");
+
+        // "进程重启"：全新 hotloader（进程内基线缓存为空）+ turn_count > 1。
+        let restarted = WorkspaceHotloader::new();
+        let (prefix_turn_2, notice_turn_2) = restarted
+            .resolve_session_prompt_context_with_globals(
+                "session_baseline_notice",
+                2,
+                &temp_dir,
+                &[],
+            );
+        assert!(
+            notice_turn_2.is_none(),
+            "基线未命中通知不得注入请求体（C6 幂等），实际 = {notice_turn_2:?}"
+        );
+        // 前缀仍按当前事实重新固化（通知移除不等于能力丢失）。
+        assert!(prefix_turn_2.contains("# Baseline Rules"));
 
         fs::remove_dir_all(&temp_dir).unwrap();
     }

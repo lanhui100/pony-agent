@@ -1,0 +1,26 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "applicable": true,
+    "max_attempts": 5,
+    "backoff_cap_ms": 8000,
+    "policy": "沿用既有 provider 重试预算（agent/retry.rs），本波禁新增重试层"
+  },
+  "concurrency_lock": {
+    "policy": "复用 sessions RwLock 与 staging-commit 写路径；新增状态一律沿用既有锁序（先取再放，禁持锁回调 sink）",
+    "new_long_lived_lock": false,
+    "nested_lock": false
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": true,
+    "required_fields": ["session_id", "turn_id"],
+    "forbidden": ["裸 println!"]
+  },
+  "resource_release": {
+    "new_handles": false,
+    "new_threads": false,
+    "new_connections": false,
+    "bounded": "折叠与对齐为纯内存计算，单会话受既有 history 上限约束"
+  }
+}

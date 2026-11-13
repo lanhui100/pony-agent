@@ -1,5 +1,31 @@
 {
-  "wave": 1,
-  "status": "pending",
+  "wave": "interrupted-turn-resume",
+  "status": "in_progress",
+  "task_tier": "B",
+  "tier_basis": "跨文件多模块（agent/runtime + session + context + projection + provider + bin/tui），命中 blast 关键字（thread/lock/sqlite），接口数/文件数超 A 级阈值",
+  "baseline_commit": "a7393954",
+  "worktree": "/home/dm/pony-agent-worktrees/interrupted-turn-resume",
+  "branch": "fix/interrupted-turn-resume",
+  "regression_baseline": {
+    "cmd": "cargo test -p pony-agent-core --lib",
+    "result": "1518 passed; 0 failed; 795.84s",
+    "exit_code": 0,
+    "log": ".dev-team/regression/baseline-lib.log"
+  },
+  "tasks": [
+    { "id": "task-1", "role": "protocol", "owner": "protocol-agent", "deliverable": "契约矩阵原地复核 + O1-O3 闭合 + 空桩 + NFR", "write_scopes": [".dev-team", "crates/pony-agent-core/src/agent/session/interrupted_turn.rs"] },
+    { "id": "task-2", "role": "test", "owner": "test-agent", "blocked_by": ["task-1"], "deliverable": "C1-C8 红相 + L2-AT", "write_scopes": ["crates/pony-agent-core/tests"] },
+    { "id": "task-3", "role": "executor", "owner": "executor", "blocked_by": ["task-2"], "deliverable": "实现至全绿 + green receipt", "write_scopes": ["crates/pony-agent-core/src/agent", "crates/pony-agent-core/src/bin/tui.rs", "crates/pony-agent-core/src/bin/tui/errors.rs", "docs/observability.yaml"] }
+  ],
+  "artifacts": {
+    "contract_matrix": ".dev-team/contract-matrix-interrupted-turn-resume.md",
+    "adr": ".agents/notes/implemented/bug-fix/2026-11-12-interrupted-turn-content-preservation.md",
+    "backlog": "B113"
+  },
+  "decisions": [
+    "C1 断言面冻结在请求组装纯函数层（工具名+结果哨兵必须出现；native 族 tool_call/tool 成对，非 native 族可见步骤文本）",
+    "保留 interrupted_turn_checkpoint_text 既有逐字格式，检查点降级为附加尾行（1518 基线依赖）",
+    "DSML 折叠：持久化侧整体丢弃协议块，展示侧沿用折叠；旧脏行只读不回写"
+  ],
   "history": []
 }

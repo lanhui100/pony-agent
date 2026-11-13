@@ -1,0 +1,150 @@
+{
+  "wave": "interrupted-turn-resume",
+  "ticket": "B113",
+  "owner": "test-agent (independent L2-T / L2-AT author)",
+  "status": "l2at-green-after-implementation",
+  "frozen_at": "2026-11-12T14:19:44+08:00",
+  "contract": ".dev-team/contract-matrix-interrupted-turn-resume.md",
+  "nfr_baseline": ".dev-team/nfr-baseline-interrupted-turn-resume.json",
+  "red_phase_receipt": ".dev-team/red-phase-interrupted-turn-resume.json",
+  "test_file": "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs",
+  "adversarial_dir": "crates/pony-agent-core/tests/acceptance/adversarial/interrupted_turn_resume/",
+  "red_command": "export CARGO_TARGET_DIR=/home/dm/pony-agent/target && cargo test -p pony-agent-core --test interrupted_turn_resume_acceptance -- --test-threads=1",
+  "red_exit_code": 101,
+  "red_failure_primitive": "SUT 栈 panic/断言：13 条为 interrupted_turn.rs 空桩 unimplemented! panic（已按 Lead 裁决注明消息），2 条为真实断言失败（C2b/C3c，复现 RC2 缺陷原文）",
+  "case_count": {
+    "frozen_acceptance_cases": 16,
+    "l2t_functional": 12,
+    "l2at_adversarial": 4,
+    "positive_control_passed": 1,
+    "preexisting_tui_unit_tests_passed": 126
+  },
+  "assertion_ids_and_contracts": [
+    {
+      "id": "C1/S1-T01",
+      "case": "c1_native_next_request_carries_closed_tool_roundtrip",
+      "mode": "L2-T",
+      "contract": "C1"
+    },
+    {
+      "id": "C1/S1-T02",
+      "case": "c1_text_family_next_request_carries_visible_step_results",
+      "mode": "L2-T",
+      "contract": "C1"
+    },
+    {
+      "id": "C2/S2-T03",
+      "case": "c2_history_has_exactly_one_interrupted_turn_labelled_with_its_own_turn_id",
+      "mode": "L2-T",
+      "contract": "C2"
+    },
+    {
+      "id": "C2/S2-T04",
+      "case": "c2b_store_close_legacy_path_labels_node_with_current_turn_id",
+      "mode": "L2-T (baseline regression leg)",
+      "contract": "C2"
+    },
+    {
+      "id": "C3/S3-T05",
+      "case": "c3_interrupted_resume_on_accident_shaped_cursor_does_not_fork_implicitly",
+      "mode": "L2-T",
+      "contract": "C3"
+    },
+    {
+      "id": "C3/S3-T06",
+      "case": "c3b_explicit_fork_path_still_creates_a_branch",
+      "mode": "L2-T (positive control)",
+      "contract": "C3"
+    },
+    {
+      "id": "C3/S3-T07",
+      "case": "c3c_legacy_interrupted_append_does_not_fork_on_accident_shaped_cursor",
+      "mode": "L2-T (baseline regression leg)",
+      "contract": "C3"
+    },
+    {
+      "id": "C4/S4-T08",
+      "case": "c4_interrupted_turn_renders_one_status_line_and_keeps_steps_in_detail",
+      "mode": "L2-T",
+      "contract": "C4"
+    },
+    {
+      "id": "C5/S5-T09",
+      "case": "c5_folding_never_writes_back_into_persisted_body",
+      "mode": "L2-T",
+      "contract": "C5"
+    },
+    {
+      "id": "C6/S6-T10",
+      "case": "c6_repeated_recovery_is_idempotent_and_does_not_duplicate_turns",
+      "mode": "L2-T",
+      "contract": "C6"
+    },
+    {
+      "id": "C7/S7-T11",
+      "case": "c7_failed_turn_is_isomorphic_to_user_cancelled_and_keeps_reason",
+      "mode": "L2-T",
+      "contract": "C7"
+    },
+    {
+      "id": "C8/S8-T12",
+      "case": "c8_legacy_session_loads_and_successful_turn_context_stays_verbatim",
+      "mode": "L2-T",
+      "contract": "C8"
+    },
+    {
+      "id": "AT1/A11",
+      "case": "adversarial::at1_oversized_malformed_event_sequence::at1_oversized_and_malformed_step_sequence_stays_closed_bounded_and_deterministic",
+      "mode": "L2-AT",
+      "contract": "C1/C2"
+    },
+    {
+      "id": "AT1/A12",
+      "case": "adversarial::at1_oversized_malformed_event_sequence::at1_empty_and_blank_steps_never_fabricate_success",
+      "mode": "L2-AT",
+      "contract": "C7"
+    },
+    {
+      "id": "AT2/A13",
+      "case": "adversarial::at2_repeated_recovery_race::at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates",
+      "mode": "L2-AT",
+      "contract": "C6"
+    },
+    {
+      "id": "AT3/A14",
+      "case": "adversarial::at3_dirty_dsml_body_injection::at3_dirty_dsml_never_reaches_persisted_body_display_or_next_request",
+      "mode": "L2-AT",
+      "contract": "C5"
+    }
+  ],
+  "adversarial_injections": [
+    "AT1 超长 + 畸形步骤序列：500×(4KB 结果) + 空名/换行/NUL/8KB 超长名/重复名 + 51 条未开始调用；断言闭合不截断、明细逐行单行有界、输出确定",
+    "AT2 重复恢复竞态：固定种子 LCG（0x00C0FFEE12345678）+ 固定 4 线程 × 8 迭代 + Barrier（零 sleep）；断言跨线程请求逐字确定、native 通道哨兵恰 1 次",
+    "AT3 脏 DSML 注入：未闭合块 + 半角/全角变体 + 参数残片注入正文；断言持久化/展示/闭合片段/下一轮请求四处均无协议片段，正文与结果保留"
+  ],
+  "discipline": {
+    "aaa": true,
+    "zero_ignore": true,
+    "zero_swallow": true,
+    "no_sleep": true,
+    "fixed_seed": true,
+    "sandbox": "XDG_DATA_HOME/HOME/LOCALAPPDATA 指向 temp 沙箱，夹具 Drop 清理"
+  },
+  "readonly_notice": "本文件与测试文件红相冻结后只读：Executor 不得修改 tests/**；实现改动后由同一条命令复跑转绿。",
+  "amendments": [
+    {
+      "id": "AMEND-1",
+      "scope": "AT2 Assert 2 计数面迁移",
+      "red_phase_receipt": ".dev-team/red-phase-interrupted-turn-resume.json#amendments",
+      "revised": "native 通道 ==1；carry 通道 <=1；禁止全局计数",
+      "rerun_exit_code": 0,
+      "rerun_result": "141 passed; 0 failed",
+      "reason": "同一工具往返在 ProviderRequest 内必然出现 3 处（native_messages / input carry / observation carry），全局 ==1 不可满足；observation 渲染被 1518 --lib 基线钉住"
+    }
+  ],
+  "post_implementation_rerun": {
+    "exit_code": 0,
+    "result": "141 passed; 0 failed; 8.47s",
+    "log_receipt": "/tmp/red-interrupted-turn-v2.log"
+  }
+}
