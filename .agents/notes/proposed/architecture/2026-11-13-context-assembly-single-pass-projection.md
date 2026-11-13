@@ -18,7 +18,7 @@ Status: proposed
 
 1. **单程装配 + 双投影**：把一次 turn 的提示词建模为 `Vec<PromptLayer>`（每个 layer 携带 `content: String`、`normalized_role`、`native_role`、`stability: Stable | Semistable | Volatile`、`owner: LayerOwner`），由 `build_layered_turn_context` **只构造一次**；`flatten_normalized()` / `flatten_native()` 变成纯投影函数，不再各自拼装内容。
 2. **预算估算复用同一份 layer 列表**：`reserved_messages` 的临时拼装删除，改为对 layer 列表求和；截断后的 `truncation_note` 以「追加一个 Volatile layer 再重估一次」表达，不再复制整段 volatile 构造。
-3. **工具提示段自注册（第二期，backlog B138）**：新增 `tool guideline` 注册点，由工具模块声明自己的模型可见名与用法条款，`prompt_tool_references()` 由注册表派生；提示词不再硬编码工具名。前缀稳定性由「工具面恒定」的既有契约（`tools/names.rs` W42/Wave-61 C1 注释：曝光面不随运行时接线变化）保证，不改缓存语义。
+3. ~~**工具提示段自注册（第二期，backlog B138）**~~ **已落地**（见 `implemented/architecture/2026-11-13-tool-owned-prompt-guidelines-and-templates.md`）：模板化 + 工具条款自注册，本提案只剩第 1/2 条（装配去重）。：新增 `tool guideline` 注册点，由工具模块声明自己的模型可见名与用法条款，`prompt_tool_references()` 由注册表派生；提示词不再硬编码工具名。前缀稳定性由「工具面恒定」的既有契约（`tools/names.rs` W42/Wave-61 C1 注释：曝光面不随运行时接线变化）保证，不改缓存语义。
    - 与 `implemented/architecture/2026-11-11-system-prompt-layered-architecture-and-receipts-guard.md` 记录的否决项「完全从提示词中剥离规划类工具约束（只留 schema）」**不同**：条款仍留在提示词里，只把**归属**从单体常量搬到工具模块，触发约束不会消失。
 4. **验收方式**：以 `context_cache_red_contract.rs`（前缀逐字节相等）、`wave61_team_activation.rs`（层序 + 策略段位置）、`system_prompt_contract.rs`（SP1–SP10）为不变式护栏，先建立「三视图内容等价」的黑盒测试，再动手改实现，最后删掉重复构造。
 

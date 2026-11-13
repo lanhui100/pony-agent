@@ -5,17 +5,18 @@
 //! 两份事实源没有任何机械约束，改名、降曝光或删工具都会让提示词继续指挥模型调用
 //! 一个不存在/不可见的工具——这是"提示词对模型撒谎"，且不会有任何现有测试变红。
 //!
-//! 断言 ID（PT1–PT5）：
+//! 断言 ID（PT1–PT6）：
 //! - PT1：`prompt_tool_references()` 每项都必须能解析到注册表中的工具；
 //! - PT2：登记项必须是模型可见面（`ModelVisible`），不得指向 Deferred/Internal；
 //! - PT3：登记项必须真的出现在提示词文本里（防止登记表僵化成过期清单）；
 //! - PT4：提示词文本里出现的工具名必须全部已登记（防止新增点名却漏登记）；
-//! - PT5：冻结契约文档（`.dev-team/contracts/system-prompt-v2.md`）§2 全文与字节数与代码一致。
+//! - PT5：冻结契约文档（`.dev-team/contracts/system-prompt-v2.md`）§2 全文与字节数与代码一致；
+//! - PT6：稳定层**模板本体**不得出现任何工具专名（解耦只靠占位符，工具名由注册表渲染）。
 //!
 //! 读取入口固定为 `agent::context::{base_system_prompt, prompt_tool_references}`，
 //! 禁止测试直接引用私有常量 `BASE_SYSTEM_PROMPT`。
 
-use pony_agent_core::agent::context::{base_system_prompt, AGENT_TEAM_POLICY_PROMPT};
+use pony_agent_core::agent::context::{agent_team_policy_prompt, base_system_prompt};
 use pony_agent_core::agent::tools::{
     canonical_tool_name, prompt_non_tool_tokens, prompt_tool_references, tool_exposure_for_name,
     ToolExposure,
@@ -26,7 +27,7 @@ use pony_agent_core::agent::tools::{
 fn prompt_corpus() -> Vec<(&'static str, &'static str)> {
     vec![
         ("BASE_SYSTEM_PROMPT", base_system_prompt()),
-        ("AGENT_TEAM_POLICY_PROMPT", AGENT_TEAM_POLICY_PROMPT),
+        ("AGENT_TEAM_POLICY_PROMPT", agent_team_policy_prompt()),
     ]
 }
 
@@ -230,4 +231,78 @@ fn pt5_frozen_contract_document_matches_the_prompt() {
          字节数是前缀预算与体量护栏的输入，登记值过期会让后续容量判断建立在错误事实上",
         prompt.len()
     );
+}
+
+
+/// 模板里去掉所有 `{{...}}` 占位符后的**字面文本**（占位符内的 primitive 名不算工具专名）。
+fn template_literal_text(template: &str) -> String {
+    let mut literal = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find("{{") {
+        literal.push_str(&rest[..open]);
+        match rest[open + 2..].find("}}") {
+            Some(close) => rest = &rest[open + 2 + close + 2..],
+            None => return literal,
+        }
+    }
+    literal.push_str(rest);
+    literal
+}
+
+/// PT6：稳定层模板本体不得出现任何工具专名。
+///
+/// B138 的解耦形态是「模板放槽位、工具名由注册表渲染」。若有人图省事把工具名又写回模板，
+/// 渲染照旧能跑、PT1–PT5 也照旧全绿（因为渲染结果没变），但解耦已经失效——这个名字又变成
+/// 第二处需要人工同步的事实。所以必须直接检查模板原文，而不是渲染结果。
+#[test]
+fn pt6_prompt_templates_contain_no_tool_names() {
+    // Arrange
+    let templates = [
+        (
+            "base_prompt_template",
+            pony_agent_core::agent::system_prompt_template::base_prompt_template(),
+        ),
+        (
+            "team_policy_template",
+            pony_agent_core::agent::system_prompt_template::team_policy_template(),
+        ),
+    ];
+    let non_tool = prompt_non_tool_tokens();
+    let mut leaked: Vec<(&'static str, String)> = Vec::new();
+
+    // Act
+    for (source, template) in templates {
+        let literal = template_literal_text(template);
+        for token in tokens(&literal) {
+            if !looks_like_tool_name(token) || non_tool.contains(&token) {
+                continue;
+            }
+            if canonical_tool_name(token).is_some() {
+                leaked.push((source, token.to_string()));
+            }
+        }
+    }
+
+    // Assert
+    assert!(
+        leaked.is_empty(),
+        "PT6 违约：提示词模板里出现了工具专名 {leaked:?}。\
+         模板只允许 `{{{{tool:<primitive>}}}}` / `{{{{guideline:<key>}}}}` 占位符：\
+         工具名必须由 tools::names 渲染（PT1/PT2 才能守住改名与曝光面）"
+    );
+    for (source, template) in templates {
+        let rendered = if source == "base_prompt_template" {
+            base_system_prompt()
+        } else {
+            agent_team_policy_prompt()
+        };
+        assert!(
+            !rendered.contains("{{"),
+            "PT6 违约：{source} 渲染后仍残留占位符，说明渲染器漏替换：{rendered}"
+        );
+        assert!(
+            !template.contains("{{tool}}"),
+            "PT6 违约：{source} 直接在模板里写了 `{{{{tool}}}}`（无 primitive 名），渲染器无法解析它"
+        );
+    }
 }

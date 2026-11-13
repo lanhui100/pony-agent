@@ -1,12 +1,12 @@
 # 冻结契约：系统提示词 v2（System Prompt v2）
 
-- 契约版本：`v2.1.0`
+- 契约版本：`v2.2.0`
 - 状态：**FROZEN（冻结）**
 - 负责人：Protocol Agent（契约面）/ Lead（唯一解冻权）
 - 关联决策：[ADR 0007](../../docs/decisions/)（提示层序与前缀缓存）、[提示词-工具一致性门禁与契约对齐](../../.agents/notes/implemented/process/2026-11-13-prompt-tool-consistency-gate.md)
-- 冻结时间：2026-10-20；修订：2026-11-13（v2.1.0）
+- 冻结时间：2026-10-20；修订：2026-11-13（v2.1.0 契约回填 / v2.2.0 模板化解耦）
 
-**版本沿革**：v2.0.0 → v2.1.0 是对**已发生漂移的收敛**，未删除任何承诺条款。v2.0.0 冻结后，代码经 receipts / 不可信数据边界 / goal 策略等 ADR 追加了条款，但本文件未同步，导致 §2 全文、SP2/SP7 片段、§6 字节数（3099）、SP9 阈值（3400）四项与代码失配。本次按代码现状回填，并新增 §7 一致性门禁，把「文档 ⇄ 代码」与「提示词 ⇄ 工具表」变成机械可验的承诺。
+**版本沿革**：v2.1.0 → v2.2.0 是**所有权搬迁**：稳定层提示词改为「模板 + 占位符 + 工具注册表渲染」，提示词模板本体不再出现工具专名，**渲染结果逐字节不变**（BASE 3790B / 团队段 2624B），模型可见行为零变化。v2.0.0 → v2.1.0 是对**已发生漂移的收敛**，未删除任何承诺条款。v2.0.0 冻结后，代码经 receipts / 不可信数据边界 / goal 策略等 ADR 追加了条款，但本文件未同步，导致 §2 全文、SP2/SP7 片段、§6 字节数（3099）、SP9 阈值（3400）四项与代码失配。本次按代码现状回填，并新增 §7 一致性门禁，把「文档 ⇄ 代码」与「提示词 ⇄ 工具表」变成机械可验的承诺。
 
 > 冻结规则：本文件中的提示词全文、断言 ID 与期望原文片段一经冻结，**实施者（executor）只读不可改**。
 > 任何文案调整必须先由 Lead 解冻并同步修订本文件，否则视为违约。
@@ -29,6 +29,15 @@ pub fn prompt_layers_are_ordered(_messages: &[ProviderMessage]) -> bool {
     unimplemented!("T3 由 executor 实现")
 }
 ```
+
+实现位置（v2.2.0）：上述两个入口现为**再导出**——
+
+```rust
+pub use crate::agent::system_prompt_template::{agent_team_policy_prompt, base_system_prompt};
+```
+
+真正的文本在 `crates/pony-agent-core/src/agent/system_prompt_template.rs`（模板）+
+`crates/pony-agent-core/src/agent/tools/prompt_contract.rs`（工具条款表与渲染器）。入口签名与读取语义不变。
 
 约束：
 
@@ -159,7 +168,20 @@ v2.0.0 记录的 v1/v2 混合态片段已全部清除：`Understand the latest r
 | PT3 | 每个登记项确实出现在 BASE 或团队策略段文本里 | 登记表僵化成过期清单 |
 | PT4 | 提示词里「形状像工具名」的 token 必须已登记，**或**登记在 `prompt_non_tool_tokens()` 白名单里（fail-closed 两支） | 改名漂移（点名一个根本不存在的工具）、新增点名漏登记 |
 | PT5 | §2 全文与字节数与 `base_system_prompt()` 逐字/逐字节一致 | 改文案不改契约，承诺与实现分家 |
+| PT6 | 稳定层**模板本体**（去掉 `{{...}}` 占位符后）不得出现任何工具专名，且渲染后不得残留 `{{` | 有人把工具名写回模板，解耦失效（渲染结果不变、PT1–PT5 仍绿） |
 
-**维护约定**：改提示词文案 → 同提交改 §2、§4 片段与 §6 字节数；改工具名/曝光面 → 同提交改 `tools::prompt_contract::prompt_tool_references()` 或提示词文本；提示词新增「像工具名却不是工具」的标识符 → 登记到 `prompt_non_tool_tokens()` 并注明理由。
+**维护约定**：改提示词文案 → 同提交改 §2、§4 片段与 §6 字节数；改工具名/曝光面 → 只改工具注册表（`tools/names.rs`），提示词模板不动；新增工具用法条款 → 登记到 `tools::prompt_contract::GUIDELINES` 并在模板放 `{{guideline:<key>}}` 槽位；提示词新增「像工具名却不是工具」的标识符 → 登记到 `prompt_non_tool_tokens()` 并注明理由。
+
+### 8. 模板与占位符（v2.2.0）
+
+稳定层模板（`agent/system_prompt_template.rs`）只允许两种占位符：
+
+| 占位符 | 渲染来源 | 工具不可见时的行为 |
+| --- | --- | --- |
+| `{{tool:<primitive>}}` | `tools::names::model_visible_tool_name_opt` | 解析不到即 `panic`（模板与注册表失配属开发期错误，PT6 在前置测试里先炸） |
+| `{{guideline:<key>}}` | `tools::prompt_contract::GUIDELINES`（工具自注册的条款正文，允许内嵌 `{{tool}}`） | 所含工具不在 `ModelVisible` 面时**整行删除**（不留空项目符号） |
+
+渲染结果按进程 `OnceLock` 缓存一次，逐轮恒定：稳定前缀不变，provider 前缀缓存命中不受影响。
+`prompt_tool_references()` 由「模板中的 `{{tool:…}}` + 条款表的 primitive」派生，不再有人工工具名清单。
 
 > 门禁真源位置：清单放在 `agent/tools/prompt_contract.rs` 而非 `agent/context.rs`，原因是后者已顶到 `size:check` 的存量基线（3003 行），任何净增行都是新违规；按 `implemented/process/2026-11-12-file-size-gate-module-split-not-baseline-bump.md` 的先例，拆模块而不是抬基线。

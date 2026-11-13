@@ -38,7 +38,7 @@ mod contract;
 mod exec;
 mod schema;
 mod names;
-mod prompt_contract;
+pub(crate) mod prompt_contract;
 mod workspace;
 mod paths;
 mod run;
