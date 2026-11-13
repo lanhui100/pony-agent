@@ -1306,3 +1306,23 @@ note: >-
       （525 正例 / 526 负例 / `1525`、`5250ms` 子串负样本）、
       `agent::retry::tests::adr_0086_regression_classify_retryability`、
       `tests/pa172_provider_failover_contract.rs::failover_trigger_class_truth_table_is_closed`。
+
+  【归属登记（2026-11-13）｜t/s 口径可取证、重试窗口纯净与读循环去阻塞（ADR：.agents/notes/implemented/bug-fix/2026-11-13-token-speed-evidence-and-window-purity.md；backlog:B134 / B124）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只新增**本地取证面**（落盘事件 + 本地结构化日志）并调整本地流式处理时序，
+  无新增对外接口、网络 IO、后台常驻任务、环境变量、依赖或 `/metrics` 出口。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、Prometheus pull 与节点日志采集前提均不成立）。
+  (2) 新增本地事实面（仅登记，非遥测出口）：轮终态新增 `turn/speed` 事件（`TurnEvent::TurnSpeed`，
+      与终态同事务写入 `sessions.db` 的 `turn_events`），同帧打一行 `turn speed settled` 结构化日志；
+      重试账本另打一行 `provider_call_retry_window`。三者只进本地 sessions.db 与
+      `<app_data_dir>/logs/pony-agent.log`（既有单行 JSON + trace_id + 512KiB 轮转通道），
+      **不上送** Loki / Sentry / Tempo，不新增标签、指标或环境变量，不改变既有日志字段契约。
+      `StreamDeltaCoalescer` 仅改变 SSE 读循环的本地节流方式（去掉阻塞 sleep，改时间窗拼接），
+      不新增网络出口或后台线程；`sink.emit` 仍走既有 Tauri/TUI 投递契约。
+  (3) 收口点：不新增 enforcement_point（无新的网络出口、异常边界或可机械拦截的收口面）；
+      行为门落在测试层——`crates/pony-agent-core/tests/f1_speed_observability.rs`（4 例）、
+      `tests/f2_retry_window_purity.rs`（2 例）、`tests/f3_stream_throttle_isolation.rs`（2 例 + 1 例 ADVISORY ignore）、
+      `src/lib/runtime/__tests__/f1-token-metrics-sample.spec.ts`（6 例）；静态门
+      「读路径零 `MIN_CLIENT_GAP` / `thread::sleep`」与变异红相收据见
+      `.dev-team/diag-tps/fix/00-DELIVERY.md`。
