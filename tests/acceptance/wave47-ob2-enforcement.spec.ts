@@ -213,7 +213,9 @@ describe.skipIf(!hasSkill || !hasPonygo)("ob2 变更级门禁与横切收口点�
       stdout = execSync("ponygo observe audit --level ob2", {
         encoding: "utf-8",
         stdio: "pipe",
-        timeout: 60000,
+        // 全量 verify 会并行跑 160+ 个 spec，ob2 审计本身约 20s CPU；60s 在满载时会撞线
+        // （表现为 exit=-1 的 SIGTERM 假红，判定值本身并非失败）。与用例 90s 预算对齐。
+        timeout: 90000,
       });
     } catch (err: any) {
       exitCode = err.status ?? -1;
