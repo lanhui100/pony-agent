@@ -96,14 +96,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 5728
-    },
-    {
-      "path": "crates/pony-agent-core/src/agent/otel/mod.rs",
-      "kind": "fn-depth",
-      "name": "spawn_local_otlp_sink",
-      "occurrence": 0,
-      "value": 11
+      "value": 4412
     },
     {
       "path": "crates/pony-agent-core/src/agent/process.rs",
@@ -159,7 +152,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 13990
+      "value": 13894
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
@@ -215,7 +208,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 3422
+      "value": 3421
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
@@ -229,7 +222,7 @@
       "kind": "fn-lines",
       "name": "start_turn_stream_with_control_and_facts",
       "occurrence": 0,
-      "value": 1734
+      "value": 1733
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
@@ -250,7 +243,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 5858
+      "value": 5773
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
@@ -271,7 +264,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6726
+      "value": 6656
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/tests.rs",

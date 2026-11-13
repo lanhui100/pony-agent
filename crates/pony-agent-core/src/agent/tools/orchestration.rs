@@ -27,14 +27,26 @@ impl ToolRouter {
             Err((code, message)) => return error_result(TOOL_SUBAGENT, &code, message, None),
         };
 
+        // P3 trace：工具执行前先建 `tool.call` span，子代理 turn 于是成为它的真子节点
+        // （旧实现要等工具结束才 backdate 创建 span，子 turn 只能挂到 turn 下）。
+        let args_preview = serde_json::to_string(&call.arguments).ok();
+        let _tool_span = crate::agent::otel::begin_tool_call_span(
+            call.call_id.as_deref(),
+            TOOL_SUBAGENT,
+            args_preview.as_deref(),
+        );
+
         let args: Result<SubagentArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            // Wave-61 C8.4 + W2：把宿主真实工作区根与**宿主当前 provider 选择**传给子代理
-            // （父会话项目指令/技能 + provider/model 继承随之生效；`args` 显式覆盖优先）。
-            Ok(args) => match subagent_in_workspace_with_provider(
+            // Wave-61 C8.4 + W2 + P1/P2：把宿主真实工作区根、**宿主当前 provider 选择**、
+            // 父会话 id 与 workspace 归属一并传给子代理（项目指令/技能、workspace 绑定、
+            // 会话 id 对齐随之生效；`args` 显式覆盖优先）。
+            Ok(args) => match subagent_in_workspace_with_context(
                 args,
                 Some(workspace_root.as_path()),
                 context.provider_selection.as_ref(),
+                context.session_id.as_deref(),
+                context.workspace_id.as_deref(),
             ) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SUBAGENT.to_string(),
@@ -101,6 +113,14 @@ impl ToolRouter {
         };
 
         let args: Result<SpawnTeammateArgs, _> = serde_json::from_value(call.arguments.clone());
+        // P3 trace：与 subagent 同构——工具执行前先建 `tool.call` span，队友 turn（含
+        // 同步驱动的首轮）因此挂在本次派生之下；记账入口按 call_id 复用同一 span。
+        let args_preview = serde_json::to_string(&call.arguments).ok();
+        let _tool_span = crate::agent::otel::begin_tool_call_span(
+            call.call_id.as_deref(),
+            TOOL_SPAWN_TEAMMATE,
+            args_preview.as_deref(),
+        );
         match args {
             // Wave-61 C7 + C8.4 + W2：派生队友后把它的初始 prompt 真正投递并驱动（引擎在位时），
             // 并把**宿主当前 provider 选择**作为继承源（`args` 的 provider/model 覆盖优先；

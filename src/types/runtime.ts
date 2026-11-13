@@ -265,7 +265,8 @@ export type SkillDescriptor = {
 export type TraceStep = {
   id: string;
   label: string;
-  state: "completed" | "active" | "pending" | "error" | "cancelled";
+  /** `skipped`：该步骤本轮未被触发（如无工具调用的 turn 的 `step-call-tool`）。 */
+  state: "completed" | "active" | "pending" | "error" | "cancelled" | "skipped";
 };
 
 export type TraceTimelineEntryKind =

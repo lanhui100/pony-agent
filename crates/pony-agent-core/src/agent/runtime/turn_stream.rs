@@ -1674,6 +1674,7 @@ impl AgentRuntime {
         // 函数返回时 Drop 自动结束 span，覆盖整轮生命周期（含同步执行的工具子轮）。
         // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
         let turn_sequence = self.session_turn_sequence(input.session_id.as_deref());
+        let turn_started_at = Instant::now(); // P5：与 `agent.turn` span 同点起算（旧实现实测差 35.4s）
         // W3 trace：队友/子代理 runtime 继承宿主 traceparent（宿主 runtime 为 `None` ⇒ root）。
         let mut otel_turn_scope = crate::agent::otel::begin_turn_trace_with_parent(
             input.session_id.as_deref().unwrap_or(""),
@@ -1693,8 +1694,6 @@ impl AgentRuntime {
         // (ADR 0074/T8): a governance-blocked turn must not swallow the answer.
         let injection_run_id = facts.run_id.clone();
         let injection_session_id = input.session_id.clone();
-        let turn_started_at = Instant::now();
-
         // Wave-7 B003：**turn 启动前**的用量治理判定（一次性；只在入口，绝不中断进行中的 turn）。
         // fail-open：账本不可读/策略非法 ⇒ Allow + governance_degraded（G3），不会进这里的分支。
         {

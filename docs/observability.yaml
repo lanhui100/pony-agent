@@ -62,6 +62,21 @@ reviewed_at: "2026-11-09"
 #     metrics/logs 维持结构性 N-A；不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+# 子代理会话归属与 trace 父子关系修复（B147 / ADR 2026-11-13-subagent-session-binding-and-trace-parenting）
+# 归属说明：
+# (1) tracing｜**适用，落点不变**（`crates/pony-agent-core/src/agent/otel/mod.rs`）：仍是唯一的
+#     span 构造/结束点，无新增 span 名、无新增端点或导出通道；本卡只改 `tool.call` 的**建 span 时机**
+#     （工具执行前建、记账时按 call_id 结束同一个 span），使子代理/队友 turn 挂到工具之下。
+#     测试从 `otel/mod.rs` 拆到 `otel/tests.rs`（文件规模门禁），不产生第二份实现：
+#     http_client 的 traceparent 注入实现仍只在 `otel/mod.rs`。
+# (2) 新增本地取证面（非遥测出口）：`tool.call` 的 status/duration/会话归属改由记账入口补写；
+#     未记账 span 有线程内 FIFO 上限 64（超限即 end），仅为防泄漏，不上报指标。
+# (3) UI：轨迹步骤新增 `skipped` 状态（无工具调用的已完成 turn），是既有 traceSteps 的取值扩展，
+#     无新增接口/网络 IO/后台任务/LLM 调用。
+# (4) ⇒ 四维归属不变：tracing/issues 仍 applicable；metrics/logs 维持结构性 N-A。
+#     不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
 dimensions:
   tracing:
     applicable: true

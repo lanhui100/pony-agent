@@ -484,16 +484,32 @@ pub fn subagent_in_workspace(
     subagent_in_workspace_with_provider(args, workspace_root, None)
 }
 
-/// W2：带宿主 provider 继承/显式覆盖的子代理入口（实现体）。
+/// W2：带宿主 provider 继承/显式覆盖的子代理入口（兼容包装）。
 ///
-/// 复刻 [`subagent_in_workspace`] 的许可门 / 前后台语义，只把引擎调用换成
-/// [`SubagentTurnEngine::run_turn_with_selection`]：
-/// - `host_selection=Some` ⇒ 子代理继承宿主 provider（再按 `args` 覆盖 provider/model）；
-/// - `host_selection=None` 且 `args` 无覆盖 ⇒ 保持 legacy（`selection=None` ⇒ 引擎走 `run_turn_in`）。
+/// 不携带会话归属上下文：workspace id / 父会话 id 缺失，由引擎回落既有解析链。
+/// 工具层入口应改用 [`subagent_in_workspace_with_context`]。
 pub fn subagent_in_workspace_with_provider(
     args: SubagentArgs,
     workspace_root: Option<&std::path::Path>,
     host_selection: Option<&ResolvedProviderSelection>,
+) -> Result<SubagentResult, String> {
+    subagent_in_workspace_with_context(args, workspace_root, host_selection, None, None)
+}
+
+/// 带**完整会话归属**的子代理入口（实现体）。
+///
+/// 在 [`subagent_in_workspace_with_provider`] 之上补齐三件事：
+/// - `session_id` 由本层预分配并下传引擎，`SubagentResult.subagent_id` 与真实子会话同一个 id；
+/// - `parent_session_id` / `workspace_id` 让引擎继承父会话的 workspace 绑定；
+/// - `args.fork_context` 原样进入请求，由引擎决定是否 seed 父历史。
+///
+/// 许可门 / 前后台语义 / provider 解析与旧入口逐字一致。
+pub fn subagent_in_workspace_with_context(
+    args: SubagentArgs,
+    workspace_root: Option<&std::path::Path>,
+    host_selection: Option<&ResolvedProviderSelection>,
+    parent_session_id: Option<&str>,
+    workspace_id: Option<&str>,
 ) -> Result<SubagentResult, String> {
     // W2 失败前置：**先解析**，解析失败立即返回 —— 绝不先起后台线程再异步失败。
     let selection = resolve_optional_teammate_provider_selection(
@@ -503,6 +519,7 @@ pub fn subagent_in_workspace_with_provider(
     )?;
 
     // W3 trace：**派发时**捕获宿主当前 turn 的 traceparent（同步与后台两条路径都继承同一 trace）。
+    // P3：工具层若已预创建 `tool.call` span，这里拿到的是该 span —— 子 turn 因此成为工具的子节点。
     let parent_traceparent = crate::agent::otel::current_traceparent();
 
     let engine = crate::agent::subagent_runtime::subagent_engine().ok_or_else(|| {
@@ -520,22 +537,32 @@ pub fn subagent_in_workspace_with_provider(
     } else {
         Some(crate::agent::subagent_runtime::subagent_gate_enter(&args.prompt)?)
     };
+    // P2：会话 id 只在这里生成一次，引擎必须复用；后台路径无 outcome 时也返回同一个 id。
     let subagent_id = format!("subagent-{}", Uuid::new_v4());
     let is_bg = args.run_in_background.unwrap_or(false);
+    let fork_context = args.fork_context.unwrap_or(false);
 
     if is_bg {
         let bg_id = subagent_id.clone();
         let bg_root = workspace_root.map(std::path::Path::to_path_buf);
+        let bg_prompt = args.prompt;
+        let bg_parent_session_id = parent_session_id.map(str::to_string);
+        let bg_workspace_id = workspace_id.map(str::to_string);
         std::thread::spawn(move || {
             // 后台 turn 全程占许可（仅非自持引擎会携带 Some）。
             let _gate = gate;
-            if let Err(err) = engine.run_turn_with_selection_and_parent(
-                &args.prompt,
-                SUBAGENT_TURN_TIMEOUT_MS,
-                bg_root.as_deref(),
-                selection.as_ref(),
-                parent_traceparent.as_deref(),
-            ) {
+            let request = crate::agent::subagent_runtime::SubagentRunRequest {
+                prompt: &bg_prompt,
+                timeout_ms: SUBAGENT_TURN_TIMEOUT_MS,
+                workspace_root: bg_root.as_deref(),
+                provider_selection: selection.as_ref(),
+                parent_traceparent: parent_traceparent.as_deref(),
+                session_id: Some(&bg_id),
+                parent_session_id: bg_parent_session_id.as_deref(),
+                workspace_id: bg_workspace_id.as_deref(),
+                fork_context,
+            };
+            if let Err(err) = engine.run_turn_request(&request) {
                 eprintln!("[subagent] background turn failed ({}): {}", bg_id, err);
             }
         });
@@ -548,18 +575,32 @@ pub fn subagent_in_workspace_with_provider(
 
     // 同步路径：许可 guard 活到本次调用结束（仅非自持引擎会携带 Some）。
     let _gate = gate;
-    match engine.run_turn_with_selection_and_parent(
-        &args.prompt,
-        SUBAGENT_TURN_TIMEOUT_MS,
+    let request = crate::agent::subagent_runtime::SubagentRunRequest {
+        prompt: &args.prompt,
+        timeout_ms: SUBAGENT_TURN_TIMEOUT_MS,
         workspace_root,
-        selection.as_ref(),
-        parent_traceparent.as_deref(),
-    ) {
-        Ok(outcome) => Ok(SubagentResult {
-            subagent_id,
-            status: "completed".to_string(),
-            output: Some(outcome.final_text),
-        }),
+        provider_selection: selection.as_ref(),
+        parent_traceparent: parent_traceparent.as_deref(),
+        session_id: Some(&subagent_id),
+        parent_session_id,
+        workspace_id,
+        fork_context,
+    };
+    match engine.run_turn_request(&request) {
+        Ok(outcome) => {
+            // P2：引擎回传真实会话 id 时以它为准（Stub 引擎可能忽略预分配 id）；
+            // 为空才回落预分配值，保证返回值永远可检索。
+            let resolved_id = if outcome.session_id.trim().is_empty() {
+                subagent_id
+            } else {
+                outcome.session_id
+            };
+            Ok(SubagentResult {
+                subagent_id: resolved_id,
+                status: "completed".to_string(),
+                output: Some(outcome.final_text),
+            })
+        }
         Err(err) => Err(err),
     }
 }

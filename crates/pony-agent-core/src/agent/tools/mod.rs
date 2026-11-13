@@ -85,7 +85,8 @@ pub use crate::agent::goal::{
 pub use crate::agent::orchestration::{
     drain_inbox, interrupt_agent, list_agents, send_message, send_message_in_workspace,
     spawn_teammate, spawn_teammate_in_workspace, spawn_teammate_in_workspace_with_provider,
-    subagent, subagent_in_workspace, subagent_in_workspace_with_provider, team_task_create,
+    subagent, subagent_in_workspace, subagent_in_workspace_with_context,
+    subagent_in_workspace_with_provider, team_task_create,
     team_task_get, team_task_list, team_task_update, wait_agent, workflow,
     InterruptAgentArgs, InterruptAgentResult, ListAgentsResult, MessageDeliveryMode, QueuedMessage,
     ReadInboxArgs, ReadInboxResult, SendMessageArgs, SendMessageResult, SpawnTeammateArgs,

@@ -260,12 +260,17 @@ fn completed_trace_with_tool(tool_ok: bool) -> Vec<TurnTraceStep> {
     ]
 }
 
+/// P5：本轮从未派发工具 ⇒ `step-call-tool` 是 `skipped`（不是 `pending`）。
+///
+/// 为什么不是 `pending`：`pending` 的语义是「排队等待执行」，会让轨迹面板看起来像卡死；
+/// `completed` 又会谎报「调用过工具」。`skipped` 是唯一不撒谎且可区分「没调用」的状态。
+/// 流式进行中的 `trace_return_active_without_tool` 仍为 `pending`（此刻确实可能再调工具）。
 fn completed_trace_without_tool() -> Vec<TurnTraceStep> {
     vec![
         trace_step("step-plan", "Receive input", "completed"),
         trace_step("step-context", "Build context", "completed"),
         trace_step("step-call-model", "Call model", "completed"),
-        trace_step("step-call-tool", "Call tool", "pending"),
+        trace_step("step-call-tool", "Call tool", "skipped"),
     ]
 }
 
@@ -974,5 +979,32 @@ mod tests {
 
         assert!(text.contains("resultCount"), "小结果保留完整内容");
         assert!(!text.contains("truncated by pony-agent"), "小结果不截断");
+    }
+
+    /// P5：无工具**完成**的 turn，`step-call-tool` 必须是 `skipped`。
+    ///
+    /// 旧行为是 `pending`（看起来像卡死在排队），`completed` 又会谎报「调用过工具」；
+    /// 进行中的无工具轨迹仍保持 `pending`——此刻确实还可能再派发工具。
+    #[test]
+    fn completed_without_tool_marks_call_tool_skipped() {
+        let step_state = |steps: &[TurnTraceStep]| {
+            steps
+                .iter()
+                .find(|step| step.id == "step-call-tool")
+                .expect("轨迹必须含 step-call-tool")
+                .state
+                .clone()
+        };
+
+        assert_eq!(
+            step_state(&completed_trace_without_tool()),
+            "skipped",
+            "P5：无工具完成的 turn 不得把 step-call-tool 留在 pending"
+        );
+        assert_eq!(
+            step_state(&trace_return_active_without_tool()),
+            "pending",
+            "P5：进行中的无工具轨迹仍应 pending（后续还可能调工具）"
+        );
     }
 }

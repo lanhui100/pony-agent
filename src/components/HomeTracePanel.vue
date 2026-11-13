@@ -1570,7 +1570,8 @@ function resolveBuildContextObservation(
                           'text-stone-500': entry.state === 'completed',
                           'animate-spin text-stone-500': entry.state === 'active',
                           'text-rose-600': entry.state === 'error',
-                          'text-stone-300': entry.state === 'pending'
+                          // `skipped`：本轮未触发该步骤（如无工具调用的 turn），弱化且不转圈。
+                          'text-stone-300': entry.state === 'pending' || entry.state === 'skipped'
                         }"
                       />
                       <span class="truncate">{{ entry.label }}</span>

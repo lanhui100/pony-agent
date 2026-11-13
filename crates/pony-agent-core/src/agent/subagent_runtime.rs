@@ -10,7 +10,7 @@
 //!   `subagent_timeout`（>timeout_ms，检测粒度 ≤1s，超时会话标注为孤儿）。
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
@@ -50,8 +50,45 @@ impl ProviderSelectionResolver for FixedSelectionResolver {
 pub struct SubagentRunOutcome {
     /// 子代理 turn 的最终文本输出。
     pub final_text: String,
-    /// 子代理会话 id。
+    /// 子代理会话 id（与编排层 `SubagentResult.subagent_id` 同一个值）。
     pub session_id: String,
+}
+
+/// 子代理 turn 的完整派发请求（会话归属 / id 对齐 / 上下文继承的唯一载体）。
+///
+/// 新增字段全部可选，既有调用方经 [`SubagentRunRequest::new`] 构造后行为与旧
+/// `run_turn_with_selection_and_parent` 逐字一致。
+pub struct SubagentRunRequest<'a> {
+    pub prompt: &'a str,
+    pub timeout_ms: u64,
+    pub workspace_root: Option<&'a Path>,
+    pub provider_selection: Option<&'a ResolvedProviderSelection>,
+    pub parent_traceparent: Option<&'a str>,
+    /// 编排层预分配的子会话 id；`Some` ⇒ 引擎必须复用，保证工具返回值可检索。
+    pub session_id: Option<&'a str>,
+    /// 父会话 id：用于继承 workspace 绑定与（可选）fork 历史。
+    pub parent_session_id: Option<&'a str>,
+    /// 父会话 workspace id；`None` ⇒ 引擎从父会话快照 / workspace root 反查。
+    pub workspace_id: Option<&'a str>,
+    /// 是否把父会话已完成历史带进子 turn 作为 seed。
+    pub fork_context: bool,
+}
+
+impl<'a> SubagentRunRequest<'a> {
+    /// 最小请求：仅 prompt + 预算，其余字段缺省（= 旧 `run_turn` 语义）。
+    pub fn new(prompt: &'a str, timeout_ms: u64) -> Self {
+        Self {
+            prompt,
+            timeout_ms,
+            workspace_root: None,
+            provider_selection: None,
+            parent_traceparent: None,
+            session_id: None,
+            parent_session_id: None,
+            workspace_id: None,
+            fork_context: false,
+        }
+    }
 }
 
 /// 子代理 turn 执行引擎契约（真实实现，禁止返回伪字符串）。
@@ -118,6 +155,24 @@ pub trait SubagentTurnEngine: Send + Sync {
     ) -> Result<SubagentRunOutcome, String> {
         let _ = parent_traceparent;
         self.run_turn_with_selection(prompt, timeout_ms, workspace_root, selection)
+    }
+
+    /// 以完整派发请求运行一个子代理 turn（additive）。
+    ///
+    /// 默认实现忽略新增的会话归属字段，原样委托
+    /// [`SubagentTurnEngine::run_turn_with_selection_and_parent`]：既有 Stub / 宿主引擎
+    /// 零改动；[`HostTurnEngine`] 覆写它，落实 workspace 继承、id 对齐与 `fork_context`。
+    fn run_turn_request(
+        &self,
+        request: &SubagentRunRequest<'_>,
+    ) -> Result<SubagentRunOutcome, String> {
+        self.run_turn_with_selection_and_parent(
+            request.prompt,
+            request.timeout_ms,
+            request.workspace_root,
+            request.provider_selection,
+            request.parent_traceparent,
+        )
     }
 }
 
@@ -290,46 +345,101 @@ impl HostTurnEngine {
 }
 
 impl HostTurnEngine {
-    /// 以**显式工作区根**运行一个子代理 turn（Wave-61 C8 的共用实现）。
+    /// 从共享会话存储读取父会话的 workspace 绑定与（可选）已完成历史。
     ///
-    /// `workspace_root` 必须是绝对路径（调用方负责）：父会话/宿主的真实工作区根，
-    /// 使子代理继承父会话的项目指令与项目技能（wave-58 F1-5）。回落规则（`None` →
-    /// `resolved_workspace_root()`）由 [`SubagentTurnEngine::run_turn_in`] 处理。
-    fn run_turn_with_root(
+    /// 只读快照：不创建父会话、不落盘、不占写锁。共享 store 缺失或父会话不存在时
+    /// 返回 `(None, [])` —— 绝不伪造归属或上下文。
+    fn inherited_parent_context(
         &self,
-        prompt: &str,
-        timeout_ms: u64,
-        workspace_root: PathBuf,
-    ) -> Result<SubagentRunOutcome, String> {
-        self.run_turn_with_root_and_selection(prompt, timeout_ms, workspace_root, None, None)
+        parent_session_id: Option<&str>,
+        fork_context: bool,
+    ) -> (
+        Option<String>,
+        Vec<crate::agent::session::TurnHistoryMessage>,
+    ) {
+        let Some(parent_session_id) = parent_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return (None, Vec::new());
+        };
+        let Some(shared) = self.shared_sessions.as_ref() else {
+            return (None, Vec::new());
+        };
+        let sessions = shared.read().unwrap_or_else(|poisoned| {
+            tracing::warn!(target: "control_plane", error = %poisoned, "[pony-agent] sessions rwlock poisoned");
+            poisoned.into_inner()
+        });
+        let snapshot = sessions.snapshot_at_readonly(Some(parent_session_id), None, &[]);
+        let history = if fork_context {
+            seed_completed_history(snapshot.history)
+        } else {
+            Vec::new()
+        };
+        (snapshot.workspace_id, history)
     }
 
-    /// W2/W3：带显式 provider 选择 + 可选父 traceparent 的建栈实现。
+    /// 子会话 workspace 归属解析：显式 id → 父会话快照 → 按 root 反查已注册 workspace。
     ///
-    /// `selection = Some` ⇒ 用 [`FixedSelectionResolver`] 固定本次栈的 provider 选择；
-    /// `None` ⇒ 既有默认解析链（`ProviderRegistryStore`），行为逐字不变。
-    /// `parent_traceparent = Some` ⇒ 建栈后注入 runtime，本 turn 的 `agent.turn` span
-    /// 挂到宿主 turn span 之下（同一 trace id）。
-    fn run_turn_with_root_and_selection(
+    /// 最后一步覆盖「父会话尚未盖章 workspace id，但调用方给了真实 root」的场景；
+    /// 三步都失败时返回 `None`（保持可诊断的缺失，不静默落默认 workspace 之外的值）。
+    fn resolve_child_workspace_id(
         &self,
-        prompt: &str,
-        timeout_ms: u64,
+        explicit: Option<&str>,
+        inherited: Option<String>,
+        workspace_root: &Path,
+    ) -> Option<String> {
+        if let Some(explicit) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+            return Some(explicit.to_string());
+        }
+        if inherited.is_some() {
+            return inherited;
+        }
+        let shared = self.shared_sessions.as_ref()?;
+        let sessions = shared.read().unwrap_or_else(|poisoned| {
+            tracing::warn!(target: "control_plane", error = %poisoned, "[pony-agent] sessions rwlock poisoned");
+            poisoned.into_inner()
+        });
+        sessions
+            .list_workspaces()
+            .into_iter()
+            .find(|workspace| workspace_root_matches(&workspace.root_path, workspace_root))
+            .map(|workspace| workspace.id)
+    }
+
+    /// 完整派发请求的建栈实现（workspace / id / fork_context 的唯一落点）。
+    fn run_turn_with_request(
+        &self,
+        request: &SubagentRunRequest<'_>,
         workspace_root: PathBuf,
-        selection: Option<ResolvedProviderSelection>,
-        parent_traceparent: Option<String>,
     ) -> Result<SubagentRunOutcome, String> {
         // 1) prompt 体积门 + 2) 并发门：引擎是许可的唯一真源（Guard Drop 归还许可，
         //    panic 展开路径同样安全）。
-        let inflight = subagent_gate_enter(prompt)?;
+        let inflight = subagent_gate_enter(request.prompt)?;
 
-        // 3) 独立会话：子代理会话 id 预生成，超时后可标注孤儿。
-        let session_id = format!("subagent-{}", Uuid::new_v4());
+        // 3) 会话 id：编排层预分配时**必须**复用（工具返回值与真实子会话同一个 id）；
+        //    仅旧调用方未预分配时才自生成。
+        let session_id = request
+            .session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("subagent-{}", Uuid::new_v4()));
         let thread_session_id = session_id.clone();
-        let prompt_owned = prompt.to_string();
+        let prompt_owned = request.prompt.to_string();
+        let selection = request.provider_selection.cloned();
+        let parent_traceparent = request
+            .parent_traceparent
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        // 父上下文在**父线程**读取（`self` / store 句柄不跨线程），worker 只收快照数据。
+        let (inherited_workspace_id, history) =
+            self.inherited_parent_context(request.parent_session_id, request.fork_context);
+        let workspace_id =
+            self.resolve_child_workspace_id(request.workspace_id, inherited_workspace_id, &workspace_root);
         // W3b：共享会话存储句柄在父线程克隆后 move 进 worker（`self` 不跨线程）。
         let shared_sessions = self.shared_sessions.clone();
-        // Wave-58 F1-5：建栈根已在调用方解析好并作为参数传入，此处直接 move 进线程
-        //（`self` 不跨线程）。
 
         // AgentRuntime 的 Send+Sync 不作为对外契约假设：runtime 在工作线程
         // 内部构建并持有，跨线程只传 outcome（TurnResult: Clone + Send 数据）。
@@ -373,9 +483,9 @@ impl HostTurnEngine {
                     workspace_mode: None,
                     session_id: Some(thread_session_id),
                     node_id: None,
-                    history: Vec::new(),
+                    history,
                     images: Vec::new(),
-                    workspace_id: None,
+                    workspace_id,
                     plan_execution_approval: None,
                     tool_authorization_mode: None,
                 };
@@ -391,7 +501,7 @@ impl HostTurnEngine {
         });
 
         // 4) 超时检测：≤1s 粒度 recv_timeout 自旋。
-        let deadline = Duration::from_millis(timeout_ms);
+        let deadline = Duration::from_millis(request.timeout_ms);
         let started = Instant::now();
         loop {
             if started.elapsed() >= deadline {
@@ -399,7 +509,7 @@ impl HostTurnEngine {
                 // session_id 写入错误消息供运维排查。
                 return Err(format!(
                     "subagent_timeout: orphan session_id={} (turn exceeded {}ms; no stop API, session left for inspection)",
-                    session_id, timeout_ms
+                    session_id, request.timeout_ms
                 ));
             }
             let wait = deadline
@@ -433,6 +543,27 @@ impl HostTurnEngine {
     }
 }
 
+/// `fork_context` 的 seed 边界：只保留最后一个 assistant 消息（含）之前的历史，
+/// 截断尚未完成的父 turn（其 user 消息已落库但 assistant 回复未产出），避免把半轮
+/// 上下文带进子代理。
+fn seed_completed_history(
+    history: Vec<crate::agent::session::TurnHistoryMessage>,
+) -> Vec<crate::agent::session::TurnHistoryMessage> {
+    let Some(last_assistant) = history.iter().rposition(|message| message.role == "assistant")
+    else {
+        return Vec::new();
+    };
+    history.into_iter().take(last_assistant + 1).collect()
+}
+
+/// workspace root 比较（忽略尾部路径分隔符；不引入 canonicalize 的 IO 与 symlink 语义）。
+fn workspace_root_matches(registered: &str, root: &Path) -> bool {
+    let registered = registered.trim_end_matches(['/', '\\']);
+    let target = root.display().to_string();
+    let target = target.trim_end_matches(['/', '\\']);
+    !registered.is_empty() && registered == target
+}
+
 impl SubagentTurnEngine for HostTurnEngine {
     /// 本引擎在 `run_turn` 内持门（见 `subagent_gate_enter`），故 orchestration 入口门必须跳过，
     /// 避免一次调用扣两个许可（Wave-61 C.1 双重扣减修正）。
@@ -441,7 +572,7 @@ impl SubagentTurnEngine for HostTurnEngine {
     }
 
     fn run_turn(&self, prompt: &str, timeout_ms: u64) -> Result<SubagentRunOutcome, String> {
-        self.run_turn_with_root(prompt, timeout_ms, self.resolved_workspace_root())
+        self.run_turn_request(&SubagentRunRequest::new(prompt, timeout_ms))
     }
 
     /// Wave-61 C8：显式工作区根优先（桌面宿主的真实工作区在 `ToolRouter.workspace_root`，
@@ -452,17 +583,12 @@ impl SubagentTurnEngine for HostTurnEngine {
         timeout_ms: u64,
         workspace_root: Option<&std::path::Path>,
     ) -> Result<SubagentRunOutcome, String> {
-        let root = workspace_root
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| self.resolved_workspace_root());
-        self.run_turn_with_root(prompt, timeout_ms, root)
+        let mut request = SubagentRunRequest::new(prompt, timeout_ms);
+        request.workspace_root = workspace_root;
+        self.run_turn_request(&request)
     }
 
-    /// W2：显式 provider 选择优先。
-    ///
-    /// - `Some(selection)` ⇒ 以 [`FixedSelectionResolver`] 固定该栈的 provider 选择
-    ///   （宿主继承或显式覆盖后的快照；`TurnInput.provider_id/model_id` 保持 `None`）；
-    /// - `None` ⇒ 逐字回落既有 [`SubagentTurnEngine::run_turn_in`]（旧行为不变）。
+    /// W2：显式 provider 选择优先（经完整请求转发，语义与旧实现逐字一致）。
     fn run_turn_with_selection(
         &self,
         prompt: &str,
@@ -470,25 +596,13 @@ impl SubagentTurnEngine for HostTurnEngine {
         workspace_root: Option<&std::path::Path>,
         selection: Option<&ResolvedProviderSelection>,
     ) -> Result<SubagentRunOutcome, String> {
-        let Some(selection) = selection else {
-            return self.run_turn_in(prompt, timeout_ms, workspace_root);
-        };
-        let root = workspace_root
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| self.resolved_workspace_root());
-        self.run_turn_with_root_and_selection(
-            prompt,
-            timeout_ms,
-            root,
-            Some(selection.clone()),
-            None,
-        )
+        let mut request = SubagentRunRequest::new(prompt, timeout_ms);
+        request.workspace_root = workspace_root;
+        request.provider_selection = selection;
+        self.run_turn_request(&request)
     }
 
-    /// W3 trace：继承宿主 turn 的 traceparent。
-    ///
-    /// - `selection=None` 且 `parent_traceparent=None` ⇒ 逐字回落 `run_turn_in`（旧行为不变）；
-    /// - 其余情况 ⇒ 建栈（可带固定 provider 选择）后注入父 traceparent，再跑 turn。
+    /// W3 trace：继承宿主 turn 的 traceparent（经完整请求转发）。
     fn run_turn_with_selection_and_parent(
         &self,
         prompt: &str,
@@ -497,23 +611,23 @@ impl SubagentTurnEngine for HostTurnEngine {
         selection: Option<&ResolvedProviderSelection>,
         parent_traceparent: Option<&str>,
     ) -> Result<SubagentRunOutcome, String> {
-        let parent_traceparent = parent_traceparent
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        if selection.is_none() && parent_traceparent.is_none() {
-            return self.run_turn_in(prompt, timeout_ms, workspace_root);
-        }
-        let root = workspace_root
+        let mut request = SubagentRunRequest::new(prompt, timeout_ms);
+        request.workspace_root = workspace_root;
+        request.provider_selection = selection;
+        request.parent_traceparent = parent_traceparent;
+        self.run_turn_request(&request)
+    }
+
+    /// 完整请求入口：解析建栈根后复用同一实现（workspace 绑定 / id 对齐 / fork_context）。
+    fn run_turn_request(
+        &self,
+        request: &SubagentRunRequest<'_>,
+    ) -> Result<SubagentRunOutcome, String> {
+        let root = request
+            .workspace_root
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| self.resolved_workspace_root());
-        self.run_turn_with_root_and_selection(
-            prompt,
-            timeout_ms,
-            root,
-            selection.cloned(),
-            parent_traceparent,
-        )
+        self.run_turn_with_request(request, root)
     }
 }
 
@@ -614,5 +728,104 @@ mod tests {
 
         // 许可未被占用的证明：正常调用仍可进入。
         let _permit = subagent_gate_enter("ok").expect("许可未被超长 prompt 占用");
+    }
+
+    /// P4：`fork_context` 的 seed 边界——只保留到最后一个 assistant 消息（含）。
+    ///
+    /// 反例必须被截掉：父 turn 的 user 消息已落库、assistant 回复尚未产出（半轮上下文
+    /// 带进子代理会让子代理误以为父轮已完成并复述未发生的事实）。
+    #[test]
+    fn fork_seed_keeps_history_up_to_last_assistant_message() {
+        let message = |role: &str, content: &str| crate::agent::session::TurnHistoryMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        };
+
+        // ① 正常的已闭合轮次：user/assistant/user/assistant ⇒ 全保留。
+        let closed = vec![
+            message("user", "q1"),
+            message("assistant", "a1"),
+            message("user", "q2"),
+            message("assistant", "a2"),
+        ];
+        assert_eq!(seed_completed_history(closed.clone()), closed);
+
+        // ② 末尾是未闭合的 user 消息 ⇒ 截断到最后一个 assistant。
+        let half = vec![
+            message("user", "q1"),
+            message("assistant", "a1"),
+            message("user", "q2-unanswered"),
+        ];
+        let seeded = seed_completed_history(half);
+        assert_eq!(seeded.len(), 2, "未闭合的父轮必须被截断");
+        assert_eq!(seeded[1].content, "a1");
+
+        // ③ 从未产出 assistant（例如父轮首个调用就失败）⇒ 不带任何上下文（禁止伪造）。
+        let empty = seed_completed_history(vec![message("user", "only-user")]);
+        assert!(empty.is_empty(), "无已完成回合时 seed 必须为空");
+    }
+
+    /// P1：workspace root 比较忽略尾部路径分隔符，但不做前缀/子目录匹配。
+    #[test]
+    fn workspace_root_match_is_exact_after_trailing_separator_trim() {
+        let root = Path::new("/home/dm/pony-agent");
+        assert!(workspace_root_matches("/home/dm/pony-agent", root));
+        assert!(workspace_root_matches("/home/dm/pony-agent/", root));
+        // 子目录必须**不**命中（否则会给子代理盖错 workspace）。
+        assert!(!workspace_root_matches("/home/dm/pony-agent/sub", root));
+        // 下划线变体（本次事故的 `pony_agent`）必须不命中。
+        assert!(!workspace_root_matches("/home/dm/pony_agent", root));
+        assert!(!workspace_root_matches("   ", root));
+    }
+
+    /// P1：子会话 workspace 归属解析优先级 显式 > 父会话继承 > 按 root 反查注册表。
+    #[test]
+    fn child_workspace_id_prefers_explicit_then_inherited_then_root_lookup() {
+        // workspace 注册要求 root 真实存在（内部会 canonicalize）⇒ 用进程内唯一临时目录。
+        let root_dir = std::env::temp_dir().join(format!("pony-agent-subagent-ws-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root_dir).expect("临时工作区目录必须可创建");
+        let root_dir = std::fs::canonicalize(&root_dir).expect("临时工作区目录必须可规范化");
+        let root = root_dir.as_path();
+
+        // ① 显式 id 优先（即使父会话已继承到别的值）。
+        let bare = HostTurnEngine::new();
+        assert_eq!(
+            bare.resolve_child_workspace_id(Some("ws-explicit"), Some("ws-parent".into()), root),
+            Some("ws-explicit".to_string())
+        );
+        // 空白显式值不得冒充归属。
+        assert_eq!(
+            bare.resolve_child_workspace_id(Some("   "), Some("ws-parent".into()), root),
+            Some("ws-parent".to_string())
+        );
+
+        // ② 无显式值 ⇒ 继承父会话快照。
+        assert_eq!(
+            bare.resolve_child_workspace_id(None, Some("ws-parent".into()), root),
+            Some("ws-parent".to_string())
+        );
+
+        // ③ 两级都缺失 ⇒ 按 root 在已注册 workspace 中反查；共享 store 缺失时保持 None。
+        assert_eq!(bare.resolve_child_workspace_id(None, None, root), None);
+
+        let mut store = crate::agent::session::SessionStore::new();
+        let workspace = store
+            .create_workspace("subagent-test", root.to_str().expect("utf-8 root"))
+            .expect("workspace 注册必须成功");
+        let engine = HostTurnEngine::new().with_shared_sessions(Some(Arc::new(
+            std::sync::RwLock::new(store),
+        )));
+        assert_eq!(
+            engine.resolve_child_workspace_id(None, None, root),
+            Some(workspace.id),
+            "root 反查必须命中已注册 workspace（否则子代理会落默认 workspace）"
+        );
+        assert_eq!(
+            engine.resolve_child_workspace_id(None, None, Path::new("/tmp/not-registered")),
+            None,
+            "未注册 root 必须返回 None，不得回退默认 workspace"
+        );
+        let _ = std::fs::remove_dir(&root_dir);
     }
 }

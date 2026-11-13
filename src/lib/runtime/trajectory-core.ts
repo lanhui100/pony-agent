@@ -149,6 +149,9 @@ function mapTraceStepStateToStatus(
   if (state === "error") return "failed";
   if (state === "running") return "running";
   if (state === "pending") return "pending";
+  // `skipped`（本轮该步骤未被触发）：轨迹 cell 只有四态，按「无失败即完成」处理；
+  // 原始 `state` 保留在 `rawEntry` 上供 trace 面板区分「没调用」与「调用成功」。
+  if (state === "skipped") return "completed";
   if (state === "done") return "completed";
   if (isTurnFailed) return "failed";
   return "completed";
