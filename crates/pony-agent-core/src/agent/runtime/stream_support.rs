@@ -4,6 +4,55 @@ use std::collections::BTreeMap;
 
 pub(super) const STREAM_REASONING_BATCH_CHARS: usize = 96;
 
+/// F3（I2）：followup 收尾把 pending 的 delta 帧**无视合并窗口**一次发完。
+///
+/// 语义契约：允许合并，禁止丢最终帧——收尾点若因窗口未到而丢帧，前端会少最后一段正文。
+/// 从 `turn_stream.rs::handle_stream_tool_turn` 外移（该函数已顶到规模基线）。
+pub(super) fn flush_tail_delta_frames<S: TurnEventSink>(
+    sink: &S,
+    coalescer: &std::cell::RefCell<StreamDeltaCoalescer>,
+    delta_turn_id: &str,
+    session_id: Option<String>,
+    followup_step: u32,
+    now_ms: u64,
+) {
+    let tail_batch = coalescer.borrow_mut().flush(now_ms);
+    if let Some(batch) = tail_batch {
+        for frame in batch.into_frames().into_iter().flatten() {
+            emit_stream_event_with_step(
+                sink,
+                "turn:delta",
+                delta_turn_id.to_string(),
+                "delta",
+                Some("calling_model"),
+                frame.text,
+                frame.reasoning,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                frame.latency_ms,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                session_id.clone(),
+                Some(followup_step),
+            );
+        }
+    }
+}
+
+
 /// 工具参数别名归一（P1-2，真实 trace 实证 9 次无谓失败）。
 ///
 /// 背景：job 系列工具的 JSON Schema 声明 camelCase（`jobId` / `timeoutMs`），而 Rust 侧

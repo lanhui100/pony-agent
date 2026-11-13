@@ -99,6 +99,7 @@ mod turn_control;
 mod turn_events;
 mod turn_sync;
 mod turn_stream;
+mod turn_stream_failures;
 mod types;
 
 pub use builder::{AgentRuntimeBuilder, DesktopRuntimePreset};
