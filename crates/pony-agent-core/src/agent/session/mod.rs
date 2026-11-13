@@ -15,6 +15,7 @@ mod history;
 // ADR 0099 阶段 3-B：存量会话日志回填（grandfather 转正，方案 A）。
 pub mod log_migrate;
 mod store;
+mod transcript_sanitize;
 // 启动装载期的有界修复（空壳会话派生字段保护 + trace 投影缓存预算）。
 pub(crate) mod startup_repair;
 // P1 启动提速：`pony resume` 目标解析的廉价 meta 查询（单条只读 SELECT，不做整库装载）。

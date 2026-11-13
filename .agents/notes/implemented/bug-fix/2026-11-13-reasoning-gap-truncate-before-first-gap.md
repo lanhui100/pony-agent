@@ -32,6 +32,10 @@ B114 因此只能靠「中断/失败轮闭合片段末条 assistant 必带 reaso
    `..._truncates_real_legacy_reasoning_gap`（断言保留 3 条前缀、缺口 assistant 与其 tool 结果一并消失）；
    新增 `test_sanitize_transcript_truncates_gap_after_tool_and_keeps_closed_roundtrip`（缺口落在
    「tool 之后的第一条 assistant」时，截断后末尾仍是已闭合往返）。
+5. **模块归属（同波体积门禁收口）**：判据与降级实现从 `session/store.rs` 外移到
+   `session/transcript_sanitize.rs`（纯搬迁，store 保留同名 `pub(crate) use` re-export，
+   既有消费者路径不变）；对应测试从 `session/tests.rs` 迁入 `session/tests/native_context.rs`，
+   使两个文件回到体积基线内（`size:check` 0 新违规）。
 
 ## Alternatives considered
 
