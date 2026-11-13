@@ -27,6 +27,7 @@
 - [Blocking Helper Unification (PA-067)](architecture/blocking-helper-unification.md)
 - [Per-Session Async Turn Task Model (PA-068)](architecture/per-session-async-turn-task-model.md)
 - [Tool Descriptor / Registry / Governed Dispatcher 真相源 (PA-076)](architecture/tool-runtime-descriptor-registry.md)
+- [接入外部 ACP Agent（Pony as ACP Client）](architecture/acp-client-integration.md)（opencode / Antigravity 接入方案，backlog:B149~B151）
 - [锁序规范](concurrency/lock-ordering.md)
 
 ## 2.1 Session Control 主线
