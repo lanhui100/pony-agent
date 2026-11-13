@@ -26,7 +26,7 @@
 | `analyze_replay_isolation.py` | A1 隔离取证（`Environment: cwd=` 真值） | 无 jsonl = 2，不是 pass |
 | `ratchet.sh` + `ratchet_add.py` | 已通过维度断言全集（单调增长） | 只增不减；换脚本路径 = 拒写 |
 | `freeze-check.sh` + `scope_check.py` | 冻结哈希漂移 + 提案写域越界 | 越界 harness diff = 红 |
-| `build-install.sh` | `npm run verify` + cargo build + 本机安装 | 本机无 pwsh 时走显式等价序列并记录 `verify_mode` |
+| `build-install.sh` | `npm run verify` + cargo build + 本机安装 | 默认全平台走全量 verify；`--verify-mode=fallback` 才走等价序列并记录 `verify_mode` |
 | `verdict.sh` | 唯一裁决者：freeze → assert → ratchet → 棘轮登记 | pass 才写棘轮 |
 
 ## 典型一轮
@@ -53,8 +53,11 @@ python3 scripts/audit/state.py transition --session <session-id> --to verify
 
 ## 平台注记
 
-- 仓库 `npm run verify` 依赖 `pwsh`（`scripts/invoke-rust-target.ps1`）。本机（Linux dev 服务器）
-  无 pwsh，`build-install.sh` 自动切换为显式等价序列（version:check / test:unit / build /
-  contract:check / size:check / ext:check / cargo check），并在输出与回执里标注
-  `verify_mode=linux-fallback`。换跑法不等于放宽标准：任一步非零即整体红。
+- `npm run verify` 已跨平台（B140）：cargo 步走 `scripts/invoke-rust-target.mjs`（node），
+  不再依赖 `pwsh`，本机（Linux dev 服务器）与 Windows CI 跑同一条链。`scripts/invoke-rust-target.ps1`
+  保留原样供既有直接调用方（CI `core-platform-check` 的 `shell: pwsh` 步骤）使用，两份槽位表由
+  `tests/invoke-rust-target-slots.spec.ts` 逐槽比对防漂移。
+- 逃生口：宿主环境确实跑不动全量 verify 时，显式传 `--verify-mode=fallback` 走等价序列
+  （version:check / test:unit / build / contract:check / size:check / ext:check / cargo check），
+  回执标注 `verify_mode=fallback`。**不再按平台自动降级**；换跑法不等于放宽标准，任一步非零即整体红。
 - `replay.sh` 的 corpus 复制进 worktree 后只读使用（corpus 任务 `write_access: none`）。

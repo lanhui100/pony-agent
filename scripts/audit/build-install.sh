@@ -4,15 +4,14 @@
 # 契约：ADR 0101 §确定性节点 build-install（npm run verify + cargo build + 本机安装替换，
 # 非零 = 红）。本机 = dev 服务器（项目常载规则：dev/devserver 均指本机）。
 #
-# 平台差异（诚实标注，不静默降级）：
-#   - Windows：`npm run verify` 全量（含 scripts/invoke-rust-target.ps1 的 cargo 检查）。
-#   - 本机（Linux）：仓库脚本链依赖 pwsh（invoke-rust-target.ps1），本机无 pwsh ⇒
-#     `npm run verify` 必然在 cargo:check:shared 处失败。此时按**显式等价序列**执行
-#     各步（version:check / test:unit / build / contract:check / size:check / ext:check /
-#     cargo check），并在回执里记录 `verify_mode=linux-fallback` 与逐步骤退出码。
-#     等价序列任一步非零 ⇒ 整体红；不因「换了个跑法」判 pass。
+# 平台口径（B140 后 verify 已跨平台，默认全平台同一条链；不静默降级）：
+#   - 默认：`npm run verify` 全量（cargo 步走 scripts/invoke-rust-target.mjs）。
+#   - 逃生口：宿主环境确实跑不动 verify 时显式传 `--verify-mode=fallback`，按**显式
+#     等价序列**执行各步（version:check / test:unit / build / contract:check / size:check /
+#     ext:check / cargo check），并在回执里记录 `verify_mode=fallback` 与逐步骤退出码。
+#     等价序列任一步非零 ⇒ 整体红；不因「换了个跑法」判 pass，也绝不按平台自动降级。
 #
-# 用法：bash scripts/audit/build-install.sh [--dry-run] [--skip-verify] [--skip-install]
+# 用法：bash scripts/audit/build-install.sh [--dry-run] [--skip-verify] [--skip-install] [--verify-mode verify|fallback]
 #          [--manifest crates/pony-agent-core/Cargo.toml] [--bin pony --bin ponycli]
 #
 # 退出码：0 = 构建与安装完成｜1 = 某步骤失败｜2 = 参数错误｜3 = 环境不可用（缺 npm/cargo）
@@ -22,7 +21,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "$HERE/lib.sh"
 
-DRY_RUN=0; SKIP_VERIFY=0; SKIP_INSTALL=0
+DRY_RUN=0; SKIP_VERIFY=0; SKIP_INSTALL=0; VERIFY_MODE=verify
 MANIFEST="crates/pony-agent-core/Cargo.toml"
 BINS=(pony ponycli)
 while [ $# -gt 0 ]; do
@@ -32,6 +31,12 @@ while [ $# -gt 0 ]; do
     --skip-install) SKIP_INSTALL=1; shift ;;
     --manifest) MANIFEST="${2:?}"; shift 2 ;;
     --bin) BINS+=("${2:?}"); shift 2 ;;
+    --verify-mode)
+      case "${2:?}" in
+        verify|fallback) VERIFY_MODE="${2}" ;;
+        *) fail_msg "非法 --verify-mode: ${2}（可选 verify|fallback）"; exit 2 ;;
+      esac
+      shift 2 ;;
     -h|--help) sed -n '2,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) fail_msg "未知参数: $1"; exit 2 ;;
   esac
@@ -40,13 +45,11 @@ done
 need_cmd npm || exit 3
 need_cmd cargo || exit 3
 
-VERIFY_MODE="npm-verify"
-if ! command -v pwsh >/dev/null 2>&1 && ! command -v powershell >/dev/null 2>&1; then
-  VERIFY_MODE="linux-fallback"
-fi
+# 默认走全量 verify：B140 已把 cargo 步的 pwsh 依赖换成跨平台 mjs，平台不再决定跑法。
+VERIFY_MODE="${VERIFY_MODE:-verify}"
 
 LADDER=()
-if [ "$VERIFY_MODE" = "npm-verify" ]; then
+if [ "$VERIFY_MODE" = "verify" ]; then
   LADDER=("npm run verify")
 else
   LADDER=(
