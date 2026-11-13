@@ -59,6 +59,7 @@
 **唯一环境限制**：`npm run verify` 整条链在 `cargo:check:shared` 处报 `sh: powershell: not found`（exit 127）——
 该脚本硬编码 Windows PowerShell，本机 Linux 无 `pwsh`；上面逐项手工重跑其全部前后步骤均 Exit 0。
 这不是本单引入的缺陷，也不改变门禁结论，但完整 `npm run verify` 在本机结构上不可绿，需另立环境单或改跨平台包装。
+→ **已立单**：`backlog:B140`（P2/Debt/toolchain::verify::powershell_linux，2026-11-13 补登记；`backlog-gate` Exit 0）。
 
 ## 工作区收尾
 - 仍为脏的是**另一并行会话**的 9 项文件（`context.rs` / `mod.rs` / `prompt_contract.rs` 等的 system-prompt 拆分，
