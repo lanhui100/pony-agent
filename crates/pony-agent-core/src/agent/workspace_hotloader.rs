@@ -2263,6 +2263,67 @@ fn render_constitution(layers: &[&ConstitutionLayer]) -> String {
 }
 
 /// 预算渲染候选层（`candidates` 顺序 = 渲染顺序 = 优先级从低到高）。
+/// 宪法层被省略的原因（预算裁决的**机器账**，不进模型可见文本）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstitutionOmissionReason {
+    /// trim 后与更高优先级层同文，被去重丢弃（不产生 `omitted` 文本标记，历史行为）。
+    DuplicateContent,
+    /// 单文件超过 `max_source_bytes` 且非最高优先级层，整层省略。
+    OversizedSource,
+    /// 渲染后超预算，按低→高优先级逐层省略。
+    BudgetExceeded,
+}
+
+impl ConstitutionOmissionReason {
+    /// 稳定诊断串（可观测面与测试断言共用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DuplicateContent => "duplicate_content",
+            Self::OversizedSource => "oversized_source",
+            Self::BudgetExceeded => "budget_exceeded",
+        }
+    }
+}
+
+/// 一条被省略的宪法层。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OmittedConstitutionLayer {
+    pub path: PathBuf,
+    pub reason: ConstitutionOmissionReason,
+}
+
+/// 最高优先级层被截断的机器账。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TruncatedConstitutionLayer {
+    pub path: PathBuf,
+    /// 正文原始字节数（截断前）。
+    pub original_bytes: usize,
+    /// 实际保留的正文字节数（不含 `truncated <path>` 标记）。
+    pub included_bytes: usize,
+}
+
+/// 宪法预算裁决的结构化报告。
+///
+/// 背景（backlog B142 / item-5）：模型可见文本里只有 `omitted <path>` / `truncated <path>`
+/// 两种字符串标记，调用方与可观测面无法知道**为什么**省略、省了多少字节、去重丢掉了哪些层。
+/// 本报告只做观测与测试，不改变任何模型可见字节。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConstitutionBudgetReport {
+    /// 被省略的层（去重 / 超源文件上限 / 超预算），按裁决顺序记录。
+    pub omitted: Vec<OmittedConstitutionLayer>,
+    /// 最高优先级层的截断记录（未发生截断时为 `None`）。
+    pub truncated: Option<TruncatedConstitutionLayer>,
+    /// 是否走到最后一步「极限预算硬裁剪」（连标题与标记都放不下）。
+    pub clamped: bool,
+}
+
+impl ConstitutionBudgetReport {
+    /// 是否发生了任何非默认裁决。
+    pub fn is_empty(&self) -> bool {
+        self.omitted.is_empty() && self.truncated.is_none() && !self.clamped
+    }
+}
+
 struct BudgetCandidate {
     source_index: usize,
     layer: ConstitutionLayer,
@@ -2317,11 +2378,13 @@ fn compose_constitution(candidates: &[BudgetCandidate]) -> String {
 }
 
 /// 预算内渲染：先按渲染后字节定保留集合（必要时截断最高优先级层），再输出。
+///
+/// 返回 `(模型可见文本, 结构化报告)`；文本与历史实现逐字节一致，报告只做观测。
 fn render_constitution_with_budget(
     snapshots: &[ConstitutionSourceSnapshot],
     layers: Vec<ConstitutionLayer>,
     max_bytes: usize,
-) -> String {
+) -> (String, ConstitutionBudgetReport) {
     let source_index: HashMap<&Path, usize> = snapshots
         .iter()
         .enumerate()
@@ -2348,11 +2411,20 @@ fn render_constitution_with_budget(
         })
         .collect();
 
-    // 1) 跨层去重：trim 后同文只保留最高优先级一份，被丢弃者不产生 omitted 标记。
+    let mut report = ConstitutionBudgetReport::default();
+
+    // 1) 跨层去重：trim 后同文只保留最高优先级一份，被丢弃者不产生 omitted 文本标记，
+    //    但记账到报告（`DuplicateContent`）：否则「少注入了一整份规则」在观测面上不可见。
     let keep_flags = dedupe_keep_flags(&candidates);
     let mut cursor = 0usize;
-    candidates.retain(|_| {
+    candidates.retain(|candidate| {
         let keep = keep_flags[cursor];
+        if !keep {
+            report.omitted.push(OmittedConstitutionLayer {
+                path: candidate.layer.source_path.clone(),
+                reason: ConstitutionOmissionReason::DuplicateContent,
+            });
+        }
         cursor += 1;
         keep
     });
@@ -2364,11 +2436,22 @@ fn render_constitution_with_budget(
         .map(|candidate| candidate.source_index)
         .max()
         .unwrap_or(usize::MAX);
+    let oversized_victims: Vec<PathBuf> = candidates
+        .iter()
+        .filter(|candidate| candidate.oversized && candidate.source_index != top_source_index)
+        .map(|candidate| candidate.layer.source_path.clone())
+        .collect();
     for candidate in candidates.iter_mut() {
         if candidate.oversized && candidate.source_index != top_source_index {
             candidate.kept = false;
         }
     }
+    report.omitted.extend(oversized_victims.into_iter().map(|path| {
+        OmittedConstitutionLayer {
+            path,
+            reason: ConstitutionOmissionReason::OversizedSource,
+        }
+    }));
 
     // 3) 从最低优先级保留层开始逐层省略，直到渲染后字节落入预算。
     let mut rendered = compose_constitution(&candidates);
@@ -2379,6 +2462,10 @@ fn render_constitution_with_budget(
             .position(|candidate| candidate.kept && candidate.source_index != top_source_index);
         match victim {
             Some(index) => {
+                report.omitted.push(OmittedConstitutionLayer {
+                    path: candidates[index].layer.source_path.clone(),
+                    reason: ConstitutionOmissionReason::BudgetExceeded,
+                });
                 candidates[index].kept = false;
                 rendered = compose_constitution(&candidates);
             }
@@ -2401,6 +2488,11 @@ fn render_constitution_with_budget(
             content.push_str(truncate_at_char_boundary(&original, available));
             content.push('\n');
             content.push_str(&marker);
+            report.truncated = Some(TruncatedConstitutionLayer {
+                path: candidates[top].layer.source_path.clone(),
+                original_bytes: original.len(),
+                included_bytes: content.len() - marker.len() - 1,
+            });
             candidates[top].layer.content = content;
             rendered = compose_constitution(&candidates);
         }
@@ -2409,8 +2501,9 @@ fn render_constitution_with_budget(
     // 5) 极限预算（连标题/标记都放不下）：退化为不超过 max_bytes 的截断摘要。
     if rendered.len() > max_bytes {
         rendered = clamp_to_budget(&rendered, max_bytes);
+        report.clamped = true;
     }
-    rendered
+    (rendered, report)
 }
 
 /// 硬裁剪到 `max_bytes` 以内的截断摘要（UTF-8 安全，尾部以 `...` 标记）。
@@ -2908,7 +3001,35 @@ impl WorkspaceHotloader {
             return None;
         }
 
-        let rendered = render_constitution_with_budget(&snapshots, layers, budget.max_bytes);
+        let (rendered, report) =
+            render_constitution_with_budget(&snapshots, layers, budget.max_bytes);
+        // 结构化诊断：预算裁决不是静默行为，省略/截断/硬裁剪都要在可观测面留痕。
+        if !report.is_empty() {
+            tracing::warn!(
+                target: "hotloader",
+                omitted = report.omitted.len(),
+                duplicated = report
+                    .omitted
+                    .iter()
+                    .filter(|entry| entry.reason == ConstitutionOmissionReason::DuplicateContent)
+                    .count(),
+                oversized = report
+                    .omitted
+                    .iter()
+                    .filter(|entry| entry.reason == ConstitutionOmissionReason::OversizedSource)
+                    .count(),
+                budget_exceeded = report
+                    .omitted
+                    .iter()
+                    .filter(|entry| entry.reason == ConstitutionOmissionReason::BudgetExceeded)
+                    .count(),
+                truncated = report.truncated.is_some(),
+                truncated_original_bytes = report.truncated.as_ref().map_or(0, |t| t.original_bytes),
+                truncated_included_bytes = report.truncated.as_ref().map_or(0, |t| t.included_bytes),
+                clamped = report.clamped,
+                "[pony-agent][hotloader] 宪法预算裁决：省略/截断/硬裁剪已发生"
+            );
+        }
         Some((rendered, hit))
     }
 
@@ -3359,5 +3480,154 @@ allowed-tools: Bash, Read
         assert!(prefix_turn_2.contains("# Baseline Rules"));
 
         fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    // ============================================================
+    // B142 / item-5：宪法预算裁决的结构化报告（ConstitutionBudgetReport）
+    // ============================================================
+
+    /// 构造一层合成宪法（不碰文件系统；预算渲染只依赖内容与快照的 oversized 标记）。
+    fn synthetic_layer(scope: AgentScope, name: &str, content: &str) -> ConstitutionLayer {
+        ConstitutionLayer {
+            scope,
+            source_path: PathBuf::from(name),
+            content: content.to_string(),
+            fingerprint: FileFingerprint {
+                path: PathBuf::from(name),
+                mtime: None,
+                file_size: content.len() as u64,
+                content_hash: fnv1a_hash(content.as_bytes()),
+            },
+        }
+    }
+
+    /// 构造与层一一对应的来源快照（`oversized` 由调用方指定）。
+    fn synthetic_snapshot(
+        scope: AgentScope,
+        name: &str,
+        content: &str,
+        oversized: bool,
+    ) -> ConstitutionSourceSnapshot {
+        ConstitutionSourceSnapshot {
+            scope,
+            path: PathBuf::from(name),
+            mtime: None,
+            file_size: content.len() as u64,
+            read_ok: true,
+            oversized,
+            content: content.to_string(),
+            content_hash: fnv1a_hash(content.as_bytes()),
+        }
+    }
+
+    /// 默认预算、无重复：报告必须为空（不得凭空产生省略记录）。
+    #[test]
+    fn constitution_report_is_empty_when_nothing_is_decided() {
+        let layers = vec![
+            synthetic_layer(AgentScope::Global, "global.md", "# Global\nrule A"),
+            synthetic_layer(AgentScope::Project, "project.md", "# Project\nrule B"),
+        ];
+        let snapshots = vec![
+            synthetic_snapshot(AgentScope::Global, "global.md", "# Global\nrule A", false),
+            synthetic_snapshot(AgentScope::Project, "project.md", "# Project\nrule B", false),
+        ];
+
+        let (text, report) =
+            render_constitution_with_budget(&snapshots, layers, InstructionBudget::default().max_bytes);
+        assert!(text.contains("rule A") && text.contains("rule B"));
+        assert!(
+            report.is_empty(),
+            "默认预算下不应有任何省略/截断记录，实际：{report:?}"
+        );
+    }
+
+    /// 跨层同文去重必须被结构化记账（历史行为不产生文本标记 → 观测面曾完全不可见）。
+    #[test]
+    fn constitution_report_records_duplicate_layers() {
+        let same = "# Rules\nsame body";
+        let layers = vec![
+            synthetic_layer(AgentScope::Global, "global.md", same),
+            synthetic_layer(AgentScope::Project, "project.md", same),
+        ];
+        let snapshots = vec![
+            synthetic_snapshot(AgentScope::Global, "global.md", same, false),
+            synthetic_snapshot(AgentScope::Project, "project.md", same, false),
+        ];
+
+        let (text, report) =
+            render_constitution_with_budget(&snapshots, layers, InstructionBudget::default().max_bytes);
+        assert_eq!(text.matches("same body").count(), 1, "同文只应保留一份");
+        assert_eq!(
+            report.omitted,
+            vec![OmittedConstitutionLayer {
+                path: PathBuf::from("global.md"),
+                reason: ConstitutionOmissionReason::DuplicateContent,
+            }],
+            "被去重丢弃的层必须记账（且只记被丢弃的那一层）"
+        );
+        assert!(report.truncated.is_none() && !report.clamped);
+    }
+
+    /// 预算不足时逐层省略必须记账为 `BudgetExceeded`，且文本严格不超预算。
+    #[test]
+    fn constitution_report_records_budget_omissions() {
+        let long_a = format!("# A\n{}", "a".repeat(200));
+        let long_b = format!("# B\n{}", "b".repeat(200));
+        let layers = vec![
+            synthetic_layer(AgentScope::Global, "global.md", &long_a),
+            synthetic_layer(AgentScope::Project, "project.md", &long_b),
+        ];
+        let snapshots = vec![
+            synthetic_snapshot(AgentScope::Global, "global.md", &long_a, false),
+            synthetic_snapshot(AgentScope::Project, "project.md", &long_b, false),
+        ];
+
+        let budget_bytes = 120usize;
+        let (text, report) = render_constitution_with_budget(&snapshots, layers, budget_bytes);
+        assert!(
+            text.len() <= budget_bytes,
+            "渲染文本必须严格落在预算内：{} > {budget_bytes}",
+            text.len()
+        );
+        assert!(
+            report
+                .omitted
+                .iter()
+                .any(|entry| entry.reason == ConstitutionOmissionReason::BudgetExceeded),
+            "超预算被省略的层必须记账为 budget_exceeded，实际：{report:?}"
+        );
+        assert!(
+            text.contains("omitted "),
+            "模型可见文本仍须保留既有的 omitted 标记（报告不改行为）"
+        );
+    }
+
+    /// 最高优先级层超限时记录截断账：原始字节、保留字节与路径可核对。
+    #[test]
+    fn constitution_report_records_top_layer_truncation() {
+        let long = format!("# Project\n{}", "x".repeat(600));
+        let layers = vec![synthetic_layer(AgentScope::Project, "project.md", &long)];
+        let snapshots = vec![synthetic_snapshot(
+            AgentScope::Project,
+            "project.md",
+            &long,
+            true,
+        )];
+
+        let budget_bytes = 200usize;
+        let (text, report) = render_constitution_with_budget(&snapshots, layers, budget_bytes);
+        assert!(text.len() <= budget_bytes, "渲染文本必须落在预算内");
+        let truncated = report
+            .truncated
+            .expect("最高优先级层放不下时必须产生截断记录");
+        assert_eq!(truncated.path, PathBuf::from("project.md"));
+        assert_eq!(truncated.original_bytes, long.len());
+        assert!(
+            truncated.included_bytes < truncated.original_bytes,
+            "保留字节必须小于原始字节（{} vs {}）",
+            truncated.included_bytes,
+            truncated.original_bytes
+        );
+        assert!(text.contains("truncated project.md"), "模型可见文本仍须保留截断标记");
     }
 }
