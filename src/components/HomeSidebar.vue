@@ -41,7 +41,7 @@ const hasSubagents = computed(() => {
 const hasTeamTasks = computed(() => teamStore.tasks.length > 0);
 
 const hasVisiblePanelsBelowStatus = computed(
-  () => goalStore.hasGoal || hasPlanOrTasks.value || hasSubagents.value || hasTeamTasks.value
+  () => goalStore.hasGoal || activePanel.value === "goal" || hasPlanOrTasks.value || hasSubagents.value || hasTeamTasks.value
 );
 
 const {
@@ -71,6 +71,10 @@ const {
 
 function togglePlan() {
   workspacePanelsStore.togglePlan();
+}
+
+function toggleGoal() {
+  workspacePanelsStore.toggleGoal();
 }
 
 function toggleRoster() {
@@ -140,8 +144,10 @@ onBeforeUnmount(() => {
 
         <!-- 目标：位于状态栏下方、计划和任务上方 -->
         <GoalBar
-          v-if="goalStore.hasGoal"
+          v-if="goalStore.hasGoal || activePanel === 'goal'"
           :session-id="sessionId"
+          :open="activePanel === 'goal' || (!activePanel && goalStore.hasGoal)"
+          @toggle="toggleGoal()"
         />
 
         <!-- 计划与任务：在有值时显示 -->

@@ -1,0 +1,26 @@
+== 全库汇总 ==
+ALL                                          turns= 581 calls= 16803 valid= 16739 elig= 9447 ttft_missing= 5447 | legacy=  103.6 decode=  143.9 e2e=  59.3
+
+== 按 model 分组 ==
+workbuddy/deepseek-v4.1-flash                turns= 285 calls= 10358 valid= 10338 elig= 6873 ttft_missing= 3435 | legacy=  118.6 decode=  163.3 e2e=  77.0
+trae-cn/deepseek-v4.1-flash                  turns=  17 calls=  1139 valid=  1139 elig=  562 ttft_missing=  477 | legacy=  143.0 decode=  152.6 e2e= 129.9
+magpie/trae-cn/deepseek-v4.1-flash           turns=  32 calls=  1268 valid=  1264 elig=  615 ttft_missing=  540 | legacy=  111.3 decode=  137.0 e2e=  88.0
+antigravity/gemini-3.8-flash                 turns= 114 calls=  2754 valid=  2740 elig=  562 ttft_missing=  571 | legacy=   38.0 decode=   98.1 e2e=  10.3
+qoder-cn/lmodel                              turns=  21 calls=   569 valid=   569 elig=  429 ttft_missing=  140 | legacy=   66.4 decode=   71.5 e2e=  56.9
+kimi/k3.1-pro                                turns=   4 calls=   155 valid=   154 elig=   76 ttft_missing=   78 | legacy=   48.2 decode=   57.5 e2e=  40.9
+deepseek/deepseek-v4.1-flash                 turns=   9 calls=   121 valid=   120 elig=   91 ttft_missing=   30 | legacy=  154.6 decode=  168.8 e2e= 124.2
+sense/deepseek-v4-flash                      turns=  10 calls=   115 valid=   109 elig=   80 ttft_missing=   35 | legacy=   68.5 decode=   77.3 e2e=  38.2
+sense/deepseek-flash                         turns=  14 calls=    89 valid=    87 elig=   48 ttft_missing=   40 | legacy=   57.7 decode=   99.9 e2e=  35.6
+qoder-cn/dfmodel                             turns=   6 calls=    85 valid=    85 elig=   60 ttft_missing=   23 | legacy=   75.1 decode=  127.4 e2e=  63.4
+opencode-zen/deepseek-v4.1-flash-free        turns=   2 calls=    57 valid=    56 elig=   29 ttft_missing=    8 | legacy=   69.0 decode=  178.8 e2e=  20.2
+gemini-3.8-flash                             turns=  19 calls=    68 valid=    60 elig=   17 ttft_missing=   50 | legacy=   32.9 decode=  118.4 e2e=  23.8
+antigravity/claude-opus-4-6-thinking         turns=  13 calls=    24 valid=    17 elig=    4 ttft_missing=   20 | legacy=   39.3 decode=   65.8 e2e=  33.0
+workbuddy/hy4free                            turns=   1 calls=     1 valid=     1 elig=    1 ttft_missing=    0 | legacy=   83.9 decode=   83.8 e2e=  36.9
+
+== 派生 basis 分布（按轮；basis 由记录同源推导，DB 未持久化该字段）==
+全库  : {'stream_decode': 440, 'end_to_end': 67, 'none': 74}
+gemini: {'stream_decode': 110, 'end_to_end': 15, 'none': 8}
+
+== 轮级速度分位（按派生 basis，契约 I4/I5 同式）==
+stream_decode  n= 440 p10=   67.4 p25=  109.0 p50=  150.0 p75=  169.9 p90=  188.0 max=   293.1
+end_to_end     n=  67 p10=    4.2 p25=   17.6 p50=   51.0 p75=   88.6 p90=  107.8 max=   149.7

@@ -1,0 +1,62 @@
+{
+  "run_id": "efflow_r1",
+  "model": "gemini-3.8-flash",
+  "stream": true,
+  "max_tokens": 512,
+  "extra": "{\"reasoning_effort\":\"low\"}",
+  "prompt_chars": 154,
+  "prompt": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.",
+  "request_body": {
+    "model": "gemini-3.8-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers."
+      }
+    ],
+    "max_tokens": 512,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "reasoning_effort": "low"
+  },
+  "cmd": "curl -N -sS -m 300 -H Authorization: Bearer <redacted> -H Content-Type: application/json -d {\"model\": \"gemini-3.8-flash\", \"messages\": [{\"role\": \"user\", \"content\": \"Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.\"}], \"max_tokens\": 512, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"reasoning_effort\": \"low\"} https://tokens.ponyjob.top/v1/chat/completions",
+  "base_url": "https://tokens.ponyjob.top/v1/chat/completions",
+  "ts_iso": "2026-11-12T18:54:47+0800",
+  "exit_code": 0,
+  "stderr": "",
+  "http_error": null,
+  "ttft_s": 14.2077,
+  "ttft_content_s": 21.4568,
+  "ttft_reasoning_s": 14.2077,
+  "total_s": 25.0684,
+  "n_sse_events": 322,
+  "n_content_chunks": 130,
+  "n_reasoning_chunks": 188,
+  "reasoning_chars": 3198,
+  "content_chars": 2162,
+  "decode_tps_content": 35.75,
+  "decode_tps_reasoning": 25.94,
+  "e2e_tps_by_completion_tokens": 54.77,
+  "decode_window_s": 10.8574,
+  "decode_window_tps": 126.46,
+  "chunks_per_completion_token": 0.232,
+  "completion_tokens": 1373,
+  "prompt_tokens": 41,
+  "usage": {
+    "prompt_tokens": 41,
+    "completion_tokens": 1373,
+    "total_tokens": 1414,
+    "completion_tokens_details": {
+      "reasoning_tokens": 834
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "has_reasoning_tokens_in_usage": true,
+  "finish_reason": "stop",
+  "content_head": "1. The Sun contains 99.86% of the solar system's mass.\n2. Mercury is the smallest planet in the solar system.\n3. Venus is the hottest planet due to a runaway greenhouse effect.\n4. Earth is the only known planet to harbor life.\n5. Mars has the largest volcano, Olympus Mons.\n6. Jupiter is the largest ",
+  "reasoning_head": "1.  The user requests a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers. I must output exactly that.\n\n2.  Content: short, factual, varied across planets, sun, moons, asteroids, comets, etc. Ensure accur"
+}

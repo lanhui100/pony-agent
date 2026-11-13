@@ -1,0 +1,61 @@
+{
+  "run_id": "flash_r3",
+  "model": "gemini-3.8-flash",
+  "stream": true,
+  "max_tokens": 512,
+  "extra": "",
+  "prompt_chars": 154,
+  "prompt": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.",
+  "request_body": {
+    "model": "gemini-3.8-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers."
+      }
+    ],
+    "max_tokens": 512,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "cmd": "curl -N -sS -m 300 -H Authorization: Bearer <redacted> -H Content-Type: application/json -d {\"model\": \"gemini-3.8-flash\", \"messages\": [{\"role\": \"user\", \"content\": \"Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.\"}], \"max_tokens\": 512, \"stream\": true, \"stream_options\": {\"include_usage\": true}} https://tokens.ponyjob.top/v1/chat/completions",
+  "base_url": "https://tokens.ponyjob.top/v1/chat/completions",
+  "ts_iso": "2026-11-12T18:45:15+0800",
+  "exit_code": 0,
+  "stderr": "",
+  "http_error": null,
+  "ttft_s": 7.6979,
+  "ttft_content_s": 8.0058,
+  "ttft_reasoning_s": 7.6979,
+  "total_s": 12.831,
+  "n_sse_events": 139,
+  "n_content_chunks": 124,
+  "n_reasoning_chunks": 11,
+  "reasoning_chars": 184,
+  "content_chars": 2362,
+  "decode_tps_content": 25.74,
+  "decode_tps_reasoning": 37.78,
+  "e2e_tps_by_completion_tokens": 46.37,
+  "decode_window_s": 5.0864,
+  "decode_window_tps": 116.98,
+  "chunks_per_completion_token": 0.227,
+  "completion_tokens": 595,
+  "prompt_tokens": 120,
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 595,
+    "total_tokens": 715,
+    "completion_tokens_details": {
+      "reasoning_tokens": 39
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "has_reasoning_tokens_in_usage": true,
+  "finish_reason": "stop",
+  "content_head": "1. The Sun contains about 99.86% of the solar system's mass.\n2. There are eight planets in the solar system.\n3. Mercury is the smallest planet and closest to the Sun.\n4. Venus has the hottest surface of any planet.\n5. Earth is the only known planet with liquid water on its surface.\n6. Mars is home t",
+  "reasoning_head": "We need answer exactly list 40 short factual statements about solar system, numbered 1-40, no preamble/conclusion/headers. Need ensure facts accurate, concise. Need produce plain list."
+}

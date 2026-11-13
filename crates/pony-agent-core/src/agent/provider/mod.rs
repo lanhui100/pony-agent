@@ -32,6 +32,14 @@ use self::responses_api::{
 pub mod model_catalog;
 pub use self::model_catalog::fetch_model_ids;
 
+mod openai_wire;
+mod usage;
+pub(crate) use self::openai_wire::openai_safe_tool_name;
+// `extract_chat_delta_text` 在拆分前即无消费者（原文件已挂 `#[allow(dead_code)]`），
+// 随函数一起留在 `openai_wire`，不在此 re-export（避免引入 unused import 噪音）。
+pub(crate) use self::usage::extract_openai_usage;
+pub(crate) use self::usage::normalize_token_usage;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderProtocol {
     #[serde(rename = "openai-completions", alias = "openai")]
@@ -5694,15 +5702,24 @@ where
             let slept = delay.as_millis() as u64;
             budget.record_attempt(slept);
             slept_ms += slept;
+            // F2：退避 sleep 属「成功 attempt 之前」耗时，逐次记账（未开账本 ⇒ no-op）。
+            crate::agent::retry::note_provider_attempt_backoff_slept(slept);
         }
-        match operation() {
+        // F2：逐 attempt 计时——失败耗时与成功 attempt 的窗口在这里各自落账
+        // （见 `agent::retry::ProviderAttemptWindow`）。**不改变**任何调度/重试语义。
+        let attempt_started_at = Instant::now();
+        let attempt_result = operation();
+        let attempt_elapsed_ms = attempt_started_at.elapsed().as_millis() as u64;
+        match attempt_result {
             Ok(value) => {
+                crate::agent::retry::note_provider_attempt_succeeded(attempt_started_at, attempt_elapsed_ms);
                 let outcome = report(&budget, attempts_total + 1, slept_ms, rl_active);
                 // attempts_total 口径 = operation 调用次数：成功这次同样计入。
                 return (Ok(value), outcome);
             }
             Err(err) => {
                 attempts_total += 1;
+                crate::agent::retry::note_provider_attempt_failed(attempt_elapsed_ms);
                 let hint_blocking = no_retry_hint.is_some_and(|hint| hint());
                 let last_error = extract_provider_error_detail(&err);
                 last_failure = Some(err.clone());
@@ -6369,88 +6386,6 @@ fn extract_reasoning_text_from_value(value: &Value) -> Option<String> {
     }
 }
 
-#[allow(dead_code)]
-fn extract_chat_delta_text(payload: &Value) -> Option<String> {
-    let delta = payload
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))?;
-    let content = delta.get("content")?;
-
-    match content {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(items) => {
-            let parts = items
-                .iter()
-                .filter_map(|item| {
-                    if let Some(text) = item.get("text").and_then(Value::as_str) {
-                        return Some(text.to_string());
-                    }
-                    item.get("text")
-                        .and_then(|value| value.get("value"))
-                        .and_then(Value::as_str)
-                        .map(|text| text.to_string())
-                })
-                .collect::<Vec<_>>();
-
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join(""))
-            }
-        }
-        _ => None,
-    }
-}
-
-fn extract_openai_usage(payload: &Value) -> Option<TokenUsage> {
-    let usage = payload.get("usage")?;
-    provider_log(format!("usage:openai raw={}", usage));
-    let cache_hit = usage
-        .get("prompt_cache_hit_tokens")
-        .and_then(Value::as_u64)
-        .map(|value| (value, "usage.prompt_cache_hit_tokens"))
-        .or_else(|| {
-            usage
-                .get("input_tokens_details")
-                .and_then(|value| value.get("cached_tokens"))
-                .and_then(Value::as_u64)
-                .map(|value| (value, "usage.input_tokens_details.cached_tokens"))
-        })
-        .or_else(|| {
-            usage
-                .get("prompt_tokens_details")
-                .and_then(|value| value.get("cached_tokens"))
-                .and_then(Value::as_u64)
-                .map(|value| (value, "usage.prompt_tokens_details.cached_tokens"))
-        });
-    Some(normalize_token_usage(TokenUsage {
-        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
-        cache_hit_input_tokens: cache_hit.map(|(value, _source)| value),
-        cache_hit_source: cache_hit.map(|(_value, source)| source.to_string()),
-        reasoning_tokens: usage
-            .get("completion_tokens_details")
-            .and_then(|value| value.get("reasoning_tokens"))
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                usage
-                    .get("output_tokens_details")
-                    .and_then(|value| value.get("reasoning_tokens"))
-                    .and_then(Value::as_u64)
-            }),
-        output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
-        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
-        cache_creation_input_tokens: None,
-        // wave-54 C3：上游 usage 真值。
-        origin: Some(USAGE_ORIGIN_PROVIDER),
-    }))
-}
-
-fn openai_safe_tool_name(name: &str) -> String {
-    name.replace('.', "__dot__")
-}
-
 fn openai_original_tool_name(name: &str) -> String {
     name.replace("__dot__", ".")
 }
@@ -6588,27 +6523,6 @@ fn estimate_native_content_chars(block: &Value) -> usize {
     }
 
     block.to_string().chars().count()
-}
-
-fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
-    let total_tokens =
-        usage
-            .total_tokens
-            .or_else(|| match (usage.input_tokens, usage.output_tokens) {
-                (Some(input_tokens), Some(output_tokens)) => Some(input_tokens + output_tokens),
-                _ => None,
-            });
-
-    TokenUsage {
-        input_tokens: usage.input_tokens,
-        cache_hit_input_tokens: usage.cache_hit_input_tokens,
-        cache_hit_source: usage.cache_hit_source,
-        reasoning_tokens: usage.reasoning_tokens,
-        output_tokens: usage.output_tokens,
-        total_tokens,
-        cache_creation_input_tokens: usage.cache_creation_input_tokens,
-        origin: usage.origin,
-    }
 }
 
 fn render_input_messages(messages: &[ProviderMessage]) -> String {
@@ -9289,6 +9203,92 @@ mod tests {
         assert_eq!(report.slept_ms, 500);
         assert!(!report.switched_to_rl);
         assert_eq!(report.scope, "decision");
+        assert_eq!(report.exhausted_reason, None);
+    }
+
+    /// 2026-11-12：HTTP **525** 由「码表不命中 ⇒ 立即 Abort」改为 ③′ 边缘 5xx 同组。
+    /// 本用例锁的是**行为**而非码表归属：`retry_provider_scoped_with_report` 必须真的
+    /// sleep 500ms 后再试一次（不是只看 `classify().is_retryable()`）。
+    /// 实证来源：会话 `pa_01a1cf14` 的 `decision_stream:attempt=1/5 … 525 … Abort`
+    /// 与 `followup_stream` / `followup_sync_batch` 同款行——两条 scope 都要覆盖。
+    #[test]
+    fn http_525_enters_retry_loop_and_succeeds_on_second_attempt() {
+        for (label, scope) in [
+            ("decision_stream", ProviderRetryScope::Decision),
+            ("followup_stream", ProviderRetryScope::Followup),
+        ] {
+            let sleeper = crate::agent::retry::FakeSleeper::new();
+            let attempts = std::cell::Cell::new(0);
+            let (result, report): (Result<&str, String>, SingleHopRetryReport) =
+                retry_provider_scoped_with_report(
+                    label,
+                    scope,
+                    || {
+                        let next = attempts.get() + 1;
+                        attempts.set(next);
+                        if next < 2 {
+                            Err(
+                                "provider 返回错误状态：525 <unknown status code>；耗时=6097ms；响应正文："
+                                    .to_string(),
+                            )
+                        } else {
+                            Ok("ok")
+                        }
+                    },
+                    &sleeper,
+                    None,
+                );
+
+            assert_eq!(
+                result.unwrap_or_else(|e| panic!("{label}: 525 必须可重试，实际 {e}")),
+                "ok"
+            );
+            assert_eq!(attempts.get(), 2, "{label}: 525 必须真的发起第二次请求");
+            assert_eq!(
+                sleeper
+                    .total_slept
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                500,
+                "{label}: 首次退避应为 initial_delay_ms=500"
+            );
+            assert_eq!(report.attempts_total, 2);
+            assert_eq!(report.slept_ms, 500);
+            assert!(!report.switched_to_rl, "{label}: 525 不是限流，不得切长退避");
+            assert_eq!(report.exhausted_reason, None);
+        }
+    }
+
+    /// 与上一条互为反向钉子：**526** `Invalid SSL Certificate` 是确定性配置错误，
+    /// 必须首跳 Abort——attempts==1、slept==0。两条并列才能证明 525/526 的拆分真的落地。
+    #[test]
+    fn http_526_aborts_without_retry() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report(
+                "followup_stream",
+                ProviderRetryScope::Followup,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err(
+                        "provider 返回错误状态：526 <unknown status code>；耗时=6097ms；响应正文："
+                            .to_string(),
+                    )
+                },
+                &sleeper,
+                None,
+            );
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1, "526 必须首跳即 Abort");
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(report.attempts_total, 1);
+        assert_eq!(report.slept_ms, 0);
         assert_eq!(report.exhausted_reason, None);
     }
 

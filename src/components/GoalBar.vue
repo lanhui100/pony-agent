@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   AlertCircle,
   LoaderCircle,
+  ChevronRight,
 } from "lucide-vue-next";
 import { safeListen } from "@/lib/tauri";
 import { refreshForTurn, useGoalStore } from "@/stores/goal";
@@ -17,15 +18,35 @@ import Button from "@/components/ui/Button.vue";
 const props = withDefaults(
   defineProps<{
     sessionId?: string;
+    /**
+     * 折叠/展开受控值。
+     *
+     * - `undefined`（未传）：非受控模式 —— 有目标即渲染并展开，无目标不渲染
+     *   （保持 GoalBar 既有冻结契约：`tests/GoalBar.spec.ts` 要求 currentGoal 为 null 时不出现 `goal-bar`）。
+     * - `true` / `false`（显式传入）：受控模式 —— 无目标时也可渲染空态引导
+     *   （快捷键 Ctrl/Cmd+G 打开 Goal 面板的入口）。
+     */
+    open?: boolean;
   }>(),
   {
     sessionId: "default",
+    open: undefined
   }
 );
+
+const emit = defineEmits<{
+  toggle: [];
+}>();
 
 const goalStore = useGoalStore();
 const { currentGoal, updating, isBlocked, isActive, isPaused, isCompleted } =
   storeToRefs(goalStore);
+
+/** 受控/非受控统一展开态：未传 `open` 时默认展开（有目标时的既有行为）。 */
+const isOpen = computed(() => (props.open === undefined ? true : props.open));
+
+/** 渲染条件：有目标，或显式要求展开（无目标时的空态引导）。 */
+const shouldRender = computed(() => currentGoal.value !== null || props.open === true);
 
 // Wave-1 C6：GoalBar 在 sessionId 变化、turn 结束（runtime 侧统一刷新）、
 // `goal://changed` / `goal://round` 事件后以真实 sessionId 刷新。
@@ -128,83 +149,115 @@ async function handleComplete() {
 
 <template>
   <section
-    v-if="currentGoal"
-    class="border-b border-stone-200/60 pb-3"
+    v-if="shouldRender"
+    class="collapsible-shell border-b border-stone-200/60 pb-3"
+    :data-open="isOpen"
     data-testid="goal-bar"
   >
-    <div class="mb-2 flex items-center justify-between gap-2">
+    <button
+      class="flex w-full items-center justify-between gap-3 text-left"
+      type="button"
+      data-testid="goal-panel-toggle"
+      @click="emit('toggle')"
+    >
       <div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-stone-500">
         <Target class="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" />
         <span>目标</span>
       </div>
-      <Badge :variant="phaseVariant" class="shrink-0 text-[10px] px-1.5 py-0.5">
-        {{ phaseLabel }}
-      </Badge>
-    </div>
-
-    <div class="rounded-[0.55rem] border border-stone-200/80 bg-[#fbf8f3] px-3 py-2 space-y-2 dark:border-stone-800 dark:bg-stone-900/60">
-      <!-- 目标主体信息 -->
-      <div class="space-y-1">
-        <div
-          class="line-clamp-2 text-xs font-semibold leading-snug text-stone-800 dark:text-stone-200"
-          :title="currentGoal.objective"
-        >
-          {{ currentGoal.objective }}
-        </div>
-        <div class="text-[10px] text-stone-400">
-          轮次: {{ currentGoal.roundsStarted }} / {{ currentGoal.maxGoalRounds }}
-        </div>
+      <div class="flex items-center gap-2">
+        <span v-if="currentGoal" class="text-[10px] leading-[1.2] text-stone-400">
+          {{ currentGoal.roundsStarted }}/{{ currentGoal.maxGoalRounds }}
+        </span>
+        <Badge v-if="currentGoal" :variant="phaseVariant" class="shrink-0 text-[10px] px-1.5 py-0.2">
+          {{ phaseLabel }}
+        </Badge>
+        <span v-else class="text-[10px] text-stone-400">无目标</span>
+        <ChevronRight
+          class="h-3.5 w-3.5 shrink-0 text-stone-300 transition duration-200"
+          :class="{ 'rotate-90': isOpen }"
+        />
       </div>
+    </button>
 
-      <!-- 控制动作按钮组 -->
-      <div class="flex items-center gap-1.5 pt-0.5 border-t border-stone-200/40 dark:border-stone-800/40">
-        <Button
-          v-if="isActive"
-          size="sm"
-          variant="outline"
-          class="h-6 gap-1 px-2 text-[11px]"
-          :disabled="updating"
-          @click="handlePause"
-        >
-          <LoaderCircle v-if="updating" class="h-3 w-3 animate-spin" />
-          <Pause v-else class="h-3 w-3 text-stone-500" />
-          暂停
-        </Button>
-
-        <Button
-          v-if="isPaused || isBlocked"
-          size="sm"
-          variant="outline"
-          class="h-6 gap-1 px-2 text-[11px]"
-          :disabled="updating"
-          @click="handleResume"
-        >
-          <LoaderCircle v-if="updating" class="h-3 w-3 animate-spin" />
-          <Play v-else class="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
-          继续
-        </Button>
-
-        <Button
-          v-if="!isCompleted"
-          size="sm"
-          variant="outline"
-          class="h-6 gap-1 px-2 text-[11px]"
-          :disabled="updating"
-          @click="handleComplete"
-        >
-          <CheckCircle2 class="h-3 w-3 text-stone-500" />
-          达成
-        </Button>
-      </div>
-
-      <!-- 阻断信息提示条 -->
+    <div v-show="isOpen" class="mt-2">
       <div
-        v-if="isBlocked && currentGoal.blocked_reason"
-        class="flex items-center gap-1.5 rounded bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300"
-        data-testid="goal-blocked-banner"
+        v-if="currentGoal"
+        class="rounded-[0.55rem] border border-stone-200/80 bg-[#fbf8f3] px-3 py-2 space-y-2 dark:border-stone-800 dark:bg-stone-900/60"
       >
-        <AlertCircle class="h-3.5 w-3.5 shrink-0 text-red-500" />
-        <span class="truncate">阻断原因：{{ currentGoal.blocked_reason }}</span>
+        <!-- 目标主体信息 -->
+        <div class="space-y-1">
+          <div
+            class="text-xs font-semibold leading-snug text-stone-800 dark:text-stone-200 break-words"
+            :title="currentGoal.objective"
+          >
+            {{ currentGoal.objective }}
+          </div>
+          <div class="text-[10px] text-stone-400">
+            轮次: {{ currentGoal.roundsStarted }} / {{ currentGoal.maxGoalRounds }}
+          </div>
+        </div>
+
+        <!-- 控制动作按钮组 -->
+        <div class="flex items-center gap-1.5 pt-0.5 border-t border-stone-200/40 dark:border-stone-800/40">
+          <Button
+            v-if="isActive"
+            size="sm"
+            variant="outline"
+            class="h-6 gap-1 px-2 text-[11px]"
+            :disabled="updating"
+            @click="handlePause"
+          >
+            <LoaderCircle v-if="updating" class="h-3 w-3 animate-spin" />
+            <Pause v-else class="h-3 w-3 text-stone-500" />
+            暂停
+          </Button>
+
+          <Button
+            v-if="isPaused || isBlocked"
+            size="sm"
+            variant="outline"
+            class="h-6 gap-1 px-2 text-[11px]"
+            :disabled="updating"
+            @click="handleResume"
+          >
+            <LoaderCircle v-if="updating" class="h-3 w-3 animate-spin" />
+            <Play v-else class="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+            继续
+          </Button>
+
+          <Button
+            v-if="!isCompleted"
+            size="sm"
+            variant="outline"
+            class="h-6 gap-1 px-2 text-[11px]"
+            :disabled="updating"
+            @click="handleComplete"
+          >
+            <CheckCircle2 class="h-3 w-3 text-stone-500" />
+            达成
+          </Button>
+        </div>
+
+        <!-- 阻断信息提示条 -->
+        <div
+          v-if="isBlocked && currentGoal.blocked_reason"
+          class="flex items-center gap-1.5 rounded bg-red-50 px-2 py-1 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300"
+          data-testid="goal-blocked-banner"
+        >
+          <AlertCircle class="h-3.5 w-3.5 shrink-0 text-red-500" />
+          <span class="truncate">阻断原因：{{ currentGoal.blocked_reason }}</span>
+        </div>
+      </div>
+
+      <!-- 空态引导 -->
+      <div
+        v-else
+        class="rounded-[0.55rem] border border-dashed border-stone-200/80 bg-stone-50/50 p-2.5 text-center text-[11px] text-stone-400 dark:border-stone-800 dark:bg-stone-900/30"
+      >
+        <span>当前会话暂无目标</span>
+        <div class="mt-1 text-[10px] text-stone-400/80">
+          可通过 <code class="rounded bg-stone-200/60 px-1 py-0.5 text-stone-600 dark:bg-stone-800 dark:text-stone-300">/goal &lt;目标&gt;</code> 创建
+        </div>
       </div>
     </div>
   </section>

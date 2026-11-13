@@ -1,0 +1,60 @@
+{
+  "run_id": "smoke_flash",
+  "model": "gemini-3.8-flash",
+  "stream": true,
+  "max_tokens": 64,
+  "extra": "",
+  "prompt_chars": 154,
+  "prompt": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.",
+  "request_body": {
+    "model": "gemini-3.8-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers."
+      }
+    ],
+    "max_tokens": 64,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "cmd": "curl -N -sS -m 300 -H Authorization: Bearer <redacted> -H Content-Type: application/json -d {\"model\": \"gemini-3.8-flash\", \"messages\": [{\"role\": \"user\", \"content\": \"Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.\"}], \"max_tokens\": 64, \"stream\": true, \"stream_options\": {\"include_usage\": true}} https://tokens.ponyjob.top/v1/chat/completions",
+  "base_url": "https://tokens.ponyjob.top/v1/chat/completions",
+  "ts_iso": "2026-11-12T18:43:42+0800",
+  "exit_code": 0,
+  "stderr": "",
+  "http_error": null,
+  "ttft_s": 17.4735,
+  "ttft_content_s": 22.0992,
+  "ttft_reasoning_s": 17.4735,
+  "total_s": 23.604,
+  "n_sse_events": 1271,
+  "n_content_chunks": 482,
+  "n_reasoning_chunks": 786,
+  "reasoning_chars": 3332,
+  "content_chars": 2055,
+  "decode_tps_content": 320.24,
+  "decode_tps_reasoning": 169.7,
+  "e2e_tps_by_completion_tokens": 53.76,
+  "completion_tokens": 1269,
+  "prompt_tokens": 67,
+  "usage": {
+    "prompt_tokens": 67,
+    "completion_tokens": 1269,
+    "total_tokens": 1336,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 786
+    },
+    "prompt_cache_hit_tokens": 0,
+    "prompt_cache_miss_tokens": 67
+  },
+  "has_reasoning_tokens_in_usage": true,
+  "finish_reason": "stop",
+  "content_head": "1. The Solar System consists of the Sun and the objects bound to it by gravity.\n2. The Sun contains most of the mass of the Solar System.\n3. The Sun is a G-type main-sequence star.\n4. Mercury is the closest planet to the Sun.\n5. Venus is the hottest planet in the Solar System.\n6. Earth is the third ",
+  "reasoning_head": "We need answer plain list 40 short factual statements about solar system, one per line numbered 1-40. No preamble conclusion headers. Need ensure factual, short. Plain list. Need avoid markdown headers maybe just numbered lines. Need 40. Need facts accurate. Could include common. Need one per line. "
+}

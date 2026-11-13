@@ -1,0 +1,412 @@
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"We"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" need answer plain list 40 short"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" factual statements solar system one per"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" line numbered 1-40. No preamble conclusion"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" markdown headers. Need ensure factual. Short."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Could include sun"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":", planets, moons, asteroids, com"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"ets, dwarf planets, features. Need exactly"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" 40 lines. Avoid markdown headers. Number"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"ed 1 to"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" 40. Plain list"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". Need no preamble."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Ensure each statement"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" factual and short. Let's craft carefully.\n\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"Need maybe \"The Sun contains more"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" than 99% of the solar system's mass.\""},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Fact. \"Mercury is"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" the smallest planet.\" etc. Need"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" 40. Avoid controversial"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" definitions?"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Pluto dwarf"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". Ensure all true"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". Could include \""},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"The solar system formed about"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" 4.6 billion years ago.\" \"The Sun"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" is a G-type main"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"-sequence star.\" \"Mercury has no moons"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".\" \"Venus rotates retrograde.\""},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" \"Earth is the densest planet.\" \"Mars"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" has two"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" moons.\" \"Jupiter is largest"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" planet.\" \"Saturn has the most extensive"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" ring system.\" \"Uranus rotates on its side.\" \"Ne"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"ptune is farthest planet from"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Sun.\" \"The asteroid belt lies between Mars and Jupiter.\" \""},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"Ceres is"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" largest object"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" in asteroid belt.\" \"Kuiper Belt"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" beyond Neptune.\" \"Pluto is a dwarf"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" planet.\" \"Eris"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" is a dwarf planet.\" \"Haumea and Makemake"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" dwarf planets.\" \"Jupiter's Great Red"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Spot is a giant storm.\" \"Saturn's"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" moon Titan has thick atmosphere.\" \"E"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"uropa may have subsurface"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" ocean.\" \"Ganymede is largest moon in"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" solar system.\" \"Callisto heavily"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" cratered.\" \"Io volcanically active"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".\" \"Enceladus has water"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"-ice ge"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"ysers.\" \"Triton orbits Neptune retro"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"grade.\" \"The Moon is Earth"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"'s only natural satellite.\" \"Solar wind is stream of charged particles from Sun.\" \"A light"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"-year is distance light travels in one year.\" \"Astronomical unit is average Earth-S"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"un distance.\" \"The Sun's core fuses hydrogen into helium.\" \"Sun"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"'s surface temperature about"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" 5,500 Celsius.\" \"Phot"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"osphere is visible surface of Sun.\" \"Cor"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"ona is Sun's outer atmosphere.\" \"Solar"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" eclipse occurs when Moon blocks Sun.\" \"L"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"unar eclipse occurs when Earth blocks sunlight"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" to Moon.\" \"Com"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"ets have tails when"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" near Sun.\""},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" \"Meteoroids"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" are small rocky"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" or metallic bodies in space.\" \"M"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"eteors are meteoroids burning in atmosphere.\" \"M"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"eteorites are meteoroids"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" that reach Earth's surface.\" \"Ven"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"us is hottest planet.\" \"Mars has"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" largest volcano"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" in solar system, Olympus Mons.\" \"Jupiter"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" has strongest magnetic field among"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" planets.\" Need exactly 40. Count."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Could include \""},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"The solar system has eight planets.\" Need line 1.\n\nNeed plain list"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" no markdown. Numbered lines. Fine. Need"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" one per line. Maybe no extra bullet"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". Use \"1. ...\" That's"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" plain. Need no preamble. Ensure 40 lines. Let's craft"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" 40 factual statements"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". Need maybe avoid \"short\""},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" but okay. Let's count:\n\n1 The solar system has"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" eight planets.\n2 The Sun contains more than 99"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"% of the solar system's mass.\n3 The solar"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" system formed about 4.6 billion years ago.\n4 The Sun is a"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" G-type main-sequence star.\n5 Mercury is the smallest planet.\n6 Mercury has"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" no moons.\n7 Venus rotates in the opposite"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" direction from most planets.\n8 Venus is the hottest"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" planet.\n9 Earth is the dens"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"est planet.\n10 Earth has one natural satellite, the Moon.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"11 Mars has two moons.\n12 Olympus"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Mons on Mars is the largest volcano in the solar system.\n13"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Jupiter is the largest planet.\n14 Jupiter's Great Red Spot is a"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" giant storm.\n15 Jupiter has the strongest magnetic field among the"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" planets.\n16 Saturn has the most extensive ring system.\n17 Saturn's moon"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Titan has a thick atmosphere.\n18 Ganymede is the largest moon"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" in the solar system.\n19 Europa may have a subsurface ocean"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".\n20 Io is the most volcanically active body"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" in the solar system.\n21 Enceladus"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" has water-ice geysers.\n22 Uranus rotates on its side"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".\n23 Neptune is the farthest planet from the Sun.\n24 Triton orbits"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Neptune in a retrograde direction.\n25 The asteroid belt lies"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" between Mars and Jupiter.\n26 Ceres is the largest object"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" in the asteroid belt.\n27 The Kuiper Belt lies beyond Neptune.\n28 Pluto is"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" a dwarf planet.\n29 Eris is a dwarf planet.\n30 Haume"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"a and Makemake are dwarf planets.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"31 The Moon is Earth's only natural satellite"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". Wait duplicate line 10."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Need replace. Could line"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" 31 \"A solar"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" eclipse occurs when the Moon"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" blocks the Sun.\" But already later"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"? Need adjust. Need 40 unique. Let's list all with count"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".\n\nNeed include AU, light-year, solar wind, core"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":", photosphere, corona, comet tails, meteor"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"oid/meteor/meteorite. Need exactly"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" 40. Let's construct final list 40, avoid"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" duplicates. Count carefully.\n\n1 The solar system has eight planets.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"2 The Sun contains more than 99% of the solar system's"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" mass.\n3 The solar system formed about 4.6 billion years ago.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"4 The Sun is a G"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"-type main-sequence star.\n5 Mercury is the smallest planet.\n6 Mercury has no moons.\n7 Venus rotates in the"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" opposite direction from most planets.\n8 Venus is the hottest planet.\n9 Earth is the dens"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"est planet.\n10 Earth has one natural satellite, the Moon.\n11 Mars"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" has two moons.\n12 Olympus Mons on Mars is the largest volcano"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" in the solar system.\n13 Jupiter is the largest planet.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"14 Jupiter's Great Red Spot is a giant"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" storm.\n15 Jupiter has the strongest magnetic field among the planets.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"16 Saturn has the most extensive ring system.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"17 Saturn's moon Titan has a thick atmosphere.\n18 Gan"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"ymede is the largest moon in the solar system.\n19 Europa may"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" have a subsurface ocean.\n20 Io is"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" the most volcanically active body in the solar system.\n21 En"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"celadus has water-ice geysers.\n22 Uranus"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" rotates on its side.\n23 Neptune is"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" the farthest planet from the Sun.\n24 Triton orbits"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Neptune in a retrograde direction.\n25 The asteroid belt lies between Mars and Jupiter.\n26"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Ceres is the largest object in the asteroid belt.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"27 The Kuiper Belt lies beyond"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" Neptune.\n28 Pluto is a dwarf planet.\n29 Eris is a dwarf planet.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"30 Haumea and Makemake are dwarf planets.\n"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"31 The astronomical unit is the average Earth-Sun distance.\n32"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" A light-year is the distance light travels in one"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" year.\n33 The Sun's core fuses hydrogen into helium.\n34"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" The Sun's visible surface is called the photosphere.\n35 The"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" corona is the Sun's outer atmosphere.\n36 A solar eclipse occurs when the Moon"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" blocks the Sun.\n37 A lunar eclipse occurs when Earth"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" blocks sunlight from reaching the Moon.\n38 Comets develop"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" tails when they approach the Sun.\n39 Meteoroids are small"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" rocky or metallic bodies in space"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":".\n40 Meteorites are meteoroids that survive passage"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" through Earth"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"'s atmosphere and reach the surface.\n\nThis is 40. Need ensure"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" \"Meteorites are meteoroids...\" okay"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". Factual. \"Ha"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"umea and Makemake are dwarf planets\" okay. \""},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"The Sun contains"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" more than 99%...\" okay"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". \"Earth dens"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"est planet"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"\" yes. \"Jupiter strongest magnetic field among planets\" yes. \"Io most"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" volcanically active body\" commonly yes. \"En"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"celadus water-ice geys"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"ers\" yes. Good. Need final only list"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":". No preamble. Numbered. Use plain. Ensure"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":" no markdown headers. Good."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"1. The solar system has eight planets.\n2"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". The Sun contains more than 99% of the solar system's"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" mass.\n3. The solar system formed about 4.6 billion years ago."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"\n4. The Sun is a G-type main-sequence star."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"\n5. Mercury is the smallest planet.\n6. Mercury has"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" no moons.\n7. Venus rotates in the opposite direction from most planets.\n8. Venus"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" is the hottest planet.\n9. Earth is the densest planet.\n10. Earth"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" has one natural satellite, the Moon.\n11."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Mars has two moons.\n12. Olympus Mons on Mars is the"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" largest volcano in the solar system.\n13. Jupiter is the"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" largest planet.\n14. Jupiter's Great Red Spot is a giant"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" storm.\n15. Jupiter has the strongest magnetic field"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" among the planets.\n16. Saturn has the most extensive ring system.\n17."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Saturn's moon Titan has a thick atmosphere.\n18."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Ganymede is the largest moon in the solar system.\n19. Europa may"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" have a subsurface ocean.\n20. Io is the most volcanically active body"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" in the solar system.\n21"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". Enceladus has water-ice geysers.\n22. Uranus rotates on"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" its side.\n23. Neptune is the farthest planet from the Sun.\n24. Trit"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"on orbits Neptune in a retrograde direction.\n25. The asteroid belt lies"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" between Mars and Jupiter.\n26. Ceres is the largest object in the asteroid belt."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"\n27. The Kuiper Belt lies beyond"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Neptune.\n28. Pluto is a dwarf planet.\n29. Eris is a dwarf planet"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n30. Haumea and Makemake"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" are dwarf planets.\n31. The astronomical unit is the average Earth-Sun distance.\n32"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". A light-year is the distance light travels in one"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" year.\n33. The Sun's core fuses hydrogen into helium.\n34"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". The Sun's visible surface is called the photosphere.\n35. The corona"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" is the Sun's outer atmosphere.\n36. A solar eclipse occurs when the Moon"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" blocks the Sun.\n37. A lunar eclipse"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" occurs when Earth blocks sunlight from reaching the Moon.\n38. Com"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ets develop tails when they approach the Sun.\n39. Meteoroids"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" are small rocky or metallic bodies in space."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"\n40. Meteorites are meteoroids that survive passage"},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" through Earth's atmosphere and reach the surface."},"finish_reason":null}],"system_fingerprint":"default","request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: {"id":"db7264d9d32a456f86fc47e47d582297","created":1794480956,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"system_fingerprint":"default","usage":{"prompt_tokens":67,"completion_tokens":2044,"total_tokens":2111,"completion_tokens_details":{"reasoning_tokens":1576,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0,"audio_tokens":0},"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0}},"request_id":"db7264d9d32a456f86fc47e47d582297"}
+
+data: [DONE]
+

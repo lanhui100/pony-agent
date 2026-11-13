@@ -25,7 +25,9 @@ use pony_agent_core::agent::control_plane::{
 };
 use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalData};
 // W3：Team 可见性数据源（全部来自真实运行时，不造数据）。
-use pony_agent_core::agent::metrics_snapshot::{context_ratio_for_window, TurnMetricsSnapshot};
+use pony_agent_core::agent::metrics_snapshot::{
+    context_ratio_for_window, format_unit_fraction_percent, TurnMetricsSnapshot,
+};
 use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
 // 显示偏好（/settings 与 Ctrl+O 的唯一真值）：独立文件持久化，与桌面端 settings.json 契约解耦。
 use pony_agent_core::agent::headless::PermissionMode;
@@ -500,6 +502,10 @@ pub use self::input::*;
 mod queue;
 #[path = "tui/goal_command.rs"]
 mod goal_command;
+#[path = "tui/shortcuts.rs"]
+mod shortcuts;
+#[path = "tui/goal_panel.rs"]
+mod goal_panel;
 pub use self::queue::*;
 
 #[path = "tui/errors.rs"]
@@ -587,6 +593,10 @@ pub enum InteractionMode {
     AgentRoster,
     /// 本轮：`/settings` 显示偏好面板（↑↓ 选择 · Space/Enter 切换 · Esc 关闭）。
     Settings,
+    /// Ctrl+H：快捷键帮助覆盖层（清单唯一真源 `tui/shortcuts.rs`；Esc 或再按关闭）。
+    ShortcutsHelp,
+    /// Ctrl+G：当前会话目标详情覆盖层（只读；Esc 或再按关闭）。
+    GoalDetail,
     /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的两段式覆盖层
     /// （① 选轮次 ② 选范围：恢复代码与会话 / 仅恢复会话）。
     Rewind,
@@ -608,7 +618,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/teams", "查看 Team 角色与状态（同 /agents）"),
     ("/clear", "清空当前消息上下文"),
     ("/compact", "压缩当前会话上下文"),
-    ("/help", "查看所有支持的快捷指令"),
+    ("/help", "查看命令与快捷键列表"),
     ("/update", "检查更新与升级新版本"),
     ("/quit", "安全退出 TUI 界面"),
 ];
@@ -4060,13 +4070,48 @@ fn goal_banner_parts(state: &TuiState, goal: &TuiGoal) -> (String, String) {
     )
 }
 
+/// F1 I4：速度段必须**自描述三件套**（速度 + 样本量 + 口径），突发剔除 `> 0` 时必须可辨别。
+///
+/// 逐字格式（契约验收按后缀可辨识，勿随意改字面量）：
+/// - `stream_decode`：`120 t/s decode n=1`；
+/// - `end_to_end`：`≈120 t/s e2e n=1`（`≈` = 含排队/prefill，跨调用不可比）；
+/// - 突发剔除 `> 0`：末尾追加 ` 剔突发N`（N = `turnBurstExcluded`，只能进端到端回退的调用数）；
+/// - `basis` 缺席（旧快照 / legacy wire）：只出裸值 `120 t/s`（不伪造口径，向后兼容）；
+/// - `turn_calls == 0`（旧快照 / 无参与计算调用）：不写 `n=`（`n=0` 会被读成「0 次调用」）。
+///
+/// 值全部直取快照（I9/I10：TUI 侧不自算速度/口径/样本量）。
+fn format_speed_segment(
+    speed: f64,
+    prefix: &str,
+    basis: Option<TurnSpeedBasis>,
+    calls: u32,
+    burst_excluded: u32,
+) -> String {
+    let mut segment = format!("{prefix}{:.0} t/s", speed.round());
+    if let Some(basis) = basis {
+        segment.push_str(match basis {
+            TurnSpeedBasis::StreamDecode => " decode",
+            TurnSpeedBasis::EndToEnd => " e2e",
+        });
+    }
+    if calls > 0 {
+        segment.push_str(&format!(" n={calls}"));
+    }
+    if burst_excluded > 0 {
+        segment.push_str(&format!(" 剔突发{burst_excluded}"));
+    }
+    segment
+}
+
 /// 数值指标段（**双口径**）：`↑in` = 当前上下文输入，`↓out` / 缓存 = 会话累计。
 ///
 /// 口径矩阵（P0，与桌面端 `HomeSidebar.vue` 同源）：
 /// - `↑in`：**当前上下文**（ADR 0035 S1：最近一次调用的上下文输入，禁止跨轮累加）；
 /// - `↓out`：**会话累计** Σ per-call 输出（`SessionUsageLedger`，缺失时回退 legacy 累计字段）；
 /// - `缓存 x%`：**会话累计**命中率 = Σ命中 / Σ上下文输入（`SessionUsageTotals::cache_hit_ratio`，
-///   fail-closed；无会话台账时回退快照的单次调用比 / legacy 单轮比）；
+///   fail-closed；无会话台账时回退快照的单次调用比 / legacy 单轮比）；百分比文本一律由 core
+///   `format_unit_fraction_percent` 出具——整数四舍五入，但**部分命中不得舍入成 100%**
+///   （99.6% 不得显示成 100%，ADR 2026-11-12-metrics-percent-honesty）；
 /// - `上下文 x%`：当前上下文 / 窗口；快照缺窗口时用调用方解析出的注册表真实窗口回退
 ///   （比例仍由 core 的 `context_ratio_for_window` 算出，TUI 不自写公式）；
 /// - `t/s`、`首token`：per-call / 轮级快照段（设计如此，不参与会话累计）。
@@ -4117,8 +4162,8 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
                 })
             })
     });
-    if let Some(ratio) = cache_ratio {
-        segments.push(format!("缓存 {:.0}%", (ratio * 100.0).round()));
+    if let Some(text) = cache_ratio.and_then(format_unit_fraction_percent) {
+        segments.push(format!("缓存 {text}%"));
     }
 
     // ---- 上下文占用：快照比 → 快照缺窗口时用解析窗口回退 → legacy 计算 ----
@@ -4136,8 +4181,8 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
             .or_else(|| (state.total_input_tokens > 0).then_some(state.total_input_tokens))?;
         context_ratio_for_window(context_tokens, window_tokens?)
     });
-    if let Some(ratio) = context_ratio {
-        segments.push(format!("上下文 {:.0}%", (ratio * 100.0).round()));
+    if let Some(text) = context_ratio.and_then(format_unit_fraction_percent) {
+        segments.push(format!("上下文 {text}%"));
     }
 
     // ---- per-call / 轮级快照段（设计上不参与会话累计）----
@@ -4149,7 +4194,13 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
                 Some(TurnSpeedBasis::EndToEnd) => "≈",
                 _ => "",
             };
-            segments.push(format!("{prefix}{:.0} t/s", speed.round()));
+            segments.push(format_speed_segment(
+                speed,
+                prefix,
+                metrics.turn_speed_basis,
+                metrics.turn_calls,
+                metrics.turn_burst_excluded.unwrap_or(0),
+            ));
         }
         if let Some(ttft_ms) = metrics.first_token_latency_ms {
             segments.push(format!("首token {ttft_ms}ms"));
@@ -6221,6 +6272,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     // 契约 C6/C7：`/settings` 显示偏好面板。
     if state.mode == InteractionMode::Settings {
         render_settings_panel(f, state);
+    }
+    if state.mode == InteractionMode::GoalDetail {
+        goal_panel::render(f, area, state);
+    }
+    if state.mode == InteractionMode::ShortcutsHelp {
+        shortcuts::render(f, area);
     }
 }
 
@@ -8870,6 +8927,15 @@ fn tui_event_loop(
                         continue;
                     }
 
+                    // Ctrl+H / Ctrl+G 覆盖层开关（转换规则唯一真源：`tui/shortcuts.rs`）。
+                    if let Some(target) = shortcuts::overlay_target(key.code, key.modifiers) {
+                        if let Some(next) = shortcuts::toggled_mode(&state.mode, target) {
+                            state.mode = next;
+                            dirty = true;
+                        }
+                        continue;
+                    }
+
                     // Ctrl+Z 挂起：raw mode 清掉了 ISIG，Ctrl+Z 不会产生 SIGTSTP，
                     // 只能由按键路径主动交还终端再 raise(SIGSTOP)（见 suspend_tui）。
                     if is_suspend_shortcut(key.code, key.modifiers) {
@@ -9086,6 +9152,19 @@ fn tui_event_loop(
                     if state.mode == InteractionMode::Settings {
                         if state.handle_settings_key(key.code).is_some() {
                             persist_tui_preferences(&state);
+                        }
+                        continue;
+                    }
+
+                    // 1c4. Ctrl+G / Ctrl+H 覆盖层：Esc 或再按同键关闭，其余键一律吞掉
+                    // （不得漏进 Composer：否则覆盖层态输入会污染草稿）。
+                    if matches!(
+                        state.mode,
+                        InteractionMode::GoalDetail | InteractionMode::ShortcutsHelp
+                    ) {
+                        if key.code == KeyCode::Esc {
+                            state.mode = InteractionMode::Normal;
+                            dirty = true;
                         }
                         continue;
                     }
@@ -10093,6 +10172,8 @@ fn tui_event_loop(
                                     help.push_str(
                                         "\n子智能体会话内：Ctrl+↑ 返回主会话 · Ctrl+←/→ 切换子智能体",
                                     );
+                                    // Ctrl+H / Ctrl+G 覆盖层入口（同时是它们的可发现路径）。
+                                    help.push_str("\nCtrl+H 快捷键帮助 · Ctrl+G 目标面板");
                                     // 契约 F-L：/cost 移除后网关需要可见入口；只展示剥离凭据后的
                                     // scheme://host[:port]/path（userinfo/query/fragment 全丢弃）。
                                     let gateway = gateway_display(&state.gateway_url);
@@ -11742,3 +11823,10 @@ mod cli_self_update_tests;
 #[path = "tui/tests/plan_approve_tests.rs"]
 mod plan_approve_tests;
 // B076: add /skill: recognition logic
+
+/// Ctrl+G 目标面板 / Ctrl+H 快捷键帮助的**跨模块**不变量单测：
+/// 新模式是否仍判为模态、清单 token 与判定函数是否一致、空态是否仍给 `/goal` 入口。
+/// 各自模块内的单元测试留在 `tui/shortcuts.rs` / `tui/goal_panel.rs`，此处只锁缝合处。
+#[cfg(test)]
+#[path = "tui/tests/shortcuts_help_tests.rs"]
+mod shortcuts_help_tests;

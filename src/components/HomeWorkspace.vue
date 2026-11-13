@@ -37,6 +37,7 @@ import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
 import QueuedMessagesBubble from "@/components/chat/QueuedMessagesBubble.vue";
 import AgentRuntimeStatusBar from "@/components/chat/AgentRuntimeStatusBar.vue";
 import TurnDial from "@/components/chat/TurnDial.vue";
+import ShortcutsHelpModal from "@/components/ShortcutsHelpModal.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -55,6 +56,7 @@ const goalStore = useGoalStore();
 const teamStore = useTeamStore();
 const workspacePanelsStore = useWorkspacePanelsStore();
 const runtimeStoreSessionList = storeToRefs(runtimeStore).sessionList;
+const showShortcutsModal = ref(false);
 
 const {
   conversationCheckpointEntries,
@@ -1567,13 +1569,18 @@ async function executeSlashCommand(command: DesktopSlashCommand) {
   // 不消耗模型轮次、不写会话历史：草稿已清空且不调用 submitTurn。
   if (command === "goal") {
     try {
+      const args = goalCommandArgs(commandInput);
       const outcome = await safeInvoke<GoalCommandOutcome>("goal_command", {
         sessionId: runtimeStore.sessionId,
-        args: goalCommandArgs(commandInput)
+        args
       });
       runtimeStore.setSessionNotice(describeGoalOutcome(outcome));
       // 目标条以后端快照为准（`clear` 后必须归零，续轮随之停止）。
       await goalStore.fetchGoal(runtimeStore.sessionId);
+      // 若是查看目标（无参数）或创建/编辑目标，自动展开目标面板
+      if (!args || outcome.goal) {
+        workspacePanelsStore.activePanel = "goal";
+      }
     } catch (error) {
       const reason = extractErrorMessage(String(error)) ?? String(error);
       runtimeStore.setSessionNotice(`目标命令执行失败：${reason}`);
@@ -1708,6 +1715,26 @@ function handleWindowKeydown(event: KeyboardEvent) {
 
     if (hasPrimaryModifier && !event.altKey && !event.shiftKey) {
       const key = event.key.toLowerCase();
+      // 可编辑区口径：Ctrl/Cmd+G / T / B 与上面的 Ctrl+Z 一致 —— 焦点在输入框内时
+      // 不劫持浏览器/输入法原生行为（如 Ctrl+G「查找下一个」）。
+      // 唯一例外是 Ctrl/Cmd+H：帮助面板必须在**任何焦点**下都能呼出（用户需随时查快捷键），
+      // 这是有意差异，勿按其它组合键口径「对齐」掉。
+      if (isEditableTarget && key !== "h") {
+        return;
+      }
+      if (key === "h") {
+        event.preventDefault();
+        showShortcutsModal.value = !showShortcutsModal.value;
+        return;
+      }
+      if (key === "g") {
+        event.preventDefault();
+        workspacePanelsStore.toggleGoal();
+        if (workspacePanelsStore.activePanel === "goal" && !goalStore.hasGoal) {
+          runtimeStore.setSessionNotice("当前会话暂无目标，可通过 /goal <目标> 创建");
+        }
+        return;
+      }
       if (key === "t") {
         event.preventDefault();
         handleTimelineScrollToTop();
@@ -2164,6 +2191,8 @@ watch(
         </button>
       </template>
     </WorkspaceComposer>
+
+    <ShortcutsHelpModal v-model:open="showShortcutsModal" />
   </section>
 </template>
 

@@ -14,6 +14,10 @@ import {
   Zap
 } from "lucide-vue-next";
 import Tooltip from "@/components/ui/Tooltip.vue";
+import {
+  formatBurstExcludedSuffix,
+  formatSpeedSampleLabel
+} from "@/lib/runtime/token-metrics";
 import { isDebugLoggingEnabled } from "@/lib/runtime/utils";
 import { useRuntimeStore } from "@/stores/runtime";
 
@@ -37,6 +41,15 @@ const props = defineProps<{
     basis?: string;
     /** 参与求和的已完成调用数。 */
     calls?: number;
+    /** F1 I4：该轮 provider 调用**总数**（含无效/不可解码记录）；旧 payload 缺键 ⇒ null。 */
+    callsTotal?: number | null;
+    /** F1 I4：`decode_eligible` 记录数（进入解码口径分子/分母的样本）。 */
+    callsEligible?: number | null;
+    /**
+     * F1 I4：`valid − decode_eligible`——因突发整包/无 TTFT/单 token 被剔除、
+     * 只能进 `end_to_end` 回退的调用数。`> 0` 时显示端必须可辨别（本组件用 tooltip + `data-*`）。
+     */
+    burstExcluded?: number | null;
     speed?: number | null;
     inputTokens?: number | null;
     outputTokens?: number | null;
@@ -77,18 +90,42 @@ const speedBasis = computed(() => props.speedDebugInfo?.basis ?? "none");
 /** wave-54 C3：估算来源必须显式降级（`≈`），不得冒充真值。 */
 const isEstimatedUsage = computed(() => props.speedDebugInfo?.origin === "estimated_chars");
 
+/**
+ * F1 I4：突发剔除数（`valid − decode_eligible`，直取快照，组件内不重算判据）。
+ *
+ * `> 0` ⇒ 本轮的 t/s **不是**纯解码速度：被物理下限（突发整包）/无 TTFT/单 token 剔除的调用
+ * 只能进 `end_to_end` 回退。显示端必须可辨别；`null`/`0` ⇒ 不提示（旧 payload 无该键，
+ * 不伪造「无突发」）。
+ */
+const speedBurstExcluded = computed(() => {
+  const value = props.speedDebugInfo?.burstExcluded;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+});
+
+/** F1 I4：样本量文本（`eligible/total 次调用`；旧 payload 缺 total ⇒ 只写参与数）。 */
+const speedSampleText = computed(() =>
+  formatSpeedSampleLabel(props.speedDebugInfo?.calls, props.speedDebugInfo?.callsTotal)
+);
+
 const speedTooltip = computed(() => {
-  const calls = props.speedDebugInfo?.calls;
   const callScope = props.speedDebugInfo?.mode === "call_only";
+  // F1 I4：样本量（含剔除数）+ 口径必须写在 tooltip 文案里（行内位点只保留「图标 + 值」，
+  // wave-61 §1 L-4/R1 冻结了行内子节点结构，故诚实化信息走 tooltip + `data-*`）。
+  const burstSuffix = formatBurstExcludedSuffix(speedBurstExcluded.value);
+  const sample = speedSampleText.value || "0 次调用";
   if (speedBasis.value === "stream_decode") {
     return callScope
       ? "当前调用的生成速度（解码口径：首 token 已计入 TTFT）"
-      : `生成速度（${calls ?? 0} 次调用，Σ(out−1)/Σ生成耗时）`;
+      : `生成速度（${sample}，Σ(out−1)/Σ生成耗时${burstSuffix}）`;
   }
   if (speedBasis.value === "end_to_end") {
     return callScope
       ? "当前调用的整体速度（端到端口径，含排队与 prefill）"
-      : `整体速度（${calls ?? 0} 次调用，Σoutput/Σ端到端耗时，含排队与 prefill）`;
+      : `整体速度（${sample}，Σoutput/Σ端到端耗时，含排队与 prefill${burstSuffix}）`;
+  }
+  // basis 缺席但仍有速度值（旧 wire）：口径未知必须明说，不得默认成解码口径。
+  if (isPositiveFiniteNumber(props.tokenGenerationSpeed)) {
+    return `速度（口径未知，${sample}${burstSuffix}）`;
   }
   return "速度（暂无已完成调用）";
 });
@@ -441,6 +478,9 @@ const showMetricsCard = computed(
             data-testid="status-metric-token-speed"
             :data-speed-mode="tokenSpeedCalculationMode || 'none'"
             :data-speed-basis="speedBasis"
+            :data-speed-calls="speedDebugInfo?.calls ?? undefined"
+            :data-speed-calls-total="speedDebugInfo?.callsTotal ?? undefined"
+            :data-speed-burst-excluded="speedBurstExcluded > 0 ? speedBurstExcluded : undefined"
             :data-speed-debug="debugAttrsEnabled ? speedDebugString : undefined"
           >
             <Tooltip text="生成速度">

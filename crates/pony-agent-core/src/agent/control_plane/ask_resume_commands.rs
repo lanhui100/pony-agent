@@ -385,49 +385,255 @@ fn ask_aware_goal(input: &TurnInput) -> String {
 mod ask_resume_fallback_tests {
     use super::*;
 
-    /// 极简记录型 sink：只关心事件名（用于断言"回落路径真的执行了一轮"）。
+    use crate::agent::config::{
+        ProviderModelCapabilities, ProviderSelectionResolver, ResolvedProviderSelection,
+        ThinkingParamPattern,
+    };
+    use crate::agent::provider::{ProviderAuthType, ProviderProtocol};
+    use crate::agent::runtime::AgentRuntimeBuilder;
+    use crate::agent::session::SessionStore;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// 记录型 sink：同时保留事件名与载荷（`turn:completed` 的正文要逐字对拍）。
     #[derive(Default)]
     struct RecordingSink {
-        names: std::sync::Mutex<Vec<String>>,
+        captured: Mutex<Vec<(String, TurnStreamEvent)>>,
     }
 
     impl RecordingSink {
         fn names(&self) -> Vec<String> {
-            self.names
+            self.captured
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .clone()
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect()
+        }
+
+        fn events_named(&self, name: &str) -> Vec<TurnStreamEvent> {
+            self.captured
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .iter()
+                .filter(|(captured, _)| captured == name)
+                .map(|(_, payload)| payload.clone())
+                .collect()
         }
     }
 
     impl TurnEventSink for RecordingSink {
-        fn emit(&self, name: &str, _payload: TurnStreamEvent) {
-            self.names
+        fn emit(&self, name: &str, payload: TurnStreamEvent) {
+            self.captured
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .push(name.to_string());
+                .push((name.to_string(), payload));
         }
     }
 
-    fn fallback_turn_input() -> TurnInput {
-        TurnInput {
-            message: "续轮兜底单测".to_string(),
-            display_message: None,
-            provider_id: None,
-            model_id: None,
+    /// 终态事件名（本轮只允许出现**一个**终态）。
+    const TERMINAL_EVENTS: [&str; 3] = ["turn:completed", "turn:failed", "turn:suspended"];
+
+    fn terminal_events(sink: &RecordingSink) -> Vec<String> {
+        sink.names()
+            .into_iter()
+            .filter(|name| TERMINAL_EVENTS.contains(&name.as_str()))
+            .collect()
+    }
+
+    /// 本地回环 mock provider：任何请求都回同一段 assistant 文本，并记录请求次数。
+    ///
+    /// 为什么必须本地 mock：这些用例要跑**真实 turn**（判据是「回落路径真的执行了一轮」），
+    /// 而 `HostControlPlaneBuilder` 未注入 resolver 时会走默认 `ProviderRegistryStore` ——
+    /// 单测就会去连用户配置里的真实网关（慢、非确定、烧 token，且违反「单测不出网」）。
+    struct MockProviderServer {
+        base_url: String,
+        address: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        shutdown: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockProviderServer {
+        fn start(reply_text: &str) -> Self {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("mock provider 必须能绑定回环端口");
+            let address = listener.local_addr().expect("mock provider 地址");
+            let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let response_body = json!({
+                "choices": [{ "message": { "role": "assistant", "content": reply_text } }],
+                "usage": { "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10 }
+            })
+            .to_string();
+            let requests_for_thread = Arc::clone(&requests);
+            let shutdown_for_thread = Arc::clone(&shutdown);
+
+            let handle = std::thread::spawn(move || loop {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    if shutdown_for_thread.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    continue;
+                };
+                if shutdown_for_thread.load(Ordering::SeqCst) {
+                    return;
+                }
+                let request_body = read_http_request_body(&mut stream);
+                requests_for_thread
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(request_body);
+                let payload = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{}",
+                    response_body.as_bytes().len(),
+                    response_body
+                );
+                let _ = stream.write_all(payload.as_bytes());
+                let _ = stream.flush();
+            });
+
+            Self {
+                base_url: format!("http://{address}/v1"),
+                address: address.to_string(),
+                requests,
+                shutdown,
+                handle: Some(handle),
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len()
+        }
+    }
+
+    impl Drop for MockProviderServer {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::SeqCst);
+            // 用一次空连接唤醒阻塞中的 accept，令 mock 线程及时退出。
+            let _ = TcpStream::connect(self.address.clone());
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn read_http_request_body(stream: &mut TcpStream) -> String {
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let mut header_end: Option<usize> = None;
+        let mut content_length = 0usize;
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                Err(_) => break,
+            }
+            if header_end.is_none() {
+                if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                    header_end = Some(index + 4);
+                    let headers = String::from_utf8_lossy(&buffer[..index + 4]).to_lowercase();
+                    for line in headers.lines() {
+                        if let Some(value) = line.strip_prefix("content-length:") {
+                            content_length = value.trim().parse::<usize>().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+            if let Some(header_end) = header_end {
+                if buffer.len().saturating_sub(header_end) >= content_length {
+                    break;
+                }
+            }
+        }
+        let body_start = header_end.unwrap_or(buffer.len());
+        String::from_utf8_lossy(&buffer[body_start..]).to_string()
+    }
+
+    struct StaticProviderResolver {
+        selection: ResolvedProviderSelection,
+    }
+
+    impl ProviderSelectionResolver for StaticProviderResolver {
+        fn resolve_provider_selection(
+            &self,
+            _provider_id: Option<&str>,
+            _model_id: Option<&str>,
+        ) -> ResolvedProviderSelection {
+            self.selection.clone()
+        }
+    }
+
+    /// 非流式（`supports_streaming = false`）：决策与回落轮都走同步 JSON，mock 只需回一段文本。
+    fn provider_selection(base_url: String) -> ResolvedProviderSelection {
+        ResolvedProviderSelection {
+            requested_name: "ask-resume-fallback-test".to_string(),
+            provider_name: "ask-resume-fallback-test".to_string(),
+            protocol: ProviderProtocol::OpenAiCompletions,
+            base_url,
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "ASK_RESUME_FALLBACK_TEST_API_KEY".to_string(),
+            api_key: Some("ask-resume-fallback-test-key".to_string()),
+            model: "ask-resume-fallback-test-model".to_string(),
+            temperature: 0.0,
+            max_output_tokens: 256,
             reasoning_effort: None,
-            workspace_mode: None,
-            tool_authorization_mode: None,
-            session_id: Some("session-ask-resume-fallback-unit".to_string()),
-            node_id: None,
-            history: Vec::new(),
-            images: Vec::new(),
-            workspace_id: None,
-            plan_execution_approval: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(8_192),
+                supports_tools: true,
+                supports_streaming: false,
+                supports_image_input: false,
+                supports_reasoning: false,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::EffortStandard,
         }
     }
 
-    fn ask_turn_input(session_id: Option<&str>, message: &str) -> TurnInput {
+    /// 隔离控制面：内存会话库 + 本地 mock provider + 内存 graph run store（零外部 IO）。
+    fn control_plane_with_mock_provider(
+        base_url: String,
+        workspace: &std::path::Path,
+    ) -> HostControlPlane {
+        let runtime = AgentRuntimeBuilder::new()
+            .session_store(SessionStore::memory_only())
+            .provider_resolver(Box::new(StaticProviderResolver {
+                selection: provider_selection(base_url),
+            }))
+            .workspace_root(workspace)
+            .build();
+        HostControlPlaneBuilder::new()
+            .runtime(runtime)
+            .graph_run_store(GraphRunStore::new())
+            .build()
+    }
+
+    /// 用例独占工作区根（Ask 只做治理判定，不落业务文件）。
+    fn isolated_workspace(test_name: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "pony-agent-ask-fallback-ws-{}-{}-{}",
+            std::process::id(),
+            test_name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create isolated workspace dir");
+        dir
+    }
+
+    fn fallback_turn_input(session_id: &str, message: &str) -> TurnInput {
         TurnInput {
             message: message.to_string(),
             display_message: None,
@@ -436,13 +642,33 @@ mod ask_resume_fallback_tests {
             reasoning_effort: None,
             workspace_mode: None,
             tool_authorization_mode: None,
-            session_id: session_id.map(str::to_string),
+            session_id: Some(session_id.to_string()),
             node_id: None,
             history: Vec::new(),
             images: Vec::new(),
             workspace_id: None,
             plan_execution_approval: None,
         }
+    }
+
+    /// prepare 阶段专用输入（只解析 run、不跑 turn ⇒ 不需要 provider）。
+    fn ask_turn_input(session_id: Option<&str>, message: &str) -> TurnInput {
+        TurnInput {
+            session_id: session_id.map(str::to_string),
+            ..fallback_turn_input(session_id.unwrap_or("anonymous"), message)
+        }
+    }
+
+    fn runs_snapshot(control_plane: &HostControlPlane) -> Vec<(String, Option<String>, String)> {
+        let graph_runs = control_plane
+            .graph_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        graph_runs
+            .list_runs()
+            .into_iter()
+            .map(|run| (run.id, run.session_id, format!("{:?}", run.phase)))
+            .collect()
     }
 
     fn seed_ready_run(
@@ -529,23 +755,32 @@ mod ask_resume_fallback_tests {
         );
     }
 
-    /// F1 fallback 分支不是死代码：指定的 run 不可续（这里用不存在的 run id）时，
+    /// F1 回落分支不是死代码：指定的 run 不可续（这里用不存在的 run id）时，
     /// `prepare_continue_graph_run_stream` 必然失败 ⇒ 必须回落到通用 ask-aware 入口，
-    /// 并且**返回 Ok**（把"run 不可续"当成回落条件，而不是当成 turn 失败上抛）。
+    /// 并且**返回 Ok**（把「run 不可续」当成回落条件，而不是当成 turn 失败上抛）。
+    ///
+    /// 封闭性（本次收口的关键）：控制面必须注入**本地回环 mock provider** + 内存会话库 +
+    /// 临时工作区。否则 `HostControlPlaneBuilder` 会走默认 `ProviderRegistryStore`，单测真的
+    /// 去连用户配置里的线上网关（非确定、烧 token、17 个 tool hop 跑 265s）。
     ///
     /// 判据（真实断言，非空跑）：
     /// 1. 返回值是 `Ok(())`；
-    /// 2. 回落路径确实执行了一轮 —— sink 至少收到一个事件；
-    /// 3. 本轮以终态收口（failed/completed/suspended 之一）。
+    /// 2. 回落路径确实执行了一轮 —— sink 收到事件，且 mock provider 真的被请求过；
+    /// 3. 本轮以**恰好一个**终态收口，且是 `turn:completed`（mock 只回文本 ⇒ 不挂起、不失败）；
+    /// 4. 终态正文逐字等于 mock 的 assistant 文本（证明跑的是真实 turn，不是空壳）；
+    /// 5. 回落新建的 run 绑定到本会话，且**没有**留下 `turn:suspended`（不得静默挂起）。
     #[test]
     fn continue_falls_back_when_bound_run_is_not_continuable() {
-        let control_plane = HostControlPlaneBuilder::new()
-            .graph_run_store(GraphRunStore::new())
-            .build();
+        const REPLY_TEXT: &str = "回落轮已在本机 mock provider 上完成。";
+        const SESSION_ID: &str = "session-ask-resume-fallback-unit";
+
+        let server = MockProviderServer::start(REPLY_TEXT);
+        let workspace = isolated_workspace("fallback-unit");
+        let control_plane = control_plane_with_mock_provider(server.base_url.clone(), &workspace);
         let sink = RecordingSink::default();
         let command = StartTurnStreamCommand {
             turn_id: "turn-ask-resume-fallback-unit-1".to_string(),
-            input: fallback_turn_input(),
+            input: fallback_turn_input(SESSION_ID, "续轮兜底单测"),
         };
 
         let outcome =
@@ -556,29 +791,142 @@ mod ask_resume_fallback_tests {
             "指定的 run 不可续时必须回落到通用入口并返回 Ok，实际 = {outcome:?}"
         );
         let names = sink.names();
-        eprintln!("OBSERVE_EVENTS = {names:?}");
-        let runs = {
-            let graph_runs = control_plane
-                .graph_runs
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            graph_runs.list_runs()
-        };
-        eprintln!(
-            "OBSERVE_RUNS = {:?}",
-            runs.iter()
-                .map(|run| (run.id.clone(), run.session_id.clone(), format!("{:?}", run.phase)))
-                .collect::<Vec<_>>()
-        );
         assert!(
             !names.is_empty(),
             "回落路径必须真的执行了一轮并派发事件（否则 fallback 是死代码），实际 = {names:?}"
         );
         assert!(
-            names
+            server.request_count() >= 1,
+            "回落路径必须真的调用过 provider（否则本轮是空壳），实际请求数 = {}",
+            server.request_count()
+        );
+
+        let terminals = terminal_events(&sink);
+        assert_eq!(
+            terminals,
+            vec!["turn:completed".to_string()],
+            "回落轮必须以**恰好一个** turn:completed 收口（mock 只回文本 ⇒ 不挂起/不失败），\
+             实际终态序列 = {terminals:?}，全量事件 = {names:?}"
+        );
+        let completed = sink.events_named("turn:completed");
+        assert_eq!(
+            completed[0].text.as_deref(),
+            Some(REPLY_TEXT),
+            "turn:completed 的正文必须逐字等于 mock 的 assistant 文本（证明跑的是真实 turn）"
+        );
+
+        let runs = runs_snapshot(&control_plane);
+        assert_eq!(
+            runs.len(),
+            1,
+            "回落必须新建**一个** run（指定 run 不存在，不可能复用），实际 = {runs:?}"
+        );
+        assert_eq!(
+            runs[0].1.as_deref(),
+            Some(SESSION_ID),
+            "回落新建的 run 必须绑定到本会话，实际 = {runs:?}"
+        );
+        assert!(
+            !matches!(runs[0].2.as_str(), "Failed" | "Cancelled"),
+            "回落轮已完成 ⇒ run 不得停在失败/取消态，实际 = {runs:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == "turn:suspended"),
+            "回落轮不得留下无终态的 suspended（静默挂起正是本工单要根治的症状），实际 = {names:?}"
+        );
+    }
+
+    /// F1 回落的第二种触发形态：**指定的 run 存在但正被另一轮占用**（`prepare_continue_graph_run_stream`
+    /// 走的是「already has an active turn」分支，而非「not found」分支）。两条分支都必须回落到通用入口，
+    /// 不得把"不可续"当成 turn 失败上抛。
+    ///
+    /// 用 `GraphRunner::begin_turn` 造这个形态：它是公共 API，且与生产里「并发轮占用同一 run」同源。
+    #[test]
+    fn continue_falls_back_when_bound_run_is_busy_with_another_turn() {
+        const REPLY_TEXT: &str = "被占用 run 上的回落轮同样跑通。";
+        const SESSION_ID: &str = "session-ask-resume-fallback-busy";
+
+        let server = MockProviderServer::start(REPLY_TEXT);
+        let workspace = isolated_workspace("fallback-busy");
+        let control_plane = control_plane_with_mock_provider(server.base_url.clone(), &workspace);
+
+        // 预置一个「正在跑别的 turn」的 run（同会话，排除「会话不匹配」这条无关失败因）。
+        let busy_run_id = "run-busy-seed";
+        {
+            let run = crate::agent::graph::GraphEngine::new("state-machine-v1").start_run(
+                busy_run_id,
+                "seeded busy run",
+                Some(SESSION_ID),
+            );
+            let mut graph_runs = control_plane
+                .graph_runs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            control_plane.graph_runner.start_run(&mut graph_runs, run);
+            let lifecycle = control_plane.graph_runner.begin_turn(
+                &mut graph_runs,
+                busy_run_id,
+                "turn-concurrent-occupier",
+                Some(SESSION_ID),
+            );
+            assert!(
+                lifecycle.is_some(),
+                "预置夹具必须能把 run 推进到 Running（active_turn_id 非空）"
+            );
+        }
+
+        let sink = RecordingSink::default();
+        let command = StartTurnStreamCommand {
+            turn_id: "turn-ask-resume-fallback-busy-1".to_string(),
+            input: fallback_turn_input(SESSION_ID, "被占用 run 回落单测"),
+        };
+
+        let outcome = control_plane.continue_ask_resume_turn_stream(&sink, busy_run_id, command);
+
+        assert!(
+            outcome.is_ok(),
+            "绑定的 run 被占用时必须回落到通用入口并返回 Ok，实际 = {outcome:?}"
+        );
+        let terminals = terminal_events(&sink);
+        assert_eq!(
+            terminals,
+            vec!["turn:completed".to_string()],
+            "被占用 run 上的回落轮同样必须以**恰好一个** turn:completed 收口，实际 = {terminals:?}，\
+             全量事件 = {:?}",
+            sink.names()
+        );
+        let completed = sink.events_named("turn:completed");
+        assert_eq!(
+            completed[0].text.as_deref(),
+            Some(REPLY_TEXT),
+            "回落轮正文必须逐字等于 mock 文本"
+        );
+
+        let runs = runs_snapshot(&control_plane);
+        assert_eq!(
+            runs.len(),
+            2,
+            "被占用的 run 不可复用 ⇒ 回落必须再新建一个 run（共 2 个），实际 = {runs:?}"
+        );
+        let busy = runs
+            .iter()
+            .find(|(id, _, _)| id == busy_run_id)
+            .unwrap_or_else(|| panic!("预置的 busy run 必须仍在 store 里，实际 = {runs:?}"));
+        assert_eq!(
+            busy.2, "Running",
+            "回落不得抢占/改写被占用 run 的 phase，实际 = {runs:?}"
+        );
+        assert!(
+            runs.iter().any(|(id, session, _)| id != busy_run_id
+                && session.as_deref() == Some(SESSION_ID)),
+            "回落新建的 run 必须绑定到本会话，实际 = {runs:?}"
+        );
+        assert!(
+            !sink
+                .names()
                 .iter()
-                .any(|name| matches!(name.as_str(), "turn:failed" | "turn:completed" | "turn:suspended")),
-            "回落路径必须以某个终态收口，实际事件序列 = {names:?}"
+                .any(|name| name == "turn:suspended"),
+            "回落轮不得留下无终态的 suspended（静默挂起正是本工单要根治的症状）"
         );
     }
 }

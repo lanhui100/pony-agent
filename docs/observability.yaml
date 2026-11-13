@@ -1267,3 +1267,42 @@ note: >-
       `crates/pony-agent-core/src/bin/tui/goal_command.rs`（参数口径与单行折叠 3 例）、
       `tests/slash-commands-goal.spec.ts`（桌面纯函数 9 例）、
       `tests/slash-commands.spec.ts`（命令清单扩为四条）。
+
+  【归属登记（2026-11-12）｜Goal 面板快捷键 Ctrl/Cmd+G 与快捷键帮助弹窗 Ctrl/Cmd+H（ADR：.agents/notes/implemented/feature/2026-11-12-goal-panel-shortcuts-and-help-dialog.md）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**前端本地 UI 交互**（全局键盘监听 +
+  本地状态面板），无新增网络 IO、后台任务、环境变量、依赖、指标或日志出口。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
+  (2) 纯交互变更（仅登记）：`HomeWorkspace.vue` 新增两类全局快捷键——
+      `Ctrl/Cmd+G` 切换右侧 Goal 面板（`workspace-panels.ts` 的 `toggleGoal`，目标为空时给出
+      `/goal <目标>` 创建引导）；`Ctrl/Cmd+H` 呼出/关闭 `ShortcutsHelpModal.vue` 快捷键帮助弹窗
+      （reka-ui Dialog + Portal，静态清单、无遥测）。`/goal`（无参）命令执行成功后自动展开 Goal 面板。
+      不新增网络出口或后台任务；快捷键仅消费既有本地 store 状态。
+  (3) 收口点：不新增 enforcement_point；行为门落在前端单测——`tests/workspace-goal-shortcuts.spec.ts`
+      （Ctrl+G 面板切换 / Ctrl+H 帮助弹窗 + `/goal` 联动 4 例）、`tests/goal-panel-and-shortcuts.spec.ts`
+      （workspace-panels goal 类型与弹窗渲染 4 例）、`tests/GoalBar.spec.ts`（冻结回归 3 例）。
+
+  【归属登记（2026-11-12）｜上游 HTTP 525 由「永久不可重试」改判为可重试（ADR：.agents/notes/implemented/bug-fix/2026-11-12-upstream-525-retry-classification.md）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**失败分类码表的一项归属**
+  （`crates/pony-agent-core/src/agent/retry.rs` 的 `UPSTREAM_EDGE_SERVER_ERROR_HINTS` 增收 `"525"`），
+  不新增对外接口、网络 IO、后台任务或 LLM 调用；不新增 enforcement_point，不伪造 /metrics。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`、
+      `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、Prometheus pull 与节点日志采集前提均不成立）。
+  (2) 变更性质（仅登记，非遥测变更）：HTTP **525 SSL Handshake Failed** 由「码表不命中 ⇒ `NonRetryable` ⇒
+      立即 Abort」改为与 522 同组（`UpstreamServerError` ⇒ `TransientRetryable`），进入既有
+      `provider_timeout_backoff_config_for(policy)`（500→1000→2000→4000ms，cap 8s，预算 30s，最多 5 次），
+      并因 `failover_eligible` 判 `UpstreamServerError` 而**自动获得换手资格**（无新增分支）。
+      **526 维持排除**（证书无效属确定性配置错误），500 冻结不变，429/408/400/401/403/context-overflow
+      分组与 `decide` 流安全闸门全部不变。它不产生新的遥测事实：同一批 525 原本就经既有
+      `[pony-provider] … attempt=n/5 failed class=…` 本地日志行与既有 turn 失败上报通道出现。
+  (3) 口径取代声明：本波**取代**上文 2026-11-07 登记中「525/526（源站 TLS 配置错误）与 500/400/401/429/408
+      的分组结论逐项不变」一句对 **525** 的表述——实证（会话 `pa_01a1cf14` 三轮连撞 525 @6–8s，
+      跨 gemini / hy4free 两模型）表明 525 是边缘↔源站握手瞬时失败，可秒级自愈；526 的排除结论继续成立。
+      旧登记作为时点记录保留原貌，不改写。
+  (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有 `error_boundary` /
+      `http_client` 未改动。行为门落在测试层——`agent::retry::tests::edge_5xx_maps_to_server_error_but_origin_tls_stays_abort`
+      （525 正例 / 526 负例 / `1525`、`5250ms` 子串负样本）、
+      `agent::retry::tests::adr_0086_regression_classify_retryability`、
+      `tests/pa172_provider_failover_contract.rs::failover_trigger_class_truth_table_is_closed`。

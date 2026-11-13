@@ -10,7 +10,7 @@ use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::context::RetrievedContextState;
@@ -38,307 +38,21 @@ impl TurnEventSink for NoopTurnEventSink {
 /// 测试可注册 mock / 清空。签名：(session_id, turn_id, event, is_terminal)。
 pub type EventPersistFn = dyn Fn(&str, &str, crate::agent::turn_event::TurnEvent, bool) + Send + Sync;
 
-static EVENT_PERSIST_REGISTRY: OnceLock<Mutex<Option<Arc<EventPersistFn>>>> = OnceLock::new();
-
-fn event_persist_registry() -> &'static Mutex<Option<Arc<EventPersistFn>>> {
-    EVENT_PERSIST_REGISTRY.get_or_init(|| Mutex::new(None))
-}
-
-/// 注册生产事件持久化通道（幂等：重复注册覆盖）。
-pub fn register_event_persist(f: Arc<EventPersistFn>) {
-    let mut slot = event_persist_registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // PA-095 #3（实施后审核 P2）：覆盖非同源通道时告警——多控制面并存时
-    // 后建者的单槽注册会劫持先建者未绑定会话的事件流（结构性已知问题，
-    // 登记于任务卡；测试侧应使用会话绑定路由）。
-    if let Some(previous) = slot.as_ref() {
-        if !Arc::ptr_eq(previous, &f) {
-            eprintln!(
-                "[pony-agent][runtime] event persist channel overwritten by a new control plane (multi-control-plane setups must route per session)"
-            );
-        }
-    }
-    *slot = Some(f);
-}
-
-/// 清空事件持久化通道（测试用）。
-pub fn clear_event_persist() {
-    let mut slot = event_persist_registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *slot = None;
-}
-
-/// PA-093：非 turn 生命周期事实（checkpoint/checkout、fork/created）经全局
-/// 注册表落盘。turn_id 用语义化字面量（事件无 turn 归属，列非空）。
-/// 未注册通道（测试/老路径）时静默跳过——与 turn 事件路径的 contained 语义一致。
-/// PA-095 #3：is_terminal=false——history 命令在持有 sessions 写锁时调用本函数，
-/// 终态内联 flush 会同线程重入写锁死锁（fork 实测挂死）；改为仅入缓冲，由
-/// history 命令包装释放写锁后的 flush_session_buffered_events 提交（或并入下一条
-/// turn 终态批）。内存后端 flush 失败 contained（与既有语义一致）。
-pub fn emit_global_event(
-    session_id: &str,
-    turn_id: &str,
-    event: crate::agent::turn_event::TurnEvent,
-) {
-    if let Some(persist) = resolve_event_persist(session_id) {
-        persist(session_id, turn_id, event, false);
-    }
-}
-
-/// 当前注册的持久化通道（None = 未注册，事件不落盘）。
-fn current_event_persist() -> Option<Arc<EventPersistFn>> {
-    event_persist_registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-}
-
-/// PA-095：分发事件到生产通道与测试多播 sink。生产单槽可被任意
-/// HostControlPlane 构建覆盖（并行测试下互相抢占），测试多播 sink 只能被
-/// 注册它的测试清除——依赖全局通道断言的测试必须走多播 sink。
-fn dispatch_event_persist(
-    session_id: &str,
-    turn_id: &str,
-    event: crate::agent::turn_event::TurnEvent,
-    is_terminal: bool,
-) {
-    // PA-095 #3（实施后审核 P1）：匿名 turn（session_id=None）归一到默认会话——
-    // 其 history/trace 本就落默认会话，事件缓冲键若保留 "" 将无人 flush（永久滞留）。
-    let resolved_session_id = if session_id.is_empty() {
-        crate::agent::session::DEFAULT_SESSION_ID
-    } else {
-        session_id
-    };
-    if let Some(persist) = resolve_event_persist(resolved_session_id) {
-        persist(resolved_session_id, turn_id, event.clone(), is_terminal);
-    }
-    #[cfg(test)]
-    for sink in event_persist_test_sinks()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-    {
-        sink(session_id, turn_id, event.clone(), is_terminal);
-    }
-}
-
-/// PA-095 #3：事件通道解析——会话绑定优先，回退全局默认单槽。会话绑定是
-/// "按 session 所有权路由的多通道模型"（任务卡登记的结构性改进）的落地：
-/// 并行测试中各场景把自身控制面的通道绑到自己的 session，全局默认槽被其他
-/// 测试构建覆盖不再影响本会话的事件落盘；生产路径无绑定时行为不变。
-///
-/// TODO(PA-095 #3 后续任务)：session 绑定路由目前仅测试构建生效（见下方
-/// `#[cfg(test)]` 分支）；生产构建恒走全局默认单槽（last-build-wins）。
-/// 生产侧按 session 接线尚未实施，勿因本签名看似接收 session_id 而误以为已接线。
-///
-/// （参数仅测试构建使用，故带下划线前缀以通过非测试编译的 unused 检查。）
-fn resolve_event_persist(_session_id: &str) -> Option<Arc<EventPersistFn>> {
-    #[cfg(test)]
-    if let Some(bound) = session_event_persist_binding(_session_id) {
-        return Some(bound);
-    }
-    current_event_persist()
-}
-
-/// PA-095：测试专用多播 sink 注册表（与生产单槽独立）。
+mod turn_flow_registry;
+// 公开 API 逐项 re-export：既有 `turn_flow::<fn>` 寻址契约一字不变。
+pub use self::turn_flow_registry::{
+    clear_event_flush, clear_event_persist, emit_global_event, flush_session_buffered_events,
+    register_event_flush, register_event_persist, EventFlushFn,
+};
+// 测试专用绑定/多播 sink 与守卫：沿用原 `#[cfg(test)]` 门，不对外暴露。
 #[cfg(test)]
-static EVENT_PERSIST_TEST_SINKS: OnceLock<Mutex<Vec<Arc<EventPersistFn>>>> = OnceLock::new();
+pub use self::turn_flow_registry::{
+    bind_event_flush_session, bind_event_persist_session, register_event_persist_test_sink,
+    EventPersistTestSinkGuard, SessionEventFlushBindingGuard, SessionEventPersistBindingGuard,
+};
+// 内部派发入口：父模块的 emit 链路仍在用，收紧为 `pub(super)` 不扩大可见性。
+use self::turn_flow_registry::dispatch_event_persist;
 
-#[cfg(test)]
-fn event_persist_test_sinks() -> &'static Mutex<Vec<Arc<EventPersistFn>>> {
-    EVENT_PERSIST_TEST_SINKS.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-/// PA-095：注册测试专用多播持久化 sink（不受生产单槽覆盖影响）。
-/// 返回守卫——Drop 时仅移除本 sink（并行测试互不清除对方注册）。
-#[cfg(test)]
-pub fn register_event_persist_test_sink(
-    f: Arc<EventPersistFn>,
-) -> EventPersistTestSinkGuard {
-    let mut sinks = event_persist_test_sinks()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    sinks.push(Arc::clone(&f));
-    drop(sinks);
-    EventPersistTestSinkGuard { sink: f }
-}
-
-/// PA-095：测试多播 sink 守卫——Drop 按指针相等移除自身。
-#[cfg(test)]
-pub struct EventPersistTestSinkGuard {
-    sink: Arc<EventPersistFn>,
-}
-
-#[cfg(test)]
-impl Drop for EventPersistTestSinkGuard {
-    fn drop(&mut self) {
-        let mut sinks = event_persist_test_sinks()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        sinks.retain(|sink| !Arc::ptr_eq(sink, &self.sink));
-    }
-}
-
-/// PA-095 #3：会话绑定事件持久化通道（测试专用）——session 所有权路由，
-/// 优先于全局默认单槽；守卫 Drop 时解除绑定。
-#[cfg(test)]
-static SESSION_EVENT_PERSIST_BINDINGS: OnceLock<Mutex<HashMap<String, Arc<EventPersistFn>>>> =
-    OnceLock::new();
-
-#[cfg(test)]
-fn session_event_persist_bindings(
-) -> &'static Mutex<HashMap<String, Arc<EventPersistFn>>> {
-    SESSION_EVENT_PERSIST_BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-#[cfg(test)]
-fn session_event_persist_binding(session_id: &str) -> Option<Arc<EventPersistFn>> {
-    session_event_persist_bindings()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(session_id)
-        .cloned()
-}
-
-/// PA-095 #3：绑定会话的事件持久化通道（测试专用）；返回守卫，Drop 解绑。
-#[cfg(test)]
-pub fn bind_event_persist_session(
-    session_id: &str,
-    f: Arc<EventPersistFn>,
-) -> SessionEventPersistBindingGuard {
-    session_event_persist_bindings()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(session_id.to_string(), Arc::clone(&f));
-    SessionEventPersistBindingGuard {
-        session_id: session_id.to_string(),
-        bound: f,
-    }
-}
-
-#[cfg(test)]
-pub struct SessionEventPersistBindingGuard {
-    session_id: String,
-    bound: Arc<EventPersistFn>,
-}
-
-#[cfg(test)]
-impl Drop for SessionEventPersistBindingGuard {
-    fn drop(&mut self) {
-        // PA-095 #3（实施后审核 P2）：仅当当前占用者仍是自己时才解绑——
-        // 同名 session 的嵌套/并行绑定不得被先结束的守卫误摘。
-        let mut bindings = session_event_persist_bindings()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if bindings
-            .get(&self.session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
-        {
-            bindings.remove(&self.session_id);
-        }
-    }
-}
-
-/// PA-095 #2：会话级事件缓冲 flush 请求——append_turn 物化前确保该会话的
-/// 缓冲事件已提交事件表（commit 先于清空，由注册闭包保证）。生产由
-/// HostControlPlaneBuilder 注册（与持久化闭包同源缓冲）；未注册（无控制面 /
-/// 测试直连 store）返回 Ok(0)。
-pub type EventFlushFn = dyn Fn(&str) -> Result<usize, String> + Send + Sync;
-
-static EVENT_FLUSH_REGISTRY: OnceLock<Mutex<Option<Arc<EventFlushFn>>>> = OnceLock::new();
-
-/// PA-095 #3：会话绑定 flush 通道（测试专用）——与持久化绑定同原理。
-#[cfg(test)]
-static SESSION_EVENT_FLUSH_BINDINGS: OnceLock<Mutex<HashMap<String, Arc<EventFlushFn>>>> =
-    OnceLock::new();
-
-#[cfg(test)]
-fn session_event_flush_bindings() -> &'static Mutex<HashMap<String, Arc<EventFlushFn>>> {
-    SESSION_EVENT_FLUSH_BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// PA-095 #3：绑定会话的 flush 请求通道（测试专用）；返回守卫，Drop 解绑。
-#[cfg(test)]
-pub fn bind_event_flush_session(
-    session_id: &str,
-    f: Arc<EventFlushFn>,
-) -> SessionEventFlushBindingGuard {
-    session_event_flush_bindings()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(session_id.to_string(), Arc::clone(&f));
-    SessionEventFlushBindingGuard {
-        session_id: session_id.to_string(),
-        bound: f,
-    }
-}
-
-#[cfg(test)]
-pub struct SessionEventFlushBindingGuard {
-    session_id: String,
-    bound: Arc<EventFlushFn>,
-}
-
-#[cfg(test)]
-impl Drop for SessionEventFlushBindingGuard {
-    fn drop(&mut self) {
-        // 同 persist 守卫——仅解绑自己（Arc::ptr_eq 校验）。
-        let mut bindings = session_event_flush_bindings()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if bindings
-            .get(&self.session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
-        {
-            bindings.remove(&self.session_id);
-        }
-    }
-}
-
-fn event_flush_registry() -> &'static Mutex<Option<Arc<EventFlushFn>>> {
-    EVENT_FLUSH_REGISTRY.get_or_init(|| Mutex::new(None))
-}
-
-/// 注册会话级 flush 请求通道（幂等：重复注册覆盖）。
-pub fn register_event_flush(f: Arc<EventFlushFn>) {
-    let mut slot = event_flush_registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *slot = Some(f);
-}
-
-/// 清空 flush 请求通道（测试用）。
-pub fn clear_event_flush() {
-    let mut slot = event_flush_registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *slot = None;
-}
-
-/// 请求提交某会话的全部缓冲事件；返回提交的事件数（0 = 无缓冲）。
-/// PA-095 #3：会话绑定 flush 通道优先（session 所有权路由），回退全局注册。
-pub fn flush_session_buffered_events(session_id: &str) -> Result<usize, String> {
-    #[cfg(test)]
-    if let Some(bound) = session_event_flush_bindings()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(session_id)
-        .cloned()
-    {
-        return bound(session_id);
-    }
-    match event_flush_registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(|f| Arc::clone(f) as Arc<EventFlushFn>)
-    {
-        Some(flush) => flush(session_id),
-        None => Ok(0),
-    }
-}
 
 pub struct PreparedTurn {
     pub user_message: String,
@@ -1313,6 +1027,13 @@ pub fn emit_event(
         dispatch_event_persist(session_id, &payload.turn_id, usage_event, false);
         dispatch_event_persist(session_id, &payload.turn_id, step_end_event, false);
     }
+    // F1 I1/I2：轮终态速度取证——**同一帧**写一条结构化事件（落 turn_events 通道）与
+    // 一行结构化日志，字段逐字同名；必须在 `turn/end`（terminal，触发 flush）**之前**
+    // 派发，才能与整批终态事件同事务落盘。
+    if let Some(speed_event) = settle_turn_speed_evidence(name, &payload) {
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, speed_event, false);
+    }
     if let Some(end_event) = build_turn_end_event(name, &payload) {
         let session_id = payload.session_id.as_deref().unwrap_or("");
         dispatch_event_persist(session_id, &payload.turn_id, end_event, true);
@@ -1540,6 +1261,94 @@ fn build_turn_end_event(
         reason: TurnEndReason::Completed,
         turn_duration_ms: payload.turn_duration_ms,
         error: None,
+    })
+}
+
+/// F1 I1 + I2：轮终态速度取证（**同一帧**产事件 + 日志，字段逐字同名）。
+///
+/// 值来源（I3，禁止消费面另写公式/判据）：
+/// - `turnSpeedTokensPerSecond` / `turnSpeedBasis` 直取 `payload.metrics`，即
+///   [`crate::agent::metrics_snapshot::build_turn_metrics_snapshot`] → [`weighted_turn_speed`]
+///   结算的唯一真值（本函数**不做任何速度运算**）；
+/// - 三个样本数由 [`turn_call_census`] 从同一份 `provider_call_records` 派生
+///   （`eligible` / `burst_excluded` 的判据只在 turn_flow 定义一次）。
+///
+/// 无值时不写键（I1，禁止 0/NaN 占位）：`None` 字段在 serde 层整键缺席；
+/// 本轮既无 per-call 记录也无快照 ⇒ 连事件都不发（没有任何可取证事实，写孤儿事件只是噪声）。
+///
+/// 返回的 `TurnEvent::TurnSpeed` 由调用方在 `turn/end`（terminal，触发 flush）之前派发，
+/// 保证与整批终态事件同事务落盘。
+fn settle_turn_speed_evidence(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::TurnEvent;
+    if !matches!(
+        name,
+        "turn:completed" | "turn:failed" | "turn:cancelled" | "turn:suspended"
+    ) {
+        return None;
+    }
+    let records = payload.provider_call_records.as_deref().unwrap_or(&[]);
+    let metrics = payload.metrics.as_ref();
+    if records.is_empty() && metrics.is_none() {
+        return None;
+    }
+
+    let speed = metrics.and_then(|metrics| metrics.turn_speed_tokens_per_second);
+    let basis = metrics.and_then(|metrics| metrics.turn_speed_basis);
+    // 样本数只在**确有可计数调用**（`valid > 0`）时才是真值：没有任何有效调用时「样本量」无定义
+    // ⇒ 键缺席（不得以 0 冒充「0 次调用」，I1「无值不写键」）。
+    let census = {
+        let census = turn_call_census(records);
+        (census.valid > 0).then_some(census)
+    };
+
+    // I2：同帧结构化日志（键名与事件字段逐字同名；无值不写键）。
+    let mut extras: Vec<(&str, Value)> = Vec::with_capacity(7);
+    extras.push(("turn_id", serde_json::json!(payload.turn_id)));
+    if let Some(speed) = speed {
+        extras.push(("turnSpeedTokensPerSecond", serde_json::json!(speed)));
+    }
+    if let Some(basis) = basis {
+        extras.push(("turnSpeedBasis", serde_json::json!(basis.as_str())));
+    }
+    if let Some(census) = census {
+        extras.push(("turnCallsTotal", serde_json::json!(census.total)));
+        extras.push(("turnCallsEligible", serde_json::json!(census.eligible)));
+        extras.push((
+            "turnBurstExcluded",
+            serde_json::json!(census.burst_excluded),
+        ));
+        // 契约 I1 原文口径的「全部解码剔除数」（valid − eligible）保留为独立可取证键：
+        // 突发整包只是其中一类，缺 TTFT / 单 token 同样被剔除，不能互相冒充。
+        extras.push((
+            "turnExcludedTotal",
+            serde_json::json!(census.excluded_total()),
+        ));
+        // 软要求（Lead 追加）：把「突发剔除」与「无 TTFT 不可测」分开——后者是「整包到达 /
+        // 非流式 followup」的根因面，与突发整包是两个不同诊断结论。
+        extras.push((
+            "turnCallsTtftMissing",
+            serde_json::json!(census.no_ttft_excluded),
+        ));
+    }
+    crate::agent::otel::log::log_json_with_fields(
+        "info",
+        TURN_SPEED_LOG_MESSAGE,
+        crate::agent::otel::exported_trace_id().as_deref(),
+        &extras,
+    );
+
+    Some(TurnEvent::TurnSpeed {
+        turn_id: payload.turn_id.clone(),
+        turn_speed_tokens_per_second: speed,
+        turn_speed_basis: basis,
+        turn_calls_total: census.map(|census| census.total),
+        turn_calls_eligible: census.map(|census| census.eligible),
+        turn_burst_excluded: census.map(|census| census.burst_excluded),
+        turn_excluded_total: census.map(|census| census.excluded_total()),
+        turn_calls_ttft_missing: census.map(|census| census.no_ttft_excluded),
     })
 }
 
@@ -2951,6 +2760,90 @@ pub fn weighted_turn_speed(records: &[ProviderCallCacheRecord]) -> TurnSpeedTrut
     }
     resolve_turn_speed(decode, valid, ttft_ms)
 }
+
+/// F1 取证口径：一轮 provider 调用的**样本普查**（唯一出处；事件 / 日志 / 显示端共用）。
+///
+/// 定义：
+/// - `total`：该轮 per-call 记录总数（含无效/不可解码记录，回答「这轮到底调了几次」）；
+/// - `valid`：`call_valid` 记录数（`dur > 0 && out > 0`）；
+/// - `eligible`：`decode_eligible` 记录数（流式解码样本，进入 `stream_decode` 的分子/分母）；
+/// - `burst_excluded`：**突发整包剔除数**——已具备解码前提（ttft 存在、`dur > ttft`、`out >= 2`）
+///   但解码窗口 `gen` 低于物理下限 [`decode_floor_ms`]（SSE 被上游代理攒成一包）的调用数；
+/// - `no_ttft_excluded`：`valid` 但**无 TTFT 观测**（无法定解码窗口，只能进端到端回退）的调用数；
+/// - `other_excluded`：其余不合格（`dur <= ttft` 或 `out < 2`）。
+///
+/// 恒等式：`valid == eligible + burst_excluded + no_ttft_excluded + other_excluded`。
+/// [`Self::excluded_total`]（= `valid − eligible`）是上述三类剔除之和，对外键名
+/// `turnExcludedTotal`，不丢任何真值。
+///
+/// 线缆口径（契约 v3，Lead 裁决 2026-11-12；两键定义各一行，禁止读者从名字猜）：
+/// - `turnBurstExcluded` = `burst_excluded`（**真突发整包数**：有 ttft 且 `gen < floor(dur)`）；
+/// - `turnExcludedTotal` = `excluded_total()`（**全部解码剔除**：`valid − decode_eligible`）；
+/// - `turnCallsTtftMissing` = `no_ttft_excluded`（`valid − 有 ttft 的 valid`，无 TTFT 不可测）。
+///
+/// 判据只复用 [`call_valid`] / [`decode_eligible`] / [`decode_floor_ms`]（I3：判据只在 turn_flow
+/// 定义一次，本函数不复制判据细节）；速度本身不在此计算（仍只由 [`weighted_turn_speed`] 结算）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TurnCallCensus {
+    pub total: u32,
+    pub valid: u32,
+    pub eligible: u32,
+    pub burst_excluded: u32,
+    pub no_ttft_excluded: u32,
+    pub other_excluded: u32,
+}
+
+impl TurnCallCensus {
+    /// `valid 记录数 − decode_eligible 记录数`（契约 I1 原文口径 = 全部解码剔除之和）。
+    pub fn excluded_total(&self) -> u32 {
+        self.burst_excluded
+            .saturating_add(self.no_ttft_excluded)
+            .saturating_add(self.other_excluded)
+    }
+}
+
+/// 由 per-call 记录派生样本普查（[`TurnCallCensus`]）。
+pub fn turn_call_census(records: &[ProviderCallCacheRecord]) -> TurnCallCensus {
+    let mut census = TurnCallCensus {
+        total: u32::try_from(records.len()).unwrap_or(u32::MAX),
+        ..TurnCallCensus::default()
+    };
+    for record in records {
+        if !call_valid(record.turn_duration_ms, record.output_tokens) {
+            continue;
+        }
+        census.valid = census.valid.saturating_add(1);
+        if decode_eligible(
+            record.turn_duration_ms,
+            record.first_token_latency_ms,
+            record.output_tokens,
+        ) {
+            census.eligible = census.eligible.saturating_add(1);
+            continue;
+        }
+        // 不合格原因分解（判据顺序与 `decode_eligible` 内部一致：先 ttft，再 dur/out，最后物理下限）。
+        match record.first_token_latency_ms {
+            None => census.no_ttft_excluded = census.no_ttft_excluded.saturating_add(1),
+            Some(ttft) => {
+                let duration = record.turn_duration_ms.unwrap_or(0);
+                let output = record.output_tokens.unwrap_or(0);
+                if duration <= ttft || output < 2 {
+                    census.other_excluded = census.other_excluded.saturating_add(1);
+                } else {
+                    // 解码前提全部满足，仍不合格 ⇒ 唯一可能是 `gen < floor(dur)`：突发整包。
+                    census.burst_excluded = census.burst_excluded.saturating_add(1);
+                }
+            }
+        }
+    }
+    census
+}
+
+/// F1 I2：轮速度结算结构化日志的 message（单行 JSON 的 `msg` 字段）。
+///
+/// 日志键名与事件字段**逐字同名**（camelCase，契约冻结键名），便于离线取证时
+/// 「日志 ↔ `turn_events.payload`」两侧共用同一套解析。
+pub const TURN_SPEED_LOG_MESSAGE: &str = "turn speed settled";
 
 /// 把速度真值与 turn 级 timing 落到根 `agent.turn` span。
 ///

@@ -92,16 +92,22 @@ Continue directly from where the conversation left off...
 
 ```
  1. [System]     BASE_SYSTEM_PROMPT
- 2. [Developer]  Domain profile
- 3. [Developer]  Project instruction
- 4. [Developer]  Memory messages
- 5. [Developer]  Volatile context
+ 2. [System]     Agent Team 策略段（仅 subagent 运行时接线时）
+ 3. [Developer]  Domain profile
+ 4. [Developer]  Semistable：会话标签 + 工作区宪法(AGENTS.md/CLAUDE.md) + 技能清单
+ 5. [Developer]  Memory messages
  6. [User]       摘要消息 ← 压缩后的旧对话
  7. [User]       第 N-9 轮用户消息  ← 保留的最近 10 轮
  8. [Assistant]  第 N-9 轮回复
      ...         ...
- 9. [User]       当前用户消息
+ 9. [Developer]  Volatile context（环境/聚焦文件/goal/plan/skills/截断提示）
+10. [User]       当前用户消息
 ```
+
+> 层序事实以代码为准：`context.rs::flatten_layered_input_messages` 的拼接顺序为
+> System（BASE → 团队策略）→ Developer（domain → semistable → memory）→ 历史 →
+> Volatile → 当前输入。Volatile 段刻意排在历史之后，避免易变内容前置造成前缀断崖。
+> 本文此前的图示把 Volatile 画在历史之前，属过期描述，已于 2026-11-13 按代码修正。
 
 ### 与 context.rs 的配合
 

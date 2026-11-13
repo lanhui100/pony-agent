@@ -1,11 +1,14 @@
 use super::*;
 // PA-171 C4：失败轮归因载体与带归因的派发旁路（`runtime/mod.rs` 的 glob 未覆盖新增符号）。
 use crate::agent::turn_flow::emit_stream_failed_attributed;
+// claim_failed_terminal 迁至 `turn_control`（终态闸门与其状态机同住），调用点保持不变。
+use super::turn_control::claim_failed_terminal;
 
 /// wave-64 R2：流式决策因用户停止而中断、取消终态已在 fallback 之前派发时的控制流哨兵。
 ///
 /// 仅在本模块内用作标记（绝不下发到宿主表面，也不进入任何落库字段）。
 const STREAM_CANCELLED_HANDLED_SENTINEL: &str = "__wave64_stream_cancelled_handled__";
+
 
 /// L1（dsh 对齐）：取消轮的 native transcript 片段——**只在已闭合的工具往返存在时**生成。
 ///
@@ -20,22 +23,6 @@ fn cancelled_turn_native_transcript(
     hop_records: &[ToolTurnHopRecord],
 ) -> Option<Vec<Value>> {
     native_transcript_for_cancelled_turn(provider.protocol(), user_message, hop_records)
-}
-
-/// wave-64 R1（BLOCKING）：终态失败派发的 **terminal-once 闸门**（内联 failed 派发块共用）。
-///
-/// `false` ⇒ 该轮已有终态派发者（C5 宽限监督已收口 cancelled / 已派发过 failed）：
-/// 调用方必须立即 `return`，不得再 persist_trace、不得再 emit `turn:failed`。
-fn claim_failed_terminal(control: &ExecutionControlRegistry, turn_id: &str) -> bool {
-    let claimed = super::turn_control::claim_terminal_status(control, turn_id, "failed");
-    if !claimed {
-        super::turn_control::log_terminal_dispatch_suppressed(
-            turn_id,
-            "failed",
-            "inline_stream_failed",
-        );
-    }
-    claimed
 }
 
 impl AgentRuntime {
@@ -969,13 +956,19 @@ impl AgentRuntime {
                 Rc::clone(&provider_call_first_token_latency);
             let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
             let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
-            let last_emit_for_client = Rc::new(Cell::new(0u64));
-            let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
+            // F3：客户端节流的读线程侧载体——旧实现是 `last_emit` + 内联 sleep，
+            // 现在是时间窗聚合器（见 `StreamDeltaCoalescer`）：窗口内合并、窗口外上屏，
+            // **读线程不再睡眠**（睡眠 = 停读 socket = TCP 背压）。
+            let delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
+            let delta_coalescer_for_emit = Rc::clone(&delta_coalescer);
             let delta_turn_id_for_emit = delta_turn_id.clone();
             // PA-095 #4 修复：followup delta 闭包此前 session_id 传 None——事件以
             // 空 session 缓冲且永不 flush（生产事件流丢失全部 followup chunk）。
             let delta_session_id_for_emit = input.session_id.clone();
-            let provider_call_started_at = Instant::now();
+            // F2（重试窗口纯净）：同上——账本起点即 per-call 计时起点，重试/退避在
+            // `provider_followup_stream_with_calls` 内部（followup 作用域还会切 20s/40s
+            // 限流退避），不共源就会被算进 dur。
+            let provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
             // PA-095 #4：本次 followup call 的 hop 索引（Copy 捕获进 delta 闭包）。
             let followup_step = completed_hops as u32;
             let response = match provider_followup_stream_with_calls(
@@ -1049,7 +1042,6 @@ impl AgentRuntime {
                         None
                     };
 
-                    let mut did_emit = false;
                     match delta {
                         ProviderStreamChunk::StreamStart => {
                             // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
@@ -1057,31 +1049,37 @@ impl AgentRuntime {
                         ProviderStreamChunk::Text(text) => {
                             if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush()
                             {
-                                flush_delta(None, Some(reasoning), latency);
+                                delta_coalescer_for_emit.borrow_mut().push(
+                                    None,
+                                    Some(reasoning),
+                                    latency,
+                                );
                             }
-                            flush_delta(Some(text), None, latency);
-                            did_emit = true;
+                            delta_coalescer_for_emit
+                                .borrow_mut()
+                                .push(Some(text), None, latency);
                         }
                         ProviderStreamChunk::Reasoning(reasoning) => {
                             if let Some(buffered_reasoning) =
                                 reasoning_batcher_for_emit.borrow_mut().push(reasoning)
                             {
-                                flush_delta(None, Some(buffered_reasoning), latency);
-                                did_emit = true;
+                                delta_coalescer_for_emit.borrow_mut().push(
+                                    None,
+                                    Some(buffered_reasoning),
+                                    latency,
+                                );
                             }
                         }
                     }
-                    if did_emit {
-                        let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
-                        let prev = last_emit_for_client_clone.get();
-                        let gap = now.saturating_sub(prev);
-                        const MIN_CLIENT_GAP_MS: u64 = 16;
-                        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-                            std::thread::sleep(std::time::Duration::from_millis(
-                                MIN_CLIENT_GAP_MS - gap,
-                            ));
+                    // F3（I1/I3）：这里只做一次时间戳比较；窗口内的内容留在 pending，
+                    // 不 sleep、不等客户端消费。`sink.emit` 是**内联**调用——其契约是
+                    // 非阻塞投递（慢 sink 会串进读循环，属已知限制，见文件头）。
+                    let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+                    let due = delta_coalescer_for_emit.borrow_mut().take_if_due(now);
+                    if let Some(batch) = due {
+                        for frame in batch.into_frames().into_iter().flatten() {
+                            flush_delta(frame.text, frame.reasoning, frame.latency_ms);
                         }
-                        last_emit_for_client_clone.set(now);
                     }
                 },
                 crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
@@ -1123,45 +1121,52 @@ impl AgentRuntime {
                 }
             };
             if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
-                emit_stream_event_with_step(
-                    sink,
-                    "turn:delta",
-                    delta_turn_id.clone(),
-                    "delta",
-                    Some("calling_model"),
-                    None,
-                    Some(buffered_reasoning.clone()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    input.session_id.clone(),
-                    Some(followup_step),
-                );
-                let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
-                let prev = last_emit_for_client.get();
-                let gap = now.saturating_sub(prev);
-                const MIN_CLIENT_GAP_MS: u64 = 16;
-                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-                    std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
+                delta_coalescer
+                    .borrow_mut()
+                    .push(None, Some(buffered_reasoning), None);
+            }
+            // F3（I2）：收尾把 pending **无视窗口**一次发完——允许合并，禁止丢最终帧。
+            let tail_now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+            let tail_batch = delta_coalescer.borrow_mut().flush(tail_now);
+            if let Some(batch) = tail_batch {
+                for frame in batch.into_frames().into_iter().flatten() {
+                    emit_stream_event_with_step(
+                        sink,
+                        "turn:delta",
+                        delta_turn_id.clone(),
+                        "delta",
+                        Some("calling_model"),
+                        frame.text,
+                        frame.reasoning,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        frame.latency_ms,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        input.session_id.clone(),
+                        Some(followup_step),
+                    );
                 }
             }
             let mut response = response;
-            let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
+            // F2：本次 followup 调用的 dur/ttft 收敛到「最后一次成功 attempt」。
+            let pure_call_window = crate::agent::retry::take_pure_call_window(
+                provider_call_started_at,
+                provider_call_first_token_latency.get(),
+            );
             let provider_call_used_true_stream =
                 response.provider_source == "provider_followup_stream";
             provider_call_records.push(build_provider_call_cache_record(
@@ -1172,11 +1177,11 @@ impl AgentRuntime {
                 Some(provider.protocol_label()),
                 response.token_usage.as_ref(),
                 if provider_call_used_true_stream {
-                    provider_call_first_token_latency.get()
+                    pure_call_window.first_token_latency_ms
                 } else {
                     None
                 },
-                Some(provider_call_duration_ms),
+                Some(pure_call_window.duration_ms),
                 if provider_call_used_true_stream {
                     ProviderLatencyKind::ProviderStream
                 } else {
@@ -1190,38 +1195,16 @@ impl AgentRuntime {
                 accumulated_fallback_reason,
                 response.fallback_reason.clone(),
             );
-            let (hop_input_tokens, hop_cache_hit, hop_reasoning, hop_output, hop_total) =
-                token_usage_parts(accumulated_token_usage.as_ref());
-            emit_stream_event(
+            emit_stream_hop_complete(
                 sink,
-                "turn:hop_complete",
-                turn_id.to_string(),
-                "hop_complete",
-                Some("streaming_response"),
-                None,
-                None,
-                Some(provider_meta),
-                Some(response.provider_source.clone()),
-                Some(response.provider_mode.clone()),
-                None,
-                None,
-                hop_input_tokens,
-                hop_cache_hit,
-                hop_reasoning,
-                hop_output,
-                hop_total,
+                turn_id,
+                provider_meta,
+                response.provider_source.as_str(),
+                response.provider_mode.as_str(),
+                accumulated_token_usage.as_ref(),
                 first_token_latency.get(),
-                Some(turn_started_at.elapsed().as_millis() as u64),
-                None,
-                None,
-                None,
-                // Wave-15 R1（契约 §7.10）：hop_complete 携带本次已完成调用的
-                // per-call 记录（有序前缀）。push 在 :679、merge 在 :697、emit 在
-                // :706 属同一迭代——刚 push 的记录就是本次已完成调用，末条即最新；
-                // 既有累加字段语义不变。
-                Some(provider_call_records.clone()),
-                None,
-                None,
+                turn_started_at.elapsed().as_millis() as u64,
+                provider_call_records.clone(),
                 input.session_id.clone(),
             );
             let return_trace_steps = self.telemetry_builder.trace_return_active(all_tools_ok);
@@ -1941,52 +1924,20 @@ impl AgentRuntime {
         ));
         let prepared_provider_meta = provider_event_meta(&prepared.provider);
         let start_trace_steps = self.telemetry_builder.start_trace_steps();
-        self.update_execution_checkpoint(
+        self.mark_stream_calling_model_checkpoint(
             control,
             &turn_id,
-            "calling_model",
-            Some(&prepared_provider_meta),
-            0,
-            None,
+            &prepared_provider_meta,
             &start_trace_steps,
-            &[],
-            None,
-            None,
-            None,
-            Some("running"),
-            None,
         );
 
-        emit_stream_event(
+        emit_stream_turn_started(
             sink,
-            "turn:started",
             turn_id.clone(),
-            "started",
-            Some("calling_model"),
-            Some(prepared.user_message.clone()),
-            None,
-            Some(&prepared_provider_meta),
-            None,
-            None,
-            None,
-            Some(prepared.build_context_observation.clone()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(start_trace_steps.clone()),
-            Some(build_stream_started_trace_timeline(
-                prepared.user_message.as_str(),
-                &prepared_provider_meta,
-                &prepared.build_context_observation,
-            )),
-            None,
-            None,
-            None,
-            None,
+            prepared.user_message.clone(),
+            &prepared_provider_meta,
+            prepared.build_context_observation.clone(),
+            start_trace_steps.clone(),
             input.session_id.clone(),
         );
         if self.should_cancel_turn(control, &turn_id) {
@@ -2216,7 +2167,11 @@ impl AgentRuntime {
                     Some((model_call_hook_outcome.trace_records, error));
                 return Err(HOOK_FAILTURN_HANDLED_SENTINEL.to_string());
             }
-            let initial_decision_started_at = Instant::now();
+            // F2（重试窗口纯净）：账本起点与 per-call 计时**同源**。重试/退避发生在
+            // `provider_decision_stream_guarded_with_mode` 内部
+            // （`provider::retry_provider_scoped_with_report_config`），因此取样点必须
+            // 就是本次调用的起点，返回后再由账本把窗口收敛到「最后一次成功 attempt」。
+            let initial_decision_started_at = crate::agent::retry::begin_provider_attempt_window();
             let initial_turn_first_token_latency = Rc::new(Cell::new(None));
             let initial_call_first_token_latency = Rc::new(Cell::new(None));
             let initial_turn_first_token_latency_for_emit =
@@ -2225,8 +2180,9 @@ impl AgentRuntime {
                 Rc::clone(&initial_call_first_token_latency);
             let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
             let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
-            let last_emit_for_client = Rc::new(Cell::new(0u64));
-            let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
+            // F3：读线程侧的时间窗聚合器（替代旧的 `last_emit` + 内联 sleep 节流）。
+            let delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
+            let delta_coalescer_for_emit = Rc::clone(&delta_coalescer);
             let turn_id_for_delta_emit = turn_id_for_stream.clone();
             let stream_session_id_for_delta_emit = stream_session_id.clone();
 
@@ -2295,7 +2251,6 @@ impl AgentRuntime {
                         let value = initial_decision_started_at.elapsed().as_millis() as u64;
                         initial_call_first_token_latency_for_emit.set(Some(value));
                     }
-                    let mut did_emit = false;
                     match delta {
                         ProviderStreamChunk::StreamStart => {
                             // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
@@ -2304,89 +2259,103 @@ impl AgentRuntime {
                             if let Some(reasoning) =
                                 reasoning_batcher_for_emit.borrow_mut().flush()
                             {
-                                flush_delta(None, Some(reasoning));
+                                delta_coalescer_for_emit.borrow_mut().push(
+                                    None,
+                                    Some(reasoning),
+                                    None,
+                                );
                             }
                             streamed_assistant_text_for_delta
                                 .borrow_mut()
                                 .push_str(&text);
-                            flush_delta(Some(text), None);
-                            did_emit = true;
+                            delta_coalescer_for_emit
+                                .borrow_mut()
+                                .push(Some(text), None, None);
                         }
                         ProviderStreamChunk::Reasoning(reasoning) => {
                             if let Some(buffered_reasoning) =
                                 reasoning_batcher_for_emit.borrow_mut().push(reasoning)
                             {
-                                flush_delta(None, Some(buffered_reasoning));
-                                did_emit = true;
+                                delta_coalescer_for_emit.borrow_mut().push(
+                                    None,
+                                    Some(buffered_reasoning),
+                                    None,
+                                );
                             }
                         }
                     }
-                    if did_emit {
-                        let now = turn_started_at.elapsed().as_millis() as u64;
-                        let prev = last_emit_for_client_clone.get();
-                        let gap = now.saturating_sub(prev);
-                        const MIN_CLIENT_GAP_MS: u64 = 16;
-                        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-                            std::thread::sleep(std::time::Duration::from_millis(
-                                MIN_CLIENT_GAP_MS - gap,
-                            ));
+                    // F3（I1/I3）：只做一次时间戳比较——窗口内的内容留在 pending，
+                    // **不 sleep、不等客户端消费**。`sink.emit` 内联且契约=非阻塞投递
+                    // （慢 sink 会串进读循环，属已知限制，见文件头）。
+                    let now = turn_started_at.elapsed().as_millis() as u64;
+                    let due = delta_coalescer_for_emit.borrow_mut().take_if_due(now);
+                    if let Some(batch) = due {
+                        for frame in batch.into_frames().into_iter().flatten() {
+                            flush_delta(frame.text, frame.reasoning);
                         }
-                        last_emit_for_client_clone.set(now);
                     }
                 },
                 crate::agent::turn_flow::LlmRequestMode::Initial,
             )?;
             if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
-                let turn_latency = if initial_turn_first_token_latency.get().is_none() {
-                    let value = turn_started_at.elapsed().as_millis() as u64;
-                    initial_turn_first_token_latency.set(Some(value));
-                    Some(value)
-                } else {
-                    None
-                };
-                emit_stream_event(
-                    sink,
-                    "turn:delta",
-                    turn_id_for_stream.clone(),
-                    "delta",
-                    Some("calling_model"),
-                    None,
-                    Some(buffered_reasoning.clone()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    turn_latency,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    input.session_id.clone(),
-                );
-                let now = turn_started_at.elapsed().as_millis() as u64;
-                let prev = last_emit_for_client.get();
-                let gap = now.saturating_sub(prev);
-                const MIN_CLIENT_GAP_MS: u64 = 16;
-                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        MIN_CLIENT_GAP_MS - gap,
-                    ));
+                delta_coalescer
+                    .borrow_mut()
+                    .push(None, Some(buffered_reasoning), None);
+            }
+            // F3（I2）：收尾**无条件**把 pending 发完——允许合并，禁止丢最终帧。
+            let tail_now = turn_started_at.elapsed().as_millis() as u64;
+            let tail_batch = delta_coalescer.borrow_mut().flush(tail_now);
+            if let Some(batch) = tail_batch {
+                for frame in batch.into_frames().into_iter().flatten() {
+                    let turn_latency = if initial_turn_first_token_latency.get().is_none() {
+                        let value = turn_started_at.elapsed().as_millis() as u64;
+                        initial_turn_first_token_latency.set(Some(value));
+                        Some(value)
+                    } else {
+                        None
+                    };
+                    emit_stream_event(
+                        sink,
+                        "turn:delta",
+                        turn_id_for_stream.clone(),
+                        "delta",
+                        Some("calling_model"),
+                        frame.text,
+                        frame.reasoning,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        turn_latency,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        input.session_id.clone(),
+                    );
                 }
             }
+            // F2：per-call (dur, ttft) 收敛为「只覆盖最后一次成功 attempt」的纯净窗口；
+            // 失败尝试/退避只留痕在账本里，不进 `gen`。轮级 TTFT 口径不变（轮级样本，
+            // 不受 per-call 纯净性约束）。
+            let pure_call_window = crate::agent::retry::take_pure_call_window(
+                initial_decision_started_at,
+                initial_call_first_token_latency.get(),
+            );
             Ok((
                 decision,
-                Some(initial_decision_started_at.elapsed().as_millis() as u64),
+                Some(pure_call_window.duration_ms),
                 initial_turn_first_token_latency.get(),
-                initial_call_first_token_latency.get(),
+                pure_call_window.first_token_latency_ms,
                 ProviderLatencyKind::ProviderStream,
             ))
         };
@@ -2437,16 +2406,21 @@ impl AgentRuntime {
                     Some((model_call_hook_outcome.trace_records, error));
                 return Err(HOOK_FAILTURN_HANDLED_SENTINEL.to_string());
             }
-            let started_at = Instant::now();
+            // F2：同步（buffered）决策的窗口同样必须纯净——无 ttft 的调用会落到
+            // `end_to_end` 口径（`Σout/Σdur`），跨 attempt 的 dur 会把失败尝试
+            // （429/525 1.9–8.0s + 退避）当成生成时间，速度被系统性压低。
+            let started_at = crate::agent::retry::begin_provider_attempt_window();
             let decision = provider_decision_with_mode(
                 &prepared.provider,
                 &prepared.planning_request,
                 &prepared.tools,
                 crate::agent::turn_flow::LlmRequestMode::Initial,
             )?;
+            let pure_call_window =
+                crate::agent::retry::take_pure_call_window(started_at, None);
             Ok((
                 decision,
-                Some(started_at.elapsed().as_millis() as u64),
+                Some(pure_call_window.duration_ms),
                 None,
                 None,
                 ProviderLatencyKind::BufferedResponse,

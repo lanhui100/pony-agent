@@ -22,6 +22,7 @@ use pony_agent_core::agent::metrics_snapshot::TurnMetricsSnapshot;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::Terminal;
+use std::time::{Duration, Instant};
 
 fn screen(state: &mut tui::TuiState, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -74,6 +75,30 @@ fn row_text(buf: &Buffer, y: u16) -> String {
 fn header_row(state: &mut tui::TuiState) -> String {
     let buf = screen(state, 110, 30);
     row_text(&buf, 0)
+}
+
+/// 把状态行右槽轮播**显式钉在指定相位**（ADR 0119：模型身份与「权限 · <级别>」时分交替）。
+///
+/// 为什么必须钉（B118）：`status_carousel_phase` 在 `status_carousel_started_at = None` 时
+/// 退化为**墙钟毫秒 % 周期**，底面行落在哪个半周期不可控 —— 「底面行 == `model · <档位>`」
+/// 这类断言会随真实时间随机红。偏移量全部取自产品常量，并当场断言相位已生效，
+/// 防止夹具失效后静默假绿。
+fn pin_carousel_phase(state: &mut tui::TuiState, model_phase: bool) {
+    let offset_ms = if model_phase {
+        tui::STATUS_CAROUSEL_MODEL_HOLD_MS / 2
+    } else {
+        tui::STATUS_CAROUSEL_MODEL_HOLD_MS + tui::STATUS_CAROUSEL_PERM_HOLD_MS / 2
+    };
+    state.status_carousel_started_at = Some(Instant::now() - Duration::from_millis(offset_ms));
+    let (is_model, _) = tui::status_carousel_phase(state);
+    assert_eq!(
+        is_model,
+        model_phase,
+        "夹具失效：期望相位 {}，实际 {}（offset={offset_ms}ms，周期={}ms）",
+        if model_phase { "模型" } else { "权限" },
+        if is_model { "模型" } else { "权限" },
+        tui::STATUS_CAROUSEL_PERIOD_MS
+    );
 }
 
 /// 底面最后一行：ADR 0078 起只承载右对齐模型身份，不得残留任何指标。
@@ -295,6 +320,8 @@ fn c5_bottom_row_reasoning_effort_label_is_plain_english() {
         let mut state = tui::TuiState::default();
         state.model = "fixture-model".to_string();
         state.reasoning_effort = Some(effort);
+        // B118：右槽是模型/权限时分轮播，必须钉在模型相位，否则断言随墙钟随机红。
+        pin_carousel_phase(&mut state, true);
         let bottom = bottom_row(&mut state);
         let expected = format!("fixture-model · {english}");
         assert!(

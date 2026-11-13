@@ -1,0 +1,66 @@
+{
+  "run_id": "effhigh_r1",
+  "model": "gemini-3.8-flash",
+  "stream": true,
+  "max_tokens": 512,
+  "extra": "{\"reasoning_effort\":\"high\"}",
+  "prompt_chars": 154,
+  "prompt": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.",
+  "request_body": {
+    "model": "gemini-3.8-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers."
+      }
+    ],
+    "max_tokens": 512,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "reasoning_effort": "high"
+  },
+  "cmd": "curl -N -sS -m 300 -H Authorization: Bearer <redacted> -H Content-Type: application/json -d {\"model\": \"gemini-3.8-flash\", \"messages\": [{\"role\": \"user\", \"content\": \"Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.\"}], \"max_tokens\": 512, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"reasoning_effort\": \"high\"} https://tokens.ponyjob.top/v1/chat/completions",
+  "base_url": "https://tokens.ponyjob.top/v1/chat/completions",
+  "ts_iso": "2026-11-12T18:55:35+0800",
+  "exit_code": 0,
+  "stderr": "",
+  "http_error": null,
+  "ttft_s": 21.8233,
+  "ttft_content_s": 40.1255,
+  "ttft_reasoning_s": 21.8233,
+  "total_s": 43.7271,
+  "n_sse_events": 206,
+  "n_content_chunks": 35,
+  "n_reasoning_chunks": 168,
+  "reasoning_chars": 6689,
+  "content_chars": 1964,
+  "decode_tps_content": 9.47,
+  "decode_tps_reasoning": 9.16,
+  "e2e_tps_by_completion_tokens": 46.74,
+  "decode_window_s": 21.893,
+  "decode_window_tps": 93.36,
+  "chunks_per_completion_token": 0.099,
+  "completion_tokens": 2044,
+  "prompt_tokens": 67,
+  "usage": {
+    "prompt_tokens": 67,
+    "completion_tokens": 2044,
+    "total_tokens": 2111,
+    "completion_tokens_details": {
+      "reasoning_tokens": 1576,
+      "accepted_prediction_tokens": 0,
+      "rejected_prediction_tokens": 0,
+      "audio_tokens": 0
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "audio_tokens": 0
+    }
+  },
+  "has_reasoning_tokens_in_usage": true,
+  "finish_reason": "stop",
+  "content_head": "1. The solar system has eight planets.\n2. The Sun contains more than 99% of the solar system's mass.\n3. The solar system formed about 4.6 billion years ago.\n4. The Sun is a G-type main-sequence star.\n5. Mercury is the smallest planet.\n6. Mercury has no moons.\n7. Venus rotates in the opposite directi",
+  "reasoning_head": "We need answer plain list 40 short factual statements solar system one per line numbered 1-40. No preamble conclusion markdown headers. Need ensure factual. Short. Could include sun, planets, moons, asteroids, comets, dwarf planets, features. Need exactly 40 lines. Avoid markdown headers. Numbered 1"
+}

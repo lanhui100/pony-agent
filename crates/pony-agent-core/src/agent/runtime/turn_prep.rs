@@ -184,26 +184,33 @@ impl AgentRuntime {
                 // provider 生成决策：工具执行后的 follow-up 请求需要把 assistant 消息的
                 // reasoning_content 完整回传给 API，本地 planner 决策没有该字段，
                 // 会被 DeepSeek 等 thinking 模式以 invalid_request_error 拒绝。
-                let started_at = Instant::now();
+                // F2（重试窗口纯净）：账本起点即 per-call 计时起点，重试/退避在
+                // `provider_decision_with_mode` 内部，不共源就会被算进 dur。
+                let started_at = crate::agent::retry::begin_provider_attempt_window();
                 let decision = provider_decision_with_mode(
                     &prepared.provider,
                     &prepared.planning_request,
                     &prepared.tools,
                     crate::agent::turn_flow::LlmRequestMode::Initial,
                 )?;
-                (decision, Some(started_at.elapsed().as_millis() as u64))
+                let duration_ms =
+                    crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
+                (decision, Some(duration_ms))
             } else {
                 match preflight_decision {
                     Some(decision) => (decision, None),
                     None => {
-                        let started_at = Instant::now();
+                        // F2：同上（同步首跳 decision 的 per-call dur 必须纯净）。
+                        let started_at = crate::agent::retry::begin_provider_attempt_window();
                         let decision = provider_decision_with_mode(
                             &prepared.provider,
                             &prepared.planning_request,
                             &prepared.tools,
                             crate::agent::turn_flow::LlmRequestMode::Initial,
                         )?;
-                        (decision, Some(started_at.elapsed().as_millis() as u64))
+                        let duration_ms =
+                            crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
+                        (decision, Some(duration_ms))
                     }
                 }
             };

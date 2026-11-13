@@ -7988,7 +7988,7 @@ mod tests {
             "assistant/message",
             "provider/usage",
             "step/end",
-            "turn/end",
+            "turn/speed", "turn/end", // F1 I1：turn/speed 显式参与有序断言，位置先于 terminal turn/end
         ];
         let mut loaded: Vec<(u64, String, crate::agent::turn_event::TurnEvent)> = Vec::new();
         for attempt in 0..8 {

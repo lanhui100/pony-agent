@@ -4193,21 +4193,10 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
     stream_runtime.start_turn_stream(
         &sink,
         "eq-stream-turn".to_string(),
-        TurnInput {
-            message: "流式等价问题".to_string(),
-            display_message: None,
-            provider_id: None,
-            model_id: None,
-            reasoning_effort: None,
-            workspace_mode: None,
-            tool_authorization_mode: None,
-            session_id: Some("eq-stream-session".to_string()),
-            node_id: None,
-            history: Vec::new(),
-            images: Vec::new(),
-            workspace_id: None,
-            plan_execution_approval: None,
-        },
+        parallel_batch_turn_input(
+            "流式等价问题",
+            "eq-stream-session",
+        ),
     );
     let _ = stream_server.finish();
 
@@ -4237,21 +4226,10 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
     failed_stream_runtime.start_turn_stream(
         &failed_sink,
         "eq-stream-failed-turn".to_string(),
-        TurnInput {
-            message: "流式失败分支".to_string(),
-            display_message: None,
-            provider_id: None,
-            model_id: None,
-            reasoning_effort: None,
-            workspace_mode: None,
-            tool_authorization_mode: None,
-            session_id: Some("eq-stream-failed-session".to_string()),
-            node_id: None,
-            history: Vec::new(),
-            images: Vec::new(),
-            workspace_id: None,
-            plan_execution_approval: None,
-        },
+        parallel_batch_turn_input(
+            "流式失败分支",
+            "eq-stream-failed-session",
+        ),
     );
 
     let records = persisted.lock().expect("persisted lock").clone();
@@ -4276,6 +4254,11 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
             "provider/usage".to_string(),
             // PA-095 #4：usage 结算同点的 StepEnd（单 call → 1 对）。
             "step/end".to_string(),
+            // 契约变更：F1 I1 新增 turn/speed 事件（见 .dev-team/diag-tps/fix/contract-v3.md）。
+            // 它必须作为**显式存在的一条**参与整段有序相等断言（不是「忽略多出事件」的弱断言）；
+            // 位置是契约的一部分：`turn_flow::emit_event` 里 `settle_turn_speed_evidence`
+            // 先于 `build_turn_end_event` 派发 ⇒ 固定落在 terminal `turn/end` 之前。
+            "turn/speed".to_string(),
             "turn/end".to_string(),
         ],
         "completed skeleton shape"

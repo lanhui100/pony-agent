@@ -321,3 +321,51 @@ fn p0_snapshot_exposes_turn_level_sums_for_session_ledger() {
     assert!(header.contains("↑200"), "↑in 仍是末次调用 200，实际 {header:?}");
     assert!(header.contains("↓30"), "↓out = 本轮 Σ 10+20 = 30，实际 {header:?}");
 }
+
+// ---------------------------------------------------------------------------
+// P0-4：诚实百分比 —— 部分命中不得被整数四舍五入谎报成 100%
+// （ADR `.agents/notes/implemented/bug-fix/2026-11-12-metrics-percent-honesty.md`）
+// ---------------------------------------------------------------------------
+#[test]
+fn p0_partial_cache_hit_never_displays_as_full_hit() {
+    let mut state = tui::TuiState::default();
+    state.session_usage.restore(SessionUsageTotals {
+        input_tokens: 20_000,
+        cache_hit_input_tokens: 19_990,
+        output_tokens: 10,
+        calls: 1,
+        calls_with_cache: 1,
+    });
+    state.live_metrics = None;
+    state.total_input_tokens = 0;
+
+    let header = header_row(&mut state);
+    assert!(
+        header.contains("缓存 99.95%"),
+        "19990/20000 必须显示 99.95%（两位小数向下取整），实际 {header:?}"
+    );
+    assert!(
+        !header.contains("缓存 100%"),
+        "部分命中绝不能显示成 100%，实际 {header:?}"
+    );
+}
+
+#[test]
+fn p0_full_cache_hit_displays_as_100() {
+    let mut state = tui::TuiState::default();
+    state.session_usage.restore(SessionUsageTotals {
+        input_tokens: 20_000,
+        cache_hit_input_tokens: 20_000,
+        output_tokens: 10,
+        calls: 1,
+        calls_with_cache: 1,
+    });
+    state.live_metrics = None;
+    state.total_input_tokens = 0;
+
+    let header = header_row(&mut state);
+    assert!(
+        header.contains("缓存 100%"),
+        "真全命中（分子 == 分母）必须显示 100%，实际 {header:?}"
+    );
+}

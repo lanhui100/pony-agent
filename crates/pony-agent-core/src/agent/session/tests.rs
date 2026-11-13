@@ -39,27 +39,6 @@ impl HistoryStateHookExecutor for StaticHistoryStateHookExecutor {
 }
 
 #[test]
-fn memory_backend_keeps_turns_in_process() {
-    let mut store = SessionStore::memory_only();
-    store.append_turn(
-        Some("test"),
-        "查看 tauri.conf.json",
-        "已读取",
-        None,
-        Vec::new(),
-    );
-
-    let snapshot = store.snapshot(Some("test"), &[]);
-    assert_eq!(snapshot.title, "查看 tauri.conf.json");
-    assert_eq!(snapshot.turn_count, 1);
-    assert_eq!(snapshot.history.len(), 2);
-    assert_eq!(
-        snapshot.last_referenced_file.as_deref(),
-        Some("tauri.conf.json")
-    );
-}
-
-#[test]
 fn serde_roundtrip_enriched_metadata() {
     let msg = TurnHistoryMessage {
         role: "assistant".to_string(),

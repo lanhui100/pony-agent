@@ -1170,6 +1170,18 @@ export interface TurnMetricsSnapshot {
   turnGenerationMs: number;
   /** 参与计算的调用数（I7：`stream_decode` ⇒ |eligible|；`end_to_end` ⇒ |valid|）。 */
   turnCalls: number;
+  /**
+   * F1 取证（与 Rust `TurnMetricsSnapshot` 同名字段）：该轮 provider 调用**总数**
+   * （含无效/不可解码记录）。旧 payload 无该键 ⇒ 缺失（**不得**当 0 次调用）。
+   */
+  turnCallsTotal?: number | null;
+  /** F1 取证：`decode_eligible` 记录数（进入解码口径分子/分母的样本）。 */
+  turnCallsEligible?: number | null;
+  /**
+   * F1 取证：`valid − decode_eligible`——因突发整包/无 TTFT/单 token 被剔除、
+   * 只能进 `end_to_end` 回退的调用数。`> 0` ⇒ 显示端必须可辨别（F1 I4）。
+   */
+  turnBurstExcluded?: number | null;
   /** 轮级 Σ 上下文输入（逐条 per-call 归一值相加；会话累计的唯一原料，禁止用末次调用冒充）。 */
   turnContextInputTokens: number;
   /** 轮级 Σ 缓存命中输入（只累加**上报了**命中字段的调用）。 */

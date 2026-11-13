@@ -96,6 +96,7 @@ mod stream_support;
 mod tool_recovery;
 mod trace_timeline;
 mod turn_control;
+mod turn_events;
 mod turn_sync;
 mod turn_stream;
 mod types;
@@ -136,6 +137,7 @@ use planner_patches::*;
 use stream_support::*;
 use tool_recovery::*;
 use trace_timeline::*;
+use turn_events::*;
 
 
 // 原 pub(crate) 项的 crate 级寻址契约保持（reviewer-b P2-1 后果二修复）

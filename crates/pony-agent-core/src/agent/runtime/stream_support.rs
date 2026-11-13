@@ -363,6 +363,47 @@ pub(super) fn derive_cache_miss_input_tokens(token_usage: Option<&TokenUsage>) -
     Some(input_tokens.saturating_sub(cache_hit_input_tokens))
 }
 
+/// 把一次 follow-up 响应的 usage / fallback 归并进轮级累加器。
+///
+/// 与内联的 `merge_token_usage` + `merge_fallback_reason` 两段**逐字等价**
+/// （同一顺序、同一借用形态），供 `turn_sync` 的多条恢复分支共用。
+pub(super) fn merge_response_usage_into_accumulators(
+    accumulated_usage: Option<TokenUsage>,
+    accumulated_fallback_reason: Option<String>,
+    response: &ProviderResponse,
+) -> (Option<TokenUsage>, Option<String>) {
+    let usage = merge_token_usage(accumulated_usage, response.token_usage.as_ref());
+    let fallback_reason =
+        merge_fallback_reason(accumulated_fallback_reason, response.fallback_reason.clone());
+    (usage, fallback_reason)
+}
+
+/// 同步（buffered）follow-up 的 per-call 记录装配并追加进 `records`。
+///
+/// 与内联 `records.push(build_provider_call_cache_record(...))` **逐字等价**：
+/// 固定 `ProviderRequestKind::ToolFollowup` / `ProviderLatencyKind::BufferedResponse`，
+/// 无首包观测（`first_token_latency_ms = None`）。
+pub(super) fn push_buffered_followup_call_record(
+    records: &mut Vec<ProviderCallCacheRecord>,
+    provider: &ProviderManager,
+    response: &ProviderResponse,
+    duration_ms: u64,
+    context_observation: &BuildContextObservation,
+) {
+    records.push(build_provider_call_cache_record(
+        ProviderRequestKind::ToolFollowup,
+        Some(response.provider_source.as_str()),
+        Some(response.provider_mode.as_str()),
+        // wave-54 C4：协议归一上下文输入口径（anthropic ⇒ input + cache_read）。
+        Some(provider.protocol_label()),
+        response.token_usage.as_ref(),
+        None,
+        Some(duration_ms),
+        ProviderLatencyKind::BufferedResponse,
+        Some(context_observation),
+    ));
+}
+
 pub(super) fn merge_token_usage(
     existing: Option<TokenUsage>,
     next: Option<&TokenUsage>,
@@ -815,6 +856,149 @@ impl ConsecutiveFailureTracker {
     /// 同一工具连续失败次数（成功或换工具即归零）。
     pub(super) fn same_tool_count(&self) -> usize {
         self.tool_count
+    }
+}
+
+// ── F3：非阻塞 delta 聚合（原 `turn_stream.rs`，按读线程聚合语义归位本模块） ──
+
+// ─────────────────── F3：非阻塞 delta 聚合（SSE 读线程零阻塞） ───────────────────
+//
+// 取证：`on_delta` 在**阻塞 SSE 读循环内联执行**——`provider::openai_sse::push_payload`
+// 每解析到一个 chunk 就同步调 `on_delta`（`openai_sse.rs:133/139/149`）。旧实现曾在 6 处
+// `on_delta` 里做「阻塞睡眠到 16ms 间隔」的客户端节流（`turn_stream.rs` 的
+// followup/initial 两条流 + `tool_recovery.rs` 的恢复流，均已删除）：睡眠期间停止读
+// socket ⇒ TCP 背压 ⇒ 突发路由（1 token/chunk，间隔中位 0ms）下 token 率被硬顶在 ~62.5/s。
+//
+// 现在改为**非阻塞时间窗聚合**：窗口内的 text/reasoning 合并进 pending，窗口外的
+// 第一个 delta 把 pending 一次性上屏。读线程每处理一个 delta 只做一次字符串拼接 +
+// 一次时间戳比较，耗时**与客户端消费速度无关**（I3）；内容只合并、不丢弃，收尾
+// 必须调 `flush()`（I2：禁止丢最终帧；终态派发本就不经此路径）。
+//
+// `sink` 契约（F3 修订 v2，Lead 裁决）：`TurnEventSink::emit` 必须是**非阻塞投递**
+// （Tauri `emit` fire-and-forget / TUI 无界 channel / headless 无消费者）。
+// 已知限制：`emit` 仍**内联**在读循环里，若将来出现阻塞式 sink（例如有界 channel
+// 满后等待），慢消费者会重新串进读线程——届时必须在 sink 实现侧解决，而不是在本
+// 聚合器里加等待（本聚合器**永不**阻塞读线程）。
+
+/// 聚合后的单帧内容（`None` 字段表示本次没有该内容，禁止用空串冒充）。
+pub(super) struct CoalescedFrame {
+    pub(super) text: Option<String>,
+    pub(super) reasoning: Option<String>,
+    pub(super) latency_ms: Option<u64>,
+}
+
+/// 一个节流窗口里攒下的内容（reasoning 与 text 各至多一段）。
+///
+/// 为什么分两槽而不是揉成一帧：既有语义要求「思考帧」与「正文帧」的载荷形状分开
+/// （旧实现也是先 flush 思考、再 flush 正文，两帧同刻发出、中间不睡眠）。合并只发生在
+/// **同类型**之内，帧形状与顺序因此与旧实现逐字一致。
+pub(super) struct CoalescedBatch {
+    reasoning: Option<String>,
+    text: Option<String>,
+    latency_ms: Option<u64>,
+}
+
+impl CoalescedBatch {
+    /// 拆成至多两帧：**先 reasoning 后 text**（与旧实现「先 flush 思考再 flush 正文」同序）。
+    /// 两帧携带同一个首字延迟值（旧实现同样把同一个 `latency` 传给两次 flush）。
+    pub(super) fn into_frames(self) -> [Option<CoalescedFrame>; 2] {
+        let latency_ms = self.latency_ms;
+        [
+            self.reasoning.map(|reasoning| CoalescedFrame {
+                text: None,
+                reasoning: Some(reasoning),
+                latency_ms,
+            }),
+            self.text.map(|text| CoalescedFrame {
+                text: Some(text),
+                reasoning: None,
+                latency_ms,
+            }),
+        ]
+    }
+}
+
+/// F3：读线程侧的 delta 聚合器（禁止任何阻塞等待，契约见上方注释）。
+pub(super) struct StreamDeltaCoalescer {
+    window_ms: u64,
+    /// 上一次真正上屏的时刻（毫秒，调用方提供的单调时钟）。
+    last_emit_ms: Option<u64>,
+    pending_text: String,
+    pending_reasoning: String,
+    pending_latency_ms: Option<u64>,
+}
+
+impl StreamDeltaCoalescer {
+    /// 客户端节流窗口：沿用旧节流口径（16ms ⇒ 上屏帧率上限不变），
+    /// 变的只是「窗口内不再阻塞读线程」。
+    const CLIENT_WINDOW_MS: u64 = 16;
+
+    pub(super) fn new() -> Self {
+        Self {
+            window_ms: Self::CLIENT_WINDOW_MS,
+            last_emit_ms: None,
+            pending_text: String::new(),
+            pending_reasoning: String::new(),
+            pending_latency_ms: None,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending_text.is_empty() && self.pending_reasoning.is_empty()
+    }
+
+    /// 入队一段增量（`text` / `reasoning` 至多一个非空）。**只拼接，绝不 sleep**。
+    ///
+    /// `latency_ms` 取**第一个**非空值：即「首个内容增量」的首字延迟，随第一个
+    /// 真正上屏的帧一起下发（合并不会把首字延迟挪后或丢失）。
+    pub(super) fn push(
+        &mut self,
+        text: Option<String>,
+        reasoning: Option<String>,
+        latency_ms: Option<u64>,
+    ) {
+        if let Some(text) = text {
+            self.pending_text.push_str(&text);
+        }
+        if let Some(reasoning) = reasoning {
+            self.pending_reasoning.push_str(&reasoning);
+        }
+        if self.pending_latency_ms.is_none() {
+            self.pending_latency_ms = latency_ms;
+        }
+    }
+
+    /// 到窗口 ⇒ 取走本窗口攒下的内容；仍在窗口内 ⇒ `None`（内容留在 pending，
+    /// 等下一次 delta 或收尾 `flush`）。
+    pub(super) fn take_if_due(&mut self, now_ms: u64) -> Option<CoalescedBatch> {
+        if self.is_empty() {
+            return None;
+        }
+        match self.last_emit_ms {
+            Some(last) if now_ms.saturating_sub(last) < self.window_ms => None,
+            _ => Some(self.take(now_ms)),
+        }
+    }
+
+    /// 收尾 flush：**无视窗口**把 pending 全部发完（禁止丢最终帧）。
+    pub(super) fn flush(&mut self, now_ms: u64) -> Option<CoalescedBatch> {
+        if self.is_empty() {
+            return None;
+        }
+        Some(self.take(now_ms))
+    }
+
+    fn take(&mut self, now_ms: u64) -> CoalescedBatch {
+        self.last_emit_ms = Some(now_ms);
+        let text = (!self.pending_text.is_empty()).then(|| std::mem::take(&mut self.pending_text));
+        let reasoning = (!self.pending_reasoning.is_empty())
+            .then(|| std::mem::take(&mut self.pending_reasoning));
+        let latency_ms = self.pending_latency_ms.take();
+        CoalescedBatch {
+            reasoning,
+            text,
+            latency_ms,
+        }
     }
 }
 

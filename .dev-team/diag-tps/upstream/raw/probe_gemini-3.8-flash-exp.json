@@ -1,0 +1,1 @@
+{"error":{"message":"Internal core error: No provider configured to handle model 'gemini-3.8-flash-exp'","type":"invalid_request_error","code":"model_not_found"}}

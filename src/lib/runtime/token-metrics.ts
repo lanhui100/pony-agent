@@ -687,10 +687,84 @@ export function formatTokenSpeed(value?: number | null): string {
   return `${Math.round(value)} t/s`;
 }
 
+/**
+ * F1 I4：速度**样本量**文本（`N/M 次调用`）。
+ *
+ * 口径（与 Rust `turn_flow::turn_call_census` 同源，本函数只做展示拼装，**不算样本**）：
+ * - `calls` = 参与计算集合的调用数（`stream_decode` ⇒ |eligible|；`end_to_end` ⇒ |valid|）；
+ * - `callsTotal` = 该轮 provider 调用总数；旧 payload 缺该键（`null`）⇒ 只显示参与数
+ *   `N 次调用`（**不得**把缺失当 0，也**不得**把总数当参与数）；
+ * - 两者缺失 ⇒ `""`（无值不占位，I1/I6 同一条诚实纪律）。
+ */
+export function formatSpeedSampleLabel(
+  calls?: number | null,
+  callsTotal?: number | null
+): string {
+  const participants =
+    typeof calls === "number" && Number.isFinite(calls) && calls > 0 ? Math.trunc(calls) : null;
+  const total =
+    typeof callsTotal === "number" && Number.isFinite(callsTotal) && callsTotal > 0
+      ? Math.trunc(callsTotal)
+      : null;
+  if (total != null) {
+    return `${participants ?? 0}/${total} 次调用`;
+  }
+  return participants == null ? "" : `${participants} 次调用`;
+}
+
+/**
+ * F1 I4：**突发剔除**提示文案（`burstExcluded > 0` 才出，`0`/缺失/非有限 ⇒ `""`）。
+ *
+ * `burstExcluded` = `valid − decode_eligible`（因突发整包/无 TTFT/单 token 被剔除、
+ * 只能进 `end_to_end` 回退的调用数）：> 0 时这一轮的 t/s **不是**纯解码速度，
+ * 显示端必须可辨别。缺失 ≠ 0（旧 payload 无该键）⇒ 不出提示，也不伪造「无突发」。
+ */
+export function formatBurstExcludedSuffix(burstExcluded?: number | null): string {
+  if (typeof burstExcluded !== "number" || !Number.isFinite(burstExcluded) || burstExcluded <= 0) {
+    return "";
+  }
+  return `；已剔除 ${Math.trunc(burstExcluded)} 次非解码调用（突发包 / 无首token / 单token）`;
+}
+
+/**
+ * 单位分数（`0..=1`）→ 诚实百分比字符串。
+ *
+ * 与 Rust `agent/metrics_snapshot.rs::format_unit_fraction_percent` 同构（单一真值语义，
+ * ADR `.agents/notes/implemented/bug-fix/2026-11-12-metrics-percent-honesty.md` Decision 1/3）：
+ * - 缺失 / 非有限 ⇒ `""`（无值不出 `0%`，不抛错，I2/I6）；
+ * - `< 0` 或 `> 1` ⇒ `""`（越界 fail-closed，不 clamp 掩盖错误数据）；
+ * - `=== 1` ⇒ `"100%"`（只有真全命中才允许出 100%）；
+ * - 其余按整数四舍五入（保 D1-4：`0.6667` ⇒ `67%`）；
+ * - 四舍五入会顶到 100 而 `ratio < 1` ⇒ 改用 2 位小数**向下取整**并去掉尾随 0
+ *   （`0.996` ⇒ `99.6%`，`0.99999` ⇒ `99.99%`），保证**永不高报**。
+ *
+ * 返回值统一带 `%` 后缀（`MetricsSnapshotDisplay.cacheRatioPercent` 的既有消费契约）。
+ */
+export function formatUnitFractionPercent(ratio: number | null): string {
+  if (ratio == null || !Number.isFinite(ratio)) {
+    return "";
+  }
+  if (ratio < 0 || ratio > 1) {
+    return "";
+  }
+  if (ratio === 1) {
+    return "100%";
+  }
+  const rounded = Math.round(ratio * 100);
+  if (rounded < 100) {
+    return `${rounded}%`;
+  }
+  const hundredths = Math.floor(ratio * 10000) / 100;
+  return `${hundredths.toFixed(2).replace(/\.?0+$/, "")}%`;
+}
+
 // ── 结算快照 → 展示映射（wave-metrics / task-4）─────────────────────────────────
 
 /**
  * 快照展示字段（冻结 API 面，`tests/metrics-snapshot-live.spec.ts` D1 断言逐字段相等）。
+ *
+ * F1 I4 追加的样本量/剔除字段一律是 **`undefined` 可省**：旧 payload 缺键或「无可计数调用」
+ * 时值为 `undefined`，既不入展示也不改变 D1 的逐字段相等断言（`toEqual` 忽略 `undefined` 属性）。
  */
 export interface MetricsSnapshotDisplay {
   contextTokens: number | null;
@@ -702,10 +776,26 @@ export interface MetricsSnapshotDisplay {
   cacheRatioPercent: string;
   contextPercent: number | null;
   origin: string | null;
+  /** F1 I4：参与计算集合的调用数（快照 `turnCalls`）；`0`/缺失 ⇒ `undefined`。 */
+  sampleCalls?: number | undefined;
+  /** F1 I4：该轮 provider 调用总数（快照 `turnCallsTotal`）；缺失/`0` ⇒ `undefined`。 */
+  sampleCallsTotal?: number | undefined;
+  /** F1 I4：`decode_eligible` 样本数（快照 `turnCallsEligible`）；缺失/`0` ⇒ `undefined`。 */
+  sampleCallsEligible?: number | undefined;
+  /** F1 I4：样本量文本（`eligible/total 次调用`）；两键皆缺 ⇒ `undefined`（不占位）。 */
+  speedSampleLabel?: string | undefined;
+  /** F1 I4：突发整包剔除数（快照 `turnBurstExcluded`）；`> 0` 才出，`0`/缺失 ⇒ `undefined`。 */
+  burstExcluded?: number | undefined;
 }
 
 function finiteNumberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** 「可展示的正计数」：非有限 / 非正 ⇒ `undefined`（`undefined` 属性不入展示、不进 `toEqual`）。 */
+function positiveCountOrUndefined(value: unknown): number | undefined {
+  const parsed = finiteNumberOrNull(value);
+  return parsed != null && parsed > 0 ? Math.trunc(parsed) : undefined;
 }
 
 /**
@@ -716,10 +806,16 @@ function finiteNumberOrNull(value: unknown): number | null {
  * - `contextWindow` ← `contextWindowTokens`（缺失 ⇒ null，不得兜底常量，I3）；
  * - `speed` ← `turnSpeedTokensPerSecond`（与 Rust `weighted_turn_speed` 同源，I5）；
  * - `ttftMs` ← `firstTokenLatencyMs`；
- * - `cacheRatioPercent` ← `round(cacheHitRatio * 100)%`，`cacheHitRatio` 为 `0..=1` 单位分数；
- *   缺失 ⇒ `""`（I2/I6：禁止伪造成 `0%`，也禁止 clamp 掩盖越界）；
+ * - `cacheRatioPercent` ← `formatUnitFractionPercent(cacheHitRatio)`（`cacheHitRatio` 为 `0..=1`
+ *   单位分数）：整数四舍五入，但四舍五入会顶到 100 而 `ratio < 1` 时降级为 1/2 位小数且**向下取整**
+ *   （`0.996` ⇒ `99.6%`），只有 `=== 1` 才输出 `100%`——**部分命中不得谎报全命中**；
+ *   缺失 / 非有限 ⇒ `""`（I2/I6：禁止伪造成 `0%`，也禁止 clamp 掩盖越界）；
  * - `contextPercent` ← `round(contextRatio * 100)`，缺失 ⇒ null（I3）；
- * - `origin` ← `origin`。
+ * - `origin` ← `origin`；
+ * - F1 I4（样本量/口径诚实化）：`sampleCalls` ← `turnCalls`、`sampleCallsTotal` ← `turnCallsTotal`、
+ *   `sampleCallsEligible` ← `turnCallsEligible`、`speedSampleLabel` = 二者合成的 `eligible/total 次调用`、
+ *   `burstExcluded` ← `turnBurstExcluded`。**全部 `undefined` 可省**：旧 payload 缺键 / 无可计数调用 ⇒
+ *   属性值 `undefined`（既不出占位、也不打破既有 D1 逐字段断言）。
  *
  * 防御：入参可为 `null` / `undefined` / 缺键的畸形线缆 —— 一律按「无值」处理，不抛错（I7）。
  */
@@ -730,6 +826,28 @@ export function resolveMetricsSnapshotDisplay(
   const cacheHitRatio = finiteNumberOrNull(source?.cacheHitRatio);
   const contextRatio = finiteNumberOrNull(source?.contextRatio);
   const origin = typeof source?.origin === "string" ? source.origin : null;
+  // F1 I4：样本量三键与突发剔除数（负数/0/缺失一律 `undefined`，不伪造「0 次调用 / 无突发」）。
+  //
+  // 门控：F1 三键（`turnCallsTotal` / `turnCallsEligible` / `turnBurstExcluded`）**全部缺席**
+  // （= 旧 payload）⇒ 本节所有字段一律 `undefined`：样本量无从谈起，且不改变既有展示面
+  // （`tests/metrics-snapshot-live.spec.ts` D1 的逐字段相等断言依赖「旧快照无新增属性」）。
+  const hasF1Sample =
+    source?.turnCallsTotal != null ||
+    source?.turnCallsEligible != null ||
+    source?.turnBurstExcluded != null;
+  const sampleCalls = hasF1Sample ? positiveCountOrUndefined(source?.turnCalls) : undefined;
+  const sampleCallsTotal = hasF1Sample
+    ? positiveCountOrUndefined(source?.turnCallsTotal)
+    : undefined;
+  const sampleCallsEligible = hasF1Sample
+    ? positiveCountOrUndefined(source?.turnCallsEligible)
+    : undefined;
+  const burstExcluded = hasF1Sample
+    ? positiveCountOrUndefined(source?.turnBurstExcluded)
+    : undefined;
+  const speedSampleLabel = hasF1Sample
+    ? formatSpeedSampleLabel(sampleCallsEligible ?? sampleCalls, sampleCallsTotal)
+    : "";
 
   return {
     contextTokens: finiteNumberOrNull(source?.contextInputTokens),
@@ -737,8 +855,13 @@ export function resolveMetricsSnapshotDisplay(
     speed: finiteNumberOrNull(source?.turnSpeedTokensPerSecond),
     speedBasis: source?.turnSpeedBasis ?? null,
     ttftMs: finiteNumberOrNull(source?.firstTokenLatencyMs),
-    cacheRatioPercent: cacheHitRatio == null ? "" : `${Math.round(cacheHitRatio * 100)}%`,
+    cacheRatioPercent: formatUnitFractionPercent(cacheHitRatio),
     contextPercent: contextRatio == null ? null : Math.round(contextRatio * 100),
     origin,
+    sampleCalls,
+    sampleCallsTotal,
+    sampleCallsEligible,
+    speedSampleLabel: speedSampleLabel === "" ? undefined : speedSampleLabel,
+    burstExcluded,
   };
 }

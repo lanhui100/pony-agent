@@ -590,11 +590,15 @@ fn failover_trigger_class_truth_table_is_closed() {
         status_error_text(401, "Unauthorized", "{\"error\":{\"message\":\"invalid api key\"}}"),
         status_error_text(503, "Service Unavailable", SERVER_ERROR_BODY),
         status_error_text(520, "Unknown", "{\"error\":{\"message\":\"cloudflare\"}}"),
+        // 525 SSL Handshake Failed：2026-11-12 起与 ③′ 边缘 5xx 同组（源站握手瞬时失败可自愈）
+        status_error_text(525, "Unknown", "{\"error\":{\"message\":\"ssl handshake\"}}"),
     ];
     let ineligible = [
         status_error_text(400, "Bad Request", BAD_REQUEST_BODY),
         "解析 provider SSE chunk 失败: expected value".to_string(),
         status_error_text(500, "Internal Server Error", INTERNAL_ERROR_BODY),
+        // 526 Invalid SSL Certificate：确定性配置错误，重试/换手都不改变结果
+        status_error_text(526, "Unknown", "{\"error\":{\"message\":\"invalid ssl certificate\"}}"),
     ];
 
     // Act + Assert

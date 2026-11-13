@@ -1,0 +1,2907 @@
+diff --git a/crates/pony-agent-core/src/agent/metrics_snapshot.rs b/crates/pony-agent-core/src/agent/metrics_snapshot.rs
+index 3c781230..2535c4e3 100644
+--- a/crates/pony-agent-core/src/agent/metrics_snapshot.rs
++++ b/crates/pony-agent-core/src/agent/metrics_snapshot.rs
+@@ -17,7 +17,9 @@
+ //!   `turn_speed_basis` 与速度同源（I10：缺席 ⇔ 无值）。
+ use crate::agent::cost::{estimate_cost_with_protocol, ProviderCostProtocol};
+ use crate::agent::telemetry::ProviderCallCacheRecord;
+-use crate::agent::turn_flow::{call_speed, weighted_turn_speed, ProviderEventMeta, TurnSpeedBasis};
++use crate::agent::turn_flow::{
++    call_speed, turn_call_census, weighted_turn_speed, ProviderEventMeta, TurnSpeedBasis,
++};
+ use serde::{Deserialize, Serialize};
+ 
+ #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+@@ -45,6 +47,23 @@ pub struct TurnMetricsSnapshot {
+     pub turn_output_tokens: u64,
+     pub turn_generation_ms: u64,
+     pub turn_calls: u32,
++    /// F1 取证：该轮 per-call 记录**总数**（含无效/不可解码记录）。
++    ///
++    /// 与 [`Self::turn_calls`]（参与计算集合）不同：本字段回答「这轮一共调了几次」，
++    /// 是样本量诚实化的分母。**无任何可计数调用 ⇒ 键缺席**（`None`）：样本量无定义，
++    /// 禁止以 `0` 冒充「0 次调用」（I1「无值不写键」）。
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub turn_calls_total: Option<u32>,
++    /// F1 取证：`decode_eligible` 记录数（进入 `stream_decode` 分子/分母的解码样本）。
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub turn_calls_eligible: Option<u32>,
++    /// F1 取证：**突发整包剔除数**——已具备解码前提（有 ttft、`dur > ttft`、`out >= 2`）
++    /// 但解码窗口低于物理下限（`gen < floor(dur)`）的调用数（SSE 被上游攒成一包）。
++    ///
++    /// `> 0` ⇒ 显示端必须可辨别（F1 I4）；`None`（旧快照 / 无可计数调用）⇒ 不提示，
++    /// **不得**据此推断「无突发」。
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub turn_burst_excluded: Option<u32>,
+     /// 轮级 Σ 上下文输入（逐条取 `context_input_tokens`，缺失回退裸 `input_tokens` 后相加）。
+     ///
+     /// 与 `turn_output_tokens` 同属**轮级聚合**组：per-call 字段只描述末次调用，会话累计
+@@ -100,6 +119,52 @@ pub fn context_ratio_for_window(context_input_tokens: u64, window_tokens: u64) -
+     unit_ratio(context_input_tokens, window_tokens)
+ }
+ 
++/// **诚实百分比文本**（不含 `%` 后缀）：`Σ分子 / Σ分母` 的展示值。
++///
++/// 口径契约（ADR `.agents/notes/implemented/bug-fix/2026-11-12-metrics-percent-honesty.md`）：
++/// - `denominator == 0` 或 `numerator > denominator` ⇒ `None`（与 [`unit_ratio`] 同一条
++///   fail-closed：不可信数据不展示，**禁止 clamp**）；
++/// - 真全量（`numerator == denominator`）⇒ `"100"`；
++/// - 普通值 ⇒ 整数四舍五入（`3/5` ⇒ `"15"`，`2/3` ⇒ `"67"`）；
++/// - 四舍五入会顶到 100 而分子小于分母 ⇒ 改用**两位小数向下取整**并去掉尾随零
++///   （`19990/20000` ⇒ `"99.95"`，`9999/10000` ⇒ `"99.99"`），保证**永不高报**
++///   ——「部分命中」不得被舍入成「全命中」（对齐 DSH `formatCacheHitPercent`）。
++pub fn format_ratio_percent(numerator: u64, denominator: u64) -> Option<String> {
++    if denominator == 0 || numerator > denominator {
++        return None;
++    }
++    if numerator == denominator {
++        return Some("100".to_string());
++    }
++    Some(percent_text(numerator as f64 / denominator as f64))
++}
++
++/// [`format_ratio_percent`] 的单位分数版（消费方已持有 `0.0..=1.0` 比值时用）。
++///
++/// 非有限 / `< 0` / `> 1` ⇒ `None`（fail-closed）；`1.0` ⇒ `"100"`；其余同上。
++pub fn format_unit_fraction_percent(ratio: f64) -> Option<String> {
++    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
++        return None;
++    }
++    if ratio == 1.0 {
++        return Some("100".to_string());
++    }
++    Some(percent_text(ratio))
++}
++
++/// 单位分数 → 百分比文本（**只在 `ratio < 1` 时调用**，`100` 由调用方判定）。
++fn percent_text(ratio: f64) -> String {
++    let percent = ratio * 100.0;
++    let rounded = percent.round();
++    if rounded < 100.0 {
++        return format!("{rounded:.0}");
++    }
++    // 部分命中：两位小数向下取整（floor），数学上保证 `<= 99.99`，绝不高报。
++    let floored = (percent * 100.0).floor() / 100.0;
++    let text = format!("{floored:.2}");
++    text.trim_end_matches('0').trim_end_matches('.').to_string()
++}
++
+ /// 「可计数」调用判据：与 [`crate::agent::turn_flow::call_valid`]（I1）同一判据 `dur > 0 && out > 0`。
+ fn is_countable(record: &ProviderCallCacheRecord) -> bool {
+     record.turn_duration_ms.unwrap_or(0) > 0 && record.output_tokens.unwrap_or(0) > 0
+@@ -178,6 +243,13 @@ pub fn build_turn_metrics_snapshot(
+ 
+     // A4/I4-I7：轮级四项 + 口径一律取自 `weighted_turn_speed`，禁止自算。
+     let turn = weighted_turn_speed(records);
++    // F1 取证：样本普查（总数 / 解码样本 / 突发剔除数）同样从**同一份 records** 派生，
++    // 判据只在 `turn_flow::turn_call_census` 定义一次（I3）。
++    // 无任何可计数调用（`valid == 0`）⇒ 样本量无定义：四个键一律缺席（禁止 0 占位）。
++    let census = {
++        let census = turn_call_census(records);
++        (census.valid > 0).then_some(census)
++    };
+ 
+     // I2：分子分母必须同源（末次调用的 cache_hit 与 context_input），禁止混量纲。
+     // 越界（cache_hit > context_input，上游数据自相矛盾）⇒ None，不得 clamp 成 100%。
+@@ -239,6 +311,9 @@ pub fn build_turn_metrics_snapshot(
+         turn_output_tokens: turn.output_tokens,
+         turn_generation_ms: turn.generation_ms,
+         turn_calls: turn.calls,
++        turn_calls_total: census.map(|census| census.total),
++        turn_calls_eligible: census.map(|census| census.eligible),
++        turn_burst_excluded: census.map(|census| census.burst_excluded),
+         turn_context_input_tokens,
+         turn_cache_hit_input_tokens,
+         turn_calls_with_cache,
+@@ -251,3 +326,46 @@ pub fn build_turn_metrics_snapshot(
+         cost_usd: resolve_cost_usd(records, provider_meta),
+     })
+ }
++
++#[cfg(test)]
++mod percent_format_tests {
++    use super::{format_ratio_percent, format_unit_fraction_percent};
++
++    #[test]
++    fn ordinary_ratios_keep_integer_rounding() {
++        assert_eq!(format_ratio_percent(3, 5).as_deref(), Some("60"));
++        assert_eq!(format_ratio_percent(3, 20).as_deref(), Some("15"));
++        assert_eq!(format_ratio_percent(2, 3).as_deref(), Some("67"));
++        assert_eq!(format_ratio_percent(0, 500).as_deref(), Some("0"));
++        assert_eq!(format_unit_fraction_percent(0.6667).as_deref(), Some("67"));
++    }
++
++    #[test]
++    fn full_hit_is_the_only_way_to_reach_100() {
++        assert_eq!(format_ratio_percent(5, 5).as_deref(), Some("100"));
++        assert_eq!(format_unit_fraction_percent(1.0).as_deref(), Some("100"));
++    }
++
++    #[test]
++    fn partial_hit_never_rounds_up_to_full_hit() {
++        // 0.998 ⇒ 整数四舍五入会到 100，必须降精度（向下取整）到 99.8。
++        assert_eq!(format_ratio_percent(1_996, 2_000).as_deref(), Some("99.8"));
++        assert_eq!(format_ratio_percent(9_999, 10_000).as_deref(), Some("99.99"));
++        assert_eq!(format_unit_fraction_percent(0.996).as_deref(), Some("99.6"));
++        assert_eq!(format_unit_fraction_percent(0.99999).as_deref(), Some("99.99"));
++        assert_eq!(
++            format_unit_fraction_percent(0.9999999).as_deref(),
++            Some("99.99")
++        );
++    }
++
++    #[test]
++    fn untrusted_inputs_fail_closed_instead_of_clamping() {
++        assert_eq!(format_ratio_percent(1, 0), None);
++        assert_eq!(format_ratio_percent(6, 5), None);
++        assert_eq!(format_unit_fraction_percent(f64::NAN), None);
++        assert_eq!(format_unit_fraction_percent(f64::INFINITY), None);
++        assert_eq!(format_unit_fraction_percent(-0.1), None);
++        assert_eq!(format_unit_fraction_percent(1.2), None);
++    }
++}
+diff --git a/crates/pony-agent-core/src/agent/provider/mod.rs b/crates/pony-agent-core/src/agent/provider/mod.rs
+index 64ef5121..66b0e1ac 100644
+--- a/crates/pony-agent-core/src/agent/provider/mod.rs
++++ b/crates/pony-agent-core/src/agent/provider/mod.rs
+@@ -32,6 +32,14 @@ use self::responses_api::{
+ pub mod model_catalog;
+ pub use self::model_catalog::fetch_model_ids;
+ 
++mod openai_wire;
++mod usage;
++pub(crate) use self::openai_wire::openai_safe_tool_name;
++// `extract_chat_delta_text` 在拆分前即无消费者（原文件已挂 `#[allow(dead_code)]`），
++// 随函数一起留在 `openai_wire`，不在此 re-export（避免引入 unused import 噪音）。
++pub(crate) use self::usage::extract_openai_usage;
++pub(crate) use self::usage::normalize_token_usage;
++
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub enum ProviderProtocol {
+     #[serde(rename = "openai-completions", alias = "openai")]
+@@ -5694,15 +5702,28 @@ where
+             let slept = delay.as_millis() as u64;
+             budget.record_attempt(slept);
+             slept_ms += slept;
++            // F2（重试窗口纯净）：退避 sleep 是「成功 attempt 之前」的耗时，逐次记账。
++            // 未开启账本 ⇒ 静默 no-op（第三方直接调用 provider 不受影响）。
++            crate::agent::retry::note_provider_attempt_backoff_slept(slept);
+         }
+-        match operation() {
++        // F2：逐 attempt 计时——失败耗时与成功 attempt 的窗口在这里各自落账
++        // （见 `agent::retry::ProviderAttemptWindow`）。**不改变**任何调度/重试语义。
++        let attempt_started_at = Instant::now();
++        let attempt_result = operation();
++        let attempt_elapsed_ms = attempt_started_at.elapsed().as_millis() as u64;
++        match attempt_result {
+             Ok(value) => {
++                crate::agent::retry::note_provider_attempt_succeeded(
++                    attempt_started_at,
++                    attempt_elapsed_ms,
++                );
+                 let outcome = report(&budget, attempts_total + 1, slept_ms, rl_active);
+                 // attempts_total 口径 = operation 调用次数：成功这次同样计入。
+                 return (Ok(value), outcome);
+             }
+             Err(err) => {
+                 attempts_total += 1;
++                crate::agent::retry::note_provider_attempt_failed(attempt_elapsed_ms);
+                 let hint_blocking = no_retry_hint.is_some_and(|hint| hint());
+                 let last_error = extract_provider_error_detail(&err);
+                 last_failure = Some(err.clone());
+@@ -6369,88 +6390,6 @@ fn extract_reasoning_text_from_value(value: &Value) -> Option<String> {
+     }
+ }
+ 
+-#[allow(dead_code)]
+-fn extract_chat_delta_text(payload: &Value) -> Option<String> {
+-    let delta = payload
+-        .get("choices")
+-        .and_then(Value::as_array)
+-        .and_then(|choices| choices.first())
+-        .and_then(|choice| choice.get("delta"))?;
+-    let content = delta.get("content")?;
+-
+-    match content {
+-        Value::String(text) => Some(text.clone()),
+-        Value::Array(items) => {
+-            let parts = items
+-                .iter()
+-                .filter_map(|item| {
+-                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+-                        return Some(text.to_string());
+-                    }
+-                    item.get("text")
+-                        .and_then(|value| value.get("value"))
+-                        .and_then(Value::as_str)
+-                        .map(|text| text.to_string())
+-                })
+-                .collect::<Vec<_>>();
+-
+-            if parts.is_empty() {
+-                None
+-            } else {
+-                Some(parts.join(""))
+-            }
+-        }
+-        _ => None,
+-    }
+-}
+-
+-fn extract_openai_usage(payload: &Value) -> Option<TokenUsage> {
+-    let usage = payload.get("usage")?;
+-    provider_log(format!("usage:openai raw={}", usage));
+-    let cache_hit = usage
+-        .get("prompt_cache_hit_tokens")
+-        .and_then(Value::as_u64)
+-        .map(|value| (value, "usage.prompt_cache_hit_tokens"))
+-        .or_else(|| {
+-            usage
+-                .get("input_tokens_details")
+-                .and_then(|value| value.get("cached_tokens"))
+-                .and_then(Value::as_u64)
+-                .map(|value| (value, "usage.input_tokens_details.cached_tokens"))
+-        })
+-        .or_else(|| {
+-            usage
+-                .get("prompt_tokens_details")
+-                .and_then(|value| value.get("cached_tokens"))
+-                .and_then(Value::as_u64)
+-                .map(|value| (value, "usage.prompt_tokens_details.cached_tokens"))
+-        });
+-    Some(normalize_token_usage(TokenUsage {
+-        input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+-        cache_hit_input_tokens: cache_hit.map(|(value, _source)| value),
+-        cache_hit_source: cache_hit.map(|(_value, source)| source.to_string()),
+-        reasoning_tokens: usage
+-            .get("completion_tokens_details")
+-            .and_then(|value| value.get("reasoning_tokens"))
+-            .and_then(Value::as_u64)
+-            .or_else(|| {
+-                usage
+-                    .get("output_tokens_details")
+-                    .and_then(|value| value.get("reasoning_tokens"))
+-                    .and_then(Value::as_u64)
+-            }),
+-        output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+-        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+-        cache_creation_input_tokens: None,
+-        // wave-54 C3：上游 usage 真值。
+-        origin: Some(USAGE_ORIGIN_PROVIDER),
+-    }))
+-}
+-
+-fn openai_safe_tool_name(name: &str) -> String {
+-    name.replace('.', "__dot__")
+-}
+-
+ fn openai_original_tool_name(name: &str) -> String {
+     name.replace("__dot__", ".")
+ }
+@@ -6590,27 +6529,6 @@ fn estimate_native_content_chars(block: &Value) -> usize {
+     block.to_string().chars().count()
+ }
+ 
+-fn normalize_token_usage(usage: TokenUsage) -> TokenUsage {
+-    let total_tokens =
+-        usage
+-            .total_tokens
+-            .or_else(|| match (usage.input_tokens, usage.output_tokens) {
+-                (Some(input_tokens), Some(output_tokens)) => Some(input_tokens + output_tokens),
+-                _ => None,
+-            });
+-
+-    TokenUsage {
+-        input_tokens: usage.input_tokens,
+-        cache_hit_input_tokens: usage.cache_hit_input_tokens,
+-        cache_hit_source: usage.cache_hit_source,
+-        reasoning_tokens: usage.reasoning_tokens,
+-        output_tokens: usage.output_tokens,
+-        total_tokens,
+-        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+-        origin: usage.origin,
+-    }
+-}
+-
+ fn render_input_messages(messages: &[ProviderMessage]) -> String {
+     messages
+         .iter()
+diff --git a/crates/pony-agent-core/src/agent/retry.rs b/crates/pony-agent-core/src/agent/retry.rs
+index 743a3200..ed8998dc 100644
+--- a/crates/pony-agent-core/src/agent/retry.rs
++++ b/crates/pony-agent-core/src/agent/retry.rs
+@@ -1,4 +1,5 @@
+-use std::time::Duration;
++use std::cell::RefCell;
++use std::time::{Duration, Instant};
+ 
+ use crate::agent::error_code::ErrorCode;
+ 
+@@ -1145,6 +1146,250 @@ where
+     Err(last_decision)
+ }
+ 
++// ─────────────────────── F2：per-call 纯净窗口（重试账本） ───────────────────────
++//
++// 取证与裁决见 `.dev-team/diag-tps/fix/f2f3-green.md`（I1）。一句话：per-call 的
++// `turn_duration_ms` / `first_token_latency_ms` 原本在重试循环**之外**取样
++// （`runtime/turn_stream.rs::initial_decision_started_at` / `provider_call_started_at`、
++// `runtime/tool_recovery.rs::started_at`），而重试在
++// `provider::retry_provider_scoped_with_report_config` 的循环里（429/525 单次
++// 1.9–8.0s，外加 20s/40s 限流退避）⇒ 失败尝试耗时被算进 `dur`。
++// `gen = dur − ttft` 因两端同步被抬高而近似抵消；但 `end_to_end` 口径
++// （`Σout / Σdur`）会被系统性压低（实测 gemini e2e 10.4 t/s vs decode 98.6 t/s）。
++//
++// 本账本由**重试循环**逐 attempt 记账，调用方只在 provider 调用前后各加一行：
++// 调用前 `let outer_start = retry::begin_provider_attempt_window();`，
++// 调用后 `let pure = retry::take_pure_call_window(outer_start, outer_ttft);`。
++// I3 不变量：本模块**不算速度**——速度唯一出口仍是
++// `turn_flow::{decode_eligible, call_speed_from_raw}`，本账本只负责把窗口修纯净。
++
++/// 一次 provider 调用（可能含多次 attempt / 换手）的重试账本。
++///
++/// 「失败耗时」与「attempts 次数」在这里是**独立字段**：它们绝不参与 per-call 的
++/// `dur` / `gen`，只做取证与结构化留痕（I2）。
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
++pub struct ProviderAttemptWindow {
++    /// attempt 次数（含最终成功的那次；整体失败的调用计全部尝试次数）。
++    pub attempts: u32,
++    /// 失败 attempt **自身**耗时之和（毫秒，不含退避 sleep）。
++    pub failed_attempt_ms: u64,
++    /// 重试循环内的退避 sleep 累计（毫秒）。
++    pub slept_ms: u64,
++    /// 最后一次**成功** attempt 的耗时（毫秒）；无成功 attempt ⇒ `None`。
++    pub succeeded_attempt_ms: Option<u64>,
++    /// 最后一次成功 attempt 的**起点**相对账本起点的偏移（毫秒）。
++    pub succeeded_attempt_offset_ms: Option<u64>,
++}
++
++impl ProviderAttemptWindow {
++    /// 成功 attempt 之前累计的耗时（失败尝试 + 退避）。
++    pub fn prelude_ms(&self) -> u64 {
++        self.failed_attempt_ms.saturating_add(self.slept_ms)
++    }
++
++    /// 外层 `dur`（跨 attempt 墙钟）→ 纯净 per-call `dur`（只覆盖最后一次成功 attempt）。
++    ///
++    /// 无成功 attempt（调用整体失败）⇒ 原样返回外层值，**不伪造**纯净性。
++    pub fn rebase_duration_ms(&self, outer_duration_ms: u64) -> u64 {
++        self.succeeded_attempt_ms.unwrap_or(outer_duration_ms)
++    }
++
++    /// 外层 `ttft`（跨 attempt）→ 纯净 `ttft`（相对成功 attempt 起点）。
++    ///
++    /// 无成功 attempt ⇒ 原样返回（同上，不伪造）。毫秒级取整可能让结果落到 0
++    /// （首 token 在成功 attempt 起点当毫秒内到达）——0 是**诚实值**，不是缺失。
++    pub fn rebase_first_token_ms(&self, outer_first_token_ms: Option<u64>) -> Option<u64> {
++        outer_first_token_ms.map(|ttft| {
++            ttft.saturating_sub(self.succeeded_attempt_offset_ms.unwrap_or(0))
++        })
++    }
++}
++
++/// 账本内部可变状态（读取即消费，一次性）。
++#[derive(Debug, Clone, Copy)]
++struct AttemptWindowState {
++    started_at: Instant,
++    attempts: u32,
++    failed_attempt_ms: u64,
++    slept_ms: u64,
++    succeeded_attempt_ms: Option<u64>,
++    succeeded_attempt_offset_ms: Option<u64>,
++}
++
++impl AttemptWindowState {
++    fn new(started_at: Instant) -> Self {
++        Self {
++            started_at,
++            attempts: 0,
++            failed_attempt_ms: 0,
++            slept_ms: 0,
++            succeeded_attempt_ms: None,
++            succeeded_attempt_offset_ms: None,
++        }
++    }
++
++    fn snapshot(&self) -> ProviderAttemptWindow {
++        ProviderAttemptWindow {
++            attempts: self.attempts,
++            failed_attempt_ms: self.failed_attempt_ms,
++            slept_ms: self.slept_ms,
++            succeeded_attempt_ms: self.succeeded_attempt_ms,
++            succeeded_attempt_offset_ms: self.succeeded_attempt_offset_ms,
++        }
++    }
++}
++
++// 为什么用 thread_local：一次 provider 调用（含其内部重试/换手）在**同一线程上同步执行**
++// ——`on_delta` 也在阻塞 SSE 读循环内联调用（`provider::openai_sse::push_payload`）。
++// 与 `runtime::limits` 的测试覆写同一取舍：不引入跨调用共享状态，也不污染并行用例。
++thread_local! {
++    static ATTEMPT_WINDOW: RefCell<Option<AttemptWindowState>> = const { RefCell::new(None) };
++}
++
++/// 开启一次 provider 调用的重试账本，返回**与外层计时同源**的起点。
++///
++/// 调用方必须以返回的 `Instant` 作为 `dur` / `ttft` 的计时起点（两者必须同源，
++/// 否则 [`ProviderAttemptWindow::rebase_first_token_ms`] 会漂移）。
++pub fn begin_provider_attempt_window() -> Instant {
++    let started_at = Instant::now();
++    ATTEMPT_WINDOW.with(|slot| *slot.borrow_mut() = Some(AttemptWindowState::new(started_at)));
++    started_at
++}
++
++/// 取走本线程当前调用的账本（一次性；取走后回到「未开启」状态）。
++pub fn take_provider_attempt_window() -> Option<ProviderAttemptWindow> {
++    ATTEMPT_WINDOW.with(|slot| slot.borrow_mut().take().map(|state| state.snapshot()))
++}
++
++/// 记一次**失败** attempt（供重试循环调用；未开启账本 ⇒ 静默 no-op）。
++pub fn note_provider_attempt_failed(elapsed_ms: u64) {
++    ATTEMPT_WINDOW.with(|slot| {
++        if let Some(state) = slot.borrow_mut().as_mut() {
++            state.attempts = state.attempts.saturating_add(1);
++            state.failed_attempt_ms = state.failed_attempt_ms.saturating_add(elapsed_ms);
++        }
++    });
++}
++
++/// 记一次**成功** attempt（供重试循环调用；未开启账本 ⇒ 静默 no-op）。
++///
++/// `started_at` 是本次 attempt 的起点：由它算出成功 attempt 相对账本起点的偏移，
++/// 从而把外层 `ttft` 平移到「成功 attempt 内部」。
++pub fn note_provider_attempt_succeeded(started_at: Instant, elapsed_ms: u64) {
++    ATTEMPT_WINDOW.with(|slot| {
++        if let Some(state) = slot.borrow_mut().as_mut() {
++            state.attempts = state.attempts.saturating_add(1);
++            state.succeeded_attempt_ms = Some(elapsed_ms);
++            state.succeeded_attempt_offset_ms = Some(
++                started_at
++                    .saturating_duration_since(state.started_at)
++                    .as_millis()
++                    .min(u128::from(u64::MAX)) as u64,
++            );
++        }
++    });
++}
++
++/// 记重试循环内一次退避 sleep 的时长（未开启账本 ⇒ 静默 no-op）。
++pub fn note_provider_attempt_backoff_slept(slept_ms: u64) {
++    ATTEMPT_WINDOW.with(|slot| {
++        if let Some(state) = slot.borrow_mut().as_mut() {
++            state.slept_ms = state.slept_ms.saturating_add(slept_ms);
++        }
++    });
++}
++
++/// 纯净 per-call 窗口的结算结果。
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct PureCallWindow {
++    /// 只覆盖最后一次成功 attempt 的耗时（毫秒）。喂 `build_provider_call_cache_record`
++    /// 的 `turn_duration_ms`。
++    pub duration_ms: u64,
++    /// 只覆盖最后一次成功 attempt 的首 token 延迟（毫秒）。喂同记录的
++    /// `first_token_latency_ms`。
++    pub first_token_latency_ms: Option<u64>,
++    /// 原始账本（重试次数 / 失败耗时 / 退避，**独立字段**，绝不混入 `gen`）。
++    /// `None` ⇔ 未开启账本（第三方直接调用 provider / 测试桩）。
++    pub window: Option<ProviderAttemptWindow>,
++}
++
++impl PureCallWindow {
++    /// 纯净窗口是否真的排除了失败尝试（有重试且已定位成功 attempt）。
++    ///
++    /// 供结构化留痕与用例断言用；不参与速度公式。
++    pub fn retried(&self) -> bool {
++        self.window
++            .is_some_and(|window| window.succeeded_attempt_ms.is_some() && window.attempts > 1)
++    }
++}
++
++/// 由外层观测结算纯净 per-call 窗口（**消费**账本，一次性）。
++///
++/// `outer_started_at` 必须是 [`begin_provider_attempt_window`] 的返回值。
++/// 未开启账本 ⇒ 原样返回外层观测（不伪造纯净性，也不回填 0）。
++pub fn take_pure_call_window(
++    outer_started_at: Instant,
++    outer_first_token_ms: Option<u64>,
++) -> PureCallWindow {
++    let outer_duration_ms = outer_started_at.elapsed().as_millis() as u64;
++    let Some(window) = take_provider_attempt_window() else {
++        return PureCallWindow {
++            duration_ms: outer_duration_ms,
++            first_token_latency_ms: outer_first_token_ms,
++            window: None,
++        };
++    };
++    let pure = PureCallWindow {
++        duration_ms: window.rebase_duration_ms(outer_duration_ms),
++        first_token_latency_ms: window.rebase_first_token_ms(outer_first_token_ms),
++        window: Some(window),
++    };
++    // I2：attempts 与失败耗时**独立留痕**（结构化日志），不进 per-call dur/gen。
++    if pure.retried() {
++        log_pure_call_window(outer_duration_ms, outer_first_token_ms, &pure);
++    }
++    pure
++}
++
++/// 重试窗口的结构化留痕（一行一条调用；无重试不写，避免常态噪声）。
++fn log_pure_call_window(
++    outer_duration_ms: u64,
++    outer_first_token_ms: Option<u64>,
++    pure: &PureCallWindow,
++) {
++    let Some(window) = pure.window else {
++        return;
++    };
++    crate::agent::otel::log::log_json_with_fields(
++        "info",
++        "provider_call_retry_window",
++        None,
++        &[
++            ("attempts", serde_json::json!(window.attempts)),
++            ("failed_attempt_ms", serde_json::json!(window.failed_attempt_ms)),
++            ("slept_ms", serde_json::json!(window.slept_ms)),
++            ("prelude_ms", serde_json::json!(window.prelude_ms())),
++            (
++                "succeeded_attempt_offset_ms",
++                serde_json::json!(window.succeeded_attempt_offset_ms),
++            ),
++            (
++                "pure_duration_ms",
++                serde_json::json!(pure.duration_ms),
++            ),
++            (
++                "pure_first_token_latency_ms",
++                serde_json::json!(pure.first_token_latency_ms),
++            ),
++            ("outer_duration_ms", serde_json::json!(outer_duration_ms)),
++            (
++                "outer_first_token_latency_ms",
++                serde_json::json!(outer_first_token_ms),
++            ),
++        ],
++    );
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/pony-agent-core/src/agent/runtime/stream_support.rs b/crates/pony-agent-core/src/agent/runtime/stream_support.rs
+index cbfa8674..98fd444a 100644
+--- a/crates/pony-agent-core/src/agent/runtime/stream_support.rs
++++ b/crates/pony-agent-core/src/agent/runtime/stream_support.rs
+@@ -363,6 +363,47 @@ pub(super) fn derive_cache_miss_input_tokens(token_usage: Option<&TokenUsage>) -
+     Some(input_tokens.saturating_sub(cache_hit_input_tokens))
+ }
+ 
++/// 把一次 follow-up 响应的 usage / fallback 归并进轮级累加器。
++///
++/// 与内联的 `merge_token_usage` + `merge_fallback_reason` 两段**逐字等价**
++/// （同一顺序、同一借用形态），供 `turn_sync` 的多条恢复分支共用。
++pub(super) fn merge_response_usage_into_accumulators(
++    accumulated_usage: Option<TokenUsage>,
++    accumulated_fallback_reason: Option<String>,
++    response: &ProviderResponse,
++) -> (Option<TokenUsage>, Option<String>) {
++    let usage = merge_token_usage(accumulated_usage, response.token_usage.as_ref());
++    let fallback_reason =
++        merge_fallback_reason(accumulated_fallback_reason, response.fallback_reason.clone());
++    (usage, fallback_reason)
++}
++
++/// 同步（buffered）follow-up 的 per-call 记录装配并追加进 `records`。
++///
++/// 与内联 `records.push(build_provider_call_cache_record(...))` **逐字等价**：
++/// 固定 `ProviderRequestKind::ToolFollowup` / `ProviderLatencyKind::BufferedResponse`，
++/// 无首包观测（`first_token_latency_ms = None`）。
++pub(super) fn push_buffered_followup_call_record(
++    records: &mut Vec<ProviderCallCacheRecord>,
++    provider: &ProviderManager,
++    response: &ProviderResponse,
++    duration_ms: u64,
++    context_observation: &BuildContextObservation,
++) {
++    records.push(build_provider_call_cache_record(
++        ProviderRequestKind::ToolFollowup,
++        Some(response.provider_source.as_str()),
++        Some(response.provider_mode.as_str()),
++        // wave-54 C4：协议归一上下文输入口径（anthropic ⇒ input + cache_read）。
++        Some(provider.protocol_label()),
++        response.token_usage.as_ref(),
++        None,
++        Some(duration_ms),
++        ProviderLatencyKind::BufferedResponse,
++        Some(context_observation),
++    ));
++}
++
+ pub(super) fn merge_token_usage(
+     existing: Option<TokenUsage>,
+     next: Option<&TokenUsage>,
+@@ -818,6 +859,149 @@ impl ConsecutiveFailureTracker {
+     }
+ }
+ 
++// ── F3：非阻塞 delta 聚合（原 `turn_stream.rs`，按读线程聚合语义归位本模块） ──
++
++// ─────────────────── F3：非阻塞 delta 聚合（SSE 读线程零阻塞） ───────────────────
++//
++// 取证：`on_delta` 在**阻塞 SSE 读循环内联执行**——`provider::openai_sse::push_payload`
++// 每解析到一个 chunk 就同步调 `on_delta`（`openai_sse.rs:133/139/149`）。旧实现曾在 6 处
++// `on_delta` 里做「阻塞睡眠到 16ms 间隔」的客户端节流（`turn_stream.rs` 的
++// followup/initial 两条流 + `tool_recovery.rs` 的恢复流，均已删除）：睡眠期间停止读
++// socket ⇒ TCP 背压 ⇒ 突发路由（1 token/chunk，间隔中位 0ms）下 token 率被硬顶在 ~62.5/s。
++//
++// 现在改为**非阻塞时间窗聚合**：窗口内的 text/reasoning 合并进 pending，窗口外的
++// 第一个 delta 把 pending 一次性上屏。读线程每处理一个 delta 只做一次字符串拼接 +
++// 一次时间戳比较，耗时**与客户端消费速度无关**（I3）；内容只合并、不丢弃，收尾
++// 必须调 `flush()`（I2：禁止丢最终帧；终态派发本就不经此路径）。
++//
++// `sink` 契约（F3 修订 v2，Lead 裁决）：`TurnEventSink::emit` 必须是**非阻塞投递**
++// （Tauri `emit` fire-and-forget / TUI 无界 channel / headless 无消费者）。
++// 已知限制：`emit` 仍**内联**在读循环里，若将来出现阻塞式 sink（例如有界 channel
++// 满后等待），慢消费者会重新串进读线程——届时必须在 sink 实现侧解决，而不是在本
++// 聚合器里加等待（本聚合器**永不**阻塞读线程）。
++
++/// 聚合后的单帧内容（`None` 字段表示本次没有该内容，禁止用空串冒充）。
++pub(super) struct CoalescedFrame {
++    pub(super) text: Option<String>,
++    pub(super) reasoning: Option<String>,
++    pub(super) latency_ms: Option<u64>,
++}
++
++/// 一个节流窗口里攒下的内容（reasoning 与 text 各至多一段）。
++///
++/// 为什么分两槽而不是揉成一帧：既有语义要求「思考帧」与「正文帧」的载荷形状分开
++/// （旧实现也是先 flush 思考、再 flush 正文，两帧同刻发出、中间不睡眠）。合并只发生在
++/// **同类型**之内，帧形状与顺序因此与旧实现逐字一致。
++pub(super) struct CoalescedBatch {
++    reasoning: Option<String>,
++    text: Option<String>,
++    latency_ms: Option<u64>,
++}
++
++impl CoalescedBatch {
++    /// 拆成至多两帧：**先 reasoning 后 text**（与旧实现「先 flush 思考再 flush 正文」同序）。
++    /// 两帧携带同一个首字延迟值（旧实现同样把同一个 `latency` 传给两次 flush）。
++    pub(super) fn into_frames(self) -> [Option<CoalescedFrame>; 2] {
++        let latency_ms = self.latency_ms;
++        [
++            self.reasoning.map(|reasoning| CoalescedFrame {
++                text: None,
++                reasoning: Some(reasoning),
++                latency_ms,
++            }),
++            self.text.map(|text| CoalescedFrame {
++                text: Some(text),
++                reasoning: None,
++                latency_ms,
++            }),
++        ]
++    }
++}
++
++/// F3：读线程侧的 delta 聚合器（禁止任何阻塞等待，契约见上方注释）。
++pub(super) struct StreamDeltaCoalescer {
++    window_ms: u64,
++    /// 上一次真正上屏的时刻（毫秒，调用方提供的单调时钟）。
++    last_emit_ms: Option<u64>,
++    pending_text: String,
++    pending_reasoning: String,
++    pending_latency_ms: Option<u64>,
++}
++
++impl StreamDeltaCoalescer {
++    /// 客户端节流窗口：沿用旧节流口径（16ms ⇒ 上屏帧率上限不变），
++    /// 变的只是「窗口内不再阻塞读线程」。
++    const CLIENT_WINDOW_MS: u64 = 16;
++
++    pub(super) fn new() -> Self {
++        Self {
++            window_ms: Self::CLIENT_WINDOW_MS,
++            last_emit_ms: None,
++            pending_text: String::new(),
++            pending_reasoning: String::new(),
++            pending_latency_ms: None,
++        }
++    }
++
++    fn is_empty(&self) -> bool {
++        self.pending_text.is_empty() && self.pending_reasoning.is_empty()
++    }
++
++    /// 入队一段增量（`text` / `reasoning` 至多一个非空）。**只拼接，绝不 sleep**。
++    ///
++    /// `latency_ms` 取**第一个**非空值：即「首个内容增量」的首字延迟，随第一个
++    /// 真正上屏的帧一起下发（合并不会把首字延迟挪后或丢失）。
++    pub(super) fn push(
++        &mut self,
++        text: Option<String>,
++        reasoning: Option<String>,
++        latency_ms: Option<u64>,
++    ) {
++        if let Some(text) = text {
++            self.pending_text.push_str(&text);
++        }
++        if let Some(reasoning) = reasoning {
++            self.pending_reasoning.push_str(&reasoning);
++        }
++        if self.pending_latency_ms.is_none() {
++            self.pending_latency_ms = latency_ms;
++        }
++    }
++
++    /// 到窗口 ⇒ 取走本窗口攒下的内容；仍在窗口内 ⇒ `None`（内容留在 pending，
++    /// 等下一次 delta 或收尾 `flush`）。
++    pub(super) fn take_if_due(&mut self, now_ms: u64) -> Option<CoalescedBatch> {
++        if self.is_empty() {
++            return None;
++        }
++        match self.last_emit_ms {
++            Some(last) if now_ms.saturating_sub(last) < self.window_ms => None,
++            _ => Some(self.take(now_ms)),
++        }
++    }
++
++    /// 收尾 flush：**无视窗口**把 pending 全部发完（禁止丢最终帧）。
++    pub(super) fn flush(&mut self, now_ms: u64) -> Option<CoalescedBatch> {
++        if self.is_empty() {
++            return None;
++        }
++        Some(self.take(now_ms))
++    }
++
++    fn take(&mut self, now_ms: u64) -> CoalescedBatch {
++        self.last_emit_ms = Some(now_ms);
++        let text = (!self.pending_text.is_empty()).then(|| std::mem::take(&mut self.pending_text));
++        let reasoning = (!self.pending_reasoning.is_empty())
++            .then(|| std::mem::take(&mut self.pending_reasoning));
++        let latency_ms = self.pending_latency_ms.take();
++        CoalescedBatch {
++            reasoning,
++            text,
++            latency_ms,
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod b010_timeout_signal_tests {
+     use super::*;
+diff --git a/crates/pony-agent-core/src/agent/runtime/tool_recovery.rs b/crates/pony-agent-core/src/agent/runtime/tool_recovery.rs
+index 6d9d54c3..25538d35 100644
+--- a/crates/pony-agent-core/src/agent/runtime/tool_recovery.rs
++++ b/crates/pony-agent-core/src/agent/runtime/tool_recovery.rs
+@@ -1,4 +1,7 @@
+ use super::*;
++// F3：读线程侧的 delta 时间窗聚合器（定义在 `runtime::turn_stream`，两条流式路径共用
++// 同一实现，避免节流口径二次演化）。
++use super::stream_support::StreamDeltaCoalescer;
+ // D1-1（ADR 0123 补充 r2）：中断注记的**单一真源**在 `agent::session::store`——
+ // 与 `is_interrupt_placeholder_text` 的整句判据共用同一字面量，本模块不再保留私有副本。
+ use crate::agent::session::{UPSTREAM_INTERRUPTED_NOTE, USER_CANCELLED_NOTE};
+@@ -16,7 +19,10 @@ pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::Provid
+     let recovery_request = build_tool_followup_recovery_request(planning_request);
+     let synthetic_tool_result =
+         build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
+-    let started_at = Instant::now();
++    // F2（重试窗口纯净）：账本起点即 per-call 计时起点；重试/退避在
++    // `provider_followup_with_mode` 内部（followup 作用域还会切 20s/40s 限流退避），
++    // 不共源就会被算进 dur。
++    let started_at = crate::agent::retry::begin_provider_attempt_window();
+     let mut response = provider_followup_with_mode(
+         provider,
+         &recovery_request,
+@@ -30,7 +36,8 @@ pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::Provid
+     .unwrap_or_else(|error| {
+         build_local_tool_followup_recovery_response(&synthetic_tool_result, hop_records, &error)
+     });
+-    let duration_ms = started_at.elapsed().as_millis() as u64;
++    // 同步恢复调用无首包观测（`BufferedResponse`）⇒ 只结算 dur，不伪造 ttft。
++    let duration_ms = crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
+     let provider_source_snapshot = response.provider_source.clone();
+     let provider_mode_snapshot = response.provider_mode.clone();
+     let token_usage_snapshot = response.token_usage.clone();
+@@ -100,7 +107,8 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
+     let recovery_request = build_tool_followup_recovery_request(planning_request);
+     let synthetic_tool_result =
+         build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
+-    let started_at = Instant::now();
++    // F2（重试窗口纯净）：账本起点即 per-call 计时起点（同上，同步恢复路径）。
++    let started_at = crate::agent::retry::begin_provider_attempt_window();
+     let started_at_for_emit = started_at;
+     let call_first_token_latency = Rc::new(Cell::new(None));
+     let call_first_token_latency_for_emit = Rc::clone(&call_first_token_latency);
+@@ -114,8 +122,9 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
+     let emitted_reasoning_chars_ref = Rc::new(Cell::new(0usize));
+     let emitted_text_for_emit = Rc::clone(&emitted_text_ref);
+     let emitted_reasoning_chars_for_emit = Rc::clone(&emitted_reasoning_chars_ref);
+-    let last_emit_for_client = Rc::new(Cell::new(0u64));
+-    let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
++    // F3：读线程侧的时间窗聚合器（替代旧的 `last_emit` + 内联 sleep 节流）。
++    let delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
++    let delta_coalescer_for_emit = Rc::clone(&delta_coalescer);
+ 
+     let mut response = provider_followup_stream_with_mode(
+         provider,
+@@ -154,68 +163,58 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
+             } else {
+                 None
+             };
+-            let mut did_emit = false;
+             match delta {
+                 ProviderStreamChunk::StreamStart => {
+                     // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
+                 }
+                 ProviderStreamChunk::Text(text) => {
+                     if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush() {
+-                        emitted_reasoning_chars_for_emit.set(
+-                            emitted_reasoning_chars_for_emit
+-                                .get()
+-                                .saturating_add(reasoning.chars().count()),
+-                        );
+-                        emit_lightweight_delta(
+-                            sink,
+-                            &turn_id_for_emit,
++                        delta_coalescer_for_emit.borrow_mut().push(
+                             None,
+                             Some(reasoning),
+                             latency,
+-                            session_id_for_emit.clone(),
+                         );
+                     }
+                     emitted_text_for_emit.borrow_mut().push_str(&text);
+-                    emit_lightweight_delta(
+-                        sink,
+-                        &turn_id_for_emit,
+-                        Some(text),
+-                        None,
+-                        latency,
+-                        session_id_for_emit.clone(),
+-                    );
+-                    did_emit = true;
++                    delta_coalescer_for_emit
++                        .borrow_mut()
++                        .push(Some(text), None, latency);
+                 }
+                 ProviderStreamChunk::Reasoning(reasoning) => {
+                     if let Some(buffered_reasoning) =
+                         reasoning_batcher_for_emit.borrow_mut().push(reasoning)
+                     {
+-                        emitted_reasoning_chars_for_emit.set(
+-                            emitted_reasoning_chars_for_emit
+-                                .get()
+-                                .saturating_add(buffered_reasoning.chars().count()),
+-                        );
+-                        emit_lightweight_delta(
+-                            sink,
+-                            &turn_id_for_emit,
++                        delta_coalescer_for_emit.borrow_mut().push(
+                             None,
+                             Some(buffered_reasoning),
+                             latency,
+-                            session_id_for_emit.clone(),
+                         );
+-                        did_emit = true;
+                     }
+                 }
+             }
+-            if did_emit {
+-                let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+-                let prev = last_emit_for_client_clone.get();
+-                let gap = now.saturating_sub(prev);
+-                const MIN_CLIENT_GAP_MS: u64 = 16;
+-                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+-                    std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
++            // F3（I1/I3）：只做一次时间戳比较；窗口内的内容留在 pending，
++            // **不 sleep、不等客户端消费**。`sink.emit` 内联且契约=非阻塞投递
++            // （慢 sink 会串进读循环，属已知限制，见 `turn_stream.rs` 文件头）。
++            let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
++            let due = delta_coalescer_for_emit.borrow_mut().take_if_due(now);
++            if let Some(batch) = due {
++                for frame in batch.into_frames().into_iter().flatten() {
++                    if let Some(reasoning) = frame.reasoning.as_ref() {
++                        emitted_reasoning_chars_for_emit.set(
++                            emitted_reasoning_chars_for_emit
++                                .get()
++                                .saturating_add(reasoning.chars().count()),
++                        );
++                    }
++                    emit_lightweight_delta(
++                        sink,
++                        &turn_id_for_emit,
++                        frame.text,
++                        frame.reasoning,
++                        frame.latency_ms,
++                        session_id_for_emit.clone(),
++                    );
+                 }
+-                last_emit_for_client_clone.set(now);
+             }
+         },
+         crate::agent::turn_flow::LlmRequestMode::ToolRecovery,
+@@ -225,25 +224,30 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
+     });
+ 
+     if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
+-        emitted_reasoning_chars_ref.set(
+-            emitted_reasoning_chars_ref
+-                .get()
+-                .saturating_add(buffered_reasoning.chars().count()),
+-        );
+-        emit_lightweight_delta(
+-            sink,
+-            turn_id,
+-            None,
+-            Some(buffered_reasoning),
+-            None,
+-            session_id.clone(),
+-        );
+-        let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+-        let prev = last_emit_for_client.get();
+-        let gap = now.saturating_sub(prev);
+-        const MIN_CLIENT_GAP_MS: u64 = 16;
+-        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+-            std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
++        delta_coalescer
++            .borrow_mut()
++            .push(None, Some(buffered_reasoning), None);
++    }
++    // F3（I2）：收尾**无条件**把 pending 发完——允许合并，禁止丢最终帧。
++    let tail_now = turn_started_at_for_latency.elapsed().as_millis() as u64;
++    let tail_batch = delta_coalescer.borrow_mut().flush(tail_now);
++    if let Some(batch) = tail_batch {
++        for frame in batch.into_frames().into_iter().flatten() {
++            if let Some(reasoning) = frame.reasoning.as_ref() {
++                emitted_reasoning_chars_ref.set(
++                    emitted_reasoning_chars_ref
++                        .get()
++                        .saturating_add(reasoning.chars().count()),
++                );
++            }
++            emit_lightweight_delta(
++                sink,
++                turn_id,
++                frame.text,
++                frame.reasoning,
++                frame.latency_ms,
++                session_id.clone(),
++            );
+         }
+     }
+ 
+@@ -276,7 +280,10 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
+         }
+     }
+ 
+-    let duration_ms = started_at.elapsed().as_millis() as u64;
++    // F2：per-call (dur, ttft) 收敛到「最后一次成功 attempt」；失败尝试/退避只留痕在账本里。
++    let pure_call_window =
++        crate::agent::retry::take_pure_call_window(started_at, call_first_token_latency.get());
++    let duration_ms = pure_call_window.duration_ms;
+     let provider_source_snapshot = response.provider_source.clone();
+     let provider_mode_snapshot = response.provider_mode.clone();
+     let token_usage_snapshot = response.token_usage.clone();
+@@ -321,7 +328,7 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
+             None,
+             token_usage_snapshot.as_ref(),
+             if latency_kind == ProviderLatencyKind::ProviderStream {
+-                call_first_token_latency.get()
++                pure_call_window.first_token_latency_ms
+             } else {
+                 None
+             },
+diff --git a/crates/pony-agent-core/src/agent/runtime/turn_prep.rs b/crates/pony-agent-core/src/agent/runtime/turn_prep.rs
+index 3bc9bcce..82ea3c95 100644
+--- a/crates/pony-agent-core/src/agent/runtime/turn_prep.rs
++++ b/crates/pony-agent-core/src/agent/runtime/turn_prep.rs
+@@ -184,26 +184,33 @@ impl AgentRuntime {
+                 // provider 生成决策：工具执行后的 follow-up 请求需要把 assistant 消息的
+                 // reasoning_content 完整回传给 API，本地 planner 决策没有该字段，
+                 // 会被 DeepSeek 等 thinking 模式以 invalid_request_error 拒绝。
+-                let started_at = Instant::now();
++                // F2（重试窗口纯净）：账本起点即 per-call 计时起点，重试/退避在
++                // `provider_decision_with_mode` 内部，不共源就会被算进 dur。
++                let started_at = crate::agent::retry::begin_provider_attempt_window();
+                 let decision = provider_decision_with_mode(
+                     &prepared.provider,
+                     &prepared.planning_request,
+                     &prepared.tools,
+                     crate::agent::turn_flow::LlmRequestMode::Initial,
+                 )?;
+-                (decision, Some(started_at.elapsed().as_millis() as u64))
++                let duration_ms =
++                    crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
++                (decision, Some(duration_ms))
+             } else {
+                 match preflight_decision {
+                     Some(decision) => (decision, None),
+                     None => {
+-                        let started_at = Instant::now();
++                        // F2：同上（同步首跳 decision 的 per-call dur 必须纯净）。
++                        let started_at = crate::agent::retry::begin_provider_attempt_window();
+                         let decision = provider_decision_with_mode(
+                             &prepared.provider,
+                             &prepared.planning_request,
+                             &prepared.tools,
+                             crate::agent::turn_flow::LlmRequestMode::Initial,
+                         )?;
+-                        (decision, Some(started_at.elapsed().as_millis() as u64))
++                        let duration_ms =
++                            crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
++                        (decision, Some(duration_ms))
+                     }
+                 }
+             };
+diff --git a/crates/pony-agent-core/src/agent/runtime/turn_stream.rs b/crates/pony-agent-core/src/agent/runtime/turn_stream.rs
+index 4b8aed41..0c06c0ed 100644
+--- a/crates/pony-agent-core/src/agent/runtime/turn_stream.rs
++++ b/crates/pony-agent-core/src/agent/runtime/turn_stream.rs
+@@ -1,12 +1,15 @@
+ use super::*;
+ // PA-171 C4：失败轮归因载体与带归因的派发旁路（`runtime/mod.rs` 的 glob 未覆盖新增符号）。
+ use crate::agent::turn_flow::emit_stream_failed_attributed;
++// claim_failed_terminal 迁至 `turn_control`（终态闸门与其状态机同住），调用点保持不变。
++use super::turn_control::claim_failed_terminal;
+ 
+ /// wave-64 R2：流式决策因用户停止而中断、取消终态已在 fallback 之前派发时的控制流哨兵。
+ ///
+ /// 仅在本模块内用作标记（绝不下发到宿主表面，也不进入任何落库字段）。
+ const STREAM_CANCELLED_HANDLED_SENTINEL: &str = "__wave64_stream_cancelled_handled__";
+ 
++
+ /// L1（dsh 对齐）：取消轮的 native transcript 片段——**只在已闭合的工具往返存在时**生成。
+ ///
+ /// 取消轮没有 `assistant/message`，此前只能靠「文本检查点」把过程清单当成 assistant
+@@ -22,22 +25,6 @@ fn cancelled_turn_native_transcript(
+     native_transcript_for_cancelled_turn(provider.protocol(), user_message, hop_records)
+ }
+ 
+-/// wave-64 R1（BLOCKING）：终态失败派发的 **terminal-once 闸门**（内联 failed 派发块共用）。
+-///
+-/// `false` ⇒ 该轮已有终态派发者（C5 宽限监督已收口 cancelled / 已派发过 failed）：
+-/// 调用方必须立即 `return`，不得再 persist_trace、不得再 emit `turn:failed`。
+-fn claim_failed_terminal(control: &ExecutionControlRegistry, turn_id: &str) -> bool {
+-    let claimed = super::turn_control::claim_terminal_status(control, turn_id, "failed");
+-    if !claimed {
+-        super::turn_control::log_terminal_dispatch_suppressed(
+-            turn_id,
+-            "failed",
+-            "inline_stream_failed",
+-        );
+-    }
+-    claimed
+-}
+-
+ impl AgentRuntime {
+     /// wave-64 R1（BLOCKING）：终态失败派发的过闸门版本 —— 除 terminal-once 闸门外，
+     /// 与 `fail_stream_turn_with_hook_dispatch` **逐字等价**（原参数原样转发）。
+@@ -969,13 +956,19 @@ impl AgentRuntime {
+                 Rc::clone(&provider_call_first_token_latency);
+             let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
+             let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
+-            let last_emit_for_client = Rc::new(Cell::new(0u64));
+-            let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
++            // F3：客户端节流的读线程侧载体——旧实现是 `last_emit` + 内联 sleep，
++            // 现在是时间窗聚合器（见 `StreamDeltaCoalescer`）：窗口内合并、窗口外上屏，
++            // **读线程不再睡眠**（睡眠 = 停读 socket = TCP 背压）。
++            let delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
++            let delta_coalescer_for_emit = Rc::clone(&delta_coalescer);
+             let delta_turn_id_for_emit = delta_turn_id.clone();
+             // PA-095 #4 修复：followup delta 闭包此前 session_id 传 None——事件以
+             // 空 session 缓冲且永不 flush（生产事件流丢失全部 followup chunk）。
+             let delta_session_id_for_emit = input.session_id.clone();
+-            let provider_call_started_at = Instant::now();
++            // F2（重试窗口纯净）：同上——账本起点即 per-call 计时起点，重试/退避在
++            // `provider_followup_stream_with_calls` 内部（followup 作用域还会切 20s/40s
++            // 限流退避），不共源就会被算进 dur。
++            let provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
+             // PA-095 #4：本次 followup call 的 hop 索引（Copy 捕获进 delta 闭包）。
+             let followup_step = completed_hops as u32;
+             let response = match provider_followup_stream_with_calls(
+@@ -1049,7 +1042,6 @@ impl AgentRuntime {
+                         None
+                     };
+ 
+-                    let mut did_emit = false;
+                     match delta {
+                         ProviderStreamChunk::StreamStart => {
+                             // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
+@@ -1057,31 +1049,37 @@ impl AgentRuntime {
+                         ProviderStreamChunk::Text(text) => {
+                             if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush()
+                             {
+-                                flush_delta(None, Some(reasoning), latency);
++                                delta_coalescer_for_emit.borrow_mut().push(
++                                    None,
++                                    Some(reasoning),
++                                    latency,
++                                );
+                             }
+-                            flush_delta(Some(text), None, latency);
+-                            did_emit = true;
++                            delta_coalescer_for_emit
++                                .borrow_mut()
++                                .push(Some(text), None, latency);
+                         }
+                         ProviderStreamChunk::Reasoning(reasoning) => {
+                             if let Some(buffered_reasoning) =
+                                 reasoning_batcher_for_emit.borrow_mut().push(reasoning)
+                             {
+-                                flush_delta(None, Some(buffered_reasoning), latency);
+-                                did_emit = true;
++                                delta_coalescer_for_emit.borrow_mut().push(
++                                    None,
++                                    Some(buffered_reasoning),
++                                    latency,
++                                );
+                             }
+                         }
+                     }
+-                    if did_emit {
+-                        let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+-                        let prev = last_emit_for_client_clone.get();
+-                        let gap = now.saturating_sub(prev);
+-                        const MIN_CLIENT_GAP_MS: u64 = 16;
+-                        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+-                            std::thread::sleep(std::time::Duration::from_millis(
+-                                MIN_CLIENT_GAP_MS - gap,
+-                            ));
++                    // F3（I1/I3）：这里只做一次时间戳比较；窗口内的内容留在 pending，
++                    // 不 sleep、不等客户端消费。`sink.emit` 是**内联**调用——其契约是
++                    // 非阻塞投递（慢 sink 会串进读循环，属已知限制，见文件头）。
++                    let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
++                    let due = delta_coalescer_for_emit.borrow_mut().take_if_due(now);
++                    if let Some(batch) = due {
++                        for frame in batch.into_frames().into_iter().flatten() {
++                            flush_delta(frame.text, frame.reasoning, frame.latency_ms);
+                         }
+-                        last_emit_for_client_clone.set(now);
+                     }
+                 },
+                 crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
+@@ -1123,45 +1121,52 @@ impl AgentRuntime {
+                 }
+             };
+             if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
+-                emit_stream_event_with_step(
+-                    sink,
+-                    "turn:delta",
+-                    delta_turn_id.clone(),
+-                    "delta",
+-                    Some("calling_model"),
+-                    None,
+-                    Some(buffered_reasoning.clone()),
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    input.session_id.clone(),
+-                    Some(followup_step),
+-                );
+-                let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+-                let prev = last_emit_for_client.get();
+-                let gap = now.saturating_sub(prev);
+-                const MIN_CLIENT_GAP_MS: u64 = 16;
+-                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+-                    std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
++                delta_coalescer
++                    .borrow_mut()
++                    .push(None, Some(buffered_reasoning), None);
++            }
++            // F3（I2）：收尾把 pending **无视窗口**一次发完——允许合并，禁止丢最终帧。
++            let tail_now = turn_started_at_for_latency.elapsed().as_millis() as u64;
++            let tail_batch = delta_coalescer.borrow_mut().flush(tail_now);
++            if let Some(batch) = tail_batch {
++                for frame in batch.into_frames().into_iter().flatten() {
++                    emit_stream_event_with_step(
++                        sink,
++                        "turn:delta",
++                        delta_turn_id.clone(),
++                        "delta",
++                        Some("calling_model"),
++                        frame.text,
++                        frame.reasoning,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        frame.latency_ms,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        input.session_id.clone(),
++                        Some(followup_step),
++                    );
+                 }
+             }
+             let mut response = response;
+-            let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
++            // F2：本次 followup 调用的 dur/ttft 收敛到「最后一次成功 attempt」。
++            let pure_call_window = crate::agent::retry::take_pure_call_window(
++                provider_call_started_at,
++                provider_call_first_token_latency.get(),
++            );
+             let provider_call_used_true_stream =
+                 response.provider_source == "provider_followup_stream";
+             provider_call_records.push(build_provider_call_cache_record(
+@@ -1172,11 +1177,11 @@ impl AgentRuntime {
+                 Some(provider.protocol_label()),
+                 response.token_usage.as_ref(),
+                 if provider_call_used_true_stream {
+-                    provider_call_first_token_latency.get()
++                    pure_call_window.first_token_latency_ms
+                 } else {
+                     None
+                 },
+-                Some(provider_call_duration_ms),
++                Some(pure_call_window.duration_ms),
+                 if provider_call_used_true_stream {
+                     ProviderLatencyKind::ProviderStream
+                 } else {
+@@ -1190,38 +1195,16 @@ impl AgentRuntime {
+                 accumulated_fallback_reason,
+                 response.fallback_reason.clone(),
+             );
+-            let (hop_input_tokens, hop_cache_hit, hop_reasoning, hop_output, hop_total) =
+-                token_usage_parts(accumulated_token_usage.as_ref());
+-            emit_stream_event(
++            emit_stream_hop_complete(
+                 sink,
+-                "turn:hop_complete",
+-                turn_id.to_string(),
+-                "hop_complete",
+-                Some("streaming_response"),
+-                None,
+-                None,
+-                Some(provider_meta),
+-                Some(response.provider_source.clone()),
+-                Some(response.provider_mode.clone()),
+-                None,
+-                None,
+-                hop_input_tokens,
+-                hop_cache_hit,
+-                hop_reasoning,
+-                hop_output,
+-                hop_total,
++                turn_id,
++                provider_meta,
++                response.provider_source.as_str(),
++                response.provider_mode.as_str(),
++                accumulated_token_usage.as_ref(),
+                 first_token_latency.get(),
+-                Some(turn_started_at.elapsed().as_millis() as u64),
+-                None,
+-                None,
+-                None,
+-                // Wave-15 R1（契约 §7.10）：hop_complete 携带本次已完成调用的
+-                // per-call 记录（有序前缀）。push 在 :679、merge 在 :697、emit 在
+-                // :706 属同一迭代——刚 push 的记录就是本次已完成调用，末条即最新；
+-                // 既有累加字段语义不变。
+-                Some(provider_call_records.clone()),
+-                None,
+-                None,
++                turn_started_at.elapsed().as_millis() as u64,
++                provider_call_records.clone(),
+                 input.session_id.clone(),
+             );
+             let return_trace_steps = self.telemetry_builder.trace_return_active(all_tools_ok);
+@@ -1941,52 +1924,20 @@ impl AgentRuntime {
+         ));
+         let prepared_provider_meta = provider_event_meta(&prepared.provider);
+         let start_trace_steps = self.telemetry_builder.start_trace_steps();
+-        self.update_execution_checkpoint(
++        self.mark_stream_calling_model_checkpoint(
+             control,
+             &turn_id,
+-            "calling_model",
+-            Some(&prepared_provider_meta),
+-            0,
+-            None,
++            &prepared_provider_meta,
+             &start_trace_steps,
+-            &[],
+-            None,
+-            None,
+-            None,
+-            Some("running"),
+-            None,
+         );
+ 
+-        emit_stream_event(
++        emit_stream_turn_started(
+             sink,
+-            "turn:started",
+             turn_id.clone(),
+-            "started",
+-            Some("calling_model"),
+-            Some(prepared.user_message.clone()),
+-            None,
+-            Some(&prepared_provider_meta),
+-            None,
+-            None,
+-            None,
+-            Some(prepared.build_context_observation.clone()),
+-            None,
+-            None,
+-            None,
+-            None,
+-            None,
+-            None,
+-            None,
+-            Some(start_trace_steps.clone()),
+-            Some(build_stream_started_trace_timeline(
+-                prepared.user_message.as_str(),
+-                &prepared_provider_meta,
+-                &prepared.build_context_observation,
+-            )),
+-            None,
+-            None,
+-            None,
+-            None,
++            prepared.user_message.clone(),
++            &prepared_provider_meta,
++            prepared.build_context_observation.clone(),
++            start_trace_steps.clone(),
+             input.session_id.clone(),
+         );
+         if self.should_cancel_turn(control, &turn_id) {
+@@ -2216,7 +2167,11 @@ impl AgentRuntime {
+                     Some((model_call_hook_outcome.trace_records, error));
+                 return Err(HOOK_FAILTURN_HANDLED_SENTINEL.to_string());
+             }
+-            let initial_decision_started_at = Instant::now();
++            // F2（重试窗口纯净）：账本起点与 per-call 计时**同源**。重试/退避发生在
++            // `provider_decision_stream_guarded_with_mode` 内部
++            // （`provider::retry_provider_scoped_with_report_config`），因此取样点必须
++            // 就是本次调用的起点，返回后再由账本把窗口收敛到「最后一次成功 attempt」。
++            let initial_decision_started_at = crate::agent::retry::begin_provider_attempt_window();
+             let initial_turn_first_token_latency = Rc::new(Cell::new(None));
+             let initial_call_first_token_latency = Rc::new(Cell::new(None));
+             let initial_turn_first_token_latency_for_emit =
+@@ -2225,8 +2180,9 @@ impl AgentRuntime {
+                 Rc::clone(&initial_call_first_token_latency);
+             let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
+             let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
+-            let last_emit_for_client = Rc::new(Cell::new(0u64));
+-            let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
++            // F3：读线程侧的时间窗聚合器（替代旧的 `last_emit` + 内联 sleep 节流）。
++            let delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
++            let delta_coalescer_for_emit = Rc::clone(&delta_coalescer);
+             let turn_id_for_delta_emit = turn_id_for_stream.clone();
+             let stream_session_id_for_delta_emit = stream_session_id.clone();
+ 
+@@ -2295,7 +2251,6 @@ impl AgentRuntime {
+                         let value = initial_decision_started_at.elapsed().as_millis() as u64;
+                         initial_call_first_token_latency_for_emit.set(Some(value));
+                     }
+-                    let mut did_emit = false;
+                     match delta {
+                         ProviderStreamChunk::StreamStart => {
+                             // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
+@@ -2304,89 +2259,103 @@ impl AgentRuntime {
+                             if let Some(reasoning) =
+                                 reasoning_batcher_for_emit.borrow_mut().flush()
+                             {
+-                                flush_delta(None, Some(reasoning));
++                                delta_coalescer_for_emit.borrow_mut().push(
++                                    None,
++                                    Some(reasoning),
++                                    None,
++                                );
+                             }
+                             streamed_assistant_text_for_delta
+                                 .borrow_mut()
+                                 .push_str(&text);
+-                            flush_delta(Some(text), None);
+-                            did_emit = true;
++                            delta_coalescer_for_emit
++                                .borrow_mut()
++                                .push(Some(text), None, None);
+                         }
+                         ProviderStreamChunk::Reasoning(reasoning) => {
+                             if let Some(buffered_reasoning) =
+                                 reasoning_batcher_for_emit.borrow_mut().push(reasoning)
+                             {
+-                                flush_delta(None, Some(buffered_reasoning));
+-                                did_emit = true;
++                                delta_coalescer_for_emit.borrow_mut().push(
++                                    None,
++                                    Some(buffered_reasoning),
++                                    None,
++                                );
+                             }
+                         }
+                     }
+-                    if did_emit {
+-                        let now = turn_started_at.elapsed().as_millis() as u64;
+-                        let prev = last_emit_for_client_clone.get();
+-                        let gap = now.saturating_sub(prev);
+-                        const MIN_CLIENT_GAP_MS: u64 = 16;
+-                        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+-                            std::thread::sleep(std::time::Duration::from_millis(
+-                                MIN_CLIENT_GAP_MS - gap,
+-                            ));
++                    // F3（I1/I3）：只做一次时间戳比较——窗口内的内容留在 pending，
++                    // **不 sleep、不等客户端消费**。`sink.emit` 内联且契约=非阻塞投递
++                    // （慢 sink 会串进读循环，属已知限制，见文件头）。
++                    let now = turn_started_at.elapsed().as_millis() as u64;
++                    let due = delta_coalescer_for_emit.borrow_mut().take_if_due(now);
++                    if let Some(batch) = due {
++                        for frame in batch.into_frames().into_iter().flatten() {
++                            flush_delta(frame.text, frame.reasoning);
+                         }
+-                        last_emit_for_client_clone.set(now);
+                     }
+                 },
+                 crate::agent::turn_flow::LlmRequestMode::Initial,
+             )?;
+             if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
+-                let turn_latency = if initial_turn_first_token_latency.get().is_none() {
+-                    let value = turn_started_at.elapsed().as_millis() as u64;
+-                    initial_turn_first_token_latency.set(Some(value));
+-                    Some(value)
+-                } else {
+-                    None
+-                };
+-                emit_stream_event(
+-                    sink,
+-                    "turn:delta",
+-                    turn_id_for_stream.clone(),
+-                    "delta",
+-                    Some("calling_model"),
+-                    None,
+-                    Some(buffered_reasoning.clone()),
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    turn_latency,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    None,
+-                    input.session_id.clone(),
+-                );
+-                let now = turn_started_at.elapsed().as_millis() as u64;
+-                let prev = last_emit_for_client.get();
+-                let gap = now.saturating_sub(prev);
+-                const MIN_CLIENT_GAP_MS: u64 = 16;
+-                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
+-                    std::thread::sleep(std::time::Duration::from_millis(
+-                        MIN_CLIENT_GAP_MS - gap,
+-                    ));
++                delta_coalescer
++                    .borrow_mut()
++                    .push(None, Some(buffered_reasoning), None);
++            }
++            // F3（I2）：收尾**无条件**把 pending 发完——允许合并，禁止丢最终帧。
++            let tail_now = turn_started_at.elapsed().as_millis() as u64;
++            let tail_batch = delta_coalescer.borrow_mut().flush(tail_now);
++            if let Some(batch) = tail_batch {
++                for frame in batch.into_frames().into_iter().flatten() {
++                    let turn_latency = if initial_turn_first_token_latency.get().is_none() {
++                        let value = turn_started_at.elapsed().as_millis() as u64;
++                        initial_turn_first_token_latency.set(Some(value));
++                        Some(value)
++                    } else {
++                        None
++                    };
++                    emit_stream_event(
++                        sink,
++                        "turn:delta",
++                        turn_id_for_stream.clone(),
++                        "delta",
++                        Some("calling_model"),
++                        frame.text,
++                        frame.reasoning,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        turn_latency,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        None,
++                        input.session_id.clone(),
++                    );
+                 }
+             }
++            // F2：per-call (dur, ttft) 收敛为「只覆盖最后一次成功 attempt」的纯净窗口；
++            // 失败尝试/退避只留痕在账本里，不进 `gen`。轮级 TTFT 口径不变（轮级样本，
++            // 不受 per-call 纯净性约束）。
++            let pure_call_window = crate::agent::retry::take_pure_call_window(
++                initial_decision_started_at,
++                initial_call_first_token_latency.get(),
++            );
+             Ok((
+                 decision,
+-                Some(initial_decision_started_at.elapsed().as_millis() as u64),
++                Some(pure_call_window.duration_ms),
+                 initial_turn_first_token_latency.get(),
+-                initial_call_first_token_latency.get(),
++                pure_call_window.first_token_latency_ms,
+                 ProviderLatencyKind::ProviderStream,
+             ))
+         };
+@@ -2437,16 +2406,21 @@ impl AgentRuntime {
+                     Some((model_call_hook_outcome.trace_records, error));
+                 return Err(HOOK_FAILTURN_HANDLED_SENTINEL.to_string());
+             }
+-            let started_at = Instant::now();
++            // F2：同步（buffered）决策的窗口同样必须纯净——无 ttft 的调用会落到
++            // `end_to_end` 口径（`Σout/Σdur`），跨 attempt 的 dur 会把失败尝试
++            // （429/525 1.9–8.0s + 退避）当成生成时间，速度被系统性压低。
++            let started_at = crate::agent::retry::begin_provider_attempt_window();
+             let decision = provider_decision_with_mode(
+                 &prepared.provider,
+                 &prepared.planning_request,
+                 &prepared.tools,
+                 crate::agent::turn_flow::LlmRequestMode::Initial,
+             )?;
++            let pure_call_window =
++                crate::agent::retry::take_pure_call_window(started_at, None);
+             Ok((
+                 decision,
+-                Some(started_at.elapsed().as_millis() as u64),
++                Some(pure_call_window.duration_ms),
+                 None,
+                 None,
+                 ProviderLatencyKind::BufferedResponse,
+diff --git a/crates/pony-agent-core/src/agent/runtime/turn_sync.rs b/crates/pony-agent-core/src/agent/runtime/turn_sync.rs
+index c3e3aebb..17aff49d 100644
+--- a/crates/pony-agent-core/src/agent/runtime/turn_sync.rs
++++ b/crates/pony-agent-core/src/agent/runtime/turn_sync.rs
+@@ -372,7 +372,9 @@ impl AgentRuntime {
+             }
+ 
+             // ── 2) 批后**一次** followup：N==1 走既有 1:1 入口（逐字不变），N>1 走批量入口 ──
+-            let provider_call_started_at = Instant::now();
++            // F2（重试窗口纯净）：账本起点即 per-call 计时起点，重试/退避在
++            // `provider_followup_with_mode` 内部，不共源就会被算进 dur。
++            let provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
+             let followup_result = if executed_calls.len() == 1 {
+                 provider_followup_with_mode(
+                     provider,
+@@ -409,25 +411,22 @@ impl AgentRuntime {
+                 }
+             };
+             let mut response = response;
+-            let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
+-            provider_call_records.push(build_provider_call_cache_record(
+-                ProviderRequestKind::ToolFollowup,
+-                Some(response.provider_source.as_str()),
+-                Some(response.provider_mode.as_str()),
+-                // wave-54 C4：协议归一上下文输入口径（anthropic ⇒ input + cache_read）。
+-                Some(provider.protocol_label()),
+-                response.token_usage.as_ref(),
+-                None,
+-                Some(provider_call_duration_ms),
+-                ProviderLatencyKind::BufferedResponse,
+-                Some(&context_observation),
+-            ));
+-            accumulated_token_usage =
+-                merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
+-            accumulated_fallback_reason = merge_fallback_reason(
+-                accumulated_fallback_reason,
+-                response.fallback_reason.clone(),
++            // F2：per-call dur 收敛为「只覆盖最后一次成功 attempt」（同步 followup 无首包观测）。
++            let provider_call_duration_ms =
++                crate::agent::retry::take_pure_call_window(provider_call_started_at, None).duration_ms;
++            push_buffered_followup_call_record(
++                provider_call_records,
++                provider,
++                &response,
++                provider_call_duration_ms,
++                &context_observation,
+             );
++            (accumulated_token_usage, accumulated_fallback_reason) =
++                merge_response_usage_into_accumulators(
++                    accumulated_token_usage,
++                    accumulated_fallback_reason,
++                    &response,
++                );
+ 
+             if let Some(error) = provider_failure_message(
+                 &response.provider_mode,
+@@ -506,14 +505,12 @@ impl AgentRuntime {
+                         &context_observation,
+                     );
+                     provider_call_records.push(recovery.provider_call_record);
+-                    accumulated_token_usage = merge_token_usage(
+-                        accumulated_token_usage,
+-                        recovery.response.token_usage.as_ref(),
+-                    );
+-                    accumulated_fallback_reason = merge_fallback_reason(
+-                        accumulated_fallback_reason,
+-                        recovery.response.fallback_reason.clone(),
+-                    );
++                    (accumulated_token_usage, accumulated_fallback_reason) =
++                        merge_response_usage_into_accumulators(
++                            accumulated_token_usage,
++                            accumulated_fallback_reason,
++                            &recovery.response,
++                        );
+                     response = recovery.response;
+                 } else if completed_hops >= max_tool_hops_per_turn() {
+                     return Err(self.fail_sync_turn_result(
+@@ -546,14 +543,12 @@ impl AgentRuntime {
+                             &context_observation,
+                         );
+                         provider_call_records.push(recovery.provider_call_record);
+-                        accumulated_token_usage = merge_token_usage(
+-                            accumulated_token_usage,
+-                            recovery.response.token_usage.as_ref(),
+-                        );
+-                        accumulated_fallback_reason = merge_fallback_reason(
+-                            accumulated_fallback_reason,
+-                            recovery.response.fallback_reason.clone(),
+-                        );
++                        (accumulated_token_usage, accumulated_fallback_reason) =
++                            merge_response_usage_into_accumulators(
++                                accumulated_token_usage,
++                                accumulated_fallback_reason,
++                                &recovery.response,
++                            );
+                         response = recovery.response;
+                     } else {
+                         current_assistant_message = response.assistant_message.clone();
+@@ -767,37 +762,13 @@ impl AgentRuntime {
+         // PA-095：同步入口事件化——prepare 成功即发射 turn:started（payload.text
+         // 携带用户消息 → 触发 user/message；build_context_observation → 触发
+         // context/observation 外置）。事件持久化走全局注册表，NoopSink 不做推送。
+-        {
+-            let sync_sink = crate::agent::turn_flow::NoopTurnEventSink;
+-            crate::agent::turn_flow::emit_stream_event(
+-                &sync_sink,
+-                "turn:started",
+-                sync_turn_id.clone(),
+-                "started",
+-                Some("calling_model"),
+-                Some(prepared.user_message.clone()),
+-                None,
+-                Some(&provider_meta),
+-                None,
+-                None,
+-                None,
+-                Some(prepared.build_context_observation.clone()),
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                None,
+-                input.session_id.clone(),
+-            );
+-        }
++        emit_sync_turn_started(
++            sync_turn_id.clone(),
++            prepared.user_message.clone(),
++            &provider_meta,
++            prepared.build_context_observation.clone(),
++            input.session_id.clone(),
++        );
+         let model_call_hook_outcome =
+             self.dispatch_hook_trace_records(TurnHookPoint::ModelCallStart);
+         let initial_model_hook_trace_records = model_call_hook_outcome.trace_records.clone();
+diff --git a/crates/pony-agent-core/src/agent/turn_event.rs b/crates/pony-agent-core/src/agent/turn_event.rs
+index 954ceb72..4d397031 100644
+--- a/crates/pony-agent-core/src/agent/turn_event.rs
++++ b/crates/pony-agent-core/src/agent/turn_event.rs
+@@ -185,6 +185,67 @@ pub enum TurnEvent {
+         error_message: String,
+         raw_snippet: String,
+     },
++    /// F1：**轮级速度口径结算**（每轮终态一条，可离线取证）。
++    ///
++    /// 为什么需要它：`turnSpeedBasis` / speed 此前只走线缆与（401 全丢的）OTel，
++    /// 不落 DB、不落日志 ⇒ 「60-70 vs 200+」无法归因（诊断 `.dev-team/diag-tps/00-SYNTHESIS.md` §5.2）。
++    /// 本事件把「速度 + 口径 + 样本量 + 突发剔除数」钉进 append-only 事件层，
++    /// 重启/离线复盘都能从 `turn_events` 复算，不依赖任何旁路。
++    ///
++    /// 契约（F1 I1，逐字）：
++    /// - 键名按契约**字面量** camelCase（与既有事件 snake_case 约定不同——契约冻结了这五个键名，
++    ///   取证脚本/验收断言按名匹配；诊断扫描也是按 camelCase 搜 payload 的）；
++    /// - **无值时不写键**（`None` ⇒ 整键缺席，禁止 `0` / `NaN` 占位）；
++    /// - 值来源唯一：`speed`/`basis` 与快照同源同帧（`weighted_turn_speed`），
++    ///   `turnCallsTotal` / `turnCallsEligible` / `turnBurstExcluded` 由 `turn_flow::turn_call_census`
++    ///   从同一份记录派生（判据不在此重写）。
++    TurnSpeed {
++        turn_id: String,
++        #[serde(
++            default,
++            rename = "turnSpeedTokensPerSecond",
++            skip_serializing_if = "Option::is_none"
++        )]
++        turn_speed_tokens_per_second: Option<f64>,
++        #[serde(
++            default,
++            rename = "turnSpeedBasis",
++            skip_serializing_if = "Option::is_none"
++        )]
++        turn_speed_basis: Option<crate::agent::turn_flow::TurnSpeedBasis>,
++        #[serde(default, rename = "turnCallsTotal", skip_serializing_if = "Option::is_none")]
++        turn_calls_total: Option<u32>,
++        #[serde(
++            default,
++            rename = "turnCallsEligible",
++            skip_serializing_if = "Option::is_none"
++        )]
++        turn_calls_eligible: Option<u32>,
++        #[serde(
++            default,
++            rename = "turnBurstExcluded",
++            skip_serializing_if = "Option::is_none"
++        )]
++        turn_burst_excluded: Option<u32>,
++        /// 契约 I1 原文口径的「全部解码剔除数」（`valid − decode_eligible`）：突发整包、
++        /// 无 TTFT、单 token 三类之和。突发只是其中一类，故与 `turnBurstExcluded` 并列保留。
++        #[serde(
++            default,
++            rename = "turnExcludedTotal",
++            skip_serializing_if = "Option::is_none"
++        )]
++        turn_excluded_total: Option<u32>,
++        /// `valid` 中**无 TTFT 观测**的调用数（`= valid − 有 ttft 的 valid`）：
++        /// 无法界定解码窗口、只能进端到端回退，是「整包到达 / 非流式 followup」的根因面
++        /// （诊断 `.dev-team/diag-tps/00-SYNTHESIS.md` §3：73% gemini 调用整包到达）。
++        /// 与 `turnBurstExcluded` **互斥不重叠**：突发 = 有 ttft 但 gen 低于物理下限。
++        #[serde(
++            default,
++            rename = "turnCallsTtftMissing",
++            skip_serializing_if = "Option::is_none"
++        )]
++        turn_calls_ttft_missing: Option<u32>,
++    },
+ }
+ 
+ impl TurnEvent {
+@@ -208,6 +269,7 @@ impl TurnEvent {
+             TurnEvent::ForkCreated { .. } => "fork/created",
+             TurnEvent::ContextObservation { .. } => "context/observation",
+             TurnEvent::CorruptedEventTombstone { .. } => "corrupted/tombstone",
++            TurnEvent::TurnSpeed { .. } => "turn/speed",
+         }
+     }
+ 
+@@ -224,6 +286,7 @@ impl TurnEvent {
+             | TurnEvent::ToolCall { turn_id, .. }
+             | TurnEvent::ToolResult { turn_id, .. }
+             | TurnEvent::ProviderUsage { turn_id, .. }
++            | TurnEvent::TurnSpeed { turn_id, .. }
+             | TurnEvent::ContextObservation { turn_id, .. } => Some(turn_id),
+             TurnEvent::CorruptedEventTombstone { turn_id, .. } => turn_id.as_deref(),
+             TurnEvent::PlanUpdate { .. }
+diff --git a/crates/pony-agent-core/src/agent/turn_flow.rs b/crates/pony-agent-core/src/agent/turn_flow.rs
+index 7b395a56..3a10f848 100644
+--- a/crates/pony-agent-core/src/agent/turn_flow.rs
++++ b/crates/pony-agent-core/src/agent/turn_flow.rs
+@@ -10,7 +10,7 @@ use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
+ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ use std::collections::HashMap;
+-use std::sync::{Arc, Mutex, OnceLock};
++use std::sync::{Mutex, OnceLock};
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+ use super::context::RetrievedContextState;
+@@ -38,307 +38,21 @@ impl TurnEventSink for NoopTurnEventSink {
+ /// 测试可注册 mock / 清空。签名：(session_id, turn_id, event, is_terminal)。
+ pub type EventPersistFn = dyn Fn(&str, &str, crate::agent::turn_event::TurnEvent, bool) + Send + Sync;
+ 
+-static EVENT_PERSIST_REGISTRY: OnceLock<Mutex<Option<Arc<EventPersistFn>>>> = OnceLock::new();
+-
+-fn event_persist_registry() -> &'static Mutex<Option<Arc<EventPersistFn>>> {
+-    EVENT_PERSIST_REGISTRY.get_or_init(|| Mutex::new(None))
+-}
+-
+-/// 注册生产事件持久化通道（幂等：重复注册覆盖）。
+-pub fn register_event_persist(f: Arc<EventPersistFn>) {
+-    let mut slot = event_persist_registry()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner());
+-    // PA-095 #3（实施后审核 P2）：覆盖非同源通道时告警——多控制面并存时
+-    // 后建者的单槽注册会劫持先建者未绑定会话的事件流（结构性已知问题，
+-    // 登记于任务卡；测试侧应使用会话绑定路由）。
+-    if let Some(previous) = slot.as_ref() {
+-        if !Arc::ptr_eq(previous, &f) {
+-            eprintln!(
+-                "[pony-agent][runtime] event persist channel overwritten by a new control plane (multi-control-plane setups must route per session)"
+-            );
+-        }
+-    }
+-    *slot = Some(f);
+-}
+-
+-/// 清空事件持久化通道（测试用）。
+-pub fn clear_event_persist() {
+-    let mut slot = event_persist_registry()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner());
+-    *slot = None;
+-}
+-
+-/// PA-093：非 turn 生命周期事实（checkpoint/checkout、fork/created）经全局
+-/// 注册表落盘。turn_id 用语义化字面量（事件无 turn 归属，列非空）。
+-/// 未注册通道（测试/老路径）时静默跳过——与 turn 事件路径的 contained 语义一致。
+-/// PA-095 #3：is_terminal=false——history 命令在持有 sessions 写锁时调用本函数，
+-/// 终态内联 flush 会同线程重入写锁死锁（fork 实测挂死）；改为仅入缓冲，由
+-/// history 命令包装释放写锁后的 flush_session_buffered_events 提交（或并入下一条
+-/// turn 终态批）。内存后端 flush 失败 contained（与既有语义一致）。
+-pub fn emit_global_event(
+-    session_id: &str,
+-    turn_id: &str,
+-    event: crate::agent::turn_event::TurnEvent,
+-) {
+-    if let Some(persist) = resolve_event_persist(session_id) {
+-        persist(session_id, turn_id, event, false);
+-    }
+-}
+-
+-/// 当前注册的持久化通道（None = 未注册，事件不落盘）。
+-fn current_event_persist() -> Option<Arc<EventPersistFn>> {
+-    event_persist_registry()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner())
+-        .clone()
+-}
+-
+-/// PA-095：分发事件到生产通道与测试多播 sink。生产单槽可被任意
+-/// HostControlPlane 构建覆盖（并行测试下互相抢占），测试多播 sink 只能被
+-/// 注册它的测试清除——依赖全局通道断言的测试必须走多播 sink。
+-fn dispatch_event_persist(
+-    session_id: &str,
+-    turn_id: &str,
+-    event: crate::agent::turn_event::TurnEvent,
+-    is_terminal: bool,
+-) {
+-    // PA-095 #3（实施后审核 P1）：匿名 turn（session_id=None）归一到默认会话——
+-    // 其 history/trace 本就落默认会话，事件缓冲键若保留 "" 将无人 flush（永久滞留）。
+-    let resolved_session_id = if session_id.is_empty() {
+-        crate::agent::session::DEFAULT_SESSION_ID
+-    } else {
+-        session_id
+-    };
+-    if let Some(persist) = resolve_event_persist(resolved_session_id) {
+-        persist(resolved_session_id, turn_id, event.clone(), is_terminal);
+-    }
+-    #[cfg(test)]
+-    for sink in event_persist_test_sinks()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner())
+-        .iter()
+-    {
+-        sink(session_id, turn_id, event.clone(), is_terminal);
+-    }
+-}
+-
+-/// PA-095 #3：事件通道解析——会话绑定优先，回退全局默认单槽。会话绑定是
+-/// "按 session 所有权路由的多通道模型"（任务卡登记的结构性改进）的落地：
+-/// 并行测试中各场景把自身控制面的通道绑到自己的 session，全局默认槽被其他
+-/// 测试构建覆盖不再影响本会话的事件落盘；生产路径无绑定时行为不变。
+-///
+-/// TODO(PA-095 #3 后续任务)：session 绑定路由目前仅测试构建生效（见下方
+-/// `#[cfg(test)]` 分支）；生产构建恒走全局默认单槽（last-build-wins）。
+-/// 生产侧按 session 接线尚未实施，勿因本签名看似接收 session_id 而误以为已接线。
+-///
+-/// （参数仅测试构建使用，故带下划线前缀以通过非测试编译的 unused 检查。）
+-fn resolve_event_persist(_session_id: &str) -> Option<Arc<EventPersistFn>> {
+-    #[cfg(test)]
+-    if let Some(bound) = session_event_persist_binding(_session_id) {
+-        return Some(bound);
+-    }
+-    current_event_persist()
+-}
+-
+-/// PA-095：测试专用多播 sink 注册表（与生产单槽独立）。
+-#[cfg(test)]
+-static EVENT_PERSIST_TEST_SINKS: OnceLock<Mutex<Vec<Arc<EventPersistFn>>>> = OnceLock::new();
+-
+-#[cfg(test)]
+-fn event_persist_test_sinks() -> &'static Mutex<Vec<Arc<EventPersistFn>>> {
+-    EVENT_PERSIST_TEST_SINKS.get_or_init(|| Mutex::new(Vec::new()))
+-}
+-
+-/// PA-095：注册测试专用多播持久化 sink（不受生产单槽覆盖影响）。
+-/// 返回守卫——Drop 时仅移除本 sink（并行测试互不清除对方注册）。
+-#[cfg(test)]
+-pub fn register_event_persist_test_sink(
+-    f: Arc<EventPersistFn>,
+-) -> EventPersistTestSinkGuard {
+-    let mut sinks = event_persist_test_sinks()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner());
+-    sinks.push(Arc::clone(&f));
+-    drop(sinks);
+-    EventPersistTestSinkGuard { sink: f }
+-}
+-
+-/// PA-095：测试多播 sink 守卫——Drop 按指针相等移除自身。
+-#[cfg(test)]
+-pub struct EventPersistTestSinkGuard {
+-    sink: Arc<EventPersistFn>,
+-}
+-
+-#[cfg(test)]
+-impl Drop for EventPersistTestSinkGuard {
+-    fn drop(&mut self) {
+-        let mut sinks = event_persist_test_sinks()
+-            .lock()
+-            .unwrap_or_else(|e| e.into_inner());
+-        sinks.retain(|sink| !Arc::ptr_eq(sink, &self.sink));
+-    }
+-}
+-
+-/// PA-095 #3：会话绑定事件持久化通道（测试专用）——session 所有权路由，
+-/// 优先于全局默认单槽；守卫 Drop 时解除绑定。
+-#[cfg(test)]
+-static SESSION_EVENT_PERSIST_BINDINGS: OnceLock<Mutex<HashMap<String, Arc<EventPersistFn>>>> =
+-    OnceLock::new();
+-
+-#[cfg(test)]
+-fn session_event_persist_bindings(
+-) -> &'static Mutex<HashMap<String, Arc<EventPersistFn>>> {
+-    SESSION_EVENT_PERSIST_BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
+-}
+-
+-#[cfg(test)]
+-fn session_event_persist_binding(session_id: &str) -> Option<Arc<EventPersistFn>> {
+-    session_event_persist_bindings()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner())
+-        .get(session_id)
+-        .cloned()
+-}
+-
+-/// PA-095 #3：绑定会话的事件持久化通道（测试专用）；返回守卫，Drop 解绑。
+-#[cfg(test)]
+-pub fn bind_event_persist_session(
+-    session_id: &str,
+-    f: Arc<EventPersistFn>,
+-) -> SessionEventPersistBindingGuard {
+-    session_event_persist_bindings()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner())
+-        .insert(session_id.to_string(), Arc::clone(&f));
+-    SessionEventPersistBindingGuard {
+-        session_id: session_id.to_string(),
+-        bound: f,
+-    }
+-}
+-
+-#[cfg(test)]
+-pub struct SessionEventPersistBindingGuard {
+-    session_id: String,
+-    bound: Arc<EventPersistFn>,
+-}
+-
+-#[cfg(test)]
+-impl Drop for SessionEventPersistBindingGuard {
+-    fn drop(&mut self) {
+-        // PA-095 #3（实施后审核 P2）：仅当当前占用者仍是自己时才解绑——
+-        // 同名 session 的嵌套/并行绑定不得被先结束的守卫误摘。
+-        let mut bindings = session_event_persist_bindings()
+-            .lock()
+-            .unwrap_or_else(|e| e.into_inner());
+-        if bindings
+-            .get(&self.session_id)
+-            .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
+-        {
+-            bindings.remove(&self.session_id);
+-        }
+-    }
+-}
+-
+-/// PA-095 #2：会话级事件缓冲 flush 请求——append_turn 物化前确保该会话的
+-/// 缓冲事件已提交事件表（commit 先于清空，由注册闭包保证）。生产由
+-/// HostControlPlaneBuilder 注册（与持久化闭包同源缓冲）；未注册（无控制面 /
+-/// 测试直连 store）返回 Ok(0)。
+-pub type EventFlushFn = dyn Fn(&str) -> Result<usize, String> + Send + Sync;
+-
+-static EVENT_FLUSH_REGISTRY: OnceLock<Mutex<Option<Arc<EventFlushFn>>>> = OnceLock::new();
+-
+-/// PA-095 #3：会话绑定 flush 通道（测试专用）——与持久化绑定同原理。
+-#[cfg(test)]
+-static SESSION_EVENT_FLUSH_BINDINGS: OnceLock<Mutex<HashMap<String, Arc<EventFlushFn>>>> =
+-    OnceLock::new();
+-
+-#[cfg(test)]
+-fn session_event_flush_bindings() -> &'static Mutex<HashMap<String, Arc<EventFlushFn>>> {
+-    SESSION_EVENT_FLUSH_BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
+-}
+-
+-/// PA-095 #3：绑定会话的 flush 请求通道（测试专用）；返回守卫，Drop 解绑。
+-#[cfg(test)]
+-pub fn bind_event_flush_session(
+-    session_id: &str,
+-    f: Arc<EventFlushFn>,
+-) -> SessionEventFlushBindingGuard {
+-    session_event_flush_bindings()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner())
+-        .insert(session_id.to_string(), Arc::clone(&f));
+-    SessionEventFlushBindingGuard {
+-        session_id: session_id.to_string(),
+-        bound: f,
+-    }
+-}
+-
+-#[cfg(test)]
+-pub struct SessionEventFlushBindingGuard {
+-    session_id: String,
+-    bound: Arc<EventFlushFn>,
+-}
+-
++mod turn_flow_registry;
++// 公开 API 逐项 re-export：既有 `turn_flow::<fn>` 寻址契约一字不变。
++pub use self::turn_flow_registry::{
++    clear_event_flush, clear_event_persist, emit_global_event, flush_session_buffered_events,
++    register_event_flush, register_event_persist, EventFlushFn,
++};
++// 测试专用绑定/多播 sink 与守卫：沿用原 `#[cfg(test)]` 门，不对外暴露。
+ #[cfg(test)]
+-impl Drop for SessionEventFlushBindingGuard {
+-    fn drop(&mut self) {
+-        // 同 persist 守卫——仅解绑自己（Arc::ptr_eq 校验）。
+-        let mut bindings = session_event_flush_bindings()
+-            .lock()
+-            .unwrap_or_else(|e| e.into_inner());
+-        if bindings
+-            .get(&self.session_id)
+-            .is_some_and(|current| Arc::ptr_eq(current, &self.bound))
+-        {
+-            bindings.remove(&self.session_id);
+-        }
+-    }
+-}
+-
+-fn event_flush_registry() -> &'static Mutex<Option<Arc<EventFlushFn>>> {
+-    EVENT_FLUSH_REGISTRY.get_or_init(|| Mutex::new(None))
+-}
+-
+-/// 注册会话级 flush 请求通道（幂等：重复注册覆盖）。
+-pub fn register_event_flush(f: Arc<EventFlushFn>) {
+-    let mut slot = event_flush_registry()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner());
+-    *slot = Some(f);
+-}
+-
+-/// 清空 flush 请求通道（测试用）。
+-pub fn clear_event_flush() {
+-    let mut slot = event_flush_registry()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner());
+-    *slot = None;
+-}
++pub use self::turn_flow_registry::{
++    bind_event_flush_session, bind_event_persist_session, register_event_persist_test_sink,
++    EventPersistTestSinkGuard, SessionEventFlushBindingGuard, SessionEventPersistBindingGuard,
++};
++// 内部派发入口：父模块的 emit 链路仍在用，收紧为 `pub(super)` 不扩大可见性。
++use self::turn_flow_registry::dispatch_event_persist;
+ 
+-/// 请求提交某会话的全部缓冲事件；返回提交的事件数（0 = 无缓冲）。
+-/// PA-095 #3：会话绑定 flush 通道优先（session 所有权路由），回退全局注册。
+-pub fn flush_session_buffered_events(session_id: &str) -> Result<usize, String> {
+-    #[cfg(test)]
+-    if let Some(bound) = session_event_flush_bindings()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner())
+-        .get(session_id)
+-        .cloned()
+-    {
+-        return bound(session_id);
+-    }
+-    match event_flush_registry()
+-        .lock()
+-        .unwrap_or_else(|e| e.into_inner())
+-        .as_ref()
+-        .map(|f| Arc::clone(f) as Arc<EventFlushFn>)
+-    {
+-        Some(flush) => flush(session_id),
+-        None => Ok(0),
+-    }
+-}
+ 
+ pub struct PreparedTurn {
+     pub user_message: String,
+@@ -1313,6 +1027,13 @@ pub fn emit_event(
+         dispatch_event_persist(session_id, &payload.turn_id, usage_event, false);
+         dispatch_event_persist(session_id, &payload.turn_id, step_end_event, false);
+     }
++    // F1 I1/I2：轮终态速度取证——**同一帧**写一条结构化事件（落 turn_events 通道）与
++    // 一行结构化日志，字段逐字同名；必须在 `turn/end`（terminal，触发 flush）**之前**
++    // 派发，才能与整批终态事件同事务落盘。
++    if let Some(speed_event) = settle_turn_speed_evidence(name, &payload) {
++        let session_id = payload.session_id.as_deref().unwrap_or("");
++        dispatch_event_persist(session_id, &payload.turn_id, speed_event, false);
++    }
+     if let Some(end_event) = build_turn_end_event(name, &payload) {
+         let session_id = payload.session_id.as_deref().unwrap_or("");
+         dispatch_event_persist(session_id, &payload.turn_id, end_event, true);
+@@ -1543,6 +1264,94 @@ fn build_turn_end_event(
+     })
+ }
+ 
++/// F1 I1 + I2：轮终态速度取证（**同一帧**产事件 + 日志，字段逐字同名）。
++///
++/// 值来源（I3，禁止消费面另写公式/判据）：
++/// - `turnSpeedTokensPerSecond` / `turnSpeedBasis` 直取 `payload.metrics`，即
++///   [`crate::agent::metrics_snapshot::build_turn_metrics_snapshot`] → [`weighted_turn_speed`]
++///   结算的唯一真值（本函数**不做任何速度运算**）；
++/// - 三个样本数由 [`turn_call_census`] 从同一份 `provider_call_records` 派生
++///   （`eligible` / `burst_excluded` 的判据只在 turn_flow 定义一次）。
++///
++/// 无值时不写键（I1，禁止 0/NaN 占位）：`None` 字段在 serde 层整键缺席；
++/// 本轮既无 per-call 记录也无快照 ⇒ 连事件都不发（没有任何可取证事实，写孤儿事件只是噪声）。
++///
++/// 返回的 `TurnEvent::TurnSpeed` 由调用方在 `turn/end`（terminal，触发 flush）之前派发，
++/// 保证与整批终态事件同事务落盘。
++fn settle_turn_speed_evidence(
++    name: &str,
++    payload: &TurnStreamEvent,
++) -> Option<crate::agent::turn_event::TurnEvent> {
++    use crate::agent::turn_event::TurnEvent;
++    if !matches!(
++        name,
++        "turn:completed" | "turn:failed" | "turn:cancelled" | "turn:suspended"
++    ) {
++        return None;
++    }
++    let records = payload.provider_call_records.as_deref().unwrap_or(&[]);
++    let metrics = payload.metrics.as_ref();
++    if records.is_empty() && metrics.is_none() {
++        return None;
++    }
++
++    let speed = metrics.and_then(|metrics| metrics.turn_speed_tokens_per_second);
++    let basis = metrics.and_then(|metrics| metrics.turn_speed_basis);
++    // 样本数只在**确有可计数调用**（`valid > 0`）时才是真值：没有任何有效调用时「样本量」无定义
++    // ⇒ 键缺席（不得以 0 冒充「0 次调用」，I1「无值不写键」）。
++    let census = {
++        let census = turn_call_census(records);
++        (census.valid > 0).then_some(census)
++    };
++
++    // I2：同帧结构化日志（键名与事件字段逐字同名；无值不写键）。
++    let mut extras: Vec<(&str, Value)> = Vec::with_capacity(7);
++    extras.push(("turn_id", serde_json::json!(payload.turn_id)));
++    if let Some(speed) = speed {
++        extras.push(("turnSpeedTokensPerSecond", serde_json::json!(speed)));
++    }
++    if let Some(basis) = basis {
++        extras.push(("turnSpeedBasis", serde_json::json!(basis.as_str())));
++    }
++    if let Some(census) = census {
++        extras.push(("turnCallsTotal", serde_json::json!(census.total)));
++        extras.push(("turnCallsEligible", serde_json::json!(census.eligible)));
++        extras.push((
++            "turnBurstExcluded",
++            serde_json::json!(census.burst_excluded),
++        ));
++        // 契约 I1 原文口径的「全部解码剔除数」（valid − eligible）保留为独立可取证键：
++        // 突发整包只是其中一类，缺 TTFT / 单 token 同样被剔除，不能互相冒充。
++        extras.push((
++            "turnExcludedTotal",
++            serde_json::json!(census.excluded_total()),
++        ));
++        // 软要求（Lead 追加）：把「突发剔除」与「无 TTFT 不可测」分开——后者是「整包到达 /
++        // 非流式 followup」的根因面，与突发整包是两个不同诊断结论。
++        extras.push((
++            "turnCallsTtftMissing",
++            serde_json::json!(census.no_ttft_excluded),
++        ));
++    }
++    crate::agent::otel::log::log_json_with_fields(
++        "info",
++        TURN_SPEED_LOG_MESSAGE,
++        crate::agent::otel::exported_trace_id().as_deref(),
++        &extras,
++    );
++
++    Some(TurnEvent::TurnSpeed {
++        turn_id: payload.turn_id.clone(),
++        turn_speed_tokens_per_second: speed,
++        turn_speed_basis: basis,
++        turn_calls_total: census.map(|census| census.total),
++        turn_calls_eligible: census.map(|census| census.eligible),
++        turn_burst_excluded: census.map(|census| census.burst_excluded),
++        turn_excluded_total: census.map(|census| census.excluded_total()),
++        turn_calls_ttft_missing: census.map(|census| census.no_ttft_excluded),
++    })
++}
++
+ /// PA-091：TurnStreamEvent → TurnEvent 映射（design.md 映射表）。
+ /// `turn:output_end` / `turn:trace` / `turn.context_built` 显式不落盘（返回 None）。
+ fn build_turn_event(
+@@ -2952,6 +2761,90 @@ pub fn weighted_turn_speed(records: &[ProviderCallCacheRecord]) -> TurnSpeedTrut
+     resolve_turn_speed(decode, valid, ttft_ms)
+ }
+ 
++/// F1 取证口径：一轮 provider 调用的**样本普查**（唯一出处；事件 / 日志 / 显示端共用）。
++///
++/// 定义：
++/// - `total`：该轮 per-call 记录总数（含无效/不可解码记录，回答「这轮到底调了几次」）；
++/// - `valid`：`call_valid` 记录数（`dur > 0 && out > 0`）；
++/// - `eligible`：`decode_eligible` 记录数（流式解码样本，进入 `stream_decode` 的分子/分母）；
++/// - `burst_excluded`：**突发整包剔除数**——已具备解码前提（ttft 存在、`dur > ttft`、`out >= 2`）
++///   但解码窗口 `gen` 低于物理下限 [`decode_floor_ms`]（SSE 被上游代理攒成一包）的调用数；
++/// - `no_ttft_excluded`：`valid` 但**无 TTFT 观测**（无法定解码窗口，只能进端到端回退）的调用数；
++/// - `other_excluded`：其余不合格（`dur <= ttft` 或 `out < 2`）。
++///
++/// 恒等式：`valid == eligible + burst_excluded + no_ttft_excluded + other_excluded`。
++/// [`Self::excluded_total`]（= `valid − eligible`）是上述三类剔除之和，对外键名
++/// `turnExcludedTotal`，不丢任何真值。
++///
++/// 线缆口径（契约 v3，Lead 裁决 2026-11-12；两键定义各一行，禁止读者从名字猜）：
++/// - `turnBurstExcluded` = `burst_excluded`（**真突发整包数**：有 ttft 且 `gen < floor(dur)`）；
++/// - `turnExcludedTotal` = `excluded_total()`（**全部解码剔除**：`valid − decode_eligible`）；
++/// - `turnCallsTtftMissing` = `no_ttft_excluded`（`valid − 有 ttft 的 valid`，无 TTFT 不可测）。
++///
++/// 判据只复用 [`call_valid`] / [`decode_eligible`] / [`decode_floor_ms`]（I3：判据只在 turn_flow
++/// 定义一次，本函数不复制判据细节）；速度本身不在此计算（仍只由 [`weighted_turn_speed`] 结算）。
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct TurnCallCensus {
++    pub total: u32,
++    pub valid: u32,
++    pub eligible: u32,
++    pub burst_excluded: u32,
++    pub no_ttft_excluded: u32,
++    pub other_excluded: u32,
++}
++
++impl TurnCallCensus {
++    /// `valid 记录数 − decode_eligible 记录数`（契约 I1 原文口径 = 全部解码剔除之和）。
++    pub fn excluded_total(&self) -> u32 {
++        self.burst_excluded
++            .saturating_add(self.no_ttft_excluded)
++            .saturating_add(self.other_excluded)
++    }
++}
++
++/// 由 per-call 记录派生样本普查（[`TurnCallCensus`]）。
++pub fn turn_call_census(records: &[ProviderCallCacheRecord]) -> TurnCallCensus {
++    let mut census = TurnCallCensus {
++        total: u32::try_from(records.len()).unwrap_or(u32::MAX),
++        ..TurnCallCensus::default()
++    };
++    for record in records {
++        if !call_valid(record.turn_duration_ms, record.output_tokens) {
++            continue;
++        }
++        census.valid = census.valid.saturating_add(1);
++        if decode_eligible(
++            record.turn_duration_ms,
++            record.first_token_latency_ms,
++            record.output_tokens,
++        ) {
++            census.eligible = census.eligible.saturating_add(1);
++            continue;
++        }
++        // 不合格原因分解（判据顺序与 `decode_eligible` 内部一致：先 ttft，再 dur/out，最后物理下限）。
++        match record.first_token_latency_ms {
++            None => census.no_ttft_excluded = census.no_ttft_excluded.saturating_add(1),
++            Some(ttft) => {
++                let duration = record.turn_duration_ms.unwrap_or(0);
++                let output = record.output_tokens.unwrap_or(0);
++                if duration <= ttft || output < 2 {
++                    census.other_excluded = census.other_excluded.saturating_add(1);
++                } else {
++                    // 解码前提全部满足，仍不合格 ⇒ 唯一可能是 `gen < floor(dur)`：突发整包。
++                    census.burst_excluded = census.burst_excluded.saturating_add(1);
++                }
++            }
++        }
++    }
++    census
++}
++
++/// F1 I2：轮速度结算结构化日志的 message（单行 JSON 的 `msg` 字段）。
++///
++/// 日志键名与事件字段**逐字同名**（camelCase，契约冻结键名），便于离线取证时
++/// 「日志 ↔ `turn_events.payload`」两侧共用同一套解析。
++pub const TURN_SPEED_LOG_MESSAGE: &str = "turn speed settled";
++
+ /// 把速度真值与 turn 级 timing 落到根 `agent.turn` span。
+ ///
+ /// 生产路径（`runtime/turn_stream.rs` / `runtime/turn_sync.rs` 的终态收尾）唯一出口：
+diff --git a/crates/pony-agent-core/src/bin/tui.rs b/crates/pony-agent-core/src/bin/tui.rs
+index eb6d6f3c..255b5665 100644
+--- a/crates/pony-agent-core/src/bin/tui.rs
++++ b/crates/pony-agent-core/src/bin/tui.rs
+@@ -25,7 +25,9 @@ use pony_agent_core::agent::control_plane::{
+ };
+ use pony_agent_core::agent::goal::{GoalActivation as AgentGoalActivation, GoalData};
+ // W3：Team 可见性数据源（全部来自真实运行时，不造数据）。
+-use pony_agent_core::agent::metrics_snapshot::{context_ratio_for_window, TurnMetricsSnapshot};
++use pony_agent_core::agent::metrics_snapshot::{
++    context_ratio_for_window, format_unit_fraction_percent, TurnMetricsSnapshot,
++};
+ use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
+ // 显示偏好（/settings 与 Ctrl+O 的唯一真值）：独立文件持久化，与桌面端 settings.json 契约解耦。
+ use pony_agent_core::agent::headless::PermissionMode;
+@@ -500,6 +502,10 @@ pub use self::input::*;
+ mod queue;
+ #[path = "tui/goal_command.rs"]
+ mod goal_command;
++#[path = "tui/shortcuts.rs"]
++mod shortcuts;
++#[path = "tui/goal_panel.rs"]
++mod goal_panel;
+ pub use self::queue::*;
+ 
+ #[path = "tui/errors.rs"]
+@@ -587,6 +593,10 @@ pub enum InteractionMode {
+     AgentRoster,
+     /// 本轮：`/settings` 显示偏好面板（↑↓ 选择 · Space/Enter 切换 · Esc 关闭）。
+     Settings,
++    /// Ctrl+H：快捷键帮助覆盖层（清单唯一真源 `tui/shortcuts.rs`；Esc 或再按关闭）。
++    ShortcutsHelp,
++    /// Ctrl+G：当前会话目标详情覆盖层（只读；Esc 或再按关闭）。
++    GoalDetail,
+     /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的两段式覆盖层
+     /// （① 选轮次 ② 选范围：恢复代码与会话 / 仅恢复会话）。
+     Rewind,
+@@ -608,7 +618,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
+     ("/teams", "查看 Team 角色与状态（同 /agents）"),
+     ("/clear", "清空当前消息上下文"),
+     ("/compact", "压缩当前会话上下文"),
+-    ("/help", "查看所有支持的快捷指令"),
++    ("/help", "查看命令与快捷键列表"),
+     ("/update", "检查更新与升级新版本"),
+     ("/quit", "安全退出 TUI 界面"),
+ ];
+@@ -4060,13 +4070,48 @@ fn goal_banner_parts(state: &TuiState, goal: &TuiGoal) -> (String, String) {
+     )
+ }
+ 
++/// F1 I4：速度段必须**自描述三件套**（速度 + 样本量 + 口径），突发剔除 `> 0` 时必须可辨别。
++///
++/// 逐字格式（契约验收按后缀可辨识，勿随意改字面量）：
++/// - `stream_decode`：`120 t/s decode n=1`；
++/// - `end_to_end`：`≈120 t/s e2e n=1`（`≈` = 含排队/prefill，跨调用不可比）；
++/// - 突发剔除 `> 0`：末尾追加 ` 剔突发N`（N = `turnBurstExcluded`，只能进端到端回退的调用数）；
++/// - `basis` 缺席（旧快照 / legacy wire）：只出裸值 `120 t/s`（不伪造口径，向后兼容）；
++/// - `turn_calls == 0`（旧快照 / 无参与计算调用）：不写 `n=`（`n=0` 会被读成「0 次调用」）。
++///
++/// 值全部直取快照（I9/I10：TUI 侧不自算速度/口径/样本量）。
++fn format_speed_segment(
++    speed: f64,
++    prefix: &str,
++    basis: Option<TurnSpeedBasis>,
++    calls: u32,
++    burst_excluded: u32,
++) -> String {
++    let mut segment = format!("{prefix}{:.0} t/s", speed.round());
++    if let Some(basis) = basis {
++        segment.push_str(match basis {
++            TurnSpeedBasis::StreamDecode => " decode",
++            TurnSpeedBasis::EndToEnd => " e2e",
++        });
++    }
++    if calls > 0 {
++        segment.push_str(&format!(" n={calls}"));
++    }
++    if burst_excluded > 0 {
++        segment.push_str(&format!(" 剔突发{burst_excluded}"));
++    }
++    segment
++}
++
+ /// 数值指标段（**双口径**）：`↑in` = 当前上下文输入，`↓out` / 缓存 = 会话累计。
+ ///
+ /// 口径矩阵（P0，与桌面端 `HomeSidebar.vue` 同源）：
+ /// - `↑in`：**当前上下文**（ADR 0035 S1：最近一次调用的上下文输入，禁止跨轮累加）；
+ /// - `↓out`：**会话累计** Σ per-call 输出（`SessionUsageLedger`，缺失时回退 legacy 累计字段）；
+ /// - `缓存 x%`：**会话累计**命中率 = Σ命中 / Σ上下文输入（`SessionUsageTotals::cache_hit_ratio`，
+-///   fail-closed；无会话台账时回退快照的单次调用比 / legacy 单轮比）；
++///   fail-closed；无会话台账时回退快照的单次调用比 / legacy 单轮比）；百分比文本一律由 core
++///   `format_unit_fraction_percent` 出具——整数四舍五入，但**部分命中不得舍入成 100%**
++///   （99.6% 不得显示成 100%，ADR 2026-11-12-metrics-percent-honesty）；
+ /// - `上下文 x%`：当前上下文 / 窗口；快照缺窗口时用调用方解析出的注册表真实窗口回退
+ ///   （比例仍由 core 的 `context_ratio_for_window` 算出，TUI 不自写公式）；
+ /// - `t/s`、`首token`：per-call / 轮级快照段（设计如此，不参与会话累计）。
+@@ -4117,8 +4162,8 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
+                 })
+             })
+     });
+-    if let Some(ratio) = cache_ratio {
+-        segments.push(format!("缓存 {:.0}%", (ratio * 100.0).round()));
++    if let Some(text) = cache_ratio.and_then(format_unit_fraction_percent) {
++        segments.push(format!("缓存 {text}%"));
+     }
+ 
+     // ---- 上下文占用：快照比 → 快照缺窗口时用解析窗口回退 → legacy 计算 ----
+@@ -4136,8 +4181,8 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
+             .or_else(|| (state.total_input_tokens > 0).then_some(state.total_input_tokens))?;
+         context_ratio_for_window(context_tokens, window_tokens?)
+     });
+-    if let Some(ratio) = context_ratio {
+-        segments.push(format!("上下文 {:.0}%", (ratio * 100.0).round()));
++    if let Some(text) = context_ratio.and_then(format_unit_fraction_percent) {
++        segments.push(format!("上下文 {text}%"));
+     }
+ 
+     // ---- per-call / 轮级快照段（设计上不参与会话累计）----
+@@ -4149,7 +4194,13 @@ fn metrics_segments(state: &TuiState) -> Vec<String> {
+                 Some(TurnSpeedBasis::EndToEnd) => "≈",
+                 _ => "",
+             };
+-            segments.push(format!("{prefix}{:.0} t/s", speed.round()));
++            segments.push(format_speed_segment(
++                speed,
++                prefix,
++                metrics.turn_speed_basis,
++                metrics.turn_calls,
++                metrics.turn_burst_excluded.unwrap_or(0),
++            ));
+         }
+         if let Some(ttft_ms) = metrics.first_token_latency_ms {
+             segments.push(format!("首token {ttft_ms}ms"));
+@@ -6222,6 +6273,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
+     if state.mode == InteractionMode::Settings {
+         render_settings_panel(f, state);
+     }
++    if state.mode == InteractionMode::GoalDetail {
++        goal_panel::render(f, area, state);
++    }
++    if state.mode == InteractionMode::ShortcutsHelp {
++        shortcuts::render(f, area);
++    }
+ }
+ 
+ /// 面板在无数据时的统一空状态：不允许整屏空白（那会让用户误判 TUI 挂了）。
+@@ -8870,6 +8927,15 @@ fn tui_event_loop(
+                         continue;
+                     }
+ 
++                    // Ctrl+H / Ctrl+G 覆盖层开关（转换规则唯一真源：`tui/shortcuts.rs`）。
++                    if let Some(target) = shortcuts::overlay_target(key.code, key.modifiers) {
++                        if let Some(next) = shortcuts::toggled_mode(&state.mode, target) {
++                            state.mode = next;
++                            dirty = true;
++                        }
++                        continue;
++                    }
++
+                     // Ctrl+Z 挂起：raw mode 清掉了 ISIG，Ctrl+Z 不会产生 SIGTSTP，
+                     // 只能由按键路径主动交还终端再 raise(SIGSTOP)（见 suspend_tui）。
+                     if is_suspend_shortcut(key.code, key.modifiers) {
+@@ -9090,6 +9156,19 @@ fn tui_event_loop(
+                         continue;
+                     }
+ 
++                    // 1c4. Ctrl+G / Ctrl+H 覆盖层：Esc 或再按同键关闭，其余键一律吞掉
++                    // （不得漏进 Composer：否则覆盖层态输入会污染草稿）。
++                    if matches!(
++                        state.mode,
++                        InteractionMode::GoalDetail | InteractionMode::ShortcutsHelp
++                    ) {
++                        if key.code == KeyCode::Esc {
++                            state.mode = InteractionMode::Normal;
++                            dirty = true;
++                        }
++                        continue;
++                    }
++
+                     // 1d. AddingProvider 模式下的按键处理
+                     if state.mode == InteractionMode::AddingProvider {
+                         match key.code {
+@@ -10093,6 +10172,8 @@ fn tui_event_loop(
+                                     help.push_str(
+                                         "\n子智能体会话内：Ctrl+↑ 返回主会话 · Ctrl+←/→ 切换子智能体",
+                                     );
++                                    // Ctrl+H / Ctrl+G 覆盖层入口（同时是它们的可发现路径）。
++                                    help.push_str("\nCtrl+H 快捷键帮助 · Ctrl+G 目标面板");
+                                     // 契约 F-L：/cost 移除后网关需要可见入口；只展示剥离凭据后的
+                                     // scheme://host[:port]/path（userinfo/query/fragment 全丢弃）。
+                                     let gateway = gateway_display(&state.gateway_url);
+@@ -11742,3 +11823,10 @@ mod cli_self_update_tests;
+ #[path = "tui/tests/plan_approve_tests.rs"]
+ mod plan_approve_tests;
+ // B076: add /skill: recognition logic
++
++/// Ctrl+G 目标面板 / Ctrl+H 快捷键帮助的**跨模块**不变量单测：
++/// 新模式是否仍判为模态、清单 token 与判定函数是否一致、空态是否仍给 `/goal` 入口。
++/// 各自模块内的单元测试留在 `tui/shortcuts.rs` / `tui/goal_panel.rs`，此处只锁缝合处。
++#[cfg(test)]
++#[path = "tui/tests/shortcuts_help_tests.rs"]
++mod shortcuts_help_tests;
+diff --git a/docs/contracts/ts-contract.snapshot.json b/docs/contracts/ts-contract.snapshot.json
+index 937e07a8..1d36788b 100644
+--- a/docs/contracts/ts-contract.snapshot.json
++++ b/docs/contracts/ts-contract.snapshot.json
+@@ -52,8 +52,11 @@
+         "reasoningTokens",
+         "step",
+         "totalTokens",
++        "turnBurstExcluded",
+         "turnCacheHitInputTokens",
+         "turnCalls",
++        "turnCallsEligible",
++        "turnCallsTotal",
+         "turnCallsWithCache",
+         "turnContextInputTokens",
+         "turnGenerationMs",
+diff --git a/src/components/HomeStatusPanel.vue b/src/components/HomeStatusPanel.vue
+index 4f4fffcf..f3446b2b 100644
+--- a/src/components/HomeStatusPanel.vue
++++ b/src/components/HomeStatusPanel.vue
+@@ -14,6 +14,10 @@ import {
+   Zap
+ } from "lucide-vue-next";
+ import Tooltip from "@/components/ui/Tooltip.vue";
++import {
++  formatBurstExcludedSuffix,
++  formatSpeedSampleLabel
++} from "@/lib/runtime/token-metrics";
+ import { isDebugLoggingEnabled } from "@/lib/runtime/utils";
+ import { useRuntimeStore } from "@/stores/runtime";
+ 
+@@ -37,6 +41,15 @@ const props = defineProps<{
+     basis?: string;
+     /** 参与求和的已完成调用数。 */
+     calls?: number;
++    /** F1 I4：该轮 provider 调用**总数**（含无效/不可解码记录）；旧 payload 缺键 ⇒ null。 */
++    callsTotal?: number | null;
++    /** F1 I4：`decode_eligible` 记录数（进入解码口径分子/分母的样本）。 */
++    callsEligible?: number | null;
++    /**
++     * F1 I4：`valid − decode_eligible`——因突发整包/无 TTFT/单 token 被剔除、
++     * 只能进 `end_to_end` 回退的调用数。`> 0` 时显示端必须可辨别（本组件用 tooltip + `data-*`）。
++     */
++    burstExcluded?: number | null;
+     speed?: number | null;
+     inputTokens?: number | null;
+     outputTokens?: number | null;
+@@ -77,18 +90,42 @@ const speedBasis = computed(() => props.speedDebugInfo?.basis ?? "none");
+ /** wave-54 C3：估算来源必须显式降级（`≈`），不得冒充真值。 */
+ const isEstimatedUsage = computed(() => props.speedDebugInfo?.origin === "estimated_chars");
+ 
++/**
++ * F1 I4：突发剔除数（`valid − decode_eligible`，直取快照，组件内不重算判据）。
++ *
++ * `> 0` ⇒ 本轮的 t/s **不是**纯解码速度：被物理下限（突发整包）/无 TTFT/单 token 剔除的调用
++ * 只能进 `end_to_end` 回退。显示端必须可辨别；`null`/`0` ⇒ 不提示（旧 payload 无该键，
++ * 不伪造「无突发」）。
++ */
++const speedBurstExcluded = computed(() => {
++  const value = props.speedDebugInfo?.burstExcluded;
++  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
++});
++
++/** F1 I4：样本量文本（`eligible/total 次调用`；旧 payload 缺 total ⇒ 只写参与数）。 */
++const speedSampleText = computed(() =>
++  formatSpeedSampleLabel(props.speedDebugInfo?.calls, props.speedDebugInfo?.callsTotal)
++);
++
+ const speedTooltip = computed(() => {
+-  const calls = props.speedDebugInfo?.calls;
+   const callScope = props.speedDebugInfo?.mode === "call_only";
++  // F1 I4：样本量（含剔除数）+ 口径必须写在 tooltip 文案里（行内位点只保留「图标 + 值」，
++  // wave-61 §1 L-4/R1 冻结了行内子节点结构，故诚实化信息走 tooltip + `data-*`）。
++  const burstSuffix = formatBurstExcludedSuffix(speedBurstExcluded.value);
++  const sample = speedSampleText.value || "0 次调用";
+   if (speedBasis.value === "stream_decode") {
+     return callScope
+       ? "当前调用的生成速度（解码口径：首 token 已计入 TTFT）"
+-      : `生成速度（${calls ?? 0} 次调用，Σ(out−1)/Σ生成耗时）`;
++      : `生成速度（${sample}，Σ(out−1)/Σ生成耗时${burstSuffix}）`;
+   }
+   if (speedBasis.value === "end_to_end") {
+     return callScope
+       ? "当前调用的整体速度（端到端口径，含排队与 prefill）"
+-      : `整体速度（${calls ?? 0} 次调用，Σoutput/Σ端到端耗时，含排队与 prefill）`;
++      : `整体速度（${sample}，Σoutput/Σ端到端耗时，含排队与 prefill${burstSuffix}）`;
++  }
++  // basis 缺席但仍有速度值（旧 wire）：口径未知必须明说，不得默认成解码口径。
++  if (isPositiveFiniteNumber(props.tokenGenerationSpeed)) {
++    return `速度（口径未知，${sample}${burstSuffix}）`;
+   }
+   return "速度（暂无已完成调用）";
+ });
+@@ -441,6 +478,9 @@ const showMetricsCard = computed(
+             data-testid="status-metric-token-speed"
+             :data-speed-mode="tokenSpeedCalculationMode || 'none'"
+             :data-speed-basis="speedBasis"
++            :data-speed-calls="speedDebugInfo?.calls ?? undefined"
++            :data-speed-calls-total="speedDebugInfo?.callsTotal ?? undefined"
++            :data-speed-burst-excluded="speedBurstExcluded > 0 ? speedBurstExcluded : undefined"
+             :data-speed-debug="debugAttrsEnabled ? speedDebugString : undefined"
+           >
+             <Tooltip text="生成速度">
+diff --git a/src/lib/runtime/token-metrics.ts b/src/lib/runtime/token-metrics.ts
+index 336f556f..390e17ee 100644
+--- a/src/lib/runtime/token-metrics.ts
++++ b/src/lib/runtime/token-metrics.ts
+@@ -687,10 +687,84 @@ export function formatTokenSpeed(value?: number | null): string {
+   return `${Math.round(value)} t/s`;
+ }
+ 
++/**
++ * F1 I4：速度**样本量**文本（`N/M 次调用`）。
++ *
++ * 口径（与 Rust `turn_flow::turn_call_census` 同源，本函数只做展示拼装，**不算样本**）：
++ * - `calls` = 参与计算集合的调用数（`stream_decode` ⇒ |eligible|；`end_to_end` ⇒ |valid|）；
++ * - `callsTotal` = 该轮 provider 调用总数；旧 payload 缺该键（`null`）⇒ 只显示参与数
++ *   `N 次调用`（**不得**把缺失当 0，也**不得**把总数当参与数）；
++ * - 两者缺失 ⇒ `""`（无值不占位，I1/I6 同一条诚实纪律）。
++ */
++export function formatSpeedSampleLabel(
++  calls?: number | null,
++  callsTotal?: number | null
++): string {
++  const participants =
++    typeof calls === "number" && Number.isFinite(calls) && calls > 0 ? Math.trunc(calls) : null;
++  const total =
++    typeof callsTotal === "number" && Number.isFinite(callsTotal) && callsTotal > 0
++      ? Math.trunc(callsTotal)
++      : null;
++  if (total != null) {
++    return `${participants ?? 0}/${total} 次调用`;
++  }
++  return participants == null ? "" : `${participants} 次调用`;
++}
++
++/**
++ * F1 I4：**突发剔除**提示文案（`burstExcluded > 0` 才出，`0`/缺失/非有限 ⇒ `""`）。
++ *
++ * `burstExcluded` = `valid − decode_eligible`（因突发整包/无 TTFT/单 token 被剔除、
++ * 只能进 `end_to_end` 回退的调用数）：> 0 时这一轮的 t/s **不是**纯解码速度，
++ * 显示端必须可辨别。缺失 ≠ 0（旧 payload 无该键）⇒ 不出提示，也不伪造「无突发」。
++ */
++export function formatBurstExcludedSuffix(burstExcluded?: number | null): string {
++  if (typeof burstExcluded !== "number" || !Number.isFinite(burstExcluded) || burstExcluded <= 0) {
++    return "";
++  }
++  return `；已剔除 ${Math.trunc(burstExcluded)} 次非解码调用（突发包 / 无首token / 单token）`;
++}
++
++/**
++ * 单位分数（`0..=1`）→ 诚实百分比字符串。
++ *
++ * 与 Rust `agent/metrics_snapshot.rs::format_unit_fraction_percent` 同构（单一真值语义，
++ * ADR `.agents/notes/implemented/bug-fix/2026-11-12-metrics-percent-honesty.md` Decision 1/3）：
++ * - 缺失 / 非有限 ⇒ `""`（无值不出 `0%`，不抛错，I2/I6）；
++ * - `< 0` 或 `> 1` ⇒ `""`（越界 fail-closed，不 clamp 掩盖错误数据）；
++ * - `=== 1` ⇒ `"100%"`（只有真全命中才允许出 100%）；
++ * - 其余按整数四舍五入（保 D1-4：`0.6667` ⇒ `67%`）；
++ * - 四舍五入会顶到 100 而 `ratio < 1` ⇒ 改用 2 位小数**向下取整**并去掉尾随 0
++ *   （`0.996` ⇒ `99.6%`，`0.99999` ⇒ `99.99%`），保证**永不高报**。
++ *
++ * 返回值统一带 `%` 后缀（`MetricsSnapshotDisplay.cacheRatioPercent` 的既有消费契约）。
++ */
++export function formatUnitFractionPercent(ratio: number | null): string {
++  if (ratio == null || !Number.isFinite(ratio)) {
++    return "";
++  }
++  if (ratio < 0 || ratio > 1) {
++    return "";
++  }
++  if (ratio === 1) {
++    return "100%";
++  }
++  const rounded = Math.round(ratio * 100);
++  if (rounded < 100) {
++    return `${rounded}%`;
++  }
++  const hundredths = Math.floor(ratio * 10000) / 100;
++  return `${hundredths.toFixed(2).replace(/\.?0+$/, "")}%`;
++}
++
+ // ── 结算快照 → 展示映射（wave-metrics / task-4）─────────────────────────────────
+ 
+ /**
+  * 快照展示字段（冻结 API 面，`tests/metrics-snapshot-live.spec.ts` D1 断言逐字段相等）。
++ *
++ * F1 I4 追加的样本量/剔除字段一律是 **`undefined` 可省**：旧 payload 缺键或「无可计数调用」
++ * 时值为 `undefined`，既不入展示也不改变 D1 的逐字段相等断言（`toEqual` 忽略 `undefined` 属性）。
+  */
+ export interface MetricsSnapshotDisplay {
+   contextTokens: number | null;
+@@ -702,12 +776,28 @@ export interface MetricsSnapshotDisplay {
+   cacheRatioPercent: string;
+   contextPercent: number | null;
+   origin: string | null;
++  /** F1 I4：参与计算集合的调用数（快照 `turnCalls`）；`0`/缺失 ⇒ `undefined`。 */
++  sampleCalls?: number | undefined;
++  /** F1 I4：该轮 provider 调用总数（快照 `turnCallsTotal`）；缺失/`0` ⇒ `undefined`。 */
++  sampleCallsTotal?: number | undefined;
++  /** F1 I4：`decode_eligible` 样本数（快照 `turnCallsEligible`）；缺失/`0` ⇒ `undefined`。 */
++  sampleCallsEligible?: number | undefined;
++  /** F1 I4：样本量文本（`eligible/total 次调用`）；两键皆缺 ⇒ `undefined`（不占位）。 */
++  speedSampleLabel?: string | undefined;
++  /** F1 I4：突发整包剔除数（快照 `turnBurstExcluded`）；`> 0` 才出，`0`/缺失 ⇒ `undefined`。 */
++  burstExcluded?: number | undefined;
+ }
+ 
+ function finiteNumberOrNull(value: unknown): number | null {
+   return typeof value === "number" && Number.isFinite(value) ? value : null;
+ }
+ 
++/** 「可展示的正计数」：非有限 / 非正 ⇒ `undefined`（`undefined` 属性不入展示、不进 `toEqual`）。 */
++function positiveCountOrUndefined(value: unknown): number | undefined {
++  const parsed = finiteNumberOrNull(value);
++  return parsed != null && parsed > 0 ? Math.trunc(parsed) : undefined;
++}
++
+ /**
+  * `TurnMetricsSnapshot` → 展示值的**唯一**映射（契约 §0「快照存在 ⇒ 快照为唯一来源，禁止各自重算」）。
+  *
+@@ -716,10 +806,16 @@ function finiteNumberOrNull(value: unknown): number | null {
+  * - `contextWindow` ← `contextWindowTokens`（缺失 ⇒ null，不得兜底常量，I3）；
+  * - `speed` ← `turnSpeedTokensPerSecond`（与 Rust `weighted_turn_speed` 同源，I5）；
+  * - `ttftMs` ← `firstTokenLatencyMs`；
+- * - `cacheRatioPercent` ← `round(cacheHitRatio * 100)%`，`cacheHitRatio` 为 `0..=1` 单位分数；
+- *   缺失 ⇒ `""`（I2/I6：禁止伪造成 `0%`，也禁止 clamp 掩盖越界）；
++ * - `cacheRatioPercent` ← `formatUnitFractionPercent(cacheHitRatio)`（`cacheHitRatio` 为 `0..=1`
++ *   单位分数）：整数四舍五入，但四舍五入会顶到 100 而 `ratio < 1` 时降级为 1/2 位小数且**向下取整**
++ *   （`0.996` ⇒ `99.6%`），只有 `=== 1` 才输出 `100%`——**部分命中不得谎报全命中**；
++ *   缺失 / 非有限 ⇒ `""`（I2/I6：禁止伪造成 `0%`，也禁止 clamp 掩盖越界）；
+  * - `contextPercent` ← `round(contextRatio * 100)`，缺失 ⇒ null（I3）；
+- * - `origin` ← `origin`。
++ * - `origin` ← `origin`；
++ * - F1 I4（样本量/口径诚实化）：`sampleCalls` ← `turnCalls`、`sampleCallsTotal` ← `turnCallsTotal`、
++ *   `sampleCallsEligible` ← `turnCallsEligible`、`speedSampleLabel` = 二者合成的 `eligible/total 次调用`、
++ *   `burstExcluded` ← `turnBurstExcluded`。**全部 `undefined` 可省**：旧 payload 缺键 / 无可计数调用 ⇒
++ *   属性值 `undefined`（既不出占位、也不打破既有 D1 逐字段断言）。
+  *
+  * 防御：入参可为 `null` / `undefined` / 缺键的畸形线缆 —— 一律按「无值」处理，不抛错（I7）。
+  */
+@@ -730,6 +826,28 @@ export function resolveMetricsSnapshotDisplay(
+   const cacheHitRatio = finiteNumberOrNull(source?.cacheHitRatio);
+   const contextRatio = finiteNumberOrNull(source?.contextRatio);
+   const origin = typeof source?.origin === "string" ? source.origin : null;
++  // F1 I4：样本量三键与突发剔除数（负数/0/缺失一律 `undefined`，不伪造「0 次调用 / 无突发」）。
++  //
++  // 门控：F1 三键（`turnCallsTotal` / `turnCallsEligible` / `turnBurstExcluded`）**全部缺席**
++  // （= 旧 payload）⇒ 本节所有字段一律 `undefined`：样本量无从谈起，且不改变既有展示面
++  // （`tests/metrics-snapshot-live.spec.ts` D1 的逐字段相等断言依赖「旧快照无新增属性」）。
++  const hasF1Sample =
++    source?.turnCallsTotal != null ||
++    source?.turnCallsEligible != null ||
++    source?.turnBurstExcluded != null;
++  const sampleCalls = hasF1Sample ? positiveCountOrUndefined(source?.turnCalls) : undefined;
++  const sampleCallsTotal = hasF1Sample
++    ? positiveCountOrUndefined(source?.turnCallsTotal)
++    : undefined;
++  const sampleCallsEligible = hasF1Sample
++    ? positiveCountOrUndefined(source?.turnCallsEligible)
++    : undefined;
++  const burstExcluded = hasF1Sample
++    ? positiveCountOrUndefined(source?.turnBurstExcluded)
++    : undefined;
++  const speedSampleLabel = hasF1Sample
++    ? formatSpeedSampleLabel(sampleCallsEligible ?? sampleCalls, sampleCallsTotal)
++    : "";
+ 
+   return {
+     contextTokens: finiteNumberOrNull(source?.contextInputTokens),
+@@ -737,8 +855,13 @@ export function resolveMetricsSnapshotDisplay(
+     speed: finiteNumberOrNull(source?.turnSpeedTokensPerSecond),
+     speedBasis: source?.turnSpeedBasis ?? null,
+     ttftMs: finiteNumberOrNull(source?.firstTokenLatencyMs),
+-    cacheRatioPercent: cacheHitRatio == null ? "" : `${Math.round(cacheHitRatio * 100)}%`,
++    cacheRatioPercent: formatUnitFractionPercent(cacheHitRatio),
+     contextPercent: contextRatio == null ? null : Math.round(contextRatio * 100),
+     origin,
++    sampleCalls,
++    sampleCallsTotal,
++    sampleCallsEligible,
++    speedSampleLabel: speedSampleLabel === "" ? undefined : speedSampleLabel,
++    burstExcluded,
+   };
+ }
+diff --git a/src/lib/runtime/useTraceProjection.ts b/src/lib/runtime/useTraceProjection.ts
+index 2558202f..2a9b1721 100644
+--- a/src/lib/runtime/useTraceProjection.ts
++++ b/src/lib/runtime/useTraceProjection.ts
+@@ -390,6 +390,11 @@ export function useTraceProjection(options: {
+         // I10：口径直取快照（缺失 ⇒ "none"），禁止按 mode 推导或当作 stream_decode。
+         basis: snapshot.turnSpeedBasis ?? "none",
+         calls: snapshot.turnCalls,
++        // F1 I4：样本量与「突发剔除数」直取快照（与 Rust `turn_call_census` 同源）；
++        // 旧 payload 缺键 ⇒ null（不伪造 0，见 `HomeStatusPanel` 的 `> 0` 才提示）。
++        callsTotal: snapshot.turnCallsTotal ?? null,
++        callsEligible: snapshot.turnCallsEligible ?? null,
++        burstExcluded: snapshot.turnBurstExcluded ?? null,
+         speed: display.speed,
+         inputTokens: display.contextTokens,
+         outputTokens: snapshot.turnOutputTokens,
+diff --git a/src/types/runtime.ts b/src/types/runtime.ts
+index 04f3bd02..544cc99c 100644
+--- a/src/types/runtime.ts
++++ b/src/types/runtime.ts
+@@ -1170,6 +1170,18 @@ export interface TurnMetricsSnapshot {
+   turnGenerationMs: number;
+   /** 参与计算的调用数（I7：`stream_decode` ⇒ |eligible|；`end_to_end` ⇒ |valid|）。 */
+   turnCalls: number;
++  /**
++   * F1 取证（与 Rust `TurnMetricsSnapshot` 同名字段）：该轮 provider 调用**总数**
++   * （含无效/不可解码记录）。旧 payload 无该键 ⇒ 缺失（**不得**当 0 次调用）。
++   */
++  turnCallsTotal?: number | null;
++  /** F1 取证：`decode_eligible` 记录数（进入解码口径分子/分母的样本）。 */
++  turnCallsEligible?: number | null;
++  /**
++   * F1 取证：`valid − decode_eligible`——因突发整包/无 TTFT/单 token 被剔除、
++   * 只能进 `end_to_end` 回退的调用数。`> 0` ⇒ 显示端必须可辨别（F1 I4）。
++   */
++  turnBurstExcluded?: number | null;
+   /** 轮级 Σ 上下文输入（逐条 per-call 归一值相加；会话累计的唯一原料，禁止用末次调用冒充）。 */
+   turnContextInputTokens: number;
+   /** 轮级 Σ 缓存命中输入（只累加**上报了**命中字段的调用）。 */

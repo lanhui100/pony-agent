@@ -17,7 +17,9 @@
 //!   `turn_speed_basis` 与速度同源（I10：缺席 ⇔ 无值）。
 use crate::agent::cost::{estimate_cost_with_protocol, ProviderCostProtocol};
 use crate::agent::telemetry::ProviderCallCacheRecord;
-use crate::agent::turn_flow::{call_speed, weighted_turn_speed, ProviderEventMeta, TurnSpeedBasis};
+use crate::agent::turn_flow::{
+    call_speed, turn_call_census, weighted_turn_speed, ProviderEventMeta, TurnSpeedBasis,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -45,6 +47,23 @@ pub struct TurnMetricsSnapshot {
     pub turn_output_tokens: u64,
     pub turn_generation_ms: u64,
     pub turn_calls: u32,
+    /// F1 取证：该轮 per-call 记录**总数**（含无效/不可解码记录）。
+    ///
+    /// 与 [`Self::turn_calls`]（参与计算集合）不同：本字段回答「这轮一共调了几次」，
+    /// 是样本量诚实化的分母。**无任何可计数调用 ⇒ 键缺席**（`None`）：样本量无定义，
+    /// 禁止以 `0` 冒充「0 次调用」（I1「无值不写键」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_calls_total: Option<u32>,
+    /// F1 取证：`decode_eligible` 记录数（进入 `stream_decode` 分子/分母的解码样本）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_calls_eligible: Option<u32>,
+    /// F1 取证：**突发整包剔除数**——已具备解码前提（有 ttft、`dur > ttft`、`out >= 2`）
+    /// 但解码窗口低于物理下限（`gen < floor(dur)`）的调用数（SSE 被上游攒成一包）。
+    ///
+    /// `> 0` ⇒ 显示端必须可辨别（F1 I4）；`None`（旧快照 / 无可计数调用）⇒ 不提示，
+    /// **不得**据此推断「无突发」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_burst_excluded: Option<u32>,
     /// 轮级 Σ 上下文输入（逐条取 `context_input_tokens`，缺失回退裸 `input_tokens` 后相加）。
     ///
     /// 与 `turn_output_tokens` 同属**轮级聚合**组：per-call 字段只描述末次调用，会话累计
@@ -98,6 +117,52 @@ pub fn context_ratio_for_window(context_input_tokens: u64, window_tokens: u64) -
         return None;
     }
     unit_ratio(context_input_tokens, window_tokens)
+}
+
+/// **诚实百分比文本**（不含 `%` 后缀）：`Σ分子 / Σ分母` 的展示值。
+///
+/// 口径契约（ADR `.agents/notes/implemented/bug-fix/2026-11-12-metrics-percent-honesty.md`）：
+/// - `denominator == 0` 或 `numerator > denominator` ⇒ `None`（与 [`unit_ratio`] 同一条
+///   fail-closed：不可信数据不展示，**禁止 clamp**）；
+/// - 真全量（`numerator == denominator`）⇒ `"100"`；
+/// - 普通值 ⇒ 整数四舍五入（`3/5` ⇒ `"15"`，`2/3` ⇒ `"67"`）；
+/// - 四舍五入会顶到 100 而分子小于分母 ⇒ 改用**两位小数向下取整**并去掉尾随零
+///   （`19990/20000` ⇒ `"99.95"`，`9999/10000` ⇒ `"99.99"`），保证**永不高报**
+///   ——「部分命中」不得被舍入成「全命中」（对齐 DSH `formatCacheHitPercent`）。
+pub fn format_ratio_percent(numerator: u64, denominator: u64) -> Option<String> {
+    if denominator == 0 || numerator > denominator {
+        return None;
+    }
+    if numerator == denominator {
+        return Some("100".to_string());
+    }
+    Some(percent_text(numerator as f64 / denominator as f64))
+}
+
+/// [`format_ratio_percent`] 的单位分数版（消费方已持有 `0.0..=1.0` 比值时用）。
+///
+/// 非有限 / `< 0` / `> 1` ⇒ `None`（fail-closed）；`1.0` ⇒ `"100"`；其余同上。
+pub fn format_unit_fraction_percent(ratio: f64) -> Option<String> {
+    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
+        return None;
+    }
+    if ratio == 1.0 {
+        return Some("100".to_string());
+    }
+    Some(percent_text(ratio))
+}
+
+/// 单位分数 → 百分比文本（**只在 `ratio < 1` 时调用**，`100` 由调用方判定）。
+fn percent_text(ratio: f64) -> String {
+    let percent = ratio * 100.0;
+    let rounded = percent.round();
+    if rounded < 100.0 {
+        return format!("{rounded:.0}");
+    }
+    // 部分命中：两位小数向下取整（floor），数学上保证 `<= 99.99`，绝不高报。
+    let floored = (percent * 100.0).floor() / 100.0;
+    let text = format!("{floored:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// 「可计数」调用判据：与 [`crate::agent::turn_flow::call_valid`]（I1）同一判据 `dur > 0 && out > 0`。
@@ -178,6 +243,13 @@ pub fn build_turn_metrics_snapshot(
 
     // A4/I4-I7：轮级四项 + 口径一律取自 `weighted_turn_speed`，禁止自算。
     let turn = weighted_turn_speed(records);
+    // F1 取证：样本普查（总数 / 解码样本 / 突发剔除数）同样从**同一份 records** 派生，
+    // 判据只在 `turn_flow::turn_call_census` 定义一次（I3）。
+    // 无任何可计数调用（`valid == 0`）⇒ 样本量无定义：四个键一律缺席（禁止 0 占位）。
+    let census = {
+        let census = turn_call_census(records);
+        (census.valid > 0).then_some(census)
+    };
 
     // I2：分子分母必须同源（末次调用的 cache_hit 与 context_input），禁止混量纲。
     // 越界（cache_hit > context_input，上游数据自相矛盾）⇒ None，不得 clamp 成 100%。
@@ -239,6 +311,9 @@ pub fn build_turn_metrics_snapshot(
         turn_output_tokens: turn.output_tokens,
         turn_generation_ms: turn.generation_ms,
         turn_calls: turn.calls,
+        turn_calls_total: census.map(|census| census.total),
+        turn_calls_eligible: census.map(|census| census.eligible),
+        turn_burst_excluded: census.map(|census| census.burst_excluded),
         turn_context_input_tokens,
         turn_cache_hit_input_tokens,
         turn_calls_with_cache,
@@ -250,4 +325,47 @@ pub fn build_turn_metrics_snapshot(
         model,
         cost_usd: resolve_cost_usd(records, provider_meta),
     })
+}
+
+#[cfg(test)]
+mod percent_format_tests {
+    use super::{format_ratio_percent, format_unit_fraction_percent};
+
+    #[test]
+    fn ordinary_ratios_keep_integer_rounding() {
+        assert_eq!(format_ratio_percent(3, 5).as_deref(), Some("60"));
+        assert_eq!(format_ratio_percent(3, 20).as_deref(), Some("15"));
+        assert_eq!(format_ratio_percent(2, 3).as_deref(), Some("67"));
+        assert_eq!(format_ratio_percent(0, 500).as_deref(), Some("0"));
+        assert_eq!(format_unit_fraction_percent(0.6667).as_deref(), Some("67"));
+    }
+
+    #[test]
+    fn full_hit_is_the_only_way_to_reach_100() {
+        assert_eq!(format_ratio_percent(5, 5).as_deref(), Some("100"));
+        assert_eq!(format_unit_fraction_percent(1.0).as_deref(), Some("100"));
+    }
+
+    #[test]
+    fn partial_hit_never_rounds_up_to_full_hit() {
+        // 0.998 ⇒ 整数四舍五入会到 100，必须降精度（向下取整）到 99.8。
+        assert_eq!(format_ratio_percent(1_996, 2_000).as_deref(), Some("99.8"));
+        assert_eq!(format_ratio_percent(9_999, 10_000).as_deref(), Some("99.99"));
+        assert_eq!(format_unit_fraction_percent(0.996).as_deref(), Some("99.6"));
+        assert_eq!(format_unit_fraction_percent(0.99999).as_deref(), Some("99.99"));
+        assert_eq!(
+            format_unit_fraction_percent(0.9999999).as_deref(),
+            Some("99.99")
+        );
+    }
+
+    #[test]
+    fn untrusted_inputs_fail_closed_instead_of_clamping() {
+        assert_eq!(format_ratio_percent(1, 0), None);
+        assert_eq!(format_ratio_percent(6, 5), None);
+        assert_eq!(format_unit_fraction_percent(f64::NAN), None);
+        assert_eq!(format_unit_fraction_percent(f64::INFINITY), None);
+        assert_eq!(format_unit_fraction_percent(-0.1), None);
+        assert_eq!(format_unit_fraction_percent(1.2), None);
+    }
 }

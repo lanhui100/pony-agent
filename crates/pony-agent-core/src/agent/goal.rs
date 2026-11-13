@@ -197,7 +197,14 @@ fn unlock_file(file: &fs::File) {
 fn unlock_file(_file: &fs::File) {}
 
 /// 契约 C2 / NFR `goal_store_atomic_write`：`*.tmp` + rename 原子替换，父目录按需创建。
-fn persist_goal_store(goals: &HashMap<String, GoalData>) -> Result<(), String> {
+///
+/// `explicit_removals`：本次调用**显式删除**的 session key。跨进程合并只做 `insert` 会把
+/// 磁盘上仍存在的旧条目重新插回（`clear_goal` 被静默复活），故合并后必须逐项 `remove`。
+/// 非删除类调用一律传 `&[]`，行为与旧实现完全一致。
+fn persist_goal_store(
+    goals: &HashMap<String, GoalData>,
+    explicit_removals: &[String],
+) -> Result<(), String> {
     let path = goal_store_path();
     if GOAL_STORE_DEGRADED.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(format!(
@@ -228,7 +235,7 @@ fn persist_goal_store(goals: &HashMap<String, GoalData>) -> Result<(), String> {
     lock_file(&lock_handle)?;
 
     // 跨进程写时合并：若磁盘已有更新且合法，保留其他 session
-    let to_write = if path.exists() {
+    let mut to_write = if path.exists() {
         if let Ok(raw) = fs::read_to_string(&path) {
             if let Ok(disk_goals) = serde_json::from_str::<HashMap<String, GoalData>>(&raw) {
                 let mut merged = disk_goals;
@@ -245,6 +252,11 @@ fn persist_goal_store(goals: &HashMap<String, GoalData>) -> Result<(), String> {
     } else {
         goals.clone()
     };
+
+    // 显式删除必须压过磁盘合并结果：否则另一进程写回的旧条目会让 clear 静默复活。
+    for key in explicit_removals {
+        to_write.remove(key);
+    }
 
     let payload = match serde_json::to_string_pretty(&to_write) {
         Ok(p) => p,
@@ -381,7 +393,7 @@ pub fn advance_goal_round(goal_id: &str) -> Result<GoalData, String> {
         goal.clone()
     };
 
-    if let Err(error) = persist_goal_store(goals) {
+    if let Err(error) = persist_goal_store(goals, &[]) {
         match previous {
             Some(previous) => {
                 goals.insert(session, previous);
@@ -577,7 +589,7 @@ pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
     let previous = goals.get(&session).cloned();
     goals.insert(session.clone(), goal.clone());
 
-    if let Err(error) = persist_goal_store(goals) {
+    if let Err(error) = persist_goal_store(goals, &[]) {
         match previous {
             Some(prev) => {
                 goals.insert(session, prev);
@@ -662,7 +674,7 @@ pub fn update_goal(args: UpdateGoalArgs) -> Result<UpdateGoalResult, String> {
         current.clone()
     };
 
-    if let Err(error) = persist_goal_store(goals) {
+    if let Err(error) = persist_goal_store(goals, &[]) {
         match previous {
             Some(previous) => {
                 goals.insert(session, previous);
@@ -697,7 +709,8 @@ pub fn clear_goal(session_id: &str) -> Result<bool, String> {
         None => return Ok(false),
     };
 
-    if let Err(error) = persist_goal_store(goals) {
+    // 显式把被删 session 传给持久化层：磁盘上若仍有该条目（另一进程写过盘），必须一并移除。
+    if let Err(error) = persist_goal_store(goals, &[session.to_string()]) {
         goals.insert(session.to_string(), previous);
         return Err(error);
     }
@@ -907,6 +920,55 @@ mod wave1_tests {
         })
         .expect("pause goal");
         assert!(active_goal_for_session(session).is_none());
+    }
+
+    /// 回归：`clear_goal` 必须能穿透跨进程合并。
+    ///
+    /// 旧实现 `persist_goal_store` 的合并只做 `insert`，磁盘上仍存在的同 session 条目会被
+    /// 重新插回，`clear` 被静默复活 ⇒ 本用例在旧实现下 `get_goal(...).goal` 为 `Some`（失败）。
+    #[test]
+    fn clear_goal_removes_entry_even_when_disk_still_has_it() {
+        let _guard = test_support::lock();
+        let (_env, store_path) = install_temp_store("clear-cross-process");
+        let session = "wave1-unit-clear-cross-process";
+
+        let created = create_goal(CreateGoalArgs {
+            session_id: Some(session.to_string()),
+            objective: "要被清掉的目标".to_string(),
+            max_goal_rounds: Some(9),
+        })
+        .expect("create_goal")
+        .goal;
+
+        // 模拟「另一进程」把含该 session 的合法 JSON 写回磁盘：此时本进程内存仍持有该条目。
+        let foreign: HashMap<String, GoalData> =
+            serde_json::from_str(&fs::read_to_string(&store_path).expect("read sidecar"))
+                .expect("parse sidecar");
+        assert_eq!(foreign.get(session).map(|g| g.id.as_str()), Some(created.id.as_str()));
+        fs::write(
+            &store_path,
+            serde_json::to_string_pretty(&foreign).expect("serialize sidecar"),
+        )
+        .expect("rewrite sidecar");
+
+        assert!(
+            clear_goal(session).expect("clear_goal"),
+            "clear_goal must report a real removal"
+        );
+
+        reset_goal_store_for_test();
+        let after = get_goal(GetGoalArgs {
+            session_id: Some(session.to_string()),
+        })
+        .expect("get_goal after reset")
+        .goal;
+        assert!(
+            after.is_none(),
+            "clear_goal must survive cross-process merge (disk still had the entry)"
+        );
+        assert!(!store_path.exists() || !fs::read_to_string(&store_path)
+            .expect("read sidecar")
+            .contains(&created.id), "cleared goal must not linger in the sidecar");
     }
 
     #[test]

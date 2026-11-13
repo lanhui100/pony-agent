@@ -21,6 +21,9 @@ pub(crate) mod startup_repair;
 pub mod startup_meta;
 #[cfg(test)]
 mod tests;
+// file-size 收口：新增用例不再堆进 `tests.rs`（内存后端最小闭环先行拆出）。
+#[cfg(test)]
+mod memory_backend_tests;
 // ADR 0092 回归：goal 续轮文案识别（单独成文件，避免撑大已触棘轮的 `tests.rs`）。
 #[cfg(test)]
 mod host_continuation_goal_round_tests;

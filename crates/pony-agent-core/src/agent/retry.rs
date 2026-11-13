@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use crate::agent::error_code::ErrorCode;
 
@@ -300,8 +301,8 @@ impl RetryAfter {
 ///
 /// 分组→注册表映射（R1）：
 /// ① timeout 四词 → [`ErrorCode::UpstreamTimeout`]；② 429 三词 → `UpstreamRateLimited`；
-/// ③ 5xx/408 四码 → `UpstreamServerError`；③′ 边缘 5xx（520–524/527/530，
-/// 实证驱动，ADR-0086）→ 同上；④ 连接三词 → `UpstreamNetwork`
+/// ③ 5xx/408 四码 → `UpstreamServerError`；③′ 边缘 5xx（520–525/527/530，
+/// 实证驱动，ADR-0086；525 于 2026-11-12 纳入）→ 同上；④ 连接三词 → `UpstreamNetwork`
 /// （禁扩 `connect` 泛词）；④′ 传输层标志 `type=connect|request` → `UpstreamNetwork`
 /// （无状态码，置于所有状态码判据之后）；⑤ 400 系七码 → `UpstreamBadRequest`/`UpstreamAuth`
 /// （401 与 400 不区分冻结，同落 NonRetryable）；⑥ context 四词 → `UpstreamContextOverflow`；
@@ -335,10 +336,18 @@ pub(crate) const UPSTREAM_SERVER_ERROR_HINTS: &[&str] = &["502", "503", "504", "
 /// ③′ 边缘 5xx（ADR-0086）：语义与 502/503/504 同为「暂时性上游不可用」，但码值
 /// 不在 RFC 标准表内（reqwest 显示为 `<unknown status code>`），原码表一条都不命中
 /// ⇒ 一律 `NonRetryable` 直接 Abort，退避预算从未启动。
-/// 525/526 明确**排除**：源站 TLS 握手/证书配置错误，重试不能改变结果，保持 Abort。
+///
+/// 525 **纳入**（ADR `.agents/notes/implemented/bug-fix/2026-11-12-upstream-525-retry-classification.md`）：
+/// 原判定沿用「源站 TLS 配置错误」的静态理由排除，但实证（会话 `pa_01a1cf14` 3 轮连撞
+/// `HTTP 525` @6–8s，跨 gemini / hy4free 两个模型）显示 Cloudflare 525 是**边缘与源站握手
+/// 瞬时失败**（源站重启/负载抖动/握手超时），与 522 同属「边缘没能完成交换」，秒级可自愈；
+/// 静态排除导致 5 次预算从未启动、也不换手，同一网关被连撞三次。故与 ③′ 其余码同组。
+///
+/// 526 仍**排除**：`Invalid SSL Certificate` 是源站证书无效/过期/不受信，属确定性配置错误，
+/// 重试与换到同源站的其他模型都不会改变结果，保持 Abort（不为让退避「看起来有效」而吞掉配置故障）。
 /// 500 亦维持既有冻结（NonRetryable，见 `stage2_upstream_code_for_hints_covers_r1_groups`）。
 pub(crate) const UPSTREAM_EDGE_SERVER_ERROR_HINTS: &[&str] =
-    &["520", "521", "522", "523", "524", "527", "530"];
+    &["520", "521", "522", "523", "524", "525", "527", "530"];
 pub(crate) const UPSTREAM_NETWORK_HINTS: &[&str] =
     &["connection reset", "connection refused", "dns"];
 /// ④′ 传输层阶段标志（ADR-0086）：`type=connect` / `type=request` /
@@ -905,7 +914,7 @@ pub fn classify_error_class(err: &str) -> &'static str {
 ///
 /// `true` 当且仅当 [`classify_error_class`] ∈ `{rate_limited, quota, timeout, network, auth}`
 /// **或** [`upstream_code_for_hints`] == [`ErrorCode::UpstreamServerError`]（502/503/504/408 与
-/// 边缘 5xx 520-524/527/530）。`bad_request` / `other` 不换手；HTTP **500 不换手**
+/// 边缘 5xx 520-525/527/530）。`bad_request` / `other` 不换手；HTTP **500 不换手**
 /// （既有码表冻结 500 为 NonRetryable，且它不在 server_error 码内 ⇒ 换 provider 无收益）。
 pub fn failover_eligible(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
@@ -1135,6 +1144,250 @@ where
         }
     }
     Err(last_decision)
+}
+
+// ─────────────────────── F2：per-call 纯净窗口（重试账本） ───────────────────────
+//
+// 取证与裁决见 `.dev-team/diag-tps/fix/f2f3-green.md`（I1）。一句话：per-call 的
+// `turn_duration_ms` / `first_token_latency_ms` 原本在重试循环**之外**取样
+// （`runtime/turn_stream.rs::initial_decision_started_at` / `provider_call_started_at`、
+// `runtime/tool_recovery.rs::started_at`），而重试在
+// `provider::retry_provider_scoped_with_report_config` 的循环里（429/525 单次
+// 1.9–8.0s，外加 20s/40s 限流退避）⇒ 失败尝试耗时被算进 `dur`。
+// `gen = dur − ttft` 因两端同步被抬高而近似抵消；但 `end_to_end` 口径
+// （`Σout / Σdur`）会被系统性压低（实测 gemini e2e 10.4 t/s vs decode 98.6 t/s）。
+//
+// 本账本由**重试循环**逐 attempt 记账，调用方只在 provider 调用前后各加一行：
+// 调用前 `let outer_start = retry::begin_provider_attempt_window();`，
+// 调用后 `let pure = retry::take_pure_call_window(outer_start, outer_ttft);`。
+// I3 不变量：本模块**不算速度**——速度唯一出口仍是
+// `turn_flow::{decode_eligible, call_speed_from_raw}`，本账本只负责把窗口修纯净。
+
+/// 一次 provider 调用（可能含多次 attempt / 换手）的重试账本。
+///
+/// 「失败耗时」与「attempts 次数」在这里是**独立字段**：它们绝不参与 per-call 的
+/// `dur` / `gen`，只做取证与结构化留痕（I2）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderAttemptWindow {
+    /// attempt 次数（含最终成功的那次；整体失败的调用计全部尝试次数）。
+    pub attempts: u32,
+    /// 失败 attempt **自身**耗时之和（毫秒，不含退避 sleep）。
+    pub failed_attempt_ms: u64,
+    /// 重试循环内的退避 sleep 累计（毫秒）。
+    pub slept_ms: u64,
+    /// 最后一次**成功** attempt 的耗时（毫秒）；无成功 attempt ⇒ `None`。
+    pub succeeded_attempt_ms: Option<u64>,
+    /// 最后一次成功 attempt 的**起点**相对账本起点的偏移（毫秒）。
+    pub succeeded_attempt_offset_ms: Option<u64>,
+}
+
+impl ProviderAttemptWindow {
+    /// 成功 attempt 之前累计的耗时（失败尝试 + 退避）。
+    pub fn prelude_ms(&self) -> u64 {
+        self.failed_attempt_ms.saturating_add(self.slept_ms)
+    }
+
+    /// 外层 `dur`（跨 attempt 墙钟）→ 纯净 per-call `dur`（只覆盖最后一次成功 attempt）。
+    ///
+    /// 无成功 attempt（调用整体失败）⇒ 原样返回外层值，**不伪造**纯净性。
+    pub fn rebase_duration_ms(&self, outer_duration_ms: u64) -> u64 {
+        self.succeeded_attempt_ms.unwrap_or(outer_duration_ms)
+    }
+
+    /// 外层 `ttft`（跨 attempt）→ 纯净 `ttft`（相对成功 attempt 起点）。
+    ///
+    /// 无成功 attempt ⇒ 原样返回（同上，不伪造）。毫秒级取整可能让结果落到 0
+    /// （首 token 在成功 attempt 起点当毫秒内到达）——0 是**诚实值**，不是缺失。
+    pub fn rebase_first_token_ms(&self, outer_first_token_ms: Option<u64>) -> Option<u64> {
+        outer_first_token_ms.map(|ttft| {
+            ttft.saturating_sub(self.succeeded_attempt_offset_ms.unwrap_or(0))
+        })
+    }
+}
+
+/// 账本内部可变状态（读取即消费，一次性）。
+#[derive(Debug, Clone, Copy)]
+struct AttemptWindowState {
+    started_at: Instant,
+    attempts: u32,
+    failed_attempt_ms: u64,
+    slept_ms: u64,
+    succeeded_attempt_ms: Option<u64>,
+    succeeded_attempt_offset_ms: Option<u64>,
+}
+
+impl AttemptWindowState {
+    fn new(started_at: Instant) -> Self {
+        Self {
+            started_at,
+            attempts: 0,
+            failed_attempt_ms: 0,
+            slept_ms: 0,
+            succeeded_attempt_ms: None,
+            succeeded_attempt_offset_ms: None,
+        }
+    }
+
+    fn snapshot(&self) -> ProviderAttemptWindow {
+        ProviderAttemptWindow {
+            attempts: self.attempts,
+            failed_attempt_ms: self.failed_attempt_ms,
+            slept_ms: self.slept_ms,
+            succeeded_attempt_ms: self.succeeded_attempt_ms,
+            succeeded_attempt_offset_ms: self.succeeded_attempt_offset_ms,
+        }
+    }
+}
+
+// 为什么用 thread_local：一次 provider 调用（含其内部重试/换手）在**同一线程上同步执行**
+// ——`on_delta` 也在阻塞 SSE 读循环内联调用（`provider::openai_sse::push_payload`）。
+// 与 `runtime::limits` 的测试覆写同一取舍：不引入跨调用共享状态，也不污染并行用例。
+thread_local! {
+    static ATTEMPT_WINDOW: RefCell<Option<AttemptWindowState>> = const { RefCell::new(None) };
+}
+
+/// 开启一次 provider 调用的重试账本，返回**与外层计时同源**的起点。
+///
+/// 调用方必须以返回的 `Instant` 作为 `dur` / `ttft` 的计时起点（两者必须同源，
+/// 否则 [`ProviderAttemptWindow::rebase_first_token_ms`] 会漂移）。
+pub fn begin_provider_attempt_window() -> Instant {
+    let started_at = Instant::now();
+    ATTEMPT_WINDOW.with(|slot| *slot.borrow_mut() = Some(AttemptWindowState::new(started_at)));
+    started_at
+}
+
+/// 取走本线程当前调用的账本（一次性；取走后回到「未开启」状态）。
+pub fn take_provider_attempt_window() -> Option<ProviderAttemptWindow> {
+    ATTEMPT_WINDOW.with(|slot| slot.borrow_mut().take().map(|state| state.snapshot()))
+}
+
+/// 记一次**失败** attempt（供重试循环调用；未开启账本 ⇒ 静默 no-op）。
+pub fn note_provider_attempt_failed(elapsed_ms: u64) {
+    ATTEMPT_WINDOW.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            state.attempts = state.attempts.saturating_add(1);
+            state.failed_attempt_ms = state.failed_attempt_ms.saturating_add(elapsed_ms);
+        }
+    });
+}
+
+/// 记一次**成功** attempt（供重试循环调用；未开启账本 ⇒ 静默 no-op）。
+///
+/// `started_at` 是本次 attempt 的起点：由它算出成功 attempt 相对账本起点的偏移，
+/// 从而把外层 `ttft` 平移到「成功 attempt 内部」。
+pub fn note_provider_attempt_succeeded(started_at: Instant, elapsed_ms: u64) {
+    ATTEMPT_WINDOW.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            state.attempts = state.attempts.saturating_add(1);
+            state.succeeded_attempt_ms = Some(elapsed_ms);
+            state.succeeded_attempt_offset_ms = Some(
+                started_at
+                    .saturating_duration_since(state.started_at)
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
+        }
+    });
+}
+
+/// 记重试循环内一次退避 sleep 的时长（未开启账本 ⇒ 静默 no-op）。
+pub fn note_provider_attempt_backoff_slept(slept_ms: u64) {
+    ATTEMPT_WINDOW.with(|slot| {
+        if let Some(state) = slot.borrow_mut().as_mut() {
+            state.slept_ms = state.slept_ms.saturating_add(slept_ms);
+        }
+    });
+}
+
+/// 纯净 per-call 窗口的结算结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PureCallWindow {
+    /// 只覆盖最后一次成功 attempt 的耗时（毫秒）。喂 `build_provider_call_cache_record`
+    /// 的 `turn_duration_ms`。
+    pub duration_ms: u64,
+    /// 只覆盖最后一次成功 attempt 的首 token 延迟（毫秒）。喂同记录的
+    /// `first_token_latency_ms`。
+    pub first_token_latency_ms: Option<u64>,
+    /// 原始账本（重试次数 / 失败耗时 / 退避，**独立字段**，绝不混入 `gen`）。
+    /// `None` ⇔ 未开启账本（第三方直接调用 provider / 测试桩）。
+    pub window: Option<ProviderAttemptWindow>,
+}
+
+impl PureCallWindow {
+    /// 纯净窗口是否真的排除了失败尝试（有重试且已定位成功 attempt）。
+    ///
+    /// 供结构化留痕与用例断言用；不参与速度公式。
+    pub fn retried(&self) -> bool {
+        self.window
+            .is_some_and(|window| window.succeeded_attempt_ms.is_some() && window.attempts > 1)
+    }
+}
+
+/// 由外层观测结算纯净 per-call 窗口（**消费**账本，一次性）。
+///
+/// `outer_started_at` 必须是 [`begin_provider_attempt_window`] 的返回值。
+/// 未开启账本 ⇒ 原样返回外层观测（不伪造纯净性，也不回填 0）。
+pub fn take_pure_call_window(
+    outer_started_at: Instant,
+    outer_first_token_ms: Option<u64>,
+) -> PureCallWindow {
+    let outer_duration_ms = outer_started_at.elapsed().as_millis() as u64;
+    let Some(window) = take_provider_attempt_window() else {
+        return PureCallWindow {
+            duration_ms: outer_duration_ms,
+            first_token_latency_ms: outer_first_token_ms,
+            window: None,
+        };
+    };
+    let pure = PureCallWindow {
+        duration_ms: window.rebase_duration_ms(outer_duration_ms),
+        first_token_latency_ms: window.rebase_first_token_ms(outer_first_token_ms),
+        window: Some(window),
+    };
+    // I2：attempts 与失败耗时**独立留痕**（结构化日志），不进 per-call dur/gen。
+    if pure.retried() {
+        log_pure_call_window(outer_duration_ms, outer_first_token_ms, &pure);
+    }
+    pure
+}
+
+/// 重试窗口的结构化留痕（一行一条调用；无重试不写，避免常态噪声）。
+fn log_pure_call_window(
+    outer_duration_ms: u64,
+    outer_first_token_ms: Option<u64>,
+    pure: &PureCallWindow,
+) {
+    let Some(window) = pure.window else {
+        return;
+    };
+    crate::agent::otel::log::log_json_with_fields(
+        "info",
+        "provider_call_retry_window",
+        None,
+        &[
+            ("attempts", serde_json::json!(window.attempts)),
+            ("failed_attempt_ms", serde_json::json!(window.failed_attempt_ms)),
+            ("slept_ms", serde_json::json!(window.slept_ms)),
+            ("prelude_ms", serde_json::json!(window.prelude_ms())),
+            (
+                "succeeded_attempt_offset_ms",
+                serde_json::json!(window.succeeded_attempt_offset_ms),
+            ),
+            (
+                "pure_duration_ms",
+                serde_json::json!(pure.duration_ms),
+            ),
+            (
+                "pure_first_token_latency_ms",
+                serde_json::json!(pure.first_token_latency_ms),
+            ),
+            ("outer_duration_ms", serde_json::json!(outer_duration_ms)),
+            (
+                "outer_first_token_latency_ms",
+                serde_json::json!(outer_first_token_ms),
+            ),
+        ],
+    );
 }
 
 #[cfg(test)]
@@ -1703,7 +1956,9 @@ mod tests {
     fn edge_5xx_maps_to_server_error_but_origin_tls_stays_abort() {
         use crate::agent::error_code::ErrorCode::*;
         // ③′ 边缘 5xx：全部落 UpstreamServerError（可重试）
-        for code in ["520", "521", "522", "523", "524", "527", "530"] {
+        // 525 于 2026-11-12 由「排除」改为「纳入」——源站握手瞬时失败可自愈，
+        // 与 522 同组；判定理由见 `UPSTREAM_EDGE_SERVER_ERROR_HINTS` 注释与对应 ADR。
+        for code in ["520", "521", "522", "523", "524", "525", "527", "530"] {
             let probe = format!(
                 "provider 返回错误状态：{code} <unknown status code>；耗时=6401ms；响应正文："
             );
@@ -1713,8 +1968,8 @@ mod tests {
                 "{code}"
             );
         }
-        // 525/526 源站 TLS 配置错误：保持 NonRetryable（码表不命中 → None）
-        for code in ["525", "526"] {
+        // 526 Invalid SSL Certificate（源站证书无效）：保持 NonRetryable（码表不命中 → None）
+        for code in ["526"] {
             let probe = format!(
                 "provider 返回错误状态：{code} <unknown status code>；耗时=6097ms；响应正文："
             );
@@ -1723,6 +1978,9 @@ mod tests {
         // 500 冻结不变；码值粘在更长数字里仍不得命中
         assert_eq!(upstream_code_for_hints("elapsed=52201ms"), None);
         assert_eq!(upstream_code_for_hints("token id 1522"), None);
+        // 525 不得靠子串误命中：`1525` / `5250ms` 都不是状态码
+        assert_eq!(upstream_code_for_hints("token id 1525"), None);
+        assert_eq!(upstream_code_for_hints("elapsed=5250ms"), None);
     }
 
     #[test]
@@ -1752,12 +2010,15 @@ mod tests {
         for probe in [
             "provider 返回错误状态：522 <unknown status code>；耗时=6401ms；响应正文：",
             "provider 返回错误状态：520 <unknown status code>",
+            // 2026-11-12：525 由「排除」改为「纳入」（源站握手瞬时失败，与 522 同组）
+            "provider 返回错误状态：525 <unknown status code>；耗时=6097ms；响应正文：",
             "error sending request for url (https://tokens.ponyjob.top/v1/chat/completions)；type=request；elapsed=30996ms",
         ] {
             assert!(policy.classify(probe).is_retryable(), "{probe}");
         }
         for probe in [
-            "provider 返回错误状态：525 <unknown status code>；耗时=6097ms；响应正文：",
+            // 526 Invalid SSL Certificate 仍属确定性配置错误 ⇒ Abort
+            "provider 返回错误状态：526 <unknown status code>；耗时=6097ms；响应正文：",
             "provider 返回错误状态：400；响应正文：invalid model",
             "provider returned 500",
         ] {

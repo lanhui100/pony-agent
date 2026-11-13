@@ -390,6 +390,11 @@ export function useTraceProjection(options: {
         // I10：口径直取快照（缺失 ⇒ "none"），禁止按 mode 推导或当作 stream_decode。
         basis: snapshot.turnSpeedBasis ?? "none",
         calls: snapshot.turnCalls,
+        // F1 I4：样本量与「突发剔除数」直取快照（与 Rust `turn_call_census` 同源）；
+        // 旧 payload 缺键 ⇒ null（不伪造 0，见 `HomeStatusPanel` 的 `> 0` 才提示）。
+        callsTotal: snapshot.turnCallsTotal ?? null,
+        callsEligible: snapshot.turnCallsEligible ?? null,
+        burstExcluded: snapshot.turnBurstExcluded ?? null,
         speed: display.speed,
         inputTokens: display.contextTokens,
         outputTokens: snapshot.turnOutputTokens,

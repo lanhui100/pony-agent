@@ -372,7 +372,9 @@ impl AgentRuntime {
             }
 
             // ── 2) 批后**一次** followup：N==1 走既有 1:1 入口（逐字不变），N>1 走批量入口 ──
-            let provider_call_started_at = Instant::now();
+            // F2（重试窗口纯净）：账本起点即 per-call 计时起点，重试/退避在
+            // `provider_followup_with_mode` 内部，不共源就会被算进 dur。
+            let provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
             let followup_result = if executed_calls.len() == 1 {
                 provider_followup_with_mode(
                     provider,
@@ -409,25 +411,22 @@ impl AgentRuntime {
                 }
             };
             let mut response = response;
-            let provider_call_duration_ms = provider_call_started_at.elapsed().as_millis() as u64;
-            provider_call_records.push(build_provider_call_cache_record(
-                ProviderRequestKind::ToolFollowup,
-                Some(response.provider_source.as_str()),
-                Some(response.provider_mode.as_str()),
-                // wave-54 C4：协议归一上下文输入口径（anthropic ⇒ input + cache_read）。
-                Some(provider.protocol_label()),
-                response.token_usage.as_ref(),
-                None,
-                Some(provider_call_duration_ms),
-                ProviderLatencyKind::BufferedResponse,
-                Some(&context_observation),
-            ));
-            accumulated_token_usage =
-                merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
-            accumulated_fallback_reason = merge_fallback_reason(
-                accumulated_fallback_reason,
-                response.fallback_reason.clone(),
+            // F2：per-call dur 收敛为「只覆盖最后一次成功 attempt」（同步 followup 无首包观测）。
+            let provider_call_duration_ms =
+                crate::agent::retry::take_pure_call_window(provider_call_started_at, None).duration_ms;
+            push_buffered_followup_call_record(
+                provider_call_records,
+                provider,
+                &response,
+                provider_call_duration_ms,
+                &context_observation,
             );
+            (accumulated_token_usage, accumulated_fallback_reason) =
+                merge_response_usage_into_accumulators(
+                    accumulated_token_usage,
+                    accumulated_fallback_reason,
+                    &response,
+                );
 
             if let Some(error) = provider_failure_message(
                 &response.provider_mode,
@@ -506,14 +505,12 @@ impl AgentRuntime {
                         &context_observation,
                     );
                     provider_call_records.push(recovery.provider_call_record);
-                    accumulated_token_usage = merge_token_usage(
-                        accumulated_token_usage,
-                        recovery.response.token_usage.as_ref(),
-                    );
-                    accumulated_fallback_reason = merge_fallback_reason(
-                        accumulated_fallback_reason,
-                        recovery.response.fallback_reason.clone(),
-                    );
+                    (accumulated_token_usage, accumulated_fallback_reason) =
+                        merge_response_usage_into_accumulators(
+                            accumulated_token_usage,
+                            accumulated_fallback_reason,
+                            &recovery.response,
+                        );
                     response = recovery.response;
                 } else if completed_hops >= max_tool_hops_per_turn() {
                     return Err(self.fail_sync_turn_result(
@@ -546,14 +543,12 @@ impl AgentRuntime {
                             &context_observation,
                         );
                         provider_call_records.push(recovery.provider_call_record);
-                        accumulated_token_usage = merge_token_usage(
-                            accumulated_token_usage,
-                            recovery.response.token_usage.as_ref(),
-                        );
-                        accumulated_fallback_reason = merge_fallback_reason(
-                            accumulated_fallback_reason,
-                            recovery.response.fallback_reason.clone(),
-                        );
+                        (accumulated_token_usage, accumulated_fallback_reason) =
+                            merge_response_usage_into_accumulators(
+                                accumulated_token_usage,
+                                accumulated_fallback_reason,
+                                &recovery.response,
+                            );
                         response = recovery.response;
                     } else {
                         current_assistant_message = response.assistant_message.clone();
@@ -767,37 +762,13 @@ impl AgentRuntime {
         // PA-095：同步入口事件化——prepare 成功即发射 turn:started（payload.text
         // 携带用户消息 → 触发 user/message；build_context_observation → 触发
         // context/observation 外置）。事件持久化走全局注册表，NoopSink 不做推送。
-        {
-            let sync_sink = crate::agent::turn_flow::NoopTurnEventSink;
-            crate::agent::turn_flow::emit_stream_event(
-                &sync_sink,
-                "turn:started",
-                sync_turn_id.clone(),
-                "started",
-                Some("calling_model"),
-                Some(prepared.user_message.clone()),
-                None,
-                Some(&provider_meta),
-                None,
-                None,
-                None,
-                Some(prepared.build_context_observation.clone()),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                input.session_id.clone(),
-            );
-        }
+        emit_sync_turn_started(
+            sync_turn_id.clone(),
+            prepared.user_message.clone(),
+            &provider_meta,
+            prepared.build_context_observation.clone(),
+            input.session_id.clone(),
+        );
         let model_call_hook_outcome =
             self.dispatch_hook_trace_records(TurnHookPoint::ModelCallStart);
         let initial_model_hook_trace_records = model_call_hook_outcome.trace_records.clone();

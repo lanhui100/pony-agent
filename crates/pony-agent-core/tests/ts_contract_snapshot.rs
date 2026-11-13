@@ -119,6 +119,11 @@ fn turn_metrics_snapshot_sample() -> TurnMetricsSnapshot {
         turn_output_tokens: 1_500,
         turn_generation_ms: 2_176,
         turn_calls: 1,
+        // F1（task-4 / 契约 v3）：样本量三键——`Option` + `skip_serializing_if`，必须给 `Some`
+        // 才真正上线缆（与上方 `callSpeedBasis` 同一约定）。
+        turn_calls_total: Some(3),
+        turn_calls_eligible: Some(1),
+        turn_burst_excluded: Some(1),
         turn_context_input_tokens: 42_000,
         turn_cache_hit_input_tokens: 9_000,
         turn_calls_with_cache: 1,

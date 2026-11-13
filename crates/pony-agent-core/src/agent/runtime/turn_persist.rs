@@ -1085,6 +1085,34 @@ impl AgentRuntime {
         result.emitted_at_ms = Some(envelope.emitted_at_ms);
     }
 
+    /// 流式入口 prepare 成功后的 `calling_model` 检查点（0 hop、无工具活动、无 source/mode/error）。
+    ///
+    /// 与 `update_execution_checkpoint` 的内联调用**逐字等价**（参数原样转发），
+    /// 抽出自 `start_turn_stream_with_control_and_facts` 以免该入口函数继续膨胀。
+    pub(super) fn mark_stream_calling_model_checkpoint(
+        &self,
+        control: &ExecutionControlRegistry,
+        turn_id: &str,
+        provider_meta: &ProviderEventMeta,
+        trace_steps: &[TurnTraceStep],
+    ) {
+        self.update_execution_checkpoint(
+            control,
+            turn_id,
+            "calling_model",
+            Some(provider_meta),
+            0,
+            None,
+            trace_steps,
+            &[],
+            None,
+            None,
+            None,
+            Some("running"),
+            None,
+        );
+    }
+
     pub(crate) fn update_execution_checkpoint(
         &self,
         control: &ExecutionControlRegistry,

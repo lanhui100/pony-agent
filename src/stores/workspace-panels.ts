@@ -11,7 +11,7 @@ import { defineStore } from "pinia";
  * store 不提供"幂等展开"入口，避免两套开合语义漂移。
  */
 
-export type WorkspacePanel = "plan" | "roster" | "tasks";
+export type WorkspacePanel = "plan" | "roster" | "tasks" | "goal";
 
 type WorkspacePanelsState = {
   activePanel: WorkspacePanel | "";
@@ -27,6 +27,9 @@ export const useWorkspacePanelsStore = defineStore("workspacePanels", {
     },
     togglePlan() {
       this.togglePanel("plan");
+    },
+    toggleGoal() {
+      this.togglePanel("goal");
     },
     toggleTasks() {
       this.togglePanel("tasks");

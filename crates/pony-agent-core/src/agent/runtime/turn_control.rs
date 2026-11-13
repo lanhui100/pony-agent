@@ -562,6 +562,22 @@ impl AgentRuntime {
 
 }
 
+/// wave-64 R1（BLOCKING）：终态失败派发的 **terminal-once 闸门**（内联 failed 派发块共用）。
+///
+/// `false` ⇒ 该轮已有终态派发者（C5 宽限监督已收口 cancelled / 已派发过 failed）：
+/// 调用方必须立即 `return`，不得再 persist_trace、不得再 emit `turn:failed`。
+pub(super) fn claim_failed_terminal(control: &ExecutionControlRegistry, turn_id: &str) -> bool {
+    let claimed = super::turn_control::claim_terminal_status(control, turn_id, "failed");
+    if !claimed {
+        super::turn_control::log_terminal_dispatch_suppressed(
+            turn_id,
+            "failed",
+            "inline_stream_failed",
+        );
+    }
+    claimed
+}
+
 #[cfg(test)]
 mod wave64_classify_tests {
     use super::*;

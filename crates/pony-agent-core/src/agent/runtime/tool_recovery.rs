@@ -1,4 +1,7 @@
 use super::*;
+// F3：读线程侧的 delta 时间窗聚合器（定义在 `runtime::turn_stream`，两条流式路径共用
+// 同一实现，避免节流口径二次演化）。
+use super::stream_support::StreamDeltaCoalescer;
 // D1-1（ADR 0123 补充 r2）：中断注记的**单一真源**在 `agent::session::store`——
 // 与 `is_interrupt_placeholder_text` 的整句判据共用同一字面量，本模块不再保留私有副本。
 use crate::agent::session::{UPSTREAM_INTERRUPTED_NOTE, USER_CANCELLED_NOTE};
@@ -16,7 +19,10 @@ pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::Provid
     let recovery_request = build_tool_followup_recovery_request(planning_request);
     let synthetic_tool_result =
         build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
-    let started_at = Instant::now();
+    // F2（重试窗口纯净）：账本起点即 per-call 计时起点；重试/退避在
+    // `provider_followup_with_mode` 内部（followup 作用域还会切 20s/40s 限流退避），
+    // 不共源就会被算进 dur。
+    let started_at = crate::agent::retry::begin_provider_attempt_window();
     let mut response = provider_followup_with_mode(
         provider,
         &recovery_request,
@@ -30,7 +36,8 @@ pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::Provid
     .unwrap_or_else(|error| {
         build_local_tool_followup_recovery_response(&synthetic_tool_result, hop_records, &error)
     });
-    let duration_ms = started_at.elapsed().as_millis() as u64;
+    // 同步恢复调用无首包观测（`BufferedResponse`）⇒ 只结算 dur，不伪造 ttft。
+    let duration_ms = crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
     let provider_source_snapshot = response.provider_source.clone();
     let provider_mode_snapshot = response.provider_mode.clone();
     let token_usage_snapshot = response.token_usage.clone();
@@ -100,7 +107,8 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
     let recovery_request = build_tool_followup_recovery_request(planning_request);
     let synthetic_tool_result =
         build_tool_followup_recovery_tool_result(blocked_tool_call, hop_records, recovery_reason);
-    let started_at = Instant::now();
+    // F2（重试窗口纯净）：账本起点即 per-call 计时起点（同上，同步恢复路径）。
+    let started_at = crate::agent::retry::begin_provider_attempt_window();
     let started_at_for_emit = started_at;
     let call_first_token_latency = Rc::new(Cell::new(None));
     let call_first_token_latency_for_emit = Rc::clone(&call_first_token_latency);
@@ -114,8 +122,9 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
     let emitted_reasoning_chars_ref = Rc::new(Cell::new(0usize));
     let emitted_text_for_emit = Rc::clone(&emitted_text_ref);
     let emitted_reasoning_chars_for_emit = Rc::clone(&emitted_reasoning_chars_ref);
-    let last_emit_for_client = Rc::new(Cell::new(0u64));
-    let last_emit_for_client_clone = Rc::clone(&last_emit_for_client);
+    // F3：读线程侧的时间窗聚合器（替代旧的 `last_emit` + 内联 sleep 节流）。
+    let delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
+    let delta_coalescer_for_emit = Rc::clone(&delta_coalescer);
 
     let mut response = provider_followup_stream_with_mode(
         provider,
@@ -154,68 +163,58 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
             } else {
                 None
             };
-            let mut did_emit = false;
             match delta {
                 ProviderStreamChunk::StreamStart => {
                     // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
                 }
                 ProviderStreamChunk::Text(text) => {
                     if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush() {
-                        emitted_reasoning_chars_for_emit.set(
-                            emitted_reasoning_chars_for_emit
-                                .get()
-                                .saturating_add(reasoning.chars().count()),
-                        );
-                        emit_lightweight_delta(
-                            sink,
-                            &turn_id_for_emit,
+                        delta_coalescer_for_emit.borrow_mut().push(
                             None,
                             Some(reasoning),
                             latency,
-                            session_id_for_emit.clone(),
                         );
                     }
                     emitted_text_for_emit.borrow_mut().push_str(&text);
-                    emit_lightweight_delta(
-                        sink,
-                        &turn_id_for_emit,
-                        Some(text),
-                        None,
-                        latency,
-                        session_id_for_emit.clone(),
-                    );
-                    did_emit = true;
+                    delta_coalescer_for_emit
+                        .borrow_mut()
+                        .push(Some(text), None, latency);
                 }
                 ProviderStreamChunk::Reasoning(reasoning) => {
                     if let Some(buffered_reasoning) =
                         reasoning_batcher_for_emit.borrow_mut().push(reasoning)
                     {
-                        emitted_reasoning_chars_for_emit.set(
-                            emitted_reasoning_chars_for_emit
-                                .get()
-                                .saturating_add(buffered_reasoning.chars().count()),
-                        );
-                        emit_lightweight_delta(
-                            sink,
-                            &turn_id_for_emit,
+                        delta_coalescer_for_emit.borrow_mut().push(
                             None,
                             Some(buffered_reasoning),
                             latency,
-                            session_id_for_emit.clone(),
                         );
-                        did_emit = true;
                     }
                 }
             }
-            if did_emit {
-                let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
-                let prev = last_emit_for_client_clone.get();
-                let gap = now.saturating_sub(prev);
-                const MIN_CLIENT_GAP_MS: u64 = 16;
-                if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-                    std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
+            // F3（I1/I3）：只做一次时间戳比较；窗口内的内容留在 pending，
+            // **不 sleep、不等客户端消费**。`sink.emit` 内联且契约=非阻塞投递
+            // （慢 sink 会串进读循环，属已知限制，见 `turn_stream.rs` 文件头）。
+            let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+            let due = delta_coalescer_for_emit.borrow_mut().take_if_due(now);
+            if let Some(batch) = due {
+                for frame in batch.into_frames().into_iter().flatten() {
+                    if let Some(reasoning) = frame.reasoning.as_ref() {
+                        emitted_reasoning_chars_for_emit.set(
+                            emitted_reasoning_chars_for_emit
+                                .get()
+                                .saturating_add(reasoning.chars().count()),
+                        );
+                    }
+                    emit_lightweight_delta(
+                        sink,
+                        &turn_id_for_emit,
+                        frame.text,
+                        frame.reasoning,
+                        frame.latency_ms,
+                        session_id_for_emit.clone(),
+                    );
                 }
-                last_emit_for_client_clone.set(now);
             }
         },
         crate::agent::turn_flow::LlmRequestMode::ToolRecovery,
@@ -225,25 +224,30 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
     });
 
     if let Some(buffered_reasoning) = reasoning_batcher.borrow_mut().flush() {
-        emitted_reasoning_chars_ref.set(
-            emitted_reasoning_chars_ref
-                .get()
-                .saturating_add(buffered_reasoning.chars().count()),
-        );
-        emit_lightweight_delta(
-            sink,
-            turn_id,
-            None,
-            Some(buffered_reasoning),
-            None,
-            session_id.clone(),
-        );
-        let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
-        let prev = last_emit_for_client.get();
-        let gap = now.saturating_sub(prev);
-        const MIN_CLIENT_GAP_MS: u64 = 16;
-        if prev > 0 && gap < MIN_CLIENT_GAP_MS {
-            std::thread::sleep(std::time::Duration::from_millis(MIN_CLIENT_GAP_MS - gap));
+        delta_coalescer
+            .borrow_mut()
+            .push(None, Some(buffered_reasoning), None);
+    }
+    // F3（I2）：收尾**无条件**把 pending 发完——允许合并，禁止丢最终帧。
+    let tail_now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+    let tail_batch = delta_coalescer.borrow_mut().flush(tail_now);
+    if let Some(batch) = tail_batch {
+        for frame in batch.into_frames().into_iter().flatten() {
+            if let Some(reasoning) = frame.reasoning.as_ref() {
+                emitted_reasoning_chars_ref.set(
+                    emitted_reasoning_chars_ref
+                        .get()
+                        .saturating_add(reasoning.chars().count()),
+                );
+            }
+            emit_lightweight_delta(
+                sink,
+                turn_id,
+                frame.text,
+                frame.reasoning,
+                frame.latency_ms,
+                session_id.clone(),
+            );
         }
     }
 
@@ -276,7 +280,10 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
         }
     }
 
-    let duration_ms = started_at.elapsed().as_millis() as u64;
+    // F2：per-call (dur, ttft) 收敛到「最后一次成功 attempt」；失败尝试/退避只留痕在账本里。
+    let pure_call_window =
+        crate::agent::retry::take_pure_call_window(started_at, call_first_token_latency.get());
+    let duration_ms = pure_call_window.duration_ms;
     let provider_source_snapshot = response.provider_source.clone();
     let provider_mode_snapshot = response.provider_mode.clone();
     let token_usage_snapshot = response.token_usage.clone();
@@ -321,7 +328,7 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
             None,
             token_usage_snapshot.as_ref(),
             if latency_kind == ProviderLatencyKind::ProviderStream {
-                call_first_token_latency.get()
+                pure_call_window.first_token_latency_ms
             } else {
                 None
             },

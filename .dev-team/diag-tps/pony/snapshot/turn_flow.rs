@@ -1,0 +1,3379 @@
+use crate::agent::capability_bridge::SkillDescriptor;
+use crate::agent::hooks::HookTraceRecord;
+use crate::agent::provider::{
+    BuildContextObservation, ProviderClient, ProviderDecision, ProviderManager, ProviderRequest,
+    ProviderStreamChunk, TokenUsage,
+};
+use crate::agent::session::TraceTimelineEntry;
+use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
+use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::context::RetrievedContextState;
+use super::runtime::{TurnResult, TurnStreamEvent};
+
+pub trait TurnEventSink {
+    fn emit(&self, name: &str, payload: TurnStreamEvent);
+    /// 事件溯源（PA-091）：将 turn 内过程事实入事件缓冲（默认空实现——
+    /// 生产路径经全局注册表持久化；测试 sink 可覆写为收集）。
+    /// 持久化失败 contained（只记日志不阻断流）；构造失败由调用方 fail loud。
+    fn persist(&self, _event: crate::agent::turn_event::TurnEvent) {}
+}
+
+/// PA-095：同步入口（run_turn）的事件通道 sink——emit 空实现（同步 API 无流式
+/// 推送），事件持久化经全局注册表进行（与 sink 无关），使同步入口产生与
+/// streaming 入口等价的事件流。
+pub struct NoopTurnEventSink;
+
+impl TurnEventSink for NoopTurnEventSink {
+    fn emit(&self, _name: &str, _payload: TurnStreamEvent) {}
+}
+
+/// PA-091：全局事件持久化注册表（OnceLock 模式，与 turn_event_sequence_registry 一致）。
+/// 生产路径由 HostControlPlane 初始化时注册（持有 sessions_rwlock 的 Arc）；
+/// 测试可注册 mock / 清空。签名：(session_id, turn_id, event, is_terminal)。
+pub type EventPersistFn = dyn Fn(&str, &str, crate::agent::turn_event::TurnEvent, bool) + Send + Sync;
+
+mod turn_flow_registry;
+pub use self::turn_flow_registry::*;
+
+
+pub struct PreparedTurn {
+    pub user_message: String,
+    pub display_message: String,
+    pub retrieved: RetrievedContextState,
+    pub provider: ProviderManager,
+    pub tools: Vec<ToolDefinition>,
+    pub planner_skills: Vec<SkillDescriptor>,
+    pub planning_request: ProviderRequest,
+    pub build_context_observation: BuildContextObservation,
+}
+
+pub struct PlannedTurn {
+    pub first_decision: ProviderDecision,
+    pub resolved_tool_call: Option<ToolCall>,
+    pub initial_decision_duration_ms: Option<u64>,
+    pub planner_hook_trace_records: Vec<HookTraceRecord>,
+}
+
+pub struct PersistedTurnOutcome {
+    pub session_summary: String,
+    pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct TurnEventEnvelope {
+    pub event_id: String,
+    pub event_type: String,
+    pub event_version: String,
+    pub sequence: u64,
+    pub emitted_at_ms: u64,
+}
+
+pub struct ModelHopTraceContent {
+    pub text: String,
+    pub reasoning_content: Option<String>,
+}
+
+pub struct SyncToolTurnOutcome {
+    pub assistant_message: String,
+    pub assistant_reasoning_content: Option<String>,
+    pub provider_native_transcript: Option<Vec<Value>>,
+    pub provider_source: String,
+    pub provider_mode: String,
+    pub fallback_reason: Option<String>,
+    pub token_usage: Option<TokenUsage>,
+    pub trace_steps: Vec<TurnTraceStep>,
+    pub tool_activities: Vec<TurnToolActivity>,
+    pub model_hop_trace_contents: Vec<ModelHopTraceContent>,
+    pub hook_trace_records: Vec<HookTraceRecord>,
+    pub first_token_latency_ms: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct ProviderEventMeta {
+    pub requested_name: String,
+    pub provider_name: String,
+    pub protocol: String,
+    pub model: String,
+    /// P0：该 provider 的上下文窗口容量（tokens）。**additive** 字段：
+    /// `None` ⇒ 未知窗口，消费者须回退既有路径（契约矩阵 I3）。
+    /// 由 Executor 在 task-3 于 [`provider_event_meta`] 填真实取值。
+    pub context_window_tokens: Option<u64>,
+}
+
+pub fn build_failed_turn_result(
+    provider_meta: Option<&ProviderEventMeta>,
+    user_message: String,
+    assistant_message: String,
+    trace_steps: Vec<TurnTraceStep>,
+    tool_activities: Vec<TurnToolActivity>,
+) -> TurnResult {
+    build_failed_turn_result_with_hooks(
+        provider_meta,
+        user_message,
+        assistant_message,
+        trace_steps,
+        tool_activities,
+        Vec::new(),
+    )
+}
+
+pub fn build_failed_turn_result_with_hooks(
+    provider_meta: Option<&ProviderEventMeta>,
+    user_message: String,
+    assistant_message: String,
+    trace_steps: Vec<TurnTraceStep>,
+    tool_activities: Vec<TurnToolActivity>,
+    hook_trace_records: Vec<HookTraceRecord>,
+) -> TurnResult {
+    TurnResult {
+        event_id: None,
+        event_type: None,
+        event_version: None,
+        sequence: None,
+        emitted_at_ms: None,
+        phase: "failed".to_string(),
+        provider_requested_name: provider_meta
+            .map(|meta| meta.requested_name.clone())
+            .unwrap_or_default(),
+        provider_name: provider_meta
+            .map(|meta| meta.provider_name.clone())
+            .unwrap_or_default(),
+        provider_protocol: provider_meta
+            .map(|meta| meta.protocol.clone())
+            .unwrap_or_default(),
+        provider_model: provider_meta
+            .map(|meta| meta.model.clone())
+            .unwrap_or_default(),
+        provider_source: "failed".to_string(),
+        provider_mode: "failed".to_string(),
+        fallback_reason: None,
+        build_context_observation: None,
+        input_tokens: None,
+        cache_hit_input_tokens: None,
+        reasoning_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        first_token_latency_ms: None,
+        turn_duration_ms: None,
+        user_message,
+        assistant_message: assistant_message.clone(),
+        trace_steps,
+        trace_timeline: Vec::new(),
+        tool_activities,
+        provider_call_records: Vec::new(),
+        hook_trace_records,
+        session_summary: assistant_message,
+    }
+}
+
+pub fn provider_event_meta(provider: &ProviderManager) -> ProviderEventMeta {
+    ProviderEventMeta {
+        requested_name: provider.requested_name().to_string(),
+        provider_name: provider.name().to_string(),
+        protocol: provider.protocol_label().to_string(),
+        model: provider.model().to_string(),
+        // task-3：窗口容量取自 provider capabilities；`None` ⇒ 未知，消费者回退既有路径（I3）。
+        context_window_tokens: provider.context_window_tokens().map(u64::from),
+    }
+}
+
+/// 失败轮无正文时的既有文案（历史冻结断言逐字依赖，**不得**改动）。
+const LEGACY_FAILED_TURN_TEXT: &str = "This turn failed.";
+
+/// 正文部分的字节上限（后缀另计，总长仍远低于 8192 字节硬上界）。
+const FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES: usize = 4096;
+
+/// 截断标记（追加在正文末尾）。
+const FAILED_PARTIAL_TEXT_TRUNCATION_MARKER: &str = "…[truncated]";
+
+/// 正文之后的失败说明后缀。
+const FAILED_PARTIAL_TEXT_SUFFIX: &str = "\n\n（该轮失败前已产出以上内容）";
+
+/// P0-3（第二刀）：组装失败轮事件正文。
+///
+/// - `partial_text = Some(非空白)` ⇒ `截断后正文 + 失败说明后缀`（保留已产出内容，仍可识别为失败轮）；
+/// - `None` / 全空白 ⇒ 逐字 [`LEGACY_FAILED_TURN_TEXT`]（兼容锁）。
+///
+/// 截断是 **UTF-8 安全**的：从预算末尾向前回退到最近的 `is_char_boundary` 位置，
+/// 绝不切出半个码点；标记计入正文预算，故正文部分不超过 [`FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES`]。
+fn build_failed_turn_text(partial_text: Option<&str>) -> String {
+    let Some(body) = partial_text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return LEGACY_FAILED_TURN_TEXT.to_string();
+    };
+    let truncated = truncate_failed_partial_text(body);
+    format!("{truncated}{FAILED_PARTIAL_TEXT_SUFFIX}")
+}
+
+/// 按 char 边界把正文截到 [`FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES`] 以内，超限追加截断标记。
+fn truncate_failed_partial_text(text: &str) -> String {
+    if text.len() <= FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES {
+        return text.to_string();
+    }
+    let budget = FAILED_PARTIAL_TEXT_BODY_LIMIT_BYTES
+        .saturating_sub(FAILED_PARTIAL_TEXT_TRUNCATION_MARKER.len());
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = String::with_capacity(end + FAILED_PARTIAL_TEXT_TRUNCATION_MARKER.len());
+    truncated.push_str(text[..end].trim_end());
+    truncated.push_str(FAILED_PARTIAL_TEXT_TRUNCATION_MARKER);
+    truncated
+}
+
+/// PA-171 C4：失败轮归因载体（`provider_source` / `provider_mode` / `fallback_reason` +
+/// 审计字段 `error_class`）。
+///
+/// 缺陷面：历史实现把三字段硬编码为 `None`，失败轮在 trace 里完全不可归因（只能看到 "failed"）。
+/// 语义约束（契约矩阵 §4.2 C4-S1/S2）：**不改**失败语义（事件名 `turn:failed`、`kind="failed"`、
+/// `error` 原样、`text` 仍走 [`build_failed_turn_text`]、PonySentry 上报保留）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FailedTurnAttribution {
+    pub provider_source: Option<String>,
+    pub provider_mode: Option<String>,
+    pub fallback_reason: Option<String>,
+    /// 失败归类（唯一来源 [`crate::agent::retry::classify_error_class`]，禁止第二套码表）。
+    pub error_class: Option<String>,
+}
+
+impl FailedTurnAttribution {
+    /// 由「本轮 provider 元数据 + 原始错误文本」派生默认归因（契约矩阵 §4.2 C4-S1 冻结取值）：
+    ///
+    /// - `provider_source = provider_attempt_failed:{requested_name}`（必须含真实 provider 名）；
+    /// - `provider_mode = "failed"`（与失败 `TurnResult` 同值，非占位词）；
+    /// - `fallback_reason = "turn_failed_no_fallback"`（本卡无跨 provider 备用链，**未发生降级**
+    ///   必须可判）；
+    /// - `error_class = classify_error_class(error)`（**永远有值**，审计机唯一判据）。
+    ///
+    /// `provider_meta = None`（连 provider 都没解析出来）⇒ 三字段保持 `None`（不编造来源），
+    /// `error_class` 仍然有值。
+    pub fn from_failure(provider_meta: Option<&ProviderEventMeta>, error: &str) -> Self {
+        let provider_source = provider_meta
+            .map(|meta| format!("provider_attempt_failed:{}", meta.requested_name));
+        Self {
+            provider_source,
+            provider_mode: provider_meta.map(|_| "failed".to_string()),
+            fallback_reason: provider_meta.map(|_| "turn_failed_no_fallback".to_string()),
+            error_class: Some(crate::agent::retry::classify_error_class(error).to_string()),
+        }
+    }
+}
+
+pub fn emit_stream_failed(
+    sink: &impl TurnEventSink,
+    turn_id: String,
+    provider_meta: Option<&ProviderEventMeta>,
+    trace_steps: Vec<TurnTraceStep>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    build_context_observation: Option<BuildContextObservation>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
+    error: String,
+    session_id: Option<String>,
+    // P0-3（第二刀）：本轮失败前**已产出/已渲染**的正文。`Some(非空白)` 时保留正文，
+    // `None`/全空白 ⇒ 回落既有 `"This turn failed."`（兼容锁，防历史断言破）。
+    partial_text: Option<String>,
+) -> TurnEventEnvelope {
+    // PA-171 C4：14 参签名**冻结**（既有测试直接调用），归因走默认派生（不新增形参）。
+    let attribution = FailedTurnAttribution::from_failure(provider_meta, &error);
+    emit_stream_failed_attributed(
+        sink,
+        turn_id,
+        provider_meta,
+        trace_steps,
+        tool_activities,
+        first_token_latency_ms,
+        turn_duration_ms,
+        build_context_observation,
+        trace_timeline,
+        provider_call_records,
+        hook_trace_records,
+        error,
+        session_id,
+        partial_text,
+        attribution,
+    )
+}
+
+/// PA-171 C4：带**显式归因**的失败轮派发旁路（`emit_stream_failed` 的超集，参数顺序不变）。
+///
+/// 两个生产调用点用它在 `fallback_reason` 里记录**触发方**（首跳 decision / 工具 followup），
+/// 使失败可归因到具体阶段；`emit_stream_failed` 用 [`FailedTurnAttribution::from_failure`]
+/// 的默认归因转调本函数。
+#[allow(clippy::too_many_arguments)]
+pub fn emit_stream_failed_attributed(
+    sink: &impl TurnEventSink,
+    turn_id: String,
+    provider_meta: Option<&ProviderEventMeta>,
+    trace_steps: Vec<TurnTraceStep>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    build_context_observation: Option<BuildContextObservation>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
+    error: String,
+    session_id: Option<String>,
+    partial_text: Option<String>,
+    attribution: FailedTurnAttribution,
+) -> TurnEventEnvelope {
+    // Wave-5 P0：CLI/TUI 形态的 turn 失败上报（开关默认关；桌面端由前端 `TurnExecutionFailed`
+    // 上报，故用进程级开关隔离，避免重复）。旁路上报：内部吞错，绝不改变轮次返回。
+    crate::agent::ponysentry::capture_turn_failure(
+        &turn_id,
+        &error,
+        provider_meta.map(|meta| meta.model.as_str()),
+    );
+    // PA-171 C4-S1：归因三字段落真实值；`error_class` 恒有值（调用方未给则按错误文本派生）。
+    let error_class = attribution
+        .error_class
+        .clone()
+        .or_else(|| Some(crate::agent::retry::classify_error_class(&error).to_string()));
+    emit_event(
+        sink,
+        "turn:failed",
+        TurnStreamEvent {
+            event_id: None,
+            session_id,
+            turn_id,
+            // Wave-4.1 B1：导出态 trace_id（门禁关闭/未采样 ⇒ None，绝不回落本地 id）。
+            trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+            cost_usd: None,
+            kind: "failed".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: Some("failed".to_string()),
+            text: Some(build_failed_turn_text(partial_text.as_deref())),
+            reasoning_content: None,
+            error: Some(error),
+            provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+            provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+            provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+            provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source: attribution.provider_source,
+            provider_mode: attribution.provider_mode,
+            fallback_reason: attribution.fallback_reason,
+            build_context_observation,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms,
+            turn_duration_ms,
+            trace_steps: Some(trace_steps),
+            trace_timeline,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            session_summary: None,
+            step: None,
+            stop_reason: None,
+            metrics: None,
+            error_class,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_stream_cancelled(
+    sink: &impl TurnEventSink,
+    turn_id: String,
+    provider_meta: Option<&ProviderEventMeta>,
+    trace_steps: Vec<TurnTraceStep>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    build_context_observation: Option<BuildContextObservation>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    error: String,
+    session_id: Option<String>,
+    // wave-60 C3：该轮 checkpoint 记录的停止原因（wire 值）；`None` ⇒ 按 `"legacy"` 下发
+    // （历史迁移无原因记录，绝不虚构 `"user"`）。
+    stop_reason: Option<String>,
+) {
+    emit_event(
+        sink,
+        "turn:cancelled",
+        TurnStreamEvent {
+            event_id: None,
+            session_id,
+            turn_id,
+            // Wave-4.1 B1：导出态 trace_id（门禁关闭/未采样 ⇒ None，绝不回落本地 id）。
+            trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：失败/取消轮无有效 usage ⇒ 成本键缺席。
+            cost_usd: None,
+            kind: "cancelled".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: Some("cancelled".to_string()),
+            text: Some("用户终止，发送消息可继续。".to_string()),
+            reasoning_content: None,
+            error: Some(error),
+            provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+            provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+            provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+            provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms,
+            turn_duration_ms,
+            trace_steps: Some(trace_steps),
+            trace_timeline,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records: None,
+            session_summary: None,
+            step: None,
+            // wave-60 C3：`turn:cancelled` 必须携带该轮 checkpoint 的 stop_reason；
+            // 无记录（历史迁移/非 stop 路径）⇒ `"legacy"`（契约 §2 C3）。
+            stop_reason: Some(stop_reason.unwrap_or_else(|| {
+                crate::agent::stop_escalation::StopReason::Legacy
+                    .as_str()
+                    .to_string()
+            })),
+            metrics: None,
+            error_class: None,
+        },
+    );
+}
+
+/// wave-60 C2：`stop_turn` 被接受时的**立即应答**事件（`turn:stop_requested`）。
+///
+/// 语义：不改变 turn 的终态归属（终态仍只有 completed/failed/cancelled 三选一），
+/// 只把"停止请求已受理、正在收口"这一事实同步推给表面。载荷字段按契约 §2 C2：
+/// `turnId` / `sessionId`（checkpoint 有则带）/ `stopReason` / `requestedAtMs`（wire 即
+/// `emittedAtMs`，由 [`emit_event`] 统一盖章）/ `kind="stop_requested"` / `phase=Some("stopping")`。
+pub fn emit_stream_stop_requested(
+    sink: &(impl TurnEventSink + ?Sized),
+    turn_id: String,
+    session_id: Option<String>,
+    stop_reason: crate::agent::stop_escalation::StopReason,
+) -> TurnEventEnvelope {
+    emit_event(
+        sink,
+        "turn:stop_requested",
+        TurnStreamEvent {
+            event_id: None,
+            session_id,
+            turn_id,
+            trace_id: crate::agent::otel::exported_trace_id(),
+            cost_usd: None,
+            kind: "stop_requested".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: Some("stopping".to_string()),
+            text: None,
+            reasoning_content: None,
+            error: None,
+            provider_requested_name: None,
+            provider_name: None,
+            provider_protocol: None,
+            provider_model: None,
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            trace_steps: None,
+            trace_timeline: None,
+            tool_activities: None,
+            provider_call_records: None,
+            hook_trace_records: None,
+            session_summary: None,
+            step: None,
+            stop_reason: Some(stop_reason.as_str().to_string()),
+            metrics: None,
+            error_class: None,
+        },
+    )
+}
+
+/// wave-60 C5：宽限期监督者派发终态（`turn:cancelled`）的**表面中立**入口。
+///
+/// 由宿主适配层在 [`crate::agent::stop_escalation::TerminalEmitter`] 内调用，使监督者
+/// 收口的事件与循环自身发出的终态走同一条 sink/事件通道（载荷形状一致，
+/// `stopReason` 为该轮 checkpoint 记录的原因）。
+pub fn emit_supervisor_cancelled(
+    sink: &(impl TurnEventSink + ?Sized),
+    turn_id: String,
+    session_id: Option<String>,
+    stop_reason: crate::agent::stop_escalation::StopReason,
+) {
+    emit_event(
+        sink,
+        "turn:cancelled",
+        TurnStreamEvent {
+            event_id: None,
+            session_id,
+            turn_id,
+            trace_id: crate::agent::otel::exported_trace_id(),
+            cost_usd: None,
+            kind: "cancelled".to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: Some("cancelled".to_string()),
+            // 契约 §0 非目标 2：落库/线上的哨兵句语义不变（呈现层改走 stopReason）。
+            text: Some("用户终止，发送消息可继续。".to_string()),
+            reasoning_content: None,
+            error: Some("stopped_by_user".to_string()),
+            provider_requested_name: None,
+            provider_name: None,
+            provider_protocol: None,
+            provider_model: None,
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            trace_steps: None,
+            trace_timeline: None,
+            tool_activities: None,
+            provider_call_records: None,
+            hook_trace_records: None,
+            session_summary: None,
+            step: None,
+            stop_reason: Some(stop_reason.as_str().to_string()),
+            metrics: None,
+            error_class: None,
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_stream_event(
+    sink: &impl TurnEventSink,
+    name: &str,
+    turn_id: String,
+    kind: &str,
+    phase: Option<&str>,
+    text: Option<String>,
+    reasoning_content: Option<String>,
+    provider_meta: Option<&ProviderEventMeta>,
+    provider_source: Option<String>,
+    provider_mode: Option<String>,
+    fallback_reason: Option<String>,
+    build_context_observation: Option<BuildContextObservation>,
+    input_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    trace_steps: Option<Vec<TurnTraceStep>>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
+    session_summary: Option<String>,
+    session_id: Option<String>,
+) -> TurnEventEnvelope {
+    emit_stream_event_with_step(
+        sink,
+        name,
+        turn_id,
+        kind,
+        phase,
+        text,
+        reasoning_content,
+        provider_meta,
+        provider_source,
+        provider_mode,
+        fallback_reason,
+        build_context_observation,
+        input_tokens,
+        cache_hit_input_tokens,
+        reasoning_tokens,
+        output_tokens,
+        total_tokens,
+        first_token_latency_ms,
+        turn_duration_ms,
+        trace_steps,
+        trace_timeline,
+        tool_activities,
+        provider_call_records,
+        hook_trace_records,
+        session_summary,
+        session_id,
+        None,
+    )
+}
+
+/// PA-095 #4：携带逻辑 hop step 的事件发射（delta/chunk 归属 hop、
+/// turn:trace(calling_model) 触发 StepStart）。
+#[allow(clippy::too_many_arguments)]
+pub fn emit_stream_event_with_step(
+    sink: &impl TurnEventSink,
+    name: &str,
+    turn_id: String,
+    kind: &str,
+    phase: Option<&str>,
+    text: Option<String>,
+    reasoning_content: Option<String>,
+    provider_meta: Option<&ProviderEventMeta>,
+    provider_source: Option<String>,
+    provider_mode: Option<String>,
+    fallback_reason: Option<String>,
+    build_context_observation: Option<BuildContextObservation>,
+    input_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    first_token_latency_ms: Option<u64>,
+    turn_duration_ms: Option<u64>,
+    trace_steps: Option<Vec<TurnTraceStep>>,
+    trace_timeline: Option<Vec<TraceTimelineEntry>>,
+    tool_activities: Option<Vec<TurnToolActivity>>,
+    provider_call_records: Option<Vec<ProviderCallCacheRecord>>,
+    hook_trace_records: Option<Vec<HookTraceRecord>>,
+    session_summary: Option<String>,
+    session_id: Option<String>,
+    step: Option<u32>,
+) -> TurnEventEnvelope {
+    let is_delta_event = name == "turn:delta";
+    // P0 指标快照的唯一附着点（裁决 A6）：仅当事件携带非空 `provider_call_records` 时写入，
+    // `turn:delta` 路径一律 `None`。25+ 调用点签名保持不变，快照在此处按需从 records 成型。
+    let metrics = if is_delta_event {
+        None
+    } else {
+        provider_call_records
+            .as_deref()
+            .filter(|records| !records.is_empty())
+            .and_then(|records| {
+                crate::agent::metrics_snapshot::build_turn_metrics_snapshot(
+                    records,
+                    provider_meta.and_then(|meta| meta.context_window_tokens),
+                    provider_meta,
+                )
+            })
+    };
+    // Wave-5 K3：单轮成本超预算 ⇒ 一条 warn 日志（软告警，**绝不**阻断请求；
+    // 会话级累计与 UI 告警由前端 store 负责，core 不建第二份会话状态）。
+    // 只在终态事件上判定，避免同一轮多事件重复告警。
+    if name == "turn:completed" {
+        let cost_usd = turn_event_cost_usd(
+            provider_meta,
+            input_tokens,
+            output_tokens,
+            cache_hit_input_tokens,
+        );
+        if let Some(cost) = cost_usd {
+            let budget = crate::agent::cost::budget_usd();
+            if crate::agent::cost::is_budget_exceeded(cost, budget) {
+                // Wave-6 K6：数值走**结构化字段**（number 类型），message 保持干净常量描述。
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "turn cost reached or exceeded budget threshold",
+                    None,
+                    &[
+                        ("turn_id", serde_json::json!(turn_id)),
+                        ("turn_cost_usd", serde_json::json!(cost)),
+                        ("budget_usd", serde_json::json!(budget.unwrap_or(0.0))),
+                    ],
+                );
+            }
+        }
+    }
+    emit_event(
+        sink,
+        name,
+        TurnStreamEvent {
+            event_id: None,
+            session_id,
+            turn_id,
+            // Wave-4.1 B1：所有活链路事件都携带导出态 trace_id（门禁关闭 ⇒ None）。
+            trace_id: crate::agent::otel::exported_trace_id(),
+            // Wave-5 K2：本轮成本（未知模型 / 缺 usage ⇒ None，键缺席）。
+            cost_usd: turn_event_cost_usd(
+                provider_meta,
+                input_tokens,
+                output_tokens,
+                cache_hit_input_tokens,
+            ),
+            kind: kind.to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: phase.map(|value| value.to_string()),
+            text,
+            reasoning_content,
+            error: None,
+            provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+            provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+            provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+            provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source,
+            provider_mode,
+            fallback_reason,
+            build_context_observation: if is_delta_event {
+                None
+            } else {
+                build_context_observation
+            },
+            input_tokens,
+            cache_hit_input_tokens,
+            reasoning_tokens,
+            output_tokens,
+            total_tokens,
+            first_token_latency_ms,
+            turn_duration_ms,
+            trace_steps: if is_delta_event { None } else { trace_steps },
+            trace_timeline: if is_delta_event { None } else { trace_timeline },
+            tool_activities: if is_delta_event {
+                None
+            } else {
+                tool_activities
+            },
+            provider_call_records: if is_delta_event {
+                None
+            } else {
+                provider_call_records
+            },
+            hook_trace_records: if is_delta_event {
+                None
+            } else {
+                hook_trace_records
+            },
+            session_summary,
+            step,
+            stop_reason: None,
+            metrics,
+            // PA-171 C4：归因字段只由 `emit_stream_failed_attributed` 填写（本泛用入口
+            // 从不出 `turn:failed`：其 `error` 恒为 None），故此处键缺席。
+            error_class: None,
+        },
+    )
+}
+
+fn resolve_canonical_event_type(
+    name: &str,
+    phase: Option<&str>,
+    build_context_observation: Option<&BuildContextObservation>,
+    tool_activities: Option<&[TurnToolActivity]>,
+) -> String {
+    match name {
+        "turn:started" => "turn.created".to_string(),
+        "turn:delta" => "turn.output_delta".to_string(),
+        "turn:output_end" => "turn.output_end".to_string(),
+        "turn:completed" => "turn.completed".to_string(),
+        "turn:failed" => "turn.failed".to_string(),
+        "turn:cancelled" => "turn.cancelled".to_string(),
+        "turn:suspended" => "turn.suspended".to_string(),
+        "turn:trace" => {
+            if build_context_observation.is_some() && matches!(phase, Some("building_context")) {
+                "turn.context_built".to_string()
+            } else {
+                match phase {
+                    Some("calling_model") => "turn.model_call_started".to_string(),
+                    _ => "turn.trace_updated".to_string(),
+                }
+            }
+        }
+        "turn:tool" => {
+            if tool_activities
+                .unwrap_or(&[])
+                .iter()
+                .any(|activity| activity.status == "running")
+            {
+                "turn.tool_call_started".to_string()
+            } else {
+                "turn.tool_call_completed".to_string()
+            }
+        }
+        _ => name.replace(':', "."),
+    }
+}
+
+fn turn_event_version() -> &'static str {
+    "turn-event-v1"
+}
+
+fn now_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn next_turn_event_sequence(turn_id: &str) -> u64 {
+    let registry = turn_event_sequence_registry();
+    let mut state = registry.lock().unwrap_or_else(|e| e.into_inner());
+    let next = state.get(turn_id).copied().unwrap_or(0).saturating_add(1);
+    state.insert(turn_id.to_string(), next);
+    next
+}
+
+fn clear_turn_event_sequence(turn_id: &str) {
+    let registry = turn_event_sequence_registry();
+    let mut state = registry.lock().unwrap_or_else(|e| e.into_inner());
+    state.remove(turn_id);
+}
+
+fn turn_event_sequence_registry() -> &'static Mutex<HashMap<String, u64>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn build_terminal_turn_event_envelope(
+    turn_id: &str,
+    name: &str,
+    phase: Option<&str>,
+    build_context_observation: Option<&BuildContextObservation>,
+    tool_activities: Option<&[TurnToolActivity]>,
+) -> TurnEventEnvelope {
+    let sequence = next_turn_event_sequence(turn_id);
+    let envelope = TurnEventEnvelope {
+        event_id: format!("{}:{}", turn_id, sequence),
+        event_type: resolve_canonical_event_type(
+            name,
+            phase,
+            build_context_observation,
+            tool_activities,
+        ),
+        event_version: turn_event_version().to_string(),
+        sequence,
+        emitted_at_ms: now_timestamp_ms(),
+    };
+
+    if matches!(
+        name,
+        "turn:completed" | "turn:failed" | "turn:cancelled" | "turn:suspended"
+    ) {
+        clear_turn_event_sequence(turn_id);
+    }
+
+    envelope
+}
+
+pub fn emit_turn_failed(
+    sink: &impl TurnEventSink,
+    turn_id: String,
+    provider_requested_name: Option<String>,
+    provider_name: Option<String>,
+    provider_protocol: Option<String>,
+    provider_model: Option<String>,
+    trace_steps: Vec<TurnTraceStep>,
+    error: String,
+    session_id: Option<String>,
+) {
+    let provider_meta = match (
+        provider_requested_name,
+        provider_name,
+        provider_protocol,
+        provider_model,
+    ) {
+        (Some(requested_name), Some(provider_name), Some(protocol), Some(model)) => {
+            Some(ProviderEventMeta {
+                requested_name,
+                provider_name,
+                protocol,
+                model,
+                context_window_tokens: None,
+            })
+        }
+        _ => None,
+    };
+    emit_stream_failed(
+        sink,
+        turn_id,
+        provider_meta.as_ref(),
+        trace_steps,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        error,
+        session_id,
+        // P0-3：兼容包装只接 turn_id/trace_steps/error，没有正文入参（旧签名保持兼容）。
+        None,
+    );
+}
+
+pub fn emit_event(
+    sink: &(impl TurnEventSink + ?Sized),
+    name: &str,
+    payload: TurnStreamEvent,
+) -> TurnEventEnvelope {
+    let mut payload = payload;
+    let terminal_turn_id = payload.turn_id.clone();
+    let next_sequence = next_turn_event_sequence(&payload.turn_id);
+    payload.event_id = Some(format!("{}:{}", payload.turn_id, next_sequence));
+    payload.event_type = Some(resolve_canonical_event_type(
+        name,
+        payload.phase.as_deref(),
+        payload.build_context_observation.as_ref(),
+        payload.tool_activities.as_deref(),
+    ));
+    payload.event_version = Some(turn_event_version().to_string());
+    payload.sequence = Some(next_sequence);
+    payload.emitted_at_ms = Some(now_timestamp_ms());
+
+    eprintln!(
+        "[pony-agent][runtime] emit {} event_type={} turn={} seq={:?} phase={:?} text_len={} tools={}",
+        name,
+        payload.event_type.as_deref().unwrap_or("unknown"),
+        payload.turn_id,
+        payload.sequence,
+        payload.phase,
+        payload.text.as_ref().map(|text| text.len()).unwrap_or(0),
+        payload
+            .tool_activities
+            .as_ref()
+            .map(|tools| tools.len())
+            .unwrap_or(0)
+    );
+    sink.emit(name, payload.clone());
+    // PA-091：事件溯源——构造 TurnEvent 经全局注册表持久化（缓冲 + turn 终态 flush）。
+    // 构造失败 fail loud（数据完整性错误）；持久化失败由注册通道 contained。
+    // 审核 P0：turn:completed 的 assistant/message 不标记 terminal——由额外发射的
+    // turn/end 统一触发 flush，避免拆批（AssistantMessage 先行落盘、TurnEnd 第二批，
+    // 两事务间崩溃会留下半终态事件流）。failed/cancelled 无额外事件，保持 terminal。
+    if let Some(event) = build_turn_event(name, &payload) {
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        let is_terminal = matches!(name, "turn:failed" | "turn:cancelled");
+        dispatch_event_persist(session_id, &payload.turn_id, event, is_terminal);
+    }
+    // PA-094：大字段外置——turn:started 携带 build_context_observation 时，额外落一条
+    // context/observation 事件（内存携带全量 payload，flush 时外置到独立表）。
+    if let Some(observation_event) = build_context_observation_event(name, &payload) {
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, observation_event, false);
+    }
+    // PA-094（审核 P0）：turn:started 额外发射 user/message——用户消息事件化，
+    // HistoryProjection 从事件重建用户消息的前提（生产路径此前不发射该事件，
+    // 事件重建的会话视图缺 user 消息）。payload.text 携带用户消息文本。
+    if let Some(user_event) = build_user_message_event(name, &payload) {
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, user_event, false);
+    }
+    // PA-095 #4：step/start 事件化（初始 call 由 turn:started 承担 step 0，
+    // followup call 由 turn:trace(calling_model) 携带 hop 索引触发）。
+    if let Some(step_start_event) = build_step_start_event(name, &payload) {
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, step_start_event, false);
+    }
+    // PA-094：turn:completed 额外发射 provider/usage（usage 结算事件，MetricsProjection
+    // 重建 ProviderCallCacheRecord 的事件源）与 turn/end（终态结算，TraceProjection
+    // 的 token 指标/timeline 挂载依赖 turn/end 触发）。顺序：usage → end（end 为
+    // terminal，触发 flush 时整批一起落盘——含 assistant/message，单事务）。
+    // PA-095 #4：per-call 结算——usage 与 step/end 相邻成对发射
+    // （usage[i] 紧跟 step_end[i]，投影的 call_model 条目结算落点一致）。
+    let usage_events = build_provider_usage_event(name, &payload);
+    let step_end_events = build_step_end_events(name, &payload, usage_events.len());
+    for pair in usage_events.into_iter().zip(step_end_events) {
+        let (usage_event, step_end_event) = pair;
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, usage_event, false);
+        dispatch_event_persist(session_id, &payload.turn_id, step_end_event, false);
+    }
+    if let Some(end_event) = build_turn_end_event(name, &payload) {
+        let session_id = payload.session_id.as_deref().unwrap_or("");
+        dispatch_event_persist(session_id, &payload.turn_id, end_event, true);
+    }
+    if matches!(
+        name,
+        "turn:completed" | "turn:failed" | "turn:cancelled" | "turn:suspended"
+    ) {
+        clear_turn_event_sequence(&terminal_turn_id);
+    }
+    // D6 迁移：PonySentry 自动 trace 上报已下线；agent trace 由 OTel span 承担
+    // （门禁关闭时零 span 分配、零 egress，见 `agent::otel`）。
+    // PA-095：返回本次发射的信封（调用方可复用为 TurnResult 终态信封，
+    // 避免二次分配序列号造成事件流与结果信封错位）。
+    TurnEventEnvelope {
+        event_id: payload.event_id.clone().unwrap_or_default(),
+        event_type: payload.event_type.clone().unwrap_or_default(),
+        event_version: payload.event_version.clone().unwrap_or_default(),
+        sequence: payload.sequence.unwrap_or(0),
+        emitted_at_ms: payload.emitted_at_ms.unwrap_or(0),
+    }
+}
+
+/// PA-094：build_context_observation 事件化——turn:started 携带观察时构造
+/// `ContextObservation` 事件（内存形态携带全量 payload；落盘形态只含引用）。
+fn build_context_observation_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    if name != "turn:started" {
+        return None;
+    }
+    let observation = payload.build_context_observation.as_ref()?;
+    Some(crate::agent::turn_event::TurnEvent::ContextObservation {
+        turn_id: payload.turn_id.clone(),
+        step: 0,
+        observation: Some(observation.clone()),
+        observation_ref: None,
+    })
+}
+
+/// PA-094（审核 P0）：user/message 事件化——turn:started 携带用户消息文本时构造
+/// `UserMessage` 事件（HistoryProjection 从事件重建用户消息的前提）。
+/// 附件消息的用户消息重建不完整（TurnStreamEvent 无 attachments 字段，已知限制）。
+fn build_user_message_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    if name != "turn:started" {
+        return None;
+    }
+    let text = payload.text.clone()?;
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::agent::turn_event::TurnEvent::UserMessage {
+        turn_id: payload.turn_id.clone(),
+        text,
+        attachments: Vec::new(),
+    })
+}
+
+/// PA-095 #4：step/start 事件化——每次 provider call 发射 StepStart（投影折叠为
+/// 该 step 的 call_model 条目）。两个触发点：
+/// - turn:started（phase=calling_model）→ 初始 call 的 StepStart{step:0}；
+/// - turn:trace(calling_model) 且 payload.step ≥ 1 → followup call 的
+///   StepStart{step:k}（运行时 followup 循环填充 hop 索引；直连路径的
+///   calling_model trace 不带 step，不重复发射——初始 call 已由 started 覆盖）。
+fn build_step_start_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    match name {
+        "turn:started" => Some(crate::agent::turn_event::TurnEvent::StepStart {
+            turn_id: payload.turn_id.clone(),
+            step: 0,
+            first_token_latency_ms: None,
+        }),
+        "turn:trace"
+            if payload.phase.as_deref() == Some("calling_model")
+                && payload.step.is_some_and(|step| step >= 1) =>
+        {
+            Some(crate::agent::turn_event::TurnEvent::StepStart {
+                turn_id: payload.turn_id.clone(),
+                step: payload.step.unwrap_or(0),
+                first_token_latency_ms: payload.first_token_latency_ms,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// PA-095 #4：step/end 事件化——ProviderUsage 同点结算（每条 usage 记录配对
+/// 一条 StepEnd{step}，相邻发射；spec："step/end at settlement"）。仅
+/// turn:completed 结算（failed/cancelled 无 usage 数据可结算，TurnEnd(Error)
+/// 已承担终态；投影 settle_timeline 对未闭合 step 容忍）。
+fn build_step_end_events(
+    name: &str,
+    payload: &TurnStreamEvent,
+    usage_count: usize,
+) -> Vec<crate::agent::turn_event::TurnEvent> {
+    if name != "turn:completed" || usage_count == 0 {
+        return Vec::new();
+    }
+    (0..usage_count as u32)
+        .map(|step| crate::agent::turn_event::TurnEvent::StepEnd {
+            turn_id: payload.turn_id.clone(),
+            step,
+        })
+        .collect()
+}
+
+/// PA-094：provider/usage 事件化——turn 终态（completed/failed/cancelled）携带
+/// token 结算字段时构造 `ProviderUsage` 事件（MetricsProjection 重建
+/// ProviderCallCacheRecord 的事件源；生产路径此前不发射该事件，重建记录恒为空
+/// ——审核 P0 修复）。审核 P1：failed/cancelled 同样发射（多 hop turn 中途失败
+/// 时已消耗的 token 不丢失）。
+/// 优先逐条发射 `payload.provider_call_records`（step 递增，per-call 粒度，
+/// request_kind/latency/prefix_mutation_reasons 保真）；无 records 时回退到
+/// 累计 token 单条（step=0，turn 级结算）。
+fn build_provider_usage_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Vec<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::TurnEvent;
+    if !matches!(name, "turn:completed" | "turn:failed" | "turn:cancelled") {
+        return Vec::new();
+    }
+    // per-call 粒度：逐条发射 provider_call_records（step 递增）。
+    if let Some(records) = payload.provider_call_records.as_deref() {
+        if !records.is_empty() {
+            return records
+                .iter()
+                .enumerate()
+                .map(|(index, record)| {
+                    let usage = crate::agent::provider::TokenUsage {
+                        input_tokens: record.input_tokens,
+                        cache_hit_input_tokens: record.cache_hit_input_tokens,
+                        cache_hit_source: record.cache_hit_source.clone(),
+                        reasoning_tokens: record.reasoning_tokens,
+                        output_tokens: record.output_tokens,
+                        total_tokens: record.total_tokens,
+                        // wave-54 C3：来源随事件载荷下发（未知 ⇒ None，禁止默认值占位）。
+                        origin: record
+                            .usage_origin
+                            .as_deref()
+                            .and_then(crate::agent::provider::usage_origin_from_label),
+                        cache_creation_input_tokens: None,
+                    };
+                    TurnEvent::ProviderUsage {
+                        turn_id: payload.turn_id.clone(),
+                        step: index as u32,
+                        request_kind: record.request_kind.clone(),
+                        usage,
+                        cache_hit_input_tokens: record.cache_hit_input_tokens,
+                        cache_miss_input_tokens: record.cache_miss_input_tokens,
+                        prefix_mutation_reasons: record
+                            .prefix_mutation_reasons
+                            .iter()
+                            .filter_map(|reason| {
+                                // 审核 P1：用 serde 序列化（snake_case，如
+                                // "session_summary_changed"）而非 Debug 格式
+                                // （"SessionSummaryChanged"）——projection 按
+                                // snake_case 反序列化，Debug 名称会全部丢失。
+                                serde_json::to_value(reason)
+                                    .ok()
+                                    .and_then(|value| value.as_str().map(str::to_string))
+                            })
+                            .collect(),
+                        first_token_latency_ms: record.first_token_latency_ms,
+                        turn_duration_ms: record.turn_duration_ms,
+                        latency_kind: record.latency_kind.clone(),
+                        // PA-095 #3：provider 取名称（与存储 trace 的 provider 维度
+                        // 同语义）；record.source 仅作无名称时的回退。
+                        provider: payload
+                            .provider_name
+                            .clone()
+                            .unwrap_or_else(|| {
+                                record.provider_source.clone().unwrap_or_default()
+                            }),
+                        model: payload.provider_model.clone().unwrap_or_default(),
+                    }
+                })
+                .collect();
+        }
+    }
+    // 回退：累计 token 单条（turn 级结算）。
+    let Some(usage) = payload_usage(payload) else {
+        return Vec::new();
+    };
+    vec![TurnEvent::ProviderUsage {
+        turn_id: payload.turn_id.clone(),
+        step: 0,
+        request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+        usage,
+        cache_hit_input_tokens: payload.cache_hit_input_tokens,
+        cache_miss_input_tokens: payload.input_tokens.and_then(|input| {
+            payload
+                .cache_hit_input_tokens
+                .map(|hit| input.saturating_sub(hit))
+        }),
+        prefix_mutation_reasons: Vec::new(),
+        first_token_latency_ms: payload.first_token_latency_ms,
+        turn_duration_ms: payload.turn_duration_ms,
+        latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+        provider: payload.provider_name.clone().unwrap_or_default(),
+        model: payload.provider_model.clone().unwrap_or_default(),
+    }]
+}
+
+/// PA-094：turn/end 事件化——turn:completed 额外构造 `TurnEnd`（reason=Completed）。
+/// 此前 completed 只落 assistant/message，投影的 turn/end 结算（token 指标、
+/// timeline 挂载、event_type 标记）永不触发——审核 P0 修复。failed/cancelled
+/// 已由 build_turn_event 发射 TurnEnd，此处不重复。
+fn build_turn_end_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+    if name != "turn:completed" {
+        return None;
+    }
+    Some(TurnEvent::TurnEnd {
+        turn_id: payload.turn_id.clone(),
+        reason: TurnEndReason::Completed,
+        turn_duration_ms: payload.turn_duration_ms,
+        error: None,
+    })
+}
+
+/// PA-091：TurnStreamEvent → TurnEvent 映射（design.md 映射表）。
+/// `turn:output_end` / `turn:trace` / `turn.context_built` 显式不落盘（返回 None）。
+fn build_turn_event(
+    name: &str,
+    payload: &TurnStreamEvent,
+) -> Option<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+    match name {
+        "turn:started" => Some(TurnEvent::TurnStart {
+            turn_id: payload.turn_id.clone(),
+        }),
+        "turn:delta" => {
+            // reasoning-only chunk（无 text）也落盘（text 为空串），保证
+            // "every emitted event SHALL be persisted" 的语义完整。
+            Some(TurnEvent::AssistantChunk {
+                turn_id: payload.turn_id.clone(),
+                // PA-095 #4：chunk 归属逻辑 hop（0-based；缺省归 step 0，
+                // 与 legacy 无 step 的 wire payload 兼容）。
+                step: payload.step.unwrap_or(0),
+                text: payload.text.clone().unwrap_or_default(),
+            })
+        }
+        "turn:completed" => Some(TurnEvent::AssistantMessage {
+            turn_id: payload.turn_id.clone(),
+            step: 0,
+            text: payload.text.clone().unwrap_or_default(),
+            reasoning_content: payload.reasoning_content.clone(),
+            usage: payload_usage(payload),
+            chunk_missing: None,
+        }),
+        "turn:failed" => Some(TurnEvent::TurnEnd {
+            turn_id: payload.turn_id.clone(),
+            reason: TurnEndReason::Error,
+            turn_duration_ms: payload.turn_duration_ms,
+            // B1：失败原因随事件落盘——事件重投影据此产与写路径同源的检查点文本
+            // （此前 error 在事件层被丢弃，重启重建的文本永久缺「失败原因」行）。
+            error: payload.error.clone(),
+        }),
+        "turn:cancelled" => Some(TurnEvent::TurnEnd {
+            turn_id: payload.turn_id.clone(),
+            reason: TurnEndReason::Cancelled,
+            turn_duration_ms: payload.turn_duration_ms,
+            // 取消轮无失败原因（cancel 的 error 是停止原因，不是失败归因）。
+            error: None,
+        }),
+        "turn:tool" => build_tool_event(payload),
+        _ => None,
+    }
+}
+
+/// 从终态 payload 的 token 字段构造 usage（全 None 时返回 None）。
+fn payload_usage(payload: &TurnStreamEvent) -> Option<crate::agent::provider::TokenUsage> {
+    if payload.input_tokens.is_none()
+        && payload.cache_hit_input_tokens.is_none()
+        && payload.reasoning_tokens.is_none()
+        && payload.output_tokens.is_none()
+        && payload.total_tokens.is_none()
+    {
+        return None;
+    }
+    Some(crate::agent::provider::TokenUsage {
+        input_tokens: payload.input_tokens,
+        cache_hit_input_tokens: payload.cache_hit_input_tokens,
+        cache_hit_source: None,
+        reasoning_tokens: payload.reasoning_tokens,
+        output_tokens: payload.output_tokens,
+        total_tokens: payload.total_tokens,
+        // 回退路径（无 per-call records）无来源信息 ⇒ 未知，不得冒充 provider 真值。
+        origin: None,
+        cache_creation_input_tokens: None,
+    })
+}
+
+/// turn:tool → ToolCall（running）/ ToolResult（completed），取最后一个 activity。
+fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_event::TurnEvent> {
+    use crate::agent::turn_event::TurnEvent;
+    let activity = payload.tool_activities.as_deref()?.last()?;
+    let step = payload.sequence.unwrap_or(0) as u32;
+    if activity.status == "running" {
+        // B1：工具描述随 ToolCall 落盘（重投影拼检查点工具行用 `name + " " + description`，
+        // 与 turn_persist 写路径同形）；空描述 ⇒ None ⇒ 工具行只含 name（兼容旧形态）。
+        let description = {
+            let trimmed = activity.description.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+        Some(TurnEvent::ToolCall {
+            turn_id: payload.turn_id.clone(),
+            step,
+            call_id: activity.id.clone(),
+            name: activity.name.clone(),
+            arguments: activity.arguments_text.clone().unwrap_or_default(),
+            started_at_ms: None,
+            description,
+        })
+    } else {
+        Some(TurnEvent::ToolResult {
+            turn_id: payload.turn_id.clone(),
+            step,
+            call_id: activity.id.clone(),
+            result: activity.result_text.clone(),
+            error: activity.error.as_ref().map(|e| e.to_string()),
+            status: Some(activity.status.clone()),
+            duration_ms: activity
+                .duration_seconds
+                .map(|seconds| (seconds * 1000.0) as u64),
+            artifacts: activity.artifacts.clone(),
+            capability_invocation: activity.capability_invocation.clone(),
+        })
+    }
+}
+
+pub fn normalize_user_message(message: &str) -> String {
+    let normalized = message.trim();
+    if normalized.is_empty() {
+        "请先输入问题。".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+pub fn token_usage_parts(
+    token_usage: Option<&TokenUsage>,
+) -> (
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+) {
+    match token_usage {
+        Some(token_usage) => (
+            token_usage.input_tokens,
+            token_usage.cache_hit_input_tokens,
+            token_usage.reasoning_tokens,
+            token_usage.output_tokens,
+            token_usage.total_tokens,
+        ),
+        None => (None, None, None, None, None),
+    }
+}
+
+pub fn provider_failure_message(
+    provider_mode: &str,
+    fallback_reason: Option<&str>,
+) -> Option<String> {
+    if provider_mode == "mock" {
+        return Some(
+            fallback_reason
+                .unwrap_or("模型调用失败，未返回真实结果。")
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+/// T8：`turn:delta` 必须携带真实 `session_id`。
+///
+/// 历史缺陷：本 helper 没有 session 形参，事件一律发 `sessionId: null`。前端严格按
+/// sessionId 过滤后，**非真流式 provider**（`supports_true_streaming_decision()==false`
+/// → `decide_sync`/`BufferedResponse`，见 `turn_stream.rs` 的 buffered 分支）本应把整段回复
+/// 通过本 helper 分块渲染，但事件被整条丢弃 ⇒ 这类 provider 在 `turn:completed` 之前完全不渲染。
+#[allow(clippy::too_many_arguments)]
+fn stream_delta_chunks(
+    sink: &impl TurnEventSink,
+    turn_id: &str,
+    session_id: Option<&str>,
+    phase: &str,
+    text: Option<&str>,
+    reasoning_content: Option<&str>,
+    started_at: &std::time::Instant,
+    initial_latency_ms: Option<u64>,
+    measure_first_delta_latency: bool,
+) -> Option<u64> {
+    let source = text.or(reasoning_content).unwrap_or_default();
+    let mut first_token_latency_ms = initial_latency_ms;
+    let mut latency_emitted = false;
+    let chunks = source
+        .as_bytes()
+        .chunks(48)
+        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+        .collect::<Vec<_>>();
+
+    for (index, delta) in chunks.iter().enumerate() {
+        let latency = if !latency_emitted && index == 0 {
+            if let Some(value) = first_token_latency_ms {
+                latency_emitted = true;
+                Some(value)
+            } else if measure_first_delta_latency {
+                let value = started_at.elapsed().as_millis() as u64;
+                first_token_latency_ms = Some(value);
+                latency_emitted = true;
+                Some(value)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        emit_stream_event(
+            sink,
+            "turn:delta",
+            turn_id.to_string(),
+            "delta",
+            Some(phase),
+            text.as_ref().map(|_| delta.clone()),
+            reasoning_content.as_ref().map(|_| delta.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            latency,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            session_id.map(str::to_string),
+        );
+
+        if index + 1 < chunks.len() {
+            std::thread::sleep(std::time::Duration::from_millis(14));
+        }
+    }
+
+    first_token_latency_ms
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn stream_reasoning_chunks(
+    sink: &impl TurnEventSink,
+    turn_id: &str,
+    session_id: Option<&str>,
+    phase: &str,
+    reasoning_content: &str,
+    started_at: &std::time::Instant,
+    initial_latency_ms: Option<u64>,
+    measure_first_delta_latency: bool,
+) -> Option<u64> {
+    stream_delta_chunks(
+        sink,
+        turn_id,
+        session_id,
+        phase,
+        None,
+        Some(reasoning_content),
+        started_at,
+        initial_latency_ms,
+        measure_first_delta_latency,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn stream_text_chunks(
+    sink: &impl TurnEventSink,
+    turn_id: &str,
+    session_id: Option<&str>,
+    phase: &str,
+    text: &str,
+    started_at: &std::time::Instant,
+    initial_latency_ms: Option<u64>,
+    measure_first_delta_latency: bool,
+) -> Option<u64> {
+    stream_delta_chunks(
+        sink,
+        turn_id,
+        session_id,
+        phase,
+        Some(text),
+        None,
+        started_at,
+        initial_latency_ms,
+        measure_first_delta_latency,
+    )
+}
+
+pub fn runtime_log(message: String) {
+    eprintln!("[pony-runtime] {}", message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct RecordingSink {
+        events: RefCell<Vec<(String, TurnStreamEvent)>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self {
+                events: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl TurnEventSink for RecordingSink {
+        fn emit(&self, name: &str, payload: TurnStreamEvent) {
+            self.events.borrow_mut().push((name.to_string(), payload));
+        }
+    }
+
+    fn sample_payload(turn_id: &str, kind: &str, text: Option<&str>) -> TurnStreamEvent {
+        TurnStreamEvent {
+            event_id: None,
+            session_id: Some("s1".to_string()),
+            turn_id: turn_id.to_string(),
+            trace_id: None,
+            cost_usd: None,
+            kind: kind.to_string(),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            phase: Some("calling_model".to_string()),
+            text: text.map(str::to_string),
+            reasoning_content: None,
+            error: None,
+            provider_requested_name: None,
+            provider_name: None,
+            provider_protocol: None,
+            provider_model: None,
+            provider_source: None,
+            provider_mode: None,
+            fallback_reason: None,
+            build_context_observation: None,
+            input_tokens: None,
+            cache_hit_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            first_token_latency_ms: None,
+            turn_duration_ms: None,
+            trace_steps: None,
+            trace_timeline: None,
+            tool_activities: None,
+            provider_call_records: None,
+            hook_trace_records: None,
+            session_summary: None,
+            step: None,
+            stop_reason: None,
+            metrics: None,
+            error_class: None,
+        }
+    }
+
+    #[test]
+    fn event_name_mapping_table_driven() {
+        use crate::agent::turn_event::TurnEvent;
+        // 8 种现有发射名 → 映射断言（design.md 映射表）
+        let cases: Vec<(&str, Option<&str>)> = vec![
+            ("turn:started", Some("turn/start")),
+            ("turn:delta", Some("assistant/chunk")),
+            ("turn:output_end", None),
+            ("turn:completed", Some("assistant/message")),
+            ("turn:failed", Some("turn/end")),
+            ("turn:cancelled", Some("turn/end")),
+            ("turn:trace", None),
+            ("turn:tool", None), // 无 tool_activities 时不落盘
+        ];
+        for (name, expected) in cases {
+            let payload = sample_payload("turn-1", name, Some("hi"));
+            let event = build_turn_event(name, &payload);
+            match expected {
+                Some(type_name) => {
+                    let event = event.unwrap_or_else(|| panic!("{name} must map to {type_name}"));
+                    assert_eq!(event.type_name(), type_name, "{name} mapping");
+                }
+                None => assert!(event.is_none(), "{name} must not persist"),
+            }
+        }
+        // reason 分支断言：failed → Error，cancelled → Cancelled
+        use crate::agent::turn_event::TurnEndReason;
+        let failed = build_turn_event("turn:failed", &sample_payload("t1", "turn:failed", None))
+            .expect("failed event");
+        match failed {
+            TurnEvent::TurnEnd { reason, .. } => {
+                assert_eq!(reason, TurnEndReason::Error, "failed reason");
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+        let cancelled = build_turn_event(
+            "turn:cancelled",
+            &sample_payload("t1", "turn:cancelled", None),
+        )
+        .expect("cancelled event");
+        match cancelled {
+            TurnEvent::TurnEnd { reason, .. } => {
+                assert_eq!(reason, TurnEndReason::Cancelled, "cancelled reason");
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+    }
+
+    /// PA-094：turn:started 携带 build_context_observation → 额外构造
+    /// context/observation 事件（内存形态携带全量 payload，落盘形态只含引用）。
+    #[test]
+    fn context_observation_event_built_from_started_payload() {
+        use crate::agent::provider::BuildContextObservation;
+        use crate::agent::turn_event::TurnEvent;
+        let mut payload = sample_payload("turn-1", "turn:started", None);
+        payload.build_context_observation = Some(BuildContextObservation {
+            request_format: "chat".into(),
+            message_count: 2,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.7,
+            max_output_tokens: 4096,
+            stable_prefix_text: String::new(),
+            semi_stable_context_text: String::new(),
+            volatile_input_text: String::new(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "messages".into(),
+            tool_definitions_text: "tools".into(),
+        });
+        let event =
+            build_context_observation_event("turn:started", &payload).expect("observation event");
+        match event {
+            TurnEvent::ContextObservation {
+                turn_id,
+                step,
+                observation,
+                observation_ref,
+            } => {
+                assert_eq!(turn_id, "turn-1");
+                assert_eq!(step, 0);
+                assert!(observation.is_some(), "payload carried in memory");
+                assert!(observation_ref.is_none(), "ref assigned at flush");
+            }
+            _ => panic!("expected ContextObservation"),
+        }
+        // 非 started 事件不构造。
+        let delta = sample_payload("turn-1", "turn:delta", Some("hi"));
+        assert!(build_context_observation_event("turn:delta", &delta).is_none());
+        // 无 observation 的 started 不构造。
+        let bare = sample_payload("turn-1", "turn:started", None);
+        assert!(build_context_observation_event("turn:started", &bare).is_none());
+    }
+
+    /// PA-094（审核 P0）：turn:started 携带用户消息文本时额外发射 user/message
+    /// 事件（HistoryProjection 从事件重建用户消息的前提）。
+    #[test]
+    fn started_emits_user_message_event() {
+        use crate::agent::turn_event::TurnEvent;
+        let mut payload = sample_payload("turn-1", "turn:started", None);
+        payload.text = Some("hello world".to_string());
+        let event = build_user_message_event("turn:started", &payload).expect("user event");
+        match event {
+            TurnEvent::UserMessage {
+                turn_id,
+                text,
+                attachments,
+            } => {
+                assert_eq!(turn_id, "turn-1");
+                assert_eq!(text, "hello world");
+                assert!(attachments.is_empty());
+            }
+            _ => panic!("expected UserMessage"),
+        }
+        // 非 started 不发射。
+        let delta = sample_payload("turn-1", "turn:delta", Some("hi"));
+        assert!(build_user_message_event("turn:delta", &delta).is_none());
+        // 无文本的 started 不发射。
+        let bare = sample_payload("turn-1", "turn:started", None);
+        assert!(build_user_message_event("turn:started", &bare).is_none());
+    }
+
+    #[test]
+    fn emit_event_persist_channel_buffers_aggregates_and_flushes() {
+        use crate::agent::turn_event::TurnEvent;
+        use std::sync::{Arc, Mutex};
+        // 注册测试持久化通道：收集 (session_id, turn_id, events, is_terminal)
+        let received: Arc<Mutex<Vec<(String, String, Vec<TurnEvent>, bool)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingSink::new();
+        let received_clone = Arc::clone(&received);
+        register_event_persist(Arc::new(move |session_id, turn_id, event, is_terminal| {
+            received_clone.lock().expect("received lock").push((
+                session_id.to_string(),
+                turn_id.to_string(),
+                vec![event],
+                is_terminal,
+            ));
+        }));
+        // emit 序列：started → delta ×2（同 turn 应合并为一条 chunk）→ completed
+        emit_event(
+            &sink,
+            "turn:started",
+            sample_payload("turn-1", "turn:started", None),
+        );
+        emit_event(
+            &sink,
+            "turn:delta",
+            sample_payload("turn-1", "turn:delta", Some("hel")),
+        );
+        emit_event(
+            &sink,
+            "turn:delta",
+            sample_payload("turn-1", "turn:delta", Some("lo")),
+        );
+        emit_event(
+            &sink,
+            "turn:completed",
+            sample_payload("turn-1", "turn:completed", Some("hello")),
+        );
+        // 验证：4 次 emit → 5 条通道记录（聚合在持久化闭包内做，通道收到原事件；
+        // 聚合正确性由 control_plane 闭包负责——此处验证 emit→persist 链路与终态标记。
+        // PA-094：completed 额外发射 turn/end（终态结算事件），故 5 条；
+        // provider/usage 仅在携带 token 结算字段时发射（sample 无 token，不发射）。
+        // 审核 P0：completed 的 assistant/message 不标记 terminal（由 turn/end
+        // 统一触发 flush，避免拆批），故 records[3] 为 false、records[4] 为 true。
+        // 全局 EVENT_PERSIST_REGISTRY 可能被并行测试污染，只统计本 turn 的记录。
+        let records = received.lock().expect("received lock");
+        let own: Vec<_> = records
+            .iter()
+            .filter(|(_, turn_id, _, _)| turn_id == "turn-1")
+            .cloned()
+            .collect();
+        // PA-095 #4：started 额外发射 step/start（初始 call 的 StepStart{0}），
+        // 通道记录 5 → 6：[turn/start, step/start, chunk, chunk, assistant/message, turn/end]。
+        assert_eq!(own.len(), 6, "every emitted event reaches persist");
+        assert_eq!(own[0].3, false, "started not terminal");
+        assert_eq!(
+            own[4].3, false,
+            "completed assistant/message not terminal (deferred)"
+        );
+        assert_eq!(own[5].3, true, "completed turn/end is terminal");
+        assert_eq!(own[0].2[0].type_name(), "turn/start");
+        assert_eq!(own[1].2[0].type_name(), "step/start");
+        assert_eq!(own[2].2[0].type_name(), "assistant/chunk");
+        assert_eq!(own[3].2[0].type_name(), "assistant/chunk");
+        assert_eq!(own[4].2[0].type_name(), "assistant/message");
+        assert_eq!(own[5].2[0].type_name(), "turn/end");
+        drop(records);
+        clear_event_persist();
+    }
+
+    #[test]
+    fn event_mapping_tool_started_and_completed() {
+        use crate::agent::telemetry::TurnToolActivity;
+        use crate::agent::turn_event::TurnEvent;
+        // running → ToolCall
+        let mut payload = sample_payload("turn-1", "turn:tool", None);
+        payload.tool_activities = Some(vec![TurnToolActivity {
+            id: "act-1".to_string(),
+            name: "bash".to_string(),
+            canonical_tool_name: None,
+            display_name_zh: None,
+            status: "running".to_string(),
+            description: "run".to_string(),
+            arguments_text: Some("{}".to_string()),
+            result_text: None,
+            duration_seconds: None,
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        }]);
+        let event = build_turn_event("turn:tool", &payload).expect("tool call event");
+        assert_eq!(event.type_name(), "tool/call");
+        // completed → ToolResult
+        payload.tool_activities = Some(vec![TurnToolActivity {
+            id: "act-1".to_string(),
+            name: "bash".to_string(),
+            canonical_tool_name: None,
+            display_name_zh: None,
+            status: "done".to_string(),
+            description: "run".to_string(),
+            arguments_text: Some("{}".to_string()),
+            result_text: Some("ok".to_string()),
+            duration_seconds: Some(0.5),
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        }]);
+        let event = build_turn_event("turn:tool", &payload).expect("tool result event");
+        assert_eq!(event.type_name(), "tool/result");
+        match event {
+            TurnEvent::ToolResult {
+                result,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(result.as_deref(), Some("ok"));
+                assert_eq!(duration_ms, Some(500));
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    /// B1：失败原因随 `turn/end` 事件落盘——事件重投影据此产与写路径同源的检查点文本
+    /// （此前 `error` 在事件层被丢弃，重启/重投影出的文本永久缺「失败原因」行）。
+    #[test]
+    fn failed_turn_end_event_carries_error_reason() {
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let mut payload = sample_payload("turn-1", "turn:failed", None);
+        payload.error = Some("provider 502 bad gateway".to_string());
+        match build_turn_event("turn:failed", &payload).expect("failed event") {
+            TurnEvent::TurnEnd { reason, error, .. } => {
+                assert_eq!(reason, TurnEndReason::Error);
+                assert_eq!(error.as_deref(), Some("provider 502 bad gateway"));
+            }
+            other => panic!("expected TurnEnd, got {}", other.type_name()),
+        }
+        // 无 error 载荷：保持 None（不得编造失败原因）。
+        match build_turn_event("turn:failed", &sample_payload("t1", "turn:failed", None))
+            .expect("failed event")
+        {
+            TurnEvent::TurnEnd { error, .. } => assert!(error.is_none()),
+            other => panic!("expected TurnEnd, got {}", other.type_name()),
+        }
+    }
+
+    /// B1：工具描述随 `tool/call` 事件落盘（检查点工具行 `name + " " + description` 的载体）。
+    #[test]
+    fn tool_call_event_carries_description_and_degrades_when_blank() {
+        use crate::agent::telemetry::TurnToolActivity;
+        use crate::agent::turn_event::TurnEvent;
+        let activity = |description: &str| TurnToolActivity {
+            id: "act-1".to_string(),
+            name: "bash".to_string(),
+            canonical_tool_name: None,
+            display_name_zh: None,
+            status: "running".to_string(),
+            description: description.to_string(),
+            arguments_text: Some("{}".to_string()),
+            result_text: None,
+            duration_seconds: None,
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        };
+        let mut payload = sample_payload("turn-1", "turn:tool", None);
+        payload.tool_activities = Some(vec![activity("  检查端口监听  ")]);
+        match build_turn_event("turn:tool", &payload).expect("tool call event") {
+            TurnEvent::ToolCall {
+                name, description, ..
+            } => {
+                assert_eq!(name, "bash");
+                assert_eq!(description.as_deref(), Some("检查端口监听"));
+            }
+            other => panic!("expected ToolCall, got {}", other.type_name()),
+        }
+        // 空白描述 ⇒ None（检查点工具行只含 name，与旧日志形态一致）。
+        payload.tool_activities = Some(vec![activity("   ")]);
+        match build_turn_event("turn:tool", &payload).expect("tool call event") {
+            TurnEvent::ToolCall { description, .. } => assert!(description.is_none()),
+            other => panic!("expected ToolCall, got {}", other.type_name()),
+        }
+    }
+
+    #[test]
+    fn event_mapping_completed_carries_usage() {
+        use crate::agent::turn_event::TurnEvent;
+        let mut payload = sample_payload("turn-1", "turn:completed", Some("done"));
+        payload.input_tokens = Some(100);
+        payload.output_tokens = Some(50);
+        payload.total_tokens = Some(150);
+        let event = build_turn_event("turn:completed", &payload).expect("completed event");
+        match event {
+            TurnEvent::AssistantMessage { usage, text, .. } => {
+                assert_eq!(text, "done");
+                let usage = usage.expect("usage present");
+                assert_eq!(usage.input_tokens, Some(100));
+                assert_eq!(usage.output_tokens, Some(50));
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    /// PA-094（审核 P0）：turn:completed 携带 token 结算字段时额外发射
+    /// provider/usage（MetricsProjection 重建 ProviderCallCacheRecord 的事件源）
+    /// 与 turn/end（终态结算，TraceProjection 的 token 指标/timeline 挂载依赖）。
+    #[test]
+    fn completed_emits_provider_usage_and_turn_end() {
+        use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+        let mut payload = sample_payload("turn-1", "turn:completed", Some("done"));
+        payload.input_tokens = Some(100);
+        payload.cache_hit_input_tokens = Some(40);
+        payload.reasoning_tokens = Some(10);
+        payload.output_tokens = Some(50);
+        payload.total_tokens = Some(160);
+        payload.first_token_latency_ms = Some(88);
+        payload.turn_duration_ms = Some(1200);
+        payload.provider_name = Some("deepseek".to_string());
+        payload.provider_model = Some("deepseek-chat".to_string());
+        // provider/usage 事件：无 provider_call_records 时回退 turn 级结算
+        // （step=0，InitialRequest）。
+        let usage_events = build_provider_usage_event("turn:completed", &payload);
+        assert_eq!(usage_events.len(), 1, "fallback single usage event");
+        match &usage_events[0] {
+            TurnEvent::ProviderUsage {
+                turn_id,
+                step,
+                request_kind,
+                usage,
+                cache_hit_input_tokens,
+                cache_miss_input_tokens,
+                first_token_latency_ms,
+                turn_duration_ms,
+                latency_kind,
+                provider,
+                model,
+                ..
+            } => {
+                assert_eq!(turn_id, "turn-1");
+                assert_eq!(*step, 0);
+                assert_eq!(
+                    request_kind,
+                    &crate::agent::telemetry::ProviderRequestKind::InitialRequest
+                );
+                assert_eq!(usage.input_tokens, Some(100));
+                assert_eq!(usage.output_tokens, Some(50));
+                assert_eq!(*cache_hit_input_tokens, Some(40));
+                assert_eq!(*cache_miss_input_tokens, Some(60), "input - cache_hit");
+                assert_eq!(*first_token_latency_ms, Some(88));
+                assert_eq!(*turn_duration_ms, Some(1200));
+                assert_eq!(
+                    latency_kind,
+                    &crate::agent::telemetry::ProviderLatencyKind::ProviderStream
+                );
+                assert_eq!(provider, "deepseek");
+                assert_eq!(model, "deepseek-chat");
+            }
+            _ => panic!("expected ProviderUsage"),
+        }
+        // per-call 粒度：携带 provider_call_records 时逐条发射（step 递增）。
+        payload.provider_call_records = Some(vec![
+            crate::agent::telemetry::ProviderCallCacheRecord {
+                request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
+                provider_source: Some("deepseek".to_string()),
+                provider_mode: None,
+                input_tokens: Some(100),
+                cache_hit_input_tokens: Some(40),
+                cache_hit_source: None,
+                cache_miss_input_tokens: Some(60),
+                reasoning_tokens: Some(10),
+                output_tokens: Some(50),
+                total_tokens: Some(160),
+                first_token_latency_ms: Some(88),
+                turn_duration_ms: Some(500),
+                latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
+                prefix_mutation_reasons: Vec::new(),
+                usage_origin: None,
+                context_input_tokens: None,
+            },
+            crate::agent::telemetry::ProviderCallCacheRecord {
+                request_kind: crate::agent::telemetry::ProviderRequestKind::ToolFollowup,
+                provider_source: Some("deepseek".to_string()),
+                provider_mode: None,
+                input_tokens: Some(80),
+                cache_hit_input_tokens: Some(30),
+                cache_hit_source: None,
+                cache_miss_input_tokens: Some(50),
+                reasoning_tokens: Some(5),
+                output_tokens: Some(30),
+                total_tokens: Some(115),
+                first_token_latency_ms: None,
+                turn_duration_ms: Some(300),
+                latency_kind: crate::agent::telemetry::ProviderLatencyKind::BufferedResponse,
+                prefix_mutation_reasons: vec![
+                    crate::agent::provider::PrefixMutationReason::SessionSummaryChanged,
+                    crate::agent::provider::PrefixMutationReason::HistoryBoundaryShifted,
+                ],
+                usage_origin: None,
+                context_input_tokens: None,
+            },
+        ]);
+        let per_call_events = build_provider_usage_event("turn:completed", &payload);
+        assert_eq!(per_call_events.len(), 2, "per-call usage events");
+        match &per_call_events[0] {
+            TurnEvent::ProviderUsage {
+                step, request_kind, ..
+            } => {
+                assert_eq!(*step, 0);
+                assert_eq!(
+                    request_kind,
+                    &crate::agent::telemetry::ProviderRequestKind::InitialRequest
+                );
+            }
+            _ => panic!("expected ProviderUsage"),
+        }
+        match &per_call_events[1] {
+            TurnEvent::ProviderUsage {
+                step,
+                request_kind,
+                latency_kind,
+                turn_duration_ms,
+                prefix_mutation_reasons,
+                ..
+            } => {
+                assert_eq!(*step, 1, "step increments per call");
+                assert_eq!(
+                    request_kind,
+                    &crate::agent::telemetry::ProviderRequestKind::ToolFollowup
+                );
+                assert_eq!(
+                    latency_kind,
+                    &crate::agent::telemetry::ProviderLatencyKind::BufferedResponse
+                );
+                assert_eq!(*turn_duration_ms, Some(300));
+                // 审核 P1：prefix_mutation_reasons 用 serde 序列化（snake_case），
+                // 而非 Debug 格式——projection 按 snake_case 反序列化。
+                assert_eq!(
+                    prefix_mutation_reasons,
+                    &vec![
+                        "session_summary_changed".to_string(),
+                        "history_boundary_shifted".to_string()
+                    ],
+                    "prefix reasons serialized as snake_case"
+                );
+            }
+            _ => panic!("expected ProviderUsage"),
+        }
+        // turn/end 事件：reason=Completed。
+        let end_event = build_turn_end_event("turn:completed", &payload).expect("end event");
+        match end_event {
+            TurnEvent::TurnEnd {
+                turn_id,
+                reason,
+                turn_duration_ms,
+                ..
+            } => {
+                assert_eq!(turn_id, "turn-1");
+                assert_eq!(reason, TurnEndReason::Completed);
+                assert_eq!(turn_duration_ms, Some(1200));
+            }
+            _ => panic!("expected TurnEnd"),
+        }
+        // 非 completed 不发射。
+        let started = sample_payload("turn-1", "turn:started", None);
+        assert!(build_provider_usage_event("turn:started", &started).is_empty());
+        assert!(build_turn_end_event("turn:started", &started).is_none());
+        // 无 token 的 completed 不发射 provider/usage（但 turn/end 仍发射）。
+        let bare = sample_payload("turn-1", "turn:completed", Some("done"));
+        assert!(build_provider_usage_event("turn:completed", &bare).is_empty());
+        assert!(build_turn_end_event("turn:completed", &bare).is_some());
+    }
+
+    #[test]
+    fn canonical_trace_event_aligns_with_context_build_end_hook_point() {
+        let observation = BuildContextObservation {
+            request_format: "chat".to_string(),
+            message_count: 3,
+            image_count: 0,
+            tool_count: 0,
+            temperature: 0.2,
+            max_output_tokens: 512,
+            stable_prefix_text: "prefix".to_string(),
+            semi_stable_context_text: "ctx".to_string(),
+            volatile_input_text: "input".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "messages".to_string(),
+            tool_definitions_text: String::new(),
+        };
+
+        let event_type = resolve_canonical_event_type(
+            "turn:trace",
+            Some("building_context"),
+            Some(&observation),
+            None,
+        );
+
+        assert_eq!(event_type, "turn.context_built");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ContextBuildEnd,
+            &event_type,
+            "building_context"
+        ));
+    }
+
+    #[test]
+    fn canonical_trace_event_aligns_with_model_call_start_hook_point() {
+        let event_type =
+            resolve_canonical_event_type("turn:trace", Some("calling_model"), None, None);
+
+        assert_eq!(event_type, "turn.model_call_started");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ModelCallStart,
+            &event_type,
+            "calling_model"
+        ));
+    }
+
+    #[test]
+    fn canonical_trace_event_prefers_model_call_started_over_context_built_outside_building_context(
+    ) {
+        let observation = BuildContextObservation {
+            request_format: "responses".to_string(),
+            message_count: 4,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.2,
+            max_output_tokens: 512,
+            stable_prefix_text: "prefix".to_string(),
+            semi_stable_context_text: "ctx".to_string(),
+            volatile_input_text: "input".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "messages".to_string(),
+            tool_definitions_text: "tools".to_string(),
+        };
+
+        let event_type = resolve_canonical_event_type(
+            "turn:trace",
+            Some("calling_model"),
+            Some(&observation),
+            None,
+        );
+
+        assert_eq!(event_type, "turn.model_call_started");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ModelCallStart,
+            &event_type,
+            "calling_model"
+        ));
+    }
+
+    #[test]
+    fn delta_event_aligns_with_model_response_end_hook_point() {
+        let event_type =
+            resolve_canonical_event_type("turn:delta", Some("streaming_response"), None, None);
+
+        assert_eq!(event_type, "turn.output_delta");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ModelResponseEnd,
+            &event_type,
+            "streaming_response"
+        ));
+    }
+
+    #[test]
+    fn delta_stream_event_strips_heavy_payload_fields() {
+        let sink = RecordingSink::new();
+        let observation = BuildContextObservation {
+            request_format: "responses".to_string(),
+            message_count: 4,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.2,
+            max_output_tokens: 512,
+            stable_prefix_text: "prefix".to_string(),
+            semi_stable_context_text: "ctx".to_string(),
+            volatile_input_text: "input".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "messages".to_string(),
+            tool_definitions_text: "tools".to_string(),
+        };
+
+        emit_stream_event(
+            &sink,
+            "turn:delta",
+            "turn-heavy-delta".to_string(),
+            "delta",
+            Some("calling_model"),
+            Some("partial".to_string()),
+            Some("thinking".to_string()),
+            None,
+            None,
+            None,
+            None,
+            Some(observation),
+            Some(11),
+            Some(3),
+            Some(5),
+            Some(7),
+            Some(18),
+            Some(42),
+            None,
+            Some(vec![TurnTraceStep {
+                id: "call-model".to_string(),
+                label: "Call model".to_string(),
+                state: "active".to_string(),
+            }]),
+            Some(vec![TraceTimelineEntry {
+                id: "model-1".to_string(),
+                kind: "call_model".to_string(),
+                label: "CALL MODEL #1".to_string(),
+                state: "active".to_string(),
+                sequence: 1,
+                text: Some("partial".to_string()),
+                ..TraceTimelineEntry::default()
+            }]),
+            Some(vec![TurnToolActivity {
+                id: "tool-1".to_string(),
+                name: "workspace.read_file".to_string(),
+                canonical_tool_name: Some("Read".to_string()),
+                display_name_zh: Some("读取".to_string()),
+                status: "done".to_string(),
+                description: "read done".to_string(),
+                arguments_text: None,
+                result_text: None,
+                duration_seconds: Some(0.1),
+                parent_activity_id: None,
+                artifacts: None,
+                error: None,
+                capability_invocation: None,
+            }]),
+            Some(vec![ProviderCallCacheRecord::default()]),
+            Some(Vec::new()),
+            Some("summary".to_string()),
+            Some("session-1".to_string()),
+        );
+
+        let events = sink.events.borrow();
+        let (_, payload) = events
+            .first()
+            .expect("delta event should have been emitted");
+
+        assert_eq!(payload.text.as_deref(), Some("partial"));
+        assert_eq!(payload.reasoning_content.as_deref(), Some("thinking"));
+        assert_eq!(payload.first_token_latency_ms, Some(42));
+        assert_eq!(payload.session_id.as_deref(), Some("session-1"));
+        assert_eq!(payload.session_summary.as_deref(), Some("summary"));
+        assert!(payload.build_context_observation.is_none());
+        assert!(payload.trace_steps.is_none());
+        assert!(payload.trace_timeline.is_none());
+        assert!(payload.tool_activities.is_none());
+        assert!(payload.provider_call_records.is_none());
+        assert!(payload.hook_trace_records.is_none());
+    }
+
+    #[test]
+    fn trace_event_with_observation_outside_building_context_falls_back_to_trace_updated() {
+        let observation = BuildContextObservation {
+            request_format: "responses".to_string(),
+            message_count: 4,
+            image_count: 0,
+            tool_count: 1,
+            temperature: 0.2,
+            max_output_tokens: 512,
+            stable_prefix_text: "prefix".to_string(),
+            semi_stable_context_text: "ctx".to_string(),
+            volatile_input_text: "input".to_string(),
+            prefix_mutation_reasons: Vec::new(),
+            context_refresh_reason: None,
+            instruction_scope_sources: Vec::new(),
+            conversation_carry_mode: None,
+            request_messages_text: "messages".to_string(),
+            tool_definitions_text: "tools".to_string(),
+        };
+
+        let event_type = resolve_canonical_event_type(
+            "turn:trace",
+            Some("tool_result_integrating"),
+            Some(&observation),
+            None,
+        );
+
+        assert_eq!(event_type, "turn.trace_updated");
+    }
+
+    #[test]
+    fn tool_event_aligns_with_tool_call_start_hook_point() {
+        let tool_activities = vec![TurnToolActivity {
+            id: "tool-1".to_string(),
+            name: "workspace.read_file".to_string(),
+            canonical_tool_name: Some("Read".to_string()),
+            display_name_zh: Some("读取".to_string()),
+            status: "running".to_string(),
+            description: "running".to_string(),
+            arguments_text: None,
+            result_text: None,
+            duration_seconds: None,
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        }];
+        let event_type = resolve_canonical_event_type(
+            "turn:tool",
+            Some("executing_tool"),
+            None,
+            Some(&tool_activities),
+        );
+
+        assert_eq!(event_type, "turn.tool_call_started");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ToolCallStart,
+            &event_type,
+            "executing_tool"
+        ));
+    }
+
+    #[test]
+    fn tool_event_aligns_with_tool_call_end_hook_point() {
+        let tool_activities = vec![TurnToolActivity {
+            id: "tool-1".to_string(),
+            name: "workspace.read_file".to_string(),
+            canonical_tool_name: Some("Read".to_string()),
+            display_name_zh: Some("读取".to_string()),
+            status: "done".to_string(),
+            description: "ok".to_string(),
+            arguments_text: None,
+            result_text: None,
+            duration_seconds: Some(0.1),
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        }];
+        let event_type = resolve_canonical_event_type(
+            "turn:tool",
+            Some("executing_tool"),
+            None,
+            Some(&tool_activities),
+        );
+
+        assert_eq!(event_type, "turn.tool_call_completed");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::ToolCallEnd,
+            &event_type,
+            "tool_result_integrating"
+        ));
+    }
+
+    #[test]
+    fn terminal_event_aligns_with_turn_finalize_end_hook_point() {
+        let event_type =
+            resolve_canonical_event_type("turn:completed", Some("completed"), None, None);
+
+        assert_eq!(event_type, "turn.completed");
+        assert!(crate::agent::hooks::hook_point_matches_canonical_boundary(
+            &crate::agent::hooks::TurnHookPoint::TurnFinalizeEnd,
+            &event_type,
+            "completed"
+        ));
+    }
+}
+
+pub fn preview_text(text: &str, max_chars: usize) -> String {
+    let normalized = text.replace('\n', "\\n");
+    let count = normalized.chars().count();
+    if count <= max_chars {
+        normalized
+    } else {
+        let preview = normalized.chars().take(max_chars).collect::<String>();
+        format!("{}...(+{} chars)", preview, count - max_chars)
+    }
+}
+
+/// 解码窗口物理下限：绝对下限（毫秒）。
+///
+/// 突发包（SSE 被上游代理攒成一包）与计时抖动下的 `gen` 只有 1–2ms，不能代表生成速率；
+/// 该下限是物理事实约束，不是数值美化（契约 I3）。
+pub const DECODE_FLOOR_MIN_MS: u64 = 200;
+
+/// 解码窗口物理下限：相对下限（百分比）。`floor(dur) = max(200ms, 5% * dur)`。
+pub const DECODE_FLOOR_RATIO_PCT: u64 = 5;
+
+/// turn / 单调用速度的**口径**（契约 I10 线缆自描述）。
+///
+/// `StreamDecode` = 分母只含真实解码窗口（已扣 TTFT 且过物理下限）；
+/// `EndToEnd` = 端到端吞吐（含排队 + prefill），与解码速度**不可比**，消费面须加 `≈` 前缀。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnSpeedBasis {
+    /// I4：`Σ(out-1) / (Σgen/1000)`。
+    StreamDecode,
+    /// I5：`Σout / (Σdur/1000)`。
+    EndToEnd,
+}
+
+impl TurnSpeedBasis {
+    /// wire 取值：`stream_decode` | `end_to_end`。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StreamDecode => "stream_decode",
+            Self::EndToEnd => "end_to_end",
+        }
+    }
+}
+
+/// I3：解码窗口物理下限 `floor(dur) = max(200ms, 5% * dur)`。
+pub fn decode_floor_ms(duration_ms: u64) -> u64 {
+    (duration_ms * DECODE_FLOOR_RATIO_PCT / 100).max(DECODE_FLOOR_MIN_MS)
+}
+
+/// I1：per-call 有效性 `dur > 0 && out > 0`。
+///
+/// 缺失或为 0 的记录不参与任何速度计算，也不计入 calls（禁止把「未知」当 0 计入）。
+pub fn call_valid(duration_ms: Option<u64>, output_tokens: Option<u64>) -> bool {
+    duration_ms.unwrap_or(0) > 0 && output_tokens.unwrap_or(0) > 0
+}
+
+/// I3：解码样本判据（**唯一出处**，消费面禁止各写一份）。
+///
+/// `call_valid && ttft 存在 && dur > ttft && out >= 2 && gen >= floor(dur)`：
+/// 无 TTFT 观测（批量同步 followup / 非流式决策）、单 token 调用、突发包一律不合格，
+/// 只能进 I5 的端到端回退。
+pub fn decode_eligible(
+    duration_ms: Option<u64>,
+    ttft_ms: Option<u64>,
+    output_tokens: Option<u64>,
+) -> bool {
+    if !call_valid(duration_ms, output_tokens) {
+        return false;
+    }
+    let duration = duration_ms.unwrap_or(0);
+    let output = output_tokens.unwrap_or(0);
+    let Some(ttft) = ttft_ms else {
+        return false;
+    };
+    if duration <= ttft || output < 2 {
+        return false;
+    }
+    call_generation_ms(Some(duration), Some(ttft)) >= decode_floor_ms(duration)
+}
+
+/// 比值 → 速度（A5 浮点卫生）：分子/分母为 0、非有限、非正 ⇒ `None`（禁止 0/NaN 上线缆）。
+fn speed_from_ratio(numerator: u64, denominator_ms: u64) -> Option<f64> {
+    if numerator == 0 || denominator_ms == 0 {
+        return None;
+    }
+    let candidate = (numerator as f64) / ((denominator_ms as f64) / 1_000.0);
+    (candidate.is_finite() && candidate > 0.0).then_some(candidate)
+}
+
+/// 单次调用生成窗口（**分母候选，不等于有效生成窗口**）。
+///
+/// `gen = (ttft 存在且 dur > ttft) ? dur - ttft : dur`（`ttft > dur` 退化，不出负值）。
+///
+/// ⚠️ 本函数只按 I2 定义**窗口**，不定义「合格性」：能否作为解码样本必须走
+/// [`decode_eligible`]（I3）。历史上把 `gen` 直接当分母用过，导致无 TTFT 调用与突发包
+/// 污染速度（契约 §0 根因 1/2），不要重犯。
+pub fn call_generation_ms(duration_ms: Option<u64>, ttft_ms: Option<u64>) -> u64 {
+    let duration = duration_ms.unwrap_or(0);
+    match ttft_ms {
+        Some(ttft) if duration > ttft => duration - ttft,
+        _ => duration,
+    }
+}
+
+/// I4 累加器：`decode_eligible` 侧的 `Σout` / `Σgen` / 调用数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecodeTotals {
+    pub output_tokens: u64,
+    pub generation_ms: u64,
+    pub calls: u32,
+}
+
+/// I5 累加器：`valid` 侧的 `Σout` / `Σdur` / 调用数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ValidTotals {
+    pub output_tokens: u64,
+    pub duration_ms: u64,
+    pub calls: u32,
+}
+
+/// 速度真值（I4–I7 同源恒等式 + I10 自描述；UI / 快照 / 根 span 共用）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TurnSpeedTruth {
+    /// 参与计算集合的 `Σout / (分母/1000)`；无参与计算调用 ⇒ `None`（禁止 0 占位）。
+    pub speed: Option<f64>,
+    /// 口径（I10）：`stream_decode` | `end_to_end`；`None` ⇔ 无值。
+    pub basis: Option<TurnSpeedBasis>,
+    /// 参与计算集合的 Σout（`stream_decode` ⇒ Σeligible out；`end_to_end` ⇒ Σvalid out），I7。
+    pub output_tokens: u64,
+    /// 分母时长（`stream_decode` ⇒ Σgen；`end_to_end` ⇒ Σdur），毫秒，I7。
+    pub generation_ms: u64,
+    /// 首个带 ttft 的 valid per-call 值（**不**跨 hop 采样，不是 turn elapsed 内首包）。
+    pub ttft_ms: Option<u64>,
+    /// 参与计算集合的调用数（按 basis 口径，I7）。
+    pub calls: u32,
+}
+
+/// I4/I5/I6：由两路累加器择一结算速度（**唯一公式出口**，禁止复制粘贴后独立演化）。
+///
+/// - `decode.calls > 0` ⇒ `Σ(out-1) / (Σgen/1000)`，`basis = stream_decode`（I4）；
+/// - 否则 `valid.calls > 0` ⇒ `Σout / (Σdur/1000)`，`basis = end_to_end`（I5）；
+/// - 否则全 `None` / `0`（I6：既无 eligible 也无 valid ⇒ 无值，禁止伪造）。
+///
+/// 禁止把两路口径混进同一个 Σ。`otel::read_active_turn_call_truth` 与
+/// `metrics_snapshot::build_turn_metrics_snapshot` 都经此函数结算，保证同源（I9）。
+pub fn resolve_turn_speed(
+    decode: DecodeTotals,
+    valid: ValidTotals,
+    ttft_ms: Option<u64>,
+) -> TurnSpeedTruth {
+    if decode.calls > 0 {
+        return TurnSpeedTruth {
+            // 分子扣 1/token：首 token 已计入 TTFT，解码窗口只新增 `out - 1` 个 token。
+            speed: speed_from_ratio(
+                decode.output_tokens.saturating_sub(u64::from(decode.calls)),
+                decode.generation_ms,
+            ),
+            basis: Some(TurnSpeedBasis::StreamDecode),
+            output_tokens: decode.output_tokens,
+            generation_ms: decode.generation_ms,
+            ttft_ms,
+            calls: decode.calls,
+        };
+    }
+    if valid.calls > 0 {
+        return TurnSpeedTruth {
+            speed: speed_from_ratio(valid.output_tokens, valid.duration_ms),
+            basis: Some(TurnSpeedBasis::EndToEnd),
+            output_tokens: valid.output_tokens,
+            generation_ms: valid.duration_ms,
+            ttft_ms,
+            calls: valid.calls,
+        };
+    }
+    TurnSpeedTruth::default()
+}
+
+/// 由原始观测求单调用速度与口径（I8，**唯一出处**）。
+///
+/// eligible ⇒ `(out-1) / (gen/1000)`，`stream_decode`；valid 但不可解码 ⇒
+/// `out / (dur/1000)`，`end_to_end`；无效 ⇒ `(None, None)`。
+pub fn call_speed_from_raw(
+    duration_ms: Option<u64>,
+    ttft_ms: Option<u64>,
+    output_tokens: Option<u64>,
+) -> (Option<f64>, Option<TurnSpeedBasis>) {
+    if !call_valid(duration_ms, output_tokens) {
+        return (None, None);
+    }
+    let duration = duration_ms.unwrap_or(0);
+    let output = output_tokens.unwrap_or(0);
+    if decode_eligible(Some(duration), ttft_ms, Some(output)) {
+        return (
+            speed_from_ratio(
+                output.saturating_sub(1),
+                call_generation_ms(Some(duration), ttft_ms),
+            ),
+            Some(TurnSpeedBasis::StreamDecode),
+        );
+    }
+    (
+        speed_from_ratio(output, duration),
+        Some(TurnSpeedBasis::EndToEnd),
+    )
+}
+
+/// 单条 per-call 记录的速度与口径（I8；快照 `callSpeed*` 用）。
+pub fn call_speed(record: &ProviderCallCacheRecord) -> (Option<f64>, Option<TurnSpeedBasis>) {
+    call_speed_from_raw(
+        record.turn_duration_ms,
+        record.first_token_latency_ms,
+        record.output_tokens,
+    )
+}
+
+/// per-hop `llm.chat` span 的单调用速度（I8/I9：与快照 per-call 同一公式，不另写一份）。
+fn calculate_call_generation_speed(
+    output_tokens: Option<u64>,
+    elapsed_ms: u64,
+    ttft_ms: Option<u64>,
+) -> Option<f64> {
+    call_speed_from_raw(Some(elapsed_ms), ttft_ms, output_tokens).0
+}
+
+/// I4/I5/I6：由 per-call 记录求 turn 速度真值。
+///
+/// 先一次遍历把记录分成 `decode_eligible` 与 `valid` 两路累加，再由
+/// [`resolve_turn_speed`] 择一结算；**禁止**在一次 Σ 中混两种口径。
+pub fn weighted_turn_speed(records: &[ProviderCallCacheRecord]) -> TurnSpeedTruth {
+    let mut decode = DecodeTotals::default();
+    let mut valid = ValidTotals::default();
+    let mut ttft_ms: Option<u64> = None;
+    for record in records {
+        if !call_valid(record.turn_duration_ms, record.output_tokens) {
+            // I1：planner-only 伪记录（dur/out 为 None）与 0 值记录不进任何 Σ、不计 calls。
+            continue;
+        }
+        let duration = record.turn_duration_ms.unwrap_or(0);
+        let output = record.output_tokens.unwrap_or(0);
+        valid.output_tokens = valid.output_tokens.saturating_add(output);
+        valid.duration_ms = valid.duration_ms.saturating_add(duration);
+        valid.calls = valid.calls.saturating_add(1);
+        if ttft_ms.is_none() {
+            ttft_ms = record.first_token_latency_ms;
+        }
+        if decode_eligible(Some(duration), record.first_token_latency_ms, Some(output)) {
+            decode.output_tokens = decode.output_tokens.saturating_add(output);
+            decode.generation_ms = decode.generation_ms.saturating_add(call_generation_ms(
+                Some(duration),
+                record.first_token_latency_ms,
+            ));
+            decode.calls = decode.calls.saturating_add(1);
+        }
+    }
+    resolve_turn_speed(decode, valid, ttft_ms)
+}
+
+/// 把速度真值与 turn 级 timing 落到根 `agent.turn` span。
+///
+/// 生产路径（`runtime/turn_stream.rs` / `runtime/turn_sync.rs` 的终态收尾）唯一出口：
+/// 速度、`basis`（`stream_decode` | `end_to_end`）、duration/ttft/calls 必须同源同帧写入，
+/// 禁止各写各的（I10）。
+pub fn record_turn_speed_truth(
+    scope: &mut crate::agent::otel::TurnTraceGuard,
+    records: &[ProviderCallCacheRecord],
+    turn_duration_ms: Option<u64>,
+) {
+    let truth = weighted_turn_speed(records);
+    scope.record_turn_speed_with_basis(truth.speed, truth.basis);
+    scope.record_turn_timing(turn_duration_ms, truth.ttft_ms, Some(truth.calls));
+}
+
+/// Wave-5 K4：把单次调用成本写入 `llm.chat` span。
+///
+/// 门禁关闭（[`crate::agent::otel::is_span_capture_enabled`] = false）时**零计算短路**：
+/// 不查价格表、不做浮点运算、不附加属性（契约 K4 边界）。
+fn record_llm_span_cost(
+    llm_span: &mut crate::agent::otel::LlmSpanGuard,
+    model: &str,
+    protocol_label: &str,
+    usage: &TokenUsage,
+) {
+    if !crate::agent::otel::is_span_capture_enabled() {
+        return;
+    }
+    // Wave-6 K1.1：按**协议语义**归一未缓存输入（Anthropic 的 input 不含 cache，不能相减）。
+    let protocol = crate::agent::cost::ProviderCostProtocol::from_label(protocol_label);
+    // wave-53 C1：一次计价同时给出三分量 ⇒ `llm.chat` 输出 `langfuse.observation.cost_details`
+    // （Langfuse 语义轨），既有 `gen_ai.cost.usd`（Tempo 面）与 turn 成本聚合由同一出口承担。
+    if let Some(estimate) = crate::agent::cost::estimate_cost_with_protocol(
+        model,
+        usage.input_tokens.unwrap_or(0),
+        usage.output_tokens.unwrap_or(0),
+        usage.cache_hit_input_tokens,
+        protocol,
+    ) {
+        llm_span.record_cost_components(
+            Some(estimate.input_cost_usd),
+            Some(estimate.output_cost_usd),
+            Some(estimate.total_cost_usd),
+        );
+    } else {
+        llm_span.record_cost(None);
+    }
+}
+
+/// wave-51 C3：缓存命中 token 的**协议门控**（契约 PA51-C3-T6 / 已知限制 L1、L3）。
+///
+/// 为什么需要门控：semconv 口径要求 `gen_ai.usage.input_tokens` **已包含**缓存命中，
+/// `gen_ai.usage.cache_read.input_tokens` 只是它的子集读数；Langfuse ingest 会从 input 减
+/// cache_read 以免重复计费。本仓 `AnthropicMessages` 的 `input_tokens` **不含** cache
+/// （见 `cost.rs` 的协议语义注释），若照报会被减成偏小值 ⇒ fail-closed：只对
+/// OpenAI 协议族（`openai-completions` / `openai-responses`）上报，其余（含未知标签）一律
+/// `None`（宁可少报，也不污染 Langfuse 用量口径）。
+/// 注：思考 token 不受门控（两类协议下思考都计入 output）。
+fn cache_reportable_input_tokens(protocol_label: &str, usage: &TokenUsage) -> Option<u64> {
+    match protocol_label {
+        "openai-completions" | "openai-responses" => usage.cache_hit_input_tokens,
+        _ => None,
+    }
+}
+
+/// B027 C1/C3：**wire 与落库共享的唯一成本出口**。
+///
+/// 语义（契约 `.dev-team/contract-matrix-cost-protocol.md`）：
+/// - `protocol` 由 `ProviderEventMeta.protocol` → [`ProviderCostProtocol::from_label`] 映射，
+///   再交 [`crate::agent::cost::estimate_cost_with_protocol`] 计价（C1 单一出口）；
+/// - 无 `provider_meta`（无法判定协议）/ 缺 input / 缺 output / 未收录模型 ⇒ `None`（C5 未知不伪造，
+///   禁止以 0 顶替）；
+/// - wire（[`turn_event_cost_usd`]）与落库（`runtime::turn_persist::estimate_trace_cost`）
+///   必须都由本函数产出，保证同一 turn 两侧逐位相等（C3）。
+///
+/// [`ProviderCostProtocol::from_label`]: crate::agent::cost::ProviderCostProtocol::from_label
+pub fn estimate_call_cost_usd(
+    provider_meta: Option<&ProviderEventMeta>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+) -> Option<f64> {
+    let meta = provider_meta?;
+    let input = input_tokens?;
+    let output = output_tokens?;
+    // Wave-6 K1.1 / B027 C2：协议语义归一（Anthropic input 不含 cache；未知协议保守按 OpenAI）。
+    let protocol = crate::agent::cost::ProviderCostProtocol::from_label(meta.protocol.as_str());
+    crate::agent::cost::estimate_cost_with_protocol(
+        meta.model.as_str(),
+        input,
+        output,
+        cache_hit_input_tokens,
+        protocol,
+    )
+    .map(|estimate| estimate.total_cost_usd)
+}
+
+/// Wave-5 K2：turn 事件成本（未知模型或缺真实 usage ⇒ `None`）。
+///
+/// B027：本函数退化为 [`estimate_call_cost_usd`] 的**同名适配层**（wire 数值不变），
+/// 使 wire 与落库共享同一出口，避免两面对口径漂移。
+fn turn_event_cost_usd(
+    provider_meta: Option<&ProviderEventMeta>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_hit_input_tokens: Option<u64>,
+) -> Option<f64> {
+    estimate_call_cost_usd(
+        provider_meta,
+        input_tokens,
+        output_tokens,
+        cache_hit_input_tokens,
+    )
+}
+
+/// `llm.chat` 请求的组装模式（写入 span 属性 `llm.request.mode`）。
+///
+/// 三者共用一个 provider 调用出口，但上下文来源不同：`Initial` 是本轮首次请求、
+/// `ToolFollowup` 是工具结果续跑、`ToolRecovery` 是「重复/超限/预算」拦截后的收尾请求。
+/// 生产事故（trace `38590d52…`）证明恢复请求曾被静默换掉上下文，本枚举是它的显式标签。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LlmRequestMode {
+    /// 本轮首次决策请求（分层上下文新组装）。
+    Initial,
+    /// 工具执行结果续跑（正常 follow-up）。
+    ToolFollowup,
+    /// 拦截式收尾（重复调用 / follow-up 超限 / 同工具连续失败）后的恢复请求。
+    ToolRecovery,
+}
+
+impl LlmRequestMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmRequestMode::Initial => "initial",
+            LlmRequestMode::ToolFollowup => "tool_followup",
+            LlmRequestMode::ToolRecovery => "tool_recovery",
+        }
+    }
+}
+
+/// 请求形状（实际发送的消息条数, 首条是否为 system 前缀）。
+///
+/// native transcript 非空时以它为准（native 流程下 provider 直接用它当 messages），
+/// 否则回退分层 `input`。纯函数：无网络、无全局态，供 span 属性与单测共用同一出口。
+pub fn llm_request_shape(request: &ProviderRequest) -> (usize, bool) {
+    if !request.native_messages.is_empty() {
+        let has_system_prefix = request
+            .native_messages
+            .first()
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str)
+            == Some("system");
+        return (request.native_messages.len(), has_system_prefix);
+    }
+    let has_system_prefix = matches!(
+        request.input.first().map(|message| &message.role),
+        Some(crate::agent::provider::ProviderRole::System)
+    );
+    (request.input.len(), has_system_prefix)
+}
+
+/// 兼容入口：等价于 [`provider_decision_with_mode`] 传 [`LlmRequestMode::Initial`]。
+pub fn provider_decision<P: ProviderClient>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+) -> Result<ProviderDecision, String> {
+    provider_decision_with_mode(provider, request, tools, LlmRequestMode::Initial)
+}
+
+pub fn provider_decision_with_mode<P: ProviderClient>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    request_mode: LlmRequestMode,
+) -> Result<ProviderDecision, String> {
+    // Wave43：llm.chat 子 span（父 = 当前活动 turn）；token 用量取响应侧。
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED,
+    );
+    let start = std::time::Instant::now();
+    let result = provider.decide_with_tools(request, tools);
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if let Ok(decision) = result.as_ref() {
+        if let Some(usage) = decision.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            // wave-51 C3：思考/缓存命中细分用量（cache 键经协议门控，见契约 PA51-C3-T6）。
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            // wave-54 C1：per-call 耗时/首包真值（buffered 无首包 ⇒ 无 ttft 键）。
+            llm_span.record_call_timing(Some(elapsed_ms), None);
+            // wave-54 C3：usage 来源（provider | estimated_chars）。
+            llm_span.record_usage_origin(usage.origin);
+            // wave-54 C4：传真实上下文窗口（无能力 ⇒ None ⇒ 两键不输出）。
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            // wave-54 C4：context_ratio 分子用协议归一输入（anthropic 含 cache_read/creation）。
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
+}
+
+/// 兼容入口：等价于 [`provider_decision_stream_with_mode`] 传 [`LlmRequestMode::Initial`]。
+pub fn provider_decision_stream<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    on_delta: F,
+) -> Result<ProviderDecision, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    provider_decision_stream_with_mode(provider, request, tools, on_delta, LlmRequestMode::Initial)
+}
+
+pub fn provider_decision_stream_with_mode<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    on_delta: F,
+    request_mode: LlmRequestMode,
+) -> Result<ProviderDecision, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    // 无守卫版本：不改变控制流，仅把请求模式透传给带守卫实现。
+    provider_decision_stream_guarded_with_mode(
+        provider,
+        request,
+        tools,
+        &crate::agent::provider::ProviderStreamGuard::without_cancel(),
+        on_delta,
+        request_mode,
+    )
+}
+
+/// T9：带取消/时长守卫的流式决策（runtime 生产路径由此进入）。
+/// 兼容入口：等价于 [`provider_decision_stream_guarded_with_mode`] 传 [`LlmRequestMode::Initial`]。
+pub fn provider_decision_stream_guarded<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    guard: &crate::agent::provider::ProviderStreamGuard<'_>,
+    on_delta: F,
+) -> Result<ProviderDecision, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    provider_decision_stream_guarded_with_mode(
+        provider,
+        request,
+        tools,
+        guard,
+        on_delta,
+        LlmRequestMode::Initial,
+    )
+}
+
+pub fn provider_decision_stream_guarded_with_mode<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    guard: &crate::agent::provider::ProviderStreamGuard<'_>,
+    mut on_delta: F,
+    request_mode: LlmRequestMode,
+) -> Result<ProviderDecision, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    // Wave43：llm.chat 子 span（流式决策）。
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM,
+    );
+    let start = std::time::Instant::now();
+    let mut first_token_time: Option<std::time::Instant> = None;
+    let result = provider.decide_with_tools_stream_guarded(request, tools, guard, |chunk| {
+        if first_token_time.is_none() {
+            first_token_time = Some(std::time::Instant::now());
+        }
+        on_delta(chunk);
+    });
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let ttft_ms = first_token_time.map(|t| t.duration_since(start).as_millis() as u64);
+    if let Ok(decision) = result.as_ref() {
+        if let Some(usage) = decision.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            // wave-51 C3：思考/缓存命中细分用量（cache 键经协议门控，见契约 PA51-C3-T6）。
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
+            // wave-54 C1：`generation = duration - ttft`（ttft 存在且 dur > ttft），否则 = duration。
+            llm_span.record_call_timing(Some(elapsed_ms), ttft_ms);
+            // wave-54 C3：usage 来源（provider | estimated_chars）。
+            llm_span.record_usage_origin(usage.origin);
+            // wave-54 C4：传真实上下文窗口（无能力 ⇒ None ⇒ 两键不输出）。
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            // wave-54 C4：context_ratio 分子用协议归一输入（anthropic 含 cache_read/creation）。
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
+}
+
+/// 兼容入口：等价于 [`provider_followup_with_mode`] 传 [`LlmRequestMode::ToolFollowup`]。
+pub fn provider_followup<P: ProviderClient>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+) -> Result<crate::agent::provider::ProviderResponse, String> {
+    provider_followup_with_mode(
+        provider,
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        tool_call,
+        tool_result,
+        LlmRequestMode::ToolFollowup,
+    )
+}
+
+pub fn provider_followup_with_mode<P: ProviderClient>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+    request_mode: LlmRequestMode,
+) -> Result<crate::agent::provider::ProviderResponse, String> {
+    // Wave43：llm.chat 子 span（工具结果后续轮）。
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED,
+    );
+    let start = std::time::Instant::now();
+    let result = provider.continue_with_tool_result(
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        tool_call,
+        tool_result,
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            // wave-51 C3：思考/缓存命中细分用量（cache 键经协议门控，见契约 PA51-C3-T6）。
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            // wave-54 C1：per-call 耗时/首包真值（buffered 无首包 ⇒ 无 ttft 键）。
+            llm_span.record_call_timing(Some(elapsed_ms), None);
+            // wave-54 C3：usage 来源（provider | estimated_chars）。
+            llm_span.record_usage_origin(usage.origin);
+            // wave-54 C4：传真实上下文窗口（无能力 ⇒ None ⇒ 两键不输出）。
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            // wave-54 C4：context_ratio 分子用协议归一输入（anthropic 含 cache_read/creation）。
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
+}
+
+/// D3a：**批量**工具结果 followup（同步路径 N>1）。
+///
+/// 与 [`provider_followup_with_mode`] **同一** otel 口径（`llm.chat` 子 span + 请求形状 + usage/
+/// 耗时/成本记录），只是把「一份结果」换成「按执行顺序的一批结果」，交 provider 的
+/// `continue_with_tool_results` 组装 1 assistant + N 结果（D2 入口，形状由 D1b 构造器保证）。
+///
+/// 只接具体类型 `ProviderManager`：D2 的批量入口是固有方法而非 `ProviderClient` 的 trait 方法，
+/// 扩 trait 会把批量语义渗透到所有测试替身；批执行只发生在生产实现上（测试用 mock HTTP）。
+#[allow(clippy::too_many_arguments)]
+pub fn provider_followup_with_calls(
+    provider: &ProviderManager,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+    request_mode: LlmRequestMode,
+) -> Result<crate::agent::provider::ProviderResponse, String> {
+    // Wave43：llm.chat 子 span（工具结果后续轮）。
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED,
+    );
+    let start = std::time::Instant::now();
+    let result = provider.continue_with_tool_results(
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        calls,
+        results,
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            llm_span.record_call_timing(Some(elapsed_ms), None);
+            llm_span.record_usage_origin(usage.origin);
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
+}
+
+/// 整批 followup 的传输口径：**恒为** [`crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED`]。
+///
+/// r2-dim1 attempt 2 / F7：本函数对应的分支（`N > 1`）不走 SSE，而是
+/// `ProviderManager::continue_with_tool_results_stream` 内部的同步
+/// `continue_with_tool_results`（`provider/mod.rs:1278-1288`），结果一次性回放为增量。
+/// 抽成纯函数是为了让「批量 ≠ 流式」这条 wire 事实可被无线程/无网络的单测锁定：
+/// 该分支曾硬编码 `STREAM`，导致 L3 把批量调用误判为「流式首包测量丢包」。
+pub fn batch_followup_transport() -> &'static str {
+    crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED
+}
+
+/// D3b（P1-1 / B018）：**整批**工具结果的流式 followup（与 [`provider_followup_with_calls`] 的
+/// 流式对偶，供 `runtime/turn_stream.rs` 批执行后一次性回填）。
+///
+/// 分派（与 D2 的 `continue_with_tool_results_stream` 同序，双层保险）：
+/// - `N == 1` ⇒ **逐字委派** [`provider_followup_stream_with_mode`]（既有 1:1 流式入口与其
+///   `llm.chat` span / ttft / 速度口径零改动，单调用回归靠既有用例锁住）；
+/// - `N > 1` ⇒ 本函数的 `llm.chat` span 只做「已解析用量」记账后走
+///   [`ProviderManager::continue_with_tool_results_stream`]。
+///
+/// **已知偏差（设计 §7 / executor2 声明）**：`N > 1` 的传输沿用既有同步 `post_*` 通道，结果按
+/// 「reasoning → text」一次性回放为增量，**不是**逐 token 真增量（`on_delta` 仍会被调用，UI 形状
+/// 与「非流式 provider」分支一致）。真增量留作后续波次。
+#[allow(clippy::too_many_arguments)]
+pub fn provider_followup_stream_with_calls<F>(
+    provider: &ProviderManager,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+    on_delta: F,
+    request_mode: LlmRequestMode,
+) -> Result<crate::agent::provider::ProviderResponse, String>
+where
+    F: FnMut(ProviderStreamChunk),
+{
+    // N == 1：逐字委派既有 1:1 流式入口（含其 span 与 latency 采集，不复制逻辑）。
+    if calls.len() == 1 && results.len() == 1 {
+        return provider_followup_stream_with_mode(
+            provider,
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            &calls[0],
+            &results[0],
+            on_delta,
+            request_mode,
+        );
+    }
+
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix,
+        // r2-dim1 attempt 2 / F7：N > 1 分支**不是**流式通道。
+        // `continue_with_tool_results_stream` 在 N > 1 时直接走同步 `continue_with_tool_results`
+        // （provider/mod.rs:1278-1288），结果一次性回放为增量；此处曾硬编码 STREAM，
+        // 使批量调用在 wire 上被标成流式、进而被 L3 归入「首包测量丢包」而非「缓冲本无首包」
+        // （实测 s3-t01 第 3 次调用日志 `mode=sync-batch`，其 span 却写 transport=stream）。
+        batch_followup_transport(),
+    );
+    let start = std::time::Instant::now();
+    let result = provider.continue_with_tool_results_stream(
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        calls,
+        results,
+        on_delta,
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
+            // 批量路径没有真增量 ⇒ 无 ttft 可比，速度分母退化为整段耗时（与 D2 同步批量一致）。
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
+            llm_span.record_call_timing(Some(elapsed_ms), None);
+            llm_span.record_usage_origin(usage.origin);
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            llm_span.record_context_normalized_input(
+                crate::agent::runtime::context_input_tokens_for(
+                    Some(provider.protocol_label()),
+                    Some(usage),
+                ),
+            );
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
+}
+
+/// 兼容入口：等价于 [`provider_followup_stream_with_mode`] 传 [`LlmRequestMode::ToolFollowup`]。
+pub fn provider_followup_stream<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+    on_delta: F,
+) -> Result<crate::agent::provider::ProviderResponse, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    provider_followup_stream_with_mode(
+        provider,
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        tool_call,
+        tool_result,
+        on_delta,
+        LlmRequestMode::ToolFollowup,
+    )
+}
+
+pub fn provider_followup_stream_with_mode<P, F>(
+    provider: &P,
+    request: &ProviderRequest,
+    tools: &[ToolDefinition],
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+    mut on_delta: F,
+    request_mode: LlmRequestMode,
+) -> Result<crate::agent::provider::ProviderResponse, String>
+where
+    P: ProviderClient,
+    F: FnMut(ProviderStreamChunk),
+{
+    // Wave43：llm.chat 子 span（流式工具结果后续轮）。
+    let mut llm_span = crate::agent::otel::start_llm_span_with_provider(
+        provider.protocol_label(),
+        Some(provider.name()),
+        Some(request.model.as_str()),
+        "chat",
+    );
+    let (request_messages, request_has_system_prefix) = llm_request_shape(request);
+    llm_span.record_request_shape(
+        request_mode.as_str(),
+        request_messages,
+        request_has_system_prefix, crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM,
+    );
+    let start = std::time::Instant::now();
+    let mut first_token_time: Option<std::time::Instant> = None;
+    let result = provider.continue_with_tool_result_stream(
+        request,
+        tools,
+        accumulated_messages,
+        assistant_message,
+        tool_call,
+        tool_result,
+        |chunk| {
+            if first_token_time.is_none() {
+                first_token_time = Some(std::time::Instant::now());
+            }
+            on_delta(chunk);
+        },
+    );
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let ttft_ms = first_token_time.map(|t| t.duration_since(start).as_millis() as u64);
+    if let Ok(response) = result.as_ref() {
+        if let Some(usage) = response.token_usage.as_ref() {
+            llm_span.record_usage(usage.input_tokens, usage.output_tokens);
+            // wave-51 C3：思考/缓存命中细分用量（cache 键经协议门控，见契约 PA51-C3-T6）。
+            llm_span.record_usage_details(
+                usage.reasoning_tokens,
+                cache_reportable_input_tokens(provider.protocol_label(), usage),
+            );
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
+            // wave-54 C1：`generation = duration - ttft`（ttft 存在且 dur > ttft），否则 = duration。
+            llm_span.record_call_timing(Some(elapsed_ms), ttft_ms);
+            // wave-54 C3：usage 来源（provider | estimated_chars）。
+            llm_span.record_usage_origin(usage.origin);
+            // wave-54 C4：传真实上下文窗口（无能力 ⇒ None ⇒ 两键不输出）。
+            llm_span
+                .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));
+            // wave-54 C4：context_ratio 分子用协议归一输入（anthropic 含 cache_read/creation）。
+            llm_span.record_context_normalized_input(crate::agent::runtime::context_input_tokens_for(
+                Some(provider.protocol_label()),
+                Some(usage),
+            ));
+            record_llm_span_cost(
+                &mut llm_span,
+                request.model.as_str(),
+                provider.protocol_label(),
+                usage,
+            );
+        }
+    }
+    result
+}

@@ -1,0 +1,57 @@
+{
+  "run_id": "high_r7",
+  "model": "gemini-3.8-flash-high",
+  "stream": true,
+  "max_tokens": 512,
+  "extra": "",
+  "prompt_chars": 154,
+  "prompt": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.",
+  "request_body": {
+    "model": "gemini-3.8-flash-high",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers."
+      }
+    ],
+    "max_tokens": 512,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "cmd": "curl -N -sS -m 300 -H Authorization: Bearer <redacted> -H Content-Type: application/json -d {\"model\": \"gemini-3.8-flash-high\", \"messages\": [{\"role\": \"user\", \"content\": \"Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.\"}], \"max_tokens\": 512, \"stream\": true, \"stream_options\": {\"include_usage\": true}} https://tokens.ponyjob.top/v1/chat/completions",
+  "base_url": "https://tokens.ponyjob.top/v1/chat/completions",
+  "ts_iso": "2026-11-12T19:02:24+0800",
+  "exit_code": 0,
+  "stderr": "",
+  "http_error": {
+    "error": {
+      "message": "Local key pool exhausted for model 'gemini-3.8-flash-high' (gateway-side cooling / window-budget / family-quota exhaustion, no upstream attempt in this request; no schedulable keys, check `ponyllm status`). Last error: No available key for provider 'antigravity' (all keys cooling down, window-budget exhausted, or family-quota exhausted) (request_id: req_18e747467f6f24d8)",
+      "type": "insufficient_quota",
+      "code": "quota_exhausted"
+    }
+  },
+  "ttft_s": null,
+  "ttft_content_s": null,
+  "ttft_reasoning_s": null,
+  "total_s": 0.1783,
+  "n_sse_events": 1,
+  "n_content_chunks": 0,
+  "n_reasoning_chunks": 0,
+  "reasoning_chars": 0,
+  "content_chars": 0,
+  "decode_tps_content": null,
+  "decode_tps_reasoning": null,
+  "e2e_tps_by_completion_tokens": null,
+  "decode_window_s": null,
+  "decode_window_tps": null,
+  "chunks_per_completion_token": null,
+  "completion_tokens": null,
+  "prompt_tokens": null,
+  "usage": null,
+  "has_reasoning_tokens_in_usage": false,
+  "finish_reason": null,
+  "content_head": "",
+  "reasoning_head": ""
+}

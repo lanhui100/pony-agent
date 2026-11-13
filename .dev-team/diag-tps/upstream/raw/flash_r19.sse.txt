@@ -1,0 +1,308 @@
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"We"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" need answer plain list "},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"40 short"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" factual statements about"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" solar system, numbered"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" "},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"1-40, one per line,"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" no preamble/con"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"clusion/markdown headers"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". Need ensure factual"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". 40 short"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" statements"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". Need plain"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" list. We can provide"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". Need be"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" careful no"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" markdown headers"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". Numbered lines"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". No bullets"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"? \"plain"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" list ..."},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" numbered 1 to 40"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"\""},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" one per"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" line. We can write"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" \"1. ...\""},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" okay"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". Need factual statements about solar system. Short"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". Ensure"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" not false"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". Let's craft "},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"40"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":".\n\nNeed no"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" preamble. Use each"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" line. Maybe statements"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":":\n1. The"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Solar"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" System formed"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" about"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" 4.6 billion years"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" ago.\n2. The Sun"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" contains"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" more"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" than 99% of the"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Solar System's mass"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":".\n3. There"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" are eight planets in the Solar"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" System.\n4. Mercury is"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" the planet closest"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" to the Sun.\n5."},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Venus is the hottest"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" planet in the Solar System"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":".\n6. Earth"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" is the only"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" planet known"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" to support"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" life.\n7. Mars is"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" known as the Red"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Planet.\n8. Jupiter is"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" the largest planet in the Solar"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" System.\n9. Saturn is"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" famous for its"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" prominent ring"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" system.\n10. Uranus rotates"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" on its side"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" relative"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" to its"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" orbital"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" plane.\n11. Neptune is"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" the farthest planet from"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" the Sun.\n12. Pluto"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" is classified"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" as a dwarf planet.\n13"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". The asteroid"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" belt lies"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" between Mars"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" and Jupiter.\n14. The"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Kuiper Belt lies"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" beyond Neptune.\n15."},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Com"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"ets"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" are icy"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" bodies that"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" can develop"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" tails near"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" the Sun.\n16. The"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Moon is"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Earth's only"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" natural satellite.\n17. Jupiter"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" has more"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" than "},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"90 known moons.\n18."},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Saturn's"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" largest moon is"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Titan.\n19"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":". Europa"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" is"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" a moon of"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Jupiter with"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" a"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" subsurface ocean"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":".\n20. Gan"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"ymede is the"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" largest moon in the Solar"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" System.\n21. The Sun"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" is a"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" G"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"-type main"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"-sequence star.\n22. Sun"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"light takes"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" about 8 minutes to reach"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Earth.\n23. The Solar"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" System is located"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" in the Milky Way galaxy"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":".\n24. The terrestrial"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" planets are Mercury"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":", Venus, Earth, and"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Mars.\n25. The gas"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" giants are Jupiter and"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Saturn.\n26. Uranus"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" and Neptune are ice"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" giants.\n27. Venus"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" has a"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" thick carbon"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" dioxide atmosphere"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":".\n28. Mars has two"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" small"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" moons, Ph"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"obos and Deimos"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":".\n29. Earth"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"'s axial"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" tilt"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" causes"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" the"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" seasons.\n30. Jupiter"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"'s Great"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" Red Spot is a"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" long"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"-lived storm.\n31. Saturn"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"'s"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" rings are made"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" mostly of ice particles.\n32. Neptune has"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" strong"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" winds in"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" its atmosphere.\n33. Mercury"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" has almost"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" no"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":" atmosphere"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":".\n"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"34"},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"."},"finish_reason":null}],"service_tier":"default","request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: {"id":"fc4ec71854be498f94b55839041180e1","created":1794481318,"model":"deepseek-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":"length"}],"service_tier":"default","usage":{"prompt_tokens":67,"completion_tokens":512,"total_tokens":579,"completion_tokens_details":{"reasoning_tokens":512},"prompt_tokens_details":{"cached_tokens":0}},"request_id":"fc4ec71854be498f94b55839041180e1"}
+
+data: [DONE]
+

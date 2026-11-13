@@ -1,0 +1,58 @@
+{
+  "run_id": "agnostream_r2",
+  "model": "antigravity/gemini-3.8-flash",
+  "stream": false,
+  "max_tokens": 512,
+  "extra": "",
+  "prompt_chars": 154,
+  "prompt": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.",
+  "request_body": {
+    "model": "antigravity/gemini-3.8-flash",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers."
+      }
+    ],
+    "max_tokens": 512,
+    "stream": false
+  },
+  "cmd": "curl -N -sS -m 300 -H Authorization: Bearer <redacted> -H Content-Type: application/json -d {\"model\": \"antigravity/gemini-3.8-flash\", \"messages\": [{\"role\": \"user\", \"content\": \"Write a plain list of 40 short factual statements about the solar system, one per line, numbered 1 to 40. No preamble, no conclusion, no markdown headers.\"}], \"max_tokens\": 512, \"stream\": false} https://tokens.ponyjob.top/v1/chat/completions",
+  "base_url": "https://tokens.ponyjob.top/v1/chat/completions",
+  "ts_iso": "2026-11-12T18:59:40+0800",
+  "exit_code": 0,
+  "stderr": "",
+  "http_error": null,
+  "ttft_s": 21.3967,
+  "ttft_content_s": null,
+  "ttft_reasoning_s": 21.3967,
+  "total_s": 21.3969,
+  "n_sse_events": 1,
+  "n_content_chunks": 0,
+  "n_reasoning_chunks": 1,
+  "reasoning_chars": 2244,
+  "content_chars": 0,
+  "decode_tps_content": null,
+  "decode_tps_reasoning": null,
+  "e2e_tps_by_completion_tokens": 23.93,
+  "decode_window_s": -0.0,
+  "decode_window_tps": -25127623.16,
+  "chunks_per_completion_token": 0.002,
+  "completion_tokens": 512,
+  "prompt_tokens": 67,
+  "usage": {
+    "prompt_tokens": 67,
+    "completion_tokens": 512,
+    "total_tokens": 579,
+    "completion_tokens_details": {
+      "reasoning_tokens": 512
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "has_reasoning_tokens_in_usage": true,
+  "finish_reason": "length",
+  "content_head": "",
+  "reasoning_head": "We need answer plain list 40 short factual statements about solar system, numbered 1-40, one per line. No preamble conclusion headers. Need ensure factual. Plain list. Need number each line. 40 statements short. Need not markdown headers. Could include \"1. The Sun...\" etc. Need exactly 40. Avoid mar"
+}

@@ -1,0 +1,306 @@
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":"We"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":" need answer plain"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":" list "},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":"40 short factual statements"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":" solar system one per line numbered "},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":"1-40."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":" No preamble conclusion markdown headers"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":". Need ensure factual"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":". Let's craft"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":". Need be concise. Let"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480563,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":"'s include diverse facts. Ensure"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":" numbered with periods maybe"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":". \"1. The"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":" Sun contains 99.86"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":"% of the Solar"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":" System's mass.\""},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":" etc. Need "},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":"40. Avoid controversial"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":"? Fine. Let's produce"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","reasoning_content":"."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"1."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" The Sun contains about"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" 99.86"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"% of the Solar"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" System's mass.\n"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"2. Mercury is"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" the smallest planet in"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" the Solar System.\n"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"3. Venus is"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" the hottest planet due"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" to its thick carbon"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" dioxide atmosphere.\n4"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". Earth is the"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" only known planet with liquid water"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" on its surface.\n"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"5. Mars is"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" home to the largest"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" volcano in the Solar"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" System, Olympus Mons"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n6. Jupiter"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480564,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" is the largest planet"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" in the Solar System"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n7. Jupiter"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"'s Great Red Spot"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" is a storm larger"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" than Earth.\n8. Saturn is"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" the least dense planet;"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" it would float in"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" water.\n9."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Uranus rotates on its side,"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" with an axial tilt"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" of about 98"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" degrees.\n10."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Neptune has the strongest"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" winds recorded in the Solar System"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n11. Pluto"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" was reclassified as a"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" dwarf planet in "},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"2006.\n12"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". The Kuiper Belt lies"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" beyond Neptune's orbit.\n13"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". The Oort"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Cloud is a distant"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" shell of icy objects"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" surrounding the Solar System.\n"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"14. The asteroid"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" belt is located between Mars and Jupiter"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n15. Cer"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480565,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"es is the largest object"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" in the asteroid belt"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" and is a dwarf planet.\n"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"16. Eris is a dwarf"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" planet more massive than Pluto"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n17. There"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" are eight planets in the Solar System"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n18. All"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" planets orbit the Sun in the same"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" direction.\n19. Most"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" planets rotate counterclockwise when"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" viewed from above the Sun's north"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" pole.\n20."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Venus rotates backward compared"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" to most planets.\n21. Jupiter"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" has at least 95"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" known moons.\n22"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". Saturn has at"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" least 146 known"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" moons.\n23."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480566,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Mercury has no moons"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n24. Venus"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" has no moons.\n"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"25. Earth has"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" one natural satellite, the Moon.\n"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"26. Mars has"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" two small moons, Phob"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"os and Deimos"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n27. Gan"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ymede, a moon of Jupiter"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":", is the largest"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" moon in the Solar"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" System.\n28."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Titan, a moon of Saturn"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":", has a thick"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" atmosphere richer in nitrogen than Earth's"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n29. En"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"celadus,"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" a moon of Saturn"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":", ejects water"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" vapor from its south"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" pole.\n30."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Io, a moon of Jupiter,"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" is the most vol"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"canically active body"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480567,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" known.\n31. Europa"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":", a moon of Jupiter"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":", likely has a subsurface"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" ocean.\n32."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" The Sun's light"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" takes about 8 minutes"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" and 20 seconds"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" to reach Earth.\n"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"33. The Solar"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" System formed about 4."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"6 billion years ago"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":".\n34. Com"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ets are icy bodies that"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" develop tails when near"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" the Sun.\n35"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". Meteoroids are small rocky"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" or metallic bodies traveling"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" through space.\n36"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". The largest known"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" crater in the Solar"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" System is on Mars"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":", called Hellas Plan"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480568,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"itia.\n37."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" The Sun is a G"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"-type main-sequence star"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":", or yellow dwarf.\n38"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". The solar wind"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" is a stream of charged particles from"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" the Sun.\n39"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":". The heliop"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ause marks the boundary where"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" the solar wind meets"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" interstellar space.\n40."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" Voyager 1 is the farthest"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" human-made object from Earth in"},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" space."},"finish_reason":null}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}],"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: {"id":"e882d6fe2bdb4c1abc9b28ab56e67036","created":1794480569,"model":"deepseek-v4-flash","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":679,"total_tokens":799,"completion_tokens_details":{"reasoning_tokens":85},"prompt_tokens_details":{"cached_tokens":0}},"request_id":"e882d6fe2bdb4c1abc9b28ab56e67036"}
+
+data: [DONE]
+

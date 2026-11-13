@@ -185,6 +185,67 @@ pub enum TurnEvent {
         error_message: String,
         raw_snippet: String,
     },
+    /// F1：**轮级速度口径结算**（每轮终态一条，可离线取证）。
+    ///
+    /// 为什么需要它：`turnSpeedBasis` / speed 此前只走线缆与（401 全丢的）OTel，
+    /// 不落 DB、不落日志 ⇒ 「60-70 vs 200+」无法归因（诊断 `.dev-team/diag-tps/00-SYNTHESIS.md` §5.2）。
+    /// 本事件把「速度 + 口径 + 样本量 + 突发剔除数」钉进 append-only 事件层，
+    /// 重启/离线复盘都能从 `turn_events` 复算，不依赖任何旁路。
+    ///
+    /// 契约（F1 I1，逐字）：
+    /// - 键名按契约**字面量** camelCase（与既有事件 snake_case 约定不同——契约冻结了这五个键名，
+    ///   取证脚本/验收断言按名匹配；诊断扫描也是按 camelCase 搜 payload 的）；
+    /// - **无值时不写键**（`None` ⇒ 整键缺席，禁止 `0` / `NaN` 占位）；
+    /// - 值来源唯一：`speed`/`basis` 与快照同源同帧（`weighted_turn_speed`），
+    ///   `turnCallsTotal` / `turnCallsEligible` / `turnBurstExcluded` 由 `turn_flow::turn_call_census`
+    ///   从同一份记录派生（判据不在此重写）。
+    TurnSpeed {
+        turn_id: String,
+        #[serde(
+            default,
+            rename = "turnSpeedTokensPerSecond",
+            skip_serializing_if = "Option::is_none"
+        )]
+        turn_speed_tokens_per_second: Option<f64>,
+        #[serde(
+            default,
+            rename = "turnSpeedBasis",
+            skip_serializing_if = "Option::is_none"
+        )]
+        turn_speed_basis: Option<crate::agent::turn_flow::TurnSpeedBasis>,
+        #[serde(default, rename = "turnCallsTotal", skip_serializing_if = "Option::is_none")]
+        turn_calls_total: Option<u32>,
+        #[serde(
+            default,
+            rename = "turnCallsEligible",
+            skip_serializing_if = "Option::is_none"
+        )]
+        turn_calls_eligible: Option<u32>,
+        #[serde(
+            default,
+            rename = "turnBurstExcluded",
+            skip_serializing_if = "Option::is_none"
+        )]
+        turn_burst_excluded: Option<u32>,
+        /// 契约 I1 原文口径的「全部解码剔除数」（`valid − decode_eligible`）：突发整包、
+        /// 无 TTFT、单 token 三类之和。突发只是其中一类，故与 `turnBurstExcluded` 并列保留。
+        #[serde(
+            default,
+            rename = "turnExcludedTotal",
+            skip_serializing_if = "Option::is_none"
+        )]
+        turn_excluded_total: Option<u32>,
+        /// `valid` 中**无 TTFT 观测**的调用数（`= valid − 有 ttft 的 valid`）：
+        /// 无法界定解码窗口、只能进端到端回退，是「整包到达 / 非流式 followup」的根因面
+        /// （诊断 `.dev-team/diag-tps/00-SYNTHESIS.md` §3：73% gemini 调用整包到达）。
+        /// 与 `turnBurstExcluded` **互斥不重叠**：突发 = 有 ttft 但 gen 低于物理下限。
+        #[serde(
+            default,
+            rename = "turnCallsTtftMissing",
+            skip_serializing_if = "Option::is_none"
+        )]
+        turn_calls_ttft_missing: Option<u32>,
+    },
 }
 
 impl TurnEvent {
@@ -208,6 +269,7 @@ impl TurnEvent {
             TurnEvent::ForkCreated { .. } => "fork/created",
             TurnEvent::ContextObservation { .. } => "context/observation",
             TurnEvent::CorruptedEventTombstone { .. } => "corrupted/tombstone",
+            TurnEvent::TurnSpeed { .. } => "turn/speed",
         }
     }
 
@@ -224,6 +286,7 @@ impl TurnEvent {
             | TurnEvent::ToolCall { turn_id, .. }
             | TurnEvent::ToolResult { turn_id, .. }
             | TurnEvent::ProviderUsage { turn_id, .. }
+            | TurnEvent::TurnSpeed { turn_id, .. }
             | TurnEvent::ContextObservation { turn_id, .. } => Some(turn_id),
             TurnEvent::CorruptedEventTombstone { turn_id, .. } => turn_id.as_deref(),
             TurnEvent::PlanUpdate { .. }

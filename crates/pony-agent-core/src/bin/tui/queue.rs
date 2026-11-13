@@ -318,5 +318,8 @@ pub fn is_modal_mode(mode: &InteractionMode) -> bool {
             | InteractionMode::TaskBoard
             | InteractionMode::AgentRoster
             | InteractionMode::Settings
+            // Ctrl+H 快捷键帮助 / Ctrl+G 目标面板：同样是占输入框的覆盖层。
+            | InteractionMode::ShortcutsHelp
+            | InteractionMode::GoalDetail
     )
 }
