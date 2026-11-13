@@ -1375,3 +1375,18 @@ note: >-
       (2a) 领域层守卫：`agent/goal.rs::create_goal` 增加对进行中目标的防覆盖拦截；`update_goal` 引入合法迁移状态矩阵（pause/resume/complete/blocked/edit），禁止已完成目标复活或非法迁移。
       (2b) 权限门：`agent/tools/orchestration.rs` 接入 `ToolExecutionContext.dispatch_context`，校验 `is_direct_human` 与 `is_goal_round`，阻止模型越权 pause/resume/complete 目标。
   (3) 收口点：不新增 enforcement_point；行为门落在单测——`agent::goal::tests::test_goal_lifecycle_and_cas`、`agent::goal_command::tests::*`、`agent::tools::tests::orchestration::goal_tools_authority_gate_b128` 与黑盒验收测试 `tests/pa109_goal_acceptance.rs`。
+
+  【归属登记（2026-11-13）｜subagent 并发上限可配置（ADR：.agents/notes/implemented/architecture/2026-11-13-subagent-concurrency-budget-settings.md；backlog: B125）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改变**本地并发许可上限的取值来源**
+  （编译期常量 → 设置项 `subagentMaxConcurrent`，默认 4 / 硬顶 8），无新增网络 IO、无新增后台常驻任务、
+  无 `/metrics` 出口。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `agent/otel/mod.rs` 与
+      `agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（桌面进程无常驻监听地址、无 pull 模型）。
+  (2) 变更面：`agent/subagent_runtime.rs` 的并发门从常量改为进程级原子上限，
+      `InflightGuard::acquire` 每次重读；`AppSettingsStore::save_view` 落盘前经
+      `normalize_subagent_max_concurrent` clamp 并回显；Tauri `load/save_app_settings` 保存即注入；
+      设置页新增数字输入（1–8，默认 4）。超限语义不变（`subagent_busy`，wave37 t3-J 契约）。
+  (3) 收口点：不新增 enforcement_point；行为门落在单测——`agent::subagent_runtime::tests::*`（4 例）、
+      `agent::app_settings::tests::subagent_max_concurrent_roundtrips_with_camel_case_and_clamps`、
+      `tests/wave37_tool_surface.rs::t3_j_concurrency_over_limit_returns_busy`、
+      前端 `tests/subagent-concurrency-setting.spec.ts`（4 例）。

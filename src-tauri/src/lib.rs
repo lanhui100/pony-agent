@@ -654,6 +654,10 @@ fn load_app_settings(app: AppHandle) -> AppSettings {
     pony_agent_core::agent::cost::set_budget_usd(settings.cost_budget_usd);
     // Wave-7：用量治理策略同步（None ⇒ 默认策略：enforcement=false，纯软告警）。
     pony_agent_core::agent::usage_governance::set_policy(settings.usage_governance_policy.clone());
+    // B125：子代理并发上限（None ⇒ 默认值；落盘值已在保存期 clamp 到 1..=硬顶）。
+    pony_agent_core::agent::subagent_runtime::set_subagent_max_concurrent(
+        settings.subagent_max_concurrent,
+    );
     // PonySentry 凭据分发（settings > env > 构建期烧录 > 缺省）：桌面端也可用 settings 覆盖
     // 构建期烧录的 token；无 token ⇒ fail-closed 零 egress，token 不进日志/Debug。
     let ponysentry_settings = settings.ponysentry_settings_snapshot();
@@ -677,6 +681,10 @@ fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
     pony_agent_core::agent::cost::set_budget_usd(saved.cost_budget_usd);
     // Wave-7：治理策略保存即生效（enforcement 仍需用户显式开启）。
     pony_agent_core::agent::usage_governance::set_policy(saved.usage_governance_policy.clone());
+    // B125：并发上限保存即生效（只影响后续 acquire，在途 turn 不被打断）。
+    pony_agent_core::agent::subagent_runtime::set_subagent_max_concurrent(
+        saved.subagent_max_concurrent,
+    );
     Ok(saved)
 }
 

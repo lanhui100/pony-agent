@@ -11,6 +11,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   agentTraceReporting: false,
 };
 
+/**
+ * B125：子代理并发上限的默认值与硬顶。
+ *
+ * 与 Rust 侧 `DEFAULT_SUBAGENT_MAX_CONCURRENT` / `SUBAGENT_MAX_CONCURRENT_CEILING`
+ * 严格对齐（后端仍是权威：越界值保存时会被 clamp 并回显）。
+ */
+export const SUBAGENT_MAX_CONCURRENT_DEFAULT = 4;
+export const SUBAGENT_MAX_CONCURRENT_CEILING = 8;
+
 type SettingsState = {
   settings: AppSettings;
   loading: boolean;
@@ -41,6 +50,9 @@ export const useSettingsStore = defineStore("settings", {
     effectiveUsageGovernancePolicy: (state) => state.usageGovernancePolicy ?? state.settings.usageGovernancePolicy,
     // 向后兼容旧 getter
     usagePolicy: (state) => state.usageGovernancePolicy ?? state.settings.usageGovernancePolicy,
+    /** B125：未配置时回落默认值，模板/展示统一从这里读。 */
+    effectiveSubagentMaxConcurrent: (state): number =>
+      state.settings.subagentMaxConcurrent ?? SUBAGENT_MAX_CONCURRENT_DEFAULT,
   },
   actions: {
     async loadSettings() {
@@ -107,6 +119,24 @@ export const useSettingsStore = defineStore("settings", {
         this.settings.agentTraceReporting = previous;
       }
     },
+    /**
+     * B125：保存子代理并发上限（越界值 clamp 到 1..=8，与后端同一口径）。
+     * 失败回滚到保存前值，避免界面显示未真正生效的上限。
+     */
+    async setSubagentMaxConcurrent(limit: number) {
+      const normalized = normalizeSubagentMaxConcurrent(limit);
+      if (normalized === undefined || this.settings.subagentMaxConcurrent === normalized) {
+        return;
+      }
+
+      const previous = this.settings.subagentMaxConcurrent;
+      this.settings.subagentMaxConcurrent = normalized;
+      await this.saveSettings();
+
+      if (this.error) {
+        this.settings.subagentMaxConcurrent = previous;
+      }
+    },
   },
 });
 
@@ -127,5 +157,17 @@ function normalizeAppSettings(settings?: Partial<AppSettings> | null): AppSettin
     otelSamplingRatio: typeof settings?.otelSamplingRatio === "number" ? settings.otelSamplingRatio : undefined,
     costBudgetUsd: typeof settings?.costBudgetUsd === "number" ? settings.costBudgetUsd : undefined,
     usageGovernancePolicy: settings?.usageGovernancePolicy ? { ...settings.usageGovernancePolicy } : undefined,
+    subagentMaxConcurrent: normalizeSubagentMaxConcurrent(settings?.subagentMaxConcurrent),
   } as AppSettings;
+}
+
+/** B125：并发上限合法化（整数、1..=硬顶）；非法值一律丢弃（回落默认值）。 */
+function normalizeSubagentMaxConcurrent(value?: number | null): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  return Math.min(
+    SUBAGENT_MAX_CONCURRENT_CEILING,
+    Math.max(1, Math.round(value)),
+  );
 }

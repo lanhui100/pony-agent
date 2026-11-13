@@ -102,6 +102,12 @@ pub struct AppSettings {
     /// 与环境变量 `PONY_AGENT_SKILL_DIRS` 共同组成跨仓库技能发现入口。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_dirs: Vec<PathBuf>,
+    /// 子代理并发上限（落盘键 `subagentMaxConcurrent`；`None` ⇒ 引擎默认值）。
+    ///
+    /// 生效值由 `subagent_runtime::normalize_subagent_max_concurrent` 统一 clamp 到
+    /// `1..=SUBAGENT_MAX_CONCURRENT_CEILING`（保存前规范化，读回即生效值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_max_concurrent: Option<usize>,
 }
 
 impl std::fmt::Debug for AppSettings {
@@ -128,6 +134,7 @@ impl std::fmt::Debug for AppSettings {
             .field("cost_budget_usd", &self.cost_budget_usd)
             .field("usage_governance_policy", &self.usage_governance_policy)
             .field("skill_dirs", &self.skill_dirs)
+            .field("subagent_max_concurrent", &self.subagent_max_concurrent)
             .finish()
     }
 }
@@ -188,6 +195,8 @@ struct AppSettingsStorage {
     usage_governance_policy: Option<crate::agent::usage_governance::UsagePolicy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skill_dirs: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subagent_max_concurrent: Option<usize>,
 }
 
 impl From<AppSettingsStorage> for AppSettings {
@@ -205,6 +214,7 @@ impl From<AppSettingsStorage> for AppSettings {
             cost_budget_usd: value.cost_budget_usd,
             usage_governance_policy: value.usage_governance_policy,
             skill_dirs: value.skill_dirs,
+            subagent_max_concurrent: value.subagent_max_concurrent,
         }
     }
 }
@@ -224,6 +234,7 @@ impl From<AppSettings> for AppSettingsStorage {
             cost_budget_usd: value.cost_budget_usd,
             usage_governance_policy: value.usage_governance_policy,
             skill_dirs: value.skill_dirs,
+            subagent_max_concurrent: value.subagent_max_concurrent,
         }
     }
 }
@@ -248,7 +259,13 @@ impl AppSettingsStore {
         self.load_storage().into()
     }
 
-    pub fn save_view(&self, view: AppSettings) -> Result<AppSettings, String> {
+    pub fn save_view(&self, mut view: AppSettings) -> Result<AppSettings, String> {
+        // B125：并发上限在落盘前规范化（单一真源 = `subagent_runtime`），读回即生效值。
+        // 越界值不拒绝整包保存：clamp 到 `1..=硬顶`，避免「输入 0/99 导致所有设置存不进去」。
+        view.subagent_max_concurrent =
+            crate::agent::subagent_runtime::normalize_subagent_max_concurrent(
+                view.subagent_max_concurrent,
+            );
         let storage: AppSettingsStorage = view.into();
         self.write_storage(&storage)?;
         Ok(storage.into())
@@ -540,6 +557,57 @@ mod tests {
 
         let loaded = store.load_view();
         assert_eq!(loaded.skill_dirs, target_dirs);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// B125：并发上限按 camelCase 落盘、保存期 clamp 回显、未配置时不写键。
+    #[test]
+    fn subagent_max_concurrent_roundtrips_with_camel_case_and_clamps() {
+        let dir = temp_settings_dir("subagent-concurrency");
+        let path = dir.join("settings.json");
+        let store = AppSettingsStore::with_path(path.clone());
+
+        let saved = store
+            .save_view(AppSettings {
+                subagent_max_concurrent: Some(99),
+                ..Default::default()
+            })
+            .expect("save_view 必须成功");
+        assert_eq!(
+            saved.subagent_max_concurrent,
+            Some(crate::agent::subagent_runtime::SUBAGENT_MAX_CONCURRENT_CEILING),
+            "越界值必须在保存期 clamp 并回显生效值"
+        );
+
+        let raw = fs::read_to_string(&path).expect("settings.json readable");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        assert_eq!(
+            json.get("subagentMaxConcurrent")
+                .and_then(|value| value.as_u64()),
+            Some(8)
+        );
+        assert!(
+            json.get("subagent_max_concurrent").is_none(),
+            "不得写出 snake_case 键"
+        );
+
+        let loaded = store.load_view();
+        assert_eq!(loaded.subagent_max_concurrent, Some(8));
+
+        // 未配置 ⇒ 不写键、读回 None（引擎回落默认值）。
+        let cleared = store
+            .save_view(AppSettings {
+                subagent_max_concurrent: None,
+                ..Default::default()
+            })
+            .expect("save_view 必须成功");
+        assert_eq!(cleared.subagent_max_concurrent, None);
+        let raw = fs::read_to_string(&path).expect("settings.json readable");
+        assert!(
+            !raw.contains("subagentMaxConcurrent"),
+            "None 不应写出键：{raw}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

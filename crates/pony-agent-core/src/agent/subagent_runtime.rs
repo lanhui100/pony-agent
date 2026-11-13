@@ -141,10 +141,48 @@ pub fn subagent_engine() -> Option<Arc<dyn SubagentTurnEngine>> {
 
 /// prompt 字节上限（NFR: subagent_max_prompt_bytes=200000）。
 pub const SUBAGENT_MAX_PROMPT_BYTES: usize = 200_000;
-/// 并发子代理上限（NFR: subagent_max_concurrent=2）。
-pub const SUBAGENT_MAX_CONCURRENT: usize = 2;
+
+/// 默认并发子代理上限（设置项 `subagentMaxConcurrent` 未配置时生效）。
+///
+/// 评估依据（2026-11-13）：单个 subagent turn 的峰值占用 ≈{完整会话上下文 + 工具输出 +
+/// 图片解码}，多并发实测单进程 RSS 可达 7.7GB（4 个子代理会话 + 主会话）。取 4 作为默认：
+/// 16GB 机器上 4 路峰值约 6–8GB，仍为主会话与系统留出余量；3 在「主会话 + 2 队友」场景
+/// 已无并行余量（B125 反馈「3 太少」）。更大机器可由设置页上调，上限见硬顶。
+pub const DEFAULT_SUBAGENT_MAX_CONCURRENT: usize = 4;
+
+/// 并发上限硬顶：设置值再大也不得突破（32GB 级机器的可用上限），防止误填导致 OOM。
+pub const SUBAGENT_MAX_CONCURRENT_CEILING: usize = 8;
+
+/// 当前生效的并发上限；**唯一写入口**是 [`set_subagent_max_concurrent`]。
+static SUBAGENT_CONCURRENT_LIMIT: AtomicUsize = AtomicUsize::new(DEFAULT_SUBAGENT_MAX_CONCURRENT);
 
 static SUBAGENT_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// 当前生效的并发上限（恒在 `1..=SUBAGENT_MAX_CONCURRENT_CEILING` 内）。
+pub fn subagent_max_concurrent() -> usize {
+    SUBAGENT_CONCURRENT_LIMIT
+        .load(Ordering::SeqCst)
+        .clamp(1, SUBAGENT_MAX_CONCURRENT_CEILING)
+}
+
+/// 把配置值规范化为落盘/生效口径：`None` 保持未配置（引擎回落默认值），
+/// `Some` 一律 clamp 到 `1..=SUBAGENT_MAX_CONCURRENT_CEILING`。
+///
+/// 单一真源：设置层（`app_settings`）落盘前与运行时门都走本函数，杜绝两处各自 clamp。
+pub fn normalize_subagent_max_concurrent(configured: Option<usize>) -> Option<usize> {
+    configured.map(|value| value.clamp(1, SUBAGENT_MAX_CONCURRENT_CEILING))
+}
+
+/// 注入并发上限（`None` ⇒ 回到默认值），返回最终生效值。
+///
+/// 生效时机：**下一次** `acquire` 起读新上限；已在途的 turn 不受影响（引擎无回合内
+/// stop API，下调上限只阻止新许可，不会取消正在跑的 turn）。
+pub fn set_subagent_max_concurrent(configured: Option<usize>) -> usize {
+    let effective =
+        normalize_subagent_max_concurrent(configured).unwrap_or(DEFAULT_SUBAGENT_MAX_CONCURRENT);
+    SUBAGENT_CONCURRENT_LIMIT.store(effective, Ordering::SeqCst);
+    effective
+}
 
 /// scope guard：持有期间占一个并发许可，Drop 时无论成败（含 panic 展开）
 /// 必然归还，杜绝许可泄漏。
@@ -153,8 +191,10 @@ struct InflightGuard;
 impl InflightGuard {
     fn acquire() -> Result<Self, String> {
         loop {
+            // 每次重试都重读上限：设置变更对后续 acquire 立即生效，无需重启。
+            let limit = subagent_max_concurrent();
             let current = SUBAGENT_INFLIGHT.load(Ordering::SeqCst);
-            if current >= SUBAGENT_MAX_CONCURRENT {
+            if current >= limit {
                 return Err("subagent_busy".to_string());
             }
             if SUBAGENT_INFLIGHT
@@ -178,7 +218,8 @@ impl Drop for InflightGuard {
 pub struct SubagentInflightGuard(InflightGuard);
 
 /// 子代理入口统一门：prompt 字节 >200000 → `prompt_too_large`；
-/// 并发运行数已达 2 → `subagent_busy`。返回的 guard Drop 时必然归还许可。
+/// 并发运行数已达生效上限（[`subagent_max_concurrent`]）→ `subagent_busy`。
+/// 返回的 guard Drop 时必然归还许可。
 pub fn subagent_gate_enter(prompt: &str) -> Result<SubagentInflightGuard, String> {
     if prompt.as_bytes().len() > SUBAGENT_MAX_PROMPT_BYTES {
         return Err("prompt_too_large".to_string());
@@ -296,7 +337,7 @@ impl HostTurnEngine {
         let worker = std::thread::spawn(move || {
             // Wave-61 C.2：并发许可必须**随工作线程**存活。父线程在超时分支提前 return 时
             // worker 仍在跑（孤儿会话），若许可留在父线程会被提前归还，实际并发会突破
-            // SUBAGENT_MAX_CONCURRENT。move 进本线程后，只有线程真正结束才归还。
+            // 生效并发上限。move 进本线程后，只有线程真正结束才归还。
             let _inflight = inflight;
             let result = catch_unwind(AssertUnwindSafe(move || {
                 // Wave-61 C12.2：本 worker 是裸 `std::thread::spawn`（**无** reactor），
@@ -473,5 +514,105 @@ impl SubagentTurnEngine for HostTurnEngine {
             selection.cloned(),
             parent_traceparent,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 并发上限是进程级静态：本模块用例串行执行，且退出时恢复默认值（含 panic 展开）。
+    static LIMIT_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct LimitTestGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for LimitTestGuard {
+        fn drop(&mut self) {
+            set_subagent_max_concurrent(None);
+        }
+    }
+
+    fn limit_test_guard() -> LimitTestGuard {
+        LimitTestGuard {
+            _guard: LIMIT_TEST_GUARD
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        }
+    }
+
+    #[test]
+    fn normalize_subagent_max_concurrent_clamps_to_range() {
+        assert_eq!(normalize_subagent_max_concurrent(None), None);
+        assert_eq!(normalize_subagent_max_concurrent(Some(0)), Some(1));
+        assert_eq!(normalize_subagent_max_concurrent(Some(3)), Some(3));
+        assert_eq!(
+            normalize_subagent_max_concurrent(Some(usize::MAX)),
+            Some(SUBAGENT_MAX_CONCURRENT_CEILING)
+        );
+    }
+
+    #[test]
+    fn set_subagent_max_concurrent_applies_default_and_clamps() {
+        let _guard = limit_test_guard();
+
+        assert_eq!(
+            set_subagent_max_concurrent(None),
+            DEFAULT_SUBAGENT_MAX_CONCURRENT
+        );
+        assert_eq!(subagent_max_concurrent(), DEFAULT_SUBAGENT_MAX_CONCURRENT);
+
+        assert_eq!(set_subagent_max_concurrent(Some(6)), 6);
+        assert_eq!(subagent_max_concurrent(), 6);
+
+        assert_eq!(set_subagent_max_concurrent(Some(0)), 1);
+        assert_eq!(subagent_max_concurrent(), 1);
+
+        assert_eq!(
+            set_subagent_max_concurrent(Some(usize::MAX)),
+            SUBAGENT_MAX_CONCURRENT_CEILING
+        );
+        assert_eq!(
+            subagent_max_concurrent(),
+            SUBAGENT_MAX_CONCURRENT_CEILING
+        );
+    }
+
+    #[test]
+    fn subagent_gate_enforces_effective_limit_and_releases_on_drop() {
+        let _guard = limit_test_guard();
+        set_subagent_max_concurrent(Some(3));
+
+        let permit_a = subagent_gate_enter("a").expect("第 1 个许可可用");
+        let permit_b = subagent_gate_enter("b").expect("第 2 个许可可用");
+        let permit_c = subagent_gate_enter("c").expect("第 3 个许可可用");
+
+        let busy = match subagent_gate_enter("d") {
+            Ok(_) => panic!("第 4 个必须 busy"),
+            Err(error) => error,
+        };
+        assert_eq!(busy, "subagent_busy");
+
+        drop(permit_a);
+        let permit_d = subagent_gate_enter("d").expect("释放后必须可重新获取");
+        drop((permit_b, permit_c, permit_d));
+    }
+
+    #[test]
+    fn subagent_gate_rejects_prompt_over_byte_limit_before_taking_permit() {
+        let _guard = limit_test_guard();
+        set_subagent_max_concurrent(Some(1));
+
+        // 超长 prompt 必须先命中 oversized，而不是先占许可/返回 busy。
+        let oversized = "x".repeat(SUBAGENT_MAX_PROMPT_BYTES + 1);
+        let error = match subagent_gate_enter(&oversized) {
+            Ok(_) => panic!("超长 prompt 必须拒绝"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "prompt_too_large");
+
+        // 许可未被占用的证明：正常调用仍可进入。
+        let _permit = subagent_gate_enter("ok").expect("许可未被超长 prompt 占用");
     }
 }

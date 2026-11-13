@@ -465,34 +465,40 @@ fn t3_k_oversized_prompt_rejected() {
     );
 }
 
-/// t3-J：并发 > 2 → subagent_busy。
+/// t3-J：并发超过生效上限 → subagent_busy。
 ///
-/// 确定性方案：先用 [`subagent_gate_enter`] 显式占满全部 2 个全局并发许可
-/// （Stub 引擎即时返回，真实 3 线程竞速窗口不可靠），随后第 3 个调用
-/// 经 orchestration::subagent 入口门必然命中 subagent_busy。
+/// 确定性方案：先把并发上限固定为默认值（B125 起上限可由设置注入），再用
+/// [`subagent_gate_enter`] 显式占满全部许可（Stub 引擎即时返回，真实线程竞速窗口不可靠），
+/// 随后下一个调用经 orchestration::subagent 入口门必然命中 subagent_busy。
 ///ENV_GUARD 串行化 C3 并发族，防止其他用例竞争全局许可。
 #[test]
 fn t3_j_concurrency_over_limit_returns_busy() {
     let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     ensure_engine_wired(StubEngine::new());
 
-    // 占满 2 个全局并发许可（guard 保持存活至断言结束）。
-    let _permit_a = pony_agent_core::agent::subagent_runtime::subagent_gate_enter("occupy-a")
-        .expect("许可 a 可用");
-    let _permit_b = pony_agent_core::agent::subagent_runtime::subagent_gate_enter("occupy-b")
-        .expect("许可 b 可用");
+    // B125：上限是进程级状态；用例内固定在默认值，避免其它用例注入的上限影响断言。
+    let limit = pony_agent_core::agent::subagent_runtime::set_subagent_max_concurrent(None);
+    // 占满全部生效许可（guard 保持存活至断言结束）。
+    let mut permits = Vec::with_capacity(limit);
+    for index in 0..limit {
+        permits.push(
+            pony_agent_core::agent::subagent_runtime::subagent_gate_enter(&format!(
+                "occupy-{index}"
+            ))
+            .expect("许可应可用"),
+        );
+    }
 
     let result: Result<SubagentResult, String> = subagent(subargs("concurrent-probe", 30_000));
-    let err = result
-        .err()
-        .unwrap_or_else(|| panic!("W37-C3-J: 许可占满后第 3 个调用必须被拒（subagent_busy）"));
+    let err = result.err().unwrap_or_else(|| {
+        panic!("W37-C3-J: 许可占满后第 {} 个调用必须被拒（subagent_busy）", limit + 1)
+    });
     assert!(
         err.contains("subagent_busy"),
         "W37-C3-J: 错误须含 subagent_busy，实际：{err}"
     );
     // 显式释放（guard drop）后再验证许可归还，杜绝许可泄漏造成的跨用例污染。
-    drop(_permit_a);
-    drop(_permit_b);
+    drop(permits);
     let _recheck = pony_agent_core::agent::subagent_runtime::subagent_gate_enter("recheck")
         .expect("W37-C3-J: 许可释放后必须可重新获取");
 }

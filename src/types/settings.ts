@@ -21,4 +21,9 @@ export type AppSettings = {
     hardLimitUsd?: number | null;
     enforcement?: boolean;
   };
+  /**
+   * B125：子代理并发上限（落盘键 `subagentMaxConcurrent`，与 Rust serde camelCase 严格一致）。
+   * 后端把生效值 clamp 到 1..=8 并回显；`null`/缺省 = 使用默认值（4）。
+   */
+  subagentMaxConcurrent?: number | null;
 };

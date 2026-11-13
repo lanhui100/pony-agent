@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
   ArrowUpCircle,
@@ -14,7 +14,7 @@ import {
   Trash2,
   TriangleAlert
 } from "lucide-vue-next";
-import { useSettingsStore } from "@/stores/settings";
+import { SUBAGENT_MAX_CONCURRENT_CEILING, useSettingsStore } from "@/stores/settings";
 import { useUpdateStore } from "@/stores/update";
 import Input from "@/components/ui/Input.vue";
 import Switch from "@/components/ui/Switch.vue";
@@ -211,6 +211,49 @@ async function toggleAgentTraceReporting(enabled: boolean) {
   if (settingsStore.error) {
     traceReportingError.value = "开关保存失败，已恢复原状态，请重试。";
   }
+}
+// ────────────────────────────────────────────────────────────────────
+
+// ── B125：子代理并发上限（1..=8，默认 4；失焦/回车保存，越界由后端 clamp 回显）──
+/** 输入草稿（字符串，避免 number input 的空值/半输入态被强转成 NaN）。 */
+const subagentConcurrencyDraft = ref(String(settingsStore.effectiveSubagentMaxConcurrent));
+const subagentConcurrencyNotice = ref("");
+const subagentConcurrencyError = ref("");
+
+// 保存回显/外部变更（如另一窗口改了设置）时同步草稿。
+watch(
+  () => settingsStore.effectiveSubagentMaxConcurrent,
+  (value) => {
+    subagentConcurrencyDraft.value = String(value);
+  },
+);
+
+function onSubagentConcurrencyKeydown(event: KeyboardEvent) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void commitSubagentConcurrency();
+  }
+}
+
+async function commitSubagentConcurrency() {
+  const parsed = Number.parseInt(subagentConcurrencyDraft.value, 10);
+  subagentConcurrencyNotice.value = "";
+  subagentConcurrencyError.value = "";
+
+  if (!Number.isFinite(parsed)) {
+    // 空/非法输入：静默恢复当前生效值，不写盘。
+    subagentConcurrencyDraft.value = String(settingsStore.effectiveSubagentMaxConcurrent);
+    return;
+  }
+
+  await settingsStore.setSubagentMaxConcurrent(parsed);
+  if (settingsStore.error) {
+    subagentConcurrencyError.value = "并发上限保存失败，已恢复原值，请重试。";
+  } else {
+    subagentConcurrencyNotice.value = `已保存，当前生效：${settingsStore.effectiveSubagentMaxConcurrent}`;
+  }
+  // 后端 clamp 后的回显值才是真值（例如输入 99 → 8、0 → 1）。
+  subagentConcurrencyDraft.value = String(settingsStore.effectiveSubagentMaxConcurrent);
 }
 // ────────────────────────────────────────────────────────────────────
 </script>
@@ -450,6 +493,44 @@ async function toggleAgentTraceReporting(enabled: boolean) {
             {{ updateStore.signedErrorMessage || "签名更新失败，请稍后重试。" }}
           </div>
         </div>
+      </div>
+
+      <!-- B125：子代理并发上限——数字输入，失焦/回车保存，越界由后端 clamp 回显。 -->
+      <div class="max-w-[680px] space-y-2" data-testid="config-subagent-concurrency-section">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-[13px] font-medium text-stone-900">子代理并发上限</span>
+          <div class="flex items-center gap-2">
+            <Input
+              :model-value="subagentConcurrencyDraft"
+              type="number"
+              class="h-8 w-16 bg-stone-100/80 text-[12px]"
+              :disabled="saving"
+              aria-label="子代理并发上限"
+              data-testid="config-subagent-concurrency-input"
+              @update:model-value="subagentConcurrencyDraft = $event"
+              @blur="commitSubagentConcurrency()"
+              @keydown="onSubagentConcurrencyKeydown"
+            />
+            <span class="text-[11px] text-stone-500">1–{{ SUBAGENT_MAX_CONCURRENT_CEILING }}（默认 4）</span>
+          </div>
+        </div>
+        <p
+          v-if="subagentConcurrencyNotice"
+          class="text-[11px] text-emerald-700"
+          role="status"
+          aria-live="polite"
+          data-testid="config-subagent-concurrency-notice"
+        >
+          {{ subagentConcurrencyNotice }}
+        </p>
+        <p
+          v-if="subagentConcurrencyError"
+          class="flex items-center gap-1.5 text-[11px] text-rose-600"
+          data-testid="config-subagent-concurrency-error"
+        >
+          <TriangleAlert class="h-3.5 w-3.5 shrink-0" />
+          {{ subagentConcurrencyError }}
+        </p>
       </div>
 
       <!-- Wave43 D7 / ADR 0050：全局轨迹上报——裸字段行（无分区标题、无边框、无背景色），标签 + 最右端 Switch。 -->
