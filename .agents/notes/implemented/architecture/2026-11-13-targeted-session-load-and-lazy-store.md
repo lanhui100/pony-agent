@@ -113,8 +113,8 @@ blob」为实现前提，必须走 SQL 投影。
 
 | 相位 | 指标 | 实测 | 验收线 |
 |---|---|---|---|
-| `A_meta_steps` | 构造 / `load_store_metadata` / `load_session_meta_index` / schema 校验 | 0.01 / 1.1–1.9 / 1.7–2.1 / 0.04 ms | — |
-| `B_open_lazy`（Ready） | `SessionStore::open_lazy()` | **3.68–4.40 ms** | < 100 ms ✅ |
+| `A_meta_steps` | 构造 / `load_store_metadata` / `load_session_meta_index` / schema 校验 | 0.01–0.08 / 1.1–2.2 / 1.7–2.2 / 0.04–0.08 ms | — |
+| `B_open_lazy`（Ready） | `SessionStore::open_lazy()` | **3.34–4.40 ms** | < 100 ms ✅ |
 | `B_after_ready` | RSS（Ready 时） | **18–20.5 MB** | < 300 MB ✅ |
 | `C_hydrate`（resume 首屏） | 定向 hydrate + 只读快照 | **63–83 ms** | < 300 ms ✅ |
 | `D_list_parity` | 稀疏列表 vs 全量列表 | 227 / 227 条，**id 集合一致** | 条数与 id 集合一致 ✅ |
@@ -140,7 +140,10 @@ blob」为实现前提，必须走 SQL 投影。
    最新的一条，定向路径的 trace 投影补全与全量路径的 `refold_missing_trace_cache` 在
    「表权威 + 节点 refs」组合上的合并顺序不同。自动化等价测试覆盖了表权威场景且为绿，
    真实库的这一例归入上面同一后续条目（trace 合并顺序单一真值化），不在本轮扩大改动面。
-3. **无持久化历史图的会话，内存合成节点 id 内嵌合成时刻**（`…-node-<ms>-<ordinal>`），
+3. **`perf_probe` 的 N 相位读数不可当 Ready 成本**：同进程前面的 F/M 相位会做整库提交
+   （227 会话、数百 MB 投影），其 WAL 在后续新连接打开时被恢复，`index_ms` 会读到
+   6.4 s 级假象；Ready 口径只认 `perf_lazy`（不跑全量相位，实测 1.7–2.2 ms）。
+4. **无持久化历史图的会话，内存合成节点 id 内嵌合成时刻**（`…-node-<ms>-<ordinal>`），
    两条路径必然不同；故 `E` 只比节点**数量**与用户可见内容。这是既有行为，非本次引入。
 
 ### 门禁与治理
