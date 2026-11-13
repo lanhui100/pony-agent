@@ -3602,7 +3602,8 @@ fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &s
         // wave-65 C1：TUI 是**唯一**打开「审批挂起可恢复」的宿主 —— 桌面（src-tauri）与 CLI
         // 仍是默认 `false`（fail-fast `approval_resume_unavailable`，INV-2 零回归）。
         .host_approval_resume(true)
-        .session_store(SessionStore::new())
+        // B148：稀疏装载——启动只读轻量元数据索引，会话内容在 hydrate 时定向装载。
+        .session_store(SessionStore::open_lazy())
         .provider_resolver(Box::new(resolver))
         .workspace_root(workspace.to_path_buf());
 
@@ -8090,6 +8091,9 @@ fn hydrate_state_from_session(
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     session_id: &str,
 ) {
+    // B148：稀疏会话库下先做**单会话定向装载**（全量模式为幂等空操作）。
+    // 未装载就取快照会把「没装载」读成「空会话」——这正是本函数要挡住的顺序错误。
+    let _ = control_plane.hydrate_session(session_id);
     // 彻底重构历史会话恢复：优先使用权威会话快照 session.history 与 turn_trace_history，确保 1:1 准确恢复
     let runtime_view = control_plane.load_session_runtime_view(pony_agent_core::agent::control_plane::SessionRuntimeViewQuery {
         session_id: Some(session_id.to_string()),

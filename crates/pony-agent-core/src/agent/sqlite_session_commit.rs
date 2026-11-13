@@ -559,7 +559,7 @@ impl SqliteSessionBackend {
         if targets.is_empty() {
             return;
         }
-        let Some(projection) = self.load_store_normalized(conn) else {
+        let Some(projection) = self.load_store_normalized(conn, None) else {
             eprintln!(
                 "[pony-agent][session] index_projection_skipped: 规范化投影不可读；{} 个轻量索引行保持原样",
                 targets.len()
@@ -579,7 +579,13 @@ impl SqliteSessionBackend {
             {
                 continue;
             }
-            sessions.insert(session_id, state.clone());
+            // 投影只带内容：索引行的标题/时间/轮次/归属是真值（否则 `updated_at_ms` 归零，
+            // 启动修复用 now 兜底 ⇒ 会话「凭空跳到最新」，列表顺序每次启动都漂移）。
+            let mut merged = state.clone();
+            if let Some(indexed_row) = sessions.get(&session_id) {
+                inherit_index_metadata(indexed_row, &mut merged);
+            }
+            sessions.insert(session_id, merged);
             filled += 1;
         }
         if filled > 0 {
@@ -1735,15 +1741,16 @@ impl SqliteSessionBackend {
     pub(crate) fn read_traces_normalized(
         &self,
         conn: &Connection,
+        filter: Option<&str>,
     ) -> Result<HashMap<String, Vec<TurnTraceRecord>>, String> {
-        let mut traces = self.read_all_normalized_traces(conn)?;
+        let mut traces = self.read_all_normalized_traces(conn, filter)?;
         // E7 兜底口子收窄（B047）：只在**规范化侧给不出该会话语义**时回读 legacy 行。
-        //
-        // 旧实现先把整张 `session_turn_traces` 读成 HashMap，再 `entry().or_insert(..)`
-        // 逐会话丢弃——真实库 222MB / 645ms 里绝大多数读完就扔（该库「有 legacy 行但
-        // 规范化侧无 trace」的会话数实测为 0）。语义等价：命中规范化侧的会话本来就
-        // 不会被 legacy 覆盖，未命中的才需要回读。
-        for session_id in legacy_trace_session_ids(conn)? {
+        // B148：filter=Some 时只回读该会话，避免整表 legacy 扫描；语义与全量装载逐会话等价。
+        let legacy_ids = match filter {
+            Some(session_id) => vec![session_id.to_string()],
+            None => legacy_trace_session_ids(conn)?,
+        };
+        for session_id in legacy_ids {
             if traces.contains_key(&session_id) {
                 continue;
             }
@@ -1763,15 +1770,17 @@ impl SqliteSessionBackend {
     fn read_all_normalized_traces(
         &self,
         conn: &Connection,
+        filter: Option<&str>,
     ) -> Result<HashMap<String, Vec<TurnTraceRecord>>, String> {
+        let filter_suffix = if filter.is_some() { " WHERE session_id = ?1" } else { "" };
         let mut statement = conn
-            .prepare(
-                "SELECT session_id, raw_json FROM normalized_turn_traces
+            .prepare(&format!(
+                "SELECT session_id, raw_json FROM normalized_turn_traces{filter_suffix}
                  ORDER BY session_id, trace_order ASC, updated_at_ms ASC, turn_id ASC",
-            )
+            ))
             .map_err(|e| format!("prepare normalized trace load: {e}"))?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(filter.into_iter()), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })
             .map_err(|e| format!("query normalized trace load: {e}"))?;
@@ -1828,7 +1837,7 @@ impl SqliteSessionBackend {
             .as_ref()
             .ok_or_else(|| "connection not initialized".to_string())?;
         let sessions = self
-            .load_store_normalized(conn)
+            .load_store_normalized(conn, None)
             .ok_or_else(|| "normalized load failed".to_string())?
             .sessions;
         let mut report = BackfillReport::default();
@@ -2399,5 +2408,38 @@ mod store_reclaim_tests {
             "必须是显式的维护锁拒绝（实际：{error}）"
         );
         let _ = std::fs::remove_file(&db_path);
+    }
+}
+
+/// 规范化投影只携带「内容」，索引行才是**元数据真值**（标题 / 时间 / 轮次 / 归属）。
+///
+/// 存量库里 `normalized_sessions` 的这几列可能是 0 / 空（写入方只落消息与 trace）：
+/// 若直接用投影替换索引行，`updated_at_ms` 会被抹成 0，启动修复再用 `now` 兜底 ⇒
+/// 会话在侧边栏「凭空跳到最新」，列表顺序每次启动都漂移（真实库 227 行里有 7 行如此）。
+/// 规则：**投影为空才继承索引**，非空值一律以内容侧为准。
+pub(crate) fn inherit_index_metadata(indexed: &SessionState, state: &mut SessionState) {
+    if state.updated_at_ms == 0 {
+        state.updated_at_ms = indexed.updated_at_ms;
+    }
+    if state.turn_count == 0 {
+        state.turn_count = indexed.turn_count;
+    }
+    if state.title.trim().is_empty() && !indexed.title.trim().is_empty() {
+        state.title = indexed.title.clone();
+    }
+    if state.summary.trim().is_empty() {
+        state.summary = indexed.summary.clone();
+    }
+    if state.last_referenced_file.is_none() {
+        state.last_referenced_file = indexed.last_referenced_file.clone();
+    }
+    if state.workspace_id.is_none() {
+        state.workspace_id = indexed.workspace_id.clone();
+    }
+    if state.title_override.is_none() {
+        state.title_override = indexed.title_override.clone();
+    }
+    if indexed.archived {
+        state.archived = true;
     }
 }

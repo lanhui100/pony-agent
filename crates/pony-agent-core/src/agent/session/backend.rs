@@ -32,6 +32,49 @@ pub enum SessionBackendTraceLoadResult {
     Loaded(Vec<TurnTraceRecord>),
 }
 
+/// B148：**轻量会话元数据行**（列表 / 恢复目标 / 控制面骨架用；不含会话内容）。
+///
+/// 约束（改动前先读）：
+/// - 只承载「不起 TUI、不装载内容也能回答」的字段（标题 / 轮次 / 归属 / 版本）；
+/// - `has_content` 是**列表可见性**判据，与 `store::session_is_persistable` 同口径，
+///   且必须把「轻量索引行」算进来（`__index_only` 行内容数组全空，但 `turnCount > 0`
+///   等价于有内容——与 `startup_meta::META_SQL` 的过滤口径逐字一致）；
+/// - 由后端在 SQL 投影里算出，**不得**靠反序列化整包 blob 再判断（那正是 B148 要消灭的
+///   启动主项）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionMetaEntry {
+    pub session_id: String,
+    /// 生效标题（`title_override` 优先，退回行上的派生 `title`）。
+    pub title: String,
+    pub title_override: Option<String>,
+    pub summary: String,
+    /// 最近引用文件（列表展示字段；`None` = 未记录）。
+    pub last_referenced_file: Option<String>,
+    pub turn_count: usize,
+    pub updated_at_ms: u64,
+    pub workspace_id: Option<String>,
+    pub archived: bool,
+    /// 该行是否有内容（false ⇒ 不应出现在会话列表里）。
+    pub has_content: bool,
+    /// 该行是否是「已停写 blob 的轻量索引行」（`__index_only`）。
+    pub index_only: bool,
+    /// `sessions.version`（CAS 期望版本来源）；无 version 列 ⇒ None。
+    pub version: Option<u64>,
+}
+
+/// B148：**单会话定向装载**结果。
+///
+/// 语义与 `load_store().sessions.remove(id)` 对齐：`Loaded` 必须与该会话在全量装载结果里
+/// 的状态一致（内容 / trace / history 图 / 日志真源合并结果都相同）；`NotFound` = 库内
+/// 无此行；`Unsupported` = 后端不具备定向能力（调用方必须退回全量语义，**不得**当作
+/// 「空会话」处理）。
+#[derive(Clone, Debug)]
+pub enum TargetedSessionLoad {
+    Loaded(Box<SessionState>),
+    NotFound,
+    Unsupported,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionBackendMutationResult {
     Unsupported,
@@ -448,6 +491,52 @@ pub trait SessionBackend: Send + Sync {
         None
     }
 
+    /// B148：本后端是否支持**定向装载**（轻量元数据索引 + 单会话完整恢复）。
+    ///
+    /// 默认 `false`：`SessionStore` 只有在后端明确声明支持时才进入稀疏（懒装载）模式，
+    /// 否则保持既有整包装载语义（File/Memory 后端的写路径是整包覆盖，稀疏快照会丢会话）。
+    fn supports_targeted_session_load(&self) -> bool {
+        false
+    }
+
+    /// B148：**轻量会话元数据索引**（不含内容，供列表 / 恢复目标 / 控制面骨架使用）。
+    ///
+    /// 默认实现退回 `load_store()` 后投影——语义正确但代价等同全量装载；需要「毫秒级
+    /// 启动」的后端必须覆写它（SQLite 侧走单条 SQL 投影）。
+    fn load_session_meta_index(&self) -> Option<Vec<SessionMetaEntry>> {
+        let store = self.load_store()?;
+        Some(
+            store
+                .sessions
+                .iter()
+                .map(|(session_id, session)| meta_entry_from_state(session_id, session, None))
+                .collect(),
+        )
+    }
+
+    /// B148：**只装载全局元数据**（附件索引 / workspace / 授权 / 版本；不含会话内容）。
+    ///
+    /// 稀疏（定向）装载用它替代 `load_store()`；会话内容改为按需单会话读取。
+    /// 默认实现退回整包装载再清空 `sessions`——语义正确，代价等同全量；SQLite 覆写它。
+    fn load_store_metadata(&self) -> Option<PersistedStore> {
+        let mut store = self.load_store()?;
+        store.sessions.clear();
+        Some(store)
+    }
+
+    /// B148：**单会话定向完整恢复**（内容 + trace + 日志真源合并，等价于全量装载里的那一行）。
+    ///
+    /// 默认实现退回整库装载再摘出目标行——非 SQLite 后端规模有限，语义优先。
+    fn load_session_targeted(&self, session_id: &str) -> TargetedSessionLoad {
+        match self.load_store() {
+            Some(mut store) => match store.sessions.remove(session_id) {
+                Some(state) => TargetedSessionLoad::Loaded(Box::new(state)),
+                None => TargetedSessionLoad::NotFound,
+            },
+            None => TargetedSessionLoad::Unsupported,
+        }
+    }
+
     /// Wave-7 B001：写入一条用量账本记录（幂等 UPSERT）。
     ///
     /// 默认实现：非 SQLite 后端无独立账本表 ⇒ 静默成功（fail-open，不阻断 turn）。
@@ -568,6 +657,45 @@ pub trait SessionBackend: Send + Sync {
         SessionBackendMutationResult::Unsupported
     }
     fn attachment_root(&self) -> Option<PathBuf>;
+}
+
+/// B148：会话「有内容」的**单一口径**（`store::session_is_persistable` 委托到这里）。
+///
+/// 语义：这一行该不该出现在会话列表里。轻量索引行（`__index_only`）的内容数组全空，
+/// 但 `turn_count > 0` 时后端在 SQL 侧判为有内容——两个入口必须给出同一结论，故口径
+/// 只在这里定义一次。
+pub(crate) fn state_has_content(session: &SessionState) -> bool {
+    !session.history.is_empty()
+        || !session.turn_trace_history.is_empty()
+        || !session.long_term_memory_entries.is_empty()
+        || !session.memory_write_evidence.is_empty()
+        || !session.memory_write_hook_trace_records.is_empty()
+        || !session.history_state_evidence.is_empty()
+        // 截断到初始（空）状态的会话仍有非空 history graph（legacy 根节点），
+        // 必须持久化，否则截断在重启后失效。
+        || !session.history_nodes.is_empty()
+}
+
+/// B148：`SessionState` → 轻量元数据行（trait 默认实现与内存/文件后端共用）。
+pub(crate) fn meta_entry_from_state(
+    session_id: &str,
+    session: &SessionState,
+    version: Option<u64>,
+) -> SessionMetaEntry {
+    SessionMetaEntry {
+        session_id: session_id.to_string(),
+        title: session.effective_title().to_string(),
+        title_override: session.title_override.clone(),
+        summary: session.summary.clone(),
+        last_referenced_file: session.last_referenced_file.clone(),
+        turn_count: session.turn_count,
+        updated_at_ms: session.updated_at_ms,
+        workspace_id: session.workspace_id.clone(),
+        archived: session.archived,
+        has_content: state_has_content(session),
+        index_only: false,
+        version,
+    }
 }
 
 #[cfg(test)]

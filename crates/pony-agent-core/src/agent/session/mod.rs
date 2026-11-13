@@ -8,6 +8,8 @@ mod log_command;
 mod log_sink;
 // ADR 0099 阶段 2-A：日志命令流 → SessionState 的 fold 重建器 + SQLite 索引重建。
 pub(crate) mod fold;
+// B148：单会话定向装载的日志真源合并（复用 fold 的同一套投影规则）。
+pub(crate) mod fold_targeted;
 // ADR 0099 阶段 3-A：会话目录包（`manifest.json` + `events.jsonl` + `attachments/`）导出/导入。
 pub mod bundle;
 // PA-174 P1：投影侧全空时从 durable `turn_events` 重建历史（纯函数）。
@@ -95,8 +97,9 @@ pub(crate) use history::history_from_branch_events;
 
 pub use backend::{
     BackfillReport, CommitOutcome, PersistCommand, PersistCommandOutcome, SeparateTraceTableMode,
-    SessionBackend, SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionMetaPatch,
-    SessionTraceMutation, TraceMigrationState, TraceTerminalPatch, TurnStateRecord,
+    SessionBackend, SessionBackendMutationResult, SessionBackendTraceLoadResult, SessionMetaEntry,
+    SessionMetaPatch, SessionTraceMutation, TargetedSessionLoad, TraceMigrationState,
+    TraceTerminalPatch, TurnStateRecord,
 };
 pub use file_backend::FileSessionBackend;
 pub use id::{

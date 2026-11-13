@@ -2,6 +2,22 @@
 # 形状：~/.agents/skills/observability-onboarding/references/declaration.schema.json
 # 判定：声明说「该不该有」，巡检说「实际有没有」，两者交叉才是结论（规则家：declaration-rubric.md）。
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
+# TUI header 指标整段降级（ADR 2026-11-14-tui-header-metrics-overflow）归属说明：
+# 纯呈现层变更（`crates/pony-agent-core/src/bin/tui.rs::header_metrics_text_within`）：宽度不足时
+# 按段优先级整段让位，不新增对外接口 / 网络 IO / 后台任务 / LLM 调用，也不新增遥测出口；
+# metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立），
+# tracing / issues 判定不变 ⇒ 不新增 applicable 判定、不新增 enforcement_point。
+# B148（ADR 2026-11-13-targeted-session-load-and-lazy-store）归属说明：会话库定向/懒装载。
+# (1) 读路径全部指向**本地 sqlite**（`sessions` / `normalized_*` 表的主键查询与单条投影），
+#     无新增网络出口、无新增依赖、无新增指标；`pony resume` 与 TUI 启动的后台装载线程沿用
+#     既有 ADR 0115 的「首帧先画 + 控制面后台装载」编排（线程数量与生命周期不变）。
+# (2) 新增**本地取证面**（非遥测出口，只落 stderr 结构化行）：`sparse_store_ready`
+#     （meta_sessions / loaded_sessions）、`targeted_session_hydrated`、
+#     `targeted_session_not_found`、`session_read_unloaded_denied`（reader 归一）、
+#     `sparse_save` 的 commit_boundary 标签 `save_to_backend_sparse`。
+# (3) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立），
+#     tracing 收口点仍是 agent/otel/mod.rs，issues 边界不变。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 service: pony-agent
 kind: desktop
 reviewed_at: "2026-11-09"
@@ -32,6 +48,15 @@ reviewed_at: "2026-11-09"
 #     effective_policy / clamped_fields）。它是一条本地只读 CLI 出口，不上报、不含密钥，
 #     故 metrics / logs 维持结构性 N-A；issues 维度不变（异常仍走既有 PonySentry 边界）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point；tracing 收口点仍是 agent/otel/mod.rs。
+
+# 上游重试次数上调 + 重试进度状态化（ADR 0104「上游调用策略」2026-11-14 修订）归属说明：
+# (1) 默认值变更（decisionMaxAttempts 5→10、retryBudgetMs 30s→60s）——纯常量，不产生遥测面；
+# (2) 重试进度改由**线程局部观察者**（agent/retry.rs 的 RetryNotice）回报，TUI 侧转
+#     `UiEvent::ProviderRetry`：进程内 UI 事件、不上报、无网络出口；结构化日志面沿用既有
+#     `provider_log` 的 `{label}:attempt=N/M failed class=…` 行 ⇒ 无新增结构化事件、无 schema 变更；
+# (3) 终态错误可见面收口（状态行单源 + 去掉 BOLD）——纯呈现层，无遥测面。
+# ⇒ metrics / logs 维持结构性 N-A（桌面进程无常驻监听地址、无 /metrics，判定不变），
+# 本卡不新增 applicable 判定、不新增 enforcement_point；tracing 收口点仍是 agent/otel/mod.rs。
 
 # Trace 审核 loop（ADR 0101 / PA-168..170）归属说明：loop 会话复用 ponycli headless 既有 OTel 出口
 # （tracing anchor 不变，仍 agent/otel/mod.rs），自身即维度 6 的审计对象（自举）；scripts/audit/* 确定性

@@ -1216,7 +1216,7 @@ pub fn merge_log_truth_into_sessions_with_budget(
 ///    不带 refs，故改为从日志自己的 DAG（节点 `parent_node_id` + `turn_id`）推导——
 ///    不套这层投影就会把 fork 分支的 trace 泄漏到顶层显示里；
 /// 3. `history` 的**可见分支视图**：由光标所指节点的快照派生（见函数内注释）。
-fn apply_index_projection(indexed: &SessionState, mut state: SessionState) -> SessionState {
+pub(crate) fn apply_index_projection(indexed: &SessionState, mut state: SessionState) -> SessionState {
     if state.workspace_id.is_none() {
         state.workspace_id = indexed.workspace_id.clone();
     }

@@ -47,6 +47,13 @@ mod compaction;
 #[path = "store_stage0.rs"]
 mod stage0;
 
+// B148：稀疏（懒装载）模式——启动只读轻量元数据索引，会话内容按需定向装载。
+// `store.rs` 已计入文件行数棘轮，状态机与实作落在 `store_sparse.rs`。
+#[path = "store_sparse.rs"]
+mod sparse;
+
+use self::sparse::default_sessions;
+
 /// PA-095 #6：cursor_version 退役——乐观锁改水位比较。seq 水位本身单调递增
 /// （checkout/fork/restore/switch 发射 history-control 事件使日志水位只增不减，
 /// 消除 ABA 窗口），cursor_version 字段保留 wire 兼容但值恒等于水位镜像。
@@ -250,6 +257,8 @@ pub struct SessionStore {
     /// ADR 0099 阶段 0（I2）：本实例**装载到的**会话版本（`sessions.version` 快照）。
     /// 它是 `commit_boundary` 的期望版本来源——「装载时存在、现在行没了」即墓碑（I3）。
     versions: std::sync::Mutex<SessionVersionMap>,
+    // B148：稀疏（懒装载）模式状态；`None` = 全量模式（桌面/CLI 与所有既有测试）。
+    lazy: Option<Box<sparse::LazySessions>>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -383,6 +392,9 @@ impl SessionStore {
 
     /// 只读获取指定会话的引用（不触发任何 ensure 或保存）。
     pub fn get_session(&self, session_id: &str) -> Option<&SessionState> {
+        if self.lazy_blocks_read(session_id) {
+            self.warn_unloaded_read(session_id, "get_session");
+        }
         self.sessions.get(session_id)
     }
 
@@ -492,6 +504,7 @@ impl SessionStore {
             ask_store: None,
             // ADR 0099 阶段 0（I2）：装载期版本快照——本实例之后的 CAS 以它为期望值。
             versions: std::sync::Mutex::new(persisted.versions),
+            lazy: None,
         };
         if should_save {
             // **启动期不写盘**（P1 启动提速 / 实测 2.0–2.3s 的常数开销）。
@@ -590,6 +603,9 @@ impl SessionStore {
         fallback_history: &[TurnHistoryMessage],
     ) -> SessionSnapshot {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID);
+        if self.lazy_blocks_read(session_key) {
+            return self.lazy_placeholder_snapshot(session_key, node_id);
+        }
         if !self.sessions.contains_key(session_key) {
             // 会话尚不存在：默认归属（workspace_id=None）解析默认工作区 root。
             return default_snapshot_for_session(
@@ -1944,6 +1960,9 @@ impl SessionStore {
     }
 
     pub fn list_sessions(&self) -> Vec<SessionOverview> {
+        if let Some(list) = self.lazy_list_sessions() {
+            return list;
+        }
         let mut sessions = self
             .sessions
             .values()
@@ -1994,7 +2013,8 @@ impl SessionStore {
     /// 只在显式恢复（`pony resume <id>`）时调用：不做启动期全量合并，避免复活用户已删除、
     /// 仅规范化行残留的会话（显式删除现在会连规范化行一起删）。返回 `true` = 会话可用。
     pub fn recover_session_from_normalized(&mut self, session_id: &str) -> bool {
-        if self.sessions.contains_key(session_id) {
+        // B148：稀疏模式先走定向装载（含日志真源合并）；全量模式为幂等判定。
+        if self.sessions.contains_key(session_id) || self.hydrate_session(session_id) {
             return true;
         }
         let Some(session) = self.backend.load_normalized_session(session_id) else {
@@ -2012,7 +2032,8 @@ impl SessionStore {
     }
 
     pub fn remove_session(&mut self, session_id: &str) -> Vec<SessionOverview> {
-        if self.sessions.remove(session_id).is_some() {
+        if self.sessions.remove(session_id).is_some() || self.lazy_has_session(session_id) {
+            self.forget_lazy_session(session_id);
             delete_session_attachment_dir(&self.attachment_root, session_id);
             self.remove_session_attachment_catalog(session_id);
 
@@ -2027,7 +2048,7 @@ impl SessionStore {
             }
         }
 
-        if self.sessions.is_empty() {
+        if self.sessions.is_empty() && self.lazy.is_none() {
             self.sessions = default_sessions();
         }
         self.list_sessions()
@@ -2226,6 +2247,7 @@ impl SessionStore {
     }
 
     pub(super) fn ensure_session(&mut self, session_id: &str) -> &mut SessionState {
+        self.ensure_session_hydrated(session_id);
         let initial_trace_migration_state = match self.backend.trace_storage_mode() {
             SeparateTraceTableMode::Off => TraceMigrationState::LegacyBlob,
             SeparateTraceTableMode::DualWrite => TraceMigrationState::DualWrite,
@@ -2313,6 +2335,7 @@ impl SessionStore {
     /// workspace_id 在同一次落盘内批量重写为 default——附件导入与工具根两条
     /// 运行时路径随之收敛到默认工作区，不再出现"硬失败 vs 静默换根"分叉。
     pub fn delete_workspace(&mut self, workspace_id: &str) -> Result<(), String> {
+        self.ensure_all_loaded_for_admin();
         crate::agent::workspace::delete_workspace_entry(&mut self.workspaces, workspace_id)?;
         for session in self.sessions.values_mut() {
             if session.workspace_id.as_deref() == Some(workspace_id) {
@@ -2332,6 +2355,7 @@ impl SessionStore {
     }
 
     pub fn rename_session(&mut self, session_id: &str, title: &str) -> Result<(), String> {
+        self.ensure_session_hydrated(session_id);
         let trimmed = crate::agent::workspace::validate_display_name(title)
             .map_err(|error| format!("会话重命名非法：{error}"))?;
         let session = self
@@ -2349,6 +2373,7 @@ impl SessionStore {
     /// 归档会话：置 archived 标记并落盘；幂等（重复归档为 no-op 成功）。
     /// 日志、数据与工作区账户位不动。
     pub fn archive_session(&mut self, session_id: &str) -> Result<(), String> {
+        self.ensure_session_hydrated(session_id);
         let session = self
             .sessions
             .get_mut(session_id)
@@ -2363,6 +2388,7 @@ impl SessionStore {
 
     /// 恢复已归档会话（取消归档）：置 archived=false 并落盘；幂等（重复取消归档为 no-op 成功）。
     pub fn unarchive_session(&mut self, session_id: &str) -> Result<(), String> {
+        self.ensure_session_hydrated(session_id);
         let session = self
             .sessions
             .get_mut(session_id)
@@ -2381,6 +2407,9 @@ impl SessionStore {
 
     /// 读取会话的权威 workspace 归属（不创建、不落盘）。None = 尚未盖章。
     pub fn read_workspace_owner(&self, session_id: &str) -> Option<String> {
+        if let Some(owner) = self.lazy_meta_workspace_owner(session_id) {
+            return owner;
+        }
         self.sessions
             .get(session_id)
             .and_then(|session| session.workspace_id.clone())
@@ -2679,7 +2708,10 @@ impl SessionStore {
     /// ADR 0099 阶段 0（I1 / E4）：**全库落盘入口**——本文件所有全库提交点（建/改/删
     /// 工作区、授权、改名、归档、事件重放等）统一经由它收敛到单一提交边界。
     pub(super) fn save_to_backend(&self) {
-        self.commit_store(&self.sessions, "save_to_backend");
+        match self.lazy_commit_sessions() {
+            Some(sessions) => self.commit_store(&sessions, "save_to_backend_sparse"),
+            None => self.commit_store(&self.sessions, "save_to_backend"),
+        }
     }
 
 
@@ -3016,6 +3048,11 @@ impl SessionStore {
             &self.attachment_assets,
             &self.attachment_root,
         );
+        // B148：稀疏实例的 `sessions` 只含**已装载**会话。整表重建索引会把未装载会话的
+        // 条目抹掉，而 asset 清理以索引判孤儿 ⇒ 会真删别的会话的附件。只重算已装载条目。
+        if self.refresh_loaded_attachment_entries() {
+            return;
+        }
         self.session_attachment_index = rebuild_session_attachment_index(&self.sessions);
     }
 
@@ -5101,17 +5138,10 @@ fn contains_any_phrase(text: &str, phrases: &[&str]) -> bool {
 // 判据 `first_legacy_reasoning_gap` 只被该实现消费，不再向外 re-export。
 pub(crate) use super::transcript_sanitize::sanitize_provider_native_transcript;
 
+/// 会话「有内容」判据（列表可见性）。B148 起口径只在 `backend::state_has_content`
+/// 定义一次——懒装载的元数据索引（SQL 侧）与内存投影必须给出同一结论。
 fn session_is_persistable(session: &SessionState) -> bool {
-    !session.history.is_empty()
-        || !session.turn_trace_history.is_empty()
-        || !session.long_term_memory_entries.is_empty()
-        || !session.memory_write_evidence.is_empty()
-        || !session.memory_write_hook_trace_records.is_empty()
-        || !session.history_state_evidence.is_empty()
-        // A session that has been truncated to the initial (empty) state
-        // still has a non-empty history graph (the legacy root node) and
-        // must be persisted so the truncation survives a restart.
-        || !session.history_nodes.is_empty()
+    super::backend::state_has_content(session)
 }
 
 /// 宿主续轮提示的唯一真值源。TUI 在 Ask 恢复、工具审批恢复、goal 轮次推进时
@@ -5307,39 +5337,6 @@ fn unique_test_session_dir(prefix: &str) -> PathBuf {
         .join("sessions")
 }
 
-fn default_sessions() -> SessionMap {
-    let mut sessions = HashMap::new();
-    sessions.insert(
-        DEFAULT_SESSION_ID.to_string(),
-        SessionState {
-            conversation_id: DEFAULT_SESSION_ID.to_string(),
-            title: DEFAULT_SESSION_TITLE.to_string(),
-            summary: DEFAULT_SESSION_SUMMARY.to_string(),
-            history: Vec::new(),
-            provider_native_transcript: Vec::new(),
-            turn_trace_history: Vec::new(),
-            trace_migration_state: TraceMigrationState::default(),
-            turn_trace_refs: None,
-            long_term_memory_entries: Vec::new(),
-            memory_write_evidence: Vec::new(),
-            memory_write_hook_trace_records: Vec::new(),
-            history_state_evidence: Vec::new(),
-            turn_count: 0,
-            last_referenced_file: None,
-            updated_at_ms: now_timestamp_ms(),
-            history_nodes: Vec::new(),
-            history_branches: Vec::new(),
-            history_cursor: HistoryCursor::default(),
-            workspace_id: None,
-            title_override: None,
-            archived: false,
-            event_watermark: 0,
-            last_commit_watermark: 0,
-        },
-    );
-    sessions
-}
-
 pub(super) fn now_timestamp_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -5460,26 +5457,34 @@ fn merge_session_attachment_assets(sessions: &SessionMap, assets: &mut Attachmen
 fn rebuild_session_attachment_index(sessions: &SessionMap) -> SessionAttachmentIndex {
     let mut index = SessionAttachmentIndex::new();
     for session in sessions.values() {
-        let mut entry = Vec::new();
-        for attachment in session
-            .history
-            .iter()
-            .flat_map(|message| message.attachments.iter())
-        {
-            let asset_id = if attachment.asset_id.trim().is_empty() {
-                attachment_asset_id(&attachment.relative_path)
-            } else {
-                attachment.asset_id.clone()
-            };
-            if !entry.iter().any(|existing| existing == &asset_id) {
-                entry.push(asset_id);
-            }
-        }
+        let entry = session_attachment_entry(session);
         if !entry.is_empty() {
             index.insert(session.conversation_id.clone(), entry);
         }
     }
     index
+}
+
+/// 单会话的附件 asset id 清单（去重保序）。
+///
+/// 稀疏模式按会话增量重算时复用同一口径，避免「整表重建」与「增量重算」各写一份逻辑而漂移。
+pub(in crate::agent::session) fn session_attachment_entry(session: &SessionState) -> Vec<String> {
+    let mut entry = Vec::new();
+    for attachment in session
+        .history
+        .iter()
+        .flat_map(|message| message.attachments.iter())
+    {
+        let asset_id = if attachment.asset_id.trim().is_empty() {
+            attachment_asset_id(&attachment.relative_path)
+        } else {
+            attachment.asset_id.clone()
+        };
+        if !entry.iter().any(|existing| existing == &asset_id) {
+            entry.push(asset_id);
+        }
+    }
+    entry
 }
 
 fn attachment_assets_for_query(

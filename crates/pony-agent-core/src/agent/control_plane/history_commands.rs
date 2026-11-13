@@ -47,6 +47,20 @@ impl HostControlPlane {
         snapshot
     }
 
+    /// B148：稀疏会话库的**按需定向装载**（`pony resume` / `/resume` / 队友会话切换共用）。
+    ///
+    /// 全量模式与已装载会话 ⇒ 幂等 `true`；库内没有该会话 ⇒ `false`（调用方按新会话处理）。
+    /// 调用顺序契约：`hydrate_session` → `load_session_runtime_view`，反了就只看到空会话。
+    pub fn hydrate_session(&self, session_id: &str) -> bool {
+        self.sessions_rwlock
+            .write()
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
+                e.into_inner()
+            })
+            .hydrate_session(session_id)
+    }
+
     /// ADR 0094：`pony resume <id>` 的按需恢复入口 —— legacy blob 行丢失但规范化表
     /// 仍有数据时，把该会话重建回内存并回写，后面的 `load_session_runtime_view`
     /// 才有历史可hydrate。返回 `true` = 会话可用。

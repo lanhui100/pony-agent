@@ -45,6 +45,7 @@ target-check-*/
 target-test/
 target-test-*/
 target-core-test/
+target-perf/
 target-test-exact*/
 target-check-tests*/
 target-check-tests-*/

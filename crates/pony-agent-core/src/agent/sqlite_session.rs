@@ -20,6 +20,7 @@ use super::session::{
 pub(crate) mod commit;
 #[path = "sqlite_session_p1.rs"]
 mod p1;
+#[path = "sqlite_targeted.rs"] mod targeted; // B148：轻量元数据索引 + 单会话定向装载（独立成文件，避免撑大已触棘轮的本文件）
 
 pub use commit::is_busy_error;
 // B046：库体回收（freelist 空洞）与只读占用探针 —— 供 `ponycli sessions vacuum` 与运维使用。
@@ -1818,11 +1819,11 @@ impl SqliteSessionBackend {
         .map_err(|e| format!("update blob ts: {e}"))?;
         Ok(())
     }
-    fn load_store_normalized(&self, conn: &Connection) -> Option<PersistedStore> {
-        let session_rows = conn
-            .prepare("SELECT session_id, title, summary, turn_count, last_referenced_file, created_at_ms, updated_at_ms, state_version, trace_migration_state, turn_trace_refs_json, provider_native_transcript_json, history_state_evidence_json, memory_json, workspace_id, title_override, archived FROM normalized_sessions")
+    pub(crate) fn load_store_normalized(&self, conn: &Connection, filter: Option<&str>) -> Option<PersistedStore> {
+        let filter_suffix = if filter.is_some() { " WHERE session_id = ?1" } else { "" }; let session_rows = conn
+            .prepare(&format!("SELECT session_id, title, summary, turn_count, last_referenced_file, created_at_ms, updated_at_ms, state_version, trace_migration_state, turn_trace_refs_json, provider_native_transcript_json, history_state_evidence_json, memory_json, workspace_id, title_override, archived FROM normalized_sessions{filter_suffix}"))
             .ok()?
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(filter.into_iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     (
@@ -1851,9 +1852,9 @@ impl SqliteSessionBackend {
         // PA-089 优化：批量预取全部子表（一次查询替代每会话 5 次查询 = N+1），
         // 消除启动时 load_store_normalized 的 1.5s 卡顿。
         let all_messages = conn
-            .prepare("SELECT session_id, message_id, turn_id, ordinal, role, content, reasoning_content, status, model_name, token_count, attachments_json FROM normalized_messages ORDER BY session_id, ordinal")
+            .prepare(&format!("SELECT session_id, message_id, turn_id, ordinal, role, content, reasoning_content, status, model_name, token_count, attachments_json FROM normalized_messages{filter_suffix} ORDER BY session_id, ordinal"))
             .ok()?
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(filter.into_iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(2)?,
@@ -1870,11 +1871,11 @@ impl SqliteSessionBackend {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         // ADR 0099 阶段 0（E7）：trace 主源 = `normalized_turn_traces`（legacy 表仅兜底）。
-        let all_traces = self.read_traces_normalized(conn).unwrap_or_default();
+        let all_traces = self.read_traces_normalized(conn, filter).unwrap_or_default();
         let all_nodes = conn
-            .prepare("SELECT session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json FROM normalized_history_nodes ORDER BY session_id")
+            .prepare(&format!("SELECT session_id, node_id, parent_node_id, branch_id, forked_from_node_id, kind, turn_id, turn_trace_refs_json, run_id, workspace_ref_json, summary, title, created_at_ms, snapshot_json, event_seq_range_json FROM normalized_history_nodes{filter_suffix} ORDER BY session_id"))
             .ok()?
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(filter.into_iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1897,9 +1898,9 @@ impl SqliteSessionBackend {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         let all_branches = conn
-            .prepare("SELECT session_id, branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms FROM normalized_history_branches ORDER BY session_id")
+            .prepare(&format!("SELECT session_id, branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms FROM normalized_history_branches{filter_suffix} ORDER BY session_id"))
             .ok()?
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(filter.into_iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1916,9 +1917,9 @@ impl SqliteSessionBackend {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
         let all_cursors = conn
-            .prepare("SELECT session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status, event_watermark FROM normalized_history_cursor ORDER BY session_id")
+            .prepare(&format!("SELECT session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id, cursor_version, mode, checkout_mode, checkout_status, event_watermark FROM normalized_history_cursor{filter_suffix} ORDER BY session_id"))
             .ok()?
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(filter.into_iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
@@ -2512,7 +2513,7 @@ impl SqliteSessionBackend {
             )
             .unwrap_or_else(|_| "legacy".to_string());
         if phase == "observing" || phase == "retired" {
-            return self.load_store_normalized(conn);
+            return self.load_store_normalized(conn, None);
         }
 
         let mut stmt = conn
@@ -2598,6 +2599,12 @@ impl SqliteSessionBackend {
 }
 
 impl SessionBackend for SqliteSessionBackend {
+    // B148：定向装载薄壳（实作在 sqlite_targeted.rs）。
+    fn supports_targeted_session_load(&self) -> bool { true }
+    fn load_store_metadata(&self) -> Option<PersistedStore> { self.load_store_metadata_impl() }
+    fn load_session_meta_index(&self) -> Option<Vec<crate::agent::session::SessionMetaEntry>> { self.load_session_meta_index_impl() }
+    fn load_session_targeted(&self, session_id: &str) -> crate::agent::session::TargetedSessionLoad { self.load_session_targeted_impl(session_id) }
+
     /// ADR 0099 阶段 0（E2/E4）：**单一提交边界**（唯一整包提交入口）。
     /// 实作在 `sqlite_session_commit.rs`（单事务 + 逐会话 CAS + 墓碑跳过 + 版本自增）。
     fn commit_boundary(&self, store: &PersistedStore) -> crate::agent::session::CommitOutcome {
@@ -2858,17 +2865,9 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn load_normalized_session(&self, session_id: &str) -> Option<SessionState> {
-        let slot = match self.connection() {
-            Ok(slot) => slot,
-            Err(error) => {
-                tracing::error!(target: "pony_core", error = %error, "[pony-agent][session] SQLite open error");
-                return None;
-            }
-        };
-        let conn = slot.as_ref().expect("connection initialized");
-        // 复用整包重建：规范化表规模由会话/消息行数决定（生产库 ~10² sessions、~10³
-        // messages），一次只为一个显式 resume 服务，代价可控；不为单会话复制 6 份查询。
-        let mut sessions = self.load_store_normalized(conn)?.sessions;
+        let slot = self.connection().ok()?;
+        // B148：真定向——按 session_id 过滤的六表投影，不再整库重建后 remove。
+        let mut sessions = self.load_store_normalized(slot.as_ref()?, Some(session_id))?.sessions;
         sessions.remove(session_id)
     }
 
