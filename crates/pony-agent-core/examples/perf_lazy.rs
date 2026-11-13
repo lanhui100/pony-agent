@@ -121,6 +121,33 @@ fn main() {
         );
     }
 
+    report_parity();
+
+    println!("final {}", vm_status());
+    println!("== done ==");
+}
+
+/// 只打印值的规模（避免把整段历史刷屏）：数组给长度、字符串给长度与前 40 字符。
+fn summarize_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Array(items) => format!("array(len={})", items.len()),
+        serde_json::Value::String(text) => {
+            let preview = text.chars().take(40).collect::<String>();
+            format!("str(len={}, {:?})", text.chars().count(), preview)
+        }
+        other => {
+            let raw = other.to_string();
+            if raw.chars().count() > 60 {
+                format!("{}…", raw.chars().take(60).collect::<String>())
+            } else {
+                raw
+            }
+        }
+    }
+}
+
+/// 相位 D/E：列表 id 一致性 + 逐 id 快照等价（需要一次全量装载做对照）。
+fn report_parity() {
     // 相位 D：列表 id 一致（一次性全量装载，最贵，放最后）。
     let sparse = SessionStore::open_lazy();
     let sparse_ids = sparse
@@ -234,26 +261,4 @@ fn main() {
         sample.len(),
         equal
     );
-
-    println!("final {}", vm_status());
-    println!("== done ==");
-}
-
-/// 只打印值的规模（避免把整段历史刷屏）：数组给长度、字符串给长度与前 40 字符。
-fn summarize_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Array(items) => format!("array(len={})", items.len()),
-        serde_json::Value::String(text) => {
-            let preview = text.chars().take(40).collect::<String>();
-            format!("str(len={}, {:?})", text.chars().count(), preview)
-        }
-        other => {
-            let raw = other.to_string();
-            if raw.chars().count() > 60 {
-                format!("{}…", raw.chars().take(60).collect::<String>())
-            } else {
-                raw
-            }
-        }
-    }
 }

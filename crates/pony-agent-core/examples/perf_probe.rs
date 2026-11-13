@@ -214,7 +214,7 @@ fn main() {
     for r in 0..rounds {
         let t = Instant::now();
         let be = SqliteSessionBackend::new_with_trace_mode(
-            db_path.clone(),
+            db_path.to_path_buf(),
             SeparateTraceTableMode::WriteSeparate,
         );
         let read_only = be.storage_read_only();
@@ -225,6 +225,17 @@ fn main() {
         );
     }
 
+    report_lazy_phases(&session_id, rounds);
+
+    report_metadata_steps(&db_path, rounds);
+
+    println!("final {}", vm_status());
+    println!("== done ==");
+}
+
+/// 相位 J/K/L/M：稀疏装载（Ready 成本）、定向 hydrate、列表一致、写集合收敛。
+fn report_lazy_phases(session_id: &str, rounds: usize) {
+    let redirected = std::env::var_os("PONY_AGENT_DATA_DIR").is_some();
     // 相位 J/K/L/M：B148 稀疏装载与写集合收敛（写模式；仅当库已重定向到副本）
     if !redirected {
         println!("phase=J..M SKIPPED：未设置 PONY_AGENT_DATA_DIR，为避免写真实库不执行");
@@ -258,8 +269,8 @@ fn main() {
             let mut store = SessionStore::open_lazy();
             let cpu0 = cpu_ticks();
             let t = Instant::now();
-            let ok = store.hydrate_session(&session_id);
-            let snapshot = store.snapshot_at_readonly(Some(&session_id), None, &[]);
+            let ok = store.hydrate_session(session_id);
+            let snapshot = store.snapshot_at_readonly(Some(session_id), None, &[]);
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             println!(
                 "phase=K_hydrate_targeted round={} ms={:.3} cpu_ms={:.0} loaded={ok} history={} turn_count={}",
@@ -305,11 +316,11 @@ fn main() {
         // M：写集合收敛（稀疏提交只写已装载会话 vs 全量整库提交）。
         for r in 0..rounds {
             let mut store = SessionStore::open_lazy();
-            let loaded = store.hydrate_session(&session_id);
+            let loaded = store.hydrate_session(session_id);
             let cpu0 = cpu_ticks();
             let t = Instant::now();
             let renamed = store
-                .rename_session(&session_id, &format!("perf-probe-{}", r + 1))
+                .rename_session(session_id, &format!("perf-probe-{}", r + 1))
                 .is_ok();
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             println!(
@@ -325,7 +336,7 @@ fn main() {
             let cpu0 = cpu_ticks();
             let t = Instant::now();
             let renamed = store
-                .rename_session(&session_id, &format!("perf-probe-full-{}", r + 1))
+                .rename_session(session_id, &format!("perf-probe-full-{}", r + 1))
                 .is_ok();
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             println!(
@@ -336,11 +347,14 @@ fn main() {
             );
         }
     }
+}
 
+/// 相位 N：稀疏装载两个子步骤的独立成本（定位 Ready 预算归属）。
+fn report_metadata_steps(db_path: &std::path::Path, rounds: usize) {
     // 相位 N：稀疏装载的两个子步骤各自成本（定位 Ready 预算归属：J 慢在哪一步）。
     for r in 0..rounds {
         let be = SqliteSessionBackend::new_with_trace_mode(
-            db_path.clone(),
+            db_path.to_path_buf(),
             SeparateTraceTableMode::WriteSeparate,
         );
         let t = Instant::now();
@@ -363,7 +377,4 @@ fn main() {
             schema.is_ok()
         );
     }
-
-    println!("final {}", vm_status());
-    println!("== done ==");
 }

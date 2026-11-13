@@ -51,7 +51,13 @@ mod stage0;
 // `store.rs` 已计入文件行数棘轮，状态机与实作落在 `store_sparse.rs`。
 #[path = "store_sparse.rs"]
 mod sparse;
+// B148：附件索引口径（整表重建 / 按会话增量共用同一份函数）。
+#[path = "attachment_index.rs"]
+mod attachment_index;
 
+pub(super) use self::attachment_index::{
+    rebuild_session_attachment_index, session_attachment_entry,
+};
 use self::sparse::default_sessions;
 
 /// PA-095 #6：cursor_version 退役——乐观锁改水位比较。seq 水位本身单调递增
@@ -5452,39 +5458,6 @@ fn merge_session_attachment_assets(sessions: &SessionMap, assets: &mut Attachmen
             }
         }
     }
-}
-
-fn rebuild_session_attachment_index(sessions: &SessionMap) -> SessionAttachmentIndex {
-    let mut index = SessionAttachmentIndex::new();
-    for session in sessions.values() {
-        let entry = session_attachment_entry(session);
-        if !entry.is_empty() {
-            index.insert(session.conversation_id.clone(), entry);
-        }
-    }
-    index
-}
-
-/// 单会话的附件 asset id 清单（去重保序）。
-///
-/// 稀疏模式按会话增量重算时复用同一口径，避免「整表重建」与「增量重算」各写一份逻辑而漂移。
-pub(in crate::agent::session) fn session_attachment_entry(session: &SessionState) -> Vec<String> {
-    let mut entry = Vec::new();
-    for attachment in session
-        .history
-        .iter()
-        .flat_map(|message| message.attachments.iter())
-    {
-        let asset_id = if attachment.asset_id.trim().is_empty() {
-            attachment_asset_id(&attachment.relative_path)
-        } else {
-            attachment.asset_id.clone()
-        };
-        if !entry.iter().any(|existing| existing == &asset_id) {
-            entry.push(asset_id);
-        }
-    }
-    entry
 }
 
 fn attachment_assets_for_query(
