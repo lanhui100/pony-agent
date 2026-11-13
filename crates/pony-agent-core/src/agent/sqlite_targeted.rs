@@ -239,10 +239,41 @@ impl SqliteSessionBackend {
             &mut sessions,
             None,
         );
-        match sessions.remove(session_id) {
+
+        // 4) B148 修正：轻量索引行在定向路径上**不经过**全量装载的投影补全前置条件
+        //（`attach_index_trace_projections_*` 只在「已有 trace 缺 observation」时才动手），
+        // 因此 trace 表这份真源要在这里按 E7 口径单独读一次（normalized 主源 → legacy
+        // 兜底），否则恢复视图会整段丢掉工具调用明细。回归用例：
+        // `tui_overlay_cancel_acceptance::j1_resume_summary_prefers_description_*`。
+        let mut state = sessions.remove(session_id);
+        if let Some(state) = state.as_mut() {
+            if state.turn_trace_history.is_empty() {
+                let table_traces = self.load_session_trace_table(session_id);
+                if !table_traces.is_empty() {
+                    let merged = self.merge_trace_history(&*state, table_traces.clone());
+                    state.turn_trace_history = merged;
+                    materialize_node_traces(state, &table_traces);
+                }
+            }
+        }
+        match state {
             Some(state) => TargetedSessionLoad::Loaded(Box::new(state)),
             None => TargetedSessionLoad::NotFound,
         }
+    }
+
+    /// B148：单会话 trace 真源读取（与全量装载的 trace 读路径同源）。
+    fn load_session_trace_table(&self, session_id: &str) -> Vec<TurnTraceRecord> {
+        let Ok(slot) = self.connection() else {
+            return Vec::new();
+        };
+        let Some(conn) = slot.as_ref() else {
+            return Vec::new();
+        };
+        self.read_traces_normalized(conn, Some(session_id))
+            .ok()
+            .and_then(|mut traces| traces.remove(session_id))
+            .unwrap_or_default()
     }
 }
 

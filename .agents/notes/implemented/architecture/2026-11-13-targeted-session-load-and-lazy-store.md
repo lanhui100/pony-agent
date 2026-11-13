@@ -155,3 +155,18 @@ blob」为实现前提，必须走 SQL 投影。
   `store.rs` 5764 ≤ 5773）。
 - 新增文件不动棘轮：`sqlite_targeted.rs`、`session/store_sparse.rs`、两个测试与两个
   `examples/perf_*.rs` 均为新文件。
+
+## 2026-11-14 回归修复（B159）：定向装载曾整段丢弃 trace
+
+- **症状**：`pony resume` 恢复出的历史只剩正文，工具调用明细消失（`tui_overlay_cancel_acceptance::j1_resume_summary_prefers_description_and_hides_structured_json` 由绿转红；已在 `d18bde15` 干净 worktree 上验证该用例当时为绿）。
+- **根因**：`load_session_targeted_impl` 的 `index_only` 分支只取轻量索引行，不读 trace 表；
+  而全量装载那侧的 `attach_index_trace_projections_with_deadline` 只在「**已有** trace 缺
+  observation」时才动手（`session.turn_trace_history.iter().any(...)`）——trace 表为空时恒 skip
+  ⇒ 定向路径下 `turn_trace_history` 永远为空，恢复视图自然没有工具行。
+- **修法**：定向装载尾部补一步单会话 trace 读取，口径与 E7 全量读路径同源
+  （`read_traces_normalized(conn, Some(id))`＝normalized 主源 + legacy 兜底），再
+  `merge_trace_history` + `materialize_node_traces` 保持节点 refs 一致。
+  只在 `turn_trace_history` 为空时触发，避免覆盖投影补全已给出的结果。
+- **回归守护**：上述 PTY 用例（真实二进制 + 真实伪终端）留在 `cargo test` 全量里；
+  另用 `d18bde15` worktree 复现「修复前红、修复后绿」的对照读数。
+
