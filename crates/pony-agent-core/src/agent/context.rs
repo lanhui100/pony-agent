@@ -12,6 +12,7 @@ use crate::agent::provider::{
     PrefixMutationReason, ProviderManager, ProviderMessage, ProviderRequest,
     ProviderRequestObservation, ProviderRole,
 };
+use crate::agent::turn_prompt_content::{system_messages_of, TurnPromptContent};
 use crate::agent::session::{
     AttachmentAsset, EnvironmentInfo, LongTermMemoryRecord, SessionSnapshot, TurnHistoryMessage,
 };
@@ -412,6 +413,25 @@ fn format_user_message_with_image_placeholders(
     }
 }
 
+/// 当前轮用户输入的 native 形态：非视觉模型给占位文本，视觉模型按有无图片选择字符串或内容块数组。
+fn native_user_input(
+    provider: &ProviderManager,
+    retrieved: &RetrievedContextState,
+    effective_text: &str,
+) -> Value {
+    let content = if !provider.supports_image_input() {
+        Value::String(effective_text.to_string())
+    } else if retrieved.turn_context.images.is_empty() {
+        Value::String(retrieved.turn_context.user_message.clone())
+    } else {
+        Value::Array(openai_user_content_blocks(
+            &retrieved.turn_context.user_message,
+            &retrieved.turn_context.images,
+        ))
+    };
+    json!({ "role": "user", "content": content })
+}
+
 fn build_layered_turn_context(
     graph_name: &str,
     provider: &ProviderManager,
@@ -428,82 +448,72 @@ fn build_layered_turn_context(
             retrieved.turn_context.user_message.clone()
         };
     let current_user_message = ProviderMessage::user(effective_user_message_text.clone());
-    // Wave-61 C3.3：团队策略段作为**紧跟 BASE 之后的第二条 System 消息**进入稳定层。
-    // 门控值来自进程级 OnceLock，bootstrap 后恒定 ⇒ 同进程内不会随 turn 抖动前缀。
-    //
-    // Wave-61 C9：门控在本次组装里**只求值一次**并复用（input 路径 / native 预留 / native 稳定层
-    // 三处必须同真同假；重复求值会在 false→true 的竞态窗口内产生段序错位与 splice 越界）。
-    let team_policy_injected = agent_team_policy_enabled();
-    let mut base_system_messages = vec![ProviderMessage::system(base_system_prompt())];
-    if team_policy_injected {
-        base_system_messages.push(ProviderMessage::system(agent_team_policy_prompt()));
-    }
-    let domain_profile_prompt = infer_domain_profile_prompt(graph_name, &retrieved.turn_context);
-    let domain_profile_messages = build_domain_profile_messages(provider, domain_profile_prompt);
-    let instruction_scope_sources = applicable_instruction_sources(retrieved);
     let input_budget_tokens = input_budget_tokens(provider);
+    let image_note = image_capability_note(provider, retrieved);
+    let base_semistable_context = provider_semistable_context_note(graph_name, provider, retrieved);
+    // Wave-61 C9：门控只求值一次并复用（两个视图必须同真同假，禁止二次求值）。
+    let team_policy_injected = agent_team_policy_enabled();
+    let mut base_texts = vec![base_system_prompt().to_string()];
+    if team_policy_injected {
+        base_texts.push(agent_team_policy_prompt().to_string());
+    }
+    let content = TurnPromptContent {
+        base: base_texts,
+        domain_profile: build_domain_profile_messages(
+            provider,
+            infer_domain_profile_prompt(graph_name, &retrieved.turn_context),
+        )
+        .into_iter()
+        .map(|message| message.content)
+        .collect(),
+        semistable: vec![base_semistable_context.note.clone()],
+        memory: build_memory_messages(retrieved)
+            .into_iter()
+            .map(|message| message.content)
+            .collect(),
+        // 易变段：一次渲染（含 goal/todo 全局读取），两个视图共享正文。
+        volatile: volatile_context_notes(
+            retrieved,
+            planner_skills,
+            image_note.as_deref(),
+            base_semistable_context.delta_notice.as_deref(),
+        ),
+    };
+    let instruction_scope_sources = applicable_instruction_sources(retrieved);
     let raw_history = retrieved
         .session_context
         .recent_history
         .iter()
         .filter_map(to_provider_history_message)
         .collect::<Vec<_>>();
-    let image_note = image_capability_note(provider, retrieved);
-    let base_semistable_context = provider_semistable_context_note(graph_name, provider, retrieved);
-    let memory_messages = build_memory_messages(retrieved);
-    let mut reserved_messages = base_system_messages.clone();
-    reserved_messages.extend(domain_profile_messages.clone());
-    reserved_messages.push(ProviderMessage::developer(
-        base_semistable_context.note.clone(),
-    ));
-    reserved_messages.extend(memory_messages.clone());
-    reserved_messages.extend(build_volatile_context_messages(
-        retrieved,
-        planner_skills,
-        image_note.as_deref(),
-        None,
-        base_semistable_context.delta_notice.as_deref(),
-    ));
-    // 层序不变量：稳定层（System）必须全部排在动态层（Developer）之前。
-    // 动态段若被插到稳定段之前，会打穿 provider 的前缀缓存命中（ADR 0007）。
+
+    // normalized 视图：预算前缀（不含截断提示）→ 80% 阈值 → 截断 → 带提示的最终易变段。
+    let reserved_messages = content.normalized_prefix(None, current_user_message.clone());
+    // 层序不变量：稳定层（System）必须全部排在动态层（Developer）之前（ADR 0007）。
     debug_assert!(
         prompt_layers_are_ordered(&reserved_messages),
         "提示层序被破坏：动态层不得排在稳定层之前"
     );
-    reserved_messages.push(current_user_message.clone());
-    let (history_messages, history_truncated_count) = {
-        // 80% 阈值检查：低于 80% context window 时不截断，保留全部历史
-        let should_truncate = provider.context_window_tokens().map_or(true, |cw| {
-            let reserved_tokens: usize = reserved_messages
-                .iter()
-                .map(estimate_provider_message_tokens)
-                .sum();
-            let history_tokens: usize = raw_history
-                .iter()
-                .map(estimate_provider_message_tokens)
-                .sum();
-            let total_tokens = reserved_tokens + history_tokens;
-            total_tokens > (cw as f64 * 0.8) as usize
-        });
-
-        if should_truncate {
-            truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens)
-        } else {
-            (raw_history, 0)
-        }
+    let exceed_eighty_percent = |reserved_tokens: usize, history_tokens: usize| {
+        provider.context_window_tokens().map_or(true, |cw| {
+            reserved_tokens + history_tokens > (cw as f64 * 0.8) as usize
+        })
+    };
+    let should_truncate = exceed_eighty_percent(
+        reserved_messages
+            .iter()
+            .map(estimate_provider_message_tokens)
+            .sum(),
+        raw_history.iter().map(estimate_provider_message_tokens).sum(),
+    );
+    let (history_messages, history_truncated_count) = if should_truncate {
+        truncate_history_messages(raw_history, &reserved_messages, input_budget_tokens)
+    } else {
+        (raw_history, 0)
     };
     let history_truncation_note = truncation_note(history_truncated_count, "history messages");
-    let project_instruction_messages = vec![ProviderMessage::developer(
-        base_semistable_context.note.clone(),
-    )];
-    let conversation_carry_messages = history_messages;
-    let volatile_context_messages = build_volatile_context_messages(
-        retrieved,
-        planner_skills,
-        image_note.as_deref(),
-        history_truncation_note.as_deref(),
-        base_semistable_context.delta_notice.as_deref(),
-    );
+    let volatile_context_messages =
+        vec![ProviderMessage::developer(content.volatile.render(history_truncation_note.as_deref()))];
     let volatile_input_messages = vec![current_user_message];
     let volatile_input_observation_text = render_turn_input_for_observation(
         &retrieved.turn_context.user_message,
@@ -516,130 +526,51 @@ fn build_layered_turn_context(
         history_truncation_note.as_deref(),
         native_tool_flow(provider, retrieved),
     );
+
+    // native 视图：同一内容单源，独立（transcript）截断与提示文案。
     let mut native_base_system_messages = Vec::new();
     let mut native_domain_profile_messages = Vec::new();
     let mut native_project_instruction_messages = Vec::new();
     let mut native_memory_messages = Vec::new();
-    let mut native_conversation_carry_messages = Vec::new();
     let mut native_volatile_context_messages = Vec::new();
     let mut native_volatile_input_messages = Vec::new();
+    let mut native_conversation_carry_messages = Vec::new();
     let conversation_carry_mode = if native_tool_flow(provider, retrieved) {
-        let native_memory = build_native_memory_messages(retrieved);
-        // Wave-61 C3.3：native 路径与 normalized-input 路径保持同构（策略段紧跟 BASE）。
-        let mut reserved_native_messages: Vec<Value> = vec![json!({
-            "role": "system",
-            "content": base_system_prompt(),
-        })];
-        if team_policy_injected {
-            reserved_native_messages.push(json!({
-                "role": "system",
-                "content": agent_team_policy_prompt(),
-            }));
-        }
-        reserved_native_messages.push(json!({
-            "role": "system",
-            "content": base_semistable_context.note.clone(),
-        }));
-        // semistable 段此刻恒为末位，domain profile 固定插在它之前 —— 插入下标由长度推导，
-        // 不再二次读取门控（C9：消除 false→true 窗口内的 splice 越界/段序错位）。
-        let domain_insert_index = reserved_native_messages.len() - 1;
-        reserved_native_messages.splice(
-            domain_insert_index..domain_insert_index,
-            domain_profile_messages.iter().map(|message| {
-                json!({
-                    "role": "system",
-                    "content": message.content.clone(),
-                })
-            }),
-        );
-        reserved_native_messages.extend(native_memory.clone());
-        reserved_native_messages.extend(build_native_volatile_context_messages(
-            retrieved,
-            planner_skills,
-            image_note.as_deref(),
+        let reserved_native_messages = content.native_prefix(
             None,
-            base_semistable_context.delta_notice.as_deref(),
-        ));
-        reserved_native_messages.push(json!({
-            "role": "user",
-            "content": effective_user_message_text.clone()
-        }));
-        let (native_transcript, native_truncated_count) = {
-            // 80% 阈值检查：低于 80% context window 时不截断
-            let should_truncate = provider.context_window_tokens().map_or(true, |cw| {
-                let reserved_tokens: usize = reserved_native_messages
-                    .iter()
-                    .map(estimate_native_message_tokens)
-                    .sum();
-                let transcript_tokens: usize = retrieved
-                    .transcript
-                    .provider_native_messages
-                    .iter()
-                    .map(estimate_native_message_tokens)
-                    .sum();
-                let total_tokens = reserved_tokens + transcript_tokens;
-                total_tokens > (cw as f64 * 0.8) as usize
-            });
-
-            if should_truncate {
-                context_window::truncate_native_messages(
-                    retrieved.transcript.provider_native_messages.clone(),
-                    &reserved_native_messages,
-                    input_budget_tokens,
-                )
-            } else {
-                (retrieved.transcript.provider_native_messages.clone(), 0)
-            }
+            json!({ "role": "user", "content": effective_user_message_text.clone() }),
+        );
+        let should_truncate = exceed_eighty_percent(
+            reserved_native_messages
+                .iter()
+                .map(estimate_native_message_tokens)
+                .sum(),
+            retrieved
+                .transcript
+                .provider_native_messages
+                .iter()
+                .map(estimate_native_message_tokens)
+                .sum(),
+        );
+        let (native_transcript, native_truncated_count) = if should_truncate {
+            context_window::truncate_native_messages(
+                retrieved.transcript.provider_native_messages.clone(),
+                &reserved_native_messages,
+                input_budget_tokens,
+            )
+        } else {
+            (retrieved.transcript.provider_native_messages.clone(), 0)
         };
-        let native_transcript_note = truncation_note(
-            native_truncated_count,
-            "provider-native transcript messages",
-        );
-        native_base_system_messages = vec![json!({
-            "role": "system",
-            "content": base_system_prompt(),
-        })];
-        if team_policy_injected {
-            native_base_system_messages.push(json!({
-                "role": "system",
-                "content": agent_team_policy_prompt(),
-            }));
-        }
-        native_domain_profile_messages = domain_profile_messages
-            .iter()
-            .map(|message| {
-                json!({
-                    "role": "system",
-                    "content": message.content.clone(),
-                })
-            })
-            .collect();
-        native_project_instruction_messages = vec![json!({
-            "role": "system",
-            "content": base_semistable_context.note.clone(),
-        })];
-        native_memory_messages = native_memory;
+        let native_transcript_note =
+            truncation_note(native_truncated_count, "provider-native transcript messages");
+        native_base_system_messages = system_messages_of(&content.base);
+        native_domain_profile_messages = system_messages_of(&content.domain_profile);
+        native_project_instruction_messages = system_messages_of(&content.semistable);
+        native_memory_messages = system_messages_of(&content.memory);
+        native_volatile_context_messages = content.native_volatile(native_transcript_note.as_deref());
+        native_volatile_input_messages =
+            vec![native_user_input(provider, retrieved, &effective_user_message_text)];
         native_conversation_carry_messages = native_transcript;
-        native_volatile_context_messages = build_native_volatile_context_messages(
-            retrieved,
-            planner_skills,
-            image_note.as_deref(),
-            native_transcript_note.as_deref(),
-            base_semistable_context.delta_notice.as_deref(),
-        );
-        native_volatile_input_messages = vec![json!({
-            "role": "user",
-            "content": if !provider.supports_image_input() {
-                Value::String(effective_user_message_text.clone())
-            } else if retrieved.turn_context.images.is_empty() {
-                Value::String(retrieved.turn_context.user_message.clone())
-            } else {
-                Value::Array(openai_user_content_blocks(
-                    &retrieved.turn_context.user_message,
-                    &retrieved.turn_context.images,
-                ))
-            }
-        })];
         ConversationCarryMode::ProviderNativeTranscriptReplay
     } else {
         ConversationCarryMode::FullReplay
@@ -650,11 +581,26 @@ fn build_layered_turn_context(
             .iter()
             .map(|skill| skill.label.clone())
             .collect(),
-        base_system_messages,
-        domain_profile_messages,
-        project_instruction_messages,
-        memory_messages,
-        conversation_carry_messages,
+        base_system_messages: content.base.iter().cloned().map(ProviderMessage::system).collect(),
+        domain_profile_messages: content
+            .domain_profile
+            .iter()
+            .cloned()
+            .map(ProviderMessage::developer)
+            .collect(),
+        project_instruction_messages: content
+            .semistable
+            .iter()
+            .cloned()
+            .map(ProviderMessage::developer)
+            .collect(),
+        memory_messages: content
+            .memory
+            .iter()
+            .cloned()
+            .map(ProviderMessage::developer)
+            .collect(),
+        conversation_carry_messages: history_messages,
         volatile_context_messages,
         volatile_input_messages,
         volatile_input_observation_text,
@@ -1024,50 +970,7 @@ fn provider_semistable_context_note(
     SemistableContextSection { note, delta_notice }
 }
 
-fn build_volatile_context_messages(
-    retrieved: &RetrievedContextState,
-    planner_skills: &[SkillDescriptor],
-    image_note: Option<&str>,
-    truncation_note: Option<&str>,
-    semistable_delta_note: Option<&str>,
-) -> Vec<ProviderMessage> {
-    let note = volatile_context_note(
-        retrieved,
-        planner_skills,
-        image_note,
-        truncation_note,
-        semistable_delta_note,
-    );
-    if note.is_empty() {
-        Vec::new()
-    } else {
-        vec![ProviderMessage::developer(note)]
-    }
-}
 
-fn build_native_volatile_context_messages(
-    retrieved: &RetrievedContextState,
-    planner_skills: &[SkillDescriptor],
-    image_note: Option<&str>,
-    truncation_note: Option<&str>,
-    semistable_delta_note: Option<&str>,
-) -> Vec<Value> {
-    let note = volatile_context_note(
-        retrieved,
-        planner_skills,
-        image_note,
-        truncation_note,
-        semistable_delta_note,
-    );
-    if note.is_empty() {
-        Vec::new()
-    } else {
-        vec![json!({
-            "role": "system",
-            "content": note,
-        })]
-    }
-}
 
 /// 平台命令行口径（P1-2b）：真实 trace 里同一轮连续 3 次 `Run` 失败（exit 9009 即
 /// Windows「命令不存在」、255/128 为后续重试），根因是模型在 Windows 上沿用 POSIX 写法。
@@ -1086,14 +989,40 @@ fn shell_command_guidance(platform: &str) -> &'static str {
     }
 }
 
-fn volatile_context_note(
+/// 易变上下文的**分段**形态：一次渲染，按视图组装。
+///
+/// 为什么分段而不是直接拼成整串：同一 turn 的易变内容要进两个 provider 视图
+/// （normalized / native），而两侧的「截断提示」文案不同（历史条数 vs 原生 transcript 条数）。
+/// 分段后正文只渲染一次——`goal::active_goal_for_session` / `todo::todo_list` 这些全局读取
+/// 也随之从每 turn 4 次降到 1 次；各视图只在自己的位置插入自己的截断说明。
+pub(crate) struct VolatileNotes {
+    /// 截断提示之前的正文段（环境 / 聚焦文件 / 活动目标 / 计划 / Run goal / 技能 / 图片提示）。
+    body: Vec<String>,
+    /// semistable 变更通知：恒在截断提示之后追加（Wave-58 F1-3）。
+    delta: Option<String>,
+}
+
+impl VolatileNotes {
+    /// 按视图渲染：`body… + truncation_note? + delta?`，与历史实现的拼接顺序逐字一致。
+    pub(crate) fn render(&self, truncation_note: Option<&str>) -> String {
+        let mut notes: Vec<&str> = self.body.iter().map(String::as_str).collect();
+        if let Some(note) = truncation_note {
+            notes.push(note);
+        }
+        if let Some(delta) = self.delta.as_deref() {
+            notes.push(delta);
+        }
+        notes.join(" ")
+    }
+}
+
+fn volatile_context_notes(
     retrieved: &RetrievedContextState,
     planner_skills: &[SkillDescriptor],
     image_note: Option<&str>,
-    truncation_note: Option<&str>,
     semistable_delta_note: Option<&str>,
-) -> String {
-    let mut notes = Vec::new();
+) -> VolatileNotes {
+    let mut body = Vec::new();
 
     if let Some(env_info) = &retrieved.session_context.env_info {
         let git_info = if env_info.is_git_repo {
@@ -1111,7 +1040,7 @@ fn volatile_context_note(
         } else {
             format!(" {guidance}")
         };
-        notes.push(format!(
+        body.push(format!(
             "Environment: cwd={}, platform={}, shell={}, date={}, tz={}, {}.{} 工作区工具（搜索/读取/写入）仅限 cwd 目录内，依赖源码（如 ../crates）不在搜索范围内，需通过 path 参数或明确路径访问。",
             env_info.cwd,
             env_info.platform,
@@ -1124,13 +1053,13 @@ fn volatile_context_note(
     }
 
     if let Some(path) = retrieved.session_context.last_referenced_file.as_deref() {
-        notes.push(format!("Focus file: {}.", path));
+        body.push(format!("Focus file: {}.", path));
     }
 
     if let Some(active_goal) =
         crate::agent::goal::active_goal_for_session(&retrieved.session_context.conversation_id)
     {
-        notes.push(format!(
+        body.push(format!(
             "Active goal: {} (phase={}, round={}/{}).",
             active_goal.objective,
             active_goal.phase,
@@ -1160,7 +1089,7 @@ fn volatile_context_note(
             } else {
                 in_progress.join(", ")
             };
-            notes.push(format!(
+            body.push(format!(
                 "Plan: {}/{} completed; in_progress: {}.",
                 completed, total, in_progress_str
             ));
@@ -1168,31 +1097,25 @@ fn volatile_context_note(
     }
 
     if let Some(goal) = retrieved.run_state.goal.as_deref() {
-        notes.push(format!("Run goal: {}.", goal));
+        body.push(format!("Run goal: {}.", goal));
     }
 
     if !planner_skills.is_empty() {
-        notes.push(render_planner_skills_note(planner_skills));
+        body.push(render_planner_skills_note(planner_skills));
     }
 
     if let Some(note) = image_note {
-        notes.push(note.to_string());
+        body.push(note.to_string());
     }
 
-    if let Some(note) = truncation_note {
-        notes.push(note.to_string());
+    VolatileNotes {
+        body,
+        delta: semistable_delta_note
+            .filter(|note| !note.trim().is_empty())
+            .map(|note| note.trim_end().to_string()),
     }
-
-    // Wave-58 F1-3：semistable 段的配置变更只以追加通知形式出现在这里，
-    // 绝不回写 semistable 段（KV-Cache 头保护）。
-    if let Some(note) = semistable_delta_note {
-        if !note.trim().is_empty() {
-            notes.push(note.trim_end().to_string());
-        }
-    }
-
-    notes.join(" ")
 }
+
 
 fn build_memory_messages(retrieved: &RetrievedContextState) -> Vec<ProviderMessage> {
     if retrieved.long_term_memory.entries.is_empty() {
@@ -1210,24 +1133,6 @@ fn build_memory_messages(retrieved: &RetrievedContextState) -> Vec<ProviderMessa
     ))]
 }
 
-fn build_native_memory_messages(retrieved: &RetrievedContextState) -> Vec<Value> {
-    if retrieved.long_term_memory.entries.is_empty() {
-        return Vec::new();
-    }
-
-    let summary = retrieved
-        .long_term_memory
-        .summary
-        .as_deref()
-        .unwrap_or("Long-term memory entries are attached to this retrieval snapshot.");
-    vec![json!({
-        "role": "system",
-        "content": format!(
-            "Long-term memory status: {}. {}",
-            retrieved.long_term_memory.status, summary
-        )
-    })]
-}
 
 fn derive_context_refresh_reason(
     retrieved: &RetrievedContextState,
@@ -2307,19 +2212,10 @@ mod tests {
     #[test]
     fn build_request_truncates_older_history_to_context_window() {
         let builder = DefaultTurnContextBuilder;
-        let provider = provider_manager(
-            "gpt-4.1-mini",
-            32,
-            ProviderModelCapabilities {
-                context_window_tokens: Some(1700),
-                supports_tools: true,
-                supports_streaming: true,
-                supports_image_input: true,
-                supports_reasoning: false,
-                ..Default::default()
-            },
-        );
-        let session = session_snapshot(
+        // fixture 隔离：易变段会按 conversation_id 读全局 goal/todo 存储，共享 "session-1"
+        // 会让并行跑的 goal/todo 单测把本用例的预算撑爆（截断掉最近历史）。本用例只关心
+        // 「超窗时旧历史被截断」，用一个专属会话 id 与全局态解耦。
+        let mut session = session_snapshot(
             vec![
                 TurnHistoryMessage {
                     role: "user".to_string(),
@@ -2349,7 +2245,19 @@ mod tests {
             Vec::new(),
             None,
         );
-
+        session.conversation_id = "fixture-history-truncation".to_string();
+        let provider = provider_manager(
+            "gpt-4.1-mini",
+            32,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(1700),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_image_input: true,
+                supports_reasoning: false,
+                ..Default::default()
+            },
+        );
         let retrieved = builder.retrieve_context_state("continue", &[], None, &session, None, None);
         let request = builder.build_request("graph-a", &provider, &retrieved, &[]);
         let joined = request
@@ -2781,6 +2689,63 @@ mod tests {
             .observation
             .semi_stable_context_text
             .contains("Active domain profile: coding."));
+    }
+
+    /// B133 等价性门禁：normalized 与 native 两个视图必须是**同一内容**的角色投影。
+    ///
+    /// 单程装配重构后，最容易发生的回归是两侧内容再次分叉（历史上易变段渲染 4 次）。
+    /// 这里对同一输入逐条比对两个视图的 `content`，任何一条不等即视为分叉。
+    #[test]
+    fn normalized_and_native_views_project_the_same_content() {
+        // Arrange
+        let builder = DefaultTurnContextBuilder;
+        let provider = provider_manager(
+            "deepseek-chat",
+            1024,
+            ProviderModelCapabilities {
+                context_window_tokens: Some(128_000),
+                supports_tools: true,
+                supports_streaming: true,
+                supports_reasoning: true,
+                ..Default::default()
+            },
+        );
+        let mut session = session_snapshot(Vec::new(), Vec::new(), None);
+        session.env_info = Some(crate::agent::session::EnvironmentInfo {
+            cwd: "/workspace".to_string(),
+            platform: "linux".to_string(),
+            shell: Some("bash".to_string()),
+            os_version: None,
+            current_date: "2026-11-13".to_string(),
+            timezone: Some("CST".to_string()),
+            ..Default::default()
+        });
+        let retrieved = builder.retrieve_context_state("检查装配一致性", &[], None, &session, None, None);
+
+        // Act
+        let request = builder.build_request("research-workflow", &provider, &retrieved, &[]);
+
+        // Assert
+        assert_eq!(
+            request.input.len(),
+            request.native_messages.len(),
+            "B133 违约：两个视图的层数不一致（说明某侧多拼/漏拼了一层）"
+        );
+        for (index, (normalized, native)) in request
+            .input
+            .iter()
+            .zip(request.native_messages.iter())
+            .enumerate()
+        {
+            let native_content = native
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("B133 违约：第 {index} 条 native 消息不是纯文本：{native}"));
+            assert_eq!(
+                normalized.content, native_content,
+                "B133 违约：第 {index} 条消息在两个视图里的内容分叉"
+            );
+        }
     }
 
     #[test]

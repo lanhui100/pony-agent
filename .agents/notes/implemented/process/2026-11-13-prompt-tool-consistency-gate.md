@@ -36,7 +36,7 @@ Status: implemented
 
 ## Alternatives considered
 
-- **把工具条款搬进工具自身的条件段**（DSH 的 `systemPrompt.section` + `text: ({scope}) => tools.get('read') ? … : ''` 模式）：结构上最彻底，但要新建注册制提示层、改动 native/normalized 双视图与 `reserved_system_message_extra_count()` 的 trace 判定，属于跨文件重构；且本仓内建工具（todo/goal/团队）曝光面恒定，当前**无行为缺陷可修**。按「最小闭包」拒绝夹带，登记为后续提案与待办（`proposed/architecture/2026-11-13-context-assembly-single-pass-projection.md` 第 3 条 / backlog B138）。**已由 `implemented/architecture/2026-11-13-tool-owned-prompt-guidelines-and-templates.md` 落地**：工具条款自注册 + 模板化，渲染字节不变。
+- **把工具条款搬进工具自身的条件段**（DSH 的 `systemPrompt.section` + `text: ({scope}) => tools.get('read') ? … : ''` 模式）：结构上最彻底，但要新建注册制提示层、改动 native/normalized 双视图与 `reserved_system_message_extra_count()` 的 trace 判定，属于跨文件重构；且本仓内建工具（todo/goal/团队）曝光面恒定，当前**无行为缺陷可修**。按「最小闭包」拒绝夹带，登记为后续提案与待办（backlog B138）。**已由 `implemented/architecture/2026-11-13-tool-owned-prompt-guidelines-and-templates.md` 落地**：工具条款自注册 + 模板化，渲染字节不变。装配去重则由 `implemented/architecture/2026-11-13-context-assembly-single-pass-projection.md` 落地（B133）。
 - **只补契约文档、不加门禁**：能修当下漂移，但下次改文案仍会静默分家——文档没有执行力，门禁才有。
 - **让测试直接 `grep` 提示词里的工具名并与 `names.rs` 对拍**（不引入 `prompt_tool_references()`）：省一个 API，但反向扫描需要在测试里复制一份「什么算工具名」的判定，且无法给 PT2 的曝光面校验提供稳定输入；真源放代码里，测试只做比对更简单。
 - **把字节数改为 `<=` 单一阈值**（放弃逐字冻结）：会丢掉「文案只能在契约内改」的强约束，与既有 `assert_eq!(len(), 3790)` 冲突；改为「逐字冻结 + 宽护栏」两段式，既保留强约束又给护栏留余量。

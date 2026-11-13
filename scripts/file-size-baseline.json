@@ -15,20 +15,6 @@
       "value": 232
     },
     {
-      "path": "crates/pony-agent-core/src/agent/context.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 3003
-    },
-    {
-      "path": "crates/pony-agent-core/src/agent/context.rs",
-      "kind": "fn-lines",
-      "name": "build_layered_turn_context",
-      "occurrence": 0,
-      "value": 259
-    },
-    {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
       "kind": "file-lines",
       "name": null,
