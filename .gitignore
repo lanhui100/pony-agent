@@ -100,3 +100,8 @@ docs/audit/rounds/*/replay/**/*.jsonl
 # 曾把它带进 main（1107 文件 / 38 万行），直接打红 check-secrets 门禁（blocked sensitive file）。
 venv/
 .venv/
+
+# 本地一次性暂存/评测脚本与运行期状态（可重新生成，不入库）：
+# .dev-team 其余文档必须跟踪，故只忽略 tmp-* 前缀的临时脚本；temp-eval-env 是 loop 运行态。
+.dev-team/tmp-*
+temp-eval-env/
