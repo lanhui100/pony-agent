@@ -366,6 +366,19 @@ pub fn active_goal_for_session(session_id: &str) -> Option<GoalData> {
         .cloned()
 }
 
+/// 契约 C1 的续轮入口：从 run 的会话事实取「本会话」的 active goal。
+///
+/// 无会话事实（缺失/空白）或无 active goal ⇒ `None`，调用方**不续轮**。旧实现回落
+/// `default` 桶，会把**别的会话**的目标读出来继续跑（跨会话串话根因，B152）。
+pub fn continuation_goal_for_run(run_session_id: Option<&str>) -> Option<(String, GoalData)> {
+    let session_id = run_session_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    let goal = active_goal_for_session(&session_id)?;
+    Some((session_id, goal))
+}
+
 /// 契约 C3：goal-round 用户消息的唯一文案实现（宿主循环与 TUI 必须共用）。
 pub fn build_goal_round_message(objective: &str, round: u32, max_rounds: u32) -> String {
     format!(
