@@ -214,7 +214,7 @@ pub fn failed_turn_checkpoint_text(
 /// 禁止裸子串匹配：模型正文里引用「（本轮由用户终止的原因见 trace）」不是注记，
 /// 误判会让真实 reasoning 空洞逃过清洗（不变量 2）。
 ///
-/// 消费方：`has_legacy_reasoning_gap` 的豁免判定——中断轮 transcript 由这些注记承载
+/// 消费方：`first_legacy_reasoning_gap` 的豁免判定——中断轮 transcript 由这些注记承载
 /// 「本轮未产出最终回复」的事实，**不得**被 reasoning 缺口清洗整段清空。
 pub fn is_interrupt_placeholder_text(text: &str) -> bool {
     let trimmed = text.trim();
@@ -5109,16 +5109,28 @@ pub(crate) fn sanitize_provider_native_transcript(session: &mut SessionState) ->
         mutated = true;
     }
 
-    // 2. 检查 reasoning 模型的思维链缺口。仅当属于 reasoning 模型上下文且确实存在推理空洞时清空降级。
-    if has_legacy_reasoning_gap(&session.provider_native_transcript) {
-        session.provider_native_transcript.clear();
+    // 2. 检查 reasoning 模型的思维链缺口。缺口消息本身不可用（缺 reasoning 的 assistant 会让
+    //    上游 400），缺口之后的一切都建立在它之上、无法安全续接，故一并丢弃；缺口之前是完整
+    //    可复用的前缀，必须保留（B114：旧逻辑 clear() 整段，续跑时上下文全丢）。
+    if let Some(gap_index) = first_legacy_reasoning_gap(&session.provider_native_transcript) {
+        session.provider_native_transcript.truncate(gap_index);
+        // 截断可能把末尾留成孤儿 tool 结果（缺口紧跟在 tool 之后时），再走一次状态机自愈
+        // 保持尾部合法，杜绝 HTTP 400。
+        let (healed, _) = crate::agent::tool_pruner::repair_and_filter_tool_roundtrips(
+            &session.provider_native_transcript,
+        );
+        session.provider_native_transcript = healed;
         return true;
     }
 
     mutated
 }
 
-pub(crate) fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
+/// 首个 reasoning 缺口消息的下标（`None` = 无缺口），本判定的单一真源。
+///
+/// 消费方：`sanitize_provider_native_transcript` 据此做「截断到缺口前」的细粒度降级（B114）；
+/// 中断/失败轮闭合片段的「末条 assistant 必须带 reasoning」约束也以本判据为准。
+pub(crate) fn first_legacy_reasoning_gap(transcript: &[Value]) -> Option<usize> {
     // 只有当 transcript 中至少有一条【非中断注记】的消息带有非空的 reasoning_content 时，
     // 该 transcript 才属于真正的 reasoning 模型上下文；纯工具模型直接豁免！
     // D1：判据统一走 `is_interrupt_placeholder_text`（检查点 / 上游中断 / 用户终止三类注记）。
@@ -5132,12 +5144,12 @@ pub(crate) fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
             .unwrap_or(false)
     });
     if !is_reasoning_transcript {
-        return false;
+        return None;
     }
 
     let mut awaiting_tool_turn_reasoning = false;
 
-    for message in transcript {
+    for (index, message) in transcript.iter().enumerate() {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => {
                 awaiting_tool_turn_reasoning = false;
@@ -5162,7 +5174,7 @@ pub(crate) fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
                     .unwrap_or(true);
 
                 if (has_tool_calls || awaiting_tool_turn_reasoning) && missing_reasoning {
-                    return true;
+                    return Some(index);
                 }
 
                 if has_tool_calls {
@@ -5173,7 +5185,7 @@ pub(crate) fn has_legacy_reasoning_gap(transcript: &[Value]) -> bool {
         }
     }
 
-    false
+    None
 }
 
 fn reasoning_content_missing(value: &Value) -> bool {

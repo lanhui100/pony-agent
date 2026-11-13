@@ -2821,7 +2821,7 @@ fn removing_session_clears_attachment_catalog_without_full_refresh() {
 }
 
 #[test]
-fn snapshot_clears_tool_turn_transcript_when_final_assistant_lacks_reasoning() {
+fn snapshot_truncates_tool_turn_transcript_when_final_assistant_lacks_reasoning() {
     let session_id = "legacy-tool-final";
     let mut store = SessionStore::memory_only();
     store.sessions.insert(
@@ -2887,7 +2887,15 @@ fn snapshot_clears_tool_turn_transcript_when_final_assistant_lacks_reasoning() {
     );
 
     let snapshot = store.snapshot(Some(session_id), &[]);
-    assert!(snapshot.provider_native_transcript.is_empty());
+    // B114：缺口落在末条 assistant（tool 之后缺 reasoning），只丢弃该条，
+    // 前面已闭合的工具往返必须保留，不得整段清空。
+    assert_eq!(snapshot.provider_native_transcript.len(), 3);
+    assert_eq!(
+        snapshot.provider_native_transcript[2]
+            .get("tool_call_id")
+            .and_then(serde_json::Value::as_str),
+        Some("call_tool")
+    );
 }
 
 #[test]

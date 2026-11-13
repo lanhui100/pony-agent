@@ -31,7 +31,7 @@ Status: implemented
      1. 遇到无对应 `tool_calls` 的孤儿 `tool` 结果直接安全剔除，绝不透传给大模型（防御 HTTP 400）；
      2. 遇到连续 `assistant` 出现未闭合调用时立即在其之前就地补齐 synthetic tool 占位，恢复严格紧邻性；
      3. 遇到 `user` 边界或序列末尾时，补齐 synthetic tool 结果与 `[中断轮次检查点: 前序工具调用在返回前被中断]` assistant 消息（并附带合规思维链 `"（本轮在工具调用完成前被中断，无有效推理链）"`）；
-   - 修复 `has_legacy_reasoning_gap`：仅在会话中包含非中断检查点的有效 `reasoning_content` 时才进行推理空洞校验，且显式豁免检查点注记本身，彻底消除 reasoning 会话中断后的破坏性误杀；仅在不可伪造的推理链缺口发生时才降级清空。
+   - 修复 `has_legacy_reasoning_gap`：仅在会话中包含非中断检查点的有效 `reasoning_content` 时才进行推理空洞校验，且显式豁免检查点注记本身，彻底消除 reasoning 会话中断后的破坏性误杀；仅在不可伪造的推理链缺口发生时才降级。降级动作的后续演进见 `.agents/notes/implemented/bug-fix/2026-11-13-reasoning-gap-truncate-before-first-gap.md`（backlog:B114）：整段清空已收窄为「截断到首个缺口前」，判据本身不变。
 4. **尾部 User 内容身份锚定算法（防重复注入）**：
    - 读侧 `align_native_transcript_with_history` 采用基于 native 尾部 user 内容在 history 中倒序锚定的策略，仅追加锚点后真正未落盘的尾部新轮次，天然免疫 400 条滑动截断与切模型场景下的重复注入。
 5. **生产构建零污染门控**：

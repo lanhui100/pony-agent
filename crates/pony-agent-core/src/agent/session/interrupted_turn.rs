@@ -232,7 +232,7 @@ pub fn interrupted_turn_transcript_closure(
             "content": pending_tool_result_note(&call.name),
         }));
     }
-    // 末条 assistant 必须带 reasoning：`has_legacy_reasoning_gap` 会把「tool 之后的无
+    // 末条 assistant 必须带 reasoning：`first_legacy_reasoning_gap` 会把「tool 之后的无
     // reasoning assistant」判成 legacy 缺口并整段清空 transcript。这里写入的不是伪造的
     // 模型思考，而是**中断事实本身**（下一轮据此知道上一轮停在工具往返之后）。
     //
@@ -292,7 +292,7 @@ pub fn append_pending_closures_to_transcript(
 
 /// 单条 assistant 工具调用消息（OpenAI 家族形态：`tool_calls[].function.name/arguments`）。
 ///
-/// 必须同时写 `reasoning_content`：`session::store::has_legacy_reasoning_gap` 把
+/// 必须同时写 `reasoning_content`：`session::store::first_legacy_reasoning_gap` 把
 /// 「reasoning 会话里带 tool_calls 却没有 reasoning 的 assistant」判成 legacy 缺口，
 /// 命中即 `provider_native_transcript.clear()` **整段清空**（事故 RC1 的放大器，见 O2）。
 /// 这里写入的不是伪造的模型思考，而是**中断事实本身**——下一轮据此知道这一跳的

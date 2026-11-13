@@ -225,7 +225,7 @@ fn test_sanitize_transcript_exempts_non_reasoning_tool_calls() {
         }),
     ];
 
-    // 在旧逻辑中，has_legacy_reasoning_gap 会把 null 判为 gap，导致整段清空！
+    // 在旧逻辑中，first_legacy_reasoning_gap 会把 null 判为 gap，导致整段清空！
     let mutated = store::sanitize_provider_native_transcript(session);
     assert!(!session.provider_native_transcript.is_empty(), "非 reasoning 模型的正常工具调用绝不能被清空！");
     assert_eq!(session.provider_native_transcript.len(), 4);
@@ -267,7 +267,7 @@ fn test_sanitize_transcript_in_place_heals_incomplete_tool_roundtrip() {
 }
 
 #[test]
-fn test_sanitize_transcript_clears_real_legacy_reasoning_gap() {
+fn test_sanitize_transcript_truncates_real_legacy_reasoning_gap() {
     let mut store = SessionStore::memory_only();
     let session = store.ensure_session("test-reasoning-session");
     // 构造一个前面有 reasoning_content，但在后续 tool 往返中缺失 reasoning_content 的破损会话
@@ -303,11 +303,74 @@ fn test_sanitize_transcript_clears_real_legacy_reasoning_gap() {
             "tool_call_id": "call_reasoning",
             "content": "ok"
         }),
+        serde_json::json!({
+            "role": "assistant",
+            "content": "继续回答",
+            "reasoning_content": "缺口之后的思维链"
+        }),
     ];
 
     let mutated = store::sanitize_provider_native_transcript(session);
     assert!(mutated);
-    assert!(session.provider_native_transcript.is_empty(), "真正的 reasoning gap 必须清空降级以防上游模型崩溃！");
+    // B114：不再整段清空，改为截断到首个缺口之前——缺口前的合法前缀必须保留供续跑复用。
+    assert_eq!(
+        session.provider_native_transcript.len(),
+        3,
+        "只能丢弃首个缺口及其之后的消息，缺口前的合法前缀必须保留"
+    );
+    assert_eq!(
+        session.provider_native_transcript[2]
+            .get("content")
+            .and_then(serde_json::Value::as_str),
+        Some("继续工具调用")
+    );
+    assert!(
+        session.provider_native_transcript.iter().all(|msg| {
+            msg.get("tool_call_id")
+                .and_then(serde_json::Value::as_str)
+                != Some("call_reasoning")
+        }),
+        "缺口消息的 assistant 及其 tool 结果必须一并丢弃，不得留下孤儿往返"
+    );
+}
+
+#[test]
+fn test_sanitize_transcript_truncates_gap_after_tool_and_keeps_closed_roundtrip() {
+    let mut store = SessionStore::memory_only();
+    let session = store.ensure_session("test-reasoning-gap-after-tool");
+    // 缺口落在「tool 结果之后的第一条 assistant」：截断后末尾是已闭合的 tool 往返，必须原样保留。
+    session.provider_native_transcript = vec![
+        serde_json::json!({ "role": "user", "content": "第一问" }),
+        serde_json::json!({
+            "role": "assistant",
+            "content": "第一答",
+            "reasoning_content": "第一轮思维链"
+        }),
+        serde_json::json!({ "role": "user", "content": "跑个工具" }),
+        serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "第二轮思维链",
+            "tool_calls": [{
+                "id": "call_closed",
+                "type": "function",
+                "function": { "name": "run_command", "arguments": "{\"CommandLine\": \"true\"}" }
+            }]
+        }),
+        serde_json::json!({ "role": "tool", "tool_call_id": "call_closed", "content": "ok" }),
+        serde_json::json!({ "role": "assistant", "content": "缺口回答" }),
+    ];
+
+    let mutated = store::sanitize_provider_native_transcript(session);
+    assert!(mutated);
+    assert_eq!(session.provider_native_transcript.len(), 5);
+    assert_eq!(
+        session.provider_native_transcript[4]
+            .get("tool_call_id")
+            .and_then(serde_json::Value::as_str),
+        Some("call_closed"),
+        "缺口前已闭合的 tool 往返必须完整保留"
+    );
 }
 
 #[test]
@@ -349,7 +412,7 @@ fn test_sanitize_transcript_in_place_heals_incomplete_reasoning_tool_roundtrip()
     assert!(mutated, "未闭合 reasoning 工具往返自愈必须标记为已修改");
     assert!(
         !session.provider_native_transcript.is_empty(),
-        "中断未闭合 reasoning 工具往返必须自愈，绝不能被 has_legacy_reasoning_gap 二次误杀清空！"
+        "中断未闭合 reasoning 工具往返必须自愈，绝不能被 first_legacy_reasoning_gap 二次误杀清空！"
     );
     assert!(session.provider_native_transcript.iter().any(|msg| {
         msg.get("role").and_then(serde_json::Value::as_str) == Some("tool")

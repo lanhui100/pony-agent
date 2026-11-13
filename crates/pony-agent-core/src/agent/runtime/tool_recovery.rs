@@ -553,7 +553,7 @@ pub(super) fn native_transcript_for_tool_turn(
 ///    但构造层仍严格保持闭合性，杜绝把脏数据推给下游自愈。
 /// 2. **末条 assistant 必须补**：transcript 若以 `tool` 消息结尾，下一请求会出现
 ///    「tool 结果后直接接 user」的非法序列（Anthropic 直接 400）。
-/// 3. **末条 assistant 必须带 reasoning**：`has_legacy_reasoning_gap` 把「`tool` 之后的
+/// 3. **末条 assistant 必须带 reasoning**：`first_legacy_reasoning_gap` 把「`tool` 之后的
 ///    无 reasoning assistant」判成 legacy 缺口并清空整段 transcript。这里写入的不是伪造的
 ///    模型思考，而是**中断事实本身**（下一轮模型据此知道上一轮为什么停在工具结果）。
 ///
