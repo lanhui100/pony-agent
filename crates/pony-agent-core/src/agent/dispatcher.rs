@@ -80,6 +80,12 @@ pub struct DispatchContext {
     /// `Cancelled`，沿用既有错误词表）；`None` ⇒ 行为与此前完全一致（向后兼容）。
     #[serde(skip)]
     pub turn_cancellation: Option<Arc<crate::agent::budget::CancellationToken>>,
+    /// B128：是否为 goal 自动续轮（由 `<goal_round ...>` 消息识别）
+    #[serde(default)]
+    pub is_goal_round: bool,
+    /// B128：是否为直接人类发起的顶层轮次（非自动续轮、非子代理）
+    #[serde(default = "default_direct_human")]
+    pub is_direct_human: bool,
 }
 
 /// 宿主审批证据（PA-141，C-141-1 serde 形状冻结：camelCase）。
@@ -95,6 +101,10 @@ fn default_host_control_available() -> bool {
     true
 }
 
+fn default_direct_human() -> bool {
+    true
+}
+
 impl Default for DispatchContext {
     fn default() -> Self {
         Self {
@@ -106,6 +116,8 @@ impl Default for DispatchContext {
             plan_execution_approval: None,
             tool_authorization_mode: None,
             turn_cancellation: None,
+            is_goal_round: false,
+            is_direct_human: true,
         }
     }
 }

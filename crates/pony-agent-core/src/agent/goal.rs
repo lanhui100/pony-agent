@@ -570,6 +570,19 @@ fn resolve_session(session_id: Option<String>) -> String {
 
 pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
     let session = resolve_session(args.session_id);
+    let mut guard = goal_store_guard();
+    ensure_goal_store_loaded(&mut guard);
+    let goals = guard.as_mut().expect("goal store must be loaded");
+
+    if let Some(existing) = goals.get(&session) {
+        if existing.phase != "completed" {
+            return Err(format!(
+                "Goal already exists for session {session} in phase '{}'; cannot overwrite in-progress goal",
+                existing.phase
+            ));
+        }
+    }
+
     let goal_id = format!("goal-{}", Uuid::new_v4());
     let goal = GoalData {
         id: goal_id,
@@ -583,9 +596,6 @@ pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
         blocked_reason: None,
     };
 
-    let mut guard = goal_store_guard();
-    ensure_goal_store_loaded(&mut guard);
-    let goals = guard.as_mut().expect("goal store must be loaded");
     let previous = goals.get(&session).cloned();
     goals.insert(session.clone(), goal.clone());
 
@@ -639,20 +649,38 @@ pub fn update_goal(args: UpdateGoalArgs) -> Result<UpdateGoalResult, String> {
 
         match args.action {
             UpdateGoalAction::Pause => {
+                if current.phase != "active" {
+                    return Err(format!("Cannot pause goal in phase '{}'", current.phase));
+                }
                 current.phase = "paused".to_string();
                 current.activation = GoalActivation::Disarmed;
             }
             UpdateGoalAction::Resume => {
+                if current.phase == "completed" {
+                    return Err("Cannot resume a completed goal".to_string());
+                }
+                if current.rounds_started >= current.max_goal_rounds {
+                    return Err(format!(
+                        "Cannot resume goal: rounds budget exhausted ({}/{})",
+                        current.rounds_started, current.max_goal_rounds
+                    ));
+                }
                 current.phase = "active".to_string();
                 current.activation = GoalActivation::Armed;
                 current.blocked_reason = None;
             }
             UpdateGoalAction::Complete => {
+                if current.phase == "completed" {
+                    return Err("Goal is already completed".to_string());
+                }
                 current.phase = "completed".to_string();
                 current.activation = GoalActivation::Disarmed;
                 current.blocked_reason = None;
             }
             UpdateGoalAction::Blocked => {
+                if current.phase == "completed" {
+                    return Err("Cannot block a completed goal".to_string());
+                }
                 let reason = args
                     .blocked_reason
                     .ok_or_else(|| "Blocked action requires blocked_reason".to_string())?;
@@ -661,6 +689,9 @@ pub fn update_goal(args: UpdateGoalArgs) -> Result<UpdateGoalResult, String> {
                 current.blocked_reason = Some(reason);
             }
             UpdateGoalAction::Edit => {
+                if current.phase == "completed" {
+                    return Err("Cannot edit a completed goal".to_string());
+                }
                 if let Some(obj) = args.objective {
                     current.objective = obj;
                 }
@@ -839,6 +870,56 @@ mod tests {
         .unwrap();
         assert_eq!(complete_res.goal.phase, "completed");
         assert_eq!(complete_res.goal.activation, GoalActivation::Disarmed);
+
+        // B127 守卫断言：completed 状态为终态，不可复活、不可再次完成、不可 pause/edit/block
+        let resume_completed = update_goal(UpdateGoalArgs {
+            session_id: Some(session.clone()),
+            goal_id: create_res.goal.id.clone(),
+            revision: 5,
+            action: UpdateGoalAction::Resume,
+            objective: None,
+            blocked_reason: None,
+            max_goal_rounds: None,
+        });
+        assert!(resume_completed.is_err(), "Resume 必须拒绝复活已完成目标");
+
+        let pause_completed = update_goal(UpdateGoalArgs {
+            session_id: Some(session.clone()),
+            goal_id: create_res.goal.id.clone(),
+            revision: 5,
+            action: UpdateGoalAction::Pause,
+            objective: None,
+            blocked_reason: None,
+            max_goal_rounds: None,
+        });
+        assert!(pause_completed.is_err(), "Pause 必须拒绝暂停已完成目标");
+
+        let complete_again = update_goal(UpdateGoalArgs {
+            session_id: Some(session.clone()),
+            goal_id: create_res.goal.id.clone(),
+            revision: 5,
+            action: UpdateGoalAction::Complete,
+            objective: None,
+            blocked_reason: None,
+            max_goal_rounds: None,
+        });
+        assert!(complete_again.is_err(), "Complete 必须拒绝再次完成已完成目标");
+
+        // B127 守卫断言：因该 session 上目标已 completed，此时允许创建新目标覆盖
+        let recreate_res = create_goal(CreateGoalArgs {
+            session_id: Some(session.clone()),
+            objective: "Second Goal".to_string(),
+            max_goal_rounds: Some(5),
+        });
+        assert!(recreate_res.is_ok(), "当既有目标为 completed 时允许创建新目标覆盖");
+
+        // 当既有目标处于 active 时，再次 create_goal 必须被拒绝（防静默覆盖）
+        let overwrite_active = create_goal(CreateGoalArgs {
+            session_id: Some(session.clone()),
+            objective: "Third Goal (should fail)".to_string(),
+            max_goal_rounds: Some(5),
+        });
+        assert!(overwrite_active.is_err(), "create_goal 必须拒绝覆盖进行中目标");
     }
 }
 

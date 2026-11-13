@@ -1356,3 +1356,21 @@ note: >-
       `crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs`（C1–C8 功能契约 +
       `tests/acceptance/adversarial/interrupted_turn_resume/` 三类确定性破坏注入），
       以及 `cargo test -p pony-agent-core --lib` 的既有回归基线。
+  【宪法预算裁决结构化账（B142 / item-5）归属说明】
+  (1) 变更面：`agent/workspace_hotloader.rs` 的预算渲染器新增**返回结构化报告**
+      （`ConstitutionBudgetReport`：omitted{path, reason=duplicate_content|oversized_source|budget_exceeded}、
+      truncated{path, original_bytes, included_bytes}、clamped），并在
+      `resolve_constitution_with_budget` 内以 `tracing::warn!(target: "hotloader", …)` 留一条**本地**结构化日志。
+      模型可见文本逐字节不变（新增测试锁定：默认预算 report 为空、去重/超预算/截断各自记账）。
+  (2) 维度判定：logs 仍是结构性 N-A（桌面进程无常驻监听地址、无 /metrics、pull 模型不成立），
+      该 warn 只作本地取证面与测试锚点，不上报、不含凭据；metrics 维度不变。
+  (3) 收口点：不新增 enforcement_point（无新网络出口、无新异常边界）；行为门落在单测
+      `agent::workspace_hotloader::tests::constitution_report_*` 四条。
+
+  【归属登记（2026-11-13）｜goal 领域状态机合法迁移矩阵与模型工具权限门（ADR：.agents/notes/implemented/bug-fix/2026-11-13-goal-domain-guard-and-authority-gate.md；backlog: B127 / B128）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改变**本地领域层目标状态迁移校验**与**模型侧工具路由鉴权**，无新增外部网络 IO、无后台常驻任务、无 `/metrics` 出口。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs` 与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A。
+  (2) 变更面：
+      (2a) 领域层守卫：`agent/goal.rs::create_goal` 增加对进行中目标的防覆盖拦截；`update_goal` 引入合法迁移状态矩阵（pause/resume/complete/blocked/edit），禁止已完成目标复活或非法迁移。
+      (2b) 权限门：`agent/tools/orchestration.rs` 接入 `ToolExecutionContext.dispatch_context`，校验 `is_direct_human` 与 `is_goal_round`，阻止模型越权 pause/resume/complete 目标。
+  (3) 收口点：不新增 enforcement_point；行为门落在单测——`agent::goal::tests::test_goal_lifecycle_and_cas`、`agent::goal_command::tests::*`、`agent::tools::tests::orchestration::goal_tools_authority_gate_b128` 与黑盒验收测试 `tests/pa109_goal_acceptance.rs`。

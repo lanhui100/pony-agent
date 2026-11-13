@@ -407,6 +407,8 @@ fn execute_composite_shared(
 
     let mut lineage = context.lineage.clone();
     lineage.push(ready.descriptor.identity.descriptor_id.clone());
+    let mut child_dispatch_ctx = context.context.clone();
+    child_dispatch_ctx.is_direct_human = false;
     let child_context = ChildDispatchContext {
         parent_call_id: request.call_id.clone(),
         parent_descriptor_id: ready.descriptor.identity.descriptor_id.clone(),
@@ -415,7 +417,7 @@ fn execute_composite_shared(
         allowed_child_ids: runner.allowed_children_for(&ready.descriptor),
         ledger: Arc::clone(&context.ledger),
         cancellation: Arc::clone(&context.cancellation),
-        context: context.context.clone(),
+        context: child_dispatch_ctx,
         clock: Arc::clone(&context.clock),
         suspended: Arc::new(AtomicBool::new(false)),
     };

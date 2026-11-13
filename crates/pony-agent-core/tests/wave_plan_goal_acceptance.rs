@@ -98,6 +98,7 @@ fn assert_wait_user(decision: &GraphDecision, case: &str) {
 
 /// 创建 armed/active 目标（objective 刻意不含任何续行关键词，见 `goal_supports_auto_continue` 词表）。
 fn create_armed_goal(session_id: &str, objective: &str) -> pony_agent_core::agent::goal::GoalData {
+    let _ = pony_agent_core::agent::goal::clear_goal(session_id);
     create_goal(CreateGoalArgs {
         session_id: Some(session_id.to_string()),
         objective: objective.to_string(),

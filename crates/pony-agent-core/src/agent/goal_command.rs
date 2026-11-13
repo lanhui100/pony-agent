@@ -547,6 +547,10 @@ mod tests {
         assert!(completed.message.starts_with("目标已完成"));
         assert_eq!(completed.goal.map(|goal| goal.phase), Some("completed".to_string()));
         assert!(active_goal_for_session(session).is_none());
+
+        // B127 守卫：/goal resume 必须拒绝复活已完成目标
+        let resume_err = execute_goal_command(session, "resume").unwrap_err();
+        assert!(resume_err.contains("Cannot resume a completed goal"));
     }
 
     #[test]

@@ -459,6 +459,16 @@ impl ToolRouter {
     }
 
     pub(super) fn execute_create_goal(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        if let Some(dispatch_ctx) = context.dispatch_context.as_ref() {
+            if !dispatch_ctx.is_direct_human {
+                return error_result(
+                    TOOL_CREATE_GOAL,
+                    "goal_action_unauthorized",
+                    "create_goal requires direct human authority".to_string(),
+                    None,
+                );
+            }
+        }
         let mut args: Result<CreateGoalArgs, _> = serde_json::from_value(call.arguments.clone());
         if let Ok(parsed) = args.as_mut() {
             fill_session_from_context(&mut parsed.session_id, context);
@@ -519,26 +529,68 @@ impl ToolRouter {
         if let Ok(parsed) = args.as_mut() {
             fill_session_from_context(&mut parsed.session_id, context);
         }
-        match args {
-            Ok(args) => match update_goal(args) {
-                Ok(res) => ToolResult {
-                    tool_name: TOOL_UPDATE_GOAL.to_string(),
-                    status: "ok".to_string(),
-                    output: json_string(json!({
-                        "ok": true,
-                        "tool": TOOL_UPDATE_GOAL,
-                        "result": res,
-                    })),
-                    duration_ms: 0,
-                },
-                Err(err) => error_result(TOOL_UPDATE_GOAL, "update_goal_failed", err, None),
+        let args = match args {
+            Ok(args) => args,
+            Err(err) => {
+                return error_result(
+                    TOOL_UPDATE_GOAL,
+                    "invalid_arguments",
+                    format!("Failed to parse update_goal arguments: {}", err),
+                    None,
+                );
+            }
+        };
+
+        if let Some(dispatch_ctx) = context.dispatch_context.as_ref() {
+            match args.action {
+                UpdateGoalAction::Pause | UpdateGoalAction::Edit => {
+                    if !dispatch_ctx.is_direct_human {
+                        return error_result(
+                            TOOL_UPDATE_GOAL,
+                            "goal_action_unauthorized",
+                            format!("Action '{:?}' requires direct human authority", args.action),
+                            None,
+                        );
+                    }
+                }
+                UpdateGoalAction::Resume => {
+                    if !dispatch_ctx.is_direct_human {
+                        return error_result(
+                            TOOL_UPDATE_GOAL,
+                            "goal_action_unauthorized",
+                            "resume action requires direct human authority (cannot resume without human initiation)".to_string(),
+                            None,
+                        );
+                    }
+                }
+                UpdateGoalAction::Complete | UpdateGoalAction::Blocked => {
+                    if !dispatch_ctx.is_direct_human && !dispatch_ctx.is_goal_round {
+                        return error_result(
+                            TOOL_UPDATE_GOAL,
+                            "goal_action_unauthorized",
+                            format!(
+                                "Action '{:?}' requires direct human authority or an active goal round",
+                                args.action
+                            ),
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+
+        match update_goal(args) {
+            Ok(res) => ToolResult {
+                tool_name: TOOL_UPDATE_GOAL.to_string(),
+                status: "ok".to_string(),
+                output: json_string(json!({
+                    "ok": true,
+                    "tool": TOOL_UPDATE_GOAL,
+                    "result": res,
+                })),
+                duration_ms: 0,
             },
-            Err(err) => error_result(
-                TOOL_UPDATE_GOAL,
-                "invalid_arguments",
-                format!("Failed to parse update_goal arguments: {}", err),
-                None,
-            ),
+            Err(err) => error_result(TOOL_UPDATE_GOAL, "update_goal_failed", err, None),
         }
     }
 

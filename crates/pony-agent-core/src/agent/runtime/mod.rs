@@ -439,6 +439,8 @@ impl AgentRuntime {
         } else {
             self.workspace_root.clone()
         };
+        let is_goal_round = crate::agent::goal::is_goal_round_prompt(&input.message);
+        let is_direct_human = !is_goal_round;
         Some(DispatchContext {
             session_id: input.session_id.clone(),
             run_id: facts.run_id.clone(),
@@ -448,6 +450,8 @@ impl AgentRuntime {
             plan_execution_approval: input.plan_execution_approval.clone(),
             tool_authorization_mode: input.tool_authorization_mode.clone(),
             turn_cancellation: None,
+            is_goal_round,
+            is_direct_human,
         })
     }
 

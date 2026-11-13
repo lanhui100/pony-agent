@@ -63,6 +63,7 @@ fn dispatch_context(turn_cancellation: Option<Arc<CancellationToken>>) -> Dispat
         plan_execution_approval: None,
         tool_authorization_mode: None,
         turn_cancellation,
+        ..Default::default()
     }
 }
 

@@ -14,9 +14,12 @@ use pony_agent_core::agent::tools::{
 static GOAL_STORE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn goal_store_guard() -> std::sync::MutexGuard<'static, ()> {
-    GOAL_STORE_TEST_LOCK
+    let guard = GOAL_STORE_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pony_agent_core::agent::goal::reset_goal_store_for_test();
+    let _ = pony_agent_core::agent::goal::clear_goal("default");
+    guard
 }
 
 #[test]
@@ -98,6 +101,18 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
     };
     let completed = update_goal(complete_args).unwrap();
     assert_eq!(completed.goal.phase, "completed");
+
+    // B127 守卫：completed 不可被 resume
+    let illegal_resume = UpdateGoalArgs {
+        session_id: None,
+        goal_id: created.goal.id.clone(),
+        revision: 4,
+        action: UpdateGoalAction::Resume,
+        objective: None,
+        blocked_reason: None,
+        max_goal_rounds: None,
+    };
+    assert!(update_goal(illegal_resume).is_err(), "Resume on completed goal must fail");
 }
 
 #[test]

@@ -459,3 +459,125 @@ fn tool_router_executes_todo_write_and_todo_list_lifecycle() {
 
     let _ = std::fs::remove_dir_all(&workspace);
 }
+
+#[test]
+fn goal_tools_authority_gate_b128() {
+    let workspace = temp_workspace();
+    let router = ToolRouter::with_workspace_root(workspace.clone());
+    let session = "b128-auth-session";
+    let _ = crate::agent::goal::clear_goal(session);
+
+    let call = |name: &str, arguments: serde_json::Value| ToolCall {
+        name: name.to_string(),
+        arguments,
+        call_id: Some("b128-test".to_string()),
+        plan: None,
+    };
+
+    // 1. 非人类轮次（例如子代理或自主非人类轮）尝试 create_goal -> 必须被权限门拦截
+    let non_human_ctx = ToolExecutionContext {
+        workspace_root: Some(workspace.clone()),
+        session_id: Some(session.to_string()),
+        dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
+            session_id: Some(session.to_string()),
+            is_direct_human: false,
+            is_goal_round: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let unauth_create = router.execute_with_context(
+        &call(
+            "create_goal",
+            json!({ "session_id": session, "objective": "自主新建目标" }),
+        ),
+        &non_human_ctx,
+    );
+    assert_eq!(unauth_create.status, "error");
+    assert!(unauth_create.output.contains("goal_action_unauthorized"));
+
+    // 2. 人类直接轮次 -> 允许 create_goal
+    let human_ctx = ToolExecutionContext {
+        workspace_root: Some(workspace.clone()),
+        session_id: Some(session.to_string()),
+        dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
+            session_id: Some(session.to_string()),
+            is_direct_human: true,
+            is_goal_round: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let auth_create = router.execute_with_context(
+        &call(
+            "create_goal",
+            json!({ "session_id": session, "objective": "人类批准的目标" }),
+        ),
+        &human_ctx,
+    );
+    assert_eq!(auth_create.status, "ok", "create_goal 必须成功: {}", auth_create.output);
+    let create_payload: Value = serde_json::from_str(&auth_create.output).unwrap();
+    let goal_id = create_payload["result"]["goal"]["id"].as_str().unwrap();
+
+    // 3. 人类暂停该目标
+    let pause_call = call(
+        "update_goal",
+        json!({
+            "session_id": session,
+            "goal_id": goal_id,
+            "revision": 1,
+            "action": "pause"
+        }),
+    );
+    let pause_res = router.execute_with_context(&pause_call, &human_ctx);
+    assert_eq!(pause_res.status, "ok");
+
+    // 4. 非人类自主轮次（模型）尝试自行 resume 暂停的目标 -> 必须被权限门拦截
+    let resume_call = call(
+        "update_goal",
+        json!({
+            "session_id": session,
+            "goal_id": goal_id,
+            "revision": 2,
+            "action": "resume"
+        }),
+    );
+    let unauth_resume = router.execute_with_context(&resume_call, &non_human_ctx);
+    assert_eq!(unauth_resume.status, "error");
+    assert!(unauth_resume.output.contains("goal_action_unauthorized"));
+
+    // 5. 人类可以 resume 目标
+    let auth_resume = router.execute_with_context(&resume_call, &human_ctx);
+    assert_eq!(auth_resume.status, "ok");
+
+    // 6. 普通非人类非 goal 轮尝试 complete -> 必须被权限门拦截
+    let complete_call = call(
+        "update_goal",
+        json!({
+            "session_id": session,
+            "goal_id": goal_id,
+            "revision": 3,
+            "action": "complete"
+        }),
+    );
+    let unauth_complete = router.execute_with_context(&complete_call, &non_human_ctx);
+    assert_eq!(unauth_complete.status, "error");
+    assert!(unauth_complete.output.contains("goal_action_unauthorized"));
+
+    // 7. goal-round 轮次允许模型 complete
+    let goal_round_ctx = ToolExecutionContext {
+        workspace_root: Some(workspace.clone()),
+        session_id: Some(session.to_string()),
+        dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
+            session_id: Some(session.to_string()),
+            is_direct_human: false,
+            is_goal_round: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let auth_complete = router.execute_with_context(&complete_call, &goal_round_ctx);
+    assert_eq!(auth_complete.status, "ok", "goal round 必须允许 complete: {}", auth_complete.output);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
