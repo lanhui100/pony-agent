@@ -13240,7 +13240,16 @@ fn start_turn_stream_stops_batch_at_interactive_ask_and_leaves_remaining_calls_u
 
 // ─────────── D4（W28b）：批内执行段的**并发接线**（`PONY_AGENT_PARALLEL_TOOLS`，默认关） ───────────
 
-const PARALLEL_PROBE_DELAY_MS: u64 = 60;
+/// 并发探针的**有界集合点**预算：进入后等「峰值达到期望值」或预算耗尽。
+///
+/// 取代「固定 `sleep(60ms)` 制造重叠窗口」：固定窗口下「并发是否被观测到」取决于负载下的
+/// 线程调度抖动（本机全量并行跑时偶红——第二路线程在 60ms 窗口内没被调度到，`peak` 就停在 1）；
+/// 集合点只依赖「并发是否真的发生」，并发成立时毫秒级返回，不成立时预算耗尽后照常返回。
+const PARALLEL_PROBE_RENDEZVOUS_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 串行负控的**观测窗口**：给「可能存在的并发对端」一段有界机会；窗口耗尽仍未出现第二路，
+/// 即构成本用例的串行证据（有界、可复算，不是用固定 sleep 伪装出来的「看起来串行」）。
+const PARALLEL_PROBE_SERIAL_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// 用例级开关覆写守卫：panic 也能还原（并行跑的其他用例不受影响）。
 struct ParallelToolsFlag(Option<bool>);
@@ -13259,22 +13268,29 @@ fn with_parallel_tools(enabled: bool) -> ParallelToolsFlag {
 ///
 /// - `entries`：`(工具名, 进入时在途并发数)`，按真实进入顺序（并发下非确定，只作并发证据）；
 /// - `peak`：实测峰值并发 —— `>= 2` 才证明并发**确实发生**（不是「两个都执行了」）；
-/// - `delay`：制造重叠窗口；若执行仍是串行的，`peak` 恒为 1；
+/// - `expected_peak` + `wait_budget`：**有界集合点**（见 [`PARALLEL_PROBE_RENDEZVOUS_BUDGET`]）。
+///   进入后最多等 `wait_budget`，直到实测峰值达到 `expected_peak`；并发成立时集合点在毫秒级
+///   返回（与调度抖动无关），串行执行时窗口耗尽后照常返回且 `peak` 保持 1；
 /// - `ask_user` 复用 D3a 的挂起标记形态（`control_outcome_pending`），其余调用返回 ok。
 struct ConcurrencyProbeToolExecutor {
     entries: Arc<Mutex<Vec<(String, usize)>>>,
     active: Arc<std::sync::atomic::AtomicUsize>,
     peak: Arc<std::sync::atomic::AtomicUsize>,
-    delay: std::time::Duration,
+    expected_peak: usize,
+    wait_budget: std::time::Duration,
+    /// 集合点的唤醒通道（`Mutex` + `Condvar`）；真正的条件是 `active`/`peak` 两个原子值。
+    rendezvous: Arc<(Mutex<()>, std::sync::Condvar)>,
 }
 
 impl ConcurrencyProbeToolExecutor {
-    fn new(delay_ms: u64) -> Self {
+    fn new(expected_peak: usize, wait_budget: std::time::Duration) -> Self {
         Self {
             entries: Arc::new(Mutex::new(Vec::new())),
             active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             peak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            delay: std::time::Duration::from_millis(delay_ms),
+            expected_peak,
+            wait_budget,
+            rendezvous: Arc::new((Mutex::new(()), std::sync::Condvar::new())),
         }
     }
 
@@ -13316,7 +13332,33 @@ impl crate::agent::tools::ToolExecutor for ConcurrencyProbeToolExecutor {
             .lock()
             .unwrap()
             .push((call.name.clone(), active_at_entry));
-        std::thread::sleep(self.delay);
+        // 有界集合点：等「峰值达到期望值」或预算耗尽（取代固定 sleep 造出来的重叠窗口）。
+        // 顺序要点：先登记 active/peak，再等待——并发对端只要进入就一定能让条件成立。
+        let deadline = std::time::Instant::now() + self.wait_budget;
+        let mut guard = self
+            .rendezvous
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while self
+            .peak
+            .load(std::sync::atomic::Ordering::SeqCst)
+            < self.expected_peak
+        {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            guard = self
+                .rendezvous
+                .1
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        drop(guard);
+        // 本调用已在途，唤醒可能在等它的对端。
+        self.rendezvous.1.notify_all();
         self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
         let is_ask = crate::agent::tools::canonical_tool_name(&call.name)
@@ -13420,12 +13462,14 @@ fn run_turn_parallel_tools_executes_concurrent_safe_segment_concurrently() {
         ])),
         json_completion(final_text),
     ]);
-    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let probe = ConcurrencyProbeToolExecutor::new(2, PARALLEL_PROBE_RENDEZVOUS_BUDGET);
     let observed = ConcurrencyProbeToolExecutor {
         entries: Arc::clone(&probe.entries),
         active: Arc::clone(&probe.active),
         peak: Arc::clone(&probe.peak),
-        delay: probe.delay,
+        expected_peak: probe.expected_peak,
+        wait_budget: probe.wait_budget,
+        rendezvous: Arc::clone(&probe.rendezvous),
     };
     let runtime = build_runtime_for_test_with_tool_executor(
         test_provider_selection(server.base_url.clone()),
@@ -13496,12 +13540,14 @@ fn run_turn_parallel_tools_keeps_run_out_of_parallel_segment() {
         ])),
         json_completion("三个工具都已执行完成。"),
     ]);
-    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let probe = ConcurrencyProbeToolExecutor::new(2, PARALLEL_PROBE_RENDEZVOUS_BUDGET);
     let observed = ConcurrencyProbeToolExecutor {
         entries: Arc::clone(&probe.entries),
         active: Arc::clone(&probe.active),
         peak: Arc::clone(&probe.peak),
-        delay: probe.delay,
+        expected_peak: probe.expected_peak,
+        wait_budget: probe.wait_budget,
+        rendezvous: Arc::clone(&probe.rendezvous),
     };
     let runtime = build_runtime_for_test_with_tool_executor(
         test_provider_selection(server.base_url.clone()),
@@ -13559,12 +13605,14 @@ fn run_turn_parallel_tools_off_keeps_serial_execution() {
         ])),
         json_completion("两个工具都已执行完成。"),
     ]);
-    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let probe = ConcurrencyProbeToolExecutor::new(2, PARALLEL_PROBE_SERIAL_WINDOW);
     let observed = ConcurrencyProbeToolExecutor {
         entries: Arc::clone(&probe.entries),
         active: Arc::clone(&probe.active),
         peak: Arc::clone(&probe.peak),
-        delay: probe.delay,
+        expected_peak: probe.expected_peak,
+        wait_budget: probe.wait_budget,
+        rendezvous: Arc::clone(&probe.rendezvous),
     };
     let runtime = build_runtime_for_test_with_tool_executor(
         test_provider_selection(server.base_url.clone()),
@@ -13613,12 +13661,14 @@ fn start_turn_stream_parallel_tools_executes_concurrent_safe_segment_concurrentl
         ]),
         json_completion(final_text),
     ]);
-    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let probe = ConcurrencyProbeToolExecutor::new(2, PARALLEL_PROBE_RENDEZVOUS_BUDGET);
     let observed = ConcurrencyProbeToolExecutor {
         entries: Arc::clone(&probe.entries),
         active: Arc::clone(&probe.active),
         peak: Arc::clone(&probe.peak),
-        delay: probe.delay,
+        expected_peak: probe.expected_peak,
+        wait_budget: probe.wait_budget,
+        rendezvous: Arc::clone(&probe.rendezvous),
     };
     let mut runtime = build_runtime_for_test_with_tool_executor(
         test_provider_selection(server.base_url.clone()),
@@ -13692,12 +13742,14 @@ fn start_turn_stream_parallel_tools_keeps_ask_out_of_parallel_segment_and_still_
         ("workspace_read_file", json!({"path": "tauri.conf.json"})),
         ("ask_user", json!({"question": "继续吗？"})),
     ])]);
-    let probe = ConcurrencyProbeToolExecutor::new(PARALLEL_PROBE_DELAY_MS);
+    let probe = ConcurrencyProbeToolExecutor::new(2, PARALLEL_PROBE_RENDEZVOUS_BUDGET);
     let observed = ConcurrencyProbeToolExecutor {
         entries: Arc::clone(&probe.entries),
         active: Arc::clone(&probe.active),
         peak: Arc::clone(&probe.peak),
-        delay: probe.delay,
+        expected_peak: probe.expected_peak,
+        wait_budget: probe.wait_budget,
+        rendezvous: Arc::clone(&probe.rendezvous),
     };
     let mut runtime = build_runtime_for_test_with_tool_executor(
         test_provider_selection(server.base_url.clone()),

@@ -191,17 +191,20 @@ fn run_command_returns_error_for_non_zero_exit_code() {
 fn run_command_returns_timeout_error_when_command_exceeds_deadline() {
     // 契约 v5 / CT-P6：本用例锁的是「promote 关闭」时的波次一超时错误路径（到期必须
     // `error.code=timeout`），而 promote 默认开启会把同一输入变成 ok+promoted。
-    // 故在用例内 pin 开关为关闭，并在退出（含 panic）时复位，避免污染同二进制的其它用例。
-    struct PromoteOffPin;
+    //
+    // 稳定性说明（B137）：pin 走**thread-local 覆写**而不是进程级 `set_var`。旧写法在用例
+    // 存续期间改写了整进程的 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT`，同二进制里并行跑的其它
+    // Run 用例会读到这个被改写/随后被删除的值（promote 语义随调度漂移），这是负载敏感偶红的
+    // 结构性来源；thread-local 覆写（`set_promote_on_timeout_override`）语义不变、影响面收敛到本用例。
+    struct PromoteOffPin(Option<bool>);
     impl PromoteOffPin {
         fn new() -> Self {
-            std::env::set_var(RUN_PROMOTE_ON_TIMEOUT_ENV, "0");
-            Self
+            Self(set_promote_on_timeout_override(Some(false)))
         }
     }
     impl Drop for PromoteOffPin {
         fn drop(&mut self) {
-            std::env::remove_var(RUN_PROMOTE_ON_TIMEOUT_ENV);
+            set_promote_on_timeout_override(self.0);
         }
     }
 

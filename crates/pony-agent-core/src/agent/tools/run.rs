@@ -773,6 +773,19 @@ pub fn classify_timeout_hint(command: &str) -> String {
     TIMEOUT_HINT_BACKGROUND_ADVICE.to_string()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `Some(bool)` ⇒ 用例显式覆写 promote 开关（`None` = 未覆写，回落 env）。
+    static PROMOTE_ON_TIMEOUT_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// 测试专用：设置 promote 开关覆写，返回先前的覆写值（便于用例收尾还原）。
+#[cfg(test)]
+pub(super) fn set_promote_on_timeout_override(value: Option<bool>) -> Option<bool> {
+    PROMOTE_ON_TIMEOUT_OVERRIDE.with(|slot| slot.replace(value))
+}
+
 /// 契约 v7 / CT-P9：Run 超时 promote 开关（**默认开启，opt-out**）。
 ///
 /// 语义（BT014 默认翻转）：
@@ -781,6 +794,16 @@ pub fn classify_timeout_hint(command: &str) -> String {
 /// - `0`/`false`/`off`/`no` ⇒ `false`（回到「kill + `error.code=timeout`」的波次一行为）；
 /// - **未识别值** ⇒ 回落默认 `true`，但打一条 warn —— 避免「开关拼错却静默生效」。
 pub(super) fn run_promote_on_timeout_enabled() -> bool {
+    // 测试覆写为什么用 thread_local 而不是进程级 env：Run 在调用线程上同步执行，thread_local
+    // 既能让用例精确注入「promote 关闭」的波次一语义，又不会污染并行跑的其他用例
+    // （进程级 `set_var` 会被同二进制的并发用例读到，是负载敏感 flaky 的温床）。
+    #[cfg(test)]
+    {
+        if let Some(override_value) = PROMOTE_ON_TIMEOUT_OVERRIDE.with(|slot| slot.get()) {
+            return override_value;
+        }
+    }
+
     let Ok(value) = std::env::var(RUN_PROMOTE_ON_TIMEOUT_ENV) else {
         return true;
     };

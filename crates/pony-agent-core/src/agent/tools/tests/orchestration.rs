@@ -1,6 +1,15 @@
 //! 编排桥接工具：job/team/goal/todo/present/spill 等处理器。
 use super::*;
 
+/// B012 用例后台作业的自身生命周期（非 Windows：`sh -c 'echo <marker>; sleep 5'`）。
+const B012_JOB_LIFETIME_SECS: u64 = 5;
+
+/// 等 marker 的**失败上界**（不是断言口径）：marker 一旦出现立即返回，预算只决定「失败报告
+/// 迟到多久」。旧值直接取 5s = 作业生命周期，等于把「spawn + 作业登记 + 首次读输出必须在
+/// 5s 内跑完」写成隐含前提；全量并行负载下这会偶发假失败。取生命周期 ×6 覆盖排队抖动，
+/// 断言语义（owner 必须读到 marker）不变。
+const B012_MARKER_WAIT_BUDGET: Duration = Duration::from_secs(B012_JOB_LIFETIME_SECS * 6);
+
 /// B012：job_* 工具的会话归属在**工具路径**上的物理证据（error 码 + owner 正控读到 marker）。
 ///
 /// 与 `tests/job_session_scope_test.rs` 同源但用途不同：那条是可执行验收，这条专门打印
@@ -32,7 +41,10 @@ fn job_tools_enforce_session_ownership_b012() {
     #[cfg(not(windows))]
     let (program, args) = (
         "sh",
-        vec!["-c".to_string(), format!("echo {MARKER}; sleep 5")],
+        vec![
+            "-c".to_string(),
+            format!("echo {MARKER}; sleep {B012_JOB_LIFETIME_SECS}"),
+        ],
     );
 
     let call = |name: &str, arguments: serde_json::Value, tag: &str| ToolCall {
@@ -59,7 +71,8 @@ fn job_tools_enforce_session_ownership_b012() {
 
     let read_args = json!({ "jobId": job_id, "wait": false });
     // 前置：owner 必须真实读到 marker（否则「跨会话不泄露」无鉴别力）。
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // 条件等待 + 有界失败上界：见 [`B012_MARKER_WAIT_BUDGET`]。
+    let deadline = Instant::now() + B012_MARKER_WAIT_BUDGET;
     loop {
         let probe = router.execute_with_context(
             &call(TOOL_JOB_OUTPUT, read_args.clone(), "probe"),

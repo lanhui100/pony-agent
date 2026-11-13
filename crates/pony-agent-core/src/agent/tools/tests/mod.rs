@@ -11,9 +11,9 @@ use crate::agent::tools::composite::MAX_GATHER_CONTEXT_PATHS;
 use crate::agent::tools::composite::MAX_WORKSPACE_BATCH_CALLS;
 use crate::agent::tools::exec::error_result_with_evidence;
 use crate::agent::tools::paths::normalize_if_verbatim;
-use crate::agent::tools::run::RUN_PROMOTE_ON_TIMEOUT_ENV;
 use crate::agent::tools::run::build_windows_batch_script;
 use crate::agent::tools::run::posix_inline_env_assignment_reason;
+use crate::agent::tools::run::set_promote_on_timeout_override;
 use crate::agent::tools::run::windows_command_not_found_hint;
 use crate::agent::tools::run::workspace_command_parts_with_batch;
 use crate::agent::tools::web::PinnedFetchError;
@@ -233,6 +233,9 @@ struct DelayedPinnedSender {
     delay_ms: u64,
     respect_timeout: bool,
     calls: Mutex<Vec<(String, u64)>>,
+    /// 每次调用的**采样时刻**（与 `calls` 一一对应）：把时序断言自校准到「同一 deadline 在该
+    /// 时刻的剩余量」，取代「测试准备阶段必须在固定 slack 内跑完」这种负载敏感假设。
+    call_instants: Mutex<Vec<(String, u64, Instant)>>,
 }
 
 impl DelayedPinnedSender {
@@ -249,11 +252,17 @@ impl DelayedPinnedSender {
             delay_ms,
             respect_timeout,
             calls: Mutex::new(Vec::new()),
+            call_instants: Mutex::new(Vec::new()),
         }
     }
 
     fn calls(&self) -> Vec<(String, u64)> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// `(url, 被授予的超时 ms, 采样时刻)`：时序断言以采样时刻的剩余预算为基准。
+    fn calls_with_instant(&self) -> Vec<(String, u64, Instant)> {
+        self.call_instants.lock().unwrap().clone()
     }
 }
 
@@ -264,10 +273,16 @@ impl PinnedSender for DelayedPinnedSender {
         _decision: &WebAccessDecision,
         timeout_ms: u64,
     ) -> Result<PinnedHttpExchange, WebFetchTransportError> {
+        let sampled_at = Instant::now();
         self.calls
             .lock()
             .unwrap()
             .push((url.to_string(), timeout_ms));
+        self.call_instants.lock().unwrap().push((
+            url.to_string(),
+            timeout_ms,
+            sampled_at,
+        ));
         if self.respect_timeout && self.delay_ms >= timeout_ms {
             return Err(WebFetchTransportError::Request(format!(
                 "timeout: 抓取 URL 超时（该跳 granted {timeout_ms} ms）。"

@@ -723,7 +723,8 @@ fn pinned_chain_exceeds_aggregate_deadline_and_is_cut_short() {
         .iter()
         .map(|(k, v)| (k.as_str(), v.clone()))
         .collect();
-    let sender = DelayedPinnedSender::with_script(&entries_ref, 400, false);
+    let hop_delay_ms = 400_u64;
+    let sender = DelayedPinnedSender::with_script(&entries_ref, hop_delay_ms, false);
 
     let budget_ms = 1050_u64;
     let deadline = Instant::now() + Duration::from_millis(budget_ms);
@@ -760,10 +761,14 @@ fn pinned_chain_exceeds_aggregate_deadline_and_is_cut_short() {
             "per-hop timeout must be clamped by the remaining budget; granted {granted}"
         );
     }
-    // Total elapsed stayed within the budget (not hops × per-hop timeout).
+    // Total elapsed must stay **below the cost of the whole scripted chain**: running all six
+    // hops would take 6 × 400 ms, so anything less proves the chain was cut structurally.
+    // 以「跳数 × 每跳延迟」为结构性上界而非「budget + 固定 1s」：后者在负载下会被调度抖动
+    // 击穿（固定 slack），前者的语义是「没有跑完整条链」，与机器负载无关。
+    let scripted_chain_ms = hop_delay_ms * entries.len() as u64;
     assert!(
-        elapsed < Duration::from_millis(budget_ms + 1000),
-        "chain must fail within the budget; elapsed {elapsed:?}"
+        elapsed < Duration::from_millis(scripted_chain_ms),
+        "chain must be cut before every scripted hop runs; elapsed {elapsed:?}, full chain {scripted_chain_ms} ms"
     );
 }
 
@@ -806,16 +811,24 @@ fn single_slow_hop_is_truncated_by_remaining_chain_budget() {
         }
         other => panic!("slow single hop must fail as a timeout; got {other:?}"),
     }
-    let calls = sender.calls();
+    let calls = sender.calls_with_instant();
     assert_eq!(calls.len(), 1);
-    let (_, granted) = &calls[0];
+    let (_, granted, sampled_at) = &calls[0];
     assert!(
         *granted <= budget_ms,
         "hop timeout must be clamped to the remaining budget; granted {granted}"
     );
+    // 自校准断言：基准是「同一 deadline 在该次调用时刻的剩余量」，而不是「budget - 固定容差」。
+    // 固定容差把「测试准备阶段（建 router / 解析脚本 / 调度线程）必须在 50ms 内跑完」写成了
+    // 隐含前提——这是纯粹的负载依赖项（机器越忙、测试进程越挤，越容易击穿）；改为同一 deadline
+    // 的两次采样后，允许的偏差只剩「钳制点 → 采样点」的亚毫秒级抖动（`as_millis` 截断各 1ms，
+    // 故取 5ms 上界）。
+    let remaining_at_call_ms = deadline.saturating_duration_since(*sampled_at).as_millis() as u64;
+    let sampling_skew_ms = 5_u64;
     assert!(
-        *granted >= budget_ms - 50,
-        "clamp must leave the whole remaining budget to the hop; granted {granted}"
+        *granted + sampling_skew_ms >= remaining_at_call_ms
+            && *granted <= remaining_at_call_ms + sampling_skew_ms,
+        "clamp must hand the whole remaining budget to the hop; granted {granted} ms, remaining at call {remaining_at_call_ms} ms"
     );
 }
 
