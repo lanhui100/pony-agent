@@ -329,17 +329,25 @@ mod tests {
             "至少应写入 1600 行，实际 {}",
             lines.len()
         );
+        // 全局 sink 是进程级单槽：并行测试（其他模块也在写日志）会把各自的行写进同一文件。
+        // 本用例的结构性不变量 = ①每一行都是完整 JSON（交错/截断必被抓）；②本用例的
+        // 8×200 行一条不少且 level 恒为 warn。外来行不参与 level 判定——否则断言实际在检
+        // 「同一文件里只有本用例写过日志」这一非契约前提（B146）。
+        let mut own_lines = 0_usize;
         for (index, line) in lines.iter().enumerate() {
-            let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
-            assert!(
-                parsed.is_ok(),
-                "L3-A#3：第 {index} 行不是完整 JSON（并发写交错）：{line}"
-            );
-            assert_eq!(
-                parsed.expect("checked")["level"], "warn",
-                "第 {index} 行 level 字段异常"
-            );
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|err| {
+                panic!("L3-A#3：第 {index} 行不是完整 JSON（并发写交错）：{line} / {err}")
+            });
+            let message = parsed["message"].as_str().unwrap_or_default();
+            if message.starts_with("thread=") {
+                own_lines += 1;
+                assert_eq!(
+                    parsed["level"], "warn",
+                    "第 {index} 行 level 字段异常（本用例只写 warn）"
+                );
+            }
         }
+        assert_eq!(own_lines, 8 * 200, "本用例写入行数必须完整（无丢行）");
 
         let _ = std::fs::remove_file(&path);
     }
