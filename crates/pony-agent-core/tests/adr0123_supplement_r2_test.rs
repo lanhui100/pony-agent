@@ -11,6 +11,9 @@
 //!
 //! 零假测试：每个用例均有硬断言，禁止 `#[ignore]`、`unwrap_or`、吞异常。
 
+use pony_agent_core::agent::session::interrupted_turn::{
+    interrupted_turn_assistant_text_with_header_steps, ClosedToolStep,
+};
 use pony_agent_core::agent::session::{
     failed_turn_checkpoint_text, interrupted_turn_checkpoint_text, is_interrupt_placeholder_text,
     UPSTREAM_INTERRUPTED_NOTE, USER_CANCELLED_NOTE,
@@ -504,8 +507,9 @@ fn failed_turn_events(turn_id: &str, failure_reason: Option<&str>) -> Vec<(u64, 
 }
 
 /// T-B1a（B1-1）：事件重投影（`projection::fold_all`）产出的失败轮检查点文本必须与
-/// 写路径**逐字同源**：经 `failed_turn_checkpoint_text`（含失败原因 + `name + description`
-/// 工具行），且「失败原因」行位于「已执行的工具步骤：」之前；
+/// 写路径**逐字同源**：两者共用收口入口 `interrupted_turn_assistant_text_with_header_steps`
+/// （头部 = `failed_turn_checkpoint_text`，含失败原因 + `name + description` 工具行；
+/// 其后追加「已完成的工具结果」段），且「失败原因」行位于「已执行的工具步骤：」之前；
 /// 旧日志（`turn/end.error` 缺失）必须逐字退化为既有中断形态（无失败原因行）。
 #[test]
 fn t_b1a_reprojected_failed_turn_checkpoint_is_same_source_as_write_path() {
@@ -549,12 +553,25 @@ fn t_b1a_reprojected_failed_turn_checkpoint_is_same_source_as_write_path() {
         messages[1].turn_id
     );
 
-    // Assert 3：与写路径纯函数**逐字同源**（含 name + description 工具行）
-    let expected = failed_turn_checkpoint_text("已做一半", &["Run 探测端口".to_string()], reason)
-        .expect("非空入参必须产出检查点文本");
+    // Assert 3：与写路径**逐字同源**（含 name + description 工具行）
+    //
+    // 2026-11-14 校准：生产写路径（`runtime/turn_persist.rs`）与投影（`projection.rs`）共用
+    // 收口入口 `interrupted_turn_assistant_text_with_header_steps`（其头部即
+    // `failed_turn_checkpoint_text` 的输出，再追加「已完成的工具结果」段）。故同源断言的
+    // 期望值取**同一入口**：内联头部函数只能命中「结果段之前」的片段，已不再是写路径全貌。
+    let expected = interrupted_turn_assistant_text_with_header_steps(
+        "已做一半",
+        &["Run 探测端口".to_string()],
+        &[ClosedToolStep {
+            name: "Run 探测端口".to_string(),
+            result_summary: "端口 8080 关闭".to_string(),
+        }],
+        &[],
+        Some(reason),
+    );
     assert_eq!(
         messages[1].content, expected,
-        "重投影检查点文本必须与 failed_turn_checkpoint_text 逐字一致（单一真源）"
+        "重投影检查点文本必须与写路径收口入口逐字一致（单一真源）"
     );
 
     // Assert 4：契约要素 —— 失败原因存在、位于工具段之前、工具行含 description
@@ -584,12 +601,20 @@ fn t_b1a_reprojected_failed_turn_checkpoint_is_same_source_as_write_path() {
     let legacy_messages = legacy_state.messages();
     assert_eq!(legacy_messages.len(), 2, "旧日志失败轮同样必须折出两条消息");
     let legacy_text = &legacy_messages[1].content;
-    let legacy_expected =
-        interrupted_turn_checkpoint_text("已做一半", &["Run 探测端口".to_string()])
-            .expect("非空入参必须产出中断检查点文本");
+    // 同源口径同上：头部 = `interrupted_turn_checkpoint_text`，其后按「确有结果摘要」追加结果段。
+    let legacy_expected = interrupted_turn_assistant_text_with_header_steps(
+        "已做一半",
+        &["Run 探测端口".to_string()],
+        &[ClosedToolStep {
+            name: "Run 探测端口".to_string(),
+            result_summary: "端口 8080 关闭".to_string(),
+        }],
+        &[],
+        None,
+    );
     assert_eq!(
         legacy_text, &legacy_expected,
-        "旧日志（无 error 键）必须逐字退化为 interrupted_turn_checkpoint_text 形态"
+        "旧日志（无 error 键）必须逐字退化为「无失败原因行」的同一收口形态"
     );
     assert!(
         !legacy_text.contains(REASON_PREFIX),
