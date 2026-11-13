@@ -135,6 +135,32 @@ fn ensure_goal_store_loaded(guard: &mut Option<HashMap<String, GoalData>>) {
     }
 }
 
+/// 旧版无条件兜底写入的伪会话键（契约 C1 已移除的 `default` 兜底）。
+const LEGACY_FALLBACK_SESSION_ID: &str = "default";
+
+/// B152 存量迁移：剔除旧 `default` 兜底写入的条目，返回被删除的 key（可能为空）。
+///
+/// 判定只针对「旧兜底产物」：key 去空白后为空、key 是 `default`、或内嵌 `session_id` 是
+/// `default`。key 与内嵌 `session_id` 不一致但两者都非 `default` 的记录**保留**——那不属于
+/// 本缺陷定义域，误删会丢掉真实会话的目标。
+fn purge_legacy_goal_entries(goals: &mut HashMap<String, GoalData>) -> Vec<String> {
+    let legacy: Vec<String> = goals
+        .iter()
+        .filter(|(session, goal)| {
+            let key = session.trim();
+            key.is_empty()
+                || key == LEGACY_FALLBACK_SESSION_ID
+                || goal.session_id.trim() == LEGACY_FALLBACK_SESSION_ID
+        })
+        .map(|(session, _)| session.clone())
+        .collect();
+
+    for key in &legacy {
+        goals.remove(key);
+    }
+    legacy
+}
+
 /// 契约 C2：读取 sidecar。文件缺失返回空 map；不可读或 JSON 损坏置 degraded 标记。
 fn load_goal_store() -> HashMap<String, GoalData> {
     let path = goal_store_path();
@@ -155,8 +181,27 @@ fn load_goal_store() -> HashMap<String, GoalData> {
     };
 
     match serde_json::from_str::<HashMap<String, GoalData>>(&raw) {
-        Ok(goals) => {
+        Ok(mut goals) => {
             GOAL_STORE_DEGRADED.store(false, std::sync::atomic::Ordering::SeqCst);
+            let purged = purge_legacy_goal_entries(&mut goals);
+            if !purged.is_empty() {
+                eprintln!(
+                    "[pony-agent] goal store `{}`: purged {} legacy `{}` entr{}",
+                    path.display(),
+                    purged.len(),
+                    LEGACY_FALLBACK_SESSION_ID,
+                    if purged.len() == 1 { "y" } else { "ies" }
+                );
+                // 必须把同一组 key 作为显式删除交给合并层：`persist_goal_store` 会先把磁盘
+                // 内容合入待写快照，只写内存 map 会让旧条目原样复活。回写失败不影响读面
+                // （内存已清），下次加载重试。
+                if let Err(error) = persist_goal_store(&goals, &purged) {
+                    eprintln!(
+                        "[pony-agent] goal store `{}` legacy purge write-back failed ({error}); will retry on next load",
+                        path.display()
+                    );
+                }
+            }
             goals
         }
         Err(error) => {
@@ -561,15 +606,25 @@ fn goal_snapshot(goal_id: &str) -> Result<GoalData, String> {
         .ok_or_else(|| format!("No goal found for goal id `{target}`"))
 }
 
-fn resolve_session(session_id: Option<String>) -> String {
+/// 契约 C1：会话 id 是 goal 的**唯一身份**，禁止 `default` 兜底。
+///
+/// 旧实现把 `None` 折叠成字面量 `"default"`，于是所有缺少会话事实的读取方（宿主续轮、
+/// TUI 轮次线程、工具回退路径）共享同一个桶：A 会话的目标会被 B 会话读出来继续跑。
+/// fail-closed：无会话 id ⇒ 显式 `Err`，由调用方决定「不续轮 / 报错」，
+/// 「借用别的会话的目标」不再是一种可能。
+fn resolve_session(session_id: Option<String>, entry: &str) -> Result<String, String> {
     session_id
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "default".to_string())
+        .ok_or_else(|| {
+            format!(
+                "{entry} requires a non-empty session_id (goal is session-scoped; `default` fallback removed)"
+            )
+        })
 }
 
 pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
-    let session = resolve_session(args.session_id);
+    let session = resolve_session(args.session_id, "create_goal")?;
     let mut guard = goal_store_guard();
     ensure_goal_store_loaded(&mut guard);
     let goals = guard.as_mut().expect("goal store must be loaded");
@@ -615,7 +670,7 @@ pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
 }
 
 pub fn get_goal(args: GetGoalArgs) -> Result<GetGoalResult, String> {
-    let session = resolve_session(args.session_id);
+    let session = resolve_session(args.session_id, "get_goal")?;
     let mut guard = goal_store_guard();
     ensure_goal_store_loaded(&mut guard);
     let goals = guard.as_ref().expect("goal store must be loaded");
@@ -625,7 +680,7 @@ pub fn get_goal(args: GetGoalArgs) -> Result<GetGoalResult, String> {
 }
 
 pub fn update_goal(args: UpdateGoalArgs) -> Result<UpdateGoalResult, String> {
-    let session = resolve_session(args.session_id);
+    let session = resolve_session(args.session_id, "update_goal")?;
     let mut guard = goal_store_guard();
     ensure_goal_store_loaded(&mut guard);
     let goals = guard.as_mut().expect("goal store must be loaded");
@@ -1164,6 +1219,132 @@ mod wave1_tests {
         // 磁盘内容应完全保留损坏现场，未被覆写
         let disk_content = fs::read(&store_path).expect("read store_path");
         assert_eq!(disk_content, corrupt_bytes, "磁盘内容不得被静默冲掉");
+    }
+
+    /// 跨会话串话根因回归：`session_id` 缺失时**不得**折叠进 `default` 桶。
+    ///
+    /// 旧实现把 `None` 变成 `"default"`，A 会话的 goal 会被任何无会话事实的读取方
+    /// （宿主续轮、TUI 轮次线程）读出来继续跑。fail-closed 后必须显式报错。
+    #[test]
+    fn missing_session_id_is_rejected_instead_of_falling_back_to_default() {
+        let _guard = test_support::lock();
+        let (_env, _store_path) = install_temp_store("fail-closed-session");
+
+        let create_err = create_goal(CreateGoalArgs {
+            session_id: None,
+            objective: "不得落进 default 桶".to_string(),
+            max_goal_rounds: Some(3),
+        })
+        .expect_err("create_goal 无 session_id 必须失败");
+        assert!(
+            create_err.contains("session_id"),
+            "错误信息必须指明 session_id 缺失：{create_err}"
+        );
+
+        let get_err = get_goal(GetGoalArgs { session_id: None })
+            .expect_err("get_goal 无 session_id 必须失败");
+        assert!(get_err.contains("session_id"), "{get_err}");
+
+        let update_err = update_goal(UpdateGoalArgs {
+            session_id: None,
+            goal_id: "goal-x".to_string(),
+            revision: 1,
+            action: UpdateGoalAction::Pause,
+            objective: None,
+            blocked_reason: None,
+            max_goal_rounds: None,
+        })
+        .expect_err("update_goal 无 session_id 必须失败");
+        assert!(update_err.contains("session_id"), "{update_err}");
+
+        // 空串/纯空白同样视为「无会话事实」。
+        let blank_err = create_goal(CreateGoalArgs {
+            session_id: Some("   ".to_string()),
+            objective: "空白会话 id".to_string(),
+            max_goal_rounds: None,
+        })
+        .expect_err("空白 session_id 必须失败");
+        assert!(blank_err.contains("session_id"), "{blank_err}");
+
+        // 关键断言：没有任何记录落进 `default` 桶（否则读取方仍会串话）。
+        assert!(
+            active_goal_for_session("default").is_none(),
+            "fail-closed 后不得再产生 default 桶条目"
+        );
+    }
+
+    /// B152 存量迁移：旧 `default` 兜底留下的条目必须在加载时清掉，且不因下一次写盘复活。
+    #[test]
+    fn legacy_default_entries_are_purged_on_load() {
+        let _guard = test_support::lock();
+        let (_env, store_path) = install_temp_store("legacy-purge");
+
+        let legacy_goal = |id: &str, session_id: &str| GoalData {
+            id: id.to_string(),
+            session_id: session_id.to_string(),
+            objective: "旧兜底目标".to_string(),
+            phase: "active".to_string(),
+            activation: GoalActivation::Armed,
+            revision: 1,
+            rounds_started: 0,
+            max_goal_rounds: 5,
+            blocked_reason: None,
+        };
+
+        let mut seeded: HashMap<String, GoalData> = HashMap::new();
+        // 三种旧兜底产物：字面量 key、空白 key、key 真实但内嵌 session_id 仍是兜底值。
+        seeded.insert(
+            "default".to_string(),
+            legacy_goal("goal-legacy-default", "default"),
+        );
+        seeded.insert("   ".to_string(), legacy_goal("goal-legacy-blank", "   "));
+        seeded.insert(
+            "pa-legacy-mixed".to_string(),
+            legacy_goal("goal-legacy-mixed", "default"),
+        );
+        // 真实会话条目：必须原样保留。
+        seeded.insert(
+            "pa-legacy-kept".to_string(),
+            legacy_goal("goal-legacy-kept", "pa-legacy-kept"),
+        );
+        fs::write(
+            &store_path,
+            serde_json::to_string_pretty(&seeded).expect("serialize seed"),
+        )
+        .expect("seed legacy store");
+
+        reset_goal_store_for_test();
+
+        // 读面：旧兜底条目不可达，真实会话条目可读且仍是 armed/active。
+        assert!(
+            active_goal_for_session("pa-legacy-kept").is_some(),
+            "真实会话条目不得被迁移误删"
+        );
+        assert!(goal_snapshot("goal-legacy-default").is_err());
+        assert!(goal_snapshot("goal-legacy-mixed").is_err());
+
+        // 磁盘面：回写已把旧 key 从 sidecar 删除（不是仅内存屏蔽）。
+        let disk: HashMap<String, GoalData> =
+            serde_json::from_str(&fs::read_to_string(&store_path).expect("read store"))
+                .expect("parse store");
+        assert_eq!(
+            disk.keys().collect::<Vec<_>>(),
+            vec![&"pa-legacy-kept".to_string()],
+            "磁盘应只剩真实会话条目"
+        );
+
+        // 复活回归：再触发一次普通写盘（推进轮次走 `explicit_removals = &[]`），
+        // 跨进程序合并不得把旧 key 从磁盘插回。
+        let kept = disk["pa-legacy-kept"].clone();
+        advance_goal_round(&kept.id).expect("advance kept goal");
+        let after: HashMap<String, GoalData> =
+            serde_json::from_str(&fs::read_to_string(&store_path).expect("read store"))
+                .expect("parse store");
+        assert!(
+            !after.values().any(|goal| goal.session_id == "default"),
+            "旧兜底条目不得复活：{:?}",
+            after.keys().collect::<Vec<_>>()
+        );
     }
 }
 

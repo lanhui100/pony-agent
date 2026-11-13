@@ -1965,8 +1965,19 @@ impl HostControlPlane {
                 return Ok(response);
             }
 
-            let session_id = response.run.session_id.as_deref().unwrap_or("default");
-            let active_goal = match crate::agent::goal::active_goal_for_session(session_id) {
+            // 契约 C1（fail-closed）：无会话事实的 run **不续轮**。旧实现回落 `default` 桶，
+            // 会把**别的会话**的目标读出来继续跑（跨会话串话的根因之一）。
+            let Some(session_id) = response
+                .run
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+            else {
+                return Ok(response);
+            };
+            let active_goal = match crate::agent::goal::active_goal_for_session(&session_id) {
                 Some(goal) => goal,
                 None => return Ok(response),
             };
@@ -2010,7 +2021,7 @@ impl HostControlPlane {
             let next_turn_id = format!("{}-turn-{}", response.run.id, response.run.steps.len() + 1);
             let next_input = TurnInput {
                 message: goal_msg,
-                session_id: Some(session_id.to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),
@@ -2789,8 +2800,19 @@ impl HostControlPlane {
                 return Ok(response);
             }
 
-            let session_id = response.run.session_id.as_deref().unwrap_or("default");
-            let active_goal = match crate::agent::goal::active_goal_for_session(session_id) {
+            // 契约 C1（fail-closed）：无会话事实的 run **不续轮**。旧实现回落 `default` 桶，
+            // 会把**别的会话**的目标读出来继续跑（跨会话串话的根因之一）。
+            let Some(session_id) = response
+                .run
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+            else {
+                return Ok(response);
+            };
+            let active_goal = match crate::agent::goal::active_goal_for_session(&session_id) {
                 Some(goal) => goal,
                 None => return Ok(response),
             };
@@ -2833,7 +2855,7 @@ impl HostControlPlane {
 
             input = TurnInput {
                 message: goal_msg,
-                session_id: Some(session_id.to_string()),
+                session_id: Some(session_id.clone()),
                 node_id: None,
                 history: Vec::new(),
                 images: Vec::new(),

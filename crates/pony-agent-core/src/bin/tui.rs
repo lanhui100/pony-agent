@@ -279,7 +279,13 @@ pub enum UiEvent {
     /// 任务看板更新通知
     TaskBoardUpdated(Vec<TuiTask>),
     /// Goal 状态更新通知
-    GoalUpdated(TuiGoal),
+    ///
+    /// 必须携带 `session_id`（跨会话隔离）：轮次线程收口时用户可能已切走会话，
+    /// 无会话标签的横幅更新会把**别的会话**的目标画到当前会话头上。
+    GoalUpdated {
+        goal: TuiGoal,
+        session_id: String,
+    },
     /// PA-171 C1/C2：goal 自动续轮**停止**（取消 / 连续失败止损 / 预算用尽 / 自动续轮次数用尽）。
     ///
     /// 为什么必须是事件而不是静默 `break`：旧实现在预算用尽时直接 `break`，界面继续显示
@@ -776,34 +782,60 @@ impl Drop for TerminalGuard {
 
 
 
-/// 契约 F-G：goal 自动续轮的取消令牌（Esc 置位、新一轮用户消息重置）。
+/// 契约 F-G + 跨会话隔离：goal 自动续轮的取消令牌（**按会话分区**）。
 ///
-/// 用 `Arc<AtomicBool>` 而非 channel：Esc 在 UI 线程置位、续轮循环在 turn 线程读取，
-/// 语义只要求"下一轮开始前看到"，不需要排队。
+/// 旧实现是进程级 `Arc<AtomicBool>`：任何会话的新消息都会 `reset()`，于是用户切到 B 会话
+/// 并发一句话之后，A 会话仍在跑的续轮循环被**重新武装**，继续把 A 的目标跑进 B 的界面
+/// （跨会话串话的根因之一）。现在取消/重置都以 session id 为键：
+/// - `cancel_for`：只停该会话的续轮（Esc 停当前会话；切走会话时停**旧会话**）；
+/// - `reset_for`：只重新武装该会话（新用户消息 = 该会话自己的新取消周期）；
+/// - `is_cancelled_for`：续轮边界判据。
+///
+/// 用共享容器而非 channel：Esc 在 UI 线程置位、续轮循环在 turn 线程读取，
+/// 语义只要求「下一轮开始前看到」，不需要排队。
 #[derive(Clone, Debug, Default)]
 pub struct GoalRoundCancelToken {
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl GoalRoundCancelToken {
     pub fn new() -> Self {
         Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
-    /// 请求取消：下一次轮次边界生效（已在跑的那一轮由 `stop_turn` 中止）。
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+    /// 请求取消**指定会话**：下一次轮次边界生效（已在跑的那一轮由 `stop_turn` 中止）。
+    pub fn cancel_for(&self, session_id: &str) {
+        let session = session_id.trim();
+        if session.is_empty() {
+            return;
+        }
+        self.cancelled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session.to_string());
     }
 
-    /// 重置（新一轮用户消息提交时调用）。
-    pub fn reset(&self) {
-        self.cancelled.store(false, Ordering::Relaxed);
+    /// 重新武装**指定会话**（该会话的新一轮用户消息提交时调用）。
+    pub fn reset_for(&self, session_id: &str) {
+        self.cancelled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(session_id.trim());
     }
 
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+    /// 该会话是否已被请求取消续轮。
+    pub fn is_cancelled_for(&self, session_id: &str) -> bool {
+        let session = session_id.trim();
+        if session.is_empty() {
+            // 无会话事实 ⇒ 视为已取消（fail-closed：绝不因「不知道自己是谁」而继续续轮）。
+            return true;
+        }
+        self.cancelled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(session)
     }
 }
 
@@ -3477,6 +3509,23 @@ pub fn build_turn_input(
         plan_execution_approval: None,
         tool_authorization_mode: Some(state.permission_mode.tool_authorization_mode().to_string()),
     }
+}
+
+/// 跨会话隔离（fail-closed）：轮次线程必须知道自己属于**哪个会话**。
+///
+/// 旧实现回落字面量 `"default"`：无会话事实的轮次会被注册进 `default` 分区，并让
+/// `run_goal_rounds` 去读 `default` 桶里**别的会话**的目标继续跑。缺会话事实 ⇒ 直接失败
+/// （调用方补发可见终态），绝不替用户挑一个会话。
+fn require_turn_session_id(turn_input: &TurnInput) -> Result<String, String> {
+    turn_input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            "本轮流式缺少 session_id：已中止（目标与续轮都不得跨会话借用）".to_string()
+        })
 }
 
 /// wave-38 D1 纯函数：恢复历史会话时的 workspace 绑定解析。
@@ -7069,6 +7118,9 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
             && control_plane.recover_session_from_normalized(&resume.session_id);
         if resume.existed || recovered {
             hydrate_state_from_session(&mut state, &control_plane, &resume.session_id);
+            // 跨会话隔离：启动续接会话时立刻把**该会话**的 goal 装载进横幅，
+            // 而不是等下一轮 `StreamCompleted` 才回读（那会表现为「目标凭空出现并自动续跑」）。
+            hydrate_goal_state(&mut state, &resume.session_id);
             if recovered {
                 // 索引行丢失属于「数据自愈」，必须让用户看见，否则会怀疑历史被篡改。
                 state.status_text = format!("已恢复会话（索引行曾丢失，已重建）{}", resume.session_id);
@@ -7784,17 +7836,92 @@ fn sub_session_candidates_from_runtime(
     })
 }
 
+/// PA-172 §8 B3 + 跨会话隔离：某会话是否有**在飞轮次线程**。
+///
+/// 比 `is_streaming` 更可靠：两轮之间存在「`StreamCompleted` 已到、下一轮 `turn:started`
+/// 未到」的假阴性窗口，`is_streaming` 在此期间为 false，而轮次线程其实还活着
+/// （正在做 goal 续轮）。会话切换必须用本判据，否则旧会话的续轮会在新会话里继续跑。
+fn is_turn_loop_in_flight(
+    registry: &TurnLoopInFlightRegistry,
+    session_id: &str,
+) -> bool {
+    registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(session_id)
+}
+
+/// 契约 C1/C6：把**目标会话**的 goal 快照装载进横幅。
+///
+/// 旧实现在切会话后不读 goal，且 `reset_session_scope` 会清空横幅 —— 于是目标只在
+/// 「下一轮 `StreamCompleted`」的回读里**突兀地冒出来并自动续跑**，用户来不及确认它
+/// 属于哪个会话。切会话即 hydrate，是消除这种「凭空出现」的唯一收口点。
+fn hydrate_goal_state(state: &mut TuiState, session_id: &str) {
+    let target = session_id.trim();
+    if target.is_empty() {
+        state.clear_goal_banner();
+        return;
+    }
+    match pony_agent_core::agent::goal::get_goal(pony_agent_core::agent::goal::GetGoalArgs {
+        session_id: Some(target.to_string()),
+    }) {
+        Ok(result) => match result.goal {
+            Some(goal) => state.set_goal(tui_goal_from_goal(&goal)),
+            None => state.clear_goal_banner(),
+        },
+        Err(error) => {
+            // fail-closed：读不出目标就**不画**横幅，绝不猜。
+            state.clear_goal_banner();
+            eprintln!("[pony-tui] goal_hydrate_failed: session={target} error={error}");
+        }
+    }
+}
+
+/// 跨会话隔离 + 契约 P-2/C6：**会话切换的唯一收口**（`/resume` 选择器、队友会话进入/左右切换、
+/// Ctrl+↑ 返回主会话共用）。
+///
+/// 三件事必须同时发生，缺一件就是串话：
+/// 1. 停掉**旧会话**的 goal 续轮（旧循环不得在新会话里继续开轮）；
+/// 2. 复位会话作用域（横幅/用量/计划/排队消息等瞬时态）；
+/// 3. 装载目标会话快照，**含 goal**（否则目标会在下一轮凭空出现并自动续跑）。
+///
+/// `/clear` 不走本函数：它换的是**全新**会话 id（无快照可 hydrate），且必须保留当前
+/// workspace 绑定，故只做「停旧续轮 + 换 id + 复位作用域」。
+fn switch_session_scope(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    target_session_id: &str,
+    goal_cancel: &GoalRoundCancelToken,
+) {
+    let previous = state.session_id.clone();
+    if previous != target_session_id {
+        goal_cancel.cancel_for(&previous);
+        goal_cancel.reset_for(target_session_id);
+    }
+    state.session_id = target_session_id.to_string();
+    state.reset_session_scope();
+    hydrate_state_from_session(state, control_plane, target_session_id);
+    hydrate_goal_state(state, target_session_id);
+}
+
 /// W3b：子会话导航的统一提示出口（`status_text` + 一次性 notice 同写，两处可见性一致）。
 fn sub_session_notice(state: &mut TuiState, message: &str) {
     state.status_text = message.to_string();
     state.status_notice = Some((message.to_string(), std::time::Instant::now()));
 }
 
-/// W3b：流式守卫 —— 本轮在飞时不切会话（不动 `session_id`、不 hydrate）。
+/// W3b：会话切换守卫 —— 本轮（含 goal 续轮）在飞时不切会话（不动 `session_id`、不 hydrate）。
+///
+/// 判据是「**在飞轮次线程**」而不是 `is_streaming`：两轮之间存在 `is_streaming` 的
+/// 假阴性窗口（`StreamCompleted` 已到、下一轮 `turn:started` 未到），此时切会话会让
+/// 旧会话的续轮把内容继续吐进新会话。
 ///
 /// 返回 `true` 表示已拦下并给出提示，调用方直接返回。
-fn sub_session_switch_blocked(state: &mut TuiState) -> bool {
-    if !state.is_streaming {
+fn sub_session_switch_blocked(
+    state: &mut TuiState,
+    turn_loop_in_flight: &TurnLoopInFlightRegistry,
+) -> bool {
+    if !state.is_streaming && !is_turn_loop_in_flight(turn_loop_in_flight, &state.session_id) {
         return false;
     }
     sub_session_notice(state, "本轮进行中：先停止或等待结束后再切换会话");
@@ -7810,6 +7937,7 @@ fn enter_sub_session_at(
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     candidates: &[SubSessionCandidate],
     index: usize,
+    goal_cancel: &GoalRoundCancelToken,
 ) {
     let Some(candidate) = candidates.get(index) else {
         return;
@@ -7828,12 +7956,11 @@ fn enter_sub_session_at(
 
     state.mode = InteractionMode::Normal;
     state.agent_roster_state = None;
-    state.session_id = session_id.clone();
-    state.reset_session_scope();
+    // 统一收口：停旧会话续轮 → 复位作用域 → hydrate（含 goal）。
+    switch_session_scope(state, control_plane, &session_id, goal_cancel);
     // 作用域复位会清空这两个字段，故在其后写回（保留最初的主会话 id）。
     state.return_session_id = Some(main_session_id);
     state.sub_session = Some(context);
-    hydrate_state_from_session(state, control_plane, &session_id);
     // 契约 §6.2：换会话即重建面板 —— 旧会话的面板必须收掉，新会话的未决 Ask 必须立刻出现。
     let _ = sync_pending_control_request(state, control_plane);
     let target = candidate.target.clone();
@@ -7851,8 +7978,10 @@ fn enter_teammate_session(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     target: &str,
+    goal_cancel: &GoalRoundCancelToken,
+    turn_loop_in_flight: &TurnLoopInFlightRegistry,
 ) {
-    if sub_session_switch_blocked(state) {
+    if sub_session_switch_blocked(state, turn_loop_in_flight) {
         return;
     }
     let candidates = sub_session_candidates_from_runtime(control_plane);
@@ -7872,7 +8001,7 @@ fn enter_teammate_session(
         sub_session_notice(state, &message);
         return;
     };
-    enter_sub_session_at(state, control_plane, &candidates, index);
+    enter_sub_session_at(state, control_plane, &candidates, index, goal_cancel);
 }
 
 /// W3b：Ctrl+←/→ —— 在当前子智能体之间循环切换（保留最初的主会话返回目标）。
@@ -7882,8 +8011,10 @@ fn switch_sub_session(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     step: SubSessionStep,
+    goal_cancel: &GoalRoundCancelToken,
+    turn_loop_in_flight: &TurnLoopInFlightRegistry,
 ) {
-    if sub_session_switch_blocked(state) {
+    if sub_session_switch_blocked(state, turn_loop_in_flight) {
         return;
     }
     let candidates = sub_session_candidates_from_runtime(control_plane);
@@ -7910,7 +8041,7 @@ fn switch_sub_session(
     else {
         return;
     };
-    enter_sub_session_at(state, control_plane, &candidates, index);
+    enter_sub_session_at(state, control_plane, &candidates, index, goal_cancel);
 }
 
 /// W3b：Ctrl+↑（花名册内 `r` 同义）—— 返回进入队友会话前保存的主会话。
@@ -7920,8 +8051,10 @@ fn switch_sub_session(
 fn return_to_main_session(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    goal_cancel: &GoalRoundCancelToken,
+    turn_loop_in_flight: &TurnLoopInFlightRegistry,
 ) {
-    if sub_session_switch_blocked(state) {
+    if sub_session_switch_blocked(state, turn_loop_in_flight) {
         return;
     }
     let Some(main_session_id) = state.return_session_id.clone() else {
@@ -7935,13 +8068,12 @@ fn return_to_main_session(
 
     state.mode = InteractionMode::Normal;
     state.agent_roster_state = None;
-    state.session_id = main_session_id.clone();
-    state.reset_session_scope();
+    // 统一收口：停旧会话（子会话）续轮 → 复位作用域 → hydrate（含 goal）。
+    switch_session_scope(state, control_plane, &main_session_id, goal_cancel);
     // 契约：成功则清空返回目标（`reset_session_scope` 已清，这里显式重申唯一真值，
     // 避免后续改动把两处语义拆散）；子会话身份同属会话作用域一并归 None。
     state.return_session_id = None;
     state.sub_session = None;
-    hydrate_state_from_session(state, control_plane, &main_session_id);
     // 契约 §6.2：回到主会话同样重建面板（主会话可能仍有未决 Ask）。
     let _ = sync_pending_control_request(state, control_plane);
     state.status_text = format!("已返回主会话 {main_session_id}");
@@ -8315,14 +8447,14 @@ fn run_goal_rounds(
             break;
         }
         let stop_reason = goal_round_stop_reason(
-            cancel.is_cancelled(),
+            cancel.is_cancelled_for(session_id),
             failures,
             active_goal.rounds_started,
             active_goal.max_goal_rounds,
         )
         .or_else(|| {
             should_abort_goal_rounds(
-                cancel.is_cancelled(),
+                cancel.is_cancelled_for(session_id),
                 consecutive,
                 pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
             )
@@ -8370,9 +8502,10 @@ fn run_goal_rounds(
                 match advance_goal_round_for_outcome(&active_goal.id, GoalRoundOutcome::Succeeded) {
                     Ok(updated) => {
                         // 投影同步：本轮预算变化立即反映到横幅（终态事件的刷新早于本行）。
-                        let _ = sink
-                            .tx
-                            .send(UiEvent::GoalUpdated(tui_goal_from_goal(&updated)));
+                        let _ = sink.tx.send(UiEvent::GoalUpdated {
+                            goal: tui_goal_from_goal(&updated),
+                            session_id: session_id.to_string(),
+                        });
                     }
                     Err(error) => {
                         // 预算推进失败 ⇒ 停（不得让"轮次已跑完但预算没记"静默演变成无限续轮）。
@@ -8985,7 +9118,7 @@ fn tui_event_loop(
                                 // wave-63 §T3：此时按键**不得静默吞** —— `note_stopping_key` 会置
                                 // 「等待安全收口」提示（流式行可见）并返回 false，拦下重复派发。
                                 if state.note_stopping_key() {
-                                    goal_round_cancel.cancel();
+                                    goal_round_cancel.cancel_for(&state.session_id);
                                     // NFR `lock_scope_bounded`：先取再放 —— 绝不在持锁期间调用
                                     // `stop_turn`（其会同步回调 sink.emit，存在锁重入/死锁风险）。
                                     let stopping_turn = { current_turn_id.lock().unwrap().take() };
@@ -9023,13 +9156,21 @@ fn tui_event_loop(
                             KeyCode::Enter => {
                                 if !state.session_list.is_empty() {
                                     let chosen = state.session_list[state.selected_session_index].clone();
-                                    state.session_id = chosen.id.clone();
+                                    // 会话切换守卫：旧会话本轮（含 goal 续轮）在飞时切走，会让旧轮
+                                    // 继续把正文吐进新会话 ⇒ 先拦下，等人停。
+                                    if sub_session_switch_blocked(&mut state, &turn_loop_in_flight) {
+                                        continue;
+                                    }
                                     // 契约 P-2：/resume 先复位会话作用域，再装载目标会话快照
                                     // （否则上一个会话的用量/计划/目标/待决请求会串到新会话）。
-                                    state.reset_session_scope();
-
-                                    state.reset_session_scope();
-                                    hydrate_state_from_session(&mut state, &control_plane, &chosen.id);
+                                    // 统一收口同时负责：停旧会话续轮 + 装载目标会话的 goal 横幅
+                                    //（旧实现要等下一轮 `StreamCompleted` 才回读 ⇒ 目标凭空出现并续跑）。
+                                    switch_session_scope(
+                                        &mut state,
+                                        &control_plane,
+                                        &chosen.id,
+                                        &goal_round_cancel,
+                                    );
                                     state.mode = InteractionMode::Normal;
                                     // 契约 §6.2：`/resume` 切到目标会话后立刻重建未决 Ask 面板
                                     // （旧会话的面板在此一并收口，同一 request_id 只留一个面板）。
@@ -9540,7 +9681,12 @@ fn tui_event_loop(
                             }
                             // W3b：Ctrl+↑ 与主会话内同一语义（返回主会话）；裸 ↑ 仍是花名册上移。
                             KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                return_to_main_session(&mut state, &control_plane);
+                                return_to_main_session(
+                                    &mut state,
+                                    &control_plane,
+                                    &goal_round_cancel,
+                                    &turn_loop_in_flight,
+                                );
                             }
                             KeyCode::Up => {
                                 if let Some(ref mut roster) = state.agent_roster_state {
@@ -9564,6 +9710,8 @@ fn tui_event_loop(
                                             &mut state,
                                             &control_plane,
                                             &target,
+                                            &goal_round_cancel,
+                                            &turn_loop_in_flight,
                                         );
                                     }
                                 }
@@ -9571,7 +9719,12 @@ fn tui_event_loop(
                             KeyCode::Char('r')
                                 if !key.modifiers.contains(KeyModifiers::CONTROL) =>
                             {
-                                return_to_main_session(&mut state, &control_plane);
+                                return_to_main_session(
+                                    &mut state,
+                                    &control_plane,
+                                    &goal_round_cancel,
+                                    &turn_loop_in_flight,
+                                );
                             }
                             _ => {}
                         }
@@ -9648,7 +9801,7 @@ fn tui_event_loop(
                                 if stop_sequence.press(identity, now_epoch_ms()) {
                                     // 契约 F-G③：先置取消令牌 —— goal 续轮循环在**下一轮开始前**看到它即中止；
                                     // 已经在跑的那一轮仍由 stop_turn 打断。
-                                    goal_round_cancel.cancel();
+                                    goal_round_cancel.cancel_for(&state.session_id);
                                     // NFR `lock_scope_bounded`：先取再放 —— 绝不在持锁期间调用
                                     // `stop_turn`（其会同步回调 sink.emit，存在锁重入/死锁风险）。
                                     let stopping_turn = { current_turn_id.lock().unwrap().take() };
@@ -9698,10 +9851,21 @@ fn tui_event_loop(
                         if let Some(shortcut) = sub_session_shortcut(&key) {
                             match shortcut {
                                 SubSessionShortcut::ReturnToMain => {
-                                    return_to_main_session(&mut state, &control_plane);
+                                    return_to_main_session(
+                                    &mut state,
+                                    &control_plane,
+                                    &goal_round_cancel,
+                                    &turn_loop_in_flight,
+                                );
                                 }
                                 SubSessionShortcut::Switch(step) => {
-                                    switch_sub_session(&mut state, &control_plane, step);
+                                    switch_sub_session(
+                                        &mut state,
+                                        &control_plane,
+                                        step,
+                                        &goal_round_cancel,
+                                        &turn_loop_in_flight,
+                                    );
                                 }
                             }
                             dirty = true;
@@ -10162,12 +10326,24 @@ fn tui_event_loop(
                                     continue;
                                 }
                                 if known_command == Some("/clear") {
+                                    // 会话切换守卫：本轮（含 goal 续轮）在飞时不得清会话 ——
+                                    // 否则旧轮会继续把正文与目标写进新会话（跨会话污染）。
+                                    if sub_session_switch_blocked(&mut state, &turn_loop_in_flight) {
+                                        dirty = true;
+                                        continue;
+                                    }
                                     // 契约 P-2：/clear = 复位会话作用域 + 换新 session_id。
                                     // ADR 0074：旧会话的 Ask 面板不得跟到新会话（先收口再复位）。
                                     state.pending_request = None;
                                     close_pending_request_overlay(&mut state);
+                                    // 跨会话隔离：旧会话的 goal 续轮必须停 —— 否则它会在这个
+                                    // 全新的空会话里继续推进旧目标；新会话没有目标，无续轮可武装。
+                                    // （刻意不 hydrate：`/clear` 保留当前 workspace 绑定，只换会话 id。）
+                                    goal_round_cancel.cancel_for(&state.session_id);
+                                    let fresh_session_id = new_session_id();
+                                    goal_round_cancel.reset_for(&fresh_session_id);
+                                    state.session_id = fresh_session_id;
                                     state.reset_session_scope();
-                                    state.session_id = new_session_id();
                                     // PA-172 §5 R2（遗留 #4）：**仅此处**（显式 /clear）复位进程级
                                     // provider 冷却表 —— 清空 + `provider_cooldown_reset` 日志。
                                     //
@@ -10408,7 +10584,7 @@ fn tui_event_loop(
                                 state.stopping_turn_id = None;
                                 state.streaming_turn_id = Some(turn_id_str.clone());
                                 // 契约 F-G④：新一轮用户消息 = 新的取消周期，重置 Esc 令牌。
-                                goal_round_cancel.reset();
+                                goal_round_cancel.reset_for(&state.session_id);
                                 // PA-171 C1-T4：同一复位点清空上一轮的「续轮停止」留痕。
                                 state.goal_rounds_stopped = None;
 
@@ -10435,6 +10611,9 @@ fn tui_event_loop(
                                 // 杜绝 `is_streaming` 永真导致输入/排队派发永久失效。
                                 let tx_turn = tx.clone();
                                 let turn_thread = std::thread::spawn(move || {
+                                  // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
+                                  // 抢走 outer 的 `tx_turn`（panic 兜底还要用它）。
+                                  let tx_session_fail = tx_turn.clone();
                                   let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                                     let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                                     // 首轮 guard 在主事件分支创建并 move 到这里；本轮调用返回即回收，
@@ -10442,10 +10621,13 @@ fn tui_event_loop(
                                     let initial_turn_sink_guard = _turn_sink_guard;
                                     // PA-172 §8 B3：**先**解析本线程所属会话，再 enter 在飞守卫
                                     //（旧实现 enter 在 session_id 计算之前 ⇒ 守卫不知道自己在哪个会话）。
-                                    let session_id = turn_input
-                                        .session_id
-                                        .clone()
-                                        .unwrap_or_else(|| "default".to_string());
+                                    let session_id = match require_turn_session_id(&turn_input) {
+                                        Ok(session_id) => session_id,
+                                        Err(reason) => {
+                                            let _ = tx_session_fail.send(UiEvent::StreamFailed(reason));
+                                            return;
+                                        }
+                                    };
                                     let _in_flight_guard = TurnLoopInFlightGuard::enter(
                                         turn_loop_in_flight_for_thread,
                                         &session_id,
@@ -10912,15 +11094,21 @@ fn tui_event_loop(
                     let resume_run_id = run_id.clone();
                     let resume_run_for_turn = resume_run_id.clone();
                     let turn_thread = std::thread::spawn(move || {
+                        // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
+                        // 抢走 outer 的 `tx_turn`（终态兜底还要用它）。
+                        let tx_session_fail = tx_turn.clone();
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                             let _guard =
                                 pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                             let _turn_sink_guard = resume_sink_guard;
                             // PA-172 §8 B3：先取本线程所属会话，再 enter 在飞守卫（按会话分区）。
-                            let session_id = turn_input
-                                .session_id
-                                .clone()
-                                .unwrap_or_else(|| "default".to_string());
+                            let session_id = match require_turn_session_id(&turn_input) {
+                                Ok(session_id) => session_id,
+                                Err(reason) => {
+                                    let _ = tx_session_fail.send(UiEvent::StreamFailed(reason));
+                                    return Ok(());
+                                }
+                            };
                             let _in_flight_guard = TurnLoopInFlightGuard::enter(
                                 turn_loop_in_flight_for_thread,
                                 &session_id,
@@ -11015,15 +11203,21 @@ fn tui_event_loop(
                     let turn_loop_in_flight_for_thread = Arc::clone(&turn_loop_in_flight);
                     let tx_turn = tx.clone();
                     let turn_thread = std::thread::spawn(move || {
+                        // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
+                        // 抢走 outer 的 `tx_turn`（终态兜底还要用它）。
+                        let tx_session_fail = tx_turn.clone();
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                             let _guard =
                                 pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
                             let _turn_sink_guard = resume_sink_guard;
                             // PA-172 §8 B3：先取本线程所属会话，再 enter 在飞守卫（按会话分区）。
-                            let session_id = turn_input
-                                .session_id
-                                .clone()
-                                .unwrap_or_else(|| "default".to_string());
+                            let session_id = match require_turn_session_id(&turn_input) {
+                                Ok(session_id) => session_id,
+                                Err(reason) => {
+                                    let _ = tx_session_fail.send(UiEvent::StreamFailed(reason));
+                                    return Ok(());
+                                }
+                            };
                             let _in_flight_guard = TurnLoopInFlightGuard::enter(
                                 turn_loop_in_flight_for_thread,
                                 &session_id,
@@ -11068,7 +11262,12 @@ fn tui_event_loop(
                 UiEvent::TaskBoardUpdated(tasks) => {
                     state.update_task_board(tasks);
                 }
-                UiEvent::GoalUpdated(goal) => {
+                UiEvent::GoalUpdated { goal, session_id } => {
+                    // 跨会话隔离：旧会话轮次线程收口时的横幅更新不得画到当前会话上
+                    // （判据与 `GoalRoundsStopped` 同源：目标属于哪个会话，就只更新哪个会话）。
+                    if session_id != state.session_id {
+                        continue;
+                    }
                     state.set_goal(goal);
                 }
                 // PA-171 C1/C2：续轮停止可见化（旧实现静默 break，横幅仍显示「进行中」）。

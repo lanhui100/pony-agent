@@ -1405,3 +1405,23 @@ note: >-
       `agent::app_settings::tests::subagent_max_concurrent_roundtrips_with_camel_case_and_clamps`、
       `tests/wave37_tool_surface.rs::t3_j_concurrency_over_limit_returns_busy`、
       前端 `tests/subagent-concurrency-setting.spec.ts`（4 例）。
+
+  【归属登记（2026-11-13）｜goal 会话归属收口：删除 default 兜底 + TUI 跨会话串话治理（ADR：.agents/notes/implemented/bug-fix/2026-11-13-goal-cross-session-isolation.md；backlog: B152）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改变**本地 goal 的会话归属判定**与
+  **TUI 会话切换/取消/横幅投影的隔离判据**，无新增网络 IO、无新增后台常驻任务、无 `/metrics` 出口。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面进程无常驻监听地址、无 pull 模型）。
+  (2) 变更面：
+      (2a) 领域层 fail-closed：`agent/goal.rs::resolve_session` 由「`None` → `"default"`」改为返回
+      `Err`；`create_goal` / `get_goal` / `update_goal` 一律传播错误，`default` 共用桶通道被删除。
+      (2b) 宿主续轮：`agent/control_plane/mod.rs` 两处续轮改为「`run.session_id` 为空即不续轮」，
+      不再回落 `"default"` 桶。
+      (2c) TUI：`bin/tui.rs` 的 `GoalRoundCancelToken` 改为按会话分区（`cancel_for` / `reset_for` /
+      `is_cancelled_for`），`UiEvent::GoalUpdated` 增加 `session_id` 并在事件循环按当前会话过滤，
+      会话切换收口 `switch_session_scope`（停旧会话续轮 + hydrate 消息快照与 goal 横幅），
+      轮次线程缺 `session_id` 时补发 `UiEvent::StreamFailed` 可见终态。
+  (3) 收口点：不新增 enforcement_point（无新网络出口、无新异常边界）；行为门落在单测——
+      `agent::goal::wave1_tests::missing_session_id_is_rejected_instead_of_falling_back_to_default`、
+      `tests/tui_batch2_regression.rs::n8b_cancel_token_is_partitioned_per_session`、
+      `n8b_cancel_token_drives_the_round_abort_decision`、`tests/pa109_goal_acceptance.rs`（3 例）。

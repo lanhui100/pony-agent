@@ -7,10 +7,14 @@ use pony_agent_core::agent::tools::{
     UpdateGoalAction, UpdateGoalArgs,
 };
 
-/// wave-13：目标工具族使用**进程级全局 store**（`goal.rs` 的 `SESSION_GOALS`，key=session_id，
-/// `None` → "default"）。本文件 3 个用例都用 `session_id: None`，cargo 默认并行执行会让它们
-/// 互相覆盖同一 "default" 槽位，从而偶发 `Goal ID mismatch`（CAS 断言误伤）。
-/// 用进程内互斥把本文件用例串行化，保持语义不变、消除并行干扰。
+/// PA-109 验收用的唯一会话 id。
+///
+/// 2026-11 修订：goal 存储已改为 **fail-closed**（`session_id` 缺失直接报错，不再折叠成
+/// `"default"` 桶）。旧版本本文件靠 `session_id: None` 共享 `"default"` 槽位，既依赖了被
+/// 删除的兜底语义，也正是跨会话串话的入口。改为显式会话 id；串行锁仍保留——进程级
+/// store 在用例间共享，同一会话槽位必须互斥。
+const SESSION: &str = "pa109-goal-acceptance";
+
 static GOAL_STORE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn goal_store_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -18,7 +22,7 @@ fn goal_store_guard() -> std::sync::MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     pony_agent_core::agent::goal::reset_goal_store_for_test();
-    let _ = pony_agent_core::agent::goal::clear_goal("default");
+    let _ = pony_agent_core::agent::goal::clear_goal(SESSION);
     guard
 }
 
@@ -26,7 +30,7 @@ fn goal_store_guard() -> std::sync::MutexGuard<'static, ()> {
 fn test_ac01_create_and_get_goal() {
     let _guard = goal_store_guard();
     let create_args = CreateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         objective: "Build payment module".to_string(),
         max_goal_rounds: Some(50),
     };
@@ -35,7 +39,10 @@ fn test_ac01_create_and_get_goal() {
     assert_eq!(created.goal.revision, 1);
     assert_eq!(created.goal.phase, "active");
 
-    let fetched: GetGoalResult = get_goal(GetGoalArgs::default()).expect("get_goal should succeed");
+    let fetched: GetGoalResult = get_goal(GetGoalArgs {
+        session_id: Some(SESSION.to_string()),
+    })
+    .expect("get_goal should succeed");
     assert!(fetched.goal.is_some());
 }
 
@@ -43,7 +50,7 @@ fn test_ac01_create_and_get_goal() {
 fn test_ac02_update_goal_cas_and_lifecycle() {
     let _guard = goal_store_guard();
     let create_args = CreateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         objective: "Multi-turn task".to_string(),
         max_goal_rounds: Some(20),
     };
@@ -51,7 +58,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // 暂停
     let pause_args = UpdateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         goal_id: created.goal.id.clone(),
         revision: created.goal.revision,
         action: UpdateGoalAction::Pause,
@@ -65,7 +72,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // 尝试用旧版本号更新应失败 (CAS guard)
     let stale_args = UpdateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         goal_id: created.goal.id.clone(),
         revision: 1,
         action: UpdateGoalAction::Resume,
@@ -77,7 +84,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // 正确 resume
     let resume_args = UpdateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         goal_id: created.goal.id.clone(),
         revision: 2,
         action: UpdateGoalAction::Resume,
@@ -91,7 +98,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // 完成
     let complete_args = UpdateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         goal_id: created.goal.id.clone(),
         revision: 3,
         action: UpdateGoalAction::Complete,
@@ -104,7 +111,7 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 
     // B127 守卫：completed 不可被 resume
     let illegal_resume = UpdateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         goal_id: created.goal.id.clone(),
         revision: 4,
         action: UpdateGoalAction::Resume,
@@ -119,14 +126,14 @@ fn test_ac02_update_goal_cas_and_lifecycle() {
 fn test_ac03_blocked_requires_reason() {
     let _guard = goal_store_guard();
     let create_args = CreateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         objective: "Test blocked".to_string(),
         max_goal_rounds: Some(10),
     };
     let created = create_goal(create_args).unwrap();
 
     let invalid_block = UpdateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         goal_id: created.goal.id.clone(),
         revision: created.goal.revision,
         action: UpdateGoalAction::Blocked,
@@ -137,7 +144,7 @@ fn test_ac03_blocked_requires_reason() {
     assert!(update_goal(invalid_block).is_err(), "Blocked without reason must fail");
 
     let valid_block = UpdateGoalArgs {
-        session_id: None,
+        session_id: Some(SESSION.to_string()),
         goal_id: created.goal.id.clone(),
         revision: created.goal.revision,
         action: UpdateGoalAction::Blocked,

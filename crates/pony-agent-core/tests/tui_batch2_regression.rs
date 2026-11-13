@@ -206,25 +206,35 @@ fn n7_io_error_stops_the_pump() {
 
 // ── N8b：取消令牌直接断言（exec-rust 已暴露 `GoalRoundCancelToken`，升级为直连语义） ──
 //
-// 契约 F-G 的真实接线：Esc 分支调 `cancel()`、提交新消息调 `reset()`、续轮循环每轮前用
-// `should_abort_goal_rounds(token.is_cancelled(), consecutive, MAX)`。这里直接锁住这三段接线，
-// 而不是只测纯函数（纯函数真值表由 N5 覆盖，二者互补）。
+// 契约 F-G 的真实接线：Esc 分支调 `cancel_for(session)`、提交新消息调 `reset_for(session)`、
+// 续轮循环每轮前用 `should_abort_goal_rounds(token.is_cancelled_for(session), consecutive, MAX)`。
+// 这里直接锁住这三段接线，而不是只测纯函数（纯函数真值表由 N5 覆盖，二者互补）。
+//
+// 2026-11 修订：令牌由进程级 `Arc<AtomicBool>` 改为**按会话分区**——旧实现下 B 会话的新消息
+// 会 `reset()` 掉 A 会话的取消位，A 的续轮因此被重新武装并跑进 B 的界面（跨会话串话）。
 
 #[test]
 fn n8b_cancel_token_drives_the_round_abort_decision() {
+    const SESSION: &str = "session-n8b";
     let token = tui::GoalRoundCancelToken::new();
-    assert!(!token.is_cancelled(), "N8b: 新令牌必须处于未取消态");
+    assert!(
+        !token.is_cancelled_for(SESSION),
+        "N8b: 新令牌必须处于未取消态"
+    );
     // 未取消 + 未达上限 ⇒ 继续续轮。
     assert!(
-        !tui::should_abort_goal_rounds(token.is_cancelled(), 0, 8),
+        !tui::should_abort_goal_rounds(token.is_cancelled_for(SESSION), 0, 8),
         "N8b: 未取消时不得中止续轮"
     );
 
     // Esc 置位：续轮判定必须立刻变为中止（即使一轮都没跑）。
-    token.cancel();
-    assert!(token.is_cancelled(), "N8b: cancel() 后 is_cancelled() 必须为 true");
+    token.cancel_for(SESSION);
     assert!(
-        tui::should_abort_goal_rounds(token.is_cancelled(), 0, 8),
+        token.is_cancelled_for(SESSION),
+        "N8b: cancel_for() 后 is_cancelled_for() 必须为 true"
+    );
+    assert!(
+        tui::should_abort_goal_rounds(token.is_cancelled_for(SESSION), 0, 8),
         "N8b: Esc 后 must-abort 判定必须成立（不得再续轮）"
     );
 
@@ -232,17 +242,53 @@ fn n8b_cancel_token_drives_the_round_abort_decision() {
     // 若克隆是深拷贝则跨线程取消永远失效（这是本类 bug 的典型形态）。
     let shared = token.clone();
     assert!(
-        shared.is_cancelled(),
+        shared.is_cancelled_for(SESSION),
         "N8b: 克隆句柄必须共享取消位（Esc 线程置位要能被续轮线程看到）"
     );
-    token.reset();
+    token.reset_for(SESSION);
     assert!(
-        !shared.is_cancelled(),
-        "N8b: reset() 必须对所有共享句柄同时生效（新一轮用户消息重置取消态）"
+        !shared.is_cancelled_for(SESSION),
+        "N8b: reset_for() 必须对所有共享句柄同时生效（新一轮用户消息重置取消态）"
     );
     assert!(
-        !tui::should_abort_goal_rounds(shared.is_cancelled(), 0, 8),
+        !tui::should_abort_goal_rounds(shared.is_cancelled_for(SESSION), 0, 8),
         "N8b: reset 后必须恢复续轮判定"
+    );
+}
+
+/// 跨会话隔离（本次修复的核心回归）：取消位必须**按会话**分区。
+///
+/// - B 会话的 `cancel_for` 不得停掉 A 会话的续轮（各有各的 Esc）；
+/// - B 会话的新消息 `reset_for(B)` 不得重新武装 A 会话（旧实现的串话根因）；
+/// - 无会话事实 ⇒ fail-closed 视为已取消。
+#[test]
+fn n8b_cancel_token_is_partitioned_per_session() {
+    const SESSION_A: &str = "session-a";
+    const SESSION_B: &str = "session-b";
+    let token = tui::GoalRoundCancelToken::new();
+
+    // A 被取消后，B 的取消/重置都不得改变 A 的状态（反向亦然）。
+    token.cancel_for(SESSION_A);
+    assert!(token.is_cancelled_for(SESSION_A));
+    assert!(
+        !token.is_cancelled_for(SESSION_B),
+        "N8b: A 会话的 Esc 不得停掉 B 会话的续轮"
+    );
+
+    token.reset_for(SESSION_B);
+    assert!(
+        token.is_cancelled_for(SESSION_A),
+        "N8b: B 会话的新消息不得重新武装 A 会话（旧 Arc<AtomicBool> 的串话根因）"
+    );
+
+    // A 自己的新消息才重新武装 A。
+    token.reset_for(SESSION_A);
+    assert!(!token.is_cancelled_for(SESSION_A));
+
+    // 空白/空会话 id ⇒ fail-closed：不知道该停谁，就按已取消处理。
+    assert!(
+        token.is_cancelled_for("  "),
+        "N8b: 无会话事实必须 fail-closed（视为已取消）"
     );
 }
 

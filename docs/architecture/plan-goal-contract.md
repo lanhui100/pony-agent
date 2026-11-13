@@ -84,6 +84,20 @@ pub fn reset_goal_store_for_test();                  // 测试接缝
 
 `GoalData` wire 形状沿用既有冻结（`roundsStarted` / `maxGoalRounds` camelCase；`session_id` / `blocked_reason` snake_case），本波不改字段名。
 
+### 2.1 会话归属（fail-closed，2026-11-13 修订）
+
+> 决策记录：`.agents/notes/implemented/bug-fix/2026-11-13-goal-cross-session-isolation.md`（backlog B152）。
+
+| 事实 | 冻结口径 |
+|---|---|
+| `session_id` 缺失 | `create_goal` / `get_goal` / `update_goal` **一律 `Err`**（文案含 `session_id`）；空串/纯空白等同缺失 |
+| `default` 兜底 | **禁止**。store 不再存在「无会话 ⇒ 落到 `"default"` 键」的路径；存量 `default` 条目不被任何读取方命中 |
+| 宿主续轮 | `run.session_id` 为空 ⇒ **不续轮**（`return Ok(response)`），不得回落 `"default"` |
+| TUI 轮次线程 | 无 `session_id` ⇒ 不启动轮次，补发 `UiEvent::StreamFailed`（可见终态） |
+| 取消令牌 | 按会话分区：`cancel_for` / `reset_for` / `is_cancelled_for`；空会话 id 视为「已取消」 |
+| 横幅事件 | `UiEvent::GoalUpdated` 携带 `session_id`；与当前会话不一致 ⇒ 丢弃（与 `GoalRoundsStopped` 同源判据） |
+| 会话切换 | 唯一收口 `tui::switch_session_scope`：停旧会话续轮 → 复位作用域 → hydrate 消息快照 → hydrate goal 横幅；守卫判据是「**在飞轮次线程**」而非 `is_streaming` |
+
 ---
 
 ## 3. C3 turn 结束续行驱动（autocontinue）
