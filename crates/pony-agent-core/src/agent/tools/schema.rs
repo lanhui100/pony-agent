@@ -498,8 +498,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             })),
         },
-        // ── PA-076 phase 7 P2-6: Plan + ViewImage added after all existing definitions
-        // so the stable prefix invariant (design Decision 10) is preserved. ──
+        // ── PA-076 phase 7 P2-6: Plan + ViewImage 追加在既有定义之后，保持稳定前缀（Decision 10）。 ──
         ToolDefinition {
             name: TOOL_PLAN_CONTROL,
             description: "控制会话级 Plan 状态：create / replace / merge / complete_step / start_execution / abort，不执行任意子调用。",
@@ -1125,6 +1124,13 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             })),
         },
+        acp_delegate_tool_definition(),
+    ]
+}
+
+
+/// B150/P1：`acp_delegate` 的定义体（从 `builtin_tools()` 抽出，避免该函数越过文件规模门）。
+fn acp_delegate_tool_definition() -> ToolDefinition {
         // B150/P1：AcpDelegate —— 把一段任务委派给外部 ACP agent（opencode / antigravity）。
         ToolDefinition {
             name: TOOL_ACP_DELEGATE,
@@ -1152,8 +1158,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 "required": ["agent", "prompt"],
                 "additionalProperties": false
             })),
-        },
-    ]
+    }
 }
 
 pub(super) fn contract_priority(view: &ToolDefinitionContractView) -> u8 {

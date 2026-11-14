@@ -244,8 +244,7 @@
                 "JobList".to_string(),
                 // W42/PA-149：技能正文按需加载。
                 "skill_load".to_string(),
-                // B150/P1：ACP 委派（builtin_tools 追加序末位，模型面 38 → 39）。
-                "acp_delegate".to_string()
+                "acp_delegate".to_string() // B150/P1：ACP 委派（模型面 38 → 39）
             ]
         );
     }
@@ -359,8 +358,7 @@
                 "JobList".to_string(),
                 // W42/PA-149：技能正文按需加载。
                 "skill_load".to_string(),
-                // B150/P1：ACP 委派（builtin_tools 追加序末位，模型面 38 → 39）。
-                "acp_delegate".to_string()
+                "acp_delegate".to_string() // B150/P1：ACP 委派（模型面 38 → 39）
             ]
         );
         assert!(payload.iter().all(|tool| {
@@ -368,10 +366,8 @@
                 .and_then(Value::as_str)
                 .is_some_and(|description| !description.trim().is_empty())
         }));
-        // PA-076 P2-6: Plan and ViewImage 在既有 13-tool 前缀后追加；W25 起 team 工具已被
-        // 摘除（未接线），W37-C1 job_* 七件成为尾部，W42 追加 skill_load，B150/P1 追加
-        // acp_delegate 成为当前尾项（cache-friendly stable prefix invariant from design
-        // Decision 10 仍保持：前缀顺序不变，仅尾部变化）。
+        // PA-076 P2-6：尾部追加序（W37-C1 job_* → W42 skill_load → B150/P1 acp_delegate）；
+        // 前缀顺序不变、仅尾部变化（cache-friendly stable prefix invariant，Decision 10）。
         let last_two = &names[names.len() - 2..];
         assert_eq!(
             last_two,
