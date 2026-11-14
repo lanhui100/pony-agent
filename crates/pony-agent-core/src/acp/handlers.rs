@@ -43,6 +43,18 @@ pub const ACP_FS_READ_MAX_BYTES: u64 = 120_000;
 /// `terminal/wait_for_exit` 的轮询切片（≤ NFR `acp.request_timeout_ms` 的预算内快速响应）。
 const TERMINAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// 每个 terminal 的**每流（stdout / stderr 各自）**输出字节上限，缺省值（1 MiB）。
+///
+/// 语义（B1 复审 BLOCKING）：输出缓冲是**有界头部窗口**——只保留从启动起的前
+/// `limit` 字节，超出部分永久丢弃并把对应 `stdout_truncated` / `stderr_truncated` 置真。
+/// 没有这条上限时 append-only 累积会被一条 `yes` 这类洪水命令打成无界内存
+/// （实测 8s ≈50MB，按 120s 预算外推 ≈760MB/terminal）。请求里的 `outputByteLimit`
+/// 可调小/调大，但受 [`ACP_TERMINAL_OUTPUT_BYTE_LIMIT_MAX`] 硬顶约束。
+pub const ACP_TERMINAL_OUTPUT_BYTE_LIMIT: usize = 1024 * 1024;
+
+/// `outputByteLimit` 的宿主硬顶（16 MiB/流）：agent 自选值不得把宿主内存当无界缓冲。
+pub const ACP_TERMINAL_OUTPUT_BYTE_LIMIT_MAX: usize = 16 * 1024 * 1024;
+
 /// 受控 tmp 目录名（workspace 根下的 `.tmp`，与 `tools/paths.rs` 的受控 tmp 布局一致）。
 const CONTROLLED_TMP_DIR: &str = ".tmp";
 
@@ -289,8 +301,12 @@ struct TerminalEntry {
     /// ProcessManager 句柄（wire `terminalId` 是它外面的 opaque 包装，不可伪造）。
     handle: String,
     /// 累积输出缓冲（B1：`wait_for_exit` 的 poll 结果**不得丢弃**，否则 create→wait→output
-    /// 的标准流程会返回空；这里 append-only 累积，`output` 返回全量而非只返回「本片」）。
+    /// 的标准流程会返回空；这里累积，`output` 返回全量而非只返回「本片」）。
+    ///
+    /// 上界见 [`TerminalBuffer::append`]：每流最多 `limit` 字节（有界头部窗口）。
     buffer: Mutex<TerminalBuffer>,
+    /// 每流字节上限（`outputByteLimit` 或 [`ACP_TERMINAL_OUTPUT_BYTE_LIMIT`]，硬顶 16 MiB）。
+    limit: usize,
 }
 
 /// per-terminal 输出累积态。
@@ -301,6 +317,68 @@ struct TerminalBuffer {
     stdout_truncated: bool,
     stderr_truncated: bool,
     exit_code: Option<i32>,
+}
+
+impl TerminalBuffer {
+    /// 追加一片输出：**有界头部窗口**语义。
+    ///
+    /// - 只 append 剩余额度（`limit - 已缓冲字节`），超出部分丢弃；
+    /// - 一旦某流被截断，`*_truncated` 永久置真，后续分片**不再**累加该流（既不会
+    ///   「重复累积已丢弃字节」，也不会把缓冲顶破上限）；
+    /// - 截断点按 UTF-8 字符边界回退，绝不切出非法字符串（不会 panic）。
+    fn append(&mut self, limit: usize, chunk: &str, upstream_truncated: bool, stderr: bool) {
+        if chunk.is_empty() {
+            return;
+        }
+        let (buffer, truncated) = if stderr {
+            (&mut self.stderr, &mut self.stderr_truncated)
+        } else {
+            (&mut self.stdout, &mut self.stdout_truncated)
+        };
+        if *truncated {
+            return;
+        }
+        let remaining = limit.saturating_sub(buffer.len());
+        if chunk.len() <= remaining {
+            buffer.push_str(chunk);
+            if upstream_truncated {
+                *truncated = true;
+            }
+            return;
+        }
+        buffer.push_str(utf8_prefix(chunk, remaining));
+        *truncated = true;
+    }
+}
+
+/// 取 `text` 的前 `max_bytes` 字节（按 UTF-8 字符边界回退）。
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// 解析 `outputByteLimit`：缺省 [`ACP_TERMINAL_OUTPUT_BYTE_LIMIT`]；0/非法 ⇒ 明确错误；
+/// 超宿主硬顶 ⇒ 截到 [`ACP_TERMINAL_OUTPUT_BYTE_LIMIT_MAX`]（agent 自选值不得无界）。
+fn resolve_output_byte_limit(requested: Option<u64>) -> Result<usize, AcpHandlerError> {
+    match requested {
+        None => Ok(ACP_TERMINAL_OUTPUT_BYTE_LIMIT),
+        Some(0) => Err(AcpHandlerError::Denied(
+            "permission_denied: terminal/create 的 outputByteLimit 必须是正字节数（0 不是合法上限）。"
+                .to_string(),
+        )),
+        Some(limit) => {
+            let limit = usize::try_from(limit).map_err(|_| {
+                AcpHandlerError::Denied(
+                    "permission_denied: terminal/create 的 outputByteLimit 超出可表示范围。"
+                        .to_string(),
+                )
+            })?;
+            Ok(limit.min(ACP_TERMINAL_OUTPUT_BYTE_LIMIT_MAX))
+        }
+    }
 }
 
 /// `terminal/*` 的 ProcessManager 治理实现。
@@ -378,10 +456,9 @@ impl ManagedTerminalHandler {
         let mut buffer = entry.buffer.lock().map_err(|_| {
             AcpHandlerError::Internal("terminal 输出缓冲已中毒，fail-closed。".to_string())
         })?;
-        buffer.stdout.push_str(&poll.stdout);
-        buffer.stderr.push_str(&poll.stderr);
-        buffer.stdout_truncated |= poll.stdout_truncated;
-        buffer.stderr_truncated |= poll.stderr_truncated;
+        // 有界头部窗口：超出 `entry.limit` 的部分直接丢弃（不重复累积，不顶破上限）。
+        buffer.append(entry.limit, &poll.stdout, poll.stdout_truncated, false);
+        buffer.append(entry.limit, &poll.stderr, poll.stderr_truncated, true);
         if let Some(code) = poll.exit_code {
             buffer.exit_code = Some(code);
         }
@@ -466,6 +543,7 @@ impl TerminalHandler for ManagedTerminalHandler {
                 Some(format!("{name}={}", variable.value))
             })
             .collect::<Vec<_>>();
+        let output_byte_limit = resolve_output_byte_limit(request.output_byte_limit)?;
         let cwd = self.resolve_cwd(request.cwd.as_deref())?;
         let start = ProcessStartRequest {
             session_id: request.session_id.clone(),
@@ -503,6 +581,7 @@ impl TerminalHandler for ManagedTerminalHandler {
                 session_id: request.session_id.clone(),
                 handle,
                 buffer: Mutex::new(TerminalBuffer::default()),
+                limit: output_byte_limit,
             }),
         );
         Ok(CreateTerminalResponse { terminal_id })
@@ -513,7 +592,8 @@ impl TerminalHandler for ManagedTerminalHandler {
         request: &TerminalOutputRequest,
     ) -> Result<TerminalOutputResponse, AcpHandlerError> {
         let entry = self.entry(&request.session_id, &request.terminal_id)?;
-        // 先 drain 一次（增量追加进缓冲），再返回**累积全量**：create→wait→output 也有内容。
+        // 先 drain 一次（增量追加进**有界**缓冲），再返回累积内容：create→wait→output 也有内容，
+        // 且返回量恒 ≤ 每流 `limit`（不会 clone 无界历史）。
         let (_, exit_code) = self.poll_into(&entry)?;
         let buffer = entry.buffer.lock().map_err(|_| {
             AcpHandlerError::Internal("terminal 输出缓冲已中毒，fail-closed。".to_string())

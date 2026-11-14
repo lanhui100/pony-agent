@@ -402,3 +402,99 @@ fn h4_long_running_terminal_wait_respects_budget_and_stays_responsive() {
     session.close();
     let _ = std::fs::remove_dir_all(&cwd);
 }
+
+// ───────────────────────── h5 terminal 输出缓冲有界 ─────────────────────────
+//
+// 复审 r2 BLOCKING（review-acp-config.json handlers.rs:381）：terminal 输出缓冲
+// 在每次 poll 时无界 `push_str` 累积 ⇒ 外部 agent 可持续轮询 output 把宿主内存拖爆。
+// 断言只测**缓冲字节上限**（不断言 RSS，CI 不友好）：
+// ① 末次 `terminal/output` 的 output 字节数 ≤ `outputByteLimit`（create 显式传 1 MiB/流）；
+// ② 协议 `TerminalOutputResponse.truncated` 必须为 true（v1 有该字段；若未来 schema 移除，
+//    以 ① 的长度上限作为等价信号）；
+// ③ kill/release 仍可用，release + close 后无残留进程。
+const H5_OUTPUT_BYTE_LIMIT: usize = 1_048_576;
+
+#[test]
+fn h5_terminal_output_buffer_is_bounded() {
+    let cwd = temp_dir("flood-output");
+    let marker = format!("pony-h5-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos());
+    let marker_file = cwd.join("marker.txt");
+    std::fs::write(&marker_file, &marker).expect("写 marker 文件");
+    let init_file = cwd.join("initialize.jsonl");
+    let resp_file = cwd.join("responses.jsonl");
+    let polls = "30";
+    let spec = spec_with_hint(
+        hint(false, true),
+        "probe_terminal_flood",
+        &[
+            init_file.to_string_lossy().as_ref(),
+            resp_file.to_string_lossy().as_ref(),
+            marker_file.to_string_lossy().as_ref(),
+            polls,
+        ],
+    );
+
+    let mut session = match AcpAgentSession::spawn_with_mcp_and_handlers(
+        &spec,
+        &cwd,
+        Vec::new(),
+        None,
+        Some(managed_terminal_handler()),
+    ) {
+        Ok(session) => session,
+        Err(error) => panic!("h5：spawn 必须成功：{error:?}"),
+    };
+    session.set_turn_budget(ACP_DEFAULT_TURN_BUDGET);
+    run_prompt(&session);
+
+    let responses = captured_responses(&cwd);
+    let final_output = response_for(&responses, 9700);
+    let text = final_output["result"]["output"]
+        .as_str()
+        .unwrap_or_else(|| panic!("h5 违约：末次 terminal/output 必须返回 result，实际 {final_output}"));
+    assert!(
+        text.len() <= H5_OUTPUT_BYTE_LIMIT,
+        "h5 违约：terminal 输出缓冲无界累积（{} 次轮询后 output {} 字节 > 上限 {} 字节，\
+         外部 agent 可据此 OOM 宿主）",
+        polls,
+        text.len(),
+        H5_OUTPUT_BYTE_LIMIT
+    );
+    assert_eq!(
+        final_output["result"]["truncated"],
+        json!(true),
+        "h5 违约：达到上限必须显式标记 truncated=true（v1 TerminalOutputResponse 字段），实际 {final_output}"
+    );
+
+    for id in [9701u64, 9702u64] {
+        let response = response_for(&responses, id);
+        assert!(
+            response.get("error").is_none(),
+            "h5 违约：超限后 kill/release 仍必须可用，实际 {response}"
+        );
+    }
+
+    session.close();
+    // 残留：release + close 后不得再有匹配 marker 的进程（marker 只在终端子进程 argv）。
+    let deadline = Duration::from_millis(nfr_acp_ms("spawn_reap_grace_ms") * 4);
+    let started = Instant::now();
+    loop {
+        let status = std::process::Command::new("pgrep")
+            .arg("-f")
+            .arg(&marker)
+            .output()
+            .expect("pgrep 可执行");
+        if status.status.code() == Some(1) {
+            break;
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "h5 违约：release+close 后不得残留终端子进程（pgrep exit={:?}），stdout:{}",
+            status.status.code(),
+            String::from_utf8_lossy(&status.stdout)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let _ = std::fs::remove_dir_all(&cwd);
+}

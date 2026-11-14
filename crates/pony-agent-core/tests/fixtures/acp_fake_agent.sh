@@ -39,6 +39,9 @@
 #                                 →output→wait_for_exit→kill→kill(幂等)→release，应答按序落 respFile
 #   probe_terminal_wait_first <initFile> <respFile> <markerFile>
 #                                 create(sleep 0.3; echo <marker>) → **wait_for_exit → output**（ACP 标准序）
+#   probe_terminal_flood <initFile> <respFile> <markerFile> <polls>
+#                                 create(`yes <marker>` + outputByteLimit=1MiB) → 期间轮询 output <polls> 次
+#                                 （无界累积向量）→ 末次 output / kill / release 应答落 resp
 #   probe_terminal_long <initFile> <respFile> <delaySeconds>
 #                                 create(sleep <delay>; echo done) → wait_for_exit → output → output(无害重试)
 #   cancel_hold <markerFile> <sessionId>
@@ -52,6 +55,7 @@ mode="${1:-ok}"
 arg="${2:-}"
 arg2="${3:-}"
 arg3="${4:-}"
+arg4="${5:-}"
 
 emit() { printf '%s\n' "$1"; }
 
@@ -144,6 +148,44 @@ while IFS= read -r line; do
             id=$(id_of "$line")
             s=$(sentinel_of "$line")
             [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":\"$s\"}}"
+            ;;
+        probe_terminal_flood)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    printf '%s\n' "$line" >> "$arg"
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                session/prompt)
+                    prompt_id="$id"
+                    marker_text=$(cat "$arg3" 2>/dev/null || printf '%s' "$arg3")
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9500,\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"acp-sess-1\",\"command\":\"sh\",\"args\":[\"-c\",\"yes $marker_text\"],\"outputByteLimit\":1048576}}"
+                    IFS= read -r answer && printf '%s\n' "$answer" >> "$arg2"
+                    tid=$(printf '%s' "$answer" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
+                    idx=0
+                    while [ "$idx" -lt "${arg4:-0}" ]; do
+                        sleep 0.05
+                        rid=$((9600 + idx))
+                        emit "{\"jsonrpc\":\"2.0\",\"id\":$rid,\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"acp-sess-1\",\"terminalId\":\"$tid\"}}"
+                        IFS= read -r answer
+                        idx=$((idx + 1))
+                    done
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9700,\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"acp-sess-1\",\"terminalId\":\"$tid\"}}"
+                    IFS= read -r answer && printf '%s\n' "$answer" >> "$arg2"
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9701,\"method\":\"terminal/kill\",\"params\":{\"sessionId\":\"acp-sess-1\",\"terminalId\":\"$tid\"}}"
+                    IFS= read -r answer && printf '%s\n' "$answer" >> "$arg2"
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9702,\"method\":\"terminal/release\",\"params\":{\"sessionId\":\"acp-sess-1\",\"terminalId\":\"$tid\"}}"
+                    IFS= read -r answer && printf '%s\n' "$answer" >> "$arg2"
+                    [ -n "$prompt_id" ] && respond_stop "$prompt_id" end_turn
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+            esac
             ;;
         probe_terminal_wait_first)
             m=$(method_of "$line")
