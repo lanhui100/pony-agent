@@ -16,7 +16,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use crate::acp::client::{AcpAgentClient, PermissionHandler};
+use crate::acp::client::{
+    AcpAgentClient, AcpClientCapabilities, FsHandler, PermissionHandler, TerminalHandler,
+};
 use crate::acp::config::AcpAgentSpec;
 use crate::acp::protocol::{
     method, ContentBlock, McpServer, PermissionOptionKind, RequestPermissionOutcome,
@@ -40,6 +42,24 @@ pub const ACP_ERROR_AGENT_REFUSED: &str = "acp_agent_refused";
 
 /// `cancelled` 归约后的错误码（沿用既有 `tool_cancelled`，§3.2.8）。
 pub const ACP_TOOL_CANCELLED: &str = "tool_cancelled";
+
+/// 能力声明推导（B175 纯函数）：`caps = hint ∧ 实际将装配的 handler`。
+///
+/// - `spec.capabilities_hint` 是**上限**（用户声明"愿意下放"）：hint=false 时即使宿主有 handler
+///   也**不声明**；
+/// - `has_fs` / `has_terminal` 表示 connect **之前**已构造好、握手后一定会装配的 handler；
+///   没有真实 handler 承载的能力不得声明（谎报会让外部 agent 发来无法治理的反向请求）；
+/// - `initialize` 是握手第一条 ⇒ 本函数必须在 `connect_with_capabilities` **之前**调用。
+pub fn capabilities_for(
+    spec: &AcpAgentSpec,
+    has_fs: bool,
+    has_terminal: bool,
+) -> AcpClientCapabilities {
+    AcpClientCapabilities {
+        fs: spec.capabilities_hint.fs && has_fs,
+        terminal: spec.capabilities_hint.terminal && has_terminal,
+    }
+}
 
 /// `acp_delegate` 工具名（`ToolResult.tool_name` 的产品面）。
 const TOOL_ACP_DELEGATE: &str = "acp_delegate";
@@ -205,10 +225,55 @@ impl AcpAgentSession {
         cwd: &Path,
         mcp_servers: Vec<McpServer>,
     ) -> Result<Self, AcpTransportError> {
+        // 既有等价行为：无真实 fs/terminal handler ⇒ 不声明任何能力。
+        Self::spawn_with_mcp_and_handlers(spec, cwd, mcp_servers, None, None)
+    }
+
+    /// B175 amend additive：**先按「将要装配的 handler」定 caps，再握手**，握手成功后立即装配。
+    ///
+    /// 这是 capacitiesHint 在生产路径真正生效的唯一入口（`install_*` 只能在 connect 之后调用，
+    /// 而 `initialize` 是握手第一条，故能力必须在 connect 前决定）：
+    /// 1. `caps = capabilities_for(spec, fs.is_some(), terminal.is_some())`（hint 是上限；
+    ///    声明 = hint ∧ 将要装的 handler）→ `connect_with_capabilities`；
+    /// 2. 校验不变式：`caps.fs == true` ⇒ `fs.is_some()`、`caps.terminal == true` ⇒
+    ///    `terminal.is_some()`，否则 fail-closed `AcpTransportError::Unavailable`
+    ///    （禁「声明了却没实现」）；
+    /// 3. 握手成功后、`new_session` 之前装配 handler（`install_fs_handler` /
+    ///    `install_terminal_handler`，保留 FailClosedPermissionHandler 审批面）；
+    /// 4. `spawn` / `spawn_with_mcp` 等价于本入口传 `(None, None)`（不声明、不装配）。
+    pub fn spawn_with_mcp_and_handlers(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        mcp_servers: Vec<McpServer>,
+        fs: Option<Arc<dyn FsHandler>>,
+        terminal: Option<Arc<dyn TerminalHandler>>,
+    ) -> Result<Self, AcpTransportError> {
+        // 1) 握手前的能力推导（initialize 是第一条报文）。
+        let capabilities = capabilities_for(spec, fs.is_some(), terminal.is_some());
+        // 2) 声明与装配一致性：声明为 true 却没有 handler ⇒ fail-closed，绝不谎报。
+        if capabilities.fs && fs.is_none() {
+            return Err(AcpTransportError::Unavailable(
+                "acp_capability_inconsistent: 声明了 clientCapabilities.fs 但未提供 FsHandler。"
+                    .to_string(),
+            ));
+        }
+        if capabilities.terminal && terminal.is_none() {
+            return Err(AcpTransportError::Unavailable(
+                "acp_capability_inconsistent: 声明了 clientCapabilities.terminal 但未提供 TerminalHandler。"
+                    .to_string(),
+            ));
+        }
         // 握手（含 protocolVersion == 1 的 fail-closed 校验）由 client 收口。
-        let mut client = AcpAgentClient::connect(spec, cwd)?;
-        // fs/terminal 一律不下放（None）：没有治理链 handler 就不声明能力（§3.2.4/§3.2.5）。
+        let mut client = AcpAgentClient::connect_with_capabilities(spec, cwd, capabilities)?;
+        // 3) 审批面固定 fail-closed；fs/terminal 仅在声明后装配（不追认未声明能力）。
         client.install_handlers(Arc::new(FailClosedPermissionHandler), None, None);
+        if let Some(handler) = fs {
+            client.install_fs_handler(handler);
+        }
+        if let Some(handler) = terminal {
+            client.install_terminal_handler(handler);
+        }
+        // 4) 会话建立在装配完成之后（杜绝「new_session 期间反向请求无 handler」窗口）。
         let response = client.new_session(cwd, mcp_servers)?;
         Ok(Self {
             client,
@@ -218,6 +283,18 @@ impl AcpAgentSession {
             pending_permissions: Mutex::new(Vec::new()),
             local_cancel: AtomicBool::new(false),
         })
+    }
+
+    /// B175 additive：装配 `fs/*` handler（热替换；保留既有 permission / terminal 槽位）。
+    ///
+    /// 只对**握手时已声明** fs 能力的会话有效：声明已在 `initialize` 固化，注入不追认新能力。
+    pub fn install_fs_handler(&self, handler: Arc<dyn FsHandler>) {
+        self.client.install_fs_handler(handler);
+    }
+
+    /// B175 additive：装配 `terminal/*` handler（热替换；保留既有 permission / fs 槽位）。
+    pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) {
+        self.client.install_terminal_handler(handler);
     }
 
     /// 设置整轮 prompt 预算（additive；转发给 [`AcpAgentClient::set_prompt_budget`]）。

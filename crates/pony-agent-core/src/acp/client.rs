@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use crate::acp::config::AcpAgentSpec;
 use crate::acp::protocol::{
     method, AgentCapabilities, AuthCapabilities, CancelNotification, ClientCapabilities,
-    ContentBlock, CreateTerminalRequest, CreateTerminalResponse,
+    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, FileSystemCapabilities,
     Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest, McpServer,
     PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
@@ -311,19 +311,53 @@ pub struct AcpAgentClient {
     prompt_budget: Mutex<Duration>,
 }
 
+/// `initialize` 时声明的客户端能力（B175）。
+///
+/// `initialize` 是握手第一条 ⇒ 能力声明必须**在 `connect` 之前**决定（不能"先握手后装 handler"）。
+/// 声明硬约束：传入本结构的能力必须 **≤ 实际会装配的 handler**；不得谎报（谎报会让外部 agent
+/// 发来宿主没有治理链承载的 `fs/*` / `terminal/*` 请求）。`spec.capabilities_hint` 只作为上限，
+/// 由 [`crate::acp::session::AcpAgentSession::capabilities_for`] 与本结构取交集。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AcpClientCapabilities {
+    /// 声明 `clientCapabilities.fs.{readTextFile,writeTextFile}`（需实际装配 [`FsHandler`]）。
+    pub fs: bool,
+    /// 声明 `clientCapabilities.terminal`（需实际装配 [`TerminalHandler`]）。
+    pub terminal: bool,
+}
+
+impl AcpClientCapabilities {
+    /// 全 false（既有 [`AcpAgentClient::connect`] 的等价语义）。
+    pub const NONE: Self = Self {
+        fs: false,
+        terminal: false,
+    };
+}
+
 impl AcpAgentClient {
-    /// 启动子进程并完成 `initialize` 握手。
+    /// 启动子进程并完成 `initialize` 握手（等价于 [`Self::connect_with_capabilities`] + 全 false）。
+    ///
+    /// 既有调用点行为不变：不声明 `fs` / `terminal`（agent 不会发 `fs/*` / `terminal/*` 反向请求）。
+    pub fn connect(spec: &AcpAgentSpec, cwd: &Path) -> Result<Self, AcpTransportError> {
+        Self::connect_with_capabilities(spec, cwd, AcpClientCapabilities::NONE)
+    }
+
+    /// B175 additive：按传入能力声明握手（`initialize` 的 `clientCapabilities.fs/terminal`）。
+    ///
+    /// 声明公式：`caps = spec.capabilities_hint ∧ 实际将装配的 handler`（hint 是上限：hint=false
+    /// 时即使有 handler 也不声明）。caps 必须在 **connect 之前** 由调用方决定（initialize 是握手
+    /// 第一条）；握手后 [`Self::install_fs_handler`] / [`Self::install_terminal_handler`] 只允许
+    /// 替换**已声明**能力的实现，不能让会话追认未声明的能力（fail-closed）。
     ///
     /// 行为契约：
     /// 1. `AcpTransport::spawn(spec, cwd, &[])`（env 白名单 / 进程组 / stderr 环形缓冲由 transport 收口）；
-    /// 2. 发送 `initialize { protocolVersion: 1, clientCapabilities, clientInfo }`；`fs` /
-    ///    `terminal` 能力**只由真实 handler 是否装配推导**并诚实声明（Gate-1 ADVISORY #8）：
-    ///    `connect` 阶段还没有任何 `FsHandler` / `TerminalHandler`（它们只能在握手后经
-    ///    [`AcpAgentClient::install_handlers`] 注入），因此这里一律**不声明**（缺省 = false）；
-    ///    `spec.capabilities_hint` 是用户可写的提示，**不得**单独决定线上能力声明；
+    /// 2. 发送 `initialize { protocolVersion: 1, clientCapabilities{caps}, clientInfo }`；
     /// 3. 校验响应 `protocolVersion == 1`，不等即 `Err(AcpTransportError::Protocol(..))`
     ///    （`acp_protocol_error`），**不重试、不降级**。
-    pub fn connect(spec: &AcpAgentSpec, cwd: &Path) -> Result<Self, AcpTransportError> {
+    pub fn connect_with_capabilities(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        capabilities: AcpClientCapabilities,
+    ) -> Result<Self, AcpTransportError> {
         let mut transport = AcpTransport::spawn(spec, cwd, &[])?;
 
         // 反向请求转发壳必须在首次 `initialize` 应答前就位：agent 可能在 initialize 期间就发
@@ -333,18 +367,19 @@ impl AcpAgentClient {
             slots: Arc::clone(&handlers),
         }));
 
-        // §3.2.4/§3.2.5 + 能力诚实性：此刻 handler 槽位仍是空的（`install_handlers` 只能在
-        // 握手之后调用），因此任何 `fs`/`terminal` 能力都**没有真实实现承载** ⇒ 缺省不声明
-        // （fail-closed：agent 不会发 fs/* / terminal/* 反向请求）。`spec.capabilities_hint`
-        // 不参与线上声明——用户可写的提示不能让宿主谎报能力。
-        let capabilities = ClientCapabilities {
-            fs: None,
-            terminal: None,
+        // B175：能力声明只由调用方传入的 caps 推导（caps 已由 session 侧与 hint 取交集）；
+        // 未声明的能力 ⇒ agent 不会发反向请求 ⇒ fail-closed（无 handler 时回 JSON-RPC error）。
+        let wire_capabilities = ClientCapabilities {
+            fs: capabilities.fs.then(|| FileSystemCapabilities {
+                read_text_file: true,
+                write_text_file: true,
+            }),
+            terminal: capabilities.terminal.then_some(true),
             auth: Some(AuthCapabilities { terminal: false }),
         };
         let request = InitializeRequest {
             protocol_version: PROTOCOL_VERSION,
-            client_capabilities: capabilities,
+            client_capabilities: wire_capabilities,
             client_info: Some(Implementation {
                 name: "pony-agent".to_string(),
                 title: Some("Pony Agent".to_string()),
@@ -490,6 +525,27 @@ impl AcpAgentClient {
         slots.permission = Some(permission);
         slots.fs = fs;
         slots.terminal = terminal;
+    }
+
+    /// B175 additive：仅热替换 `fs/*` handler（保留既有 permission / terminal 槽位）。
+    ///
+    /// 只能替换**握手时已声明**的 fs 能力实现；未声明时注入不改变线上能力（capability 声明已在
+    /// `initialize` 固化，不会追认）。
+    pub fn install_fs_handler(&self, handler: Arc<dyn FsHandler>) {
+        let mut slots = self
+            .handlers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slots.fs = Some(handler);
+    }
+
+    /// B175 additive：仅热替换 `terminal/*` handler（保留既有 permission / fs 槽位）。
+    pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) {
+        let mut slots = self
+            .handlers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slots.terminal = Some(handler);
     }
 
     /// 关闭会话与子进程（幂等；顺序由 [`AcpTransport::close`] 收口）。
