@@ -176,6 +176,9 @@ pub struct AcpAgentSession {
     cancellation: Mutex<Option<Arc<CancellationToken>>>,
     /// 当前挂起的审批槽位（`cancel()` 翻标志 → `resolve_permission` 立即回 `cancelled`）。
     pending_permissions: Mutex<Vec<Arc<PermissionSlot>>>,
+    /// 本会话的**本地**取消标志：`cancel()` 只翻它，绝不去 cancel 宿主注入的共享 turn 令牌
+    /// （单次委派超时取消不得连带取消整轮 turn）。
+    local_cancel: AtomicBool,
 }
 
 impl AcpAgentSession {
@@ -194,6 +197,7 @@ impl AcpAgentSession {
             session_id: response.session_id,
             cancellation: Mutex::new(Some(Arc::new(CancellationToken::new()))),
             pending_permissions: Mutex::new(Vec::new()),
+            local_cancel: AtomicBool::new(false),
         })
     }
 
@@ -238,8 +242,8 @@ impl AcpAgentSession {
             }
         };
 
-        // 会话已取消：不再向 agent 发 prompt（fail-closed 归约为 aborted）。
-        if self.session_cancelled() {
+        // 会话已取消（本地标志或宿主令牌）：不再向 agent 发 prompt（fail-closed 归约为 aborted）。
+        if self.cancellation_requested() {
             return self.outcome_result(
                 AcpTurnOutcome::Cancelled,
                 StopReason::Cancelled,
@@ -256,15 +260,17 @@ impl AcpAgentSession {
         // 线程，本线程按 `turn_cancel_poll_ms`(≤100ms) 轮询取消令牌；一旦触发即发
         // `session/cancel` notification（agent 随后以 `stopReason: cancelled` 回应本轮），
         // 从而不必等满整轮预算。取消发送失败只记诊断，不改变 prompt 的归约结果。
-        let prompt_result = std::thread::scope(|scope| {
+        let (prompt_result, cancel_observed) = std::thread::scope(|scope| {
             let handle =
                 scope.spawn(move || self.client.prompt(&self.session_id, blocks, observer));
             let mut cancel_sent = false;
+            let mut cancel_observed = false;
             while !handle.is_finished() {
                 // 每一片都重读槽位：`set_cancellation_token` 是 `&self` 热替换，prompt 运行期
                 // 注入的令牌也必须被同一个轮询观察到（不能只读启动时的快照）。
-                if !cancel_sent && self.session_cancelled() {
+                if !cancel_sent && self.cancellation_requested() {
                     cancel_sent = true;
+                    cancel_observed = true;
                     if let Err(error) = self.client.cancel(&self.session_id) {
                         eprintln!(
                             "[acp][session] session/cancel 发送失败（取消仍按 aborted 归约）：{error}"
@@ -273,7 +279,7 @@ impl AcpAgentSession {
                 }
                 std::thread::sleep(CANCEL_POLL_INTERVAL);
             }
-            handle.join()
+            (handle.join(), cancel_observed)
         });
         let response = match prompt_result {
             Ok(result) => result,
@@ -297,6 +303,20 @@ impl AcpAgentSession {
                 &warnings,
                 started,
             ),
+            // 取消已触发但 agent 不配合（根本没回包 ⇒ 传输层 timeout/断链）：归因优先于传输层
+            // 错误分类，必须归约 aborted + tool_cancelled，不得退化成 acp_timeout。
+            Err(error) if cancel_observed || self.cancellation_requested() => {
+                eprintln!(
+                    "[acp][session] 取消已触发但 agent 未回 cancelled（{error}），按 aborted 归约"
+                );
+                self.outcome_result(
+                    AcpTurnOutcome::Cancelled,
+                    StopReason::Cancelled,
+                    &updates,
+                    &warnings,
+                    started,
+                )
+            }
             // 传输层失败：保留 §3.2.9 的 `acp_*` 错误码来源，不塌缩成通用错误。
             Err(error) => self.error_result(error.code(), error.to_string(), started),
         }
@@ -304,16 +324,13 @@ impl AcpAgentSession {
 
     /// 取消：`session/cancel` notification + 挂起权限请求全部回 `cancelled`（§3.2.6）。
     pub fn cancel(&self) -> Result<(), AcpTransportError> {
-        // 1) 先翻挂起审批的取消标志：让 `resolve_permission` 立即归约成 cancelled。
+        // 1) 只翻**本地**取消标志：本方法取消的是本会话的一次委派，**不得** cancel 宿主注入的
+        //    共享 turn 令牌（那会把整个 turn 连带取消）；注入令牌全程只读（`is_cancelled` 观察）。
+        self.local_cancel.store(true, Ordering::Release);
+        // 2) 挂起审批全部取消，让 `resolve_permission` 立即归约成 cancelled。
         if let Ok(slots) = self.pending_permissions.lock() {
             for slot in slots.iter() {
                 slot.request_cancel();
-            }
-        }
-        // 2) 取消令牌：prompt / 后续轮次立即观察（不再向 agent 发新请求）。
-        if let Ok(slot) = self.cancellation.lock() {
-            if let Some(token) = slot.as_ref() {
-                token.cancel();
             }
         }
         // 3) 协议层取消通知（A2：notification，无 id）。
@@ -559,12 +576,18 @@ impl AcpAgentSession {
         event
     }
 
+    /// 宿主注入的共享令牌是否已取消（**只读**：本会话从不 cancel 它）。
     fn session_cancelled(&self) -> bool {
         self.cancellation
             .lock()
             .ok()
             .and_then(|slot| slot.as_ref().map(|token| token.is_cancelled()))
             .unwrap_or(false)
+    }
+
+    /// 本轮是否已请求取消：本地 `cancel()` 标志或宿主令牌（任一成立即成立）。
+    fn cancellation_requested(&self) -> bool {
+        self.local_cancel.load(Ordering::Acquire) || self.session_cancelled()
     }
 
     /// 等宿主决定：有界条件轮询（5ms）+ 取消标志 + NFR 超时；任何非批准终态 ⇒ cancelled。
@@ -598,7 +621,7 @@ impl AcpAgentSession {
                 }
             }
 
-            if slot.is_cancel_requested() || self.session_cancelled() {
+            if slot.is_cancel_requested() || self.cancellation_requested() {
                 settle_cancel(dispatcher, &pending.request_id);
                 return Ok(cancelled_response());
             }

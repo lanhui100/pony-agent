@@ -155,10 +155,36 @@ impl ToolRouter {
             }
         };
 
+        // 预算与取消令牌统一由 session 裁决（单一真源）：本层只做注入。宿主 `stop_turn` 的令牌
+        // 必须进 session 的 100ms 轮询，否则生产路径上外部 agent 杀不掉；timeoutMs 进整轮预算，
+        // 这里**不再**自建第二套超时/取消触发（双份预算会与 session 抢发 session/cancel）。
+        if let Some(ms) = args.timeout_ms {
+            if ms == 0 {
+                session.close();
+                return error_result(
+                    TOOL_ACP_DELEGATE,
+                    "invalid_arguments",
+                    "acp_delegate 的 timeoutMs 必须大于 0。".to_string(),
+                    None,
+                );
+            }
+            session.set_turn_budget(std::time::Duration::from_millis(ms));
+        }
+        if let Some(token) = context.cancellation.as_ref() {
+            session.set_cancellation_token(std::sync::Arc::clone(token));
+        }
+        eprintln!(
+            "[acp] acp_delegate: agent={} session={} budget_ms={:?} host_cancellation={}",
+            spec.id,
+            session.session_id(),
+            args.timeout_ms,
+            context.cancellation.is_some()
+        );
+
         let blocks = vec![crate::acp::protocol::ContentBlock::Text {
             text: args.prompt,
         }];
-        let result = run_delegate_prompt(&session, blocks, args.timeout_ms);
+        let result = run_delegate_prompt(&session, blocks);
         session.close();
         result
     }
@@ -1127,8 +1153,8 @@ fn resolve_delegate_cwd(
     Ok(canonical)
 }
 
-/// 跑一轮 prompt；`timeoutMs` 给出时是**整轮预算**（超预算即发 `session/cancel` 并归约
-/// `acp_timeout`，绝不让调用方无限等）。
+/// 跑一轮 prompt。整轮预算（`timeoutMs` → `session.set_turn_budget`）与取消（宿主令牌 →
+/// session 内轮询）都由 [`acp::session::AcpAgentSession`] 裁决，超预算即归约 `acp_timeout`。
 ///
 /// 事件上行说明：工具层没有 `TurnEventSink` 注入点（`ToolExecutionContext` 无该字段），
 /// 因此这里用 `NoopTurnEventSink`；外部 agent 的可见性由 `tool.call` span + 归约后的
@@ -1136,52 +1162,11 @@ fn resolve_delegate_cwd(
 fn run_delegate_prompt(
     session: &crate::acp::session::AcpAgentSession,
     blocks: Vec<crate::acp::protocol::ContentBlock>,
-    timeout_ms: Option<u64>,
 ) -> ToolResult {
-    let Some(limit) = timeout_ms.map(std::time::Duration::from_millis) else {
-        let sink = crate::agent::turn_flow::NoopTurnEventSink;
-        return session.prompt(blocks, &sink);
-    };
-    if limit.is_zero() {
-        return error_result(
-            TOOL_ACP_DELEGATE,
-            "invalid_arguments",
-            "acp_delegate 的 timeoutMs 必须大于 0。".to_string(),
-            None,
-        );
-    }
-
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let sink = crate::agent::turn_flow::NoopTurnEventSink;
-            let _ = sender.send(session.prompt(blocks, &sink));
-        });
-        match receiver.recv_timeout(limit) {
-            Ok(result) => result,
-            Err(_) => {
-                // 超预算：先取消（session/cancel notification），再给一个请求预算的宽限让
-                // prompt 线程按 cancelled 收尾；仍不返回则直接归约 acp_timeout。
-                if let Err(error) = session.cancel() {
-                    eprintln!("[acp] 超预算后 session/cancel 失败：{error}");
-                }
-                let grace = crate::acp::transport::ACP_REQUEST_TIMEOUT;
-                // 等 prompt 线程收尾（有界）；回归约结果无论如何都是 acp_timeout。
-                let _ = receiver.recv_timeout(grace);
-                timeout_result(limit)
-            }
-        }
-    })
-}
-
-fn timeout_result(limit: std::time::Duration) -> ToolResult {
-    error_result(
-        TOOL_ACP_DELEGATE,
-        "acp_timeout",
-        format!(
-            "委派超过 timeoutMs={} 仍未返回，已发出 session/cancel，按 acp_timeout fail-closed。",
-            limit.as_millis()
-        ),
-        None,
-    )
+    // 预算（`timeoutMs` → `session.set_turn_budget`）与取消（`ToolExecutionContext.cancellation`
+    // → session 内 `turn_cancel_poll_ms` 轮询）全部由 session 统一裁决；本函数只跑一轮 prompt。
+    // 原先这里的 `recv_timeout + session.cancel` 兜底已删除：它与 session 内轮询并发触发，
+    // 会形成双重 session/cancel 竞态与双份预算（哪一份先生效不确定）。
+    let sink = crate::agent::turn_flow::NoopTurnEventSink;
+    session.prompt(blocks, &sink)
 }

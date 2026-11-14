@@ -2236,13 +2236,28 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
         Ok(session) => session,
         Err(error) => return acp_session_error(error),
     };
+    // 整轮预算：`--timeout-secs` 是用户显式预算；缺省用执行策略默认（120s，与
+    // `acp_delegate` 的 ToolExecutionPolicy 默认一致），**不得**回落到 transport 的 5s
+    // 单请求硬顶——否则 slow agent（>5s）会被误判成 acp_timeout/exit 7。
+    const ACP_DEFAULT_TURN_BUDGET: Duration = Duration::from_secs(120);
+    let budget = match parsed.timeout {
+        Some(limit) if !limit.is_zero() => limit,
+        _ => ACP_DEFAULT_TURN_BUDGET,
+    };
+    session.set_turn_budget(budget);
+    eprintln!(
+        "[ponycli] acp: agent={} session={} turn_budget={:?}",
+        spec.id,
+        session.session_id(),
+        budget
+    );
     let blocks = vec![pony_agent_core::acp::protocol::ContentBlock::Text {
         text: prompt,
     }];
     let code = match parsed.output_format {
         OutputFormat::Jsonl => {
             let sink = headless::JsonlSink::new();
-            let code = acp_run_prompt(&session, blocks, &sink, parsed.timeout);
+            let code = acp_run_prompt(&session, blocks, &sink);
             // jsonl 契约：stdout 每行一个事件对象（sink 已保证 JSONL 形状）。
             for line in sink.finish() {
                 println!("{line}");
@@ -2251,7 +2266,7 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
         }
         OutputFormat::Sse => {
             let sink = headless::SseSink::new();
-            let code = acp_run_prompt(&session, blocks, &sink, parsed.timeout);
+            let code = acp_run_prompt(&session, blocks, &sink);
             for frame in sink.finish() {
                 println!("{frame}");
             }
@@ -2259,7 +2274,7 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
         }
         OutputFormat::Text => {
             let sink = AcpTextSink;
-            acp_run_prompt(&session, blocks, &sink, parsed.timeout)
+            acp_run_prompt(&session, blocks, &sink)
         }
     };
     session.close();
@@ -2375,36 +2390,15 @@ fn acp_resume(
 }
 
 /// 跑一轮 prompt；`--timeout-secs` 给出时是整轮预算（超预算 → session/cancel + Timeout 码）。
-fn acp_run_prompt<S: TurnEventSink + Sync>(
+fn acp_run_prompt<S: TurnEventSink>(
     session: &pony_agent_core::acp::session::AcpAgentSession,
     blocks: Vec<pony_agent_core::acp::protocol::ContentBlock>,
     sink: &S,
-    timeout: Option<Duration>,
 ) -> i32 {
-    let Some(limit) = timeout else {
-        return acp_result_exit_code(&session.prompt(blocks, sink));
-    };
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let _ = sender.send(session.prompt(blocks, sink));
-        });
-        match receiver.recv_timeout(limit) {
-            Ok(result) => acp_result_exit_code(&result),
-            Err(_) => {
-                if let Err(error) = session.cancel() {
-                    eprintln!("[ponycli] acp 超时后 session/cancel 失败：{error}");
-                }
-                // 有界等 prompt 线程收尾（agent 以 cancelled 应答）；无论如何按 Timeout 退出。
-                let _ = receiver.recv_timeout(pony_agent_core::acp::transport::ACP_REQUEST_TIMEOUT);
-                eprintln!(
-                    "[ponycli] acp_timeout: 委派超过 {}s 未返回，已发出 session/cancel。",
-                    limit.as_secs()
-                );
-                ExitCode::Timeout.code()
-            }
-        }
-    })
+    // 预算（`--timeout-secs` → `session.set_turn_budget`）与取消（宿主令牌 / `cancel()`）统一由
+    // session 裁决；CLI 侧不再自建 `recv_timeout + cancel` 兜底（双份预算会与 session 抢发
+    // session/cancel）。超预算由 session 归约为 `acp_timeout`，退出码见 `acp_result_exit_code`。
+    acp_result_exit_code(&session.prompt(blocks, sink))
 }
 
 /// 归约 → 进程退出码（`ok` = 0；`aborted` = 6；其余 = 5 ToolFailure）。
