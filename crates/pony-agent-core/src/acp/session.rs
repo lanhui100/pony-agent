@@ -167,7 +167,10 @@ pub struct AcpAgentSession {
     session_id: String,
     /// 取消令牌（§3.2.6）：宿主 `stop_turn` 被接受后，先 `session/cancel` notification，
     /// 再把所有挂起 `session/request_permission` 回 `cancelled`。
-    cancellation: Option<Arc<CancellationToken>>,
+    ///
+    /// 由 [`AcpAgentSession::set_cancellation_token`] 写入（`&self` 热替换）：prompt 期间按
+    /// `turn_cancel_poll_ms`（≤100ms）轮询，触发即 `client.cancel` + 归约 aborted / `tool_cancelled`。
+    cancellation: Mutex<Option<Arc<CancellationToken>>>,
     /// 当前挂起的审批槽位（`cancel()` 翻标志 → `resolve_permission` 立即回 `cancelled`）。
     pending_permissions: Mutex<Vec<Arc<PermissionSlot>>>,
 }
@@ -186,14 +189,36 @@ impl AcpAgentSession {
             client,
             prompt_gate: Mutex::new(()),
             session_id: response.session_id,
-            cancellation: Some(Arc::new(CancellationToken::new())),
+            cancellation: Mutex::new(Some(Arc::new(CancellationToken::new()))),
             pending_permissions: Mutex::new(Vec::new()),
         })
+    }
+
+    /// 设置整轮 prompt 预算（additive；转发给 [`AcpAgentClient::set_prompt_budget`]）。
+    ///
+    /// 默认值 = `ACP_REQUEST_TIMEOUT`（5000ms）。整轮委派预算（`timeoutMs` /
+    /// `--timeout-secs` / 执行策略）必须经本方法进入会话，否则真实 agent 的 >5s 一轮会被硬顶失败。
+    pub fn set_turn_budget(&self, budget: Duration) {
+        self.client.set_prompt_budget(budget);
+    }
+
+    /// 设置宿主取消令牌（additive；写入既有 `cancellation` 槽位，`&self` 热替换）。
+    ///
+    /// 语义（§3.2.6）：prompt 期间按 `turn_cancel_poll_ms`（≤100ms）轮询该令牌；一旦
+    /// `is_cancelled()` ⇒ 发 `session/cancel` notification，挂起审批回 `cancelled`，本轮归约
+    /// 为 `status: aborted` + 错误码 [`ACP_TOOL_CANCELLED`]。未设置时沿用会话自建令牌。
+    pub fn set_cancellation_token(&self, token: Arc<CancellationToken>) {
+        if let Ok(mut slot) = self.cancellation.lock() {
+            *slot = Some(token);
+        }
     }
 
     /// 跑一轮 prompt：串行闸 → `client.prompt` → update 实时映射（[`Self::emit_update`]）→
     /// [`Self::reduce_stop_reason`] 归约成 [`ToolResult`]。
     ///
+    /// 预算：`client.prompt` 的 deadline 取 [`AcpAgentSession::set_turn_budget`]（默认
+    /// `ACP_REQUEST_TIMEOUT`），**不是**固定 5s 硬顶。
+    /// 取消：prompt 期间轮询 [`AcpAgentSession::set_cancellation_token`] 的令牌。
     /// 归约口径：`ok` / `truncated` 仍为成功；`refused` → error `acp_agent_refused`；
     /// `cancelled` → aborted `tool_cancelled`。
     pub fn prompt(&self, blocks: Vec<ContentBlock>, sink: &dyn TurnEventSink) -> ToolResult {
@@ -212,7 +237,13 @@ impl AcpAgentSession {
 
         // 会话已取消：不再向 agent 发 prompt（fail-closed 归约为 aborted）。
         if self.session_cancelled() {
-            return self.outcome_result(AcpTurnOutcome::Cancelled, StopReason::Cancelled, &[], &[], started);
+            return self.outcome_result(
+                AcpTurnOutcome::Cancelled,
+                StopReason::Cancelled,
+                &[],
+                &[],
+                started,
+            );
         }
 
         let collector = Arc::new(UpdateCollector::default());
@@ -247,8 +278,10 @@ impl AcpAgentSession {
             }
         }
         // 2) 取消令牌：prompt / 后续轮次立即观察（不再向 agent 发新请求）。
-        if let Some(token) = &self.cancellation {
-            token.cancel();
+        if let Ok(slot) = self.cancellation.lock() {
+            if let Some(token) = slot.as_ref() {
+                token.cancel();
+            }
         }
         // 3) 协议层取消通知（A2：notification，无 id）。
         self.client.cancel(&self.session_id)
@@ -306,12 +339,14 @@ impl AcpAgentSession {
             created_at_ms: now_ms(),
             answered_at_ms: None,
         };
-        let pending = dispatcher.hydrate_persisted_ask(&record, PendingControlRequestState::Pending);
+        let pending =
+            dispatcher.hydrate_persisted_ask(&record, PendingControlRequestState::Pending);
         if let Ok(mut slots) = self.pending_permissions.lock() {
             slots.push(Arc::clone(&slot));
         }
 
-        let outcome = self.await_permission_decision(dispatcher, authorization, &pending, request, &slot);
+        let outcome =
+            self.await_permission_decision(dispatcher, authorization, &pending, request, &slot);
 
         if let Ok(mut slots) = self.pending_permissions.lock() {
             slots.retain(|candidate| !Arc::ptr_eq(candidate, &slot));
@@ -493,8 +528,10 @@ impl AcpAgentSession {
 
     fn session_cancelled(&self) -> bool {
         self.cancellation
-            .as_ref()
-            .is_some_and(|token| token.is_cancelled())
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|token| token.is_cancelled()))
+            .unwrap_or(false)
     }
 
     /// 等宿主决定：有界条件轮询（5ms）+ 取消标志 + NFR 超时；任何非批准终态 ⇒ cancelled。

@@ -14,6 +14,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -204,9 +205,11 @@ impl AcpInboundRequestHandler for DelegatingRequestHandler {
                 None => capability_not_declared(&request.method),
             },
             method::TERMINAL_WAIT_FOR_EXIT => match terminal {
-                Some(handler) => handler_dispatch(&request, |parsed: &WaitForTerminalExitRequest| {
-                    handler.wait_for_exit(parsed).and_then(to_value)
-                }),
+                Some(handler) => {
+                    handler_dispatch(&request, |parsed: &WaitForTerminalExitRequest| {
+                        handler.wait_for_exit(parsed).and_then(to_value)
+                    })
+                }
                 None => capability_not_declared(&request.method),
             },
             method::TERMINAL_KILL => match terminal {
@@ -301,6 +304,11 @@ pub struct AcpAgentClient {
     agent_capabilities: AgentCapabilities,
     /// 反向请求 handler 槽位（`install_handlers(&self)` 的热替换面，见 [`HandlerSlots`]）。
     handlers: Arc<Mutex<HandlerSlots>>,
+    /// 单轮 `session/prompt` 的出站请求预算（默认 [`ACP_REQUEST_TIMEOUT`]）。
+    ///
+    /// 由 [`AcpAgentClient::set_prompt_budget`] 写入：整轮委派预算（`timeoutMs` /
+    /// `--timeout-secs` / 执行策略）只影响本字段，**不是**固定 5000ms 硬顶。
+    prompt_budget: Mutex<Duration>,
 }
 
 impl AcpAgentClient {
@@ -363,6 +371,7 @@ impl AcpAgentClient {
             session_id: None,
             agent_capabilities: response.agent_capabilities,
             handlers,
+            prompt_budget: Mutex::new(ACP_REQUEST_TIMEOUT),
         })
     }
 
@@ -405,10 +414,24 @@ impl AcpAgentClient {
         Ok(response)
     }
 
+    /// 设置单轮 `session/prompt` 的出站请求预算（additive；`&self` 热替换）。
+    ///
+    /// 语义：
+    /// - 默认值 = [`ACP_REQUEST_TIMEOUT`]（5000ms，stdio 单请求基准）；
+    /// - 整轮委派预算（`timeoutMs` / `--timeout-secs` / 执行策略）经本方法写入后，`prompt`
+    ///   用它作为 `transport.request` 的 deadline，**不再**固定 5000ms 硬顶；
+    /// - 零值/极小值由 transport 侧 `MIN_REQUEST_TIMEOUT` 兜底（不在此处改写语义）。
+    pub fn set_prompt_budget(&self, budget: std::time::Duration) {
+        if let Ok(mut slot) = self.prompt_budget.lock() {
+            *slot = budget;
+        }
+    }
+
     /// 发送一轮 prompt 并返回 agent 的停止原因。
     ///
     /// `session/update` 通知在 prompt 期间经 `on_update` 观测（事件映射由 `acp::session` 完成）；
-    /// 请求超时预算固定为 `transport::ACP_REQUEST_TIMEOUT`（5000ms）。
+    /// deadline 取 [`AcpAgentClient::set_prompt_budget`] 的当前值（默认
+    /// [`ACP_REQUEST_TIMEOUT`]），而非固定 5000ms。
     pub fn prompt(
         &self,
         session_id: &str,
@@ -424,9 +447,14 @@ impl AcpAgentClient {
         let params = serde_json::to_value(request).map_err(|error| {
             AcpTransportError::Protocol(format!("序列化 session/prompt 请求失败：{error}。"))
         })?;
+        let budget = self
+            .prompt_budget
+            .lock()
+            .map(|budget| *budget)
+            .unwrap_or(ACP_REQUEST_TIMEOUT);
         let result = self
             .transport
-            .request(method::SESSION_PROMPT, params, ACP_REQUEST_TIMEOUT)?;
+            .request(method::SESSION_PROMPT, params, budget)?;
         serde_json::from_value(result).map_err(|error| {
             AcpTransportError::Protocol(format!(
                 "session/prompt 响应不符合 v1 schema（缺 stopReason）：{error}。"
