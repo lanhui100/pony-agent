@@ -100,4 +100,16 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
   `ManagedTerminalHandler` → `ProcessBackend`/`ProcessManager`（有界 wait、release 回收、零裸 std::process）。
   ③ **已知不对称（债 B176）**：`acp_delegate` 工具路径已按 hint 装配 handler；
   `ponycli acp` 宿主形态缺少 `AuthorizeStore`/`ProcessManager` 装配面，仍不声明能力。
+- **Fix-round（B174/B175 审查后，commit `268d17f7`）**：
+  ① terminal 输出用 per-terminal **append-only 缓冲**（`wait_for_exit` 不得 drain 丢弃）；
+  ② MCP 加载诊断分级：只有 `invalid_json`/`invalid_root`/`unsupported_schema_version` 致命，
+     `workspace_mcp_config_untrusted` 降为「忽略 + diagnostics」（否则仓库带 `.mcp.json` 即可废掉
+     `acp_delegate`，且唯一绕法是信任仓库配置 —— 安全方向相反）；
+  ③ `HandlerSlots.declared` **声明闸门**：未声明能力的 `install_*` 直接拒绝，反向请求仍 fail-closed
+     （修复「装了 handler 就能执行未声明能力」的契约破口）；
+  ④ 入站请求改由专用 `acp-inbound` 分发线程应答（transport 读线程只入队），`wait_for_exit` 预算改
+     `ACP_DEFAULT_TURN_BUDGET`(120s) —— 长命令不再硬顶失败、也不再饿死 prompt 应答；
+  ⑤ `terminal/create` 支持 `cwd`（绝对 + canonical + `is_dir`，绑定 workspace root 时须在 root 内）；
+     env 键按 `split('=')` 归一化后查 deny 表（杜绝 `KEY=VALUE` 绕过）；读切片改为「先按 line/limit
+     切、再对实际返回内容判 120KB 上限」。
 - **人工验收缺口**：`opencode acp` 本机不可用（仅有 `agy`），端到端真机联调仍需人工跑一轮。
