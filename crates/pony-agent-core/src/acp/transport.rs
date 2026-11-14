@@ -89,6 +89,17 @@ pub trait AcpInboundRequestHandler: Send + Sync {
     fn handle(&self, request: AcpInboundRequest) -> AcpInboundResponse;
 }
 
+/// 入站**通知**分发器（agent→client 的 `method` 无 `id` 报文，如 `session/update`）。
+///
+/// 与 [`AcpInboundRequestHandler`] 分开：通知**不产生应答**，只做观测/事件上行
+/// （P1 的 `acp::session` 在此把 update 映射为 `turn:delta` / `turn:tool`）。
+///
+/// 硬约束：未注入 handler 时通知**丢弃并记 stderr 诊断**（不 panic、不阻断读线程）；
+/// 通知处理不得影响请求 id 配对（响应按 `id` 匹配，通知永不消耗挂起请求）。
+pub trait AcpNotificationHandler: Send + Sync {
+    fn handle_notification(&self, method: &str, params: serde_json::Value);
+}
+
 /// stdio 传输层错误；`code()` 是 `acp_*` 错误码唯一真源（§3.2.9）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcpTransportError {
@@ -137,6 +148,8 @@ pub struct AcpTransport {
     inbound: Mutex<Receiver<AcpInbound>>,
     /// 入站请求分发器（未注入 = fail-closed）。
     handler: Mutex<Option<Arc<dyn AcpInboundRequestHandler>>>,
+    /// 入站通知分发器（未注入 = 丢弃 + stderr 诊断）。
+    notification_handler: Mutex<Option<Arc<dyn AcpNotificationHandler>>>,
     /// stderr 尾部环形缓冲（诊断证据）。
     stderr_tail: Arc<Mutex<Vec<String>>>,
     /// 出站请求 id 分配器。
@@ -181,6 +194,13 @@ impl AcpTransport {
     /// 注入 / 替换入站请求分发器（P1 实现）。
     pub fn set_handler(&mut self, handler: Arc<dyn AcpInboundRequestHandler>) {
         unimplemented!("P1：写入 handler 槽位")
+    }
+
+    /// 注入 / 替换入站通知分发器（P1 实现）。
+    ///
+    /// 未注入时 reader 线程对 `session/update` 等通知只记 stderr 诊断并丢弃，不得 panic。
+    pub fn set_notification_handler(&self, handler: Arc<dyn AcpNotificationHandler>) {
+        unimplemented!("P1：写入通知处理槽位")
     }
 
     /// 关闭并回收子进程（幂等；P1 实现）。

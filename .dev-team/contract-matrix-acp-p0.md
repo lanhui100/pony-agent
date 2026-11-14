@@ -31,6 +31,7 @@
 | `acp/transport.rs:132` | `AcpTransport`（child/stdin/入站帧/handler/stderr 环形缓冲/id 分配器/非法行计数/终止标记） |
 | `acp/transport.rs:156/167/177/182/189/194` | `spawn(spec,cwd,extra_env)` / `request(method,params,deadline)` / `notify` / `set_handler` / `close` / `stderr_tail` —— 体全部 `unimplemented!()` |
 | `acp/transport.rs:88` | `AcpInboundRequestHandler`（agent→client 请求分发 trait；未注入 ⇒ fail-closed，绝不 default allow） |
+| `acp/transport.rs:99 / 202 / 152` | `AcpNotificationHandler`（入站**通知**分发 trait，`method` 无 `id`）/ `set_notification_handler(&self, ...)` / 字段 `notification_handler: Mutex<Option<Arc<dyn AcpNotificationHandler>>>` —— 未注入时通知丢弃 + stderr 诊断，不得 panic、不得影响请求 id 配对。（amend：补 §3 入站通知观测出口） |
 | `acp/transport.rs:94` | `AcpTransportError` 8 变体 → `acp_*` 错误码（§3.2.9） |
 
 ## 2. 协议不变量（红相断言面，Test Agent 只读此表写断言）
@@ -46,6 +47,7 @@
 | A7 | `request` 超过 `ACP_REQUEST_TIMEOUT`(5000ms) → `AcpTransportError::Timeout`，错误码 `acp_timeout` | 不重试、不静默 |
 | A8 | stdout 非法 JSON：连续 <3 行记 stderr 诊断并跳过（不 panic）；连续 ≥3 行 fail-closed `acp_protocol_error` | 阈值语义见 NFR |
 | A9 | `close()` 在 `SPAWN_REAP_GRACE`(500ms) 后对 Unix 进程组 SIGKILL 且 `wait()` 回收；超时后无残留子进程 | 平台局限（Windows 无进程组）随 `plugin_host` 既有口径 |
+| A10 | agent 发无 `id` 的 `session/update` → 注入的 `AcpNotificationHandler` 被调用**恰好一次**，`method=="session/update"`、`params.sessionId` 正确；未注入 handler 时通知被丢弃、不 panic、不影响后续请求 id 配对 | 补 §3 transport「入站通知」缺口；通知永不消耗挂起请求 |
 
 ## 3. NFR 数值（真值源：`.dev-team/nfr-baseline.json` 的 `acp` 段 + `transport.rs` 常量）
 
