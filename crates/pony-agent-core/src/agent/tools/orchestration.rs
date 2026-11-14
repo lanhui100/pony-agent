@@ -81,13 +81,86 @@ impl ToolRouter {
     /// `acp_timeout` / `acp_unavailable`）。
     ///
     /// [`AcpAgentSession`]: crate::acp::session::AcpAgentSession
-    #[allow(unused_variables)]
     pub(super) fn execute_acp_delegate(
         &self,
         call: &ToolCall,
         context: &ToolExecutionContext,
     ) -> ToolResult {
-        unimplemented!("P1：acp_delegate 工具实现（spec 解析 + workspace root + session.prompt + 归约）")
+        // Wave-61 C8.4 同源：cwd 缺省时用与文件工具同一工作区根（解析失败按文件工具口径 fail-closed）。
+        let workspace_root = match self
+            .resolved_workspace_root(context, self.extract_call_workspace_id(call, context))
+        {
+            Ok(root) => root,
+            Err((code, message)) => return error_result(TOOL_ACP_DELEGATE, &code, message, None),
+        };
+
+        // P3 trace：与 subagent 同构——执行前先建 `tool.call` span，外部 agent 的
+        // `session/prompt` 因此挂到本次委派之下。
+        let args_preview = serde_json::to_string(&call.arguments).ok();
+        let _tool_span = crate::agent::otel::begin_tool_call_span(
+            call.call_id.as_deref(),
+            TOOL_ACP_DELEGATE,
+            args_preview.as_deref(),
+        );
+
+        let args: AcpDelegateArgs = match serde_json::from_value(call.arguments.clone()) {
+            Ok(args) => args,
+            Err(error) => {
+                return error_result(
+                    TOOL_ACP_DELEGATE,
+                    "invalid_arguments",
+                    format!("Failed to parse acp_delegate arguments: {error}"),
+                    None,
+                )
+            }
+        };
+        if args.prompt.trim().is_empty() {
+            return error_result(
+                TOOL_ACP_DELEGATE,
+                "invalid_arguments",
+                "acp_delegate 的 prompt 不能为空。".to_string(),
+                None,
+            );
+        }
+
+        // 清单解析（用户清单 → 内置默认）；未知 agent 保留 `acp_config_agent_not_found` 来源。
+        let spec = match crate::acp::config::resolve_agent(args.agent.trim()) {
+            Ok(spec) => spec,
+            Err(error) => {
+                return error_result(
+                    TOOL_ACP_DELEGATE,
+                    error.code(),
+                    error.to_string(),
+                    Some("先在本机配置该 ACP agent，或改用内置 opencode / antigravity。".to_string()),
+                )
+            }
+        };
+
+        let cwd = match resolve_delegate_cwd(
+            args.cwd.as_deref(),
+            spec.default_cwd.as_deref(),
+            &workspace_root,
+        ) {
+            Ok(cwd) => cwd,
+            Err(message) => {
+                return error_result(TOOL_ACP_DELEGATE, "invalid_arguments", message, None)
+            }
+        };
+
+        // 每任务一个子进程（§3.2.1：不并发打同一 session）。
+        let mut session = match crate::acp::session::AcpAgentSession::spawn(&spec, &cwd) {
+            Ok(session) => session,
+            Err(error) => {
+                return error_result(TOOL_ACP_DELEGATE, error.code(), error.to_string(), None)
+            }
+        };
+
+        let blocks = vec![crate::acp::protocol::ContentBlock::Text {
+            text: args.prompt,
+        }];
+        let result = run_delegate_prompt(&session, blocks, args.timeout_ms);
+        session.close();
+        result
     }
 
     pub(super) fn execute_workflow(&self, call: &ToolCall) -> ToolResult {
@@ -1001,3 +1074,114 @@ impl ToolRouter {
     }
 }
 
+
+// ───────────────────────────── B150/P1：acp_delegate 实现细节 ─────────────────────────────
+
+/// `acp_delegate` 参数（schema 见 `agent/tools/schema.rs`；`description` 由全局
+/// `with_description()` 注入，故不在此声明——未知字段 serde 默认忽略）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpDelegateArgs {
+    agent: String,
+    prompt: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+/// 委派 cwd 解析：显式 `cwd` > 清单 `default_cwd` > 会话 workspace root；一律 canonicalize。
+fn resolve_delegate_cwd(
+    explicit: Option<&str>,
+    spec_default: Option<&str>,
+    workspace_root: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let candidate = match explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            let path = std::path::PathBuf::from(value);
+            if !path.is_absolute() {
+                // 不静默 canonicalize 相对路径（§3.2.2）。
+                return Err(format!(
+                    "acp_delegate 的 cwd 必须是绝对路径（§3.2.2），实际 `{value}`。"
+                ));
+            }
+            path
+        }
+        None => match spec_default.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => std::path::PathBuf::from(value),
+            None => workspace_root.to_path_buf(),
+        },
+    };
+    let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "acp_delegate 的工作目录 `{}` 不可用（{error}）。",
+            candidate.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "acp_delegate 的工作目录 `{}` 不是目录。",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+/// 跑一轮 prompt；`timeoutMs` 给出时是**整轮预算**（超预算即发 `session/cancel` 并归约
+/// `acp_timeout`，绝不让调用方无限等）。
+///
+/// 事件上行说明：工具层没有 `TurnEventSink` 注入点（`ToolExecutionContext` 无该字段），
+/// 因此这里用 `NoopTurnEventSink`；外部 agent 的可见性由 `tool.call` span + 归约后的
+/// `ToolResult`（含 update 计数）承担，交互式实时渲染属 P2 宿主形态（CLI/TUI 持有 sink）。
+fn run_delegate_prompt(
+    session: &crate::acp::session::AcpAgentSession,
+    blocks: Vec<crate::acp::protocol::ContentBlock>,
+    timeout_ms: Option<u64>,
+) -> ToolResult {
+    let Some(limit) = timeout_ms.map(std::time::Duration::from_millis) else {
+        let sink = crate::agent::turn_flow::NoopTurnEventSink;
+        return session.prompt(blocks, &sink);
+    };
+    if limit.is_zero() {
+        return error_result(
+            TOOL_ACP_DELEGATE,
+            "invalid_arguments",
+            "acp_delegate 的 timeoutMs 必须大于 0。".to_string(),
+            None,
+        );
+    }
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let sink = crate::agent::turn_flow::NoopTurnEventSink;
+            let _ = sender.send(session.prompt(blocks, &sink));
+        });
+        match receiver.recv_timeout(limit) {
+            Ok(result) => result,
+            Err(_) => {
+                // 超预算：先取消（session/cancel notification），再给一个请求预算的宽限让
+                // prompt 线程按 cancelled 收尾；仍不返回则直接归约 acp_timeout。
+                if let Err(error) = session.cancel() {
+                    eprintln!("[acp] 超预算后 session/cancel 失败：{error}");
+                }
+                let grace = crate::acp::transport::ACP_REQUEST_TIMEOUT;
+                // 等 prompt 线程收尾（有界）；回归约结果无论如何都是 acp_timeout。
+                let _ = receiver.recv_timeout(grace);
+                timeout_result(limit)
+            }
+        }
+    })
+}
+
+fn timeout_result(limit: std::time::Duration) -> ToolResult {
+    error_result(
+        TOOL_ACP_DELEGATE,
+        "acp_timeout",
+        format!(
+            "委派超过 timeoutMs={} 仍未返回，已发出 session/cancel，按 acp_timeout fail-closed。",
+            limit.as_millis()
+        ),
+        None,
+    )
+}
