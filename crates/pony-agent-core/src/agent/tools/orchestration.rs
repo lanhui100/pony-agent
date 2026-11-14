@@ -158,8 +158,12 @@ impl ToolRouter {
         // 预算与取消令牌统一由 session 裁决（单一真源）：本层只做注入。宿主 `stop_turn` 的令牌
         // 必须进 session 的 100ms 轮询，否则生产路径上外部 agent 杀不掉；timeoutMs 进整轮预算，
         // 这里**不再**自建第二套超时/取消触发（双份预算会与 session 抢发 session/cancel）。
-        if let Some(ms) = args.timeout_ms {
-            if ms == 0 {
+        //
+        // timeoutMs 缺省 ⇒ 取 `acp` 层单一真源的执行策略默认预算（120s，
+        // 与 `names.rs` 的 ToolExecutionPolicy / CLI `--timeout-secs` 同源），
+        // **不得** leave 成 transport 的单请求 5s 硬顶（否则 >5s 的真实 agent 被误判 acp_timeout）。
+        let turn_budget = match args.timeout_ms {
+            Some(0) => {
                 session.close();
                 return error_result(
                     TOOL_ACP_DELEGATE,
@@ -168,16 +172,18 @@ impl ToolRouter {
                     None,
                 );
             }
-            session.set_turn_budget(std::time::Duration::from_millis(ms));
-        }
+            Some(ms) => std::time::Duration::from_millis(ms),
+            None => crate::acp::ACP_DEFAULT_TURN_BUDGET,
+        };
+        session.set_turn_budget(turn_budget);
         if let Some(token) = context.cancellation.as_ref() {
             session.set_cancellation_token(std::sync::Arc::clone(token));
         }
         eprintln!(
-            "[acp] acp_delegate: agent={} session={} budget_ms={:?} host_cancellation={}",
+            "[acp] acp_delegate: agent={} session={} budget_ms={} host_cancellation={}",
             spec.id,
             session.session_id(),
-            args.timeout_ms,
+            turn_budget.as_millis(),
             context.cancellation.is_some()
         );
 

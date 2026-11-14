@@ -1094,7 +1094,7 @@ fn print_usage(format: OutputFormat) {
     human!(format, "  --list      Print configured agents as JSON lines ({{id,label,command,args,builtin}})");
     human!(format, "  --resume    Resume a session; unsupported agents fail closed with acp_unavailable");
     human!(format, "  --output-format jsonl/sse: stdout = events only (no banner, no REPL)");
-    human!(format, "  --timeout-secs <n>  Bound the delegated turn (0..=86400); expiry = exit 7");
+    human!(format, "  --timeout-secs <n>  Bound the delegated turn (1..=86400); expiry = exit 7");
     human!(format, "  Run `ponycli acp --help` for the full ACP section.");
     human!(format, "");
     human!(format, "Exit codes: 0 success / 1 internal / 2 usage / 3 config / 4 provider-network");
@@ -2172,6 +2172,12 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
                     Err(message) => return acp_usage_error(&message),
                 };
                 match value.parse::<u64>() {
+                    // ADVISORY#6：0 不是合法预算（会立即超时）；显式拒绝为用法错误，绝不静默。
+                    Ok(0) => {
+                        return acp_usage_error(
+                            "--timeout-secs 必须 ≥ 1（0 不是合法预算；缺省预算请省略该参数）",
+                        )
+                    }
                     Ok(secs) if secs <= MAX_TIMEOUT_SECS => {
                         parsed.timeout = Some(Duration::from_secs(secs))
                     }
@@ -2236,14 +2242,13 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
         Ok(session) => session,
         Err(error) => return acp_session_error(error),
     };
-    // 整轮预算：`--timeout-secs` 是用户显式预算；缺省用执行策略默认（120s，与
-    // `acp_delegate` 的 ToolExecutionPolicy 默认一致），**不得**回落到 transport 的 5s
-    // 单请求硬顶——否则 slow agent（>5s）会被误判成 acp_timeout/exit 7。
-    const ACP_DEFAULT_TURN_BUDGET: Duration = Duration::from_secs(120);
-    let budget = match parsed.timeout {
-        Some(limit) if !limit.is_zero() => limit,
-        _ => ACP_DEFAULT_TURN_BUDGET,
-    };
+    // 整轮预算：`--timeout-secs` 是用户显式预算；缺省用 `acp` 层**单一真源**
+    // `ACP_DEFAULT_TURN_BUDGET`（与 `acp_delegate` 的 ToolExecutionPolicy 默认同源），
+    // **不得**回落到 transport 的 5s 单请求硬顶——否则 slow agent（>5s）会被误判成
+    // acp_timeout/exit 7。
+    let budget = parsed
+        .timeout
+        .unwrap_or(pony_agent_core::acp::ACP_DEFAULT_TURN_BUDGET);
     session.set_turn_budget(budget);
     eprintln!(
         "[ponycli] acp: agent={} session={} turn_budget={:?}",
@@ -2500,7 +2505,7 @@ fn print_acp_usage() {
     println!("  -p, --prompt <text>        Run a single delegated turn with the given prompt");
     println!("  --output-format <fmt>      text | jsonl | sse (default: text; jsonl/sse: stdout = events only)");
     println!("  --workspace <dir>          Absolute workspace root for session/new (default: current dir)");
-    println!("  --timeout-secs <n>         Bound the delegated turn (0..=86400); expiry exits with code 7");
+    println!("  --timeout-secs <n>         Bound the delegated turn (1..=86400); expiry exits with code 7");
     println!("  --resume <session-id>      Resume an existing ACP session; unsupported agents fail");
     println!("                             closed with acp_unavailable (never silently starts a new session)");
     println!("  -h, --help                 Show this help");

@@ -196,9 +196,15 @@ pub(super) fn execution_policy_for_primitive(primitive: &str) -> ToolExecutionPo
             policy.default_timeout_ms = DEFAULT_RUN_TIMEOUT_MS;
             policy.result_budget_bytes = MAX_FULL_READ_BYTES as usize;
         }
-        TOOL_SUBAGENT | TOOL_WORKFLOW | TOOL_ACP_DELEGATE => {
+        TOOL_SUBAGENT | TOOL_WORKFLOW => {
             policy.concurrent_safe = true;
             policy.default_timeout_ms = 120_000;
+        }
+        // B151/P2（ADVISORY#5）：ACP 委派的默认预算只认 `acp` 层单一真源
+        // （`ACP_DEFAULT_TURN_BUDGET`），CLI / 工具入口 / 执行策略三处同源。
+        TOOL_ACP_DELEGATE => {
+            policy.concurrent_safe = true;
+            policy.default_timeout_ms = crate::acp::ACP_DEFAULT_TURN_BUDGET.as_millis() as u64;
         }
         TOOL_SPAWN_TEAMMATE
         | TOOL_LIST_AGENTS

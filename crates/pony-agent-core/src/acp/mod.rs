@@ -15,3 +15,16 @@ pub mod config;
 pub mod protocol;
 pub mod session;
 pub mod transport;
+
+use std::time::Duration;
+
+/// 外部 ACP agent **一轮委派的默认整轮预算**（单一真源）。
+///
+/// 消费方（禁止在别处再写字面量 120s）：
+/// - `agent/tools/names.rs`：`acp_delegate` 的 `ToolExecutionPolicy.default_timeout_ms`；
+/// - `bin/cli.rs`：`ponycli acp` 的 `--timeout-secs` 缺省值；
+/// - `agent/tools/orchestration.rs`：`acp_delegate` 工具入口缺省预算。
+///
+/// 语义：这是**整轮**（一次 `session/prompt` 到 agent 收尾）的预算，不是单请求 5s
+/// （`transport::ACP_REQUEST_TIMEOUT`）——缺省预算不得回落到 5s 硬顶。
+pub const ACP_DEFAULT_TURN_BUDGET: Duration = Duration::from_secs(120);

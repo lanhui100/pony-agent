@@ -613,3 +613,76 @@ fn p1_13_session_cancel_does_not_mutate_host_token() {
     session.close();
     cleanup(&cwd);
 }
+
+// ───────────────────────── P1-14 工具入口缺省预算 ─────────────────────────
+//
+// [POST-HOC-GREEN: 实现先于用例，仅作回归守护]
+// 契约：`acp_delegate` **不带 `timeoutMs`** 时，预算必须取执行策略默认（120s），
+// 不得回落成 transport 的 5s 单请求基准：
+// fake agent 延迟 = baseline + 1500ms（> 5s 硬顶）→ 必须 `status=ok`（而非 `acp_timeout`），
+// 且实测耗时 > baseline（证明本轮真跑完，而不是被 5s 砍断后伪造成功）。
+#[test]
+fn p1_14_tool_entry_default_budget_not_capped_at_five_seconds() {
+    let baseline_ms = nfr_acp_ms("request_timeout_ms");
+    let delay_ms = baseline_ms + 1500;
+    let delay_seconds = format!("{:.3}", delay_ms as f64 / 1000.0);
+
+    let cwd = temp_dir("tool-default-budget");
+    let config_home = cwd.join("config");
+    write_acp_agents_config(
+        &config_home,
+        json!({
+            "id": "fake",
+            "label": "Fake ACP agent",
+            "command": "sh",
+            "args": [fixture_script(), "slow_prompt", delay_seconds, "acp-sess-1"]
+        }),
+    );
+
+    let _env_guard = CONFIG_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+    let router = ToolRouter::with_workspace_root(cwd.clone());
+    let context = ToolExecutionContext {
+        workspace_root: Some(cwd.clone()),
+        session_id: Some("tool-default-budget-session".to_string()),
+        ..Default::default()
+    };
+    // 刻意**不带** timeoutMs：预算必须由执行策略默认值（120s）决定。
+    let call = ToolCall {
+        call_id: Some("call-acp-default-budget".to_string()),
+        name: "acp_delegate".to_string(),
+        arguments: json!({
+            "agent": "fake",
+            "prompt": "slow external task",
+            "description": "委派给外部 ACP agent（缺省预算）"
+        }),
+        plan: None,
+    };
+
+    let started = Instant::now();
+    let result = router.execute_with_context(&call, &context);
+    let elapsed = started.elapsed();
+
+    match old_xdg {
+        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+
+    assert_eq!(
+        result.status, "ok",
+        "P1-14 违约：缺省预算下 {delay_ms}ms 的一轮必须成功（不得被 {baseline_ms}ms 硬顶成 acp_timeout），实际 {result:?}，耗时 {elapsed:?}"
+    );
+    assert!(
+        elapsed > Duration::from_millis(baseline_ms),
+        "P1-14 违约：本轮真实延迟 {delay_ms}ms > 5s，实测耗时 {elapsed:?} 未超过 5s（说明并未真跑完）"
+    );
+    assert!(
+        !result.output.contains("acp_timeout"),
+        "P1-14 违约：输出不得含 acp_timeout，实际 {}",
+        result.output
+    );
+
+    cleanup(&cwd);
+}
