@@ -87,4 +87,17 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
   `aborted`/`tool_cancelled`，不退化成 `acp_timeout`。
   ④ **取消轮询**在 prompt 旁路线程进行，本线程 100ms 每 tick 重读令牌槽位（支持运行期热替换），
   `thread::scope` 必 join。
+- **追加决策（B174 / B175，2026-11-14 晚）**：
+  ① **MCP 接线**：`AcpAgentSpec.mcpServers` 三态——缺省 `inherit` 复用 Pony 既有 MCP 配置
+  （`mcp-config-v1` 仅 stdio，故 inherit 只产 `McpServer::Stdio`，加载 diagnostics 逐条落 stderr 不吞）、
+  显式 `[]` 禁用、显式条目可透传 stdio/http/sse；显式条目 env 命中 `is_denied_spec_env_key`
+  ⇒ `acp_config_invalid` fail-closed（不静默过滤）。
+  ② **能力声明诚实性升级**：`initialize` 的 `clientCapabilities.fs/terminal` 改为
+  「`capabilities_hint` **∧** 实际装配的 handler」推导，且必须在 connect 前定稿
+  （`connect_with_capabilities` / `spawn_with_mcp_and_handlers`）；声明 true 而 handler 缺失 ⇒
+  `Unavailable(acp_capability_inconsistent)`。handler 本体走既有治理面：
+  `WorkspaceFsHandler` → `PathPermissionChecker`（Read/Write 两向，120KB 读上限、tmp+rename 原子写）、
+  `ManagedTerminalHandler` → `ProcessBackend`/`ProcessManager`（有界 wait、release 回收、零裸 std::process）。
+  ③ **已知不对称（债 B176）**：`acp_delegate` 工具路径已按 hint 装配 handler；
+  `ponycli acp` 宿主形态缺少 `AuthorizeStore`/`ProcessManager` 装配面，仍不声明能力。
 - **人工验收缺口**：`opencode acp` 本机不可用（仅有 `agy`），端到端真机联调仍需人工跑一轮。

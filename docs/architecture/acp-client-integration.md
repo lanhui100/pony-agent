@@ -25,6 +25,9 @@
 | 会话驱动已实现：串行闸、update→`TurnEventSink` 映射、stopReason 5→4 归约、permission→`ask_control` CAS 往返（`session.resolve_permission` 层已验；**尚无缝内生产调用方**，见 B161）、取消令牌联动（`set_cancellation_token`，P1-10 验） | `acp/session.rs`；`tests/acp_client_contract.rs`（11 条）+ `tests/acp_p1_blockers.rs` |
 | `acp_delegate` 已是模型可见工具（工具面 38→39、builtin 45→46） | `agent/tools/{schema,names,mod}.rs`；`tests/acp_client_contract.rs` P1-8 |
 | 宿主形态：`ponycli acp`（`--list` / 单轮 `-p` / `--resume` fail-closed）可用 | `crates/pony-agent-core/src/bin/cli.rs`；`tests/acp_host_surface.rs`（5 条） |
+| **MCP 接线（B174）**：`AcpAgentSpec.mcpServers` 三态（缺省=inherit Pony 既有 MCP 配置 / `[]`=禁用 / 显式条目）；inherit 只产 stdio（Pony `mcp-config-v1` 仅 stdio），显式条目可透传 stdio/http/sse；env 命中 deny 表 ⇒ `acp_config_invalid` fail-closed | `acp/config.rs`（`resolve_mcp_servers`）；`acp/session.rs`（`spawn_with_mcp`）；`tests/acp_mcp_wiring.rs`（6 条） |
+| **fs/terminal 能力（B175）**：`WorkspaceFsHandler`（classify Read/Write + workspace 边界 + 120KB 读上限 + 原子写）与 `ManagedTerminalHandler`（`ProcessBackend` + 有界 wait + release 回收）已落地；`initialize` 声明 = `capabilities_hint ∧ 实际装配的 handler`（声明 true 而 handler 缺失 ⇒ `acp_capability_inconsistent`） | `acp/handlers.rs`；`acp/session.rs`（`capabilities_for` / `spawn_with_mcp_and_handlers`）；`tests/acp_capabilities_contract.rs`（11 条） |
+| **能力装配不对称（债）**：`execute_acp_delegate` 已按 hint 装配两 handler；`ponycli acp` 宿主形态仍走 `spawn`（无 AuthorizeStore/ProcessManager ⇒ 不声明能力，hint 在 CLI 侧暂不生效，见 B176） | `agent/tools/orchestration.rs` vs `bin/cli.rs` |
 | 未做（登记在 backlog）：transport 内联 permission 无 dispatcher 注入点（B161）、update 非实时 flush（B162）、Tauri 三命令与前端类型（B163） | `node scripts/backlog.mjs list` |
 | 既有 ACP 空壳测试（`wave4_4_acceptance.rs` 的 B084/B085/B086 字符串恒真断言）已替换为真契约 | `tests/wave4_4_acceptance.rs` |
 | 决策记录 | `.agents/notes/implemented/architecture/2026-11-14-acp-client-external-agent-integration.md` |
@@ -131,8 +134,8 @@ Pony 模型通过工具 `acp_delegate` 把一段任务交给外部 ACP agent，c
 1. **会话串行化**：opencode 明确"一个 session 同时只能跑一个 prompt"。`AcpAgentSession` 内部加 `Mutex` 串行闸；并发委派走"每任务一个子进程"或"排队"，不并发打同一 session。
 2. **cwd 必须绝对路径**：`session/new` 的 `cwd` 从 `ToolExecutionContext.workspace_root` 取，`canonicalize` 后校验（复用 `plugin_host::capability::resolve_workspace_dir`）。
 3. **`request_permission` → 走 `ask_control`**：外部 agent 请求权限时，注册一条 `PendingControlRequestKind::Approval`，经既有 `turn:tool` / Ask 面板让用户决定，再回 `{outcome:{outcome:"selected",optionId}}`。**这是 Pony 治理链与外部 agent 的唯一审批交汇点**，不能默认 `allow`。
-4. **`fs/*` → 走 `path_permission`**：声明 `clientCapabilities.fs.{readTextFile,writeTextFile}` 时，读走 `classify_path` + `AuthorizeStore`，写走 workspace 边界判定；**不声明**则该能力整块不下放（fail-closed，让 agent 自己在子进程里读）。
-5. **`terminal/*` → 走 `ProcessManager`**：声明 `clientCapabilities.terminal=true` 时，`terminal/create` 落到 `agent::process::ProcessManager`（已有 kill/cancel/kill_after/drain_stats）。
+4. **`fs/*` → 走 `path_permission`（已落地，B175）**：`WorkspaceFsHandler` 读走 `PathPermissionChecker::classify(.., Read)`（内部 `canonicalize_for_read`）+ 120KB 上限，写走 `classify(.., Write)`（内部 `canonicalize_for_write`：词法拒 `..`/绝对逃逸 + 祖先校验）后 tmp+rename 原子写；越界/未授权 ⇒ `AcpHandlerError::Denied`。**未声明**则该能力整块不下放（fail-closed，让 agent 自己在子进程里读）。
+5. **`terminal/*` → 走 `ProcessManager`（已落地，B175）**：`ManagedTerminalHandler` 的 create→`ProcessBackend::start`（isolate env + deny 键过滤）、output→poll、wait_for_exit→10ms 有界轮询、kill→`kill_if_exists`、release→kill+回收；opaque `terminalId` 句柄表，未知 id ⇒ 明确错误码。
 6. **`session/cancel` 语义**：Pony 侧 `stop_turn` 被接受 → 对 ACP 发 `session/cancel` notification + 对所有挂起 `request_permission` 回 `cancelled`。
 7. **事件映射**（`session/update` → Pony 事件）：
    | ACP update | Pony 事件 |
@@ -164,7 +167,7 @@ Pony 模型通过工具 `acp_delegate` 把一段任务交给外部 ACP agent，c
 | `crates/pony-agent-core/src/acp/mod.rs` | 重写 | 改为 `pub mod protocol; pub mod transport; pub mod client; pub mod session; pub mod config;`；把现有 `server` 降级为 `pub(crate) mod legacy_server;`（或不挂载，仅保留历史） |
 | `crates/pony-agent-core/src/acp/protocol.rs` | 重写 | ACP v1 类型：`InitializeRequest/Response`、`ClientCapabilities`、`AgentCapabilities`、`SessionNewRequest/Response`、`PromptRequest/Response`、`StopReason`、`SessionUpdate`（8 个变体）、`ContentBlock`（text/image/audio/resource/resource_link）、`RequestPermissionRequest/Response`、`RequestPermissionOutcome`、`PermissionOption{optionId,name,kind}`、`ToolCallUpdate`、`ReadTextFileRequest`、`WriteTextFileRequest`、`Terminal*`；**`protocolVersion` 用 `u32`（=1）** |
 | `crates/pony-agent-core/src/acp/transport.rs` | 新增 | `AcpTransport`：`spawn(command,args,cwd,env)`（env 白名单 + Unix 进程组，模式抄 `plugin_host/transport.rs:170-260`）、`request(method,params,deadline)`、`notify(method,params)`、入站请求分发回调、stderr 环形缓冲。**双通道**：一个 reader 线程区分 `id+method`（入站请求）/`method` 无 id（通知）/`id` 无 method（响应） |
-| `crates/pony-agent-core/src/acp/config.rs` | 新增 | `AcpAgentSpec { id, label, command, args, env, default_cwd?, capabilities_hint }`；存储 `~/.config/pony-agent/acp-agents.json`（与 `providers.json` 同级，**独立文件**，不动 provider schema）；内置两条默认：`opencode → (opencode, ["acp"])`、`antigravity → (agy, ["acp"])` |
+| `crates/pony-agent-core/src/acp/config.rs` | 新增 | `AcpAgentSpec { id, label, command, args, env, default_cwd?, capabilities_hint, mcp_servers? }`（`mcpServers` 见 B174）；存储 `~/.config/pony-agent/acp-agents.json`（与 `providers.json` 同级，**独立文件**，不动 provider schema）；内置两条默认：`opencode → (opencode, ["acp"])`、`antigravity → (agy, ["acp"])` |
 
 ### P1 —— 会话驱动 + 委派工具
 
