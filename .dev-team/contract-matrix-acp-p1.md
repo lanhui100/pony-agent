@@ -14,7 +14,7 @@
 | `acp/client.rs:297` | `AcpAgentClient { transport, agent_id, session_id, agent_capabilities, handlers, prompt_budget: Mutex<Duration> }` |
 | `acp/client.rs:323` | `connect(spec,cwd) -> Result<Self, AcpTransportError>`：spawn → initialize → `protocolVersion == 1` 否则 `AcpTransportError::Protocol`（`acp_protocol_error`，不重试不降级） |
 | `acp/client.rs:381` | `new_session(&mut self, cwd, mcp_servers) -> Result<SessionNewResponse, _>`（cwd 绝对路径，transport 已校验） |
-| `acp/client.rs:424` | **NEW** `set_prompt_budget(&self, budget: Duration)`：写入 `prompt_budget`（默认 `ACP_REQUEST_TIMEOUT`）；文档：prompt 出站请求用它，**不是**固定 5000ms 硬顶 |
+| `acp/client.rs:426` | **NEW** `set_prompt_budget(&self, budget: Duration)`：写入 `prompt_budget`（默认 `ACP_REQUEST_TIMEOUT`）；文档：prompt 出站请求用它，**不是**固定 5000ms 硬顶 |
 | `acp/client.rs:435` | `prompt(&self, session_id, blocks, on_update: Arc<dyn AcpNotificationHandler>) -> Result<PromptResponse, _>`（deadline = `prompt_budget` 当前值，默认 5000ms） |
 | `acp/client.rs:466 / 494` | `cancel(&self, session_id)`（发 `session/cancel` **notification**）/ `close(&mut self)` |
 | `acp/client.rs:478` | `install_handlers(permission, fs?, terminal?)`；未注入 = 整块 fail-closed |
@@ -22,9 +22,9 @@
 | `acp/session.rs:52` | `AcpTurnOutcome { Ok / Truncated / Refused / Cancelled }`（§3.2.8 五 → 四归约） |
 | `acp/session.rs:162 / 173` | `AcpAgentSession { client, prompt_gate: Mutex<()>, session_id, cancellation: Mutex<Option<Arc<CancellationToken>>>, pending_permissions }` |
 | `acp/session.rs:182` | `spawn(spec,cwd)`：connect → install_handlers → new_session |
-| `acp/session.rs:201` | **NEW** `set_turn_budget(&self, budget: Duration)`：转发 `client.set_prompt_budget`；文档：默认值 = `ACP_REQUEST_TIMEOUT` |
-| `acp/session.rs:210` | **NEW** `set_cancellation_token(&self, token: Arc<CancellationToken>)`：写入既有 `cancellation` 槽位；文档：prompt 期间按 `turn_cancel_poll_ms`(≤100ms) 轮询，触发即 `client.cancel` + 归约 aborted/`tool_cancelled` |
-| `acp/session.rs:224` | `prompt(&self, blocks, sink: &dyn TurnEventSink) -> ToolResult`（串行闸 + update 映射 + stopReason 归约；预算/取消见上两行） |
+| `acp/session.rs:204` | **NEW** `set_turn_budget(&self, budget: Duration)`：转发 `client.set_prompt_budget`；文档：默认值 = `ACP_REQUEST_TIMEOUT` |
+| `acp/session.rs:213` | **NEW** `set_cancellation_token(&self, token: Arc<CancellationToken>)`：写入既有 `cancellation` 槽位；文档：prompt 期间按 `turn_cancel_poll_ms`(≤100ms) 轮询，触发即 `client.cancel` + 归约 aborted/`tool_cancelled` |
+| `acp/session.rs:227` | `prompt(&self, blocks, sink: &dyn TurnEventSink) -> ToolResult`（串行闸 + update 映射 + stopReason 归约；预算/取消见上两行） |
 | `acp/session.rs:273 / 291` | `cancel(&self)`（cancel notification + 挂起 permission 全回 cancelled）/ `close(&mut self)` |
 | `acp/session.rs:301` | `resolve_permission(&self, request, &GovernedDispatcher, &ControlRequestAuthorization)`：`ask_control::answer_ask` 往返，绝不默认 allow |
 | `acp/session.rs:364 / 457` | `emit_update(&self, sink, &SessionUpdate)`（8 变体 → turn:delta/turn:tool）/ `reduce_stop_reason(StopReason) -> AcpTurnOutcome` |
@@ -66,4 +66,5 @@
 - 计数变更：`builtin_tools()` 45 → 46；模型可见产品面 38 → 39（`acp_delegate` 尾插，KV-cache 前缀不变，仅尾部 +1）。
 - **Lead 裁决（2026-11-14）**：`team_tool_surface_exact_count` **38 → 39** 已同步（`.dev-team/nfr-baseline.json` 值 39 + schema `const: 39`，保持精确值语义、未放宽为 minimum）；依据 `agent/tools/schema.rs` 的 `builtin_tools()` 与 `agent/provider/tests.rs` 同步后的实际模型可见面。注：该字段此前不在 instance 内属既有漂移，本次按裁决显式登记 39。
 - **需 Lead 裁决**：`.dev-team/nfr-baseline.json` 的 `acp` 段不含 P1 的 prompt 预算；`transport::ACP_REQUEST_TIMEOUT`(5000ms) 已覆盖单请求，整轮 prompt 超时由 `timeoutMs`/执行策略承担，未新增键。
-- **Gate-1 amend（2026-11-14）**：TIMEOUT — `client.prompt` 已改为读 `prompt_budget`（默认 5000ms），`set_prompt_budget`/`set_turn_budget` 为 additive 公开面；CONTRACT_BREAK — `set_cancellation_token` 写入既有 `cancellation` 槽位（`Mutex<Option<..>>`）。注：两文件在 amend 前已由 P1 Executor 实现（非空桩），故 setter 用真实赋值而非 `unimplemented!()`（避免给已实现层引入 panic 回归）；prompt 期间 token 轮询与 `execute_acp_delegate` 读 `context.cancellation` 的接线属 executor fix-round（orchestration.rs 不在本批写域）。
+- **Gate-1 amend（2026-11-14）**：TIMEOUT — `client.prompt` 已改为读 `prompt_budget`（默认 5000ms），`set_prompt_budget`(`client.rs:426`)/`set_turn_budget`(`session.rs:204`) 为 additive 公开面；CONTRACT_BREAK — `set_cancellation_token`(`session.rs:213`) 写入既有 `cancellation` 槽位（`Mutex<Option<..>>`），`session.prompt`(`session.rs:227`) 已实现 in-prompt 轮询：`CANCEL_POLL_INTERVAL`=100ms(`session.rs:51`)、scoped thread(`session.rs:259`) 轮询 token → `client.cancel` → 归约 aborted/`tool_cancelled`。注：两文件在 amend 前已由 P1 Executor 实现（非空桩），故 setter 用真实赋值而非 `unimplemented!()`（避免给已实现层引入 panic 回归）。`execute_acp_delegate` 读 `context.cancellation` 的接线属 executor fix-round（orchestration.rs 不在本批写域）。
+- **Gate-1 amend 验证**：`cargo test -p pony-agent-core --test acp_p1_blockers` → **2/2 passed**（P1-9 预算不被 5s 硬顶、P1-10 取消联动）；ACP 五个测试文件合计 **44 tests passed / 0 failed**；`npm run cargo:check:shared` → **Exit 0**。

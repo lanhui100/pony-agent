@@ -22,7 +22,7 @@
 | 旧草稿 `acp/server.rs`（方向相反的 agent 侧）与 `crates/pony-agent-sdk/`（无 `Cargo.toml`、零消费者）已删除 | `git log --oneline -- crates/pony-agent-core/src/acp/server.rs crates/pony-agent-sdk` |
 | 协议层是 ACP v1：`protocolVersion` 为整数 `1`；`session/cancel`、`session/update` 是 notification；`session/request_permission` 是 **agent→client 请求** | `acp/protocol.rs`（`PROTOCOL_VERSION: u32 = 1`）；`tests/acp_p0_acceptance.rs` |
 | stdio transport 已实现：env 白名单 + Unix 进程组 + 三路分流（入站请求/通知/响应）+ 迟到响应缓冲 + 连续 3 行非法 JSON fail-closed + stderr 环形 32 + close 进程组 SIGKILL | `acp/transport.rs`；`tests/acp_p0_adversarial.rs`（7 条 L2-AT） |
-| 会话驱动已实现：串行闸、update→`TurnEventSink` 映射、stopReason 5→4 归约、permission→`ask_control` CAS 往返、取消令牌联动 | `acp/session.rs`；`tests/acp_client_contract.rs`（11 条） |
+| 会话驱动已实现：串行闸、update→`TurnEventSink` 映射、stopReason 5→4 归约、permission→`ask_control` CAS 往返（`session.resolve_permission` 层已验；**尚无缝内生产调用方**，见 B161）、取消令牌联动（`set_cancellation_token`，P1-10 验） | `acp/session.rs`；`tests/acp_client_contract.rs`（11 条）+ `tests/acp_p1_blockers.rs` |
 | `acp_delegate` 已是模型可见工具（工具面 38→39、builtin 45→46） | `agent/tools/{schema,names,mod}.rs`；`tests/acp_client_contract.rs` P1-8 |
 | 宿主形态：`ponycli acp`（`--list` / 单轮 `-p` / `--resume` fail-closed）可用 | `crates/pony-agent-core/src/bin/cli.rs`；`tests/acp_host_surface.rs`（5 条） |
 | 未做（登记在 backlog）：transport 内联 permission 无 dispatcher 注入点（B161）、update 非实时 flush（B162）、Tauri 三命令与前端类型（B163） | `node scripts/backlog.mjs list` |
