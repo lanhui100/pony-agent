@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pony_agent_core::acp::client::{AcpAgentClient, AcpClientCapabilities};
 use pony_agent_core::acp::config::{AcpAgentSpec, AcpCapabilitiesHint};
@@ -136,7 +136,9 @@ fn spec_probing_fs(hint: AcpCapabilitiesHint, cwd: &Path, paths: &[&str]) -> Acp
     )
 }
 
-fn spec_probing_terminal(hint: AcpCapabilitiesHint, cwd: &Path, marker: &str) -> AcpAgentSpec {
+/// marker 经**文件**传递：fake agent argv 只含文件路径，marker 只拼进终端子进程命令行，
+/// 因此 `pgrep -f <marker>` 不会命中 fake agent 自身。
+fn spec_probing_terminal(hint: AcpCapabilitiesHint, cwd: &Path, marker_file: &Path) -> AcpAgentSpec {
     let init_file = cwd.join("initialize.jsonl");
     let resp_file = cwd.join("responses.jsonl");
     spec_with_hint(
@@ -145,7 +147,7 @@ fn spec_probing_terminal(hint: AcpCapabilitiesHint, cwd: &Path, marker: &str) ->
         &[
             init_file.to_string_lossy().as_ref(),
             resp_file.to_string_lossy().as_ref(),
-            marker,
+            marker_file.to_string_lossy().as_ref(),
         ],
     )
 }
@@ -166,6 +168,19 @@ fn run_prompt(session: &AcpAgentSession) {
         &NoopSink,
     );
     assert_eq!(result.status, "ok", "probe 轮必须正常结束（end_turn），实际 {result:?}");
+}
+
+/// NFR 唯一真源（残留断言的有界等待上界由 `acp.spawn_reap_grace_ms` 派生）。
+fn nfr_acp_ms(key: &str) -> u64 {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.dev-team/nfr-baseline.json");
+    let body = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("读取 NFR 真源失败 {}: {error}", path.display()));
+    let parsed: Value = serde_json::from_str(&body).expect("nfr-baseline.json 必须是合法 JSON");
+    parsed
+        .get("acp")
+        .and_then(|acp| acp.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("nfr-baseline.json 缺 acp.{key}"))
 }
 
 fn error_text(response: &Value) -> String {
@@ -514,7 +529,9 @@ fn g6_fs_handler_fails_closed_outside_workspace() {
 fn g7_terminal_handler_full_chain_and_no_residue() {
     let cwd = temp_dir("terminal-chain");
     let marker = format!("pony-acp-term-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos());
-    let spec = spec_probing_terminal(hint(false, true), &cwd, marker.as_str());
+    let marker_file = cwd.join("marker.txt");
+    std::fs::write(&marker_file, &marker).expect("写 marker 文件");
+    let spec = spec_probing_terminal(hint(false, true), &cwd, &marker_file);
 
     let mut session = match AcpAgentSession::spawn_with_mcp_and_handlers(
         &spec,
@@ -563,20 +580,29 @@ fn g7_terminal_handler_full_chain_and_no_residue() {
         "C5 违约：terminal/release 必须成功，实际 {released}"
     );
 
-    // 无残留：release 后不得再有匹配 marker 的进程。
-    let status = std::process::Command::new("pgrep")
-        .arg("-f")
-        .arg(&marker)
-        .output()
-        .expect("pgrep 可执行");
-    assert_eq!(
-        status.status.code(),
-        Some(1),
-        "C5 违约：release 后不得残留子进程（pgrep 期望无匹配，exit=1），stdout:{}",
-        String::from_utf8_lossy(&status.stdout)
-    );
-
+    // 无残留断言必须在会话关闭**之后**（fake agent argv 不含 marker，故不会自命中；
+    // 关闭会话保证外部 agent 本身与终端子进程都已回收），并有 NFR 派生的有界等待。
     session.close();
+    let deadline = Duration::from_millis(nfr_acp_ms("spawn_reap_grace_ms") * 4);
+    let started = Instant::now();
+    loop {
+        let status = std::process::Command::new("pgrep")
+            .arg("-f")
+            .arg(&marker)
+            .output()
+            .expect("pgrep 可执行");
+        if status.status.code() == Some(1) {
+            break;
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "C5 违约：release+close 后不得残留子进程（pgrep 期望无匹配，实际 exit={:?}），stdout:{}",
+            status.status.code(),
+            String::from_utf8_lossy(&status.stdout)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
     let _ = std::fs::remove_dir_all(&cwd);
 }
 

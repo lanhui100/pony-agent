@@ -32,7 +32,9 @@
 #                                 记录 initialize 原始行；prompt 期间对 pathsFile 每行（JSON 路径字面量）
 #                                 发 fs/read_text_file + fs/write_text_file 各一次，client 原始应答行
 #                                 按序落 respFile（B175 fs 能力用例）
-#   probe_terminal <initFile> <respFile> <marker>
+#   probe_terminal <initFile> <respFile> <markerFile>
+#                                 markerFile 内一行是唯一 marker；仅把它拼进**终端子进程**的命令行
+#                                 （fake agent 自身 argv 只含文件路径，避免 pgrep 自命中）
 #                                 记录 initialize；prompt 期间发 terminal/create(echo hi + marker)
 #                                 →output→wait_for_exit→kill→kill(幂等)→release，应答按序落 respFile
 #   cancel_hold <markerFile> <sessionId>
@@ -183,7 +185,8 @@ while IFS= read -r line; do
                     ;;
                 session/prompt)
                     prompt_id="$id"
-                    emit "{\"jsonrpc\":\"2.0\",\"id\":9201,\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"acp-sess-1\",\"command\":\"sh\",\"args\":[\"-c\",\"echo hi; : $arg3\"]}}"
+                    marker_text=$(cat "$arg3" 2>/dev/null || printf '%s' "$arg3")
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9201,\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"acp-sess-1\",\"command\":\"sh\",\"args\":[\"-c\",\"echo hi; : $marker_text\"]}}"
                     IFS= read -r answer && printf '%s\n' "$answer" >> "$arg2"
                     tid=$(printf '%s' "$answer" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
                     emit "{\"jsonrpc\":\"2.0\",\"id\":9202,\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"acp-sess-1\",\"terminalId\":\"$tid\"}}"

@@ -147,8 +147,44 @@ impl ToolRouter {
             }
         };
 
+        // B175：fs/terminal 能力 handler 必须在握手**前**决定存在性（initialize 是第一条报文）。
+        // 本层同时持有 `authorize_store`（PA-080 授权清单）与 `process_manager`（进程编排唯一口），
+        // 因此可以真装配：`caps = hint ∧ handler 存在`（hint 只是上限；hint=false 时即使 handler
+        // 可用也不声明）。绝不出现「声明了但没装」——缺失即由 session 侧 fail-closed。
+        let fs_handler: Option<Arc<dyn crate::acp::client::FsHandler>> =
+            spec.capabilities_hint.fs.then(|| {
+                Arc::new(crate::acp::handlers::WorkspaceFsHandler::new(
+                    cwd.clone(),
+                    Arc::clone(self.authorize_store()),
+                    // purpose 是审计标签；read/write 各自按自己的 PathPurpose 判定。
+                    crate::agent::path_permission::PathPurpose::Read,
+                )) as Arc<dyn crate::acp::client::FsHandler>
+            });
+        let terminal_handler: Option<Arc<dyn crate::acp::client::TerminalHandler>> =
+            spec.capabilities_hint.terminal.then(|| {
+                Arc::new(crate::acp::handlers::ManagedTerminalHandler::new(Arc::new(
+                    self.process_manager.clone(),
+                ))) as Arc<dyn crate::acp::client::TerminalHandler>
+            });
+        let fs_declared = fs_handler.is_some();
+        let terminal_declared = terminal_handler.is_some();
+
+        // B174：mcpServers 三态（inherit / 显式 [] / 显式条目）在本层解析后随 session/new 下发。
+        let mcp_servers = match crate::acp::config::resolve_mcp_servers_in(&spec, &cwd) {
+            Ok(servers) => servers,
+            Err(error) => {
+                return error_result(TOOL_ACP_DELEGATE, error.code(), error.to_string(), None)
+            }
+        };
+
         // 每任务一个子进程（§3.2.1：不并发打同一 session）。
-        let mut session = match crate::acp::session::AcpAgentSession::spawn(&spec, &cwd) {
+        let mut session = match crate::acp::session::AcpAgentSession::spawn_with_mcp_and_handlers(
+            &spec,
+            &cwd,
+            mcp_servers,
+            fs_handler,
+            terminal_handler,
+        ) {
             Ok(session) => session,
             Err(error) => {
                 return error_result(TOOL_ACP_DELEGATE, error.code(), error.to_string(), None)
@@ -180,11 +216,13 @@ impl ToolRouter {
             session.set_cancellation_token(std::sync::Arc::clone(token));
         }
         eprintln!(
-            "[acp] acp_delegate: agent={} session={} budget_ms={} host_cancellation={}",
+            "[acp] acp_delegate: agent={} session={} budget_ms={} host_cancellation={} fs_handler={} terminal_handler={}",
             spec.id,
             session.session_id(),
             turn_budget.as_millis(),
-            context.cancellation.is_some()
+            context.cancellation.is_some(),
+            fs_declared,
+            terminal_declared
         );
 
         let blocks = vec![crate::acp::protocol::ContentBlock::Text {
