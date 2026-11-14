@@ -47,6 +47,7 @@ import type {
   TurnInput,
   TurnInputImage,
   TurnMetricsSnapshot,
+  TurnRetryEvent,
   TurnStreamEvent,
   TurnTraceRecord
 } from "../types/runtime";
@@ -348,6 +349,14 @@ export type ActiveStreamKind = "reasoning" | "content" | null;
 type RuntimeStateW59 = RuntimeState & {
   activeStreamKind?: ActiveStreamKind;
   liveMetrics: TurnMetricsSnapshot | null;
+  /**
+   * 上游重试进度（`turn:retry` → 状态行「正在重试（n/m）...」）：会话内瞬时态，不持久化。
+   *
+   * 真值来自 Rust `agent::retry::RetryNotice`（`attempt` / `maxAttempts` 同源，桌面端经
+   * `src-tauri/src/tauri_adapter.rs` 的回合阻塞线程发出）；只由 `applyTurnRetryProgress`
+   * 写入，由 `clearTimeoutRetryPlaceholder` 在回合/跳转边界清空。
+   */
+  retryProgress: { turnId: string; attempt: number; maxAttempts: number } | null;
 };
 
 /**
@@ -489,6 +498,14 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
       streamBufferReasoning: "",
       /** Wave-59 F4 / D-59-3：hop 级流式类型（null=本 hop 无输出；undefined=未接线⇒旧判据）。 */
       activeStreamKind: undefined as ActiveStreamKind | undefined,
+      /**
+       * 桌面端上游重试进度（`turn:retry` 的唯一落点）。
+       *
+       * 真值源是 Rust `agent::retry::RetryNotice`（与 TUI 状态行**同一个**出口）：
+       * `attempt` = 已失败尝试数（1 起），`maxAttempts` = 本跳允许的尝试总数（含首次）。
+       * 只由 `applyTurnRetryProgress` 写入、由 `clearTimeoutRetryPlaceholder` 在回合/跳转边界清空。
+       */
+      retryProgress: null as { turnId: string; attempt: number; maxAttempts: number } | null,
       browserPreviewRunToken: 0,
       messages: persisted?.messages ?? [],
       attachmentAssets: persisted?.attachmentAssets ?? [],
@@ -683,11 +700,14 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
             state.streamBufferText ||
             (activeAssistantMessage && activeAssistantMessage.content)
           );
-      // RC9 / F4-5：retrying 的真实可达信号源 —— 超时（可重试错误）重试提交时，store 把
+      // RC9 / F4-5：retrying 的**提交期**信号源 —— 超时（可重试错误）重试提交时，store 把
       // `TIMEOUT_RETRY_PENDING_MESSAGE` 写进 pending assistant（见 submitTurn）；首个 delta 与
       // `turn:started` 都会清空该占位文案 ⇒ 回到 calling_model 后重试信号自然清零。
-      // 无后端「最大重试次数」信号，故不传 retryMax（status.ts 缺省时降级为「正在重试…」，不虚构分母）。
       const retryingAfterTimeout = activeAssistantMessage?.content === TIMEOUT_RETRY_PENDING_MESSAGE;
+      // 流式期的**真实**重试进度（`turn:retry` → `retryProgress`）优先：分母 `maxAttempts` 与
+      // `attempt` 同源（后端 `RetryNotice`），故可展示 n/m；无通知时回退到占位判定且不传 retryMax
+      // （status.ts 缺省降级为「正在重试…」，不虚构分母）。
+      const retryProgress = state.retryProgress;
       return resolveAgentRuntimeStatus({
         isSubmitting: state.isSubmitting,
         phase: state.phase,
@@ -695,7 +715,8 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         turnStartedAt: state.activeTurnStartedAtMs ?? null,
         streamingReasoning: isStreamingReasoning,
         hasStreamingContent,
-        retryAttempt: retryingAfterTimeout ? 1 : undefined
+        retryAttempt: retryProgress ? retryProgress.attempt : retryingAfterTimeout ? 1 : undefined,
+        retryMax: retryProgress?.maxAttempts
       });
     },
     /**
@@ -3417,6 +3438,35 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
           message.content = "";
         }
       }
+      // 真实重试进度（`turn:retry`）同点清零：两者的生命周期边界一致（回合/跳转/首个输出），
+      // 分开清会让状态行滞留「正在重试（3/10）...」。给定的 turnId 与进度所属轮次不符时保留。
+      if (!turnId || this.retryProgress?.turnId === turnId) {
+        this.retryProgress = null;
+      }
+    },
+    /**
+     * 桌面端上游重试进度落地（`turn:retry` → 状态行「正在重试（n/m）...」的唯一写点）。
+     *
+     * 归属判定沿用流式事件的 fail-closed 口径：`sessionId` 缺失或非本会话 ⇒ 丢弃
+     * （后台会话的重试不得污染当前状态行）。**不**按 turnId 门禁 —— 生产路径里本地 requestId
+     * 与后端 turnId 可能不同（D-59-9 同因），按 id 卡会让重试态再次不可达；过期由
+     * `clearTimeoutRetryPlaceholder` 在各回合/跳转边界统一清空。
+     *
+     * 数值一律照抄后端通知（`attempt` / `maxAttempts` 同源），不在此推算、不补齐分母。
+     */
+    applyTurnRetryProgress(payload: TurnRetryEvent) {
+      if (!payload.sessionId || payload.sessionId !== this.sessionId) {
+        return;
+      }
+      // 物理上不可信的负载（分母 < 分子 / 分子非正）不得进状态行。
+      if (!(payload.attempt > 0) || payload.maxAttempts < payload.attempt) {
+        return;
+      }
+      this.retryProgress = {
+        turnId: payload.turnId,
+        attempt: payload.attempt,
+        maxAttempts: payload.maxAttempts
+      };
     },
     ensureAssistantMessage(turnId: string, modelName?: string | null) {
       const messageId = `assistant-${turnId}`;
@@ -3952,6 +4002,14 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         const unlisten = await safeListen<TurnStreamEvent>(eventName, ({ payload }) => handler(payload));
         registry.unlisteners.push(unlisten);
       };
+
+      // 桌面端上游重试进度：`turn:retry` 的负载不是 `TurnStreamEvent`（不参与回合状态机），
+      // 故单独注册；句柄同样进 registry，随 `releaseTurnEventRegistry` 统一 unlisten。
+      // 事件由 `src-tauri/src/tauri_adapter.rs` 的回合阻塞线程发出（真值 = retry::RetryNotice）。
+      const unlistenTurnRetry = await safeListen<TurnRetryEvent>("turn:retry", ({ payload }) => {
+        this.applyTurnRetryProgress(payload);
+      });
+      registry.unlisteners.push(unlistenTurnRetry);
 
       await listen("turn:started", (payload) => {
         // Wave-59 F4-5 / D-59-9：retry 占位清零**不得**依赖 turnId 门禁。

@@ -28,6 +28,18 @@
 #     （stderr 结构化行 + 有界环形缓冲），不上报。
 # (3) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
+# 上游重试真值面（ADR 2026-11-14-upstream-retry-count-and-status-surface，backlog:B154/B155）与
+# 其桌面端接线（ADR 2026-11-14-desktop-retry-progress-surface）归属说明：
+# (1) 库层：`agent/retry.rs` 新增线程局部观察者（`RetryNotice` / `install_retry_observer` /
+#     `notify_provider_retry` + RAII 守卫），只做**进程内回调**，无网络出口、无 exporter 变更、
+#     无新增 span（tracing 收口点仍是 `agent/otel/mod.rs`）；未安装观察者即静默 no-op。
+# (2) 桌面端：`src-tauri/src/tauri_adapter.rs` 在回合阻塞线程内安装观察者，经**既有唯一**
+#     `TauriTurnEventSink.app.emit` 落点发 `turn:retry`（负载 `TurnRetryPayload`）。该事件是
+#     WebView 进程内前置通道（Tauri IPC），不是遥测出口；结构上不产生 /metrics、不上送日志。
+# (3) 前端：`turn:retry` → store `retryProgress` → 状态行文案，纯呈现层，无新增接口/网络 IO/后台任务。
+# (4) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
+#     issues 边界不变（异常仍走既有 PonySentry 客户端）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
 service: pony-agent
 kind: desktop
 reviewed_at: "2026-11-09"

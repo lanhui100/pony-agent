@@ -1274,6 +1274,29 @@ export type TurnStreamEvent = {
 };
 
 /**
+ * 桌面端上游重试进度事件 `turn:retry` 的负载（wire 对齐 Rust
+ * `src-tauri/src/tauri_adapter.rs::TurnRetryPayload`，camelCase）。
+ *
+ * 真值源与 TUI 状态行是**同一个**：`crates/pony-agent-core/src/agent/retry.rs::RetryNotice`
+ * （只报告真实发生的重试；`attempt` = 已失败尝试数，1 起；`maxAttempts` = 本跳允许的尝试总数，
+ * 含首次 ⇒ 口径 `attempt/maxAttempts`）。前端不得自行推算分母 —— 历史上伪造「重试中(1/5)」
+ * 正是因为拿不到真实分母。
+ *
+ * 纪律：本事件**不是**回合生命周期事件（不进 `TurnStreamEvent` 状态机，不参与终态判定），
+ * 仅用于状态行展示；归属不匹配的负载由 store 丢弃。
+ */
+export type TurnRetryEvent = {
+  turnId: string;
+  sessionId: string;
+  attempt: number;
+  maxAttempts: number;
+  /** 本次退避将 sleep 的毫秒数（尚未执行）。 */
+  delayMs: number;
+  /** 失败分类，封闭集同 `agent::retry::classify_error_class`。 */
+  errorClass: string;
+};
+
+/**
  * wave-60 §1 结构化停止原因（唯一词汇表，与 Rust
  * `crates/pony-agent-core/src/agent/stop_escalation.rs` 的 `StopReason` 同名同值）。
  * 契约纪律：只能追加，禁止重命名/删除既有值。
