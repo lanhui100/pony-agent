@@ -43,6 +43,13 @@
 
 **保真声明**：r2/r3 的 FAIL 收据不做美化，保留在 git 历史与 backlog 归档里；r4 PASS 的审查对象是 `be302170`（源码面 `de3f7a5e`）。共 5 条 BLOCKING，全部由独立审查在交付前钉住，零漏放到用户手上。
 
+## 4.2 追加波次（B174 mcpServers / B175 fs-terminal，同日 21:30–22:45）
+
+- **并发写者首次出现**：本次作业期间同仓另有会话在提交（`4c914dab`/`80bf5d30`）并持有未提交改动（agent/config.rs、bin/cli.rs、bin/tui*、src/stores/*、docs/observability.yaml）。处置：向全部 teammate 下发「只碰自己写域 / 禁 `git add -A` / 失败点不在自身范围只回报不修」的纪律，Lead 全部按**路径级**暂存提交 —— 未发生一例跨写域污染，也未误提交他人 WIP。**教训**：多会话共享工作区时，`git add -A` 与「顺手修编译错」是最大的两个事故源。
+- **协议特派员的角色漂移（第二次）**：B174 的 `resolve_mcp_servers` 与 B175 的 `connect_with_capabilities`/`capabilities_for`/handler 装配逻辑都由 protocol-agent 以「空桩会让既有入口 panic」为由写成了真实实现。功能上更稳（未击穿既有测试），但「契约层不含逻辑」这条已连续两次失守 —— 建议下一波把该理由制度化：**允许 protocol-agent 在既有实现文件里写「最小可编译实现」，但必须在回报首行声明 `stub-overreach: <原因>`**，由 Lead 决定是否转 executor 复核。
+- **测试缺陷 vs 实现缺陷的判定**：g7（terminal 残留）初判为「实现没回收」，实为**测试自命中**（marker 在 fake agent argv 里、且在 close 之前 pgrep）。由 Executor 提出假设、Test Agent 修正（marker 改文件传递 + 断言后移 + NFR 派生有界轮询），Lead 只做裁决。这条链路是本次分工协作最健康的一次：实现者不许改测试、测试者不许改实现，缺陷归属被强制说清。
+- **门禁覆盖再次暴露同一缺口**：`npm run verify` 仍不含 Rust 集成测试，本波新增的 `acp_mcp_wiring`/`acp_capabilities_contract` 只能靠显式目标清单跑到 —— 与 §4 建议 1 完全一致，优先级应保持最高。
+
 ## 5. 结论
 
 本轮团队在**红相独立分权**与**双路对抗审查**上取得真实收益（4 条 BLOCKING 全部在交付前被机器反例钉住并修复），代价是 2 次 executor 空转 + 1 次门禁时序失真。下一波优先落地建议 1（verify 覆盖契约测试）与建议 3（切片机械阈值），这两条直接决定「门禁是否被穿透」与「token 是否被空转吃掉」。
