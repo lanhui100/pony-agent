@@ -14,7 +14,9 @@
 #   concurrent       回 {"echo": <params.sentinel>}，验证并发请求不串包
 #
 # P1（会话驱动）模式：
-#   init_capture <file> <1|2>      记录 initialize 原始请求行，按版本回 1 或 2（P1-1 版本校验）
+#   init_capture <file> <1|2> [sessionNewFile]
+#                                 记录 initialize 原始请求行，按版本回 1 或 2；
+#                                 若给第 4 个参数，则把 session/new 原始行追加到该文件（B174 mcpServers 证据）
 #   flow <stopReason> <sessionId>  完整会话流：initialize → session/new → prompt 回指定 stopReason
 #   updates <sessionId>            prompt 期间发 agent_message_chunk / agent_thought_chunk / tool_call
 #   permission_prompt <file> <sessionId>
@@ -143,6 +145,7 @@ while IFS= read -r line; do
                     fi
                     ;;
                 session/new)
+                    [ -n "$arg3" ] && printf '%s\n' "$line" >> "$arg3"
                     [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
                     ;;
                 session/prompt)

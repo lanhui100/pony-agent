@@ -97,6 +97,7 @@ fn fake_spec(mode: &str, extra: &[&str]) -> AcpAgentSpec {
         env: Vec::new(),
         default_cwd: None,
         capabilities_hint: AcpCapabilitiesHint::default(),
+        mcp_servers: None,
     }
 }
 

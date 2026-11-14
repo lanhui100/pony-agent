@@ -19,9 +19,9 @@ use serde_json::{json, Value};
 use crate::acp::client::{AcpAgentClient, PermissionHandler};
 use crate::acp::config::AcpAgentSpec;
 use crate::acp::protocol::{
-    method, ContentBlock, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SessionNotification, SessionUpdate, StopReason, ToolCallLocation,
-    ToolCallStatus, ToolKind,
+    method, ContentBlock, McpServer, PermissionOptionKind, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionNotification, SessionUpdate,
+    StopReason, ToolCallLocation, ToolCallStatus, ToolKind,
 };
 use crate::acp::transport::{AcpNotificationHandler, AcpTransportError, ACP_REQUEST_TIMEOUT};
 use crate::agent::ask_persistence::{AskLifecycleState, PersistedAsk};
@@ -185,12 +185,31 @@ impl AcpAgentSession {
     /// 建会话：`AcpAgentClient::connect` → `install_handlers` → `new_session`。
     ///
     /// `cwd` 必须是绝对路径（从 `ToolExecutionContext.workspace_root` 取）。
+    ///
+    /// B174：`mcpServers` 走 spec 三态（缺省 ⇒ inherit：复用 Pony 既有 MCP 配置；显式 `[]` ⇒
+    /// 禁用；显式条目 ⇒ 仅用条目），由 [`crate::acp::config::resolve_mcp_servers_in`] 解析后
+    /// 经 [`Self::spawn_with_mcp`] 下发。既有签名不变；配置不可用时 fail-closed
+    /// （`AcpTransportError::Unavailable`，消息保留 `acp_config_*` 码），不静默降级为空列表。
     pub fn spawn(spec: &AcpAgentSpec, cwd: &Path) -> Result<Self, AcpTransportError> {
+        let mcp_servers = crate::acp::config::resolve_mcp_servers_in(spec, cwd)
+            .map_err(|error| AcpTransportError::Unavailable(error.to_string()))?;
+        Self::spawn_with_mcp(spec, cwd, mcp_servers)
+    }
+
+    /// B174 additive：用**已解析的** wire `mcpServers` 建会话（不叠加 inherit）。
+    ///
+    /// 与 [`Self::spawn`] 共用同一路径：先 `connect`（含 `protocolVersion == 1` 校验与
+    /// fs/terminal 能力 fail-closed 不下放），再 `session/new { cwd, mcpServers }`。
+    pub fn spawn_with_mcp(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<Self, AcpTransportError> {
         // 握手（含 protocolVersion == 1 的 fail-closed 校验）由 client 收口。
         let mut client = AcpAgentClient::connect(spec, cwd)?;
         // fs/terminal 一律不下放（None）：没有治理链 handler 就不声明能力（§3.2.4/§3.2.5）。
         client.install_handlers(Arc::new(FailClosedPermissionHandler), None, None);
-        let response = client.new_session(cwd, Vec::new())?;
+        let response = client.new_session(cwd, mcp_servers)?;
         Ok(Self {
             client,
             prompt_gate: Mutex::new(()),
