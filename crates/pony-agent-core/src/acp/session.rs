@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use crate::acp::client::{AcpAgentClient, AcpHandlerError, PermissionHandler};
+use crate::acp::client::{AcpAgentClient, PermissionHandler};
 use crate::acp::config::AcpAgentSpec;
 use crate::acp::protocol::{
     method, ContentBlock, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
@@ -46,6 +46,9 @@ const TOOL_ACP_DELEGATE: &str = "acp_delegate";
 
 /// 审批轮询间隔（有界条件轮询：到达终态立即返回，不靠固定 sleep 当同步）。
 const PERMISSION_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// prompt 期间取消令牌的轮询间隔（契约 `turn_cancel_poll_ms` ≤ 100ms，与 exec.rs 同范式）。
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// stopReason 的 Pony 归约结果（§3.2.8 映射表，5 → 4 类）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,7 +251,37 @@ impl AcpAgentSession {
 
         let collector = Arc::new(UpdateCollector::default());
         let observer = Arc::clone(&collector) as Arc<dyn AcpNotificationHandler>;
-        let response = self.client.prompt(&self.session_id, blocks, observer);
+
+        // §3.2.6 取消联动：`client.prompt` 在协议层阻塞等 agent 应答，因此把 prompt 放进行内
+        // 线程，本线程按 `turn_cancel_poll_ms`(≤100ms) 轮询取消令牌；一旦触发即发
+        // `session/cancel` notification（agent 随后以 `stopReason: cancelled` 回应本轮），
+        // 从而不必等满整轮预算。取消发送失败只记诊断，不改变 prompt 的归约结果。
+        let prompt_result = std::thread::scope(|scope| {
+            let handle =
+                scope.spawn(move || self.client.prompt(&self.session_id, blocks, observer));
+            let mut cancel_sent = false;
+            while !handle.is_finished() {
+                // 每一片都重读槽位：`set_cancellation_token` 是 `&self` 热替换，prompt 运行期
+                // 注入的令牌也必须被同一个轮询观察到（不能只读启动时的快照）。
+                if !cancel_sent && self.session_cancelled() {
+                    cancel_sent = true;
+                    if let Err(error) = self.client.cancel(&self.session_id) {
+                        eprintln!(
+                            "[acp][session] session/cancel 发送失败（取消仍按 aborted 归约）：{error}"
+                        );
+                    }
+                }
+                std::thread::sleep(CANCEL_POLL_INTERVAL);
+            }
+            handle.join()
+        });
+        let response = match prompt_result {
+            Ok(result) => result,
+            // prompt 线程 panic：fail-closed 为不可用（不 panic 传播，不伪造成功）。
+            Err(_) => Err(AcpTransportError::Unavailable(
+                "session/prompt 执行线程 panic。".to_string(),
+            )),
+        };
 
         // 先按到达顺序把 update 映射进 TurnEventSink，再归约 stopReason。
         let (updates, warnings) = collector.take();
@@ -865,14 +898,4 @@ fn tool_kind_str(kind: &ToolKind) -> &'static str {
 
 fn json_text(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|error| format!("<unserializable:{error}>"))
-}
-
-/// `AcpHandlerError` 的会话侧诊断（P1 未用它构造 handler，保留以避免死代码并给 P2 复用）。
-#[allow(dead_code)]
-fn handler_error_text(error: &AcpHandlerError) -> String {
-    match error {
-        AcpHandlerError::Denied(message) => format!("acp_handler_denied: {message}"),
-        AcpHandlerError::NotFound(message) => format!("acp_handler_not_found: {message}"),
-        AcpHandlerError::Internal(message) => format!("acp_handler_internal: {message}"),
-    }
 }

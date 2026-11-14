@@ -2417,7 +2417,33 @@ fn acp_result_exit_code(result: &pony_agent_core::agent::tools::ToolResult) -> i
         }
         _ => {
             eprintln!("[ponycli] {}: {}", result.status, result.output);
-            ExitCode::ToolFailure.code()
+            // 退出码契约：`acp_timeout`（传输层/整轮预算超时）属于 timeout 档 = 7，
+            // 不得塌进通用 tool-failure(5)——否则 usage 文档「expiry = exit 7」与实现不符。
+            if acp_result_error_code(result).as_deref() == Some("acp_timeout") {
+                ExitCode::Timeout.code()
+            } else {
+                ExitCode::ToolFailure.code()
+            }
+        }
+    }
+}
+
+/// 从归约后的 `ToolResult.output`（JSON 封套）取 `error.code`；解析失败回退文本匹配。
+///
+/// 只读产物、不构造第二套错误码：`error.code` 由 `acp::session` 按 §3.2.9 分源写入。
+fn acp_result_error_code(result: &pony_agent_core::agent::tools::ToolResult) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(&result.output) {
+        Ok(value) => value
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(|code| code.as_str())
+            .map(str::to_string),
+        Err(_) => {
+            if result.output.contains("\"acp_timeout\"") {
+                Some("acp_timeout".to_string())
+            } else {
+                None
+            }
         }
     }
 }

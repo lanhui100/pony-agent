@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use crate::acp::config::AcpAgentSpec;
 use crate::acp::protocol::{
     method, AgentCapabilities, AuthCapabilities, CancelNotification, ClientCapabilities,
-    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, FileSystemCapabilities,
+    ContentBlock, CreateTerminalRequest, CreateTerminalResponse,
     Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest, McpServer,
     PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
@@ -316,8 +316,11 @@ impl AcpAgentClient {
     ///
     /// 行为契约：
     /// 1. `AcpTransport::spawn(spec, cwd, &[])`（env 白名单 / 进程组 / stderr 环形缓冲由 transport 收口）；
-    /// 2. 发送 `initialize { protocolVersion: 1, clientCapabilities, clientInfo }`，能力按
-    ///    `spec.capabilities_hint` 声明（`fs`/`terminal` 未声明 = 整块不下放）；
+    /// 2. 发送 `initialize { protocolVersion: 1, clientCapabilities, clientInfo }`；`fs` /
+    ///    `terminal` 能力**只由真实 handler 是否装配推导**并诚实声明（Gate-1 ADVISORY #8）：
+    ///    `connect` 阶段还没有任何 `FsHandler` / `TerminalHandler`（它们只能在握手后经
+    ///    [`AcpAgentClient::install_handlers`] 注入），因此这里一律**不声明**（缺省 = false）；
+    ///    `spec.capabilities_hint` 是用户可写的提示，**不得**单独决定线上能力声明；
     /// 3. 校验响应 `protocolVersion == 1`，不等即 `Err(AcpTransportError::Protocol(..))`
     ///    （`acp_protocol_error`），**不重试、不降级**。
     pub fn connect(spec: &AcpAgentSpec, cwd: &Path) -> Result<Self, AcpTransportError> {
@@ -330,14 +333,13 @@ impl AcpAgentClient {
             slots: Arc::clone(&handlers),
         }));
 
+        // §3.2.4/§3.2.5 + 能力诚实性：此刻 handler 槽位仍是空的（`install_handlers` 只能在
+        // 握手之后调用），因此任何 `fs`/`terminal` 能力都**没有真实实现承载** ⇒ 缺省不声明
+        // （fail-closed：agent 不会发 fs/* / terminal/* 反向请求）。`spec.capabilities_hint`
+        // 不参与线上声明——用户可写的提示不能让宿主谎报能力。
         let capabilities = ClientCapabilities {
-            // §3.2.4：未声明 = 整块不下放（外部 agent 只能在自己子进程里读写）。
-            fs: spec.capabilities_hint.fs.then(|| FileSystemCapabilities {
-                read_text_file: true,
-                write_text_file: true,
-            }),
-            // §3.2.5：终端能力同理（未声明时 agent 不应发 terminal/*）。
-            terminal: spec.capabilities_hint.terminal.then_some(true),
+            fs: None,
+            terminal: None,
             auth: Some(AuthCapabilities { terminal: false }),
         };
         let request = InitializeRequest {
