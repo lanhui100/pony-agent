@@ -1010,6 +1010,7 @@ mod tests {
                 session_id: session_id.to_string(),
                 program: program.to_string(),
                 arguments: args.iter().map(|arg| arg.to_string()).collect(),
+                cwd: None,
                 sandbox: sandbox_request(),
             })
             .expect("start must succeed")

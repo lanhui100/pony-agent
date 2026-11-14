@@ -26,7 +26,7 @@
 //! `SandboxBackend` remains separate, and non-Windows behavior is direct-child lifecycle only.
 
 use crate::agent::tool_runtime::{
-    ProcessBackend, ProcessPollResult, ProcessStartRequest, ProcessState,
+    ProcessBackend, ProcessPollResult, ProcessStartRequest, ProcessState, SandboxRequest,
 };
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -343,6 +343,39 @@ pub struct ProcessManager {
     inner: Arc<Inner>,
 }
 
+/// `start` 的可选 cwd 校验：必须指向一个已存在目录（端口不做 workspace 边界判定）。
+fn require_existing_dir(cwd: &str) -> Result<&std::path::Path, String> {
+    let path = std::path::Path::new(cwd);
+    if path.is_dir() {
+        Ok(path)
+    } else {
+        Err(format!("cwd `{cwd}` is not an existing directory"))
+    }
+}
+
+/// Design Decision 7：沙箱子进程的最小环境（`env_clear` + 必需变量 + 显式 allowlist）。
+///
+/// 隔离子进程不得继承 provider key、会话密钥或宿主代理变量；空 allowlist 仍然隔离
+/// （只保留 `ESSENTIAL_ENV_VARS`）。从 `start_inner` 抽出以控制该函数规模（行为逐字不变）。
+fn apply_sandbox_environment(command: &mut Command, sandbox: &SandboxRequest) {
+    if !sandbox.isolate_environment {
+        return;
+    }
+    command.env_clear();
+    for key in ESSENTIAL_ENV_VARS {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    for entry in &sandbox.environment_allowlist {
+        if let Some((key, value)) = entry.split_once('=') {
+            command.env(key, value);
+        } else if let Ok(value) = std::env::var(entry) {
+            command.env(entry, value);
+        }
+    }
+}
+
 impl ProcessManager {
     /// A manager with the default 64 KiB per-stream output caps.
     pub fn new() -> Self {
@@ -640,6 +673,10 @@ impl ProcessManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // B175 ADVISORY①：可选子进程工作目录（`None` = 既有行为不变）。
+        if let Some(cwd) = request.cwd.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            command.current_dir(require_existing_dir(cwd)?);
+        }
         // Windows 弹窗修复：控制台子进程（cmd/powershell）不得弹出可见控制台窗口。
         #[cfg(windows)]
         hide_console_window(&mut command);
@@ -662,27 +699,8 @@ impl ProcessManager {
                     | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
             );
         }
-        // Design Decision 7: sandboxed children run with a minimal environment and must not
-        // inherit provider keys, session secrets, or ambient proxy env vars. A child whose
-        // `SandboxRequest` sets `isolate_environment` gets a minimal env (`env_clear` plus the
-        // essential vars plus the explicit `environment_allowlist`); an empty allowlist still
-        // isolates — only the essential vars survive. The legacy (non-sandboxed) path inherits
-        // the parent env (phase-4..7 review P1-3, phase-5 review P1-1).
-        if request.sandbox.isolate_environment {
-            command.env_clear();
-            for key in ESSENTIAL_ENV_VARS {
-                if let Ok(value) = std::env::var(key) {
-                    command.env(key, value);
-                }
-            }
-            for entry in &request.sandbox.environment_allowlist {
-                if let Some((key, value)) = entry.split_once('=') {
-                    command.env(key, value);
-                } else if let Ok(value) = std::env::var(entry) {
-                    command.env(entry, value);
-                }
-            }
-        }
+        // Design Decision 7：沙箱子进程只带最小环境（见 `apply_sandbox_environment`）。
+        apply_sandbox_environment(&mut command, &request.sandbox);
         #[cfg(windows)]
         let job = {
             #[cfg(test)]
@@ -1226,6 +1244,7 @@ mod tests {
                 session_id: session_id.to_string(),
                 program: program.to_string(),
                 arguments,
+                cwd: None,
                 sandbox: sandbox(),
             })
             .expect("start should succeed")
@@ -1248,6 +1267,7 @@ mod tests {
                 session_id: session.to_string(),
                 program,
                 arguments,
+                cwd: None,
                 sandbox: SandboxRequest {
                     workspace_root: ".".to_string(),
                     allow_network: false,
@@ -1286,6 +1306,7 @@ mod tests {
                 session_id: session.to_string(),
                 program,
                 arguments,
+                cwd: None,
                 sandbox: SandboxRequest {
                     workspace_root: ".".to_string(),
                     allow_network: false,
@@ -1739,6 +1760,7 @@ mod tests {
                     "agent::process::tests::helper_process".to_string(),
                     "--nocapture".to_string(),
                 ],
+                cwd: None,
                 sandbox: SandboxRequest {
                     workspace_root: ".".to_string(),
                     allow_network: false,
@@ -1960,6 +1982,7 @@ mod tests {
             session_id: session.to_string(),
             program: program.clone(),
             arguments: arguments.clone(),
+            cwd: None,
             sandbox: sandbox(),
         });
         assert!(res.is_err());
@@ -1974,6 +1997,7 @@ mod tests {
             session_id: session.to_string(),
             program: program.clone(),
             arguments: arguments.clone(),
+            cwd: None,
             sandbox: sandbox(),
         });
         assert!(res.is_err());
@@ -1990,6 +2014,7 @@ mod tests {
             session_id: session.to_string(),
             program: long_program.clone(),
             arguments: long_arguments.clone(),
+            cwd: None,
             sandbox: sandbox(),
         });
         assert!(res.is_err());
@@ -2012,6 +2037,7 @@ mod tests {
             session_id: session.to_string(),
             program: long_program.clone(),
             arguments: long_arguments.clone(),
+            cwd: None,
             sandbox: sandbox(),
         });
         assert!(res.is_err());
@@ -2034,6 +2060,7 @@ mod tests {
             session_id: session.to_string(),
             program: echo_command().0,
             arguments: echo_command().1,
+            cwd: None,
             sandbox: sandbox(),
         });
         manager.set_wait_before_assign(false);
@@ -2054,6 +2081,7 @@ mod tests {
             session_id: session.to_string(),
             program: long_program.clone(),
             arguments: long_arguments.clone(),
+            cwd: None,
             sandbox: sandbox(),
         });
         manager.set_missing_pipe(None);

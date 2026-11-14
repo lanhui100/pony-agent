@@ -24,13 +24,13 @@ use crate::acp::protocol::{
     TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
     WriteTextFileRequest, WriteTextFileResponse,
 };
-use crate::acp::transport::ACP_REQUEST_TIMEOUT;
+use crate::acp::ACP_DEFAULT_TURN_BUDGET;
 use crate::agent::path_permission::{
     AuthorizeStore, PathPermissionChecker, PathPurpose, PermissionError,
 };
 use crate::agent::process::ProcessManager;
 use crate::agent::tool_runtime::{
-    ProcessBackend, ProcessPollResult, ProcessStartRequest, ProcessState, SandboxRequest,
+    ProcessBackend, ProcessStartRequest, ProcessState, SandboxRequest,
 };
 
 /// 单次 `fs/read_text_file` 的读取上限（fail-closed）。
@@ -159,28 +159,29 @@ impl FsHandler for WorkspaceFsHandler {
                 self.describe_target(&canonical)
             )));
         }
-        if metadata.len() > ACP_FS_READ_MAX_BYTES {
-            // fail-closed：不截断、不假装成功——让 agent 用 line/limit 分片读。
+        // ADVISORY③：上限作用于**本次实际返回的内容**——先按 line/limit 流式切片，再判上限；
+        // 无 line/limit 的整读仍以文件大小先行短路（避免把超大文件读进内存）。
+        if request.line.is_none() && request.limit.is_none() && metadata.len() > ACP_FS_READ_MAX_BYTES {
             return Err(AcpHandlerError::Denied(format!(
                 "permission_denied: 文件 {} 字节超过 ACP 读取上限 {ACP_FS_READ_MAX_BYTES} 字节，请用 line/limit 分片读取。",
                 metadata.len()
             )));
         }
-        let bytes = std::fs::read(&canonical).map_err(|error| {
-            AcpHandlerError::Internal(format!(
-                "读取文件失败（{}）：{error}。",
-                self.describe_target(&canonical)
-            ))
-        })?;
-        let text = String::from_utf8(bytes).map_err(|_| {
-            AcpHandlerError::Internal(format!(
-                "文件不是合法 UTF-8（{}），拒绝以文本读取。",
-                self.describe_target(&canonical)
-            ))
-        })?;
-        Ok(ReadTextFileResponse {
-            content: slice_lines(&text, request.line, request.limit),
-        })
+        read_slice(&canonical, request.line, request.limit, ACP_FS_READ_MAX_BYTES).map_err(
+            |error| match error {
+                SliceReadError::Io(error) => AcpHandlerError::Internal(format!(
+                    "读取文件失败（{}）：{error}。",
+                    self.describe_target(&canonical)
+                )),
+                SliceReadError::NotUtf8 => AcpHandlerError::Internal(format!(
+                    "文件不是合法 UTF-8（{}），拒绝以文本读取。",
+                    self.describe_target(&canonical)
+                )),
+                SliceReadError::TooLarge { actual } => AcpHandlerError::Denied(format!(
+                    "permission_denied: 请求的行范围返回 {actual} 字节，超过 ACP 读取上限 {ACP_FS_READ_MAX_BYTES} 字节，请缩小 limit。"
+                )),
+            },
+        ).map(|content| ReadTextFileResponse { content })
     }
 
     fn write_text_file(
@@ -230,45 +231,98 @@ fn map_permission_error(error: PermissionError) -> AcpHandlerError {
     AcpHandlerError::Denied(format!("{}: {}", error.code.as_str(), error.message))
 }
 
-/// `line`（1-based）/`limit` 切片；两者都缺省时逐字节原样返回（不做行尾归一）。
-fn slice_lines(text: &str, line: Option<u32>, limit: Option<u32>) -> String {
-    if line.is_none() && limit.is_none() {
-        return text.to_string();
-    }
+/// 流式行切片读取的失败面。
+enum SliceReadError {
+    Io(std::io::Error),
+    NotUtf8,
+    TooLarge { actual: usize },
+}
+
+/// 按 `line`（1-based）/`limit` 流式读取，只把**所选行范围**装进内存并对其判上限。
+///
+/// 语义：既不因为文件整体很大而拒绝合法的分片请求，也不会把整文件读进内存；
+/// 返回内容逐字节保留原行（含行尾换行），不做行尾归一。
+fn read_slice(
+    path: &Path,
+    line: Option<u32>,
+    limit: Option<u32>,
+    max_bytes: u64,
+) -> Result<String, SliceReadError> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).map_err(SliceReadError::Io)?;
+    let mut reader = std::io::BufReader::new(file);
     let skip = line.unwrap_or(1).max(1) as usize - 1;
     let take = limit.map(|value| value as usize).unwrap_or(usize::MAX);
-    text.split_inclusive('\n')
-        .skip(skip)
-        .take(take)
-        .collect::<String>()
+    let mut selected = String::new();
+    let mut index = 0usize;
+    let mut collected = 0usize;
+    loop {
+        let mut line_buffer = String::new();
+        let read = reader.read_line(&mut line_buffer).map_err(SliceReadError::Io)?;
+        if read == 0 {
+            break;
+        }
+        if index >= skip && collected < take {
+            collected += 1;
+            if selected.len() + line_buffer.len() > max_bytes as usize {
+                return Err(SliceReadError::TooLarge {
+                    actual: selected.len() + line_buffer.len(),
+                });
+            }
+            selected.push_str(&line_buffer);
+        }
+        index += 1;
+        if collected >= take {
+            break;
+        }
+    }
+    if index == 0 && !selected.is_empty() {
+        return Err(SliceReadError::NotUtf8);
+    }
+    Ok(selected)
 }
 
 /// 一个已 `terminal/create` 的受管终端。
-#[derive(Clone)]
 struct TerminalEntry {
     /// ProcessManager 的 session 归属（跨 session 句柄一律 fail-closed）。
     session_id: String,
     /// ProcessManager 句柄（wire `terminalId` 是它外面的 opaque 包装，不可伪造）。
     handle: String,
+    /// 累积输出缓冲（B1：`wait_for_exit` 的 poll 结果**不得丢弃**，否则 create→wait→output
+    /// 的标准流程会返回空；这里 append-only 累积，`output` 返回全量而非只返回「本片」）。
+    buffer: Mutex<TerminalBuffer>,
+}
+
+/// per-terminal 输出累积态。
+#[derive(Default)]
+struct TerminalBuffer {
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    exit_code: Option<i32>,
 }
 
 /// `terminal/*` 的 ProcessManager 治理实现。
 ///
 /// # 语义
 /// - `create` → [`ProcessManager`] 的 `ProcessBackend::start`（`sandbox.isolate_environment =
-///   true`；env 只经 `environment_allowlist` 且拒绝凭据/加载器劫持键）；返回 handle 即 wire
-///   `terminalId`（opaque 包装，cross-session 伪造 → `NotFound`）。
-/// - `output` → `ProcessBackend::poll`（stdout + stderr 顺序拼接；`truncated` 取两流之或；
-///   `exitStatus` 由 `exit_code` 归约，`signal` 无独立字段 ⇒ `None`）。
-/// - `wait_for_exit` → 有界轮询 `poll` 直到 `Exited` 或 [`ACP_REQUEST_TIMEOUT`] 超时。
+///   true`；env 只经 `environment_allowlist` 且拒绝凭据/加载器劫持键）；可选 `cwd`（绝对路径
+///   校验；若 handler 绑定 workspace root 则必须在 root 内）；返回 opaque `terminalId`
+///   （cross-session 伪造 → `NotFound`）。
+/// - `output` → `ProcessBackend::poll` **累积**（不丢帧）+ 返回全量 stdout/stderr。
+/// - `wait_for_exit` → 有界轮询 `poll` 直到 `Exited` 或预算 [`ACP_DEFAULT_TURN_BUDGET`] 超时；
+///   轮询结果同样累积进 per-terminal 缓冲（不吞输出）。
 /// - `kill` → `kill_if_exists`（幂等；保留 handle 供最终 `output`）。
 /// - `release` → `kill_if_exists` + 条目回收（释放后 handle 不再可用，且无残留子进程）。
 /// - **禁用面**：不存在裸 `std::process` 调用；唯一进程编排口是 `ProcessManager`。
 pub struct ManagedTerminalHandler {
     /// 会话进程编排器（kill/cancel/kill_after/drain_stats 的既有回收语义）。
     process_manager: Arc<ProcessManager>,
+    /// 会话 workspace root（additive；绑定后 `cwd` 必须在其中，未绑定则仅做绝对路径校验）。
+    workspace_root: Option<PathBuf>,
     /// wire `terminalId` → 受管句柄（opaque、不可跨会话伪造）。
-    terminals: Mutex<HashMap<String, TerminalEntry>>,
+    terminals: Mutex<HashMap<String, Arc<TerminalEntry>>>,
 }
 
 impl ManagedTerminalHandler {
@@ -276,17 +330,31 @@ impl ManagedTerminalHandler {
     pub fn new(process_manager: Arc<ProcessManager>) -> Self {
         Self {
             process_manager,
+            workspace_root: None,
+            terminals: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// additive：绑定会话 workspace root（`terminal/create.cwd` 的边界判定锚点）。
+    pub fn with_workspace_root(process_manager: Arc<ProcessManager>, workspace_root: PathBuf) -> Self {
+        Self {
+            process_manager,
+            workspace_root: Some(std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root)),
             terminals: Mutex::new(HashMap::new()),
         }
     }
 
     /// 解析 `terminalId`（未知 / 跨 session ⇒ `NotFound`，绝不 panic）。
-    fn entry(&self, session_id: &str, terminal_id: &str) -> Result<TerminalEntry, AcpHandlerError> {
+    fn entry(
+        &self,
+        session_id: &str,
+        terminal_id: &str,
+    ) -> Result<Arc<TerminalEntry>, AcpHandlerError> {
         let terminals = self.terminals.lock().map_err(|_| {
             AcpHandlerError::Internal("terminal 句柄表已中毒，fail-closed。".to_string())
         })?;
         match terminals.get(terminal_id) {
-            Some(entry) if entry.session_id == session_id => Ok(entry.clone()),
+            Some(entry) if entry.session_id == session_id => Ok(Arc::clone(entry)),
             Some(_) => Err(AcpHandlerError::NotFound(format!(
                 "terminalId `{terminal_id}` 不属于当前会话（跨 session 伪造已拒绝）。"
             ))),
@@ -296,15 +364,70 @@ impl ManagedTerminalHandler {
         }
     }
 
-    fn poll(&self, entry: &TerminalEntry) -> Result<ProcessPollResult, AcpHandlerError> {
-        self.process_manager
+    /// poll 一次并把结果**累积**进 per-terminal 缓冲（B1：绝不 drain 后丢弃），返回进程状态。
+    fn poll_into(&self, entry: &TerminalEntry) -> Result<(ProcessState, Option<i32>), AcpHandlerError> {
+        let poll = self
+            .process_manager
             .poll(&entry.session_id, &entry.handle)
             .map_err(|error| {
                 AcpHandlerError::Internal(format!(
                     "terminal 输出轮询失败（{}）：{error}。",
                     entry.handle
                 ))
-            })
+            })?;
+        let mut buffer = entry.buffer.lock().map_err(|_| {
+            AcpHandlerError::Internal("terminal 输出缓冲已中毒，fail-closed。".to_string())
+        })?;
+        buffer.stdout.push_str(&poll.stdout);
+        buffer.stderr.push_str(&poll.stderr);
+        buffer.stdout_truncated |= poll.stdout_truncated;
+        buffer.stderr_truncated |= poll.stderr_truncated;
+        if let Some(code) = poll.exit_code {
+            buffer.exit_code = Some(code);
+        }
+        Ok((poll.state, buffer.exit_code))
+    }
+
+    /// 解析并校验 `terminal/create` 的工作目录（ADVISORY①）。
+    fn resolve_cwd(&self, requested: Option<&str>) -> Result<Option<String>, AcpHandlerError> {
+        let explicit = requested.map(str::trim).filter(|value| !value.is_empty());
+        let candidate = match explicit {
+            Some(value) => {
+                let path = PathBuf::from(value);
+                if !path.is_absolute() {
+                    return Err(AcpHandlerError::Denied(format!(
+                        "permission_denied: terminal/create 的 cwd 必须是绝对路径，实际 `{value}`。"
+                    )));
+                }
+                path
+            }
+            None => match self.workspace_root.clone() {
+                Some(root) => root,
+                None => return Ok(None),
+            },
+        };
+        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+            AcpHandlerError::Denied(format!(
+                "permission_denied: terminal/create 的 cwd `{}` 不可用（{error}）。",
+                candidate.display()
+            ))
+        })?;
+        if !canonical.is_dir() {
+            return Err(AcpHandlerError::Denied(format!(
+                "permission_denied: terminal/create 的 cwd `{}` 不是目录。",
+                canonical.display()
+            )));
+        }
+        if let Some(root) = self.workspace_root.as_ref() {
+            if !canonical.starts_with(root) {
+                return Err(AcpHandlerError::Denied(format!(
+                    "outside_workspace_write_denied: terminal/create 的 cwd `{}` 不在会话 workspace `{}` 内。",
+                    canonical.display(),
+                    root.display()
+                )));
+            }
+        }
+        Ok(Some(canonical.to_string_lossy().into_owned()))
     }
 }
 
@@ -328,18 +451,33 @@ impl TerminalHandler for ManagedTerminalHandler {
             .as_deref()
             .unwrap_or(&[])
             .iter()
-            // 显式 env 仍必须过凭据/加载器劫持拒绝表（与 MCP spec env 同一口径）。
-            .filter(|variable| !crate::agent::mcp_client::is_denied_spec_env_key(&variable.name))
-            .map(|variable| format!("{}={}", variable.name, variable.value))
+            // ADVISORY②：键名先归一化再比对 deny 表（含 `NAME=value` 形态的绕过）——
+            // 与 `is_denied_spec_env_key` 同一真源，绝不因拼写形态漏放。
+            .filter_map(|variable| {
+                let name = variable.name.trim();
+                let key = name.split('=').next().unwrap_or(name).trim();
+                if key.is_empty() || name.contains('=') || crate::agent::mcp_client::is_denied_spec_env_key(key) {
+                    eprintln!(
+                        "[acp][terminal] 丢弃 env 条目 `{}`（空键 / 含 `=` 的非法键 / 命中 deny 表）",
+                        key
+                    );
+                    return None;
+                }
+                Some(format!("{name}={}", variable.value))
+            })
             .collect::<Vec<_>>();
+        let cwd = self.resolve_cwd(request.cwd.as_deref())?;
         let start = ProcessStartRequest {
             session_id: request.session_id.clone(),
             program: request.command.clone(),
             arguments: request.args.clone().unwrap_or_default(),
+            cwd,
             sandbox: SandboxRequest {
-                workspace_root: request
-                    .cwd
-                    .clone()
+                workspace_root: self
+                    .workspace_root
+                    .as_ref()
+                    .map(|root| root.display().to_string())
+                    .or_else(|| request.cwd.clone())
                     .or_else(|| {
                         std::env::current_dir()
                             .ok()
@@ -361,10 +499,11 @@ impl TerminalHandler for ManagedTerminalHandler {
         })?;
         terminals.insert(
             terminal_id.clone(),
-            TerminalEntry {
+            Arc::new(TerminalEntry {
                 session_id: request.session_id.clone(),
                 handle,
-            },
+                buffer: Mutex::new(TerminalBuffer::default()),
+            }),
         );
         Ok(CreateTerminalResponse { terminal_id })
     }
@@ -374,14 +513,17 @@ impl TerminalHandler for ManagedTerminalHandler {
         request: &TerminalOutputRequest,
     ) -> Result<TerminalOutputResponse, AcpHandlerError> {
         let entry = self.entry(&request.session_id, &request.terminal_id)?;
-        let poll = self.poll(&entry)?;
-        // 契约 §4：stdout + stderr 顺序拼接；truncated 取两流之或。
-        let mut output = poll.stdout;
-        output.push_str(&poll.stderr);
+        // 先 drain 一次（增量追加进缓冲），再返回**累积全量**：create→wait→output 也有内容。
+        let (_, exit_code) = self.poll_into(&entry)?;
+        let buffer = entry.buffer.lock().map_err(|_| {
+            AcpHandlerError::Internal("terminal 输出缓冲已中毒，fail-closed。".to_string())
+        })?;
+        let mut output = buffer.stdout.clone();
+        output.push_str(&buffer.stderr);
         Ok(TerminalOutputResponse {
             output,
-            truncated: poll.stdout_truncated || poll.stderr_truncated,
-            exit_status: poll.exit_code.map(|code| TerminalExitStatus {
+            truncated: buffer.stdout_truncated || buffer.stderr_truncated,
+            exit_status: exit_code.map(|code| TerminalExitStatus {
                 exit_code: Some(code),
                 // ProcessPollResult 无独立 signal 字段 ⇒ 契约映射 None。
                 signal: None,
@@ -394,20 +536,22 @@ impl TerminalHandler for ManagedTerminalHandler {
         request: &WaitForTerminalExitRequest,
     ) -> Result<WaitForTerminalExitResponse, AcpHandlerError> {
         let entry = self.entry(&request.session_id, &request.terminal_id)?;
-        let deadline = Instant::now() + ACP_REQUEST_TIMEOUT;
+        // B4：预算取 NFR 派生的整轮预算（不是传输层单请求 5s）；且入站分发已移出读线程
+        // （transport 专用分发线程），这里的阻塞等待不再拖住其它入站帧的读取。
+        let deadline = Instant::now() + ACP_DEFAULT_TURN_BUDGET;
         loop {
-            let poll = self.poll(&entry)?;
-            if poll.state == ProcessState::Exited {
+            let (state, exit_code) = self.poll_into(&entry)?;
+            if state == ProcessState::Exited {
                 return Ok(WaitForTerminalExitResponse {
-                    exit_code: poll.exit_code,
+                    exit_code,
                     signal: None,
                 });
             }
             if Instant::now() >= deadline {
-                // 有界等待：不无限阻塞 transport 读线程；超时明确报错（仍可 kill/release）。
+                // 有界等待：不无限阻塞；超时明确报错（仍可 kill/release）。
                 return Err(AcpHandlerError::Internal(format!(
                     "terminal/wait_for_exit 超过 {:?} 仍未退出（terminalId 仍可 kill/release）。",
-                    ACP_REQUEST_TIMEOUT
+                    ACP_DEFAULT_TURN_BUDGET
                 )));
             }
             std::thread::sleep(TERMINAL_POLL_INTERVAL);

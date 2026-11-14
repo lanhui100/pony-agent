@@ -275,23 +275,58 @@ impl AcpTransport {
         let malformed_streak = Arc::new(AtomicU32::new(0));
         let fatal = Arc::new(Mutex::new(None));
         let (sender, receiver) = mpsc::channel::<AcpInbound>();
+        // 入站**请求**专用分发线程（B4）：handler 应答可能长时间阻塞（例如
+        // `terminal/wait_for_exit` 的整轮预算可达 120s），绝不能内联在读线程上——否则会拖住
+        // 后续所有入站帧的读取与响应匹配（长命令会连带把其它请求饿死）。
+        let (request_sender, request_receiver) = mpsc::channel::<AcpInboundRequest>();
+        let dispatcher = std::thread::Builder::new()
+            .name("acp-inbound".to_string())
+            .spawn({
+                let stdin = Arc::clone(&stdin);
+                let handler = Arc::clone(&handler);
+                let stderr_tail = Arc::clone(&stderr_tail);
+                let fatal = Arc::clone(&fatal);
+                move || {
+                    for request in request_receiver {
+                        let outcome = respond_to_inbound_request(
+                            &stdin,
+                            &handler,
+                            request.id.clone(),
+                            &request.method,
+                            request.params.clone(),
+                        );
+                        if let Err(error) = outcome {
+                            // 应答写不出去 = agent 已不可写：记录真源错误码后停止分发（不重试）。
+                            push_bounded(
+                                &stderr_tail,
+                                format!("[acp] 入站请求应答写入失败：{error}"),
+                            );
+                            record_fatal(&fatal, error);
+                            break;
+                        }
+                    }
+                }
+            });
+        if let Err(error) = dispatcher {
+            reap_child(child);
+            return Err(AcpTransportError::Spawn(format!(
+                "启动入站请求分发线程失败：{error}。"
+            )));
+        }
 
-        // stdout 读线程：按行解析 + 三路分流 + 应答入站请求。
+        // stdout 读线程：按行解析 + 三路分流（请求转交分发线程，通知内联，响应上送）。
         let reader = std::thread::Builder::new()
             .name("acp-stdout".to_string())
             .spawn({
-                let stdin = Arc::clone(&stdin);
-                let stderr_tail = Arc::clone(&stderr_tail);
-                let handler = Arc::clone(&handler);
                 let notification_handler = Arc::clone(&notification_handler);
                 let malformed_streak = Arc::clone(&malformed_streak);
+                let stderr_tail = Arc::clone(&stderr_tail);
                 let fatal = Arc::clone(&fatal);
                 move || {
                     read_loop(
                         stdout,
                         sender,
-                        stdin,
-                        handler,
+                        request_sender,
                         notification_handler,
                         stderr_tail,
                         malformed_streak,
@@ -388,7 +423,7 @@ impl AcpTransport {
 
     /// 发送请求并按 `deadline` 等待同 id 响应，返回 `result`。
     ///
-    /// 同一 transport 上的请求串行化；迟到响应有界暂存；入站请求由 reader 线程先分流再匹配。
+    /// 同一 transport 上的请求串行化；迟到响应有界暂存；入站请求由专用分发线程应答（读线程不再阻塞）。
     pub fn request(
         &self,
         method: &str,
@@ -583,8 +618,7 @@ fn write_line(
 fn read_loop(
     stdout: ChildStdout,
     sender: Sender<AcpInbound>,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
-    handler: Arc<Mutex<Option<Arc<dyn AcpInboundRequestHandler>>>>,
+    request_sender: Sender<AcpInboundRequest>,
     notification_handler: Arc<Mutex<Option<Arc<dyn AcpNotificationHandler>>>>,
     stderr_tail: Arc<Mutex<Vec<String>>>,
     malformed_streak: Arc<AtomicU32>,
@@ -633,7 +667,17 @@ fn read_loop(
             let params = value.get("params").cloned().unwrap_or(Value::Null);
             let id = value.get("id").filter(|id| !id.is_null()).cloned();
             let outcome = match id {
-                Some(id) => respond_to_inbound_request(&stdin, &handler, id, method, params),
+                Some(id) => request_sender
+                    .send(AcpInboundRequest {
+                        id,
+                        method: method.to_string(),
+                        params,
+                    })
+                    .map_err(|_| {
+                        AcpTransportError::Unavailable(
+                            "入站请求分发线程已退出（应答侧不可用）。".to_string(),
+                        )
+                    }),
                 None => {
                     dispatch_notification(&notification_handler, &stderr_tail, method, params);
                     Ok(())

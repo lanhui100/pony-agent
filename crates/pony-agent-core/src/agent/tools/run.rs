@@ -197,7 +197,7 @@ impl ToolRouter {
         let handle = match self.process_manager.start(&ProcessStartRequest {
             session_id: session_id.clone(),
             program,
-            arguments,
+            arguments, cwd: None, // 既有行为不变（workspace root 由 shell 命令内的 `cd` 承载）
             sandbox: sandbox_request,
         }) {
             Ok(value) => value,

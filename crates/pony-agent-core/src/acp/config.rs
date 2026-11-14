@@ -397,14 +397,26 @@ fn inherit_pony_mcp_servers(
 ) -> Result<Vec<McpServer>, AcpConfigError> {
     let load = load_mcp_config(workspace_root);
 
-    // 诊断不得吞：逐条记 code/server/message（绝不回显 env 值），文件级致命项 fail-closed。
+    // 诊断不得吞：逐条记 code/server/message（绝不回显 env 值）。
+    //
+    // B2：只有「整份配置不可解析」类诊断才致命（`invalid_json` / `invalid_root`）。
+    // 其余文件级诊断——典型如 `workspace_mcp_config_untrusted`（工作区 `.mcp.json` 随仓库
+    // 分发、默认不可信 ⇒ loader 按既有 trust 语义**忽略**它并产出诊断）——属于「忽略 + 记账」，
+    // 不得 fail-closed：否则仓库里只要存在 `.mcp.json`，所有 acp_delegate 都会因
+    // `acp_config_invalid` 全废。
     let mut fatal: Option<&crate::agent::mcp_config::McpConfigDiagnostic> = None;
     for diagnostic in &load.diagnostics {
         eprintln!(
             "[acp][config] ACP agent `{}` inherit MCP 诊断：code={} server={:?} message={}",
             spec.id, diagnostic.code, diagnostic.server, diagnostic.message
         );
-        if diagnostic.server.is_none() && fatal.is_none() {
+        // 文件级诊断中，仅「不可解析 / 不受支持 schema」是致命的；`workspace_mcp_config_untrusted`
+        // 是既有 trust 语义的「忽略并记账」，不得升级为错误。
+        let fatal_code = matches!(
+            diagnostic.code.as_str(),
+            "invalid_json" | "invalid_root" | "unsupported_schema_version"
+        );
+        if diagnostic.server.is_none() && fatal_code && fatal.is_none() {
             fatal = Some(diagnostic);
         }
     }

@@ -162,9 +162,10 @@ impl ToolRouter {
             });
         let terminal_handler: Option<Arc<dyn crate::acp::client::TerminalHandler>> =
             spec.capabilities_hint.terminal.then(|| {
-                Arc::new(crate::acp::handlers::ManagedTerminalHandler::new(Arc::new(
-                    self.process_manager.clone(),
-                ))) as Arc<dyn crate::acp::client::TerminalHandler>
+                Arc::new(crate::acp::handlers::ManagedTerminalHandler::with_workspace_root(
+                    Arc::new(self.process_manager.clone()),
+                    cwd.clone(),
+                )) as Arc<dyn crate::acp::client::TerminalHandler>
             });
         let fs_declared = fs_handler.is_some();
         let terminal_declared = terminal_handler.is_some();

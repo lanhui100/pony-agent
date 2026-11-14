@@ -130,6 +130,9 @@ struct HandlerSlots {
     permission: Option<Arc<dyn PermissionHandler>>,
     fs: Option<Arc<dyn FsHandler>>,
     terminal: Option<Arc<dyn TerminalHandler>>,
+    /// B175/B3：本次会话在 `initialize` 里**已声明**的能力。装配与反向请求分发都以它为闸门：
+    /// 未声明的能力即使被 `install_*` 注入也一律 fail-closed（不追认、不执行）。
+    declared: AcpClientCapabilities,
 }
 
 /// `connect` 装入 transport 的入站请求分发器：按 method 路由到 handler 槽位。
@@ -149,11 +152,19 @@ impl DelegatingRequestHandler {
             .slots
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (
-            slots.permission.clone(),
-            slots.fs.clone(),
-            slots.terminal.clone(),
-        )
+        // B3 fail-closed 闸门：未在 initialize 声明的能力，即使槽位被注入 handler 也不服务
+        // 反向请求（否则「caps=false 却真实执行 fs/terminal」与声明面自相矛盾）。
+        let fs = if slots.declared.fs {
+            slots.fs.clone()
+        } else {
+            None
+        };
+        let terminal = if slots.declared.terminal {
+            slots.terminal.clone()
+        } else {
+            None
+        };
+        (slots.permission.clone(), fs, terminal)
     }
 }
 
@@ -362,7 +373,11 @@ impl AcpAgentClient {
 
         // 反向请求转发壳必须在首次 `initialize` 应答前就位：agent 可能在 initialize 期间就发
         // `session/request_permission`（fixture 的 `permission` 模式即如此）。
-        let handlers = Arc::new(Mutex::new(HandlerSlots::default()));
+        // B3：同时记录本次会话**将声明**的能力，作为后续装配/分发闸门。
+        let handlers = Arc::new(Mutex::new(HandlerSlots {
+            declared: capabilities,
+            ..HandlerSlots::default()
+        }));
         transport.set_handler(Arc::new(DelegatingRequestHandler {
             slots: Arc::clone(&handlers),
         }));
@@ -536,6 +551,13 @@ impl AcpAgentClient {
             .handlers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !slots.declared.fs {
+            // B3：握手已固化「不声明 fs」⇒ 装配被拒绝（不追认新能力；绝不执行反向请求）。
+            eprintln!(
+                "[acp][client] 拒绝装配 FsHandler：本会话 initialize 未声明 clientCapabilities.fs（fail-closed，不追认）。"
+            );
+            return;
+        }
         slots.fs = Some(handler);
     }
 
@@ -545,6 +567,12 @@ impl AcpAgentClient {
             .handlers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !slots.declared.terminal {
+            eprintln!(
+                "[acp][client] 拒绝装配 TerminalHandler：本会话 initialize 未声明 clientCapabilities.terminal（fail-closed，不追认）。"
+            );
+            return;
+        }
         slots.terminal = Some(handler);
     }
 

@@ -366,6 +366,12 @@ pub struct ProcessStartRequest {
     pub program: String,
     #[serde(default)]
     pub arguments: Vec<String>,
+    /// 子进程工作目录（additive，B175 ADVISORY①）：`None` = 继承宿主当前目录（既有行为不变）。
+    ///
+    /// 消费方必须在传入前完成校验（绝对路径 / 存在 / 是否在会话 workspace 内）；本层只负责
+    /// 把它交给 `Command::current_dir`（不做边界判定，保持端口职责单一）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     pub sandbox: SandboxRequest,
 }
 
