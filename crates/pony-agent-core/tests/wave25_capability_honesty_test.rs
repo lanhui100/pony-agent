@@ -73,8 +73,9 @@ const TEAM_TOOLS: [&str; 9] = [
 ///   interrupt_agent/drain_inbox/team_task_create/team_task_update/team_task_list），
 ///   插在 `ViewImage` 之后、`TodoWrite` 之前（契约 C1.2）。总计 39 项；
 /// - v1.2（Lead 裁决）：`workflow` 因 handler 是桩（`orchestration.rs:286-297`）退回 `Internal`，
-///   模型面 39 → 38 项。总计 38 项。
-const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 38] = [
+///   模型面 39 → 38 项；
+/// - B150/P1：真实实现的 `acp_delegate`（外部 ACP agent 委派）尾插模型面，38 → 39 项。总计 39 项。
+const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 39] = [
     "Run",
     "Ask",
     "Read",
@@ -113,6 +114,8 @@ const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 38] = [
     "JobKill",
     "JobList",
     "skill_load",
+    // B150/P1：外部 ACP agent 委派（模型面 38 → 39，尾插）。
+    "acp_delegate",
 ];
 
 fn make_call(name: &str, arguments: Value) -> ToolCall {
@@ -187,7 +190,7 @@ fn t1_team_tools_are_present_in_model_visible_surface() {
     let missing: Vec<&&str> = expected.difference(&actual).collect();
     assert!(
         leaked.is_empty() && missing.is_empty(),
-        "T1 失败：模型可见工具面与冻结的 38 名清单（含 wave-61 v1.2 C1.2 的 9 项团队工具）不一致。\n\
+        "T1 失败：模型可见工具面与冻结的 39 名清单（含 wave-61 v1.2 C1.2 的 9 项团队工具 + B150 acp_delegate）不一致。\n\
          期望（{} 项）：{expected:?}\n\
          实际（{} 项）：{actual:?}\n\
          多出的（未登记工具回流）：{leaked:?}\n\

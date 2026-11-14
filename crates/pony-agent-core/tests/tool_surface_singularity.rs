@@ -6,8 +6,8 @@
 //!
 //! | 用例 | 冻结的契约（ADR 0065） | 落地前期望 |
 //! |---|---|---|
-//! | `t1_builtin_surface_identity_is_frozen` | 后果「45 个内建工具名称/顺序/schema 逐字节不变」 | 绿（不变量守卫） |
-//! | `t1_all_45_builtin_primitives_reach_a_handler` | 决策 2「分派表穷尽覆盖 45 primitive」 | 绿（不变量守卫） |
+//! | `t1_builtin_surface_identity_is_frozen` | 后果「46 个内建工具名称/顺序/schema 逐字节不变」 | 绿（不变量守卫） |
+//! | `t1_all_46_builtin_primitives_reach_a_handler` | 决策 2「分派表穷尽覆盖 46 primitive」 | 绿（不变量守卫） |
 //! | `t1_unknown_tool_name_is_unsupported` | 决策 9「`unsupported_tool` 仅表示名字确实未知」 | 绿 |
 //! | `t1_descriptor_without_handler_fails_closed` | 决策 2「handler 表是唯一分派入口」 | 绿 |
 //! | `t1_read_only_denies_external_write_tool_by_declared_permission` | 决策 5「读权限事实，名称不参与判定」 | **红（按名嗅探漏洞回归）** |
@@ -40,7 +40,7 @@
 //! - 负例逐例独立 `#[test]`，每例单独给出可辨识的失败原因，不做整批笼统断言；
 //! - 只断言**行为**（派发结果 / 错误码 / 可见性），不断言实现细节：不引用 `PRIMITIVE_DISPATCH_TABLE`
 //!   的顺序（Lead 裁决：表顺序是实现自由度），也不引用 `tools.rs` 的任何私有符号；
-//! - 45 工具的 golden 是**本文件内的独立字面量**（不是从被测代码推导出来的）。schema 用 FNV-1a
+//! - 46 工具的 golden 是**本文件内的独立字面量**（不是从被测代码推导出来的）。schema 用 FNV-1a
 //!   对 `serde_json::to_string(input_schema)` 取值，避免 30KB schema 文本淹没断言。
 
 use pony_agent_core::agent::budget::DispatchBudgetConfig;
@@ -314,7 +314,7 @@ impl ToolProvider for RecordingProvider {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// 1. 45 内建工具面冻结（名称 / 顺序 / schema / kind / exposure）
+// 1. 46 内建工具面冻结（名称 / 顺序 / schema / kind / exposure）
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// `(descriptor_id, model_name, kind, exposure, FNV-1a(serde_json(input_schema)))`，
@@ -365,6 +365,9 @@ const BUILTIN_GOLDEN: &[(&str, &str, &str, &str, u64)] = &[
     ("builtin:job_kill", "JobKill", "execute", "model_visible", 0x48dc1dc492ee2adc),
     ("builtin:job_list", "JobList", "execute", "model_visible", 0x439ad3b9da88d665),
     ("builtin:skill_load", "skill_load", "read", "model_visible", 0xe6650761f1de664f),
+    // B150/P1：acp_delegate 尾插在内建面（复合工具，模型面 38 → 39）；schema 由
+    // tools/schema.rs:1130 的 definition 决定，逐字节冻结。
+    ("builtin:acp_delegate", "acp_delegate", "composite", "model_visible", 0x197dcf7c328a2f35),
     ("builtin:time_now", "Run", "read", "internal", 0x439ad3b9da88d665),
     ("builtin:echo_input", "Ask", "interactive", "internal", 0x71e16d17e1847e86),
     ("builtin:workspace_read_file", "Read", "read", "internal", 0xbdd5da7930910554),
@@ -397,8 +400,8 @@ fn t1_builtin_surface_identity_is_frozen() {
     // Assert 1 — 数量冻结
     assert_eq!(
         registry.descriptors.len(),
-        45,
-        "内建 descriptor 数量必须保持 45，实际 {}",
+        46,
+        "内建 descriptor 数量必须保持 46，实际 {}",
         registry.descriptors.len()
     );
     assert_eq!(
@@ -428,7 +431,7 @@ fn t1_builtin_surface_identity_is_frozen() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// 2. 45 primitive 的分派覆盖（行为遍历，不断言表顺序）
+// 2. 46 primitive 的分派覆盖（行为遍历，不断言表顺序）
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /// 从 descriptor 的 input schema 生成最小合法入参（只填 `required` 里的键）。
@@ -463,7 +466,7 @@ fn minimal_arguments(schema: &Value) -> Value {
 }
 
 #[test]
-fn t1_all_45_builtin_primitives_reach_a_handler() {
+fn t1_all_46_builtin_primitives_reach_a_handler() {
     // Arrange — 生产装配（唯一一处注册全部内建 handler 的路径）
     let root = TempRoot::new("coverage");
     let executor = build_governed_executor(Some(root.path.clone()), None);
@@ -471,7 +474,7 @@ fn t1_all_45_builtin_primitives_reach_a_handler() {
     let descriptors = dispatcher.registry().descriptors.clone();
     let context = DispatchContext::default();
 
-    // Act + Assert 1 — 45 个 primitive 逐个遍历，每个都必须落到 handler
+    // Act + Assert 1 — 46 个 primitive 逐个遍历，每个都必须落到 handler
     let mut unreachable: Vec<String> = Vec::new();
     for descriptor in &descriptors {
         let descriptor_id = descriptor.identity.descriptor_id.clone();
@@ -499,8 +502,8 @@ fn t1_all_45_builtin_primitives_reach_a_handler() {
     );
     assert_eq!(
         descriptors.len(),
-        45,
-        "遍历基数必须恰好是 45 个内建 primitive，实际 {}",
+        46,
+        "遍历基数必须恰好是 46 个内建 primitive，实际 {}",
         descriptors.len()
     );
 }
@@ -1580,7 +1583,7 @@ fn t1_external_model_names_resolve_through_the_registry_alias_index() {
 /// 该入口是这段不变量唯一的可观测面（其余路径需要真实 API key 才能触达）。
 #[test]
 fn t1_appending_one_external_tool_keeps_the_builtin_provider_view_byte_identical() {
-    // Arrange — 内建工具面数组（45 条定义，其中 38 条进入模型可见投影）
+    // Arrange — 内建工具面数组（46 条定义，其中 39 条进入模型可见投影）
     let baseline_tools = builtin_tools();
     let mut with_external = baseline_tools.clone();
     let external_name: &'static str = Box::leak("mcp__x__y".to_string().into_boxed_str());
@@ -1594,17 +1597,17 @@ fn t1_appending_one_external_tool_keeps_the_builtin_provider_view_byte_identical
     let baseline_views = surface_contract_views(&baseline_tools);
     let observed_views = surface_contract_views(&with_external);
 
-    // Assert 1 — 内建模型可见面必须是 38 项（数量不因外部追加而漂移）
+    // Assert 1 — 内建模型可见面必须是 39 项（数量不因外部追加而漂移）
     assert_eq!(
         baseline_views.len(),
-        38,
-        "内建模型可见工具面必须恰好 38 项，实际 {}",
+        39,
+        "内建模型可见工具面必须恰好 39 项，实际 {}",
         baseline_views.len()
     );
     assert_eq!(
         observed_views.len(),
-        39,
-        "追加 1 个外部工具后必须恰好 39 项（38 内建 + 1 外部），实际 {}（疑似落入 legacy fallback）",
+        40,
+        "追加 1 个外部工具后必须恰好 40 项（39 内建 + 1 外部），实际 {}（疑似落入 legacy fallback）",
         observed_views.len()
     );
 

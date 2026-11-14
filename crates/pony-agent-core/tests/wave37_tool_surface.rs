@@ -95,7 +95,7 @@ fn parse_code(result: &pony_agent_core::agent::tools::ToolResult) -> String {
 }
 
 // ============================================================
-// C1 工具面：模型可见面 39 项精确清单（Wave-61 迁移：29 + 10 项团队工具）
+// C1 工具面：模型可见面 39 项精确清单（Wave-61 迁移：29 + 10 项团队工具；B150 尾插 acp_delegate）
 // ============================================================
 
 #[test]
@@ -105,8 +105,8 @@ fn t1_model_visible_surface_is_exact_38_tool_list() {
 
     assert_eq!(
         names.len(),
-        38,
-        "W37-C1 × W42/PA-149 × W61-C1(v1.2) 模型可见工具面必须为 38 项（29 + 9 项团队工具；workflow 退回 Internal）"
+        39,
+        "W37-C1 × W42/PA-149 × W61-C1(v1.2) × B150 模型可见工具面必须为 39 项（30 + 9 项团队工具；workflow 退回 Internal）"
     );
 
     // 契约 v1.2 反向守卫：`workflow` 是桩 handler（orchestration.rs:286-297），不得进模型面。
@@ -159,8 +159,10 @@ fn t1_model_visible_surface_is_exact_38_tool_list() {
         // W42/PA-149：技能正文按需加载，由 builtin_tools 默认追加序排在 JobList 之后
         //（与 `builtin_turn_tool_contract_views()` 实测输出一致，非猜测位置）。
         "skill_load",
+        // B150/P1：外部 ACP agent 委派（尾插，KV-cache 前缀不变）。
+        "acp_delegate",
     ];
-    assert_eq!(names, expected, "W37-C1 × W42 × W61(v1.2) 38 项精确清单（含顺序）");
+    assert_eq!(names, expected, "W37-C1 × W42 × W61(v1.2) × B150 39 项精确清单（含顺序）");
 
     // C1.1 表：kind / exposure / priority / permission facts
     // （ToolKind::as_str 为 snake_case：read/search/execute）

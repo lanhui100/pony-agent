@@ -20,6 +20,9 @@
 #   permission_prompt <file> <sessionId>
 #                                  prompt 期间发 session/request_permission，把 client 的应答原始行
 #                                  追加到 <file>，随后回 end_turn（P1-4 fail-closed）
+#   slow_prompt <delaySeconds> <sessionId>
+#                                  initialize/session/new 即时，session/prompt 延迟指定秒数后回 end_turn
+#                                  （P1-9 整轮预算用例：延迟 > ACP_REQUEST_TIMEOUT）
 #   cancel_hold <markerFile> <sessionId>
 #                                  prompt 期间写 marker 文件并挂起，收到 session/cancel 通知后
 #                                  才回 {"stopReason":"cancelled"}（P1-5 取消链路）
@@ -146,7 +149,7 @@ while IFS= read -r line; do
                     ;;
             esac
             ;;
-        flow|updates|permission_prompt|cancel_hold)
+        flow|updates|permission_prompt|cancel_hold|slow_prompt)
             m=$(method_of "$line")
             id=$(id_of "$line")
             session_id="${arg2:-acp-sess-1}"
@@ -172,6 +175,10 @@ while IFS= read -r line; do
                             fi
                             [ -n "$id" ] && respond_stop "$id" end_turn
                             ;;
+                        slow_prompt)
+                            sleep "$arg"
+                            [ -n "$id" ] && respond_stop "$id" end_turn
+                            ;;
                         cancel_hold)
                             printf '%s\n' "$id" >> "$arg"
                             prompt_id="$id"
@@ -179,6 +186,8 @@ while IFS= read -r line; do
                                 [ -z "$next" ] && continue
                                 nm=$(method_of "$next")
                                 if [ "$nm" = "session/cancel" ]; then
+                                    # 证据面：把收到的 session/cancel 原始行另存为 "<marker>.cancel"
+                                    printf '%s\n' "$next" >> "$arg.cancel"
                                     [ -n "$prompt_id" ] && respond_stop "$prompt_id" cancelled
                                     break
                                 fi

@@ -917,8 +917,8 @@ fn t2_all_bad_config_keeps_the_builtin_tool_surface() {
     let after_views = builtin_turn_tool_contract_views();
     assert_eq!(
         after_views.len(),
-        38,
-        "配置全坏后内建模型可见工具面必须仍是 38 项，实际 {}",
+        39,
+        "配置全坏后内建模型可见工具面必须仍是 39 项（含 B150 acp_delegate），实际 {}",
         after_views.len()
     );
     assert_eq!(
