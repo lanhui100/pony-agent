@@ -18,6 +18,14 @@
 # (3) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立），
 #     tracing 收口点仍是 agent/otel/mod.rs，issues 边界不变。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
+# ACP 外部 Agent 接入（ADR 2026-11-14-acp-client-external-agent-integration，backlog:B149~B151）归属说明：
+# (1) 新增**出网/跨进程出口**：Pony 以子进程 stdio 承载 newline-delimited JSON-RPC 与外部 agent
+#     （opencode / agy）通信，属「外部网络/进程 IO」类；但无 HTTP 监听地址、无 exporter 变更。
+# (2) tracing 落点仍是 `agent/otel/mod.rs`（`acp.session` / `acp.request` span 走同一构造点，
+#     不新增第二份 OTel 初始化）；issues 落点仍是 `agent/ponysentry/client.rs`；子进程 stderr 与
+#     非法 JSON 行走既有本地取证面（stderr 结构化行 + 有界环形缓冲），不上报。
+# (3) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
 service: pony-agent
 kind: desktop
 reviewed_at: "2026-11-09"

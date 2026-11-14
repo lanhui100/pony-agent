@@ -1,31 +1,49 @@
 {
-  "wave": "interrupted-turn-resume",
+  "wave": "acp-client-p0-p2",
   "status": "in_progress",
-  "task_tier": "B",
-  "tier_basis": "跨文件多模块（agent/runtime + session + context + projection + provider + bin/tui），命中 blast 关键字（thread/lock/sqlite），接口数/文件数超 A 级阈值",
-  "baseline_commit": "a7393954",
-  "worktree": "/home/dm/pony-agent-worktrees/interrupted-turn-resume",
-  "branch": "fix/interrupted-turn-resume",
+  "task_tier": "C",
+  "tier_basis": "跨系统协议面（ACP v1 线协议 + stdio 双向 JSON-RPC）+ 安全敏感（request_permission/fs/terminal 治理边界）+ 命中 blast 关键字（spawn/thread/lock/fs/Command::new）+ 跨包（pony-agent-core / src-tauri / 前端类型 / CLI）；无裁量降级权",
+  "baseline_commit": "f4146970",
+  "branch": "main",
   "regression_baseline": {
-    "cmd": "cargo test -p pony-agent-core --lib",
-    "result": "1518 passed; 0 failed; 795.84s",
+    "cmd": "npm run cargo:check:shared && cargo test -p pony-agent-core --lib",
+    "result": "cargo check exit 0; lib 1550 passed / 0 failed, 212.47s",
     "exit_code": 0,
-    "log": ".dev-team/regression/baseline-lib.log"
+    "log": ".dev-team/regression/baseline-acp-p0.log"
   },
+  "observability_dynamic": "触及外部进程 IO（spawn agent + stdio）⇒ audit-diff.sh + check-declaration.sh 必须跑；docs/observability.yaml 已补归属段，提交带 [decl-change-approved]",
   "tasks": [
-    { "id": "task-1", "role": "protocol", "owner": "protocol-agent", "deliverable": "契约矩阵原地复核 + O1-O3 闭合 + 空桩 + NFR", "write_scopes": [".dev-team", "crates/pony-agent-core/src/agent/session/interrupted_turn.rs"] },
-    { "id": "task-2", "role": "test", "owner": "test-agent", "blocked_by": ["task-1"], "deliverable": "C1-C8 红相 + L2-AT", "write_scopes": ["crates/pony-agent-core/tests"] },
-    { "id": "task-3", "role": "executor", "owner": "executor", "blocked_by": ["task-2"], "deliverable": "实现至全绿 + green receipt", "write_scopes": ["crates/pony-agent-core/src/agent", "crates/pony-agent-core/src/bin/tui.rs", "crates/pony-agent-core/src/bin/tui/errors.rs", "docs/observability.yaml"] }
+    { "id": "task-1", "backlog": "B149", "role": "protocol", "owner": "protocol-agent", "deliverable": "acp 空桩/类型/接口 + NFR ACP 段 + 契约矩阵", "write_scopes": ["crates/pony-agent-core/src/acp", "crates/pony-agent-core/src/lib.rs", "crates/pony-agent-sdk", ".dev-team"] },
+    { "id": "task-2", "backlog": "B149", "role": "test", "owner": "test-agent", "blocked_by": ["task-1"], "deliverable": "P0 蓝军 7 项 + L2-AT 3 类红相", "write_scopes": ["crates/pony-agent-core/tests", ".dev-team"] },
+    { "id": "task-3", "backlog": "B149", "role": "executor", "owner": "executor", "blocked_by": ["task-2"], "deliverable": "transport.rs + config.rs 实现至全绿 + green receipt", "write_scopes": ["crates/pony-agent-core/src/acp"] },
+    { "id": "task-4", "backlog": "B150", "role": "test", "owner": "test-agent", "blocked_by": ["task-3"], "deliverable": "acp_client_contract 8 项红相", "write_scopes": ["crates/pony-agent-core/tests", ".dev-team"] },
+    { "id": "task-5", "backlog": "B150", "role": "executor", "owner": "executor", "blocked_by": ["task-4"], "deliverable": "client.rs/session.rs + acp_delegate 工具", "write_scopes": ["crates/pony-agent-core/src/acp", "crates/pony-agent-core/src/agent/tools"] },
+    { "id": "task-6", "backlog": "B151", "role": "test", "owner": "test-agent", "blocked_by": ["task-5"], "deliverable": "宿主形态红相（CLI/Tauri）", "write_scopes": ["crates/pony-agent-core/tests", ".dev-team"] },
+    { "id": "task-7", "backlog": "B151", "role": "executor", "owner": "executor", "blocked_by": ["task-6"], "deliverable": "ponycli acp 子命令 + Tauri 命令", "write_scopes": ["crates/pony-agent-core/src/bin/cli.rs", "crates/pony-agent-core/src/acp", "src-tauri/src/lib.rs", "src/types"] }
   ],
   "artifacts": {
-    "contract_matrix": ".dev-team/contract-matrix-interrupted-turn-resume.md",
-    "adr": ".agents/notes/implemented/bug-fix/2026-11-12-interrupted-turn-content-preservation.md",
-    "backlog": "B113"
+    "plan_truth": "docs/architecture/acp-client-integration.md",
+    "contract_matrix": ".dev-team/contract-matrix-acp-p0.md",
+    "adr": ".agents/notes/proposed/architecture/2026-11-14-acp-client-external-agent-integration.md",
+    "backlog": "B149 / B150 / B151",
+    "test_design": ".dev-team/acp-p0-test-design.md"
   },
   "decisions": [
-    "C1 断言面冻结在请求组装纯函数层（工具名+结果哨兵必须出现；native 族 tool_call/tool 成对，非 native 族可见步骤文本）",
-    "保留 interrupted_turn_checkpoint_text 既有逐字格式，检查点降级为附加尾行（1518 基线依赖）",
-    "DSML 折叠：持久化侧整体丢弃协议块，展示侧沿用折叠；旧脏行只读不回写"
+    "方案 B（委派工具 + 子代理引擎）先行，协议层按 P2 宿主需求设计；不改 ProviderProtocol/ProviderClient",
+    "自研同步 stdio transport（与 plugin_host/transport.rs 同构），不引入 agent-client-protocol crate",
+    "删除 acp/server.rs（协议方向错误）与 crates/pony-agent-sdk（无 Cargo.toml/零消费者）",
+    "request_permission 无 handler 一律 cancelled（fail-closed），绝不默认 allow",
+    "文档生成物走生成器：gen-extension-points.mjs 增 ACP 行（禁手改文档）"
   ],
-  "history": []
+  "history": [
+    {
+      "wave": "interrupted-turn-resume",
+      "status": "done",
+      "task_tier": "B",
+      "baseline_commit": "a7393954",
+      "branch": "fix/interrupted-turn-resume",
+      "regression_baseline": { "cmd": "cargo test -p pony-agent-core --lib", "result": "1518 passed; 0 failed; 795.84s", "exit_code": 0, "log": ".dev-team/regression/baseline-lib.log" },
+      "artifacts": { "contract_matrix": ".dev-team/contract-matrix-interrupted-turn-resume.md", "adr": ".agents/notes/implemented/bug-fix/2026-11-12-interrupted-turn-content-preservation.md", "backlog": "B113" }
+    }
+  ]
 }

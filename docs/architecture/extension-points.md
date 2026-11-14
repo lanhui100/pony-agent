@@ -13,6 +13,7 @@
 | Skill | L1 编译期接缝 | 写 `SKILL.md`（frontmatter） | `pony-skill-manifest-v1` | `workspace_hotloader.rs` | 载体已存在（`workspace_hotloader.rs`） |
 | Hook | L1 编译期接缝 | 写 `.pony/hooks.json`（`command` 或 `argv` 形态） | `agent-hooks-v1` | `hook_commands.rs` | 载体已存在（`hook_commands.rs`） |
 | Plugin | L2 进程外插件 | 写 `plugin.json` + 可执行体，stdio JSON-RPC 2.0 | `pony-plugin-v1` | `plugin_host/` | 载体已存在（`plugin_host/`） |
+| 外部 Agent（ACP） | L3 跨进程协议（Pony 为 ACP Client） | 在 `~/.config/pony-agent/acp-agents.json` 登记 spec（或走内置 opencode/antigravity），由 `acp_delegate` 工具或 `ponycli acp` 宿主 spawn 外部 agent | `acp-v1（外部协议，真源 agentclientprotocol.com protocol/v1）` | `acp/` | 载体已存在（`acp/`） |
 
 ## 2. registry source 枚举（`tools.rs` → `ToolDescriptorSource`，4 个变体）
 

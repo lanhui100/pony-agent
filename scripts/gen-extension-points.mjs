@@ -110,6 +110,7 @@ function main() {
   });
 
   const pluginHost = `${SRC}/plugin_host/mod.rs`;
+  const acpModule = 'crates/pony-agent-core/src/acp/mod.rs';
   const mcpConfigLoader = sourceContains(SRC, 'mcpServers');
 
   const rows = [
@@ -154,6 +155,14 @@ function main() {
       contract: 'pony-plugin-v1',
       carrier: '`plugin_host/`',
       status: exists(pluginHost) ? '载体已存在（`plugin_host/`）' : '载体未落地（ADR 0067 待 T3）',
+    },
+    {
+      point: '外部 Agent（ACP）',
+      layer: 'L3 跨进程协议（Pony 为 ACP Client）',
+      how: '在 `~/.config/pony-agent/acp-agents.json` 登记 spec（或走内置 opencode/antigravity），由 `acp_delegate` 工具或 `ponycli acp` 宿主 spawn 外部 agent',
+      contract: 'acp-v1（外部协议，真源 agentclientprotocol.com protocol/v1）',
+      carrier: '`acp/`',
+      status: exists(acpModule) ? '载体已存在（`acp/`）' : '载体未落地（backlog:B149/B150/B151）',
     },
   ];
 
