@@ -3,13 +3,11 @@
 //! 存储位置：`~/.config/pony-agent/acp-agents.json` —— 与 `providers.json` **同级但独立**，
 //! 绝不改动 provider 配置 schema（真源 `docs/architecture/acp-client-integration.md` §4 P0 表）。
 //!
-//! 本文件 P0 只冻结类型 / 常量 / 函数签名；加载、写入、回退逻辑一律 `unimplemented!()`，
-//! 由 P1 Executor 实现。内置两条默认 agent 是**数据契约**（不依赖任何 I/O）。
+//! 失败语义（禁吞异常）：读/写/解析/校验失败一律映射到 [`AcpConfigError`] 的 4 个稳定错误码，
+//! 不静默回落、不 panic。**唯一的回落**是「清单文件不存在」这一显式语义 ⇒ 用内置两条默认
+//! （`opencode acp` / `agy acp`）；文件存在但损坏则报错而不是悄悄用默认覆盖用户的清单。
 
-// P0 空桩：函数体统一 `unimplemented!()`，形参「未使用」属预期；P1 实现时移除本允许。
-#![allow(unused_variables)]
-
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -103,33 +101,148 @@ pub enum AcpConfigError {
 
 impl AcpConfigError {
     pub fn code(&self) -> &'static str {
-        unimplemented!("P1：错误码映射（acp_config_io / acp_config_parse / acp_config_invalid / acp_config_agent_not_found）")
+        match self {
+            Self::Io(_) => "acp_config_io",
+            Self::Parse(_) => "acp_config_parse",
+            Self::Invalid(_) => "acp_config_invalid",
+            Self::NotFound(_) => "acp_config_agent_not_found",
+        }
     }
 }
 
+impl std::fmt::Display for AcpConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::Io(message) | Self::Parse(message) | Self::Invalid(message) => message,
+            Self::NotFound(message) => message,
+        };
+        write!(formatter, "{}: {message}", self.code())
+    }
+}
+
+impl std::error::Error for AcpConfigError {}
+
 /// 清单文件完整路径（`<config_dir>/pony-agent/acp-agents.json`）。
 ///
-/// 必须是**绝对路径**；目录不存在时由加载方创建（P1 实现）。
+/// 必须是**绝对路径**；目录不存在时由 [`save_agents`] 创建。
 pub fn agents_file_path() -> PathBuf {
-    unimplemented!("P1：dirs::config_dir() + ACP_CONFIG_DIR_NAME + ACP_AGENTS_FILE_NAME")
+    // `dirs::config_dir()` 在 Linux = `$XDG_CONFIG_HOME`（缺省 `$HOME/.config`），
+    // 与 `providers.json` / `model-preferences.json` 同一解析口径（单一真值，不另立名单）。
+    let mut path = dirs::config_dir()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    path.push(ACP_CONFIG_DIR_NAME);
+    path.push(ACP_AGENTS_FILE_NAME);
+    path
 }
 
-/// 读取用户清单；文件不存在时返回内置默认（P1 实现）。
+/// 读取用户清单；文件不存在时返回内置默认。
 pub fn load_agents() -> Result<Vec<AcpAgentSpec>, AcpConfigError> {
-    unimplemented!("P1：读文件 → parse → 不存在则 builtin_agent_specs()")
+    let path = agents_file_path();
+    if !path.exists() {
+        return Ok(builtin_agent_specs());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        AcpConfigError::Io(format!("读取 ACP agent 清单 {} 失败：{error}。", path.display()))
+    })?;
+    // 未知字段容错：不启用 `deny_unknown_fields`（清单随官方 schema 演进，未知键必须被忽略）。
+    let agents: Vec<AcpAgentSpec> = serde_json::from_str(&raw).map_err(|error| {
+        AcpConfigError::Parse(format!(
+            "解析 ACP agent 清单 {} 失败：{error}。",
+            path.display()
+        ))
+    })?;
+    for spec in &agents {
+        validate_spec(spec)?;
+    }
+    Ok(agents)
 }
 
-/// 原子写回用户清单（P1 实现：`*.tmp` + rename）。
+/// 原子写回用户清单（`*.tmp` + rename：拒绝半截文件）。
 pub fn save_agents(agents: &[AcpAgentSpec]) -> Result<(), AcpConfigError> {
-    unimplemented!("P1：序列化 + 原子写")
+    for spec in agents {
+        validate_spec(spec)?;
+    }
+    let path = agents_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AcpConfigError::Io(format!(
+                "创建 ACP 配置目录 {} 失败：{error}。",
+                parent.display()
+            ))
+        })?;
+    }
+    let payload = serde_json::to_string_pretty(agents).map_err(|error| {
+        AcpConfigError::Parse(format!("序列化 ACP agent 清单失败：{error}。"))
+    })?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, payload).map_err(|error| {
+        AcpConfigError::Io(format!("写入 ACP agent 清单临时文件 {} 失败：{error}。", tmp.display()))
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|error| {
+        // 落盘失败必须清理临时文件，否则下次写入会撞上陈旧半成品。
+        let _ = std::fs::remove_file(&tmp);
+        AcpConfigError::Io(format!(
+            "落盘 ACP agent 清单 {} 失败：{error}。",
+            path.display()
+        ))
+    })
 }
 
-/// 把 [`BUILTIN_AGENTS`] 物化为 [`AcpAgentSpec`]（P1 实现）。
+/// 把 [`BUILTIN_AGENTS`] 物化为 [`AcpAgentSpec`]。
 pub fn builtin_agent_specs() -> Vec<AcpAgentSpec> {
-    unimplemented!("P1：BUILTIN_AGENTS → Vec<AcpAgentSpec>")
+    BUILTIN_AGENTS
+        .iter()
+        .map(|builtin| AcpAgentSpec {
+            id: builtin.id.to_string(),
+            label: builtin.label.to_string(),
+            command: builtin.command.to_string(),
+            args: builtin.args.iter().map(|arg| (*arg).to_string()).collect(),
+            env: Vec::new(),
+            default_cwd: None,
+            capabilities_hint: AcpCapabilitiesHint::default(),
+        })
+        .collect()
 }
 
-/// 按 id 解析一条规格（先用户清单，后内置默认；P1 实现）。
+/// 按 id 解析一条规格（先用户清单，后内置默认）。
 pub fn resolve_agent(id: &str) -> Result<AcpAgentSpec, AcpConfigError> {
-    unimplemented!("P1：load_agents() 中按 id 查找，未命中回退 builtin")
+    let agents = load_agents()?;
+    if let Some(spec) = agents.into_iter().find(|spec| spec.id == id) {
+        return Ok(spec);
+    }
+    // 清单存在但未收录该 id：内置默认仍是合法的兜底（用户清单是"增补"而非"替换"）。
+    if let Some(spec) = builtin_agent_specs()
+        .into_iter()
+        .find(|spec| spec.id == id)
+    {
+        return Ok(spec);
+    }
+    Err(AcpConfigError::NotFound(format!(
+        "未找到 id 为 `{id}` 的 ACP agent（用户清单与内置默认均无）。"
+    )))
+}
+
+/// 规格校验（fail-closed）：id/command 非空、`default_cwd` 必须是绝对路径（§3.2.2）。
+fn validate_spec(spec: &AcpAgentSpec) -> Result<(), AcpConfigError> {
+    if spec.id.trim().is_empty() {
+        return Err(AcpConfigError::Invalid(
+            "ACP agent 的 id 不能为空。".to_string(),
+        ));
+    }
+    if spec.command.trim().is_empty() {
+        return Err(AcpConfigError::Invalid(format!(
+            "ACP agent `{}` 的 command 不能为空。",
+            spec.id
+        )));
+    }
+    if let Some(cwd) = spec.default_cwd.as_deref() {
+        if !Path::new(cwd).is_absolute() {
+            return Err(AcpConfigError::Invalid(format!(
+                "ACP agent `{}` 的 default_cwd 必须是绝对路径（§3.2.2），实际 `{cwd}`。",
+                spec.id
+            )));
+        }
+    }
+    Ok(())
 }
