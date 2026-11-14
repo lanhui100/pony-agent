@@ -252,10 +252,7 @@ impl AcpTransport {
         apply_child_env(&mut process, &env_extra);
 
         let mut child = process.spawn().map_err(|error| {
-            AcpTransportError::Spawn(format!(
-                "启动 ACP agent `{}` 失败：{error}。",
-                spec.command
-            ))
+            AcpTransportError::Spawn(format!("启动 ACP agent `{}` 失败：{error}。", spec.command))
         })?;
 
         let Some(stdin) = child.stdin.take() else {
@@ -399,9 +396,10 @@ impl AcpTransport {
         deadline: Duration,
     ) -> Result<Value, AcpTransportError> {
         // 串行闸：收包通道是单流的，两个请求同时等会把对方的响应吞掉。
-        let _serial = self.request_lock.lock().map_err(|_| {
-            AcpTransportError::Unavailable("request 串行锁已中毒。".into())
-        })?;
+        let _serial = self
+            .request_lock
+            .lock()
+            .map_err(|_| AcpTransportError::Unavailable("request 串行锁已中毒。".into()))?;
         // 已 fail-closed 的会话不得再发新请求（不重试、不放行）。
         if let Some(error) = self.fatal_error() {
             return Err(error);
@@ -435,9 +433,10 @@ impl AcpTransport {
             }
 
             let received = {
-                let receiver = self.inbound.lock().map_err(|_| {
-                    AcpTransportError::Unavailable("收包锁已中毒。".into())
-                })?;
+                let receiver = self
+                    .inbound
+                    .lock()
+                    .map_err(|_| AcpTransportError::Unavailable("收包锁已中毒。".into()))?;
                 receiver.recv_timeout(remaining)
             };
 
@@ -531,10 +530,7 @@ impl AcpTransport {
 
     /// 已记录的 fail-closed 原因（只读快照，不清空：会话级失败不可恢复）。
     fn fatal_error(&self) -> Option<AcpTransportError> {
-        self.fatal
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
+        self.fatal.lock().ok().and_then(|slot| slot.clone())
     }
 
     fn take_late_response(&self, id: u64) -> Option<Result<Value, AcpTransportError>> {
@@ -566,9 +562,9 @@ fn write_line(
         AcpTransportError::Protocol(format!("序列化 JSON-RPC 报文失败：{error}。"))
     })?;
     line.push('\n');
-    let mut guard = stdin.lock().map_err(|_| {
-        AcpTransportError::Unavailable("stdin 锁已中毒。".into())
-    })?;
+    let mut guard = stdin
+        .lock()
+        .map_err(|_| AcpTransportError::Unavailable("stdin 锁已中毒。".into()))?;
     let stdin = guard.as_mut().ok_or_else(|| {
         AcpTransportError::Unavailable("agent stdin 已关闭（进程已退出）。".into())
     })?;
@@ -616,9 +612,7 @@ fn read_loop(
                 let streak = malformed_streak.fetch_add(1, Ordering::SeqCst) + 1;
                 push_bounded(
                     &stderr_tail,
-                    format!(
-                        "[acp] 非法 JSON 行（连续第 {streak} 行）：{error}；原文={trimmed}"
-                    ),
+                    format!("[acp] 非法 JSON 行（连续第 {streak} 行）：{error}；原文={trimmed}"),
                 );
                 if streak >= MALFORMED_LINE_STREAK_LIMIT {
                     record_fatal(
@@ -657,18 +651,17 @@ fn read_loop(
         let Some(response_id) = response_id(&value) else {
             record_fatal(
                 &fatal,
-                AcpTransportError::Protocol(format!(
-                    "响应帧缺可解析 id，无法归属：{trimmed}"
-                )),
+                AcpTransportError::Protocol(format!("响应帧缺可解析 id，无法归属：{trimmed}")),
             );
             break;
         };
         let result = extract_result(&value);
-        if sender.send(AcpInbound::Response {
-            id: response_id,
-            result,
-        })
-        .is_err()
+        if sender
+            .send(AcpInbound::Response {
+                id: response_id,
+                result,
+            })
+            .is_err()
         {
             // 接收端已销毁（transport 已 drop）：读线程安静退出，调用方已不在。
             break;
@@ -751,7 +744,10 @@ fn dispatch_notification(
     method: &str,
     params: Value,
 ) {
-    let handler = notification_handler.lock().ok().and_then(|slot| slot.clone());
+    let handler = notification_handler
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone());
     match handler {
         Some(handler) => handler.handle_notification(method, params),
         None => push_bounded(
@@ -780,9 +776,7 @@ fn extract_result(value: &Value) -> Result<Value, AcpTransportError> {
             .map(str::to_string)
             .unwrap_or_else(|| error.to_string());
         return Err(if code == Some(JSONRPC_AUTH_REQUIRED) {
-            AcpTransportError::AuthRequired(format!(
-                "agent 要求先认证（-32000）：{message}。"
-            ))
+            AcpTransportError::AuthRequired(format!("agent 要求先认证（-32000）：{message}。"))
         } else {
             AcpTransportError::Agent(format!(
                 "agent 返回 JSON-RPC error（{}）：{message}。",
