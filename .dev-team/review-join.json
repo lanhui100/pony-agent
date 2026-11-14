@@ -1,5 +1,103 @@
 {
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "gate2-l3p-r4-5370",
+    "fresh_context": true
+  },
+  "executed_by": "gate2-l3p-r4-5370",
+  "reviewed_commit": "be302170faed1fa728bf29f76e001cea3c318d6c",
   "verdict": "PASS",
-  "audited_scopes": ["docs/architecture/"],
-  "findings": []
+  "audited_scopes": [
+    "crates/pony-agent-core/src/acp/",
+    "crates/pony-agent-core/src/agent/tools/",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/tests/",
+    "docs/observability.yaml",
+    ".dev-team/nfr-baseline.json",
+    ".dev-team/contract-matrix-acp-p1.md"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/acp/session.rs",
+      "line": 298,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "claim": "取消优先归因只在 Err 分支成立：`match response { Ok(response) => outcome_result(reduce_stop_reason(...)) }`（session.rs:298-305）不检查 `cancel_observed`/`cancellation_requested()`。对不配合 session/cancel 的 agent，宿主已取消仍归约 status=ok；实测 600ms 取消 + slow_prompt 6.5s（budget 120s）⇒ 6628ms 返回 status=ok/stopReason=end_turn。Err 分支（session.rs:306-319）归因 aborted/tool_cancelled 正确。该 ADVISORY 未登记 backlog（B161~B168 均不覆盖），建议补一条债务或把 Ok 分支也纳入取消归因（若保留现状需写明「完成竞态优先于取消」的契约理由）。",
+      "counterexample_cmd": "/home/dm/pony-agent/target-test/debug/l3p-r4-probe cancel_ignored 6.500 2>/dev/null | cut -c1-200   # 期望：ELAPSED_MS≈6628 STATUS=ok（600ms 已取消）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/transport.rs",
+      "line": 283,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "claim": "transport 的两个旁路线程（stdout reader 283、stderr 排空 316）未在结构体保留 JoinHandle，`close()`（transport.rs:492-531）只做 关 stdin → 宽限 → SIGKILL 进程组 → kill/wait，不 join 这两个线程，靠子进程死亡后的 EOF 自行退出。prompt 侧线程用 `thread::scope`（session.rs:259-284）必 join，此点成立。实测 12 轮 spawn→prompt→close（含二次 close 幂等）后 `/proc/self/task` delta=0、`pgrep -af acp_fake_agent` 无残留 ⇒ 无线上泄漏，故判 ADVISORY；建议 close 尾部 join（或显式记录「EOF 退出」为设计取舍）。",
+      "counterexample_cmd": "/home/dm/pony-agent/target-test/debug/leakgate leak; sleep 1; pgrep -af acp_fake_agent || echo NO_RESIDUAL   # 实测 TASKS before=1 after=1 delta=0；NO_RESIDUAL"
+    },
+    {
+      "file": ".dev-team/nfr-baseline.json",
+      "line": 22,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "claim": "nfr acp 段三键与源码常量逐一一致（request_timeout_ms=5000 == transport.rs:34 `ACP_REQUEST_TIMEOUT`；malformed_line_streak_limit=3 == transport.rs:37；spawn_reap_grace_ms=500 == transport.rs:44），但本轮单一真源 `ACP_DEFAULT_TURN_BUDGET=120s`（acp/mod.rs:30）没有任何 nfr 键承载，契约矩阵 §4 仍挂「需 Lead 裁决」（contract-matrix-acp-p1.md:68）。配置自检因此无法机械核验 120s 缺省预算，建议补 `acp.turn_budget_ms=120000`（或显式写「执行策略默认，不属 NFR」）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"import json;print(json.load(open('.dev-team/nfr-baseline.json'))['acp'])\" && grep -n 'ACP_DEFAULT_TURN_BUDGET' crates/pony-agent-core/src/acp/mod.rs && grep -n '需 Lead 裁决' .dev-team/contract-matrix-acp-p1.md"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools/orchestration.rs",
+      "line": 182,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "claim": "新增 `[acp] acp_delegate: ... budget_ms=...` 诊断走裸 eprintln（orchestration.rs:182-188），与 `logging.format=json` 声明不符；同类债务 B164 的描述只列 `acp/{transport,client,session}.rs` 与 `bin/cli.rs`，未含 orchestration.rs ⇒ 本条新诊断不在既有债务登记覆盖内。诊断本身不吞异常（打印后继续真实 prompt，实测 stderr 可见 budget_ms=120000/9000/1000 且结果按预算归约）。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'eprintln!' crates/pony-agent-core/src/agent/tools/orchestration.rs && python3 -c \"import json;[print(t['id'],t['description'][:120]) for t in map(json.loads,open('backlog/tasks.jsonl')) if t['id']=='B164']\""
+    },
+    {
+      "file": "crates/pony-agent-core/tests/wave37_tool_surface.rs",
+      "line": 102,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "claim": "断言仍为精确值（names.len() == 39，wave37_tool_surface.rs:106-110；tool_surface_singularity.rs:503-509 为 descriptors.len() == 46），未放宽为 >=/minimum；但用例名与文件头注释仍写 38（`t1_model_visible_surface_is_exact_38_tool_list` 第 102 行、注释第 31-35 行）⇒ 名字/文档与真值漂移，仅可读性问题，不影响断言强度。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'exact_38_tool_list' crates/pony-agent-core/tests/wave37_tool_surface.rs && sed -n '106,110p' crates/pony-agent-core/tests/wave37_tool_surface.rs"
+    }
+  ],
+  "six_questions": {
+    "1_timeout": {
+      "verdict": "PASS",
+      "note": "四条预算路径实测生效；工具缺省路径 >5s ok；取消 <预算 ⇒ aborted/tool_cancelled；--timeout-secs 0 ⇒ Exit 2。"
+    },
+    "2_logging_json": {
+      "verdict": "PASS(带 ADVISORY)",
+      "note": "8/8 acp_* 错误码在 transport.rs:161-171 有唯一映射且测试各覆盖；裸 eprintln 属已登记 B164（ADVISORY，不阻断）；新增 [acp] 诊断不吞异常；B164 文件清单未含 orchestration.rs（见 findings）。"
+    },
+    "3_resource_release": {
+      "verdict": "PASS(带 ADVISORY)",
+      "note": "prompt 侧 thread::scope 必 join；close 幂等（terminated 早退，12 轮二次 close 无 panic）；12 轮 spawn/close 后线程 delta=0、pgrep 无残留；transport reader/stderr 线程未 join（ADVISORY）。"
+    },
+    "4_concurrency_idempotency": {
+      "verdict": "PASS(带 ADVISORY)",
+      "note": "prompt_gate 串行化实测（同 session 两个 1.0s prompt 并发 ⇒ 2202ms 且两者 ok）；local_cancel 取消优先（Err 分支 aborted/tool_cancelled @722ms）；宿主令牌只读（ACP 侧零 token.cancel()，P1-13 绿）；Ok 分支忽略取消 = ADVISORY（6628ms ok）。"
+    },
+    "5_config_selfcheck": {
+      "verdict": "PASS(带 ADVISORY)",
+      "note": "清单缺失回落内置两条；损坏报 acp_config_parse 不静默覆盖；未知字段容错；相对 cwd 双入口拒绝（orchestration.rs:1134-1139 / config.rs:245-252）；nfr 三键与常量一致；observability 明确「未新增 acp.session/acp.request span」且源码只有既有 tool.call span（orchestration.rs:100）。120s 缺 nfr 键（ADVISORY）。"
+    },
+    "6_contract_compat": {
+      "verdict": "PASS",
+      "note": "10 套指定测试全绿 Exit 0（103 tests：11+5+19+7+6+16+23+4+9+3）；39/46 为精确断言未放宽；fix 提交对测试文件仅 +73/-0；四条门禁 Exit 0。"
+    }
+  },
+  "executed_evidence": {
+    "reviewed_head": "be302170 (docs-only commit on top of fix de3f7a5e；源码级审查对象 = de3f7a5e)",
+    "tool_default_budget": "l3p-r4-probe default（无 timeoutMs，fake slow_prompt 6.500s）⇒ ELAPSED_MS=6628 STATUS=ok, stderr budget_ms=120000",
+    "tool_explicit_budget": "explicit timeoutMs=9000 ⇒ 6528ms ok；explicit_short timeoutMs=1000 ⇒ 1519ms error code=acp_timeout；timeoutMs=0 ⇒ 21ms invalid_arguments（不 spawn）",
+    "tool_cancel": "host token cancel @600ms + slow_cancel 夹具 ⇒ 722ms aborted code=tool_cancelled",
+    "cli_budget": "ponycli acp 无 flag ⇒ exit 0 / 6645ms / turn_budget=120s；--timeout-secs 30 ⇒ exit 0 / 6549ms；--timeout-secs 1 ⇒ exit 7 / 1533ms（acp_timeout）；--timeout-secs 0 ⇒ exit 2；--timeout-secs 99999999999 ⇒ exit 2",
+    "prompt_gate": "同 session 并发两个 slow_prompt(1.0s) ⇒ 2202ms，a=ok b=ok（串行，不并发打穿）",
+    "resource_probe": "12 轮 spawn→prompt→close→close：/proc/self/task before=1 after=1 delta=0；pgrep acp_fake_agent 无残留（唯一一次 pgrep 命中为并行 Gate-1 探针 /tmp/gate1-r4-* 在跑的进程，与本轮代码无关，其后已退出）",
+    "tests": "mcp_channel_closure 16 / tool_surface_singularity 23 / wave37_tool_surface 9 / wave25 4 / acp_client_contract 11 / acp_host_surface 5 / acp_p0_acceptance 19 / acp_p0_adversarial 7 / acp_p1_blockers 6 / wave4_4_acceptance 3 = 103 passed / 0 failed, Exit 0",
+    "gates": "npm run cargo:check:shared=0；size:check=0（0 new violation / 61 grandfathered）；adr:check=0（verify-note + 117 归档件 sha256）；backlog:gate=0（active 15 / archived 96，doctor ok）",
+    "single_source": "acp/mod.rs:30 ACP_DEFAULT_TURN_BUDGET=120s ⇒ names.rs:207 / cli.rs:2251 / orchestration.rs:176 三处同源（grep ACP_DEFAULT_TURN_BUDGET 仅此四处含定义）"
+  },
+  "attestation": {
+    "self_signed": false
+  }
 }

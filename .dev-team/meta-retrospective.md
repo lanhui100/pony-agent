@@ -32,6 +32,17 @@
 4. **计划门禁时序前移**：`review-plan.json` 必须在红相锚定前产出，并让 `dev-meta-lint.py` 校验其 `reviewed_commit` 早于首个实现提交（当前只校验文件存在）。
 5. **derivative 写域事前声明**：凡工具面/枚举基数变化必然连带既有契约测试，应在建任务时登记 `allow_derivative_scopes`，避免事后补票。
 
+## 4.1 审查轮次流水（机器收据：`.dev-team/review-plan.json` / `review-join.json`，schema_version=2）
+
+| 轮次 | Gate-1（方案对抗） | Gate-2（L3-P 六问） | 本轮被抓住的真缺陷 |
+|---|---|---|---|
+| r2 @3ebb0742 | FAIL（2 BLOCKING） | FAIL（2 BLOCKING） | ①prompt 被 5000ms 硬顶 ②取消令牌未联动 ③工具面 38→39/45→46 漏同步 4 份冻结契约 |
+| r3 @4ba50955 | FAIL（1 BLOCKING） | FAIL（1 BLOCKING） | ④cli/orchestration 两入口未接线（库层 setter 零调用点）⑤工具入口缺省仍 5s 硬顶 |
+| r4 @be302170 | **PASS**（0 BLOCKING / 4 ADVISORY） | **PASS**（0 BLOCKING / 5 ADVISORY） | 无 |
+| 处置 | 逐条修复并以提交闭环 | 同上 | ADVISORY 转 B164~B170；当场修 3 条（exit code、dead code、capabilities 不虚报） |
+
+**保真声明**：r2/r3 的 FAIL 收据不做美化，保留在 git 历史与 backlog 归档里；r4 PASS 的审查对象是 `be302170`（源码面 `de3f7a5e`）。共 5 条 BLOCKING，全部由独立审查在交付前钉住，零漏放到用户手上。
+
 ## 5. 结论
 
 本轮团队在**红相独立分权**与**双路对抗审查**上取得真实收益（4 条 BLOCKING 全部在交付前被机器反例钉住并修复），代价是 2 次 executor 空转 + 1 次门禁时序失真。下一波优先落地建议 1（verify 覆盖契约测试）与建议 3（切片机械阈值），这两条直接决定「门禁是否被穿透」与「token 是否被空转吃掉」。

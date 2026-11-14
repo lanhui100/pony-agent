@@ -1,5 +1,90 @@
 {
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "gate1-acp-r4-4368",
+    "fresh_context": true
+  },
+  "executed_by": "gate1-acp-r4-4368",
+  "reviewed_commit": "be302170faed1fa728bf29f76e001cea3c318d6c",
   "verdict": "PASS",
-  "audited_scopes": ["docs/architecture/"],
-  "findings": []
+  "audited_scopes": [
+    "crates/pony-agent-core/src/acp/",
+    "crates/pony-agent-core/src/agent/tools/",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/tests/",
+    "docs/architecture/acp-client-integration.md",
+    ".dev-team/contract-matrix-acp-p0.md",
+    ".dev-team/contract-matrix-acp-p1.md",
+    ".agents/notes/implemented/architecture/2026-11-14-acp-client-external-agent-integration.md",
+    "docs/observability.yaml"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools/orchestration.rs",
+      "line": 165,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "claim": "`timeoutMs=0` 的入参校验发生在 `AcpAgentSession::spawn` 之后（先 spawn/session/new 再在 Some(0) 分支 close 并返回），因此「0 => invalid_arguments」只在 agent 可启动时成立：agent 命令不可执行时同一入参返回 `acp_spawn_failed`，且一个纯输入错误也真的起了一次子进程（实测 23ms）。建议把 timeoutMs 校验前移到 spawn 之前，让错误码与 agent 可用性解耦（fail-closed 未破，故非阻断）。",
+      "counterexample_cmd": "/home/dm/pony-agent/target/debug/gate1-r4 zero-missing 6.500  # 实跑：CASE=zero-missing-agent status=error code=acp_spawn_failed elapsed_ms=0；对照 /home/dm/pony-agent/target/debug/gate1-r4 zero 6.500 → status=error code=invalid_arguments elapsed_ms=23"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_p1_blockers.rs",
+      "line": 625,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "claim": "P1-14 只机械守护「缺省预算不受 5s 硬顶」这一条；工具入口的显式预算面（timeoutMs=1000 ⇒ acp_timeout、timeoutMs=0 ⇒ invalid_arguments）与 CLI `--timeout-secs 0` ⇒ Exit 2 均无冻结用例（P1-12 只跑 30s/1s 两个值，acp_p1_blockers 全文无 timeoutMs=0 断言）。三条行为经本审判独立实测正确，但缺机械守护，回归时会静默漂移。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'timeoutMs\": 0\\|\"0\"' crates/pony-agent-core/tests/acp_p1_blockers.rs crates/pony-agent-core/tests/acp_client_contract.rs  # 空输出 ⇒ 无断言；行为仅靠 code review"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/session.rs",
+      "line": 299,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "claim": "取消已触发（宿主令牌在 600ms 置位、session 已发 session/cancel）但外部 agent 仍回 `stopReason=end_turn` 时，`prompt()` 走 `Ok(response) => reduce_stop_reason` 分支，取消归因只覆盖 Err 分支（306-319）与入口早检（246），于是本轮归约成 `status=ok`（实测 3128ms / status=ok / stopReason=end_turn）。生产治理路径被 dispatcher `finalize_execution` 的 `_ if turn_cancelled => cancelled`（dispatcher.rs:1554-1557）兜住，故只影响直接调 `ToolRouter::execute_with_context` 的消费者（测试/遗留路径）；建议在 Ok 分支也做 `cancel_observed` 归因，避免两层口径不一致。",
+      "counterexample_cmd": "/home/dm/pony-agent/target/debug/gate1-r4 cancel-race 3.000  # 实跑：CASE=cancel-race status=ok elapsed_ms=3128（宿主令牌 600ms 取消）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/session.rs",
+      "line": 207,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "claim": "反回归锚点漂移/自相矛盾：`set_turn_budget` 文档仍写「默认值 = ACP_REQUEST_TIMEOUT（5000ms）」——这正是被固化的旧口径（三入口现总是注入预算，缺省 120s）；`.dev-team/contract-matrix-acp-p1.md` §5 的行号与实测不符（写 session.rs:227/259/282，实测 prompt=231 / scope.spawn=265 / sleep=280；写「cancel() 181/200」，实测 cancel() 在 326，181/200 是 local_cancel 字段与初始化）。文档行号是审查者的定位入口，失准会让下一轮复核误判代码未改。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'pub fn prompt(\\|scope.spawn\\|sleep(CANCEL_POLL_INTERVAL)\\|local_cancel\\|pub fn cancel(' crates/pony-agent-core/src/acp/session.rs"
+    }
+  ],
+  "prior_round_disposition": {
+    "r3_blocking": {
+      "id": "TIMEOUT: 工具入口不传 timeoutMs 时仍被 5000ms 硬顶（orchestration.rs:161 无 else 分支）",
+      "status": "CLOSED",
+      "evidence": "真实 ToolRouter::execute_with_context 调 acp_delegate 不带 timeoutMs：status=ok，elapsed_ms=6532（fixture 延迟 baseline+1500ms=6.5s，>5s）⇒ 既非 5s 砍断也非秒回假绿；同一 harness 以 delay=125s 复跑 ⇒ status=error/acp_timeout，elapsed_ms=120536，报错文本「超过 120s 未响应」⇒ 缺省预算确为 120s（有限、非 5s、非无限）。代码面：orchestration.rs:178 无条件 set_turn_budget；names.rs:207 / cli.rs:2251 / orchestration.rs:176 均引用 acp/mod.rs:30 ACP_DEFAULT_TURN_BUDGET；ACP 面除该常量外无 120s 字面量（names.rs:201 的 120_000 属 subagent/workflow，不在 ACP 面）。"
+    },
+    "code_commit_reviewed": "de3f7a5ed7644ce1ae2bd62edbc9aee26b90c355（HEAD be302170 为其上 docs-only 提交：契约矩阵 §5 + ADR fix-round 决策，无代码变更）"
+  },
+  "executed_evidence": {
+    "independent_harness": {
+      "what": "自建 /tmp/gate1-r4（path 依赖 pony-agent-core，不落地任何仓库文件）直调 ToolRouter::execute_with_context，XDG_CONFIG_HOME 隔离 acp-agents.json，fixture=tests/fixtures/acp_fake_agent.sh slow_prompt",
+      "cases": [
+        "default(no timeoutMs) delay=6.5s ⇒ status=ok elapsed=6532ms updates=1 stopReason=end_turn",
+        "default(no timeoutMs) delay=125s ⇒ status=error code=acp_timeout elapsed=120536ms（『超过 120s 未响应』）",
+        "timeoutMs=1000 delay=6.5s ⇒ status=error code=acp_timeout elapsed=1518ms",
+        "timeoutMs=0 delay=6.5s ⇒ status=error code=invalid_arguments elapsed=23ms",
+        "timeoutMs=0 + 不可启动 agent ⇒ status=error code=acp_spawn_failed（见 finding 1）",
+        "宿主令牌 600ms 取消 + delay=3s ⇒ status=ok elapsed=3128ms（见 finding 3）"
+      ]
+    },
+    "cli_zero_budget": "HOME/XDG 隔离后 `target/debug/ponycli acp --agent fake -p hi --timeout-secs 0` ⇒ EXIT=2，stderr「--timeout-secs 必须 ≥ 1（0 不是合法预算；缺省预算请省略该参数）」；`--help` ACP 段文本「(1..=86400)」与之自洽（注：headless 段的 `--timeout-secs <n>` 自述 0..=86400，属另一模式既有句柄，未在本轮变更）。",
+    "regression": "cargo test -p pony-agent-core --no-fail-fast --test acp_p1_blockers --test acp_client_contract --test acp_host_surface --test acp_p0_acceptance --test acp_p0_adversarial --test wave4_4_acceptance --test tool_surface_singularity --test mcp_channel_closure ⇒ CARGO_EXIT=0；8 个 target 合计 90 passed / 0 failed（acp_p1_blockers 6 / acp_client_contract 11 / acp_host_surface 5 / acp_p0_acceptance 19 / acp_p0_adversarial 7 / wave4_4 3 / tool_surface_singularity 23 / mcp_channel_closure 16）。注：首轮以 `| tail -60` 取尾部会掩盖 cargo 退出码，已改为落盘全日志重跑取值。",
+    "gates": {
+      "npm run cargo:check:shared": "EXIT=0（Finished dev profile in 0.51s）",
+      "npm run size:check": "EXIT=0（0 new violation / 61 over limit / 61 grandfathered / 0 shrunken）",
+      "npm run adr:check": "EXIT=0（verify-note 全部通过 + 117 条归档件 sha256 一致）"
+    },
+    "red_phase": ".dev-team/acp-p1-blockers-red.log RUN 4 记录 p1_14 FAILED：status=error/acp_timeout「超过 5s 未响应」duration_ms=5521；RUN 5（修复后）p1_14 ok ⇒ 『先红后绿』有物理红相，非事后补绿。",
+    "single_source_grep": "grep -rn 'ACP_DEFAULT_TURN_BUDGET\\|from_secs(120)\\|120_000' 在 ACP 面仅命中 acp/mod.rs:30（唯一字面量）与 names.rs:207 / cli.rs:2251 / orchestration.rs:176 三处引用；names.rs:201 的 120_000 属 TOOL_SUBAGENT|TOOL_WORKFLOW，非 ACP 面。",
+    "fix_round_risk_scan": "预算与 CANCEL_POLL_INTERVAL(100ms) 交互：轮询仅在 prompt 未完成时 sleep，预算 <1 tick 也由 client.prompt 自己的 deadline 裁决，无抢占式 bug；local_cancel 粘滞：工具入口每调用新建 session 并 close，跨调用无粘滞（CLI resume 路径不进入 prompt）；dispatcher 的 BudgetLedger 120s 只在 preflight check_deadline，不与 session 预算争抢（无双超时竞态）。"
+  },
+  "attestation": {
+    "self_signed": false
+  }
 }

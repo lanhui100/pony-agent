@@ -203,8 +203,9 @@ impl AcpAgentSession {
 
     /// 设置整轮 prompt 预算（additive；转发给 [`AcpAgentClient::set_prompt_budget`]）。
     ///
-    /// 默认值 = `ACP_REQUEST_TIMEOUT`（5000ms）。整轮委派预算（`timeoutMs` /
-    /// `--timeout-secs` / 执行策略）必须经本方法进入会话，否则真实 agent 的 >5s 一轮会被硬顶失败。
+    /// 调用方缺省必须传 [`crate::acp::ACP_DEFAULT_TURN_BUDGET`]（120s，与 CLI
+    /// `--timeout-secs` / `ToolExecutionPolicy` 默认同源）；不传则仍回落到
+    /// `ACP_REQUEST_TIMEOUT`（5000ms），真实 agent 的 >5s 一轮会被硬顶失败。
     pub fn set_turn_budget(&self, budget: Duration) {
         self.client.set_prompt_budget(budget);
     }

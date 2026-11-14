@@ -1,6 +1,6 @@
 {
   "wave": "acp-client-p0-p2",
-  "status": "in_progress",
+  "status": "completed",
   "task_tier": "C",
   "tier_basis": "跨系统协议面（ACP v1 线协议 + stdio 双向 JSON-RPC）+ 安全敏感（request_permission/fs/terminal 治理边界）+ 命中 blast 关键字（spawn/thread/lock/fs/Command::new）+ 跨包（pony-agent-core / src-tauri / 前端类型 / CLI）；无裁量降级权",
   "baseline_commit": "f4146970",
@@ -127,7 +127,8 @@
     "文档生成物走生成器：gen-extension-points.mjs 增 ACP 行（禁手改文档）",
     "Gate-1/Gate-2 均在交付前以 fresh-context subagent 执行，收据 .dev-team/review-plan.json / review-join.json（schema_version=2）",
     "文件规模门：schema.rs builtin_tools 1102→1074（抽出 acp_delegate_tool_definition）、provider/tests.rs 3003→2999，零行为变更",
-    "P2 范围收敛：只做 CLI 宿主形态；Tauri 三命令+前端类型转 B163（方案原标 optional）"
+    "P2 范围收敛：只做 CLI 宿主形态；Tauri 三命令+前端类型转 B163（方案原标 optional）",
+    "审查轮次 r2/r3 FAIL 收据保真保留；5 条 BLOCKING 全在交付前修复并各带机器反例"
   ],
   "history": [
     {
@@ -153,6 +154,7 @@
     "Gate-1 方案对抗（subagent, reviewed_commit b61682e1）：FAIL，2 BLOCKING（prompt 5s 硬顶 / 取消令牌未联动）+ 8 ADVISORY",
     "Gate-2 L3-P 六问（subagent, reviewed_commit b61682e1）：FAIL，Q1 超时 + Q6 工具面 38→39/45→46 漏同步 4 份冻结契约测试",
     "BLOCKING 修复：client.set_prompt_budget/session.set_turn_budget 落地（P1-9 绿）；四份契约测试同步（16/23/9/4 全绿）；P1-10 取消联动待修",
-    "ADVISORY 转 backlog：B164(eprintln 非 json)/B165(Windows Job Object)/B166(SessionUpdate 14 变体)/B167(capabilities 诚实性)/B168(串行闸零断言)"
+    "ADVISORY 转 backlog：B164(eprintln 非 json)/B165(Windows Job Object)/B166(SessionUpdate 14 变体)/B167(capabilities 诚实性)/B168(串行闸零断言)",
+    "Gate-1 r4 / Gate-2 r4（reviewed_commit be302170）：双方 PASS（0 BLOCKING / 9 ADVISORY）"
   ]
 }
