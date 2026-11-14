@@ -32,7 +32,7 @@ use crate::acp::protocol::{
 };
 use crate::acp::transport::{
     AcpInboundRequest, AcpInboundRequestHandler, AcpInboundResponse, AcpNotificationHandler,
-    AcpTransport, AcpTransportError, ACP_REQUEST_TIMEOUT,
+    AcpTransport, AcpTransportError, ACP_HANDSHAKE_TIMEOUT, ACP_REQUEST_TIMEOUT,
 };
 
 /// JSON-RPC「方法不存在 / 能力未下放」错误码。
@@ -404,7 +404,8 @@ impl AcpAgentClient {
         let params = serde_json::to_value(request).map_err(|error| {
             AcpTransportError::Protocol(format!("序列化 initialize 请求失败：{error}。"))
         })?;
-        let result = transport.request(method::INITIALIZE, params, ACP_REQUEST_TIMEOUT)?;
+        // B178-1：握手预算独立（真机 `agy acp` 冷启动 + 初始化可 >5s），不用单请求 5s。
+        let result = transport.request(method::INITIALIZE, params, ACP_HANDSHAKE_TIMEOUT)?;
         let response: InitializeResponse = serde_json::from_value(result).map_err(|error| {
             AcpTransportError::Protocol(format!("initialize 响应不符合 ACP v1 schema：{error}。"))
         })?;
@@ -458,7 +459,8 @@ impl AcpAgentClient {
         })?;
         let result = self
             .transport
-            .request(method::SESSION_NEW, params, ACP_REQUEST_TIMEOUT)?;
+            // B178-1：`session/new` 同属握手阶段，用握手预算（真机会话初始化可 >5s）。
+            .request(method::SESSION_NEW, params, ACP_HANDSHAKE_TIMEOUT)?;
         let response: SessionNewResponse = serde_json::from_value(result).map_err(|error| {
             AcpTransportError::Protocol(format!("session/new 响应不符合 v1 schema：{error}。"))
         })?;

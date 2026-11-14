@@ -57,3 +57,11 @@ caps.terminal = spec.capabilities_hint.terminal && has_terminal_handler
 
 - `cargo check -p pony-agent-core --lib` → **Exit 0**（0 warning）；`npm run cargo:check:shared` → **Exit 0**（`Finished dev profile ... in 24.66s`）。
 - 未改 `agent/path_permission.rs`、`agent/process.rs`、`acp/transport.rs`、`acp/protocol.rs`、`acp/config.rs`。
+
+## 6. B178 真机修复登记（additive，2026-11-15）
+
+| 项 | 真值源 | 语义 |
+|---|---|---|
+| 握手预算 | `acp/transport.rs` `ACP_HANDSHAKE_TIMEOUT`（NFR `acp.handshake_timeout_ms` = 30000） | `initialize` / `session/new` 用握手预算而非 `ACP_REQUEST_TIMEOUT`（5s）；真机 `agy acp` 冷启动可 >5s，5s 会误杀 |
+| ACP 专属 env 扩展 | `acp/transport.rs` `ACP_CHILD_ENV_EXTRA_ALLOWLIST` + `apply_acp_child_env_extras` | 在 `apply_child_env` 之后补 `XDG_* / TERM / LANG / LC_ALL / NO_COLOR`（宿主存在才补）；**不改 MCP/插件共享名单**，每键仍过 `is_denied_env_key`（PATH/LD_*/DYLD_*/AWS_* 照旧拒绝） |
+| agent error 归因 | `acp/transport.rs` `extract_result` + `request` 的 deadline 分支 | `-32000` / `-32603` / 文案含 auth/authenticate/unauthorized/login/credential/登录 ⇒ `AuthRequired`；其余 ⇒ `Agent`；deadline 到点时先非阻塞消费已入队帧（`drain_ready_responses`），已收到的 error 帧绝不改报 `acp_timeout` |

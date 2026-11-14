@@ -18,10 +18,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use pony_agent_core::acp::config::{resolve_mcp_servers_in, AcpAgentSpec, AcpCapabilitiesHint};
+use pony_agent_core::acp::config::{
+    resolve_mcp_servers_in, AcpAgentSpec, AcpCapabilitiesHint, AcpEnvVariable,
+};
 use pony_agent_core::acp::handlers::{ManagedTerminalHandler, WorkspaceFsHandler};
 use pony_agent_core::acp::protocol::ContentBlock;
 use pony_agent_core::acp::session::AcpAgentSession;
+use pony_agent_core::acp::transport::{AcpTransportError, ACP_HANDSHAKE_TIMEOUT};
 use pony_agent_core::acp::ACP_DEFAULT_TURN_BUDGET;
 use pony_agent_core::agent::path_permission::{AuthorizeStore, PathPurpose};
 use pony_agent_core::agent::process::ProcessManager;
@@ -495,6 +498,171 @@ fn h5_terminal_output_buffer_is_bounded() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+// ───────────────────────── i1 握手预算（B178-1） ─────────────────────────
+//
+// [POST-HOC-GREEN: 实现先于用例（B178 已修），仅作回归守护]
+// 旧实现把 `initialize` 也套在 transport 单请求 5s 基准上 ⇒ 慢启动 agent 永远握手失败；
+// 新实现用 `ACP_HANDSHAKE_TIMEOUT`（30s）。用例注入 >5s、<30s 的 initialize 延迟。
+#[test]
+fn i1_handshake_budget_exceeds_legacy_five_seconds() {
+    let baseline_ms = nfr_acp_ms("request_timeout_ms");
+    let delay_ms = baseline_ms + 1000;
+    let delay_seconds = format!("{:.3}", delay_ms as f64 / 1000.0);
+    let cwd = temp_dir("handshake-budget");
+    let spec = spec_with_hint(hint(false, false), "init_delay", &[delay_seconds.as_str()]);
+
+    let started = Instant::now();
+    let spawned = AcpAgentSession::spawn(&spec, &cwd);
+    let elapsed = started.elapsed();
+
+    let mut session = match spawned {
+        Ok(session) => session,
+        Err(error) => panic!(
+            "i1 违约：initialize 延迟 {delay_ms}ms 在握手预算 {ACP_HANDSHAKE_TIMEOUT:?} 内必须成功（旧 5s 基准会失败），实际 {error:?}"
+        ),
+    };
+    assert!(
+        elapsed > Duration::from_millis(baseline_ms),
+        "i1：本用例必须真正超过旧 {baseline_ms}ms 基准才有覆盖力，实测 {elapsed:?}"
+    );
+    assert!(
+        elapsed < ACP_HANDSHAKE_TIMEOUT,
+        "i1 违约：握手必须在 {ACP_HANDSHAKE_TIMEOUT:?} 预算内完成，实测 {elapsed:?}"
+    );
+
+    session.close();
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+// ───────────────────────── i2 ACP 子进程 env 扩展（B178-2） ─────────────────────────
+//
+// [POST-HOC-GREEN: 实现先于用例（B178 已修），仅作回归守护]
+// `ACP_CHILD_ENV_EXTRA_ALLOWLIST`（XDG_*/TERM/LANG）必须原样透传；`spec.env` 注入 PATH 必须被
+// deny 表拦下（子进程 PATH 仍是宿主 PATH，绝不是注入值）。
+#[test]
+fn i2_acp_child_env_extends_allowlist_without_path_injection() {
+    let _guard: MutexGuard<'static, ()> = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let cwd = temp_dir("env-extra");
+    let out_file = cwd.join("env.txt");
+    let unique = format!("pony-i2-{}", std::process::id());
+    let expected: Vec<(&'static str, String)> = vec![
+        ("XDG_CONFIG_HOME", format!("/tmp/{unique}/config")),
+        ("TERM", format!("term-{unique}")),
+        ("LANG", "C.UTF-8-i2".to_string()),
+    ];
+    let saved: Vec<(&'static str, Option<std::ffi::OsString>)> = expected
+        .iter()
+        .map(|(key, _)| (*key, std::env::var_os(key)))
+        .collect();
+    let host_path = std::env::var("PATH").unwrap_or_default();
+    for (key, value) in &expected {
+        std::env::set_var(key, value);
+    }
+
+    let mut spec = spec_with_hint(
+        hint(false, false),
+        "env_capture",
+        &[out_file.to_string_lossy().as_ref()],
+    );
+    // 恶意注入：PATH 属 deny 表，必须被丢弃。
+    spec.env = vec![AcpEnvVariable {
+        name: "PATH".to_string(),
+        value: "/evil-acp-injected".to_string(),
+    }];
+
+    let spawn_result = AcpAgentSession::spawn(&spec, &cwd);
+    let mut session = match spawn_result {
+        Ok(session) => session,
+        Err(error) => panic!("i2：spawn 必须成功：{error:?}"),
+    };
+    session.close();
+
+    for (key, old) in saved {
+        match old {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    let body = std::fs::read_to_string(&out_file).expect("fake agent 必须写出 env 快照");
+    let mut received = std::collections::BTreeMap::new();
+    for line in body.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            received.insert(key.to_string(), value.to_string());
+        }
+    }
+    for (key, value) in &expected {
+        assert_eq!(
+            received.get(*key).map(String::as_str),
+            Some(value.as_str()),
+            "i2 违约：ACP 子进程必须收到宿主 `{key}`（在 ACP_CHILD_ENV_EXTRA_ALLOWLIST 内），实际 {received:?}"
+        );
+    }
+    let child_path = received.get("PATH").cloned().unwrap_or_default();
+    assert_ne!(
+        child_path, "/evil-acp-injected",
+        "i2 违约：PATH 属 deny 表，spec.env 注入必须被丢弃，实际子进程 PATH={child_path:?}"
+    );
+    assert_eq!(
+        child_path, host_path,
+        "i2 违约：子进程 PATH 必须是宿主 allowlist 值（不得被注入覆盖），实际 {child_path:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+// ───────────────────────── i3 initialize 错误归因（B178-3） ─────────────────────────
+//
+// [POST-HOC-GREEN: 实现先于用例（B178 已修），仅作回归守护]
+// 错误帧必须**如实归因**：认证语义 ⇒ `acp_auth_required`（绝不塌成 acp_timeout）；
+// 无认证语义的 -32603 ⇒ `acp_agent_error`（保留原始码/文案）。
+#[test]
+fn i3_initialize_error_attribution_is_faithful() {
+    let cwd = temp_dir("init-error");
+
+    let auth_spec = spec_with_hint(
+        hint(false, false),
+        "init_error",
+        &["-32603", "please authenticate first"],
+    );
+    let auth_error = match AcpAgentSession::spawn(&auth_spec, &cwd) {
+        Ok(mut session) => {
+            session.close();
+            panic!("i3 违约：agent 回错误帧时 spawn 必须失败，实际成功")
+        }
+        Err(error) => error,
+    };
+    assert!(
+        matches!(auth_error, AcpTransportError::AuthRequired(_)),
+        "i3 违约：认证语义必须归因 AuthRequired，实际 {auth_error:?}"
+    );
+    assert_eq!(
+        auth_error.code(),
+        "acp_auth_required",
+        "i3 违约：认证错误码必须是 acp_auth_required（不是 acp_timeout），实际 {auth_error:?}"
+    );
+
+    let plain_spec = spec_with_hint(hint(false, false), "init_error", &["-32603", "internal boom"]);
+    let plain_error = match AcpAgentSession::spawn(&plain_spec, &cwd) {
+        Ok(mut session) => {
+            session.close();
+            panic!("i3 违约：agent 回错误帧时 spawn 必须失败，实际成功")
+        }
+        Err(error) => error,
+    };
+    assert!(
+        matches!(plain_error, AcpTransportError::Agent(_)),
+        "i3 违约：无认证语义的 -32603 必须归因 Agent，实际 {plain_error:?}"
+    );
+    assert_eq!(
+        plain_error.code(),
+        "acp_agent_error",
+        "i3 违约：非 auth 的 -32603 必须报 acp_agent_error（不得一律当认证错误），实际 {plain_error:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&cwd);
 }

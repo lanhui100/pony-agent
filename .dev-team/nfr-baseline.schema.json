@@ -395,12 +395,18 @@
           "type": "integer",
           "const": 500,
           "description": "close() 回收宽限：先关 stdin 等自然退出，超宽限后 Unix 对进程组 SIGKILL 并同步 wait()，禁止残留子进程。"
+        },
+        "handshake_timeout_ms": {
+          "type": "integer",
+          "const": 30000,
+          "description": "B178（真机）：握手阶段（initialize / session/new）的单请求预算。与 request_timeout_ms 分开——外部 agent 冷启动 + 会话初始化可 >5s，用 5s 会误杀。真值源 crates/pony-agent-core/src/acp/transport.rs 的 ACP_HANDSHAKE_TIMEOUT。"
         }
       },
       "required": [
         "request_timeout_ms",
         "malformed_line_streak_limit",
-        "spawn_reap_grace_ms"
+        "spawn_reap_grace_ms",
+        "handshake_timeout_ms"
       ],
       "additionalProperties": false
     }

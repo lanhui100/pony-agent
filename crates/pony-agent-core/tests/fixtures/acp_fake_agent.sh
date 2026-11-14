@@ -39,6 +39,9 @@
 #                                 →output→wait_for_exit→kill→kill(幂等)→release，应答按序落 respFile
 #   probe_terminal_wait_first <initFile> <respFile> <markerFile>
 #                                 create(sleep 0.3; echo <marker>) → **wait_for_exit → output**（ACP 标准序）
+#   init_delay <delaySeconds>       initialize 内延迟再应答（B178 握手预算 i1）
+#   env_capture <outFile>          initialize 时把实收 XDG_CONFIG_HOME/TERM/LANG/PATH 写 outFile（i2）
+#   init_error <code> <message>    initialize 回 JSON-RPC error 帧（i3 错误归因）
 #   probe_terminal_flood <initFile> <respFile> <markerFile> <polls>
 #                                 create(`yes <marker>` + outputByteLimit=1MiB) → 期间轮询 output <polls> 次
 #                                 （无界累积向量）→ 末次 output / kill / release 应答落 resp
@@ -148,6 +151,60 @@ while IFS= read -r line; do
             id=$(id_of "$line")
             s=$(sentinel_of "$line")
             [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":\"$s\"}}"
+            ;;
+        init_delay)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    sleep "$arg"
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                session/prompt)
+                    [ -n "$id" ] && respond_stop "$id" end_turn
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+            esac
+            ;;
+        env_capture)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    : > "$arg"
+                    for key in XDG_CONFIG_HOME TERM LANG PATH; do
+                        eval "value=\${$key-__UNSET__}"
+                        printf '%s=%s\n' "$key" "$value" >> "$arg"
+                    done
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                session/prompt)
+                    [ -n "$id" ] && respond_stop "$id" end_turn
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+            esac
+            ;;
+        init_error)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":$arg,\"message\":\"$arg2\"}}"
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+            esac
             ;;
         probe_terminal_flood)
             m=$(method_of "$line")

@@ -26,12 +26,43 @@ use serde_json::{json, Value};
 use crate::acp::config::AcpAgentSpec;
 use crate::acp::protocol::method as acp_method;
 use crate::acp::protocol::{RequestPermissionOutcome, RequestPermissionResponse};
-use crate::agent::plugin_host::capability::{apply_child_env, resolve_workspace_dir};
+use crate::agent::plugin_host::capability::{
+    apply_child_env, is_denied_env_key, resolve_workspace_dir,
+};
 
 /// 单次出站请求预算（NFR：`acp.request_timeout_ms` = 5000）。
 ///
-/// 覆盖 `initialize` / `session/new` / `session/prompt`；超时即 fail-closed（`acp_timeout`）。
+/// 覆盖 `session/prompt` 等普通请求；超时即 fail-closed（`acp_timeout`）。
+/// 注意：`initialize` / `session/new` 属于**握手**阶段，用 [`ACP_HANDSHAKE_TIMEOUT`]
+///（真机 `agy acp` 冷启动 + 会话初始化可 >5s，5s 会误杀）。
 pub const ACP_REQUEST_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// 握手阶段（`initialize` / `session/new`）的请求预算（NFR：`acp.handshake_timeout_ms` = 30000）。
+///
+/// 与 [`ACP_REQUEST_TIMEOUT`] 分开的理由（B178 真机）：`agy acp` / `opencode acp` 冷启动
+/// （首次拉起运行时、读凭据、建立内部会话）实测可超过 5s；若仍用 5s 单请求预算，真机会在
+/// 握手处被误判成 `acp_timeout` 而 fail-closed。握手只发生一次，放宽到 30s 不放大稳态开销。
+pub const ACP_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(30_000);
+
+/// ACP 子进程**专属**扩展 env 白名单（B178 真机挂起根因）。
+///
+/// 背景：`spawn` 复用 plugin_host 的 `apply_child_env`（MCP/插件共享白名单，F8a 单一真值），
+/// 其中不含 `XDG_*` / `TERM` / `LANG`，导致外部 agent 找不到自己的凭据/缓存目录、或在
+/// 交互式 CLI 的 TTY 探测分支上挂起。这里在 `apply_child_env` **之后**补这些键（宿主存在才补）。
+///
+/// 边界：**这是 ACP 专属扩展，不改 MCP/插件共享名单**；每一项仍必须过
+/// `plugin_host::capability::is_denied_env_key`（PATH / LD_* / DYLD_* / AWS_* 等照旧拒绝）。
+pub const ACP_CHILD_ENV_EXTRA_ALLOWLIST: &[&str] = &[
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "NO_COLOR",
+];
 
 /// stdout 连续非法 JSON 行阈值（NFR：`acp.malformed_line_streak_limit` = 3）。
 ///
@@ -250,6 +281,8 @@ impl AcpTransport {
             .collect();
         env_extra.extend(extra_env.iter().cloned());
         apply_child_env(&mut process, &env_extra);
+        // B178：ACP 专属扩展（见 [`ACP_CHILD_ENV_EXTRA_ALLOWLIST`]），仍逐键过 deny 表。
+        apply_acp_child_env_extras(&mut process);
 
         let mut child = process.spawn().map_err(|error| {
             AcpTransportError::Spawn(format!("启动 ACP agent `{}` 失败：{error}。", spec.command))
@@ -461,6 +494,12 @@ impl AcpTransport {
 
             let remaining = end.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                // B178-3：deadline 到点时通道里可能**已经**有本请求的响应/error 帧（刚入队但
+                // 尚未被 recv 消费）。已收到的帧优先于 deadline 归因——绝不允许「agent 已明确
+                // 报错」被上报成 acp_timeout。
+                if let Some(outcome) = self.drain_ready_responses(id) {
+                    return outcome;
+                }
                 return Err(AcpTransportError::Timeout(format!(
                     "`{method}` 请求超过 {deadline:?} 未响应。stderr: {:?}",
                     self.stderr_tail()
@@ -485,15 +524,7 @@ impl AcpTransport {
                     result,
                 }) => {
                     // 迟到/乱序响应：有界暂存，绝不静默丢弃。
-                    if let Ok(mut late) = self.late_responses.lock() {
-                        late.insert(response_id, result);
-                        while late.len() > LATE_RESPONSE_CAPACITY {
-                            let Some(oldest) = late.keys().copied().min() else {
-                                break;
-                            };
-                            late.remove(&oldest);
-                        }
-                    }
+                    self.buffer_late_response(response_id, result);
                 }
                 // reader 线程已内联消费请求/通知，本通道只上送响应；防御性跳过。
                 Ok(_) => continue,
@@ -568,6 +599,45 @@ impl AcpTransport {
         self.fatal.lock().ok().and_then(|slot| slot.clone())
     }
 
+    /// 非阻塞消费所有已入队帧：命中目标 id 的主响应即返回；其余响应进迟到缓冲。
+    ///
+    /// 语义：只要响应帧**已经到达本进程**，就绝不因 deadline 到期而改报超时。
+    fn drain_ready_responses(&self, id: u64) -> Option<Result<Value, AcpTransportError>> {
+        loop {
+            let frame = {
+                let receiver = self.inbound.lock().ok()?;
+                receiver.try_recv()
+            };
+            match frame {
+                Ok(AcpInbound::Response {
+                    id: response_id,
+                    result,
+                }) => {
+                    if response_id == id {
+                        return Some(result);
+                    }
+                    self.buffer_late_response(response_id, result);
+                }
+                Ok(_) => continue,
+                // 空 / 断开：没有已到达的目标帧（断开由主循环 Disconnected 分支归因）。
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// 迟到/乱序响应有界暂存（绝不静默丢弃）。
+    fn buffer_late_response(&self, id: u64, result: Result<Value, AcpTransportError>) {
+        if let Ok(mut late) = self.late_responses.lock() {
+            late.insert(id, result);
+            while late.len() > LATE_RESPONSE_CAPACITY {
+                let Some(oldest) = late.keys().copied().min() else {
+                    break;
+                };
+                late.remove(&oldest);
+            }
+        }
+    }
+
     fn take_late_response(&self, id: u64) -> Option<Result<Value, AcpTransportError>> {
         self.late_responses
             .lock()
@@ -579,6 +649,20 @@ impl AcpTransport {
 impl Drop for AcpTransport {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// 补 ACP 专属扩展 env（`ACP_CHILD_ENV_EXTRA_ALLOWLIST`）：宿主存在才写入，命中 deny 表跳过。
+fn apply_acp_child_env_extras(command: &mut Command) {
+    for key in ACP_CHILD_ENV_EXTRA_ALLOWLIST {
+        if is_denied_env_key(key) {
+            // 与显式声明同口径：只打键名，绝不打值。
+            eprintln!("[acp] ACP 扩展 env `{key}` 命中 deny 表，已跳过（fail-closed）。");
+            continue;
+        }
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
     }
 }
 
@@ -819,15 +903,41 @@ fn extract_result(value: &Value) -> Result<Value, AcpTransportError> {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| error.to_string());
-        return Err(if code == Some(JSONRPC_AUTH_REQUIRED) {
-            AcpTransportError::AuthRequired(format!("agent 要求先认证（-32000）：{message}。"))
-        } else {
-            AcpTransportError::Agent(format!(
-                "agent 返回 JSON-RPC error（{}）：{message}。",
+        // B178-3 如实归因：agent 明确回了 error 帧时，绝不归成超时。
+        // - `-32000`（既有 ACP auth_required）或 `-32603`（internal error；真机 agy/opencode
+        //   在「未登录 / 内部初始化失败」时用它）⇒ AuthRequired；
+        // - 文案含认证/登录语义（auth / authenticate / unauthorized / login / credential / 登录）
+        //   ⇒ AuthRequired；
+        // - 其余 ⇒ Agent（`acp_agent_error`，保留原始码与文案）。
+        let lowered = message.to_ascii_lowercase();
+        let auth_marker = [
+            "auth",
+            "authenticate",
+            "unauthorized",
+            "login",
+            "credential",
+            "登录",
+        ]
+        .iter()
+        .any(|marker| lowered.contains(marker));
+        // i3 复审：归因不得过宽。
+        // - `-32000`：ACP 规范即 auth required ⇒ AuthRequired；
+        // - `-32603`：**仅当**文案命中认证关键词才 AuthRequired，否则如实归 Agent；
+        // - 其余码（含无码）⇒ Agent（`acp_agent_error`）。
+        let auth_required = code == Some(JSONRPC_AUTH_REQUIRED)
+            || (code == Some(JSONRPC_INTERNAL_ERROR) && auth_marker);
+        if auth_required {
+            return Err(AcpTransportError::AuthRequired(format!(
+                "agent 要求先认证（code={}）：{message}。",
                 code.map(|code| code.to_string())
                     .unwrap_or_else(|| "unknown".to_string())
-            ))
-        });
+            )));
+        }
+        return Err(AcpTransportError::Agent(format!(
+            "agent 返回 JSON-RPC error（{}）：{message}。",
+            code.map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        )));
     }
     value.get("result").cloned().ok_or_else(|| {
         AcpTransportError::Protocol(format!("响应帧既缺 result 也缺 error：{value}"))

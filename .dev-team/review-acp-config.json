@@ -1,0 +1,154 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "acp-cfg-r2-9f3c",
+    "fresh_context": true
+  },
+  "executed_by": "acp-cfg-r2-9f3c",
+  "reviewed_commit": "268d17f744af71c2dd1f4d4144289995e37a5b6f",
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/acp/",
+    "crates/pony-agent-core/src/acp/handlers.rs",
+    "crates/pony-agent-core/src/acp/client.rs",
+    "crates/pony-agent-core/src/acp/transport.rs",
+    "crates/pony-agent-core/src/acp/config.rs",
+    "crates/pony-agent-core/src/acp/session.rs",
+    "crates/pony-agent-core/src/agent/process.rs",
+    "crates/pony-agent-core/src/agent/tool_runtime.rs",
+    "crates/pony-agent-core/src/agent/tools/orchestration.rs",
+    "crates/pony-agent-core/tests/acp_config_regressions.rs",
+    "crates/pony-agent-core/tests/acp_capabilities_contract.rs",
+    "crates/pony-agent-core/tests/acp_mcp_wiring.rs",
+    "crates/pony-agent-core/tests/fixtures/acp_fake_agent.sh"
+  ],
+  "blocking_recheck": [
+    {
+      "id": "B1 handlers.rs:399 wait_for_exit 丢输出",
+      "status": "已关闭",
+      "evidence": "h1 绿（断言 output 含 marker，红相日志显示旧实现 output=\"\"）；handlers.rs:368-388 poll_into 只 append 不丢弃，:516-527 output 返回累积全量"
+    },
+    {
+      "id": "B2 config.rs:407 未信任 workspace .mcp.json 当致命",
+      "status": "已关闭",
+      "evidence": "h2 绿（resolve => Ok(空) + spawn 成功）；config.rs:415-421 只把 invalid_json/invalid_root/unsupported_schema_version 当致命。附带新 ADVISORY：invalid_mcp_servers 被顺带降级且文档未同步"
+    },
+    {
+      "id": "B3 client.rs:534 install_* 无已声明闸门",
+      "status": "已关闭",
+      "evidence": "h3 绿（9100/9500 均 error，且响应全文无 TOP-SECRET-CONTENT）；client.rs:378 declared 固化 + :554/:570 装配闸门 + :152-165 分发闸门（双保险，热替换无法追认）"
+    },
+    {
+      "id": "B4 handlers.rs:397 wait 5s 硬顶 + 内联读线程",
+      "status": "已关闭（两半均有独立证据）",
+      "evidence": "(a) 预算改 120s：h4 实测 6.13s 通过，红相为 -32603 5s 超时；(b) 读线程解耦：/tmp/probe_dispatch3_bin 在 wait_for_exit 在途 5s 时，agent 的 session/prompt 应答 0.100s 即被读到。残留：入站请求分发仍是单线程串行（ADVISORY），h4 的『不饿死』断言无法观测该性质"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/acp/handlers.rs",
+      "line": 381,
+      "rule": "LEAK",
+      "severity": "BLOCKING",
+      "detail": "B1 的修法（TerminalBuffer append-only）把『丢输出』换成了『无界累积』：TerminalBuffer.stdout/stderr（handlers.rs:298-304）只 append（:381-382），全仓库无任何 trim/clear，仅在 release 时随条目删除（:586）；output 每次 clone 全量历史（:521-522）。Protocol 里 terminal/create 的 output_byte_limit（protocol.rs:678）仍然被完全忽略（grep 无消费点），因此连 agent 显式申请的限额也无效。量化实测：单次 wait_for_exit（内部 10ms 轮询、预算 120s）跑 `sh -c 'yes flood & sleep 8'` 就在 8s 内累积 50.7MB、RSS 10MB→153MB（约 6.4MB/s），按 120s 预算外推 ≈760MB/terminal，多 terminal 相乘 ⇒ 外部 agent（第三方二进制）可用一条命令把宿主 OOM；旧实现 poll 后 drain，内存是有界的，故这是本次修复引入的回归。修法：给 TerminalBuffer 设硬上限（优先取 output_byte_limit，缺省如 1MiB/流），超限即停 append 并置 truncated=true（或保留尾部窗口），并在 create 时记录限额。（附注：7bde4b94 的 ADR 把『per-terminal append-only 缓冲』记为既定决策但未记录任何上限，修复时应把上限一并写入该决策记录。）",
+      "counterexample_cmd": "/tmp/probe_wait_mem_bin   # 单次 wait_for_exit + `yes` 洪水：8s 累积缓冲 50790400B、RSS 153524KB；/tmp/probe_mem2_bin 3s 内 1220 次 output 累积 45.4MiB（源码 /tmp/probe_wait_mem.rs、/tmp/probe_mem2.rs，rustc --extern pony_agent_core=target/debug/deps/libpony_agent_core-*.rlib 编译；结构证据：grep -n 'push_str\\|clone()' crates/pony-agent-core/src/acp/handlers.rs 无任何上限分支）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/config.rs",
+      "line": 417,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "detail": "B2 的致命码白名单只留 invalid_json/invalid_root/unsupported_schema_version，把同样是『文件级（server==None）整份不可用』的 invalid_mcp_servers（mcp_config.rs:416-422，`mcpServers` 不是对象即整份丢弃）一并降级成「忽略+诊断」。但 config.rs:344-347 的文档仍明确把 invalid_mcp_servers 列入 fail-closed 清单，错误码面（:355 `acp_config_invalid`）也未同步；tests/ 下 grep 不到任何 invalid_mcp_servers 用例（0 命中）⇒ 全局/工作区 mcp.json 结构损坏时，acp_delegate 会静默以 0 个 MCP server 上线而不是 fail-closed。要么把该码加回白名单，要么改文档并在测试里钉住新语义。",
+      "counterexample_cmd": "sed -n '344,348p;413,421p' crates/pony-agent-core/src/acp/config.rs && grep -rn 'invalid_mcp_servers' crates/pony-agent-core/tests/ | wc -l   # => 0（无任何覆盖）"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/transport.rs",
+      "line": 282,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "detail": "acp-inbound 分发线程的 JoinHandle 被丢弃（:282-315，`if let Err(error) = dispatcher` 只看 spawn 失败），transport 不保存句柄、close()（:526-575）也不 join、无任何关停信号；线程退出唯一路径是 request_sender 随读线程 drop 后 channel 关闭，或在途 handler 返回后写 stdin 失败 break。实测 close() 10ms 返回后线程仍存活 1/3/5s，直到 6s 的 handler 返回才消失 ⇒ 若在途的是 wait_for_exit（预算 120s）或真实 PermissionHandler（等用户审批），close 后线程可再活数分钟，期间仍持有 stdin/fatal/handler 的 Arc 并对已关闭的终端继续轮询。不是无界泄漏，但『close 即收口』不成立且无测试。修法：保存 JoinHandle + close 时用关停标志/Condvar 唤醒并 join（或把长等待改成可分片的 recv_timeout）。",
+      "counterexample_cmd": "/tmp/probe_lifecycle_bin   # [L] close() 返回用时=10.13ms；acp-inbound 线程数=1（close 后 1s/3s/5s 仍为 1，8s 才 0）；源码 /tmp/probe_lifecycle.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/transport.rs",
+      "line": 670,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "detail": "读线程只入队（:667-676）确实解开了 responses 的饿死，但入站**请求**仍由单线程串行消费（:282-303 单 for 循环）。实测：agent 连发 wait_for_exit(9602, 5s) 与 terminal/output(9603) 时，9603 的应答被压到 5.008s 才写出（对照组把 9603 放前面则 0.002s 即应答）⇒ 一条长 wait 会把后续所有入站请求（包括用来救场的 terminal/kill）整段排队，最长 120s。这是旧实现就有的串行语义（未回归），且多数 ACP agent 逐条 await，故列 ADVISORY；但 commit message「长等待不再饿死其它入站帧」对外表述强于实现，且 h4 无法观测该点（见下一条）。",
+      "counterexample_cmd": "/tmp/probe_dispatch2_bin wait_first   # 9603 应答 5.008s；/tmp/probe_dispatch2_bin output_first => 9603 0.002s（对照）"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_config_regressions.rs",
+      "line": 397,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "h4 声称验证『不得饿死其它入站应答』，但断言结构性失效：夹具 probe_terminal_long（fixtures/acp_fake_agent.sh:186-199）是严格同步的——9404 只有在读到 9402 的应答之后才发出，因此 9404 永远不可能观测到 wait 期间的并发性；该断言实际只证明『wait 结束后分发线程还活着』。真正的反例需要 agent 在 wait 在途时不等待而连发第二个请求（见 /tmp/probe_dispatch2_bin）。B4 的『不饿死』两字目前没有任何测试支撑。建议补一条并发用例（连发 wait+kill/output，断言第二个请求的应答早于第一个）。",
+      "counterexample_cmd": "sed -n '186,205p' crates/pony-agent-core/tests/fixtures/acp_fake_agent.sh   # 9404 在 9402 应答之后才 emit；/tmp/probe_dispatch2_bin wait_first 给出真并发反例"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_config_regressions.rs",
+      "line": 298,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "h3（:298 只 install_fs_handler / :302-315 只断言 fs 两 id）只覆盖 fs 一侧：terminal 的对偶闸门（client.rs:570）与 install_handlers（client.rs:530-543，仍无条件写槽位，仅靠 :152-165 的分发闸门兜底）都没有反例用例；h3 也只断言『有 error』而不校验 error.data.code=acp_unavailable，若将来 handler 装配成功但被 path_permission 拒绝，同一断言仍会绿。另外 install_fs_handler/install_terminal_handler 被拒时只 eprintln + 返回 ()（client.rs:554-561/:570-577），调用方无法用类型系统感知『装配被丢弃』。建议补 terminal 版 h3 + 断言错误码。",
+      "counterexample_cmd": "grep -n 'install_terminal_handler\\|install_handlers' crates/pony-agent-core/tests/*.rs | grep -c 'declared\\|未声明'; sed -n '549,578p' crates/pony-agent-core/src/acp/client.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/handlers.rs",
+      "line": 280,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "detail": "read_slice 的 `SliceReadError::NotUtf8` 分支不可达：`if index == 0 && !selected.is_empty()` 恒假（index==0 ⇒ selected 必空），而 BufRead::read_line 遇到非法 UTF-8 会返回 io::Error(InvalidData)，已在 :261 映射成 Io。实测非 UTF-8 文件报 `Internal(读取文件失败（…）：stream did not contain valid UTF-8)`，docs 承诺的『文件不是合法 UTF-8』文案（:176-180）永不触发。功能上仍 fail-closed，属死代码 + 错误分类漂移。",
+      "counterexample_cmd": "/tmp/probe_fs_bin   # [F] 非 UTF-8 整读 => Err(\"Internal(\\\"读取文件失败（<workspace>/bad.bin）：stream did not contain valid UTF-8。\\\")\")"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/handlers.rs",
+      "line": 143,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "detail": "上一轮 ADVISORY（handlers.rs:169 SECURITY）只闭环了 OOM 一半：read_slice 现在单次 open + 流式 + max_bytes 上限，metadata 膨胀不再能撑爆内存。但 canonicalize-then-open 竞态仍在：classify 返回 canonical 字符串（:142），随后 std::fs::metadata（:143）与 File::open（:253）各自按字符串重新解析路径；同一 agent 完全可以用 terminal 在 workspace 内把目录换成指向外部的 symlink，让判定与打开指向不同 inode。修法同前（open 后 fstat/读都走同一 fd）。",
+      "counterexample_cmd": "sed -n '139,170p;246,262p' crates/pony-agent-core/src/acp/handlers.rs   # classify → metadata → File::open 三次独立路径解析"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/handlers.rs",
+      "line": 541,
+      "rule": "TIMEOUT",
+      "severity": "ADVISORY",
+      "detail": "wait_for_exit 的预算硬编码 crate 常量 ACP_DEFAULT_TURN_BUDGET（acp/mod.rs:32，120s），与调用方 set_turn_budget 完全解耦：会话默认 prompt 预算也是 120s，因此『需要 ~120s 的命令』必然先撞 prompt deadline，wait 的 120s 永远用不满；反过来调用方把整轮预算调到 600s 也救不了 wait。预算应作为 handler 可配置字段由 orchestration 注入（与 prompt 预算同源），否则 NFR 里 wait 语义仍然是两个不相干的数字。",
+      "counterexample_cmd": "grep -n 'ACP_DEFAULT_TURN_BUDGET' crates/pony-agent-core/src/acp/{mod.rs,handlers.rs,session.rs} crates/pony-agent-core/src/agent/tools/orchestration.rs   # handlers/session 各自硬编码，无参数注入"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/handlers.rs",
+      "line": 330,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "detail": "workspace 边界只靠 with_workspace_root 的 Option：ManagedTerminalHandler::new（:330-336，public）不绑定 root，resolve_cwd 便只校验『绝对路径 + 是目录』（:404-431），实测可让 agent 以 cwd=/etc 执行命令（生产路径 orchestration.rs:163-169 已改用 with_workspace_root，故生产安全；但 new() 仍是公开的脚枪，h1/h4 也在用它）。建议把 with_workspace_root 设为唯一构造口，或让 new() 至少拒绝 workspace 外 cwd。",
+      "counterexample_cmd": "/tmp/probe_cwd_bin   # [C4] 未绑定 + cwd=/etc => OK pwd=/etc；[C2] 绑定 root + cwd=/etc => REJECT outside_workspace_write_denied"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/config.rs",
+      "line": 445,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "detail": "上一轮 ADVISORY（inherit 把 mcp.json 里 `${env:VAR}` 展开后的明文值随 session/new 交给外部 agent 进程）仍未闭环：docs/architecture/acp-client-integration.md 无任何『继承即把 env 明文交给第三方 agent』的说明，headers 也无敏感键诊断。协议决定行为可接受，但承诺面缺文档与诊断，属未记账的既有风险。",
+      "counterexample_cmd": "grep -rn '明文\\|env 明' docs/architecture/acp-client-integration.md | wc -l   # => 0；对应代码 sed -n '440,470p' crates/pony-agent-core/src/acp/config.rs"
+    }
+  ],
+  "machine_facts": {
+    "head": "7bde4b94a193af8621c7d2c6721dc69bdd9d7999",
+    "regressions_4cases": "cargo test -p pony-agent-core --test acp_config_regressions -- --test-threads=1 => exit 0，4 passed / 0 failed（6.70s）",
+    "regression_suite": "cargo test -p pony-agent-core --no-fail-fast --test acp_config_regressions --test acp_capabilities_contract --test acp_mcp_wiring --test acp_client_contract --test acp_p0_acceptance --test acp_p0_adversarial --test acp_p1_blockers --test acp_host_surface --test wave4_4_acceptance => exit 0；11+11+4+5+6+19+7+6+3 = 72 passed / 0 failed",
+    "size_check": "npm run size:check => exit 0（0 new violation / 61 over limit / 61 grandfathered）",
+    "cargo_check_shared": "npm run cargo:check:shared => exit 0（Finished dev profile）",
+    "red_phase": ".dev-team/acp-config-regressions-red.log：REGRESSIONS_EXIT=101，h1 output=\"\"、h4 -32603 5s 硬顶、h3 泄漏 TOP-SECRET-CONTENT —— 4 条用例具备真实红相判别力",
+    "independent_probes": "/tmp/probe_wait_mem_bin, /tmp/probe_mem2_bin, /tmp/probe_mem_bin, /tmp/probe_dispatch2_bin, /tmp/probe_dispatch3_bin, /tmp/probe_lifecycle_bin, /tmp/probe_cwd_bin, /tmp/probe_fs_bin（源码同名 .rs，均以 target/debug/deps/libpony_agent_core-*.rlib 独立编译，不属仓库源码）",
+    "apply_sandbox_environment": "逐行比对 process.rs:346-372 与旧内联块（268d17f7 diff 删除段）：env_clear → ESSENTIAL_ENV_VARS → environment_allowlist 的 split_once/回读两支完全一致，早退条件与调用位置（process_group/creation_flags 之后、spawn 之前）不变 ⇒ 行为等价",
+    "handler_gate_bypass": "先 install 后握手不可能（install_* 只有 &AcpAgentClient 一个入口，declared 在 connect 内固化）；先 connect 再 install 被 :554/:570 拒绝；install_handlers 绕闸门写槽位时仍被 :152-165 分发闸门拦下（探针 h3 + 源码双向）",
+    "head_at_receipt": "7bde4b94a193af8621c7d2c6721dc69bdd9d7999",
+    "head_note": "审查期间另一会话在 268d17f7 之上追加 7bde4b94（docs-only，+12 行 ADR，无代码改动）；staged/audited 代码状态 = 268d17f7，全部测试与探针在该状态上执行。该 ADR 把『append-only 缓冲』记为决策但未写上限，故本收据的 LEAK 结论同样适用于 7bde4b94。"
+  },
+  "attestation": {
+    "self_signed": false
+  }
+}

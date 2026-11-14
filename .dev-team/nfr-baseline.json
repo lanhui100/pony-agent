@@ -21,7 +21,8 @@
   "acp": {
     "request_timeout_ms": 5000,
     "malformed_line_streak_limit": 3,
-    "spawn_reap_grace_ms": 500
+    "spawn_reap_grace_ms": 500,
+    "handshake_timeout_ms": 30000
   },
   "team_tool_surface_exact_count": 39
 }
