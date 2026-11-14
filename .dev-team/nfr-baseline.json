@@ -17,5 +17,10 @@
     "file_handles",
     "network_connections",
     "subagent_processes"
-  ]
+  ],
+  "acp": {
+    "request_timeout_ms": 5000,
+    "malformed_line_streak_limit": 3,
+    "spawn_reap_grace_ms": 500
+  }
 }

@@ -376,6 +376,33 @@
       "type": "integer",
       "const": 200000,
       "description": "wave-61 v1.2 复登（值不得改动，真值源 subagent_runtime.rs SUBAGENT_MAX_PROMPT_BYTES）：子代理 prompt 字节上限（超出即 prompt_too_large）。契约：wave-61 C6.3/C6-A4。"
+    },
+    "acp": {
+      "type": "object",
+      "description": "B149（ACP P0）新增（additive-only，未进入顶层 required）：Pony 作为 ACP Client 驱动外部 agent 的 stdio 传输基准。真值源 crates/pony-agent-core/src/acp/transport.rs；契约见 .dev-team/contract-matrix-acp-p0.md。",
+      "properties": {
+        "request_timeout_ms": {
+          "type": "integer",
+          "const": 5000,
+          "description": "单次出站 ACP 请求（initialize / session/new / session/prompt）预算；超时 fail-closed 为 acp_timeout。注意：这是 stdio 子进程会话级往返，不是网络类 external_call_timeout_ms(<=3000)。"
+        },
+        "malformed_line_streak_limit": {
+          "type": "integer",
+          "const": 3,
+          "description": "stdout 连续非法 JSON 行阈值：未达阈值记 stderr 诊断并跳过该行（不 panic），达到即 fail-closed 为 acp_protocol_error。"
+        },
+        "spawn_reap_grace_ms": {
+          "type": "integer",
+          "const": 500,
+          "description": "close() 回收宽限：先关 stdin 等自然退出，超宽限后 Unix 对进程组 SIGKILL 并同步 wait()，禁止残留子进程。"
+        }
+      },
+      "required": [
+        "request_timeout_ms",
+        "malformed_line_streak_limit",
+        "spawn_reap_grace_ms"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
