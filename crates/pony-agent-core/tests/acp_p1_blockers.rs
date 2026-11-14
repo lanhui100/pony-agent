@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pony_agent_core::acp::config::{AcpAgentSpec, AcpCapabilitiesHint};
@@ -22,8 +22,9 @@ use pony_agent_core::acp::session::{AcpAgentSession, ACP_TOOL_CANCELLED};
 use pony_agent_core::acp::transport::ACP_REQUEST_TIMEOUT;
 use pony_agent_core::agent::budget::CancellationToken;
 use pony_agent_core::agent::runtime::TurnStreamEvent;
+use pony_agent_core::agent::tools::{ToolCall, ToolExecutionContext, ToolRouter};
 use pony_agent_core::agent::turn_flow::TurnEventSink;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 // ───────────────────────────── 设施 ─────────────────────────────
 
@@ -74,6 +75,28 @@ fn fake_spec(mode: &str, extra: &[&str]) -> AcpAgentSpec {
         default_cwd: None,
         capabilities_hint: AcpCapabilitiesHint::default(),
     }
+}
+
+fn fixture_script() -> String {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("acp_fake_agent.sh");
+    assert!(script.is_file(), "fake agent fixture 缺失: {}", script.display());
+    script.to_string_lossy().into_owned()
+}
+
+/// 进程级 XDG 隔离的串行闸（本文件仅 P1-11 需要读 acp-agents.json）。
+static CONFIG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn write_acp_agents_config(config_home: &Path, spec: Value) {
+    let dir = config_home.join("pony-agent");
+    std::fs::create_dir_all(&dir).expect("创建 pony-agent 配置目录");
+    std::fs::write(
+        dir.join("acp-agents.json"),
+        serde_json::to_string_pretty(&json!([spec])).expect("清单必须可序列化"),
+    )
+    .expect("写入 acp-agents.json");
 }
 
 fn spawn_session(mode: &str, extra: &[&str], cwd: &Path) -> AcpAgentSession {
@@ -237,5 +260,122 @@ fn p1_10_cancellation_token_aborts_prompt_and_notifies_agent() {
 
     let mut session = session;
     session.close();
+    cleanup(&cwd);
+}
+
+// ───────────────────────── P1-11 工具级取消联动（生产路径一半） ─────────────────────────
+
+/// P1-11：`acp_delegate` 必须把 `ToolExecutionContext.cancellation` 接入 ACP 会话，
+/// 使 stop_turn 取消能真正杀掉外部 agent：
+/// - fake agent 延迟 = baseline + 3000ms（后台 sleep 代表长任务，期间可接收 `session/cancel`）；
+/// - 运行中取消后，`execute_acp_delegate` 必须 `status=aborted` + `code=tool_cancelled`；
+/// - 耗时必须显著小于 slow 延迟；
+/// - agent 侧必须出现 `<marker>.cancel` 证据（证明 `session/cancel` 真发出）。
+#[test]
+fn p1_11_tool_path_cancellation_aborts_acp_delegate() {
+    let baseline_ms = nfr_acp_ms("request_timeout_ms");
+    let delay_ms = baseline_ms + 3000;
+    let delay_seconds = format!("{:.3}", delay_ms as f64 / 1000.0);
+
+    let cwd = temp_dir("tool-cancel");
+    let config_home = cwd.join("config");
+    let marker = cwd.join("tool-prompt.marker");
+    write_acp_agents_config(
+        &config_home,
+        json!({
+            "id": "fake",
+            "label": "Fake ACP agent",
+            "command": "sh",
+            "args": [
+                fixture_script(),
+                "slow_cancel",
+                marker.to_string_lossy(),
+                delay_seconds,
+                "acp-sess-1"
+            ]
+        }),
+    );
+
+    let _env_guard = CONFIG_ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+    std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+    let router = ToolRouter::with_workspace_root(cwd.clone());
+    let token = Arc::new(CancellationToken::new());
+    let context = ToolExecutionContext {
+        workspace_root: Some(cwd.clone()),
+        session_id: Some("tool-session".to_string()),
+        cancellation: Some(Arc::clone(&token)),
+        ..Default::default()
+    };
+    let call = ToolCall {
+        call_id: Some("call-acp-1".to_string()),
+        name: "acp_delegate".to_string(),
+        arguments: json!({
+            "agent": "fake",
+            "prompt": "long running external task",
+            "timeoutMs": delay_ms,
+            "description": "委派给外部 ACP agent"
+        }),
+        plan: None,
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    let (cancel_to_result, result) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = router.execute_with_context(&call, &context);
+            let _ = sender.send(result);
+        });
+
+        assert!(
+            wait_until(|| marker.exists(), Duration::from_millis(baseline_ms)),
+            "P1-11 前置：fake agent 必须在 {baseline_ms}ms 内收到 prompt"
+        );
+        let cancelled_at = Instant::now();
+        token.cancel();
+        let result = receiver
+            .recv_timeout(Duration::from_millis(delay_ms + baseline_ms))
+            .expect("P1-11 违约：取消后 acp_delegate 必须及时返回（不得等满 slow 延迟/预算）");
+        (cancelled_at.elapsed(), result)
+    });
+
+    match old_xdg {
+        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+        None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+
+    assert_eq!(
+        result.tool_name, "acp_delegate",
+        "P1-11：结果必须来自 acp_delegate，实际 {result:?}"
+    );
+    assert_eq!(
+        result.status, "aborted",
+        "P1-11 违约：工具级取消必须归约 status=aborted（当前未接线时会是 error/acp_timeout），实际 {result:?}"
+    );
+    assert!(
+        result.output.contains(ACP_TOOL_CANCELLED),
+        "P1-11 违约：错误码必须是 {ACP_TOOL_CANCELLED}，实际 {}",
+        result.output
+    );
+    assert!(
+        cancel_to_result < Duration::from_millis(delay_ms),
+        "P1-11 违约：取消必须在 slow 延迟 {delay_ms}ms 之前生效，实测 {cancel_to_result:?}"
+    );
+
+    // 取消链路证据：agent 只有在真正收到 session/cancel 后才落盘该文件。
+    let evidence = cwd.join("tool-prompt.marker.cancel");
+    assert!(
+        wait_until(|| evidence.exists(), Duration::from_millis(baseline_ms)),
+        "P1-11 违约：未向外部 agent 发送 session/cancel notification（agent 侧无证据）"
+    );
+    let raw = std::fs::read_to_string(&evidence).expect("读取 cancel 证据");
+    let frame: Value = serde_json::from_str(raw.lines().next().expect("cancel 证据行缺失"))
+        .expect("cancel 证据必须是 JSON");
+    assert_eq!(
+        frame["method"],
+        json!("session/cancel"),
+        "P1-11：发出的必须是 session/cancel notification"
+    );
+
     cleanup(&cwd);
 }

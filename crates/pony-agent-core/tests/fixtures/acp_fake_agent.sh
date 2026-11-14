@@ -20,6 +20,9 @@
 #   permission_prompt <file> <sessionId>
 #                                  prompt 期间发 session/request_permission，把 client 的应答原始行
 #                                  追加到 <file>，随后回 end_turn（P1-4 fail-closed）
+#   slow_cancel <markerFile> <delaySeconds> <sessionId>
+#                                  后台 sleep 模拟长任务；期间若收到 session/cancel 立即落证据
+#                                  （<markerFile>.cancel）并回 cancelled（P1-11 工具级取消联动）
 #   slow_prompt <delaySeconds> <sessionId>
 #                                  initialize/session/new 即时，session/prompt 延迟指定秒数后回 end_turn
 #                                  （P1-9 整轮预算用例：延迟 > ACP_REQUEST_TIMEOUT）
@@ -33,6 +36,7 @@ set -u
 mode="${1:-ok}"
 arg="${2:-}"
 arg2="${3:-}"
+arg3="${4:-}"
 
 emit() { printf '%s\n' "$1"; }
 
@@ -149,10 +153,14 @@ while IFS= read -r line; do
                     ;;
             esac
             ;;
-        flow|updates|permission_prompt|cancel_hold|slow_prompt)
+        flow|updates|permission_prompt|cancel_hold|slow_prompt|slow_cancel)
             m=$(method_of "$line")
             id=$(id_of "$line")
-            session_id="${arg2:-acp-sess-1}"
+            case "$mode" in
+                # slow_cancel：<marker> <delay> <sessionId>
+                slow_cancel) session_id="${arg3:-acp-sess-1}" ;;
+                *) session_id="${arg2:-acp-sess-1}" ;;
+            esac
             case "$m" in
                 initialize)
                     [ -n "$id" ] && respond_initialize "$id"
@@ -178,6 +186,22 @@ while IFS= read -r line; do
                         slow_prompt)
                             sleep "$arg"
                             [ -n "$id" ] && respond_stop "$id" end_turn
+                            ;;
+                        slow_cancel)
+                            prompt_id="$id"
+                            printf '%s\n' "$id" >> "$arg"
+                            # 后台 sleep 代表“agent 正在长时间执行”；主 shell 立即进入读循环，
+                            # 因而 session/cancel 在睡眠期间即可被接收（取消响应性）。
+                            sleep "${arg2:-5}" &
+                            while IFS= read -r next; do
+                                [ -z "$next" ] && continue
+                                nm=$(method_of "$next")
+                                if [ "$nm" = "session/cancel" ]; then
+                                    printf '%s\n' "$next" >> "$arg.cancel"
+                                    [ -n "$prompt_id" ] && respond_stop "$prompt_id" cancelled
+                                    break
+                                fi
+                            done
                             ;;
                         cancel_hold)
                             printf '%s\n' "$id" >> "$arg"
