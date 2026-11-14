@@ -223,7 +223,7 @@ Pony 模型通过工具 `acp_delegate` 把一段任务交给外部 ACP agent，c
 
 **阶段 P1（委派工具）** — `backlog:B150` ✅（两项遗留债见 B161/B162）
 - 验收：`tests/acp_client_contract.rs` 11 条全绿（初始化版本校验/绝对 cwd/update 三映射/permission fail-closed + Ask 往返/cancel 结算挂起审批/5 stopReason 归约/崩溃非 panic/工具面四项）。
-- 未覆盖：**真实端到端**驱动 `opencode acp` 与 `agy acp` 各一轮属人工验收项，本次仅用 fake agent 夹具（本机仅有 `agy`，无 `opencode`）。
+- **真机验证（2026-11-15）**：`opencode v2.2.7 acp`（`/home/dm/.opencode/bin/opencode`，绝对路径 spec）单轮通过 —— `ponycli acp --agent oc -p "Reply with exactly: OK" --output-format jsonl` → Exit 0，stdout `{"type":"turn:delta","text":"OK"}`。`agy acp`（1.5.9）**当前未登录**（`agy -p` 直接报 `Authentication required` + OAuth URL），因此 `agy` 侧真机轮次仍待登录后补。
 - 遗留债：transport 内联 permission 无 dispatcher 注入点（`B161`）；update 在 prompt 返回后 flush、非实时（`B162`）。
 - 门禁：`npm test`、`npm run verify`、`acp_client_contract.rs` 全绿。
 

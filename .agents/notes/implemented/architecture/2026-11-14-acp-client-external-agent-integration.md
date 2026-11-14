@@ -112,4 +112,7 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
   ⑤ `terminal/create` 支持 `cwd`（绝对 + canonical + `is_dir`，绑定 workspace root 时须在 root 内）；
      env 键按 `split('=')` 归一化后查 deny 表（杜绝 `KEY=VALUE` 绕过）；读切片改为「先按 line/limit
      切、再对实际返回内容判 120KB 上限」。
+- **真机验收（2026-11-15）**：`opencode v2.2.7 acp` 端到端单轮通过（CLI 路径，Exit 0，
+  `turn:delta.text=="OK"`）；`agy 1.5.9` 本机未登录（`agy -p` 返回 `Authentication required` + OAuth URL），
+  其真机轮次待登录后补。配置面形状：`acp-agents.json` **根是数组**（不是 `{"agents": [...]}`）。
 - **人工验收缺口**：`opencode acp` 本机不可用（仅有 `agy`），端到端真机联调仍需人工跑一轮。
