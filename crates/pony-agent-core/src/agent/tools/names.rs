@@ -86,6 +86,8 @@ pub fn canonical_tool_name(name: &str) -> Option<&'static str> {
         TOOL_JOB_LIST | "job.list" => Some(TOOL_JOB_LIST),
         // W42/PA-149：技能正文加载（产品名即工具名 `skill_load`）。
         TOOL_SKILL_LOAD | "skill.load" => Some(TOOL_SKILL_LOAD),
+        // B150/P1：外部 ACP agent 委派（产品名即工具名 `acp_delegate`；驼峰旧拼写归一）。
+        TOOL_ACP_DELEGATE | "AcpDelegate" | "acp.delegate" => Some(TOOL_ACP_DELEGATE),
         _ => None,
     }
 }
@@ -145,6 +147,8 @@ pub(super) fn builtin_aliases_for_primitive(primitive: &str) -> Vec<&'static str
         TOOL_JOB_KILL => vec![TOOL_JOB_KILL, "job.kill"],
         TOOL_JOB_LIST => vec![TOOL_JOB_LIST, "job.list"],
         TOOL_SKILL_LOAD => vec![TOOL_SKILL_LOAD, "skill.load"],
+        // B150/P1：外部 ACP agent 委派（点号别名与产品名同源）。
+        TOOL_ACP_DELEGATE => vec![TOOL_ACP_DELEGATE, "acp.delegate"],
         _ => Vec::new(),
     }
 }
@@ -192,7 +196,7 @@ pub(super) fn execution_policy_for_primitive(primitive: &str) -> ToolExecutionPo
             policy.default_timeout_ms = DEFAULT_RUN_TIMEOUT_MS;
             policy.result_budget_bytes = MAX_FULL_READ_BYTES as usize;
         }
-        TOOL_SUBAGENT | TOOL_WORKFLOW => {
+        TOOL_SUBAGENT | TOOL_WORKFLOW | TOOL_ACP_DELEGATE => {
             policy.concurrent_safe = true;
             policy.default_timeout_ms = 120_000;
         }
@@ -284,6 +288,8 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_JOB_LIST => "JobList",
         // W42/PA-149：`skill_load` 的产品名保持小写原样（契约面按此名断言，见 C1-5）。
         TOOL_SKILL_LOAD => TOOL_SKILL_LOAD,
+        // B150/P1：`acp_delegate` 同样小写原名透传（与 subagent 同构，避免 telemetry 记成 Run）。
+        TOOL_ACP_DELEGATE => TOOL_ACP_DELEGATE,
         // Wave-61 C1.6：10 项团队/子代理工具同样「小写原名透传」（与 TOOL_SKILL_LOAD 同构）。
         // 不登记会让 `model_visible_tool_name()` 回落字面量 "Run"，把 telemetry 的 tool activity
         //（telemetry.rs:306/332/508/576）记成 `Run`，污染 trace 取证面；也避免 descriptor 的
@@ -367,6 +373,8 @@ pub fn tool_kind_for_name(name: &str) -> ToolKind {
         TOOL_JOB_START | TOOL_JOB_OUTPUT | TOOL_JOB_KILL | TOOL_JOB_LIST => ToolKind::Execute,
         // W42/PA-149：技能正文加载是纯只读。
         TOOL_SKILL_LOAD => ToolKind::Read,
+        // B150/P1：外部 ACP agent 委派是复合执行（外部 agent 自带工具循环，与 subagent 同构）。
+        TOOL_ACP_DELEGATE => ToolKind::Composite,
         _ => ToolKind::External,
     }
 }
@@ -434,6 +442,8 @@ pub fn tool_exposure_for_name(name: &str) -> ToolExposure {
         | TOOL_JOB_LIST => ToolExposure::ModelVisible,
         // W42/PA-149：技能正文按需加载进入常驻模型可见面。
         TOOL_SKILL_LOAD => ToolExposure::ModelVisible,
+        // B150/P1：`acp_delegate` 进入常驻模型可见面（工具面 38 → 39）。
+        TOOL_ACP_DELEGATE => ToolExposure::ModelVisible,
         // Wave-61 C1：9 项团队/子代理工具进入常驻模型可见面（29 → 38）。
         // 可见性**不**随 `subagent_runtime_wired` 变化（契约 C1.4）：工具面逐 turn 恒定，
         // 「可用/可执行」才由 :152 的运行时判定收口（10 处 fail-closed 门保持不变）。
@@ -496,6 +506,8 @@ pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
         TOOL_TEAM_TASK_CREATE => Some("建任务".to_string()),
         TOOL_TEAM_TASK_UPDATE => Some("更新任务".to_string()),
         TOOL_TEAM_TASK_LIST => Some("任务板".to_string()),
+        // B150/P1：外部 ACP agent 委派（小写原名透传，按产品名匹配）。
+        TOOL_ACP_DELEGATE => Some("外部代理".to_string()),
         // PA-112 / W20：`todo_write` / `todo_list` 与 goal 工具族同样走「小写原名透传」，
         // 但注意本函数的匹配对象是 **产品名**（`model_visible_tool_name(name)` 的输出）：
         // todo 工具的 `canonical_tool_name` 归一后仍是小写 primitive，而 `model_visible_tool_name_opt`

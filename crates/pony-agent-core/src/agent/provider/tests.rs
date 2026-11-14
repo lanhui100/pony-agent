@@ -242,8 +242,10 @@
                 "JobOutput".to_string(),
                 "JobKill".to_string(),
                 "JobList".to_string(),
-                // W42/PA-149：技能正文按需加载（builtin_tools 追加序末位）。
-                "skill_load".to_string()
+                // W42/PA-149：技能正文按需加载。
+                "skill_load".to_string(),
+                // B150/P1：ACP 委派（builtin_tools 追加序末位，模型面 38 → 39）。
+                "acp_delegate".to_string()
             ]
         );
     }
@@ -355,8 +357,10 @@
                 "JobOutput".to_string(),
                 "JobKill".to_string(),
                 "JobList".to_string(),
-                // W42/PA-149：技能正文按需加载（builtin_tools 追加序末位）。
-                "skill_load".to_string()
+                // W42/PA-149：技能正文按需加载。
+                "skill_load".to_string(),
+                // B150/P1：ACP 委派（builtin_tools 追加序末位，模型面 38 → 39）。
+                "acp_delegate".to_string()
             ]
         );
         assert!(payload.iter().all(|tool| {
@@ -365,11 +369,14 @@
                 .is_some_and(|description| !description.trim().is_empty())
         }));
         // PA-076 P2-6: Plan and ViewImage 在既有 13-tool 前缀后追加；W25 起 team 工具已被
-        // 摘除（未接线），W37-C1 job_* 七件成为尾部，W42 追加 skill_load 成为当前尾项
-        //（cache-friendly stable prefix invariant from design Decision 10 仍保持：
-        // 前缀顺序不变，仅尾部变化）。
+        // 摘除（未接线），W37-C1 job_* 七件成为尾部，W42 追加 skill_load，B150/P1 追加
+        // acp_delegate 成为当前尾项（cache-friendly stable prefix invariant from design
+        // Decision 10 仍保持：前缀顺序不变，仅尾部变化）。
         let last_two = &names[names.len() - 2..];
-        assert_eq!(last_two, &["JobList".to_string(), "skill_load".to_string()]);
+        assert_eq!(
+            last_two,
+            &["skill_load".to_string(), "acp_delegate".to_string()]
+        );
     }
 
     #[test]
@@ -798,7 +805,7 @@
     }
 
     /// ADR 0065 decision 4 / T2 交界不变量一：**纯内建数组**的输出必须与旧
-    /// `is_builtin_tool_definition_set == true` 分支逐字节相同（38 项产品面、去重、registry 序）。
+    /// `is_builtin_tool_definition_set == true` 分支逐字节相同（39 项产品面、去重、registry 序）。
     #[test]
     fn surface_contract_views_is_byte_identical_for_the_pure_builtin_array() {
         let builtin = crate::agent::tools::builtin_tools();
@@ -809,12 +816,12 @@
         );
         assert_eq!(
             surface_contract_views(&builtin).len(),
-            38,
-            "模型可见产品面仍是 38 项"
+            39,
+            "模型可见产品面 39 项（Wave-61 的 38 项 + B150/P1 acp_delegate）"
         );
     }
 
-    /// 交界不变量二：外部工具**只追加、不改序**。追加一个 `mcp__*` 条目后，内建 38 项必须
+    /// 交界不变量二：外部工具**只追加、不改序**。追加一个 `mcp__*` 条目后，内建 39 项必须
     /// 逐字节不变且保持前缀，外部条目按数组顺序排在最后（KV-cache 前缀稳定）。
     #[test]
     fn surface_contract_views_appends_external_tools_after_an_unchanged_builtin_prefix() {

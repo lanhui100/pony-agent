@@ -69,6 +69,27 @@ impl ToolRouter {
         }
     }
 
+    /// B150/P1：`acp_delegate` —— 把一段任务委派给外部 ACP agent（空桩）。
+    ///
+    /// 结构照抄 [`Self::execute_subagent`]（`orchestration.rs:19-72`）：
+    /// 解析 `AcpAgentSpec`（`acp::config::resolve_agent`）→ 解析 workspace_root（与 subagent
+    /// 同源 `resolved_workspace_root`）→ 建 `tool.call` span → 建 [`AcpAgentSession`] → 跑
+    /// prompt → 归约 `ToolResult`。`args: { agent(必填), prompt(必填), cwd?, timeoutMs? }`。
+    ///
+    /// 错误码沿用 §3.2.9 的 `acp_*` 分源（`acp_spawn_failed` / `acp_initialize_failed` /
+    /// `acp_protocol_error` / `acp_agent_error` / `acp_agent_refused` / `acp_auth_required` /
+    /// `acp_timeout` / `acp_unavailable`）。
+    ///
+    /// [`AcpAgentSession`]: crate::acp::session::AcpAgentSession
+    #[allow(unused_variables)]
+    pub(super) fn execute_acp_delegate(
+        &self,
+        call: &ToolCall,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        unimplemented!("P1：acp_delegate 工具实现（spec 解析 + workspace root + session.prompt + 归约）")
+    }
+
     pub(super) fn execute_workflow(&self, call: &ToolCall) -> ToolResult {
         if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_WORKFLOW);

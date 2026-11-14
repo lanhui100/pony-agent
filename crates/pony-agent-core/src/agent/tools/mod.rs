@@ -274,6 +274,9 @@ pub(crate) const TOOL_JOB_LIST: &str = "job_list";
 // 白名单判定，fail-closed）。
 pub(crate) const TOOL_SKILL_LOAD: &str = "skill_load";
 
+// B150/P1：外部 ACP agent 委派（工具即治理边界，与 subagent 同构；产品名 = primitive 名）。
+pub(crate) const TOOL_ACP_DELEGATE: &str = "acp_delegate";
+
 pub struct ToolRouter {
     workspace_root: PathBuf,
     process_manager: ProcessManager,
@@ -304,7 +307,7 @@ pub type PrimitiveDispatchFn = fn(&ToolRouter, &ToolCall, &ToolExecutionContext)
 /// 表顺序 = `builtin_tools()` 定义序（`primitive_dispatch_table_covers_every_builtin_primitive`
 /// 的全覆盖遍历断言依赖该等价关系；查表本身与顺序无关）。
 ///
-/// 不变量（ADR 0065）：表必须**恰好**覆盖 `builtin_tools()` 的 45 个 primitive，一个不多一个
+/// 不变量（ADR 0065）：表必须**恰好**覆盖 `builtin_tools()` 的 46 个 primitive，一个不多一个
 /// 不少——这条不变量是失去 `match` 穷尽性检查后的替代门禁。
 static PRIMITIVE_DISPATCH_TABLE: &[(&str, PrimitiveDispatchFn)] = &[
     // `time_now`：无参 primitive，签名适配为忽略 call/context。
@@ -428,6 +431,10 @@ static PRIMITIVE_DISPATCH_TABLE: &[(&str, PrimitiveDispatchFn)] = &[
     }),
     (TOOL_SKILL_LOAD, |router, call, context| {
         router.execute_skill_load(call, context)
+    }),
+    // B150/P1：外部 ACP agent 委派（空桩；结构照抄 `execute_subagent`）。
+    (TOOL_ACP_DELEGATE, |router, call, context| {
+        router.execute_acp_delegate(call, context)
     }),
 ];
 

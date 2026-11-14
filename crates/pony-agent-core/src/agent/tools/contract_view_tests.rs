@@ -40,7 +40,7 @@ fn builtin_tool_contract_views_deduplicate_to_model_surface() {
             "Plan",
             "ViewImage",
             // Wave-61 C1：9 项团队工具进入模型可见面（插在 ViewImage 之后、TodoWrite 之前，
-            // 与本文件 `characterization_product_surface_...` 的 38 项清单同序；
+            // 与本文件 `characterization_product_surface_...` 的 39 项清单同序；
             // `workflow` 因桩实现保持 Internal，不在可见面）。
             "subagent",
             "spawn_teammate",
@@ -65,7 +65,9 @@ fn builtin_tool_contract_views_deduplicate_to_model_surface() {
             "JobKill",
             "JobList",
             // W42/PA-149：技能正文按需加载（产品名保持 `skill_load`）。
-            "skill_load"
+            "skill_load",
+            // B150/P1：ACP 委派（模型面 38 → 39）。
+            "acp_delegate"
         ]
     );
     assert_eq!(
@@ -112,7 +114,9 @@ fn builtin_tool_contract_views_deduplicate_to_model_surface() {
             "job_kill",
             "job_list",
             // W42/PA-149：七件 W37 工具之后的技能正文加载 primitive。
-            "skill_load"
+            "skill_load",
+            // B150/P1：ACP 委派 primitive（产品名即 primitive 名）。
+            "acp_delegate"
         ]
     );
 }
@@ -128,7 +132,7 @@ fn canonical_tool_name_keeps_run_as_product_name_but_allows_internal_run_shell()
 }
 
 /// ADR 0065 decision 2：`execute_internal` 从 72 行 `match` 改为 fn 指针表后，编译期穷尽性
-/// 检查消失，必须由本遍历断言补回——表与 `builtin_tools()` 的 45 个 primitive 必须**双射**
+/// 检查消失，必须由本遍历断言补回——表与 `builtin_tools()` 的 46 个 primitive 必须**双射**
 /// （每个恰好一次，无缺无多余），且表内每个 key 都能被 `canonical_tool_name` 归一化回自身
 /// （否则该臂永久不可达）。
 #[test]
@@ -151,12 +155,12 @@ fn primitive_dispatch_table_covers_every_builtin_primitive() {
 
     assert_eq!(
         builtin_primitives.len(),
-        45,
+        46,
         "builtin_tools() 的 primitive 数已变化；分派表必须同步"
     );
     assert_eq!(
         sorted_table, builtin_primitives,
-        "分派表必须是 45 个内建 primitive 的双射（缺臂 ⇒ 工具静默变 unsupported_tool）"
+        "分派表必须是 46 个内建 primitive 的双射（缺臂 ⇒ 工具静默变 unsupported_tool）"
     );
 
     for primitive in table.iter().copied() {
@@ -179,13 +183,13 @@ fn characterization_product_surface_keeps_unique_names_and_json_object_schemas()
 
     assert_eq!(
         tools.len(),
-        45,
-        "W42/PA-149 新增 skill_load 后内部注册数（44+1）"
+        46,
+        "W42/PA-149 新增 skill_load 后内部注册数 45；B150/P1 追加 acp_delegate → 46"
     );
     assert_eq!(
         names.len(),
-        38,
-        "Wave-61 C1 后模型可见工具面 38 项（29 既有 + 9 团队工具；workflow 桩实现不暴露）"
+        39,
+        "Wave-61 C1 后模型可见面 38 项 + B150/P1 的 acp_delegate = 39 项"
     );
     assert_eq!(
         names,
@@ -231,7 +235,9 @@ fn characterization_product_surface_keeps_unique_names_and_json_object_schemas()
             "JobKill",
             "JobList",
             // W42/PA-149：技能正文按需加载。
-            "skill_load"
+            "skill_load",
+            // B150/P1：ACP 委派（模型面 38 → 39）。
+            "acp_delegate"
         ]
     );
     for view in views {
@@ -381,8 +387,8 @@ fn builtin_registry_projects_the_existing_product_surface() {
     assert_eq!(registry.snapshot_id, "builtin-tool-catalog-v1");
     assert_eq!(
         names.len(),
-        38,
-        "Wave-61 C1 后模型可见面 38 项（29 既有 + 9 团队工具；workflow 桩实现不暴露）"
+        39,
+        "Wave-61 C1 的 38 项 + B150/P1 的 acp_delegate = 39 项"
     );
     assert!(registry.resolve("Run").is_some());
     assert!(registry.resolve("workspace.run_command").is_some());
@@ -390,6 +396,20 @@ fn builtin_registry_projects_the_existing_product_surface() {
     assert!(registry.resolve("Present").is_some());
     assert!(registry.resolve("JobList").is_some());
     assert!(registry.resolve("skill_load").is_some());
+    // B150/P1：`acp_delegate` 的 descriptor 必须可解析、ModelVisible、Composite 且带中文展示名。
+    assert_eq!(
+        registry
+            .resolve("acp_delegate")
+            .map(|descriptor| descriptor.exposure.clone()),
+        Some(ToolExposure::ModelVisible),
+        "acp_delegate 必须已在模型可见面（B150/P1）"
+    );
+    assert_eq!(
+        registry
+            .resolve("acp_delegate")
+            .map(|descriptor| descriptor.kind.clone()),
+        Some(ToolKind::Composite)
+    );
     // Wave-61 C1：10 项团队工具的 descriptor 必须可解析且已 ModelVisible。
     for name in [
         "subagent",

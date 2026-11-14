@@ -344,8 +344,8 @@
     },
     "team_tool_surface_exact_count": {
       "type": "integer",
-      "const": 38,
-      "description": "wave-61 新增（additive-only，未进入顶层 required）：模型可见工具面精确项数。29（W37-C1 × W42/PA-149 基线）+ 9 项团队工具（subagent/spawn_teammate/list_agents/send_message/interrupt_agent/drain_inbox/team_task_create/team_task_update/team_task_list）= 38；workflow 按 v1.2 C1.7 保持 Internal（实现是桩，orchestration.rs:286-297），不进模型面。契约：wave-61 C1-A1/C1-A8。"
+      "const": 39,
+      "description": "模型可见工具面精确项数（精确值语义，不放宽为 minimum）。wave-61 基线：29（W37-C1 × W42/PA-149）+ 9 项团队工具 = 38；B150/P1 追加 acp_delegate（acp_delegate + 委派工具面）后 = 39。workflow 按 v1.2 C1.7 仍保持 Internal（实现是桩），不进模型面。真值源：agent/tools/schema.rs 的 builtin_tools() + agent/provider/tests.rs 的面投影断言。契约：wave-61 C1-A1/C1-A8；B150 P1 增量同步（值 38 → 39）。"
     },
     "subagent_engine_registration_required_in": {
       "type": "array",

@@ -1125,6 +1125,34 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             })),
         },
+        // B150/P1：AcpDelegate —— 把一段任务委派给外部 ACP agent（opencode / antigravity）。
+        ToolDefinition {
+            name: TOOL_ACP_DELEGATE,
+            description: "把一段任务委派给外部 ACP agent（如 opencode / antigravity）执行，返回该 agent 的最终结果；agent 名取自已配置的 ACP agent 清单。",
+            input_schema: with_description(json!({
+                "type": "object",
+                "properties": {
+                    "agent": {
+                        "type": "string",
+                        "description": "ACP agent 标识（如 opencode / antigravity）"
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "交给外部 agent 的任务描述"
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "工作目录（绝对路径；缺省使用当前会话 workspace root）"
+                    },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "description": "整轮委派超时毫秒数（缺省由执行策略决定）"
+                    }
+                },
+                "required": ["agent", "prompt"],
+                "additionalProperties": false
+            })),
+        },
     ]
 }
 
@@ -1163,6 +1191,8 @@ pub(super) fn contract_priority(view: &ToolDefinitionContractView) -> u8 {
         TOOL_JOB_LIST => 100,
         // W42/PA-149：技能正文加载与内置只读工具同级。
         TOOL_SKILL_LOAD => 100,
+        // B150/P1：ACP 委派与子代理同级的复合工具。
+        TOOL_ACP_DELEGATE => 100,
         _ => 50,
     }
 }
