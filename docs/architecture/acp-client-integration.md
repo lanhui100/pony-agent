@@ -1,7 +1,7 @@
 # Pony 接入外部 ACP Agent 的实现方案（Pony as ACP Client）
 
-> 状态：调研 + 方案（未改代码）
-> 核对日期：2026-11-13
+> 状态：P0（协议层）/ P1（会话驱动 + `acp_delegate`）/ P2-CLI（`ponycli acp`）已交付；P2 可选面（Tauri 命令 / 前端类型）见 `backlog:B163`
+> 核对日期：2026-11-14（原调研 2026-11-13）
 > 协议真源：agentclientprotocol.com `protocol/v1`（Stable，`protocolVersion` 为整数 `1`）
 >
 > **执行账本（本方案拆成三条待办，按依赖顺序推进）**
@@ -14,21 +14,21 @@
 
 ---
 
-## 0. 现状核对（仓库实测）
+## 0. 现状核对（2026-11-14 更新：P0/P1/P2-CLI 已落地）
 
 | 事实 | 证据 |
 |---|---|
-| `crates/pony-agent-core/src/acp/` 存在 3 个文件（`mod.rs` / `protocol.rs` / `server.rs`） | `ls crates/pony-agent-core/src/acp/` |
-| **该模块未参与编译**：`lib.rs` 只有 `pub mod agent;`，全仓 `acp::` 零命中 | `cat crates/pony-agent-core/src/lib.rs`；`grep -rn "crate::acp\|pony_agent_core::acp" --include=*.rs .` → 0 |
-| 现有草稿是 **agent 侧（server）**，方向与本需求相反 | `server.rs` 处理 `initialize` / `session/new` / `session/cancel` / `session/request_permission` 的**入站**请求 |
-| 草稿协议与 v1 不符：`protocolVersion: "0.1"`（字符串，官方是整数 `1`）；把 `session/request_permission` 当成 client→agent 的审批应答（官方是 **agent→client 的请求**） | `server.rs:57-62`、`server.rs:78-130` |
-| `crates/pony-agent-sdk/` 只有 `src/lib.rs`，**无 `Cargo.toml`**，不在 workspace members ⇒ 也未参与构建 | `ls crates/pony-agent-sdk`；`Cargo.toml` members 仅 core + src-tauri |
-| SDK 里 `PonyClient::spawn` 传 `acp` 子命令，但 CLI **无此子命令**（`SubCommand` 只有 `Run`/`Init`） | `crates/pony-agent-sdk/src/lib.rs:15-20`；`crates/pony-agent-core/src/bin/cli.rs:64-68` |
-| 既有 ACP 测试是空壳：只断言字符串含 `"jsonrpc"` | `crates/pony-agent-core/tests/wave4_4_acceptance.rs:1-6` |
-| 无任何 ACP 相关 ADR | `grep -rln "ACP" .agents/notes/` → 仅 2 条无关历史 |
-| 核对当时无 ACP 相关 backlog 条目；现已拆为 B149（P0）/ B150（P1）/ B151（P2） | `node scripts/backlog.mjs list` |
+| `acp/` 已参与编译：`lib.rs` 挂 `pub mod acp;`，模块面为 `protocol` / `transport` / `config` / `client` / `session` | `crates/pony-agent-core/src/lib.rs`、`acp/mod.rs` |
+| 旧草稿 `acp/server.rs`（方向相反的 agent 侧）与 `crates/pony-agent-sdk/`（无 `Cargo.toml`、零消费者）已删除 | `git log --oneline -- crates/pony-agent-core/src/acp/server.rs crates/pony-agent-sdk` |
+| 协议层是 ACP v1：`protocolVersion` 为整数 `1`；`session/cancel`、`session/update` 是 notification；`session/request_permission` 是 **agent→client 请求** | `acp/protocol.rs`（`PROTOCOL_VERSION: u32 = 1`）；`tests/acp_p0_acceptance.rs` |
+| stdio transport 已实现：env 白名单 + Unix 进程组 + 三路分流（入站请求/通知/响应）+ 迟到响应缓冲 + 连续 3 行非法 JSON fail-closed + stderr 环形 32 + close 进程组 SIGKILL | `acp/transport.rs`；`tests/acp_p0_adversarial.rs`（7 条 L2-AT） |
+| 会话驱动已实现：串行闸、update→`TurnEventSink` 映射、stopReason 5→4 归约、permission→`ask_control` CAS 往返、取消令牌联动 | `acp/session.rs`；`tests/acp_client_contract.rs`（11 条） |
+| `acp_delegate` 已是模型可见工具（工具面 38→39、builtin 45→46） | `agent/tools/{schema,names,mod}.rs`；`tests/acp_client_contract.rs` P1-8 |
+| 宿主形态：`ponycli acp`（`--list` / 单轮 `-p` / `--resume` fail-closed）可用 | `crates/pony-agent-core/src/bin/cli.rs`；`tests/acp_host_surface.rs`（5 条） |
+| 未做（登记在 backlog）：transport 内联 permission 无 dispatcher 注入点（B161）、update 非实时 flush（B162）、Tauri 三命令与前端类型（B163） | `node scripts/backlog.mjs list` |
+| 既有 ACP 空壳测试（`wave4_4_acceptance.rs` 的 B084/B085/B086 字符串恒真断言）已替换为真契约 | `tests/wave4_4_acceptance.rs` |
+| 决策记录 | `.agents/notes/implemented/architecture/2026-11-14-acp-client-external-agent-integration.md` |
 
-**结论**：当前项目**没有任何可用的 ACP 实现**，只有一段未编译、协议方向相反的草稿。
 
 ---
 
@@ -212,18 +212,20 @@ Pony 模型通过工具 `acp_delegate` 把一段任务交给外部 ACP agent，c
 
 ---
 
-## 5. 落地顺序与验收
+## 5. 落地顺序与验收（2026-11-14：P0/P1/P2-CLI 已交付）
 
-**阶段 P0（协议层，1 个 PR）** — `backlog:B149`
-- 验收：`cargo check` 通过；`acp::protocol` 对官方 schema 样例 round-trip 全绿；`acp::transport` 对 fake agent 完成 `initialize` 往返。
+**阶段 P0（协议层）** — `backlog:B149` ✅
+- 验收：`cargo check` 通过；`protocol` 官方样例 round-trip 全绿（`tests/acp_p0_acceptance.rs`）；`transport` 对 fake agent 完成 `initialize` 往返；连续 3 行非法 JSON fail-closed（`tests/acp_p0_adversarial.rs`）。
 - 门禁：`npm run cargo:check:shared`、`npm run adr:check`。
 
-**阶段 P1（委派工具，1 个 PR）** — `backlog:B150`
-- 验收：`acp_delegate` 能真实驱动 `opencode acp` 与 `agy acp` 各跑通一轮（人工验收）；`request_permission` 走 Ask 面板；取消链路 `stop_turn → session/cancel → cancelled`。
+**阶段 P1（委派工具）** — `backlog:B150` ✅（两项遗留债见 B161/B162）
+- 验收：`tests/acp_client_contract.rs` 11 条全绿（初始化版本校验/绝对 cwd/update 三映射/permission fail-closed + Ask 往返/cancel 结算挂起审批/5 stopReason 归约/崩溃非 panic/工具面四项）。
+- 未覆盖：**真实端到端**驱动 `opencode acp` 与 `agy acp` 各一轮属人工验收项，本次仅用 fake agent 夹具（本机仅有 `agy`，无 `opencode`）。
+- 遗留债：transport 内联 permission 无 dispatcher 注入点（`B161`）；update 在 prompt 返回后 flush、非实时（`B162`）。
 - 门禁：`npm test`、`npm run verify`、`acp_client_contract.rs` 全绿。
 
-**阶段 P2（宿主形态，可选）** — `backlog:B151`
-- 验收：`ponycli acp --agent opencode` 交互可用；`session/load` 恢复。
+**阶段 P2（宿主形态）** — `backlog:B151` ✅（CLI 面）；可选面（Tauri 命令 / 前端类型）→ `backlog:B163`
+- 验收：`ponycli acp --list`、`ponycli acp --agent <id> -p <text> --output-format jsonl` 可用（`tests/acp_host_surface.rs` 5 条）；`--resume` 对 `loadSession=false`（含未实现 `session/load`）显式 `acp_unavailable`，不静默当新会话。
 
 **明确不做（本方案边界）**
 - 不改 `ProviderProtocol` / `ProviderClient`（外部 agent 不是 provider）。
