@@ -68,3 +68,19 @@
 - **需 Lead 裁决**：`.dev-team/nfr-baseline.json` 的 `acp` 段不含 P1 的 prompt 预算；`transport::ACP_REQUEST_TIMEOUT`(5000ms) 已覆盖单请求，整轮 prompt 超时由 `timeoutMs`/执行策略承担，未新增键。
 - **Gate-1 amend（2026-11-14）**：TIMEOUT — `client.prompt` 已改为读 `prompt_budget`（默认 5000ms），`set_prompt_budget`(`client.rs:426`)/`set_turn_budget`(`session.rs:204`) 为 additive 公开面；CONTRACT_BREAK — `set_cancellation_token`(`session.rs:213`) 写入既有 `cancellation` 槽位（`Mutex<Option<..>>`），`session.prompt`(`session.rs:227`) 已实现 in-prompt 轮询：`CANCEL_POLL_INTERVAL`=100ms(`session.rs:51`)、scoped thread(`session.rs:259`) 轮询 token → `client.cancel` → 归约 aborted/`tool_cancelled`。注：两文件在 amend 前已由 P1 Executor 实现（非空桩），故 setter 用真实赋值而非 `unimplemented!()`（避免给已实现层引入 panic 回归）。`execute_acp_delegate` 读 `context.cancellation` 的接线属 executor fix-round（orchestration.rs 不在本批写域）。
 - **Gate-1 amend 验证**：`cargo test -p pony-agent-core --test acp_p1_blockers` → **2/2 passed**（P1-9 预算不被 5s 硬顶、P1-10 取消联动）；ACP 五个测试文件合计 **44 tests passed / 0 failed**；`npm run cargo:check:shared` → **Exit 0**。
+
+## 5. Fix-round 记录（Gate-1/Gate-2 r2→r4，2026-11-14）
+
+> 本节替换上文中所有「接线属 executor fix-round / 不在本批写域」的过渡说法 —— 接线已完成并入库（commits 9e1cc389 / 1fc039b4 / de3f7a5e）。
+
+| 决策 | 落点（HEAD 实测） | 说明 |
+|---|---|---|
+| 预算单一真源 | `crates/pony-agent-core/src/acp/mod.rs:30` `ACP_DEFAULT_TURN_BUDGET = 120s` | CLI `--timeout-secs`(`bin/cli.rs:2251`)、工具入口缺省(`agent/tools/orchestration.rs:176`)、`ToolExecutionPolicy` 默认(`agent/tools/names.rs:207`) 三处同源；ACP 面已无 120s 字面量 |
+| 工具入口缺省预算 | `orchestration.rs:164-186` | `timeoutMs` 缺失 ⇒ 120s 且**总是** `set_turn_budget`；`Some(0)` → invalid_arguments；诊断打印解析后的 `budget_ms` |
+| 宿主取消令牌只读 | `acp/session.rs:181/200` | 新增 `local_cancel: AtomicBool`；`cancel()` 只翻本地标志 + 挂起审批 + 发 notification，**不**调用宿主令牌 `cancel()` |
+| 取消优先归因 | `acp/session.rs:306-319` | 取消已触发但 agent 不配合时归因 `aborted`/`tool_cancelled`，不退化成 `acp_timeout` |
+| 取消轮询 | `acp/session.rs:227/259/282` | prompt 旁路线程 + 本线程 100ms(`CANCEL_POLL_INTERVAL:51`) 每 tick 重读令牌槽位（支持运行期热替换）；`thread::scope` 必 join |
+| `--timeout-secs 0` | `bin/cli.rs:2176` | 显式 Exit 2（usage 1..=86400），不再静默等同缺省 |
+
+**测试面（HEAD 实测 51 passed / 0 failed）**：`acp_p1_blockers` 6（P1-9 预算不被 5s 顶 / P1-10 取消联动 / P1-11 工具路径取消 / P1-12 CLI `--timeout-secs` 走线 / P1-13 宿主令牌只读 / P1-14 工具缺省预算）+ `acp_client_contract` 11 + `acp_host_surface` 5 + `acp_p0_acceptance` 19 + `acp_p0_adversarial` 7 + `wave4_4_acceptance` 3。
+P1-12/13/14 标注 `[POST-HOC-GREEN: 实现先于用例，仅作回归守护]`（红相在 P1-9/10/11）。

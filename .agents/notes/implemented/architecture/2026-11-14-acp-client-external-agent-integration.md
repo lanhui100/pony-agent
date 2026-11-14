@@ -77,4 +77,14 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
   - `B162`：`session/update` 在 prompt 返回后按序 flush（`TurnEventSink` 非 `Send+Sync`），
     零丢帧但非实时，委派期间 UI 无实时 `turn:delta`。
   - `B163`：Tauri 三命令与前端 `src/types/acp.ts`（方案中标注为可选）未做。
+- **Fix-round 决策（Gate-1/Gate-2 对抗审查后追加，2026-11-14）**：
+  ① **单轮预算单一真源** = `acp/mod.rs:30 ACP_DEFAULT_TURN_BUDGET`（120s），CLI `--timeout-secs`、
+  工具入口缺省、`ToolExecutionPolicy` 默认三处引用同一常量（此前三处各自 5s/120s，导致
+  `timeoutMs`/`--timeout-secs` 声明可配而实际被 5000ms 硬顶）；`--timeout-secs 0` 显式 Exit 2。
+  ② **宿主取消令牌只读**：`session.cancel()` 只翻本地 `local_cancel` 并回 `session/cancel`
+  notification，**不**调用宿主 `CancellationToken::cancel()`——否则单次委派超时会取消整个 turn。
+  ③ **取消归因优先于传输层错误**：取消已触发而 agent 不配合（不回 `cancelled`）时归约
+  `aborted`/`tool_cancelled`，不退化成 `acp_timeout`。
+  ④ **取消轮询**在 prompt 旁路线程进行，本线程 100ms 每 tick 重读令牌槽位（支持运行期热替换），
+  `thread::scope` 必 join。
 - **人工验收缺口**：`opencode acp` 本机不可用（仅有 `agy`），端到端真机联调仍需人工跑一轮。
