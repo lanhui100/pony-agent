@@ -13,11 +13,23 @@
 #   capture          把收到的 session/cancel 原始行追加写入 <arg> 指定的文件
 #   concurrent       回 {"echo": <params.sentinel>}，验证并发请求不串包
 #
+# P1（会话驱动）模式：
+#   init_capture <file> <1|2>      记录 initialize 原始请求行，按版本回 1 或 2（P1-1 版本校验）
+#   flow <stopReason> <sessionId>  完整会话流：initialize → session/new → prompt 回指定 stopReason
+#   updates <sessionId>            prompt 期间发 agent_message_chunk / agent_thought_chunk / tool_call
+#   permission_prompt <file> <sessionId>
+#                                  prompt 期间发 session/request_permission，把 client 的应答原始行
+#                                  追加到 <file>，随后回 end_turn（P1-4 fail-closed）
+#   cancel_hold <markerFile> <sessionId>
+#                                  prompt 期间写 marker 文件并挂起，收到 session/cancel 通知后
+#                                  才回 {"stopReason":"cancelled"}（P1-5 取消链路）
+#
 # 仅依赖 POSIX sh + sed + sleep；不读环境变量（参数全部走 argv，避免宿主 env 白名单影响）。
 set -u
 
 mode="${1:-ok}"
 arg="${2:-}"
+arg2="${3:-}"
 
 emit() { printf '%s\n' "$1"; }
 
@@ -28,6 +40,18 @@ sentinel_of() { printf '%s' "$1" | sed -n 's/.*"sentinel":"\([^"]*\)".*/\1/p'; }
 
 respond_initialize() {
     emit "{\"jsonrpc\":\"2.0\",\"id\":$1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":false},\"authMethods\":[]}}"
+}
+
+respond_session_new() {
+    emit "{\"jsonrpc\":\"2.0\",\"id\":$1,\"result\":{\"sessionId\":\"$2\"}}"
+}
+
+respond_stop() {
+    emit "{\"jsonrpc\":\"2.0\",\"id\":$1,\"result\":{\"stopReason\":\"$2\"}}"
+}
+
+respond_permission() {
+    emit '{"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"acp-sess-1","toolCall":{"toolCallId":"tc-1","title":"edit a.rs","kind":"edit"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject once","kind":"reject_once"}]}}'
 }
 
 case "$mode" in
@@ -98,6 +122,80 @@ while IFS= read -r line; do
             id=$(id_of "$line")
             s=$(sentinel_of "$line")
             [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":\"$s\"}}"
+            ;;
+        init_capture)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    printf '%s\n' "$line" >> "$arg"
+                    if [ "${arg2:-1}" = "2" ]; then
+                        [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":2,\"agentCapabilities\":{},\"authMethods\":[]}}"
+                    else
+                        [ -n "$id" ] && respond_initialize "$id"
+                    fi
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                session/prompt)
+                    [ -n "$id" ] && respond_stop "$id" end_turn
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+            esac
+            ;;
+        flow|updates|permission_prompt|cancel_hold)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            session_id="${arg2:-acp-sess-1}"
+            case "$m" in
+                initialize)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "$session_id"
+                    ;;
+                session/prompt)
+                    case "$mode" in
+                        updates)
+                            emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$session_id\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"hello\"}}}}"
+                            emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$session_id\",\"update\":{\"sessionUpdate\":\"agent_thought_chunk\",\"content\":{\"type\":\"text\",\"text\":\"reasoning\"}}}}"
+                            emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$session_id\",\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"tc-1\",\"title\":\"edit a.rs\",\"kind\":\"edit\",\"status\":\"pending\"}}}"
+                            [ -n "$id" ] && respond_stop "$id" end_turn
+                            ;;
+                        permission_prompt)
+                            respond_permission
+                            if IFS= read -r answer; then
+                                printf '%s\n' "$answer" >> "$arg"
+                            fi
+                            [ -n "$id" ] && respond_stop "$id" end_turn
+                            ;;
+                        cancel_hold)
+                            printf '%s\n' "$id" >> "$arg"
+                            prompt_id="$id"
+                            while IFS= read -r next; do
+                                [ -z "$next" ] && continue
+                                nm=$(method_of "$next")
+                                if [ "$nm" = "session/cancel" ]; then
+                                    [ -n "$prompt_id" ] && respond_stop "$prompt_id" cancelled
+                                    break
+                                fi
+                            done
+                            ;;
+                        *)
+                            [ -n "$id" ] && respond_stop "$id" "${arg:-end_turn}"
+                            ;;
+                    esac
+                    ;;
+                session/cancel)
+                    :
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_stop "$id" end_turn
+                    ;;
+            esac
             ;;
         *)
             id=$(id_of "$line")
