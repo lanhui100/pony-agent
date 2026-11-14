@@ -379,3 +379,237 @@ fn p1_11_tool_path_cancellation_aborts_acp_delegate() {
 
     cleanup(&cwd);
 }
+
+// ───────────────────────── P1-12 CLI 走线（--timeout-secs 真进预算） ─────────────────────────
+//
+// [POST-HOC-GREEN: 实现先于用例，仅作回归守护]
+// 背景：Gate-1 r2 指出「红相只直调库 setter，绿 ≠ 交付可用」。本条改走**真实交付入口**
+// （`ponycli acp` 子进程），证明 `--timeout-secs` 确实进入整轮预算：
+// - 延迟 = baseline + 1500ms（> 5s 硬顶、< 30s 预算）→ EXIT 0 且 stdout 含 `turn:delta`；
+// - 同延迟、`--timeout-secs 1` → EXIT 7（Timeout 档，usage 契约）。
+
+use std::process::{Command, Output, Stdio};
+
+fn cli_timeout_for(ms: u64) -> Duration {
+    Duration::from_millis(ms)
+}
+
+/// 有界执行 ponycli（stdin=null 防 REPL 挂死；超时 kill 并附原始输出）。
+fn run_ponycli(command: &mut Command, timeout: Duration) -> Output {
+    command.stdin(Stdio::null());
+    let label = format!("{command:?}");
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ponycli 必须可执行（CARGO_BIN_EXE_ponycli）");
+    let started = Instant::now();
+    loop {
+        match child.try_wait().expect("try_wait ponycli") {
+            Some(_) => break,
+            None => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().expect("收集超时输出");
+                    panic!(
+                        "CLI 未在 {timeout:?} 内退出\ncmd: {label}\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    child.wait_with_output().expect("收集 ponycli 输出")
+}
+
+/// 隔离的 `ponycli acp` 入口（XDG_CONFIG_HOME 注入 fake spec；HOME/XDG_* 全隔离）。
+struct AcpCliEnv {
+    root: PathBuf,
+}
+
+impl AcpCliEnv {
+    fn new(tag: &str, spec: Value) -> Self {
+        let root = temp_dir(tag);
+        for child in ["home", "config", "data", "state", "cache", "workspace"] {
+            std::fs::create_dir_all(root.join(child)).expect("创建隔离子目录");
+        }
+        write_acp_agents_config(&root.join("config"), spec);
+        Self { root }
+    }
+
+    fn workspace(&self) -> PathBuf {
+        self.root.join("workspace")
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ponycli"));
+        command
+            .env("HOME", self.root.join("home"))
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
+            .env("XDG_DATA_HOME", self.root.join("data"))
+            .env("XDG_STATE_HOME", self.root.join("state"))
+            .env("XDG_CACHE_HOME", self.root.join("cache"));
+        command
+    }
+}
+
+impl Drop for AcpCliEnv {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn p1_12_cli_timeout_secs_feeds_turn_budget() {
+    let baseline_ms = nfr_acp_ms("request_timeout_ms");
+    let delay_ms = baseline_ms + 1500; // > 5s 硬顶、< 30s 预算（Lead 冻结注入值）
+    let delay_seconds = format!("{:.3}", delay_ms as f64 / 1000.0);
+    let env = AcpCliEnv::new(
+        "cli-budget",
+        json!({
+            "id": "fake",
+            "label": "Fake ACP agent",
+            "command": "sh",
+            "args": [fixture_script(), "slow_prompt", delay_seconds, "acp-sess-1"]
+        }),
+    );
+    let workspace = env.workspace();
+    let workspace_text = workspace.to_string_lossy().into_owned();
+    let watchdog = cli_timeout_for(delay_ms + 2 * baseline_ms);
+
+    // (a) 30s 预算：延迟 6.5s 的一轮必须成功，且 jsonl stdout 事件流含 turn:delta。
+    let ok_run = run_ponycli(
+        env.command().args([
+            "acp",
+            "--agent",
+            "fake",
+            "-p",
+            "hi",
+            "--output-format",
+            "jsonl",
+            "--workspace",
+            workspace_text.as_str(),
+            "--timeout-secs",
+            "30",
+        ]),
+        watchdog,
+    );
+    let stdout = String::from_utf8_lossy(&ok_run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&ok_run.stderr).into_owned();
+    assert_eq!(
+        ok_run.status.code(),
+        Some(0),
+        "P1-12 违约：{}ms 的一轮在 --timeout-secs 30 下必须 EXIT 0（不得被 5s 硬顶）\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        delay_ms
+    );
+    let mut saw_delta = false;
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line).unwrap_or_else(|error| {
+            panic!("P1-12 违约：jsonl stdout 每行必须是合法 JSON（{error}）：{line}")
+        });
+        if value["type"] == json!("turn:delta") && value["text"] == json!("hello") {
+            saw_delta = true;
+        }
+    }
+    assert!(
+        saw_delta,
+        "P1-12 违约：CLI 事件流必须含 turn:delta(text=hello)（证明真实入口把 update 映射进 JsonlSink）\nstdout:\n{stdout}"
+    );
+
+    // (b) 1s 预算：同延迟必须 EXIT 7（Timeout 档），不得塌进 0/5。
+    let timeout_run = run_ponycli(
+        env.command().args([
+            "acp",
+            "--agent",
+            "fake",
+            "-p",
+            "hi",
+            "--output-format",
+            "jsonl",
+            "--workspace",
+            workspace_text.as_str(),
+            "--timeout-secs",
+            "1",
+        ]),
+        watchdog,
+    );
+    assert_eq!(
+        timeout_run.status.code(),
+        Some(7),
+        "P1-12 违约：--timeout-secs 1 必须 EXIT 7（Timeout），证明该参数真进预算\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&timeout_run.stdout),
+        String::from_utf8_lossy(&timeout_run.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&timeout_run.stdout),
+        String::from_utf8_lossy(&timeout_run.stderr)
+    );
+    assert!(
+        !combined.contains("panicked at"),
+        "P1-12：超时路径不得 panic，实际输出：\n{combined}"
+    );
+}
+
+// ───────────────────────── P1-13 宿主取消令牌只读 ─────────────────────────
+//
+// [POST-HOC-GREEN: 实现先于用例，仅作回归守护]
+// 契约：`session.cancel()` 是「宿主 → 外部 agent」的出站取消，**不得**把宿主自己的
+// `CancellationToken` 置位（否则会污染整个 turn 的取消语义）；同时会话内挂起等待必须归零
+// （prompt 归约 aborted / tool_cancelled，不得悬挂）。
+#[test]
+fn p1_13_session_cancel_does_not_mutate_host_token() {
+    let baseline_ms = nfr_acp_ms("request_timeout_ms");
+    let horizon_ms = baseline_ms + 3000;
+
+    let cwd = temp_dir("host-token");
+    let marker = cwd.join("prompt-received.marker");
+    let marker_text = marker.to_string_lossy().into_owned();
+    let session = spawn_session("cancel_hold", &[marker_text.as_str(), "acp-sess-1"], &cwd);
+    session.set_turn_budget(Duration::from_millis(horizon_ms));
+
+    let host_token = Arc::new(CancellationToken::new());
+    assert!(!host_token.is_cancelled(), "P1-13 前置：宿主令牌初始必须未取消");
+    session.set_cancellation_token(Arc::clone(&host_token));
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = session.prompt(prompt_blocks("long running task"), &NoopSink);
+            let _ = sender.send(result);
+        });
+
+        assert!(
+            wait_until(|| marker.exists(), Duration::from_millis(baseline_ms)),
+            "P1-13 前置：fake agent 必须在 {baseline_ms}ms 内收到 session/prompt"
+        );
+
+        session
+            .cancel()
+            .expect("P1-13：session.cancel() 必须成功发出 session/cancel notification");
+
+        let result = receiver
+            .recv_timeout(Duration::from_millis(horizon_ms))
+            .expect("P1-13 违约：cancel 后挂起等待必须归零（prompt 未返回）");
+        assert_eq!(
+            result.status, "aborted",
+            "P1-13 违约：会话内挂起等待必须归约 aborted，实际 {result:?}"
+        );
+        assert!(
+            result.output.contains(ACP_TOOL_CANCELLED),
+            "P1-13 违约：错误码必须是 {ACP_TOOL_CANCELLED}，实际 {}",
+            result.output
+        );
+
+        assert!(
+            !host_token.is_cancelled(),
+            "P1-13 违约：session.cancel() 不得把宿主 CancellationToken 置位（出站取消与宿主生命周期必须解耦）"
+        );
+    });
+
+    let mut session = session;
+    session.close();
+    cleanup(&cwd);
+}

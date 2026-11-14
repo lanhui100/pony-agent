@@ -184,6 +184,8 @@ while IFS= read -r line; do
                             [ -n "$id" ] && respond_stop "$id" end_turn
                             ;;
                         slow_prompt)
+                            # 先发一条 update（CLI jsonl 走线用例需要 turn:delta），再模拟长任务。
+                            emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$session_id\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"hello\"}}}}"
                             sleep "$arg"
                             [ -n "$id" ] && respond_stop "$id" end_turn
                             ;;
