@@ -1086,6 +1086,17 @@ fn print_usage(format: OutputFormat) {
     human!(format, "                             per_attempt_effective_timeout_ms); no secrets");
     human!(format, "Sessions subcommand exit codes: 0 ok / 2 invalid bundle / 3 target exists or maintenance lock busy / 4 degraded");
     human!(format, "");
+    human!(format, "ACP agent host mode (B151/P2):");
+    human!(format, "  ponycli acp --list");
+    human!(format, "  ponycli acp --agent <id> -p <text> [--output-format text|jsonl|sse]");
+    human!(format, "              [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]");
+    human!(format, "  --agent     ACP agent id from acp-agents.json (opencode | antigravity | ...)");
+    human!(format, "  --list      Print configured agents as JSON lines ({{id,label,command,args,builtin}})");
+    human!(format, "  --resume    Resume a session; unsupported agents fail closed with acp_unavailable");
+    human!(format, "  --output-format jsonl/sse: stdout = events only (no banner, no REPL)");
+    human!(format, "  --timeout-secs <n>  Bound the delegated turn (0..=86400); expiry = exit 7");
+    human!(format, "  Run `ponycli acp --help` for the full ACP section.");
+    human!(format, "");
     human!(format, "Exit codes: 0 success / 1 internal / 2 usage / 3 config / 4 provider-network");
     human!(format, "            5 tool-failure / 6 permission-denied (incl. suspended) / 7 timeout");
 }
@@ -1805,6 +1816,10 @@ fn main() {
     if let Some(code) = run_maintenance_subcommand_if_requested() {
         std::process::exit(code);
     }
+    // B151/P2：ACP 宿主形态同属「解析之前拦截」的命名空间（`ponycli acp ...`）。
+    if let Some(code) = run_acp_subcommand_if_requested() {
+        std::process::exit(code);
+    }
     let _runtime_guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
     // 尽早装配 panic hook（崩溃上报），随后解析参数以决定是否需把诊断日志改道 stderr。
     pony_agent_core::agent::ponysentry::install_panic_hook();
@@ -2079,4 +2094,396 @@ mod maintenance_help_guard_tests {
             );
         }
     }
+}
+
+// ───────────────────── B151/P2：ACP 宿主形态（`ponycli acp`） ─────────────────────
+
+/// `ponycli acp` 的冻结参数面（Lead 2026-11-14 冻结，不得夹带其它 flag）。
+struct AcpCliArgs {
+    agent: Option<String>,
+    list: bool,
+    prompt: Option<String>,
+    output_format: OutputFormat,
+    workspace: Option<PathBuf>,
+    timeout: Option<Duration>,
+    resume: Option<String>,
+}
+
+/// `acp` 子命令拦截：`main` 里只留一行（与 sessions/config 同一做法）。
+fn run_acp_subcommand_if_requested() -> Option<i32> {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) != Some("acp") {
+        return None;
+    }
+    Some(run_acp_client_mode(&argv[2..]))
+}
+
+/// `ponycli acp [--agent <id>] [--list] [-p|--prompt <text>] [--output-format jsonl|sse]
+///              [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]`
+///
+/// 失败一律「非 0 + stderr 带真源错误码」，绝不 panic、绝不在 stdin 上等输入（无 REPL）。
+fn run_acp_client_mode(args: &[String]) -> i32 {
+    let mut parsed = AcpCliArgs {
+        agent: None,
+        list: false,
+        prompt: None,
+        output_format: OutputFormat::Text,
+        workspace: None,
+        timeout: None,
+        resume: None,
+    };
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-h" | "--help" => {
+                print_acp_usage();
+                return ExitCode::Success.code();
+            }
+            "--list" => parsed.list = true,
+            "--agent" => match next_value(args, &mut idx) {
+                Ok(value) => parsed.agent = Some(value),
+                Err(message) => return acp_usage_error(&message),
+            },
+            "-p" | "--prompt" => match next_value(args, &mut idx) {
+                Ok(value) => parsed.prompt = Some(value),
+                Err(message) => return acp_usage_error(&message),
+            },
+            "--output-format" => {
+                let value = match next_value(args, &mut idx) {
+                    Ok(value) => value,
+                    Err(message) => return acp_usage_error(&message),
+                };
+                parsed.output_format = match OutputFormat::from_str(&value) {
+                    Ok(format) => format,
+                    Err(error) => {
+                        return acp_usage_error(&format!(
+                            "{error}（acp 模式只接受 text|jsonl|sse，不得静默退化）"
+                        ))
+                    }
+                };
+            }
+            "--workspace" => match next_value(args, &mut idx) {
+                Ok(value) => parsed.workspace = Some(PathBuf::from(value)),
+                Err(message) => return acp_usage_error(&message),
+            },
+            "--timeout-secs" => {
+                let value = match next_value(args, &mut idx) {
+                    Ok(value) => value,
+                    Err(message) => return acp_usage_error(&message),
+                };
+                match value.parse::<u64>() {
+                    Ok(secs) if secs <= MAX_TIMEOUT_SECS => {
+                        parsed.timeout = Some(Duration::from_secs(secs))
+                    }
+                    Ok(secs) => {
+                        return acp_usage_error(&format!(
+                            "--timeout-secs {secs} 超出上限 {MAX_TIMEOUT_SECS}（无上限的预算不可兑现）"
+                        ))
+                    }
+                    Err(_) => {
+                        return acp_usage_error(&format!(
+                            "--timeout-secs 需要 0..={MAX_TIMEOUT_SECS} 的整数，实际 `{value}`"
+                        ))
+                    }
+                }
+            }
+            "--resume" => match next_value(args, &mut idx) {
+                Ok(value) => parsed.resume = Some(value),
+                Err(message) => return acp_usage_error(&message),
+            },
+            other => return acp_usage_error(&format!("acp 子命令不接受参数 `{other}`")),
+        }
+        idx += 1;
+    }
+
+    // 1) `--list`：内置 + 用户清单逐行 JSON（缺文件回落内置两条默认）。
+    if parsed.list {
+        return acp_list_agents();
+    }
+
+    // 2) 非 `--list` 必须显式 --agent（不静默进入默认流程）。
+    let Some(agent_id) = parsed.agent.clone() else {
+        return acp_usage_error("acp 模式必须显式给出 --agent <id>（--list 除外）");
+    };
+    let spec = match pony_agent_core::acp::config::resolve_agent(&agent_id) {
+        Ok(spec) => spec,
+        Err(error) => {
+            // 保留清单层的真源错误码（`acp_config_agent_not_found` 等），不塌缩成通用错误。
+            eprintln!("[ponycli] {}: {error}", error.code());
+            return ExitCode::Config.code();
+        }
+    };
+    let workspace = match acp_workspace(parsed.workspace.as_deref()) {
+        Ok(workspace) => workspace,
+        Err(message) => {
+            eprintln!("[ponycli] acp_unavailable: {message}");
+            return ExitCode::Usage.code();
+        }
+    };
+
+    // 3) `--resume`：按 agentCapabilities.loadSession 判定；不支持即显式降级（不静默新会话）。
+    if let Some(session_id) = parsed.resume.clone() {
+        return acp_resume(&spec, &workspace, &session_id);
+    }
+
+    // 4) 单轮：无 `-p/--prompt` ⇒ 用法错误（本模式无 REPL，绝不在 stdin 上等输入）。
+    let Some(prompt) = parsed.prompt.clone() else {
+        return acp_usage_error("acp 模式需要 -p/--prompt <text>（本模式无 REPL）");
+    };
+
+    let mut session = match pony_agent_core::acp::session::AcpAgentSession::spawn(&spec, &workspace)
+    {
+        Ok(session) => session,
+        Err(error) => return acp_session_error(error),
+    };
+    let blocks = vec![pony_agent_core::acp::protocol::ContentBlock::Text {
+        text: prompt,
+    }];
+    let code = match parsed.output_format {
+        OutputFormat::Jsonl => {
+            let sink = headless::JsonlSink::new();
+            let code = acp_run_prompt(&session, blocks, &sink, parsed.timeout);
+            // jsonl 契约：stdout 每行一个事件对象（sink 已保证 JSONL 形状）。
+            for line in sink.finish() {
+                println!("{line}");
+            }
+            code
+        }
+        OutputFormat::Sse => {
+            let sink = headless::SseSink::new();
+            let code = acp_run_prompt(&session, blocks, &sink, parsed.timeout);
+            for frame in sink.finish() {
+                println!("{frame}");
+            }
+            code
+        }
+        OutputFormat::Text => {
+            let sink = AcpTextSink;
+            acp_run_prompt(&session, blocks, &sink, parsed.timeout)
+        }
+    };
+    session.close();
+    code
+}
+
+/// 取下一个参数值（缺失即用法错误，绝不把下一个 flag 当值）。
+fn next_value(args: &[String], idx: &mut usize) -> Result<String, String> {
+    let value = args
+        .get(*idx + 1)
+        .ok_or_else(|| format!("参数 `{}` 缺少取值", args[*idx]))?;
+    *idx += 1;
+    Ok(value.clone())
+}
+
+fn acp_usage_error(message: &str) -> i32 {
+    eprintln!("\x1b[31mArgument Error:\x1b[0m {message}");
+    eprintln!("用法：ponycli acp [--agent <id>] [--list] [-p|--prompt <text>] [--output-format jsonl|sse] [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]");
+    ExitCode::Usage.code()
+}
+
+/// `--list`：逐行 JSON `{id,label,command,args,builtin}`（缺文件回落到内置两条默认）。
+fn acp_list_agents() -> i32 {
+    let agents = match pony_agent_core::acp::config::load_agents() {
+        Ok(agents) => agents,
+        Err(error) => {
+            eprintln!("[ponycli] {}: {error}", error.code());
+            return ExitCode::Config.code();
+        }
+    };
+    for agent in agents {
+        let builtin = acp_is_builtin(&agent);
+        let line = serde_json::json!({
+            "id": agent.id,
+            "label": agent.label,
+            "command": agent.command,
+            "args": agent.args,
+            "builtin": builtin,
+        });
+        match serde_json::to_string(&line) {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("[ponycli] acp_unavailable: --list 序列化失败：{error}");
+                return ExitCode::Internal.code();
+            }
+        }
+    }
+    ExitCode::Success.code()
+}
+
+/// 是否为内置默认项（id + 启动命令 + 参数三者都与 `BUILTIN_AGENTS` 一致才算）。
+fn acp_is_builtin(spec: &pony_agent_core::acp::config::AcpAgentSpec) -> bool {
+    pony_agent_core::acp::config::BUILTIN_AGENTS
+        .iter()
+        .any(|builtin| {
+            builtin.id == spec.id
+                && builtin.command == spec.command
+                && builtin.args.len() == spec.args.len()
+                && builtin
+                    .args
+                    .iter()
+                    .zip(spec.args.iter())
+                    .all(|(left, right)| *left == right.as_str())
+        })
+}
+
+/// 工作目录：缺省当前目录；必须绝对路径 + 存在 + 是目录（canonicalize 后交给 ACP）。
+fn acp_workspace(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    let candidate = match explicit {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir()
+            .map_err(|error| format!("无法获取当前工作目录（{error}），请显式传 --workspace"))?,
+    };
+    if !candidate.is_absolute() {
+        return Err(format!(
+            "--workspace 必须是绝对路径，实际 `{}`。",
+            candidate.display()
+        ));
+    }
+    let canonical = std::fs::canonicalize(&candidate)
+        .map_err(|error| format!("--workspace `{}` 不可用（{error}）。", candidate.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("--workspace `{}` 不是目录。", canonical.display()));
+    }
+    Ok(canonical)
+}
+
+/// `--resume`：按 `agentCapabilities.loadSession` 判定；不支持/未实现一律显式降级。
+fn acp_resume(
+    spec: &pony_agent_core::acp::config::AcpAgentSpec,
+    workspace: &Path,
+    session_id: &str,
+) -> i32 {
+    let mut client = match pony_agent_core::acp::client::AcpAgentClient::connect(spec, workspace) {
+        Ok(client) => client,
+        Err(error) => return acp_session_error(error),
+    };
+    let loadable = client.agent_capabilities().load_session;
+    client.close();
+    if !loadable {
+        eprintln!(
+            "[ponycli] acp_unavailable: agent `{}` 声明 loadSession=false，无法恢复会话 `{session_id}`（不静默降级为新会话）。",
+            spec.id
+        );
+        return ExitCode::Config.code();
+    }
+    // fail-closed：本波次未实现 session/load 恢复时，必须显式降级而不是悄悄开新会话。
+    eprintln!(
+        "[ponycli] acp_unavailable: agent `{}` 支持 loadSession，但 session/load 恢复尚未实现（显式降级，不静默新会话）。",
+        spec.id
+    );
+    ExitCode::Config.code()
+}
+
+/// 跑一轮 prompt；`--timeout-secs` 给出时是整轮预算（超预算 → session/cancel + Timeout 码）。
+fn acp_run_prompt<S: TurnEventSink + Sync>(
+    session: &pony_agent_core::acp::session::AcpAgentSession,
+    blocks: Vec<pony_agent_core::acp::protocol::ContentBlock>,
+    sink: &S,
+    timeout: Option<Duration>,
+) -> i32 {
+    let Some(limit) = timeout else {
+        return acp_result_exit_code(&session.prompt(blocks, sink));
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let _ = sender.send(session.prompt(blocks, sink));
+        });
+        match receiver.recv_timeout(limit) {
+            Ok(result) => acp_result_exit_code(&result),
+            Err(_) => {
+                if let Err(error) = session.cancel() {
+                    eprintln!("[ponycli] acp 超时后 session/cancel 失败：{error}");
+                }
+                // 有界等 prompt 线程收尾（agent 以 cancelled 应答）；无论如何按 Timeout 退出。
+                let _ = receiver.recv_timeout(pony_agent_core::acp::transport::ACP_REQUEST_TIMEOUT);
+                eprintln!(
+                    "[ponycli] acp_timeout: 委派超过 {}s 未返回，已发出 session/cancel。",
+                    limit.as_secs()
+                );
+                ExitCode::Timeout.code()
+            }
+        }
+    })
+}
+
+/// 归约 → 进程退出码（`ok` = 0；`aborted` = 6；其余 = 5 ToolFailure）。
+fn acp_result_exit_code(result: &pony_agent_core::agent::tools::ToolResult) -> i32 {
+    match result.status.as_str() {
+        "ok" => ExitCode::Success.code(),
+        "aborted" => {
+            eprintln!("[ponycli] {}: {}", result.status, result.output);
+            ExitCode::PermissionDenied.code()
+        }
+        _ => {
+            eprintln!("[ponycli] {}: {}", result.status, result.output);
+            ExitCode::ToolFailure.code()
+        }
+    }
+}
+
+/// 传输/会话层错误 → 退出码（保留 `acp_*` 错误码来源，不塌缩）。
+fn acp_session_error(error: pony_agent_core::acp::transport::AcpTransportError) -> i32 {
+    use pony_agent_core::acp::transport::AcpTransportError;
+    eprintln!("[ponycli] {}: {error}", error.code());
+    match error {
+        AcpTransportError::Spawn(_) | AcpTransportError::Initialize(_) => ExitCode::Config.code(),
+        AcpTransportError::AuthRequired(_) => ExitCode::PermissionDenied.code(),
+        AcpTransportError::Timeout(_) => ExitCode::Timeout.code(),
+        AcpTransportError::Protocol(_) => ExitCode::Internal.code(),
+        AcpTransportError::Agent(_) | AcpTransportError::Refused(_) | AcpTransportError::Unavailable(_) => {
+            ExitCode::ToolFailure.code()
+        }
+    }
+}
+
+/// text 模式的 ACP sink：正文走 stdout，思考/工具活动走 stderr（stdout 只留人类可读正文）。
+struct AcpTextSink;
+
+impl TurnEventSink for AcpTextSink {
+    fn emit(&self, name: &str, payload: TurnStreamEvent) {
+        match name {
+            "turn:delta" => {
+                if let Some(text) = payload.text.as_deref() {
+                    print!("{text}");
+                    let _ = io::stdout().flush();
+                }
+                if let Some(reasoning) = payload.reasoning_content.as_deref() {
+                    eprintln!("\x1b[2m[thinking] {reasoning}\x1b[0m");
+                }
+            }
+            "turn:tool" => {
+                if let Some(activities) = payload.tool_activities.as_ref() {
+                    for activity in activities {
+                        eprintln!(
+                            "\x1b[36m[tool]\x1b[0m {} :: {} ({})",
+                            activity.id, activity.description, activity.status
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `ponycli acp --help` 的用法段（冻结拼写：`--agent` / `--list` / `--resume` 等）。
+fn print_acp_usage() {
+    println!("\x1b[1;32m=== Pony Agent CLI — ACP agent host mode ===\x1b[0m");
+    println!("Usage: ponycli acp [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("  --agent <id>               ACP agent id from the acp-agents.json list (opencode | antigravity | ...)");
+    println!("                             required unless --list is given (no REPL in this mode)");
+    println!("  --list                     Print every configured ACP agent as one JSON object per line");
+    println!("                             {{id,label,command,args,builtin}}; exit 0");
+    println!("  -p, --prompt <text>        Run a single delegated turn with the given prompt");
+    println!("  --output-format <fmt>      text | jsonl | sse (default: text; jsonl/sse: stdout = events only)");
+    println!("  --workspace <dir>          Absolute workspace root for session/new (default: current dir)");
+    println!("  --timeout-secs <n>         Bound the delegated turn (0..=86400); expiry exits with code 7");
+    println!("  --resume <session-id>      Resume an existing ACP session; unsupported agents fail");
+    println!("                             closed with acp_unavailable (never silently starts a new session)");
+    println!("  -h, --help                 Show this help");
+    println!();
+    println!("Config discovery: $XDG_CONFIG_HOME/pony-agent/acp-agents.json (missing ⇒ builtin defaults).");
 }
