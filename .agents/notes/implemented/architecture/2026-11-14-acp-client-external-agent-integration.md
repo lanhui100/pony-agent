@@ -140,4 +140,12 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
      configOptions）；`-32601` 归类为 `acp_method_not_supported`（agy 不支持 delete/fork），不能当通用错误。
   ④ **additionalDirectories 由客户端兜**：opencode 强校验（绝对/禁 glob，否则 -32602）、agy 完全不校验，
      故在 client 侧 canonical 化 + 去重 + 本地 fail-closed（不发请求）。
+- **B183 收口决策（2026-11-15）**：
+  ① **代理零配置**：ACP 子进程 env 合并顺序固定为「宿主白名单 → `<HOME>/.pony/proxy.env`（仅 `*_proxy`，
+     逐键过 deny 表）→ `spec.env` → `extra_env`」，`inheritProxyEnv` 缺省 true 可关；这样 `pony` 从无代理
+     变量的 shell 启动时，agy 仍能出网（否则它直连 IPv6 被墙、`session/new` 挂 30s+）。
+  ② **agent id 对模型可见**：`acp_delegate` 的工具描述与 `agent` 参数描述显式列 `opencode` / `antigravity`，
+     并指向 `ponycli acp --list`（自定义 agent）；模型无需猜测即可委派。
+  ③ 安全边界不变：代理值本身可能含凭据，故只注入 `*_proxy` 且拒绝 `LD_*`/`AWS_*`/`SSH_AUTH_SOCK` 等键，
+     诊断只打键名不回显值。
 - **人工验收缺口**：`opencode acp` 本机不可用（仅有 `agy`），端到端真机联调仍需人工跑一轮。
