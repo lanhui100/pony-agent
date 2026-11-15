@@ -338,6 +338,18 @@ impl Default for ProviderModelCapabilities {
     }
 }
 
+/// `capabilities` 整段缺席时的「未声明」哨兵：窗口为 `None`，其余布尔能力取默认值。
+///
+/// 必须与 [`ProviderModelCapabilities::default`] 区分开：`default()` 的
+/// `context_window_tokens` 是**补缺值**（256K 保守水位）；若把它当成声明值，
+/// 「用户从未填过窗口」就与「用户填了 262144」不可分辨，预设再也补不了缺。
+fn undeclared_model_capabilities() -> ProviderModelCapabilities {
+    ProviderModelCapabilities {
+        context_window_tokens: None,
+        ..ProviderModelCapabilities::default()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProtocolEndpoint {
@@ -367,7 +379,8 @@ pub struct ProviderModelConfig {
     /// 模型级 base_url 覆盖（D4）：非空 trim 值优先于 provider endpoint / 默认值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    #[serde(default)]
+    /// 整段缺席 ⇒ [`undeclared_model_capabilities`]（窗口未声明，交给预设补缺）。
+    #[serde(default = "undeclared_model_capabilities")]
     pub capabilities: ProviderModelCapabilities,
 }
 
@@ -839,6 +852,15 @@ impl ProviderRegistryStore {
             path: path.into(),
             secret_store,
         }
+    }
+
+    /// 注册表落盘路径（只读）。
+    ///
+    /// 供 `agent::model_window` 的定点编辑与盘点复用：那里必须读**原始 JSON** 才能区分
+    /// 「用户声明了窗口」与「预设补缺」，不能走已被归一化的 `load_view`。
+    /// 暴露路径而不是在别处再拼一遍 `config_dir()`，是为了让第二处不存在。
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn get_service_api_key(&self, service: &str) -> Option<String> {
@@ -2032,18 +2054,27 @@ fn normalize_capability_preset(
     }
 }
 
+/// 能力归一化：**窗口显式声明优先，预设只补缺**。
+///
+/// - `capabilities.contextWindowTokens` 是逐模型的个体事实（同一预设可挂 128K/200K/1M 的
+///   不同部署），只要用户填了正数就必须原样保留；
+/// - `capabilityPreset` 是能力族的真值：布尔能力（tools / streaming / 推理 / 图片…）仍由预设
+///   决定，预设猜不准的只有「这次部署真实允许的上下文长度」这一项，故只对窗口开例外；
+/// - 只有窗口缺席（`None`）或非法（`0`）时才用预设默认值补缺，绝不覆盖已声明值。
 fn normalize_model_capabilities(
     protocol: &ProviderProtocol,
     model_name: &str,
     capability_preset: &ProviderCapabilityPreset,
     capabilities: ProviderModelCapabilities,
 ) -> ProviderModelCapabilities {
+    let declared_window = capabilities
+        .context_window_tokens
+        .filter(|tokens| *tokens > 0);
+
     if matches!(capability_preset, ProviderCapabilityPreset::Custom) {
         let defaults = default_model_capabilities(protocol, model_name);
         return ProviderModelCapabilities {
-            context_window_tokens: capabilities
-                .context_window_tokens
-                .or(defaults.context_window_tokens),
+            context_window_tokens: declared_window.or(defaults.context_window_tokens),
             supports_tools: capabilities.supports_tools,
             supports_streaming: capabilities.supports_streaming,
             supports_image_input: capabilities.supports_image_input,
@@ -2056,33 +2087,11 @@ fn normalize_model_capabilities(
         };
     }
 
-    let defaults = preset_model_capabilities(capability_preset, protocol, model_name);
-    let looks_like_legacy_empty = capabilities.context_window_tokens.is_none()
-        && !capabilities.supports_tools
-        && !capabilities.supports_streaming
-        && !capabilities.supports_image_input
-        && !capabilities.supports_reasoning
-        && !capabilities.supports_video_input
-        && !capabilities.supports_audio_input
-        && !capabilities.supports_image_output
-        && !capabilities.supports_video_output
-        && !capabilities.supports_audio_output;
-    let looks_like_implicit_defaults = capabilities.context_window_tokens.is_none()
-        && capabilities.supports_tools
-        && capabilities.supports_streaming
-        && !capabilities.supports_image_input
-        && !capabilities.supports_reasoning
-        && !capabilities.supports_video_input
-        && !capabilities.supports_audio_input
-        && !capabilities.supports_image_output
-        && !capabilities.supports_video_output
-        && !capabilities.supports_audio_output;
-
-    if looks_like_legacy_empty || looks_like_implicit_defaults {
-        return defaults;
+    let mut resolved = preset_model_capabilities(capability_preset, protocol, model_name);
+    if declared_window.is_some() {
+        resolved.context_window_tokens = declared_window;
     }
-
-    defaults
+    resolved
 }
 
 fn resolve_model_capability_declaration(
