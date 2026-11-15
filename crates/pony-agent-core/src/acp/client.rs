@@ -81,7 +81,9 @@ impl AcpHandlerError {
 ///
 /// 实现必须走 `ask_control` 往返让用户决定；**fail-closed 硬约束**：无 handler / 未决即取消时
 /// 返回 `cancelled`，任何情况下不得默认 `allow`（§6 风险表第一条）。
-pub trait PermissionHandler: Send + Sync {
+// 注：`std::fmt::Debug` supertrait 是为了让 `DispatchContext`（含 `Arc<dyn PermissionHandler>`）
+// 能继续 `#[derive(Debug)]`；handler 的 Debug 输出只打角色名，不泄漏治理内部状态。
+pub trait PermissionHandler: Send + Sync + std::fmt::Debug {
     fn decide(&self, request: &RequestPermissionRequest) -> RequestPermissionResponse;
 }
 

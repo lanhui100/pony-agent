@@ -2237,7 +2237,7 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
         return acp_usage_error("acp 模式需要 -p/--prompt <text>（本模式无 REPL）");
     };
 
-    let mut session = match pony_agent_core::acp::session::AcpAgentSession::spawn(&spec, &workspace)
+    let mut session = match pony_agent_core::acp::session::AcpAgentSession::spawn_for_cli(&spec, &workspace)
     {
         Ok(session) => session,
         Err(error) => return acp_session_error(error),

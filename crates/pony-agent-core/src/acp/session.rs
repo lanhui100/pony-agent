@@ -483,6 +483,45 @@ impl AcpAgentSession {
         })
     }
 
+    /// B176：CLI 宿主形态（`ponycli acp`）的会话入口（additive）。
+    ///
+    /// 与 [`Self::spawn`] 的唯一差别：按 `spec.capabilities_hint` 装配**真实可用**的
+    /// fs/terminal handler 之后再握手 —— handler 存在性参与 [`capabilities_for`] 的推导，
+    /// 因此只有 hint=true 时 `initialize` 才真的声明对应能力（hint=false ⇒ 不装配、不声明）。
+    ///
+    /// - **fs**：`WorkspaceFsHandler`（workspace 边界 + PA-080 授权清单；CLI 无持久化授权 ⇒ 空表）；
+    /// - **terminal**：CLI 侧可用公开构造的 `ProcessManager::new()`（无宿主注入点，不需要额外装配），
+    ///   绑定 workspace root 做 cwd 边界 ⇒ 可诚实声明；
+    /// - **permission**：恒 `None`（CLI 无 Ask 面板 ⇒ `FailClosedPermissionHandler`，一律 cancelled）。
+    pub fn spawn_for_cli(spec: &AcpAgentSpec, cwd: &Path) -> Result<Self, AcpTransportError> {
+        let mcp_servers = crate::acp::config::resolve_mcp_servers_in(spec, cwd)
+            .map_err(|error| AcpTransportError::Unavailable(error.to_string()))?;
+        let fs_handler: Option<Arc<dyn FsHandler>> = spec.capabilities_hint.fs.then(|| {
+            Arc::new(crate::acp::handlers::WorkspaceFsHandler::new(
+                cwd.to_path_buf(),
+                Arc::new(crate::agent::path_permission::AuthorizeStore::new()),
+                crate::agent::path_permission::PathPurpose::Read,
+            )) as Arc<dyn FsHandler>
+        });
+        let terminal_handler: Option<Arc<dyn TerminalHandler>> =
+            spec.capabilities_hint.terminal.then(|| {
+                Arc::new(
+                    crate::acp::handlers::ManagedTerminalHandler::with_workspace_root(
+                        Arc::new(crate::agent::process::ProcessManager::new()),
+                        cwd.to_path_buf(),
+                    ),
+                ) as Arc<dyn TerminalHandler>
+            });
+        if spec.capabilities_hint.fs || spec.capabilities_hint.terminal {
+            eprintln!(
+                "[ponycli] acp capabilities: fs={} terminal={}（声明由真实 handler 装配决定；permission 恒 fail-closed）",
+                fs_handler.is_some(),
+                terminal_handler.is_some()
+            );
+        }
+        Self::spawn_with_full_options(spec, cwd, mcp_servers, fs_handler, terminal_handler, None)
+    }
+
     /// B175 additive：装配 `fs/*` handler（热替换；保留既有 permission / terminal 槽位）。
     ///
     /// 只对**握手时已声明** fs 能力的会话有效：声明已在 `initialize` 固化，注入不追认新能力。
