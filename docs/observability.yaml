@@ -2,6 +2,18 @@
 # 形状：~/.agents/skills/observability-onboarding/references/declaration.schema.json
 # 判定：声明说「该不该有」，巡检说「实际有没有」，两者交叉才是结论（规则家：declaration-rubric.md）。
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
+# B190（ADR 2026-11-15-session-fold-precheck-loses-log-only-sessions）归属说明：折叠字节预检降级后的定向补折。
+# (1) 只改**本地**会话装载读路径（`crates/pony-agent-core/src/agent/session/fold.rs`）：字节预检降级后
+#     追加一轮「日志有、索引无」会话的定向折叠，读的仍是本地 `session.jsonl`；无新增对外接口、网络出口、
+#     后台任务、LLM 调用或依赖，也无新增指标。成本上界沿用既有 ADR 0106 的启动装载预算口径
+#     （单会话 8MiB + 总量 32MiB + 800ms），不新增调参旋钮。
+# (2) 新增**本地取证面**（非遥测出口，只落 stderr → 运行日志行）：
+#     `session_fold_targeted_fill: folded=… skipped=… elapsed=…ms`，与既有 `session_fold_precheck` /
+#     `session_fold_slow` 同一命名族；不上报，不含消息正文与凭据。
+# (3) ⇒ 四维归属不变：tracing / issues 仍 applicable（落点不变 agent/otel/mod.rs、agent/ponysentry/client.rs），
+#     metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
+#     不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 # TUI header 指标整段降级（ADR 2026-11-14-tui-header-metrics-overflow）归属说明：
 # 纯呈现层变更（`crates/pony-agent-core/src/bin/tui.rs::header_metrics_text_within`）：宽度不足时
 # 按段优先级整段让位，不新增对外接口 / 网络 IO / 后台任务 / LLM 调用，也不新增遥测出口；

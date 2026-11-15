@@ -10,6 +10,8 @@ mod log_sink;
 pub(crate) mod fold;
 // B148：单会话定向装载的日志真源合并（复用 fold 的同一套投影规则）。
 pub(crate) mod fold_targeted;
+// B190：读路径折叠预算（字节预检 + 定向补折）——从 fold.rs 抽出，压回文件规模基线。
+pub(crate) mod fold_read_view;
 // ADR 0099 阶段 3-A：会话目录包（`manifest.json` + `events.jsonl` + `attachments/`）导出/导入。
 pub mod bundle;
 // PA-174 P1：投影侧全空时从 durable `turn_events` 重建历史（纯函数）。

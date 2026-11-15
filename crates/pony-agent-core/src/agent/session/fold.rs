@@ -992,220 +992,9 @@ pub fn read_session_state(
     Ok(folded)
 }
 
-// ---------------------------------------------------------------------------
-// ADR 0099 阶段 2-B：读路径切到日志真源
-// ---------------------------------------------------------------------------
-
-/// 读路径折叠的**耗时预算**（ADR 0099 阶段 2 门禁：启动装载 ≤800ms）。
-///
-/// 超预算不是错误，是**降级信号**：本轮保持索引视图（grandfather），记
-/// `session_fold_slow` 日志，下轮再补。绝不因为「快了才可信」而在读路径上阻塞启动。
-pub const DEFAULT_READ_FOLD_BUDGET: std::time::Duration = std::time::Duration::from_millis(800);
-
-/// 读路径折叠的**日志字节预算**：折叠开始前先按日志总字节做一次预检，超出即整轮降级。
-///
-/// 为什么需要它（B047 实测）：`DEFAULT_READ_FOLD_BUDGET` 是**时**预算，超时后的语义是
-/// 「整轮丢弃已折叠结果、回落索引视图」（见 [`fold_read_view`] 的不变量）。真实库
-/// 682MB 日志 / 154 会话时，折叠读到 800ms 只折完 10 个会话就被丢弃——
-/// `session_fold_slow: elapsed=880ms folded=10 skipped=144`，**这 880ms 是纯损耗**：
-/// 折出来的东西一行都没用上，随后 `fill_index_only_rows_from_index_projection` 又把
-/// 153 个会话从索引投影全量读一遍。
-///
-/// 换成字节预检后，同一份库的判定是**确定性**的（同一批日志两次装载给同一结论，不会
-/// 因为机器快慢而跳变），且判定时**不花任何日志 IO**：总量超预算 ⇒ 直接按索引视图。
-/// 索引视图的完整性由 `fill_index_only_rows_from_index_projection` 保证（它不受预算约束）。
-///
-/// 取值依据：实测读路径折叠吞吐 ≈ 100MB/s（10 会话 / 88MB / 880ms）⇒ 32MiB ≈ 320ms，
-/// 既留出「小库照常走日志真源」的空间，也不让大库白付秒级代价。
-pub const DEFAULT_READ_FOLD_LOG_BYTES: u64 = 32 * 1024 * 1024;
-
-/// 读路径折叠报告（供调用方记录 `session_fold_slow` 与装载耗时）。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ReadFoldOutcome {
-    /// 成功 fold 且**有已提交命令**的会话（日志真源侧）。
-    pub folded: Vec<String>,
-    /// 折叠出 `RemoveSession` 墓碑的会话（D3：读路径视其为不存在）。
-    pub deleted: Vec<String>,
-    /// fold / 读日志失败的会话（`(session_id, 原因)`）：**保留索引视图**，不丢会话。
-    pub failed: Vec<(String, String)>,
-    /// 因预算耗尽而**跳过折叠**的会话（`degraded()` 为真 ⇔ 非空）。
-    pub skipped_due_to_budget: Vec<String>,
-    /// 日志文件存在但没有任何已提交命令（只有 header）的会话：**不覆盖索引行**。
-    pub empty_log: Vec<String>,
-    /// 本轮折叠总耗时（毫秒）。
-    pub elapsed_ms: u128,
-}
-
-impl ReadFoldOutcome {
-    /// 是否触发了「超预算 ⇒ 降级为读索引」。
-    pub fn degraded(&self) -> bool {
-        !self.skipped_due_to_budget.is_empty()
-    }
-}
-
-/// 日志根下各会话日志文件的字节总量（`stat` 级别，不读内容）。
-///
-/// 只服务 [`fold_read_view`] 的**字节预检**：判定「本轮折叠能否在预算内跑完」。
-/// 单条 `stat` / 路径推导失败按 0 计——该会话会在折叠阶段按 `failed` 收口，预检不重复报错。
-fn total_log_bytes(store: &SessionLogStore, metas: &[SessionLogMeta]) -> u64 {
-    metas
-        .iter()
-        .filter_map(|meta| store.log_path(&meta.session_id, &meta.cwd).ok())
-        .filter_map(|path| std::fs::metadata(path).ok())
-        .map(|meta| meta.len())
-        .sum()
-}
-
-/// 读路径的**日志侧视图**：扫日志根，逐会话 fold 出 `SessionState`。
-///
-/// 与 [`rebuild_index`] 的区别：这里**只读**、不写索引、单会话失败不中断整轮
-/// （该会话保留索引视图，等价于「下轮再补」）。
-///
-/// 超预算时返回**空视图**并把名单记进 `skipped_due_to_budget`——降级语义是「本轮按索引
-/// 读」，不是「读一半日志 + 一半索引」：半态会让 `load_store` 的同一份结果在两次调用
-/// 之间跳变，而启动路径只需要「可读且完整」。
-///
-/// 为避免「读满 800ms 又被整轮丢弃」的纯损耗，进入循环前先做**字节预检**
-/// （[`DEFAULT_READ_FOLD_LOG_BYTES`]）：日志总量超预算 ⇒ 一次日志 IO 都不做，直接降级。
-pub fn fold_read_view(
-    log_root: &Path,
-    budget: std::time::Duration,
-) -> (HashMap<String, SessionState>, ReadFoldOutcome) {
-    fold_read_view_with_byte_budget(log_root, budget, DEFAULT_READ_FOLD_LOG_BYTES)
-}
-
-/// 与 [`fold_read_view`] 同义，字节预算由调用方给出（测试用：单测要能在不造 32MiB 夹具的
-/// 前提下驱动预检分支）。
-fn fold_read_view_with_byte_budget(
-    log_root: &Path,
-    budget: std::time::Duration,
-    byte_budget: u64,
-) -> (HashMap<String, SessionState>, ReadFoldOutcome) {
-    let started = std::time::Instant::now();
-    let store = SessionLogStore::new(log_root.to_path_buf());
-    let mut outcome = ReadFoldOutcome::default();
-    let metas = match store.list_sessions() {
-        Ok(metas) => metas,
-        Err(error) => {
-            // 扫不动日志根（权限 / IO）⇒ 整轮降级为读索引，不阻塞启动。
-            outcome.skipped_due_to_budget.push(format!("<log-root: {error}>"));
-            return (HashMap::new(), outcome);
-        }
-    };
-    // 预算为 0 ⇒ 立即降级（测试与「极端保护」入口用同一条判定，不做特殊分支）。
-    let mut over_budget = budget.is_zero();
-    // B047 预检：日志总量超出字节预算 ⇒ 折叠注定无法在时预算内完成，而超时的语义是
-    // **整轮丢弃**。此时连一次日志读都不做，直接整轮降级为读索引（确定性、零损耗）。
-    let log_bytes_total = total_log_bytes(&store, &metas);
-    if log_bytes_total > byte_budget {
-        outcome.skipped_due_to_budget = metas
-            .iter()
-            .map(|meta| meta.session_id.clone())
-            .collect();
-        outcome.elapsed_ms = started.elapsed().as_millis();
-        eprintln!(
-            "[pony-agent][session] session_fold_precheck: log_bytes={}MB byte_budget={}MB sessions={} — 日志总量超出读路径折叠字节预算，本轮整轮按索引视图（不读日志）",
-            log_bytes_total / (1024 * 1024),
-            byte_budget / (1024 * 1024),
-            metas.len()
-        );
-        return (HashMap::new(), outcome);
-    }
-    let mut folded: HashMap<String, SessionState> = HashMap::new();
-    for meta in metas {
-        if over_budget || started.elapsed() > budget {
-            over_budget = true;
-            outcome.skipped_due_to_budget.push(meta.session_id.clone());
-            continue;
-        }
-        let session_id = meta.session_id.clone();
-        let events = match read_log_events(&store, &meta) {
-            Ok(events) => events,
-            Err(error) => {
-                outcome
-                    .failed
-                    .push((session_id, format!("read log: {error}")));
-                continue;
-            }
-        };
-        if events.is_empty() {
-            // 只有 header：日志还没有任何已提交命令。用它覆盖索引行会把真实历史读成空。
-            outcome.empty_log.push(session_id);
-            continue;
-        }
-        match fold_session(&events) {
-            Ok(result) if result.deleted => outcome.deleted.push(session_id),
-            Ok(result) => {
-                let mut state = result.state;
-                if state.conversation_id.is_empty() {
-                    state.conversation_id = session_id.clone();
-                }
-                outcome.folded.push(session_id.clone());
-                folded.insert(session_id, state);
-            }
-            Err(error) => outcome
-                .failed
-                .push((session_id, format!("fold: {error}"))),
-        }
-    }
-    outcome.elapsed_ms = started.elapsed().as_millis();
-    if outcome.degraded() {
-        eprintln!(
-            "[pony-agent][session] session_fold_slow: elapsed={}ms budget={}ms folded={} skipped={} — 降级为读索引（下轮再补）",
-            outcome.elapsed_ms,
-            budget.as_millis(),
-            outcome.folded.len(),
-            outcome.skipped_due_to_budget.len()
-        );
-        // 降级即整轮回落索引视图（见上方「半态」说明）。
-        outcome.folded.clear();
-        return (HashMap::new(), outcome);
-    }
-    (folded, outcome)
-}
-
-/// 把**日志真源**合并进索引视图（`load_store` 的读切换）。
-///
-/// 合并规则（ADR 0099 D1 / 阶段 2 / 2-D）：
-/// 1. 有日志的会话 ⇒ **日志无条件为准**（同 id 覆盖索引行）。阶段 2-D 停写整包 blob 后，
-///    索引行只剩索引字段（`__index_only` 轻量行），日志是唯一内容来源；原先那条
-///    「索引 `updated_at_ms` 更新就保留索引」的过渡定序已删除——留着它会把轻量行
-///    （内容为空、时间戳却随写路径前进）当成比日志更新，从而把会话读成空壳；
-/// 2. 无日志的会话 ⇒ 保持索引视图（存量会话，grandfather，不得丢失）；
-/// 3. 墓碑（`RemoveSession`）⇒ 从视图里移除（D3：删除不复活）；
-/// 4. 折叠失败的会话 ⇒ 保持索引视图（不丢会话，下一轮再补）；
-/// 5. fold 无法推导的索引侧字段（`INDEX_ONLY_STATE_FIELDS` + `workspace_id`）从索引行继承，
-///    否则读切换会凭空丢掉「日志不承载」的真实状态。
-pub fn merge_log_truth_into_sessions(
-    log_root: &Path,
-    sessions: &mut HashMap<String, SessionState>,
-) -> ReadFoldOutcome {
-    merge_log_truth_into_sessions_with_budget(log_root, sessions, DEFAULT_READ_FOLD_BUDGET)
-}
-
-/// 与 [`merge_log_truth_into_sessions`] 同语义，但预算由调用方给出（测试/维护入口用）。
-pub fn merge_log_truth_into_sessions_with_budget(
-    log_root: &Path,
-    sessions: &mut HashMap<String, SessionState>,
-    budget: std::time::Duration,
-) -> ReadFoldOutcome {
-    let (folded, outcome) = fold_read_view(log_root, budget);
-    for (session_id, state) in folded {
-        match sessions.get(&session_id) {
-            None => {
-                // 索引里没有这一行 ⇒ 日志是唯一来源（阶段 2-B 的核心兑现点）。
-                sessions.insert(session_id, state);
-            }
-            Some(indexed) => {
-                sessions.insert(session_id, apply_index_projection(indexed, state));
-            }
-        }
-    }
-    for session_id in &outcome.deleted {
-        sessions.remove(session_id);
-    }
-    outcome
-}
+// B190：读路径预算（字节预检 + 定向补折）搬到 `fold_read_view.rs`；仅 re-export 仍有
+// 外部消费者的 `merge_log_truth_into_sessions`，保持 `fold::*` 既有寻址契约零改动。
+pub use super::fold_read_view::merge_log_truth_into_sessions;
 
 /// 把**索引独有的投影产物**套到日志 fold 出的状态上（日志里没有承载它们的命令）。
 ///
@@ -2328,6 +2117,14 @@ pub(crate) fn canonical_commands(state: &SessionState, epoch: u64) -> Vec<Persis
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 读路径预算（字节预检 + 定向补折）真值在 `fold_read_view`：此处显式引入，
+    // 不放 `fold.rs` 顶层 re-export —— `cargo fix --lib` 会把「只在 cfg(test) 用」的
+    // re-export 当死导入删掉，删了单测就编译失败（B190 踩过）。
+    use crate::agent::session::fold_read_view::{
+        fold_read_view_with_byte_budget, merge_log_truth_into_sessions_with_caps,
+        merge_log_truth_into_sessions_with_budget, total_log_bytes, DEFAULT_READ_FOLD_LOG_BYTES,
+        DEFAULT_READ_FOLD_SESSION_BYTES,
+    };
     use crate::agent::session::log_command::command_to_value;
     use crate::agent::session::PersistCommand;
     use serde_json::json;
@@ -2905,6 +2702,137 @@ mod tests {
             "预检不读日志，耗时应接近 0ms（实际 {}ms）",
             outcome.elapsed_ms
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 预检降级后，**日志独有**的会话必须被定向补折回视图：索引里没有它，日志是唯一来源。
+    #[test]
+    fn precheck_degrade_folds_log_only_session_back_into_view() {
+        let root = temp_log_root("targeted-fill");
+        let log_only = "pa_2b_targeted_log_only";
+        write_log(
+            &root,
+            log_only,
+            &[append_text_command(log_only, "user", "只在日志里", 0)],
+        );
+        let mut sessions = HashMap::new();
+
+        // precheck 字节预算 0 ⇒ 必降级；定向补折的总量/单会话预算给足。
+        let outcome = merge_log_truth_into_sessions_with_caps(
+            &root,
+            &mut sessions,
+            Duration::from_secs(60),
+            0,
+            DEFAULT_READ_FOLD_LOG_BYTES,
+            DEFAULT_READ_FOLD_SESSION_BYTES,
+        );
+
+        assert!(outcome.precheck_degraded, "前置：必须由字节预检降级");
+        assert_eq!(
+            outcome.folded,
+            vec![log_only.to_string()],
+            "日志独有的会话必须补回视图（否则 /resume 永久看不到）"
+        );
+        assert_eq!(sessions[log_only].history[0].content, "只在日志里");
+        assert!(
+            !outcome.degraded(),
+            "唯一缺失的会话已补回 ⇒ 本轮不再算降级（实际 skipped={:?}）",
+            outcome.skipped_due_to_budget
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 索引已覆盖的会话不补折：预检降级的初衷（一次日志 IO 都不做）不能被补折吃掉。
+    #[test]
+    fn targeted_fill_skips_sessions_covered_by_index() {
+        let root = temp_log_root("targeted-covered");
+        let covered = "pa_2b_targeted_covered";
+        write_log(
+            &root,
+            covered,
+            &[append_text_command(covered, "user", "日志内容", 0)],
+        );
+        let mut sessions = HashMap::new();
+        sessions.insert(covered.to_string(), index_state(covered, "索引内容", 1));
+
+        let outcome = merge_log_truth_into_sessions_with_caps(
+            &root,
+            &mut sessions,
+            Duration::from_secs(60),
+            0,
+            DEFAULT_READ_FOLD_LOG_BYTES,
+            DEFAULT_READ_FOLD_SESSION_BYTES,
+        );
+
+        assert!(outcome.precheck_degraded);
+        assert!(
+            outcome.folded.is_empty(),
+            "索引已覆盖 ⇒ 不得为它白付一次日志 IO（实际 folded={:?}）",
+            outcome.folded
+        );
+        assert_eq!(
+            sessions[covered].history[0].content, "索引内容",
+            "索引视图必须保持原样"
+        );
+        assert_eq!(
+            outcome.skipped_due_to_budget,
+            vec![covered.to_string()],
+            "降级名单只留「本轮确实没读」的会话"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 单会话字节上限：超大日志不补折（交给显式 `pony resume <id>` 的定向装载）。
+    #[test]
+    fn targeted_fill_respects_per_session_byte_cap() {
+        let root = temp_log_root("targeted-session-cap");
+        let log_only = "pa_2b_targeted_oversized";
+        write_log(
+            &root,
+            log_only,
+            &[append_text_command(log_only, "user", "只在日志里", 0)],
+        );
+        let mut sessions = HashMap::new();
+
+        let outcome = merge_log_truth_into_sessions_with_caps(
+            &root,
+            &mut sessions,
+            Duration::from_secs(60),
+            0,
+            DEFAULT_READ_FOLD_LOG_BYTES,
+            1,
+        );
+
+        assert!(outcome.folded.is_empty(), "单会话超上限必须跳过");
+        assert!(sessions.is_empty(), "跳过即不落视图（不得造半态）");
+        assert_eq!(outcome.skipped_due_to_budget, vec![log_only.to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 总量上限：补折累计字节超预算即收手，剩余名单留给下轮。
+    #[test]
+    fn targeted_fill_respects_total_byte_budget() {
+        let root = temp_log_root("targeted-total-cap");
+        let log_only = "pa_2b_targeted_total";
+        write_log(
+            &root,
+            log_only,
+            &[append_text_command(log_only, "user", "只在日志里", 0)],
+        );
+        let mut sessions = HashMap::new();
+
+        let outcome = merge_log_truth_into_sessions_with_caps(
+            &root,
+            &mut sessions,
+            Duration::from_secs(60),
+            0,
+            1,
+            DEFAULT_READ_FOLD_SESSION_BYTES,
+        );
+
+        assert!(outcome.folded.is_empty(), "总量超预算必须跳过");
+        assert!(sessions.is_empty());
+        assert_eq!(outcome.skipped_due_to_budget, vec![log_only.to_string()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
