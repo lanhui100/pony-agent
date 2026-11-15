@@ -76,6 +76,7 @@ fn rich_session(id: &str, title: &str, at: u64) -> SessionState {
     SessionState {
         conversation_id: id.to_string(),
         title: title.to_string(),
+        ai_title: None,
         summary: format!("{title}-summary"),
         history: vec![
             user_msg(&format!("{title}-hello"), "t1"),

@@ -513,6 +513,7 @@ fn legacy_state_with_transcript(session_id: &str) -> SessionState {
     SessionState {
         conversation_id: session_id.to_string(),
         title: "带 transcript 的老会话".to_string(),
+        ai_title: None,
         summary: "摘要".to_string(),
         history,
         provider_native_transcript: vec![

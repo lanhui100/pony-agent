@@ -347,6 +347,7 @@ fn crafted_accident_state() -> SessionState {
     SessionState {
         conversation_id: SID.to_string(),
         title: "中断轮续跑验收".to_string(),
+        ai_title: None,
         summary: "摘要".to_string(),
         history: node_two.history.clone(),
         provider_native_transcript: Vec::new(),

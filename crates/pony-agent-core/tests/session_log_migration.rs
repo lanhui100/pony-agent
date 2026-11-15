@@ -238,6 +238,7 @@ fn legacy_state(session_id: &str, title: &str, workspace_id: Option<&str>) -> Se
     SessionState {
         conversation_id: session_id.to_string(),
         title: title.to_string(),
+        ai_title: None,
         summary: format!("{title} 摘要"),
         history,
         provider_native_transcript: Vec::new(),

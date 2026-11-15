@@ -749,6 +749,7 @@ fn ensure_history_graph_does_not_resurrect_cancelled_head() {
     let mut session = SessionState {
         conversation_id: session_id.to_string(),
         title: "测试".to_string(),
+        ai_title: None,
         summary: "摘要".to_string(),
         history: Vec::new(),
         provider_native_transcript: Vec::new(),

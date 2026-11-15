@@ -280,6 +280,7 @@ fn index_only_session(session_id: &str, title: &str, contents: &[&str]) -> Sessi
     SessionState {
         conversation_id: session_id.to_string(),
         title: title.to_string(),
+        ai_title: None,
         summary: "只有索引行，没有日志文件".to_string(),
         history: contents.iter().map(|text| user_message(text)).collect(),
         provider_native_transcript: Vec::new(),
