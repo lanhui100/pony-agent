@@ -313,18 +313,9 @@ fn test_model_selector_state_logic() {
     assert_eq!(state.mode, tui::InteractionMode::Normal);
 
     let models = vec![
-        tui::ModelItem {
-            id: "gpt-4o".to_string(),
-            name: "GPT-4o".to_string(),
-        },
-        tui::ModelItem {
-            id: "claude-3-7-sonnet".to_string(),
-            name: "Claude 3.7 Sonnet".to_string(),
-        },
-        tui::ModelItem {
-            id: "deepseek-reasoner".to_string(),
-            name: "DeepSeek R1".to_string(),
-        },
+        tui::ModelItem::new("gpt-4o", "GPT-4o"),
+        tui::ModelItem::new("claude-3-7-sonnet", "Claude 3.7 Sonnet"),
+        tui::ModelItem::new("deepseek-reasoner", "DeepSeek R1"),
     ];
 
     // 打开 model 选择器
@@ -355,10 +346,7 @@ fn test_model_selector_state_logic() {
     assert_eq!(state.model, "gpt-4o");
 
     // 取消选择器
-    state.open_model_selector(vec![tui::ModelItem {
-        id: "temp-model".to_string(),
-        name: "Temp Model".to_string(),
-    }]);
+    state.open_model_selector(vec![tui::ModelItem::new("temp-model", "Temp Model")]);
     assert_eq!(state.mode, tui::InteractionMode::SelectingModel);
     state.cancel_model_selector();
     assert_eq!(state.mode, tui::InteractionMode::Normal);

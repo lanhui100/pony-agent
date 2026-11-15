@@ -105,7 +105,7 @@ pub const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
         title: "面板与会话",
         items: &[
             ShortcutItem { keys: "Ctrl+T", description: "任务看板（流式期同样可用）" },
-            ShortcutItem { keys: "Ctrl+R", description: "模型面板，拉取并切换模型（流式期同样可用）" },
+            ShortcutItem { keys: "Ctrl+R", description: "模型面板，拉取并切换模型（面板内 w 改上下文窗口；流式期同样可用）" },
             ShortcutItem { keys: "Ctrl+M", description: "同 Ctrl+R（仅 kitty 协议终端可上报）" },
             ShortcutItem { keys: "Ctrl+↑", description: "子会话内返回主会话" },
             ShortcutItem { keys: "Ctrl+← / Ctrl+→", description: "切换子智能体会话" },

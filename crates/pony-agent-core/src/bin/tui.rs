@@ -29,6 +29,9 @@ use pony_agent_core::agent::metrics_snapshot::{
     context_ratio_for_window, format_unit_fraction_percent, TurnMetricsSnapshot,
 };
 use pony_agent_core::agent::model_preferences::{ModelPreferences, ModelPreferencesStore};
+// 上下文窗口文案：模型面板徽标与 `w` 编辑器共用同一十进制口径（K=1000 / M=1_000_000），
+// 与桌面端 `formatTokenUnit` 对齐——三处各写一份就会出现「同一个窗口两个数字」。
+use pony_agent_core::agent::model_window::format_context_window;
 // 显示偏好（/settings 与 Ctrl+O 的唯一真值）：独立文件持久化，与桌面端 settings.json 契约解耦。
 use pony_agent_core::agent::headless::PermissionMode;
 use pony_agent_core::agent::tui_preferences::{TuiPreferences, TuiPreferencesStore};
@@ -548,6 +551,13 @@ pub use self::model_panel::*;
 // ADR 0113「撤回」：双击 Esc / `/rewind` 的两段式覆盖层（轮次 → 范围 → 执行）。
 #[path = "tui/rewind.rs"]
 mod rewind;
+// `/models` 面板的上下文窗口编辑器（`w`）：逐模型声明的入口（真源 `agent::model_window`）。
+#[path = "tui/model_window_editor.rs"]
+mod model_window_editor;
+pub use self::model_window_editor::ModelWindowEditState;
+// 模型面板列表的唯一构建入口：窗口徽标 / 声明来源随行携带，
+// 四个「打开或刷新面板」的路径共用它（各写一份就会有一半行缺字段）。
+use self::model_window_editor::model_items_for_provider;
 
 pub use protocol::*;
 
@@ -614,13 +624,16 @@ pub enum InteractionMode {
     /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的两段式覆盖层
     /// （① 选轮次 ② 选范围：恢复代码与会话 / 仅恢复会话）。
     Rewind,
+    /// `/models` 面板内 `w`：编辑当前高亮模型的上下文窗口
+    /// （↵ 保存 · esc 取消 · 留空 / `-` 恢复跟随预设）。真值落点 `agent::model_window`。
+    EditingModelWindow,
 }
 
 pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "选择并恢复历史会话"),
     ("/rewind", "撤回到某个用户轮次（会话 + 已写文件）"),
     ("/provider", "管理与切换模型提供商"),
-    ("/models", "切换当前活跃模型（Ctrl+R / Ctrl+M）"),
+    ("/models", "切换当前活跃模型（Ctrl+R / Ctrl+M；面板内 w 改上下文窗口）"),
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
     ("/permission", "查看或切换工具执行权限级别"),
     ("/settings", "设置 TUI 显示与交互偏好"),
@@ -1169,6 +1182,26 @@ pub struct ProviderItem {
 pub struct ModelItem {
     pub id: String,
     pub name: String,
+    /// `providers.json` 里显式声明的上下文窗口（`None` = 未声明，跟随能力预设）。
+    /// 与 `context_window_tokens` 必须分开：面板要能说清「这个数是我填的，还是预设补的」。
+    pub declared_context_window: Option<u32>,
+    /// 生效窗口（声明值 > 预设补缺）；渲染直接用它，不在每帧读盘。
+    pub context_window_tokens: Option<u32>,
+}
+
+impl ModelItem {
+    /// 只带 id/name 的条目（窗口未知）。
+    ///
+    /// 供未接注册表的调用方与测试构造：窗口字段必须显式建模，但这里的「不知道」是合法状态
+    /// （例如面板用空列表占位），不该逼每个调用方各写两个 `None`。
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            declared_context_window: None,
+            context_window_tokens: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1426,6 +1459,9 @@ pub struct TuiState {
     pub selected_model_index: usize,
     /// Ctrl+D 默认模型 / Ctrl+F 优选列表（磁盘持久化，独立于 providers.json 契约）。
     pub model_preferences: ModelPreferences,
+    /// `/models` 面板 `w` 打开的上下文窗口编辑器状态（`None` = 编辑器未打开）。
+    /// 缓冲与错误都放在这里（不借用 Composer），避免编辑窗口时吞掉用户草稿。
+    pub model_window_edit: Option<ModelWindowEditState>,
     pub reasoning_effort: Option<ProviderReasoningEffort>,
     pub selected_reasoning_effort_index: usize,
     pub selected_command_index: usize,
@@ -1563,6 +1599,7 @@ impl Default for TuiState {
             selected_model_index: 0,
             // 磁盘偏好由 run_tui 启动时加载并覆盖（Default 不做 IO，保证测试与快照可复现）。
             model_preferences: ModelPreferences::default(),
+            model_window_edit: None,
             reasoning_effort: None,
             selected_reasoning_effort_index: 0,
             selected_command_index: 0,
@@ -4613,15 +4650,25 @@ fn model_display_name(item: &ModelItem) -> String {
 
 /// 行右侧徽标：默认（Ctrl+D）/ 优选（Ctrl+F）/ 当前（正在使用），可叠加。
 fn model_badges(state: &TuiState, item: &ModelItem) -> String {
-    let mut parts: Vec<&str> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
     if state.model_preferences.default_model.as_deref() == Some(item.id.as_str()) {
-        parts.push("默认");
+        parts.push("默认".to_string());
     }
     if state.model_preferences.is_preferred(&item.id) {
-        parts.push("优选");
+        parts.push("优选".to_string());
     }
     if item.id == state.model {
-        parts.push("当前");
+        parts.push("当前".to_string());
+    }
+    // 上下文窗口必须显示**来源**：声明值裸写，预设补缺加后缀。
+    // 这是「按 256K 算的百分比对不对」在界面上唯一可自查的地方（`w` 可直接改）。
+    if let Some(window) = item.context_window_tokens {
+        let label = format_context_window(window);
+        parts.push(if item.declared_context_window.is_some() {
+            format!("ctx {label}")
+        } else {
+            format!("ctx {label}·预设")
+        });
     }
     parts.join(" · ")
 }
@@ -6372,7 +6419,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             f,
             rect,
             &title,
-            "↑↓ 选择 · ↵ 确认 · ⌃D 设默认 · ⌃F 优选 · r 刷新 · esc 取消",
+            "↑↓ 选择 · ↵ 确认 · ⌃D 设默认 · ⌃F 优选 · w 改窗口 · r 刷新 · esc 取消",
         );
         let inner_w = body.width as usize;
         let mut lines_out: Vec<Line<'static>> = Vec::new();
@@ -6524,6 +6571,10 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
     if state.mode == InteractionMode::ShortcutsHelp {
         shortcuts::render(f, area);
+    }
+    // `/models` 面板之上的窗口编辑器（模态；`None` 时不画）。
+    if state.mode == InteractionMode::EditingModelWindow {
+        model_window_editor::render(f, state);
     }
 }
 
@@ -9035,7 +9086,9 @@ fn tui_event_loop(
         // 流式态 160ms 驱动动效；问答等待期用 450ms 的低频呼吸提醒（不闪、不抢注意力）。
         let awaiting_answer = matches!(
             state.mode,
-            InteractionMode::AskUserQuestion | InteractionMode::AddingProvider
+            InteractionMode::AskUserQuestion
+                | InteractionMode::AddingProvider
+                | InteractionMode::EditingModelWindow
         );
         let tick_ms = if state.is_streaming { 160 } else { 450 };
         if (state.is_streaming || awaiting_answer)
@@ -9426,11 +9479,9 @@ fn tui_event_loop(
                                     let view = registry.load_view();
                                     let current_prov = view.providers.iter().find(|p| p.id == selected.id).cloned();
                                     if let Some(p) = current_prov {
-                                        let items: Vec<ModelItem> = p
-                                            .models
-                                            .iter()
-                                            .map(|m| ModelItem { id: m.id.clone(), name: m.name.clone() })
-                                            .collect();
+                                        // 窗口徽标与声明来源随行携带（列表构建时一次读盘，
+                                        // 渲染期不再访问文件系统）：见 `model_items_for_provider`。
+                                        let items = model_items_for_provider(&registry, &p.id);
                                         state.open_model_selector(items);
                                         state.status_text = "正在拉取模型列表…".to_string();
                                         spawn_model_discovery(&state, &tx, &p.id);
@@ -9447,6 +9498,15 @@ fn tui_event_loop(
                     }
 
                     // 1c. Model 选择弹窗模式下的按键处理
+                    // 1c0. 上下文窗口编辑器（`/models` 面板内 `w` 打开）：
+                    // 模态吸收全部按键，绝不漏进 Composer（否则数字会被当成用户消息发出去）。
+                    if state.mode == InteractionMode::EditingModelWindow {
+                        if state.handle_model_window_editor_key(&key) {
+                            dirty = true;
+                        }
+                        continue;
+                    }
+
                     if state.mode == InteractionMode::SelectingModel {
                         // Ctrl+D（设默认）/ Ctrl+F（切换优选）是「写盘」动作，走独立可测函数。
                         if apply_model_panel_shortcut(
@@ -9482,6 +9542,14 @@ fn tui_event_loop(
                                     .unwrap_or_else(|| state.current_provider_id.clone());
                                 state.status_text = "正在拉取模型列表…".to_string();
                                 spawn_model_discovery(&state, &tx, &prov_id);
+                            }
+                            // 逐模型上下文窗口：面板内唯一能写 providers.json 的入口。
+                            // 保存走 `agent::model_window` 的**定点写入**（只改这一个键，
+                            // 未声明的模型保持未声明），不走 `save_view` 整份重写。
+                            KeyCode::Char('w') | KeyCode::Char('W') => {
+                                if let Err(error) = state.open_model_window_editor() {
+                                    state.set_status_notice(error);
+                                }
                             }
                             _ => {}
                         }
@@ -10276,11 +10344,8 @@ fn tui_event_loop(
                                     .as_ref()
                                     .and_then(|id| view.providers.iter().find(|p| &p.id == id));
                                 if let Some(p) = prov {
-                                    let items: Vec<ModelItem> = p
-                                        .models
-                                        .iter()
-                                        .map(|m| ModelItem { id: m.id.clone(), name: m.name.clone() })
-                                        .collect();
+                                    // 窗口徽标与声明来源随行携带（见 `model_items_for_provider`）。
+                                    let items = model_items_for_provider(&registry, &p.id);
                                     state.open_model_selector(items);
                                     state.status_text = "正在拉取模型列表…".to_string();
                                     spawn_model_discovery(&state, &tx, &p.id);
@@ -10422,11 +10487,8 @@ fn tui_event_loop(
 
                                     match current_prov {
                                         Some(p) => {
-                                            let items: Vec<ModelItem> = p
-                                                .models
-                                                .iter()
-                                                .map(|m| ModelItem { id: m.id.clone(), name: m.name.clone() })
-                                                .collect();
+                                            // 窗口徽标与声明来源随行携带（见 `model_items_for_provider`）。
+                                            let items = model_items_for_provider(&registry, &p.id);
                                             state.open_model_selector(items);
                                             state.status_text = "正在拉取模型列表…".to_string();
                                             spawn_model_discovery(&state, &tx, &p.id);
@@ -11171,13 +11233,10 @@ fn tui_event_loop(
                         Err(error) => Err(error),
                     };
                     match saved {
-                        Ok(saved) => {
-                            let items: Vec<ModelItem> = saved
-                                .providers
-                                .iter()
-                                .find(|p| p.id == provider_id)
-                                .map(|p| p.models.iter().map(|m| ModelItem { id: m.id.clone(), name: m.name.clone() }).collect())
-                                .unwrap_or_default();
+                        Ok(_saved) => {
+                            // 列表从**磁盘真值**重建（`saved` 的窗口已被预设补缺，
+                            // 无法区分「声明」与「补缺」；见 `model_items_for_provider`）。
+                            let items = model_items_for_provider(&registry, &provider_id);
                             let n = items.len();
                             if state.mode == InteractionMode::SelectingModel {
                                 // 面板已开：刷新列表，保留当前命中项选择（统一索引空间），否则回到 0。
@@ -12294,3 +12353,8 @@ mod plan_approve_tests;
 #[cfg(test)]
 #[path = "tui/tests/shortcuts_help_tests.rs"]
 mod shortcuts_help_tests;
+
+/// `/models` 面板 `w`：上下文窗口编辑器的验收测试（真实注册表 + 真实渲染）。
+#[cfg(test)]
+#[path = "tui/tests/model_window_editor_tests.rs"]
+mod model_window_editor_tests;

@@ -321,5 +321,7 @@ pub fn is_modal_mode(mode: &InteractionMode) -> bool {
             // Ctrl+H 快捷键帮助 / Ctrl+G 目标面板：同样是占输入框的覆盖层。
             | InteractionMode::ShortcutsHelp
             | InteractionMode::GoalDetail
+            // `/models` 的窗口编辑器：Enter 是「保存窗口」，绝不能被当成「提交排队消息」。
+            | InteractionMode::EditingModelWindow
     )
 }

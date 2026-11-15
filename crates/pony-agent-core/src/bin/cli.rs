@@ -1084,6 +1084,13 @@ fn print_usage(format: OutputFormat) {
     human!(format, "  ponycli config effective   One-line JSON: disk_policy vs effective_policy");
     human!(format, "                             (+ clamped_fields, aggregate_budget_ms,");
     human!(format, "                             per_attempt_effective_timeout_ms); no secrets");
+    human!(format, "  ponycli models list [--provider <id>]");
+    human!(format, "                             One JSON line per model: declaredContextWindowTokens");
+    human!(format, "                             (disk truth) / contextWindowTokens (effective) / source");
+    human!(format, "  ponycli models set-window --provider <id> --model <id> --window <v>");
+    human!(format, "                             v = 200000 | 200K | 1M | clear ('clear' removes the");
+    human!(format, "                             declaration so the capability preset fills it again).");
+    human!(format, "                             Touches only that one key; siblings are untouched.");
     human!(format, "Sessions subcommand exit codes: 0 ok / 2 invalid bundle / 3 target exists or maintenance lock busy / 4 degraded");
     human!(format, "");
     human!(format, "ACP agent host mode (B151/P2):");
@@ -1388,7 +1395,10 @@ fn run_maintenance_subcommand_if_requested() -> Option<i32> {
     let argv: Vec<String> = std::env::args().collect();
     if is_help_request(&argv) {
         // 维护命名空间下的 `--help` 明确打印用法（而不是把 `--db` 当成未知参数报错）。
-        if matches!(argv.get(1).map(String::as_str), Some("sessions") | Some("config")) {
+        if matches!(
+            argv.get(1).map(String::as_str),
+            Some("sessions") | Some("config") | Some("models")
+        ) {
             print_usage(OutputFormat::Text);
             return Some(0);
         }
@@ -1401,6 +1411,8 @@ fn run_maintenance_subcommand_if_requested() -> Option<i32> {
         .or_else(run_sessions_migrate_logs_if_requested)
         .or_else(run_sessions_vacuum_if_requested)
         .or_else(run_config_effective_if_requested)
+        // 模型配置面（窗口声明）：与 TUI `/models` 的 `w` 同一真源，定点写入不整份重写。
+        .or_else(run_models_subcommand_if_requested)
 }
 
 /// `ponycli config effective`：打印**生效策略**报告（单行 JSON 到 stdout，exit 0）。
@@ -1430,6 +1442,139 @@ fn run_config_effective_if_requested() -> Option<i32> {
             Some(1)
         }
     }
+}
+
+use pony_agent_core::agent::model_window::{
+    list_context_windows, parse_context_window_input, set_context_window, ModelContextWindow,
+};
+
+/// `ponycli models` 的解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelsCommand {
+    List {
+        provider: Option<String>,
+    },
+    SetWindow {
+        provider: String,
+        model: String,
+        /// `None` = 清除声明（恢复跟随能力预设）。
+        window: Option<u32>,
+    },
+}
+
+/// 解析 `ponycli models ...`：`Ok(None)` = 这不是 models 子命令。
+///
+/// 拆成纯函数是为了可测（入口只负责取 argv → 执行 → 打印 → 退出码），
+/// 参数错误的文案与「缺哪个参数」也能被用例钉住。
+pub fn parse_models_command(args: &[String]) -> Result<Option<ModelsCommand>, String> {
+    if args.get(1).map(String::as_str) != Some("models") {
+        return Ok(None);
+    }
+    match args.get(2).map(String::as_str) {
+        Some("list") => Ok(Some(ModelsCommand::List {
+            provider: flag_value(args, "--provider"),
+        })),
+        Some("set-window") => {
+            let provider = flag_value(args, "--provider").ok_or("缺少 --provider")?;
+            let model = flag_value(args, "--model").ok_or("缺少 --model")?;
+            let raw = flag_value(args, "--window").ok_or("缺少 --window")?;
+            let window = parse_context_window_input(&raw)?;
+            Ok(Some(ModelsCommand::SetWindow {
+                provider,
+                model,
+                window,
+            }))
+        }
+        Some(other) => Err(format!("未知的 models 子命令：{other}")),
+        None => Err("models 需要子命令（list | set-window）".to_string()),
+    }
+}
+
+/// 单条模型的窗口报告：`declaredContextWindowTokens`（磁盘事实）与 `contextWindowTokens`
+/// （生效值）必须并列，否则「这个数是不是我填的」在 CLI 上无从判断。不含任何密钥。
+fn model_window_report(entry: &ModelContextWindow) -> serde_json::Value {
+    serde_json::json!({
+        "providerId": entry.provider_id,
+        "providerName": entry.provider_name,
+        "modelId": entry.model_id,
+        "modelName": entry.model_name,
+        "model": entry.model,
+        "capabilityPreset": entry.preset,
+        "declaredContextWindowTokens": entry.declared,
+        "contextWindowTokens": entry.effective,
+        "source": if entry.declared.is_some() { "declared" } else { "preset" },
+    })
+}
+
+/// 执行解析后的命令，返回要打印的报告行（调用方负责输出）。
+pub fn execute_models_command(
+    store: &ProviderRegistryStore,
+    command: &ModelsCommand,
+) -> Result<Vec<serde_json::Value>, String> {
+    match command {
+        ModelsCommand::List { provider } => Ok(list_context_windows(store)
+            .iter()
+            .filter(|entry| {
+                provider
+                    .as_deref()
+                    .map_or(true, |wanted| entry.provider_id == wanted)
+            })
+            .map(model_window_report)
+            .collect()),
+        ModelsCommand::SetWindow {
+            provider,
+            model,
+            window,
+        } => {
+            let entry = set_context_window(store, provider, model, *window)?;
+            Ok(vec![model_window_report(&entry)])
+        }
+    }
+}
+
+/// `ponycli models list [--provider <id>]`
+/// `ponycli models set-window --provider <id> --model <id> --window <200K|1M|200000|clear>`
+///
+/// 与 TUI `/models` 面板的 `w` 共用同一真源 `agent::model_window`：**定点**改
+/// `providers[].models[].capabilities.contextWindowTokens` 一个键，未声明的模型保持未声明
+/// （不会被归一化补成 262144）。CLI 此前完全没有 provider/model 配置面，窗口只能手改文件
+/// 或用桌面端（ADR 2026-11-14-model-declared-window-tui-entry）。
+///
+/// 输出：每行一个 JSON（`list` = 每个模型一行；`set-window` = 写入后的单条）。
+///
+/// 退出码：`0` 成功 / `2` 参数非法 / `3` 未命中模型或落盘失败。
+fn run_models_subcommand_if_requested() -> Option<i32> {
+    const USAGE: &str = "用法：ponycli models list [--provider <id>]\n      ponycli models set-window --provider <id> --model <id> --window <200K|1M|200000|clear>";
+
+    let args: Vec<String> = std::env::args().collect();
+    let command = match parse_models_command(&args) {
+        Ok(Some(command)) => command,
+        Ok(None) => return None,
+        Err(error) => {
+            eprintln!("[ponycli] models：{error}");
+            eprintln!("{USAGE}");
+            return Some(2);
+        }
+    };
+
+    let store = ProviderRegistryStore::new();
+    let reports = match execute_models_command(&store, &command) {
+        Ok(reports) => reports,
+        Err(error) => {
+            eprintln!("[ponycli] models 失败：{error}");
+            return Some(3);
+        }
+    };
+    for report in reports {
+        match serde_json::to_string(&report) {
+            Ok(line) => println!("{line}"),
+            Err(error) => {
+                eprintln!("[ponycli] models 序列化失败：{error}");
+                return Some(1);
+            }
+        }
+    }
+    Some(0)
 }
 
 /// `ponycli sessions migrate-logs [--dry-run] [--db <path>] [--force]`

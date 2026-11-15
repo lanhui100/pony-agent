@@ -40,6 +40,17 @@
 # (4) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
 #     issues 边界不变（异常仍走既有 PonySentry 客户端）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
+# 模型上下文窗口的 TUI/CLI 入口（ADR 2026-11-14-model-declared-window-tui-entry）归属说明：
+# (1) 变更面是**本地配置文件**（`<config_dir>/pony-agent/providers.json`）的单键读写
+#     （`agent/model_window.rs::set_context_window`：临时文件 + rename），无网络出口、无后台任务、
+#     无 LLM 调用、无 exporter 变更；未安装任何新的观测回调。
+# (2) 新增的对外面是**本地 CLI stdout 契约**（`ponycli models list|set-window` 的单行 JSON，
+#     含 declaredContextWindowTokens / contextWindowTokens / source，不含任何密钥），
+#     与 `ponycli config effective` 同口径，不是遥测出口。
+# (3) TUI `w` 编辑器为纯呈现 + 本地写，失败原因只落到面板文案（不伪装成功），不新增 stderr 结构化行。
+# (4) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
+#     tracing 收口点仍是 `agent/otel/mod.rs`，issues 边界不变。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 service: pony-agent
 kind: desktop
 reviewed_at: "2026-11-09"

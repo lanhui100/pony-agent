@@ -49,10 +49,7 @@ fn line_texts(buf: &ratatui::buffer::Buffer) -> Vec<String> {
 }
 
 fn model(id: &str, name: &str) -> tui::ModelItem {
-    tui::ModelItem {
-        id: id.to_string(),
-        name: name.to_string(),
-    }
+    tui::ModelItem::new(id, name)
 }
 
 // ── #1 Shift+Enter 换行（而非发送）────────────────────────────────────────────
