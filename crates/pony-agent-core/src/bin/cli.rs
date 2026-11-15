@@ -1058,6 +1058,15 @@ fn print_usage(format: OutputFormat) {
     );
     human!(format, "Usage: ponycli [init] [OPTIONS] [-p <prompt>]");
     human!(format, "");
+    print_usage_core_section(format);
+    print_usage_headless_section(format);
+    print_usage_maintenance_section(format);
+    print_usage_acp_section(format);
+    print_usage_exit_codes(format);
+}
+
+/// `print_usage` 的分域片段（纯拆分：输出逐字一致）。
+fn print_usage_core_section(format: OutputFormat) {
     human!(format, "Core options:");
     human!(
         format,
@@ -1085,6 +1094,10 @@ fn print_usage(format: OutputFormat) {
     );
     human!(format, "      --key, --api-key <key> Provider API key");
     human!(format, "");
+}
+
+/// `print_usage` 的分域片段（纯拆分：输出逐字一致）。
+fn print_usage_headless_section(format: OutputFormat) {
     human!(format, "Headless delivery form (wave-59 / PA-164):");
     human!(
         format,
@@ -1141,6 +1154,10 @@ fn print_usage(format: OutputFormat) {
         "the two non-enforcing tiers is passed EXPLICITLY (text mode default passes None)."
     );
     human!(format, "");
+}
+
+/// `print_usage` 的分域片段（纯拆分：输出逐字一致）。
+fn print_usage_maintenance_section(format: OutputFormat) {
     human!(format, "Maintenance subcommands (ADR 0099):");
     human!(
         format,
@@ -1258,6 +1275,10 @@ fn print_usage(format: OutputFormat) {
     );
     human!(format, "Sessions subcommand exit codes: 0 ok / 2 invalid bundle / 3 target exists or maintenance lock busy / 4 degraded");
     human!(format, "");
+}
+
+/// `print_usage` 的分域片段（纯拆分：输出逐字一致）。
+fn print_usage_acp_section(format: OutputFormat) {
     human!(format, "ACP agent host mode (B151/P2):");
     human!(format, "  ponycli acp --list");
     human!(
@@ -1322,6 +1343,10 @@ fn print_usage(format: OutputFormat) {
         "  Run `ponycli acp --help` for the full ACP section."
     );
     human!(format, "");
+}
+
+/// `print_usage` 的分域片段（纯拆分：输出逐字一致）。
+fn print_usage_exit_codes(format: OutputFormat) {
     human!(
         format,
         "Exit codes: 0 success / 1 internal / 2 usage / 3 config / 4 provider-network"
@@ -1330,6 +1355,57 @@ fn print_usage(format: OutputFormat) {
         format,
         "            5 tool-failure / 6 permission-denied (incl. suspended) / 7 timeout"
     );
+}
+
+
+/// 解析本轮 CLI 会话标识（`--resume` > `--continue`（有上次则续）> 新建），并打印会话横幅。
+fn resolve_cli_session_id(
+    args: &CliArgs,
+    format: OutputFormat,
+    control_plane: &HostControlPlane,
+    tracker: &SessionTracker,
+) -> String {
+    let session_id = if let Some(res) = &args.resume_session_id {
+        human!(format, "  Session:     Resuming {}", res);
+        res.clone()
+    } else if args.continue_last {
+        if let Some(last) = tracker.get_last() {
+            human!(format, "  Session:     Continuing {}", last);
+            last
+        } else {
+            let fresh = new_cli_session_id(control_plane);
+            human!(
+                format,
+                "  Session:     No previous session found, created {}",
+                fresh
+            );
+            fresh
+        }
+    } else {
+        let fresh = new_cli_session_id(&control_plane);
+        fresh
+    };
+
+    session_id
+}
+
+/// 组装本轮输入：`-p` 与 stdin 管道文本按既有优先级合并（纯搬迁，行为逐字等价）。
+fn compose_final_prompt(args: &CliArgs, piped_input: Option<String>) -> Option<String> {
+    let final_prompt = match (args.prompt.clone(), piped_input) {
+        (Some(p), Some(pipe)) => Some(format!(
+            "Context piped from stdin:\n```\n{}\n```\n\nPrompt:\n{}",
+            pipe.trim(),
+            p
+        )),
+        (None, Some(pipe)) => Some(format!(
+            "Context piped from stdin:\n```\n{}\n```",
+            pipe.trim()
+        )),
+        (Some(p), None) => Some(p),
+        (None, None) => None,
+    };
+
+    final_prompt
 }
 
 /// 可观测性引导（Wave-5 P0 修复：CLI/TUI 交付形态此前**完全没有** tracing 与 issue 引导）。
@@ -2270,44 +2346,11 @@ fn main() {
     let bound_workspace_id = bind_workspace_id(&control_plane, &args.workspace);
     let tracker = SessionTracker::new(&state_dir);
 
-    let mut session_id = if let Some(res) = &args.resume_session_id {
-        human!(format, "  Session:     Resuming {}", res);
-        res.clone()
-    } else if args.continue_last {
-        if let Some(last) = tracker.get_last() {
-            human!(format, "  Session:     Continuing {}", last);
-            last
-        } else {
-            let fresh = new_cli_session_id(&control_plane);
-            human!(
-                format,
-                "  Session:     No previous session found, created {}",
-                fresh
-            );
-            fresh
-        }
-    } else {
-        let fresh = new_cli_session_id(&control_plane);
-        fresh
-    };
+    let mut session_id = resolve_cli_session_id(&args, format, &control_plane, &tracker);
 
     tracker.record(&session_id);
 
-    // 检查 stdin 管道是否有数据
-    let piped_input = read_stdin_if_piped();
-    let final_prompt = match (args.prompt.clone(), piped_input) {
-        (Some(p), Some(pipe)) => Some(format!(
-            "Context piped from stdin:\n```\n{}\n```\n\nPrompt:\n{}",
-            pipe.trim(),
-            p
-        )),
-        (None, Some(pipe)) => Some(format!(
-            "Context piped from stdin:\n```\n{}\n```",
-            pipe.trim()
-        )),
-        (Some(p), None) => Some(p),
-        (None, None) => None,
-    };
+    let final_prompt = compose_final_prompt(&args, read_stdin_if_piped());
 
     if let Some(prompt) = final_prompt {
         // 单发（无头）路径：退出码＝终态映射（契约 C2）。

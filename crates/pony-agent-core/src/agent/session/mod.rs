@@ -14,6 +14,8 @@ pub(crate) mod fold_targeted;
 pub mod bundle;
 // PA-174 P1：投影侧全空时从 durable `turn_events` 重建历史（纯函数）。
 mod history;
+// B186：`ensure_history_graph` 物化构造（纯搬迁，压回 store.rs 规模基线）。
+mod history_materialize;
 // ADR 0099 阶段 3-B：存量会话日志回填（grandfather 转正，方案 A）。
 pub mod log_migrate;
 mod store;

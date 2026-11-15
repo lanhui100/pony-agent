@@ -3387,43 +3387,13 @@ pub fn ensure_history_graph(session: &mut SessionState) -> bool {
                 .get(turn_index + 1)
                 .copied()
                 .unwrap_or(session.history.len());
-            let history = session.history[..end].to_vec();
-            let mut materialized = SessionState {
-                conversation_id: session.conversation_id.clone(),
-                title: DEFAULT_SESSION_TITLE.to_string(),
-                ai_title: None,
-                summary: DEFAULT_SESSION_SUMMARY.to_string(),
-                history,
-                provider_native_transcript: if turn_index + 1 == user_indexes.len() {
-                    session.provider_native_transcript.clone()
-                } else {
-                    Vec::new()
-                },
-                turn_trace_history: session
-                    .turn_trace_history
-                    .iter()
-                    .take((turn_index + 1).min(session.turn_trace_history.len()))
-                    .cloned()
-                    .collect(),
-                trace_migration_state: session.trace_migration_state,
-                turn_trace_refs: None,
-                long_term_memory_entries: replay_long_term_memory(&session.history[..end]),
-                memory_write_evidence: Vec::new(),
-                memory_write_hook_trace_records: Vec::new(),
-                history_state_evidence: Vec::new(),
-                turn_count: 0,
-                last_referenced_file: None,
-                updated_at_ms: session.updated_at_ms,
-                history_nodes: Vec::new(),
-                history_branches: Vec::new(),
-                history_cursor: HistoryCursor::default(),
-                event_watermark: 0,
-                last_commit_watermark: 0,
-                workspace_id: session.workspace_id.clone(),
-                title_override: None,
-                archived: false,
-            };
-            refresh_session_metadata(&mut materialized, false);
+            let materialized = super::history_materialize::materialized_history_session(
+                session,
+                session.history[..end].to_vec(),
+                replay_long_term_memory(&session.history[..end]),
+                turn_index,
+                user_indexes.len(),
+            );
             session.history_nodes.push(HistoryNode {
                 node_id: legacy_history_node_id(session, turn_index + 1),
                 session_id: session.conversation_id.clone(),
