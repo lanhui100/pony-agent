@@ -85,6 +85,41 @@ pub enum AcpTurnOutcome {
     Cancelled,
 }
 
+/// B176/B184：CLI 宿主形态的 fs/terminal handler 构造（`spawn_for_cli*` 与 `resume` 共用口径）。
+///
+/// 只有 `capabilities_hint` 为 true 才构造真实 handler（hint 是上限；handler 存在性参与
+/// [`capabilities_for`] 推导 ⇒ hint=false 时 initialize 不声明）；permission 不在此处
+///（CLI 无 Ask 面板 ⇒ 恒 `FailClosedPermissionHandler`）。
+fn cli_capability_handlers(
+    spec: &AcpAgentSpec,
+    cwd: &Path,
+) -> (Option<Arc<dyn FsHandler>>, Option<Arc<dyn TerminalHandler>>) {
+    let fs_handler: Option<Arc<dyn FsHandler>> = spec.capabilities_hint.fs.then(|| {
+        Arc::new(crate::acp::handlers::WorkspaceFsHandler::new(
+            cwd.to_path_buf(),
+            Arc::new(crate::agent::path_permission::AuthorizeStore::new()),
+            crate::agent::path_permission::PathPurpose::Read,
+        )) as Arc<dyn FsHandler>
+    });
+    let terminal_handler: Option<Arc<dyn TerminalHandler>> =
+        spec.capabilities_hint.terminal.then(|| {
+            Arc::new(
+                crate::acp::handlers::ManagedTerminalHandler::with_workspace_root(
+                    Arc::new(crate::agent::process::ProcessManager::new()),
+                    cwd.to_path_buf(),
+                ),
+            ) as Arc<dyn TerminalHandler>
+        });
+    if spec.capabilities_hint.fs || spec.capabilities_hint.terminal {
+        eprintln!(
+            "[ponycli] acp capabilities: fs={} terminal={}（声明由真实 handler 装配决定；permission 恒 fail-closed）",
+            fs_handler.is_some(),
+            terminal_handler.is_some()
+        );
+    }
+    (fs_handler, terminal_handler)
+}
+
 /// 挂起审批的取消标记：`cancel()` 只需翻标志，不必持有 dispatcher。
 struct PermissionSlot {
     cancel_requested: AtomicBool,
@@ -540,29 +575,7 @@ impl AcpAgentSession {
     ) -> Result<Self, AcpTransportError> {
         let mcp_servers = crate::acp::config::resolve_mcp_servers_in(spec, cwd)
             .map_err(|error| AcpTransportError::Unavailable(error.to_string()))?;
-        let fs_handler: Option<Arc<dyn FsHandler>> = spec.capabilities_hint.fs.then(|| {
-            Arc::new(crate::acp::handlers::WorkspaceFsHandler::new(
-                cwd.to_path_buf(),
-                Arc::new(crate::agent::path_permission::AuthorizeStore::new()),
-                crate::agent::path_permission::PathPurpose::Read,
-            )) as Arc<dyn FsHandler>
-        });
-        let terminal_handler: Option<Arc<dyn TerminalHandler>> =
-            spec.capabilities_hint.terminal.then(|| {
-                Arc::new(
-                    crate::acp::handlers::ManagedTerminalHandler::with_workspace_root(
-                        Arc::new(crate::agent::process::ProcessManager::new()),
-                        cwd.to_path_buf(),
-                    ),
-                ) as Arc<dyn TerminalHandler>
-            });
-        if spec.capabilities_hint.fs || spec.capabilities_hint.terminal {
-            eprintln!(
-                "[ponycli] acp capabilities: fs={} terminal={}（声明由真实 handler 装配决定；permission 恒 fail-closed）",
-                fs_handler.is_some(),
-                terminal_handler.is_some()
-            );
-        }
+        let (fs_handler, terminal_handler) = cli_capability_handlers(spec, cwd);
         Self::spawn_with_full_options_and_dirs(
             spec,
             cwd,
@@ -572,6 +585,87 @@ impl AcpAgentSession {
             None,
             additional_dirs,
         )
+    }
+
+    /// B184 additive：CLI `--resume` 建连（**跳过 `session/new`**，用 `session/load` 接续既有会话）。
+    ///
+    /// 语义（executor 实现时必须逐条兑现）：
+    /// 1. **connect**：与 [`Self::spawn_for_cli_with_dirs`] 同口径组装 handlers/caps ——
+    ///    `capabilities_hint` 驱动 fs/terminal handler 与 `initialize.clientCapabilities`
+    ///    （caps 必须在 connect 前定稿），permission 恒 fail-closed；
+    /// 2. **不得调用 `session/new`**：那会创建新会话，与 resume 语义冲突；
+    /// 3. 调用 `client.load_session(LoadSessionRequest { cwd, session_id, mcp_servers:
+    ///    resolve_mcp_servers_in(spec, cwd), additional_directories: 由 client canonical 化的
+    ///    dirs, meta: None })`（字段已齐，见 `protocol.rs` 的 `LoadSessionRequest`）；
+    /// 4. **session_id 同步**：响应带 `sessionId` ⇒ 用响应值；缺失 ⇒ 沿用请求的 `session_id`
+    ///    （两形态兼容，不伪造）；
+    /// 5. **失败面（绝不静默新建）**：agent 回 `-32601` 或 `initialize.agentCapabilities.loadSession
+    ///    == false` ⇒ `AcpTransportError::Unsupported`（能力降级）；协议/版本不符 ⇒ `Protocol`；
+    ///    任何失败都不得回落 `session/new` 或返回一个"新"会话。
+    pub fn spawn_for_cli_resume(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        session_id: &str,
+        additional_dirs: &[PathBuf],
+    ) -> Result<Self, AcpTransportError> {
+        // 1) caps/handlers 与 `spawn_for_cli_with_dirs` 同口径（caps 必须在 connect 前定稿）。
+        let (fs_handler, terminal_handler) = cli_capability_handlers(spec, cwd);
+        let capabilities = capabilities_for(spec, fs_handler.is_some(), terminal_handler.is_some());
+        let mut client =
+            AcpAgentClient::connect_with_capabilities(spec, cwd, capabilities)?;
+        // 2) 提前判定 agent 是否支持恢复：`loadSession` 缺省/false ⇒ Unsupported（绝不静默新建）。
+        if !client.agent_capabilities().load_session {
+            client.close();
+            return Err(AcpTransportError::Unsupported(format!(
+                "agent `{}` 声明 loadSession=false，无法恢复会话 `{session_id}`（不静默新建会话）。",
+                spec.id
+            )));
+        }
+        // 3) 装配次序同 `spawn_with_full_options`（permission 恒 fail-closed，fs/terminal 只在声明后装）。
+        client.install_handlers(
+            Arc::new(FailClosedPermissionHandler) as Arc<dyn PermissionHandler>,
+            None,
+            None,
+        );
+        if let Some(handler) = fs_handler {
+            client.install_fs_handler(handler);
+        }
+        if let Some(handler) = terminal_handler {
+            client.install_terminal_handler(handler);
+        }
+        // 4) 跳过 `session/new`（那会新建会话），用 `session/load` 接续；mcpServers 同一三态解析。
+        let mcp_servers = crate::acp::config::resolve_mcp_servers_in(spec, cwd)
+            .map_err(|error| AcpTransportError::Unavailable(error.to_string()))?;
+        let request = LoadSessionRequest {
+            cwd: cwd.to_string_lossy().into_owned(),
+            session_id: session_id.to_string(),
+            mcp_servers,
+            additional_directories: if additional_dirs.is_empty() {
+                None
+            } else {
+                Some(
+                    additional_dirs
+                        .iter()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect(),
+                )
+            },
+            meta: None,
+        };
+        let response = client.load_session(request)?;
+        // 5) session_id 同步：响应带 sessionId ⇒ 用响应值；缺失沿用请求 id（client 已写 stderr 诊断）。
+        let session_id = response
+            .session_id
+            .clone()
+            .unwrap_or_else(|| session_id.to_string());
+        Ok(Self {
+            client,
+            prompt_gate: Mutex::new(()),
+            session_id,
+            cancellation: Mutex::new(Some(Arc::new(CancellationToken::new()))),
+            pending_permissions: Mutex::new(Vec::new()),
+            local_cancel: AtomicBool::new(false),
+        })
     }
 
     /// B175 additive：装配 `fs/*` handler（热替换；保留既有 permission / terminal 槽位）。

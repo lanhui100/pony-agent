@@ -1567,7 +1567,7 @@ fn run_models_subcommand_if_requested() -> Option<i32> {
     };
     for report in reports {
         match serde_json::to_string(&report) {
-            Ok(line) => println!("{line}"),
+            Ok(line) => emit_stdout_line(&line),
             Err(error) => {
                 eprintln!("[ponycli] models 序列化失败：{error}");
                 return Some(1);
@@ -2372,20 +2372,28 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
         }
     };
 
-    // 3) `--resume`：按 agentCapabilities.loadSession 判定；不支持即显式降级（不静默新会话）。
-    if let Some(session_id) = parsed.resume.clone() {
-        return acp_resume(&spec, &workspace, &session_id);
-    }
-
-    // 4) 单轮：无 `-p/--prompt` ⇒ 用法错误（本模式无 REPL，绝不在 stdin 上等输入）。
+    // 3) 单轮：无 `-p/--prompt` ⇒ 用法错误（本模式无 REPL，绝不在 stdin 上等输入）。
     let Some(prompt) = parsed.prompt.clone() else {
         return acp_usage_error("acp 模式需要 -p/--prompt <text>（本模式无 REPL）");
     };
 
-    let mut session = match pony_agent_core::acp::session::AcpAgentSession::spawn_for_cli(&spec, &workspace)
-    {
-        Ok(session) => session,
-        Err(error) => return acp_session_error(error),
+    // 4) `--resume` ⇒ `session/load` 接续既有会话（**跳过 `session/new`**，绝不静默新建）；
+    //    不支持（loadSession=false 或 -32601）⇒ `Unsupported` ⇒ stderr `acp_unavailable` + 非 0。
+    let mut session = match parsed.resume.clone() {
+        Some(session_id) => match pony_agent_core::acp::session::AcpAgentSession::spawn_for_cli_resume(
+            &spec,
+            &workspace,
+            &session_id,
+            &[],
+        ) {
+            Ok(session) => session,
+            Err(error) => return acp_resume_error(&spec, &session_id, error),
+        },
+        None => match pony_agent_core::acp::session::AcpAgentSession::spawn_for_cli(&spec, &workspace)
+        {
+            Ok(session) => session,
+            Err(error) => return acp_session_error(error),
+        },
     };
     // 整轮预算：`--timeout-secs` 是用户显式预算；缺省用 `acp` 层**单一真源**
     // `ACP_DEFAULT_TURN_BUDGET`（与 `acp_delegate` 的 ToolExecutionPolicy 默认同源），
@@ -2410,7 +2418,7 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
             let code = acp_run_prompt(&session, blocks, &sink);
             // jsonl 契约：stdout 每行一个事件对象（sink 已保证 JSONL 形状）。
             for line in sink.finish() {
-                println!("{line}");
+                emit_stdout_line(&line);
             }
             code
         }
@@ -2418,7 +2426,7 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
             let sink = headless::SseSink::new();
             let code = acp_run_prompt(&session, blocks, &sink);
             for frame in sink.finish() {
-                println!("{frame}");
+                emit_stdout_line(&frame);
             }
             code
         }
@@ -2438,6 +2446,32 @@ fn next_value(args: &[String], idx: &mut usize) -> Result<String, String> {
         .ok_or_else(|| format!("参数 `{}` 缺少取值", args[*idx]))?;
     *idx += 1;
     Ok(value.clone())
+}
+
+/// B184：面向 stdout 的输出统一收口（EPIPE **方案②**：不恢复 SIGPIPE 默认处置）。
+///
+/// 缘由：Rust 默认忽略 SIGPIPE，`ponycli ... | head -1` 提前关闭管道后 `println!` 会触发
+/// `ErrorKind::BrokenPipe` 并从 print 宏 panic（实测 exit 101）。方案②比「恢复 SIG_DFL」
+/// 更可控：BrokenPipe ⇒ 安静 `exit(0)`（下游截断是正常用法，不是错误）；其余 IO 错误照旧在
+/// stderr 上报，不吞。覆盖输出点：`models list` / `acp --list` / `acp` 的 JSONL/SSE/text 事件。
+fn emit_stdout_bytes(bytes: &[u8]) {
+    use std::io::Write;
+    let result = {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(bytes).and_then(|()| stdout.flush())
+    };
+    match result {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(error) => eprintln!("[ponycli] stdout 写入失败：{error}"),
+    }
+}
+
+fn emit_stdout_line(line: &str) {
+    let mut payload = String::with_capacity(line.len() + 1);
+    payload.push_str(line);
+    payload.push('\n');
+    emit_stdout_bytes(payload.as_bytes());
 }
 
 fn acp_usage_error(message: &str) -> i32 {
@@ -2465,7 +2499,7 @@ fn acp_list_agents() -> i32 {
             "builtin": builtin,
         });
         match serde_json::to_string(&line) {
-            Ok(text) => println!("{text}"),
+            Ok(text) => emit_stdout_line(&text),
             Err(error) => {
                 eprintln!("[ponycli] acp_unavailable: --list 序列化失败：{error}");
                 return ExitCode::Internal.code();
@@ -2512,34 +2546,27 @@ fn acp_workspace(explicit: Option<&Path>) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// `--resume`：按 `agentCapabilities.loadSession` 判定；不支持/未实现一律显式降级。
-fn acp_resume(
+/// B184：`--resume` 失败面映射（**绝不静默新建**）。
+///
+/// `Unsupported`（agent 不支持 load / `-32601` / `loadSession=false`）⇒ stderr `acp_unavailable`
+/// 文案 + 既有「配置/不支持」退出码档（`ExitCode::Config`）；其余传输层错误走
+/// [`acp_session_error`] 的既有分档。
+fn acp_resume_error(
     spec: &pony_agent_core::acp::config::AcpAgentSpec,
-    workspace: &Path,
     session_id: &str,
+    error: pony_agent_core::acp::transport::AcpTransportError,
 ) -> i32 {
-    let mut client = match pony_agent_core::acp::client::AcpAgentClient::connect(spec, workspace) {
-        Ok(client) => client,
-        Err(error) => return acp_session_error(error),
-    };
-    let loadable = client.agent_capabilities().load_session;
-    client.close();
-    if !loadable {
+    use pony_agent_core::acp::transport::AcpTransportError;
+    if let AcpTransportError::Unsupported(message) = &error {
         eprintln!(
-            "[ponycli] acp_unavailable: agent `{}` 声明 loadSession=false，无法恢复会话 `{session_id}`（不静默降级为新会话）。",
+            "[ponycli] acp_unavailable: agent `{}` 无法恢复会话 `{session_id}`（{message}）；不静默新建会话。",
             spec.id
         );
         return ExitCode::Config.code();
     }
-    // fail-closed：本波次未实现 session/load 恢复时，必须显式降级而不是悄悄开新会话。
-    eprintln!(
-        "[ponycli] acp_unavailable: agent `{}` 支持 loadSession，但 session/load 恢复尚未实现（显式降级，不静默新会话）。",
-        spec.id
-    );
-    ExitCode::Config.code()
+    acp_session_error(error)
 }
 
-/// 跑一轮 prompt；`--timeout-secs` 给出时是整轮预算（超预算 → session/cancel + Timeout 码）。
 fn acp_run_prompt<S: TurnEventSink>(
     session: &pony_agent_core::acp::session::AcpAgentSession,
     blocks: Vec<pony_agent_core::acp::protocol::ContentBlock>,
@@ -2619,8 +2646,8 @@ impl TurnEventSink for AcpTextSink {
         match name {
             "turn:delta" => {
                 if let Some(text) = payload.text.as_deref() {
-                    print!("{text}");
-                    let _ = io::stdout().flush();
+                    // text 模式同样收口：BrokenPipe ⇒ 安静退出（B184）。
+                    emit_stdout_bytes(text.as_bytes());
                 }
                 if let Some(reasoning) = payload.reasoning_content.as_deref() {
                     eprintln!("\x1b[2m[thinking] {reasoning}\x1b[0m");

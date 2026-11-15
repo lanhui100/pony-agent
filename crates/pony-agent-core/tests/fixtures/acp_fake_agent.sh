@@ -39,6 +39,14 @@
 #                                 →output→wait_for_exit→kill→kill(幂等)→release，应答按序落 respFile
 #   probe_terminal_wait_first <initFile> <respFile> <markerFile>
 #                                 create(sleep 0.3; echo <marker>) → **wait_for_exit → output**（ACP 标准序）
+#   resume_ok <reqFile> <sessionId>
+#                                 记录全部请求行；initialize 声明 loadSession=true，
+#                                 session/load 回 sessionId+modes，session/prompt 发一条
+#                                 agent_message_chunk(text=hello) 后 end_turn（B184 R1）
+#   resume_no_id <reqFile>        loadSession=true；session/load **不回 sessionId**（opencode 形态，R3）
+#   resume_disabled <reqFile>     initialize 声明 loadSession=false（R2 降级路径）
+#   resume_method_unsupported <reqFile>
+#                                 loadSession=true，但 session/load 回 -32601（R2 降级路径）
 #   env_dump <outFile>             initialize 时把子进程实收 env 全量写 outFile（B183 代理合并顺序）
 #   session_list <initFile> <opencode|agy>
 #                                 记录全部请求行；session/list 回 2 条（opencode，含 nextCursor）或空列表（agy）
@@ -80,6 +88,11 @@ sentinel_of() { printf '%s' "$1" | sed -n 's/.*"sentinel":"\([^"]*\)".*/\1/p'; }
 
 respond_initialize() {
     emit "{\"jsonrpc\":\"2.0\",\"id\":$1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":false},\"authMethods\":[]}}"
+}
+
+# B184：声明支持 session/load 的 initialize 响应（resume 用例）
+respond_initialize_load_true() {
+    emit "{\"jsonrpc\":\"2.0\",\"id\":$1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true},\"authMethods\":[]}}"
 }
 
 respond_session_new() {
@@ -162,6 +175,40 @@ while IFS= read -r line; do
             id=$(id_of "$line")
             s=$(sentinel_of "$line")
             [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":\"$s\"}}"
+            ;;
+        resume_ok|resume_no_id|resume_disabled|resume_method_unsupported)
+            printf '%s\n' "$line" >> "$arg"
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    if [ "$mode" = "resume_disabled" ]; then
+                        [ -n "$id" ] && respond_initialize "$id"
+                    else
+                        [ -n "$id" ] && respond_initialize_load_true "$id"
+                    fi
+                    ;;
+                session/load)
+                    if [ "$mode" = "resume_method_unsupported" ]; then
+                        [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"
+                    elif [ "$mode" = "resume_no_id" ]; then
+                        [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"configOptions\":[{\"type\":\"boolean\",\"id\":\"fast\",\"name\":\"Fast\",\"currentValue\":true}],\"modes\":{\"currentModeId\":\"code\",\"availableModes\":[{\"id\":\"code\",\"name\":\"Code\"}]}}}"
+                    else
+                        session_id_value="${arg2:-acp-sess-1}"
+                        [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"$session_id_value\",\"modes\":{\"currentModeId\":\"code\",\"availableModes\":[{\"id\":\"code\",\"name\":\"Code\"}]}}}"
+                    fi
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                session/prompt)
+                    emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"acp-sess-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"hello\"}}}}"
+                    [ -n "$id" ] && respond_stop "$id" end_turn
+                    ;;
+                *)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+                    ;;
+            esac
             ;;
         env_dump)
             m=$(method_of "$line")
