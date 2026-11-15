@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -123,59 +124,199 @@ impl PermissionHandler for FailClosedPermissionHandler {
     }
 }
 
-/// prompt 期间的 `session/update` 收集器。
+/// 宿主审批 handler（B161）：把 agent 的 `session/request_permission` 接到
+/// `GovernedDispatcher` 的既有往返面。
 ///
-/// `TurnEventSink` 的冻结签名不带 `Send + Sync`，而通知回调来自 transport 的读线程：因此
-/// 不能在回调里直接 `sink.emit`。这里先按到达顺序收集，prompt 返回后在调用方线程统一映射
-/// 上行（事件顺序与载荷完整保留，不丢帧）；driver 侧如需真流式，应引入 `Sync` sink 面。
-#[derive(Default)]
-struct UpdateCollector {
-    updates: Mutex<Vec<SessionUpdate>>,
-    warnings: Mutex<Vec<String>>,
+/// 语义（executor 实现时必须逐条兑现）：
+/// 1. 把请求注册成 `PendingControlRequestKind::Approval`（携带 toolCall 与 options）；有界等待
+///    （轮询间隔 ≤ `turn_cancel_poll_ms`，总预算 ≤ `ACP_REQUEST_TIMEOUT`，即 NFR
+///    `acp.request_timeout_ms` = 5000ms）；
+/// 2. 宿主 `approve_control_request` / `cancel_control_request`（或
+///    `ask_control::answer_ask(dispatcher, request_id, authorization)`）消费后：
+///    - 批准 ⇒ 从 `request.options` 里取宿主选择的 `optionId` 返回
+///      `{outcome:{outcome:"selected",optionId}}`；`optionId` **必须 ∈ options**，不得越界编造；
+///    - 取消 / 拒绝 / 超时 / dispatcher 不可用 ⇒ `{outcome:{outcome:"cancelled"}}`；
+/// 3. **绝不默认 allow**：没有宿主响应（无面板/无回答）⇒ `cancelled`（§6 风险表第一条）。
+#[allow(dead_code)]
+pub struct DispatcherPermissionHandler {
+    /// 既有治理往返面（与 ask/approval 共用同一 dispatcher）。
+    dispatcher: Arc<GovernedDispatcher>,
+    /// CAS 授权凭据（`ControlRequestAuthorization`），由宿主既有授权链派生。
+    authorization: ControlRequestAuthorization,
 }
 
-impl UpdateCollector {
-    fn record_warning(&self, warning: String) {
-        if let Ok(mut warnings) = self.warnings.lock() {
-            warnings.push(warning);
+impl DispatcherPermissionHandler {
+    /// 构造 handler（握手**前**构造，握手后、`new_session` 前
+    /// 由 [`AcpAgentSession::spawn_with_full_options`] 装配）。
+    pub fn new(
+        dispatcher: Arc<GovernedDispatcher>,
+        authorization: ControlRequestAuthorization,
+    ) -> Self {
+        Self {
+            dispatcher,
+            authorization,
         }
     }
+}
 
-    fn take(&self) -> (Vec<SessionUpdate>, Vec<String>) {
-        let updates = self
-            .updates
-            .lock()
-            .map(|mut updates| std::mem::take(&mut *updates))
-            .unwrap_or_default();
-        let warnings = self
-            .warnings
-            .lock()
-            .map(|mut warnings| std::mem::take(&mut *warnings))
-            .unwrap_or_default();
-        (updates, warnings)
+impl PermissionHandler for DispatcherPermissionHandler {
+    fn decide(&self, request: &RequestPermissionRequest) -> RequestPermissionResponse {
+        // 1) 注册 `PendingControlRequestKind::Approval`（与 ask/approval 同一张 CAS 表；
+        //    沿用 `resolve_permission` 已验证的注册路径，审批不可被本层伪造或绕过）。
+        let request_id = format!(
+            "acp-permission-{}-{}",
+            request.session_id,
+            uuid::Uuid::new_v4()
+        );
+        let pending = register_approval(&self.dispatcher, request, &request_id);
+        // 2) 有界等待宿主 approve / cancel（≤ NFR `acp.request_timeout_ms`）。本 handler 不持有
+        //    会话取消信号（取消链路由 `AcpAgentSession::cancel()` 发 `session/cancel` 通知，
+        //    agent 会以 `stopReason: cancelled` 收尾），故取消谓词恒 false。
+        // 3) 无宿主 / 超时 / 已取消 ⇒ `cancelled`（绝不 allow、不 panic）。
+        match await_approval(
+            &self.dispatcher,
+            &self.authorization,
+            &pending,
+            request,
+            &|| false,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!(
+                    "[acp][session] 宿主审批往返失败（{}），fail-closed：cancelled",
+                    error
+                );
+                cancelled_response()
+            }
+        }
     }
 }
 
-impl AcpNotificationHandler for UpdateCollector {
+/// 把 `session/request_permission` 注册成 dispatcher 里的 Approval 待决请求。
+///
+/// 与 `resolve_permission` 共用同一路径：`hydrate_persisted_ask` 进入 dispatcher 的 CAS 表，
+/// 只能被真实 `approve_control_request` / `cancel_control_request` 消费。
+fn register_approval(
+    dispatcher: &GovernedDispatcher,
+    request: &RequestPermissionRequest,
+    request_id: &str,
+) -> PendingControlRequest {
+    let record = PersistedAsk {
+        request_id: request_id.to_string(),
+        version: 1,
+        nonce: format!("acp-nonce-{}", uuid::Uuid::new_v4()),
+        session_id: request.session_id.clone(),
+        run_id: None,
+        turn_id: request.tool_call.tool_call_id.clone(),
+        call_id: request.tool_call.tool_call_id.clone(),
+        kind: PendingControlRequestKind::Approval,
+        prompt: format!(
+            "外部 ACP agent 请求工具权限：{}",
+            request
+                .tool_call
+                .title
+                .clone()
+                .unwrap_or_else(|| request.tool_call.tool_call_id.clone())
+        ),
+        options: request
+            .options
+            .iter()
+            .map(|option| option.option_id.clone())
+            .collect(),
+        multi_select: false,
+        state: AskLifecycleState::Pending,
+        created_at_ms: now_ms(),
+        answered_at_ms: None,
+    };
+    dispatcher.hydrate_persisted_ask(&record, PendingControlRequestState::Pending)
+}
+
+/// 有界等待宿主决定（轮询间隔 [`PERMISSION_POLL_INTERVAL`]，总预算 [`ACP_REQUEST_TIMEOUT`]）。
+///
+/// 终态语义：`Consumed` ⇒ `selected`（optionId 只从 `request.options` 里取）；
+/// `Cancelled/Expired`、请求消失、`is_cancelled()`、超时 ⇒ `cancelled`（fail-closed）。
+fn await_approval(
+    dispatcher: &GovernedDispatcher,
+    authorization: &ControlRequestAuthorization,
+    pending: &PendingControlRequest,
+    request: &RequestPermissionRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<RequestPermissionResponse, String> {
+    let deadline = Instant::now() + ACP_REQUEST_TIMEOUT;
+    loop {
+        match dispatcher.pending_request(&pending.request_id) {
+            Some(current) => match current.state {
+                PendingControlRequestState::Pending => {}
+                // 宿主已批准：把批准映射成请求 options 里的一个 optionId（绝不越界取值）。
+                PendingControlRequestState::Consumed => {
+                    return selected_response(request, authorization)
+                }
+                // Cancelled / Expired：批准已不可能，fail-closed。
+                _ => return Ok(cancelled_response()),
+            },
+            // 请求从 CAS 表消失（不该发生）：fail-closed，不静默当成 allow。
+            None => {
+                eprintln!(
+                    "[acp][session] 审批请求 `{}` 已从 dispatcher 消失，fail-closed：cancelled",
+                    pending.request_id
+                );
+                return Ok(cancelled_response());
+            }
+        }
+        if is_cancelled() {
+            settle_cancel(dispatcher, &pending.request_id);
+            return Ok(cancelled_response());
+        }
+        if Instant::now() >= deadline {
+            // 超时不是批准：显式把待决审批置 Cancelled 后再回 cancelled（不留 Pending 悬挂）。
+            settle_cancel(dispatcher, &pending.request_id);
+            return Ok(cancelled_response());
+        }
+        std::thread::sleep(PERMISSION_POLL_INTERVAL);
+    }
+}
+
+/// prompt 期间的 `session/update` **实时**转发器（B162）。
+///
+/// `TurnEventSink` 的冻结签名不带 `Send + Sync`，读线程回调不能直写 sink；因此读线程回调把
+/// `SessionUpdate` 经 `mpsc` 送回调用线程，调用线程 `recv_timeout` 逐条 `emit_update` ——
+/// **不**在 prompt 返回后批量 flush（委派期间 UI 实时可见 `turn:delta` / `turn:tool`）。
+/// 通道断开 = prompt 线程结束（正常或 panic），剩余帧先抽干再归约。
+struct UpdateForwarder {
+    /// 上行通道（读线程 → 调用线程）：**无界 mpsc**。
+    ///
+    /// 取舍（B162 时序契约）：读线程回调内 `send` 绝不阻塞（std mpsc 无界 ⇒ 无背压、无丢弃、
+    /// 保序）；内存上界 = 单轮尚未消费的 update 帧数（消费即释放，帧平均几 KB）。
+    /// 不选「有界 + 丢弃」：丢弃会破坏 R2（顺序）/ R3（不丢最后一条）语义。发送失败
+    ///（调用线程已退出）静默丢弃，不 panic。
+    tx: mpsc::Sender<SessionUpdate>,
+    /// 解析失败 / 非 update 通知的诊断（与 update 流分离，最终随归约结果记账）。
+    warnings: Arc<Mutex<Vec<String>>>,
+}
+
+impl AcpNotificationHandler for UpdateForwarder {
     fn handle_notification(&self, method: &str, params: Value) {
         if method != method::SESSION_UPDATE {
             // 非 update 通知不静默：结构化日志 + 记一条 warning（不进 UI 事件流）。
             let warning = format!("acp_unexpected_notification: `{method}`");
             eprintln!("[acp][session] 收到未处理的入站通知 `{method}`：{params}");
-            self.record_warning(warning);
+            if let Ok(mut warnings) = self.warnings.lock() {
+                warnings.push(warning);
+            }
             return;
         }
         match serde_json::from_value::<SessionNotification>(params) {
             Ok(notification) => {
-                if let Ok(mut updates) = self.updates.lock() {
-                    updates.push(notification.update);
-                }
+                // 调用线程已退出（prompt 结束）⇒ 丢弃即可，绝不 panic。
+                let _ = self.tx.send(notification.update);
             }
             Err(error) => {
                 // 载荷不合 v1 schema：记 warning 并继续（不 panic、不静默）。
-                self.record_warning(format!(
-                    "acp_protocol_error: session/update 载荷不符合 v1 schema：{error}"
-                ));
+                if let Ok(mut warnings) = self.warnings.lock() {
+                    warnings.push(format!(
+                        "acp_protocol_error: session/update 载荷不符合 v1 schema：{error}"
+                    ));
+                }
             }
         }
     }
@@ -248,6 +389,30 @@ impl AcpAgentSession {
         fs: Option<Arc<dyn FsHandler>>,
         terminal: Option<Arc<dyn TerminalHandler>>,
     ) -> Result<Self, AcpTransportError> {
+        // 既有等价行为：无 permission handler ⇒ FailClosedPermissionHandler（一律 cancelled）。
+        Self::spawn_with_full_options(spec, cwd, mcp_servers, fs, terminal, None)
+    }
+
+    /// B161 additive：`spawn_with_mcp_and_handlers` + 可选宿主审批 handler。
+    ///
+    /// 装配顺序（与 fs/terminal 同一时点，均在 `new_session` 之前）：
+    /// 1. **握手前**按 `capabilities_for(spec, fs.is_some(), terminal.is_some())` 定 caps →
+    ///    `connect_with_capabilities`（permission 无 wire 声明位，不参与 caps）；
+    /// 2. 声明与装配一致性校验：`caps.fs==true ⇒ fs.is_some()`、`caps.terminal==true ⇒
+    ///    terminal.is_some()`，否则 `AcpTransportError::Unavailable`（fail-closed）；
+    /// 3. 握手成功后、`new_session` 前装配：`permission` 缺省回落
+    ///    `FailClosedPermissionHandler`（**无 permission handler ⇒ 一律 cancelled**）；
+    ///    fs/terminal 仅在声明后装配（`HandlerSlots.declared` 闸门，不追认）；
+    /// 4. `request_permission` 始终有 handler 兜底；**有 handler 但宿主无响应/超时 ⇒
+    ///    cancelled**（在 `PermissionHandler` 实现内收口，绝不 allow）。
+    pub fn spawn_with_full_options(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        mcp_servers: Vec<McpServer>,
+        fs: Option<Arc<dyn FsHandler>>,
+        terminal: Option<Arc<dyn TerminalHandler>>,
+        permission: Option<Arc<dyn PermissionHandler>>,
+    ) -> Result<Self, AcpTransportError> {
         // 1) 握手前的能力推导（initialize 是第一条报文）。
         let capabilities = capabilities_for(spec, fs.is_some(), terminal.is_some());
         // 2) 声明与装配一致性：声明为 true 却没有 handler ⇒ fail-closed，绝不谎报。
@@ -265,8 +430,14 @@ impl AcpAgentSession {
         }
         // 握手（含 protocolVersion == 1 的 fail-closed 校验）由 client 收口。
         let mut client = AcpAgentClient::connect_with_capabilities(spec, cwd, capabilities)?;
-        // 3) 审批面固定 fail-closed；fs/terminal 仅在声明后装配（不追认未声明能力）。
-        client.install_handlers(Arc::new(FailClosedPermissionHandler), None, None);
+        // 3) 同一时点装配：permission（缺省 fail-closed）+ 已声明的 fs/terminal。
+        //
+        // 注意：`session/request_permission` **不属于** `clientCapabilities` 面（ACP v1 只声明
+        // fs/terminal），因此 permission **恒装配、不受 `HandlerSlots.declared` 闸门限制**
+        //（闸门只作用于 fs/terminal 两项声明能力）；无 permission handler 时装配的
+        // FailClosedPermissionHandler 保证「一律 cancelled」。
+        let permission = permission.unwrap_or_else(|| Arc::new(FailClosedPermissionHandler));
+        client.install_handlers(permission, None, None);
         if let Some(handler) = fs {
             client.install_fs_handler(handler);
         }
@@ -317,14 +488,17 @@ impl AcpAgentSession {
         }
     }
 
-    /// 跑一轮 prompt：串行闸 → `client.prompt` → update 实时映射（[`Self::emit_update`]）→
-    /// [`Self::reduce_stop_reason`] 归约成 [`ToolResult`]。
+    /// 跑一轮 prompt（**实时** update 语义，B162）：串行闸 → `client.prompt` 在旁路线程执行 →
+    /// 读线程回调把 `SessionUpdate` 经 `mpsc` 送回**调用线程** → 调用线程 `recv_timeout` 循环
+    /// 把每一帧立即 [`Self::emit_update`]（不批量 flush）→ `stopReason` 归约成 [`ToolResult`]。
     ///
-    /// 预算：`client.prompt` 的 deadline 取 [`AcpAgentSession::set_turn_budget`]（默认
-    /// `ACP_REQUEST_TIMEOUT`），**不是**固定 5s 硬顶。
-    /// 取消：prompt 期间轮询 [`AcpAgentSession::set_cancellation_token`] 的令牌。
-    /// 归约口径：`ok` / `truncated` 仍为成功；`refused` → error `acp_agent_refused`；
-    /// `cancelled` → aborted `tool_cancelled`。
+    /// - 时序：`turn:delta` / `turn:tool` 在 agent 产出时即刻上行；prompt 返回只做终局归约。
+    /// - 预算：`client.prompt` 的 deadline 取 [`AcpAgentSession::set_turn_budget`]（默认
+    ///   `ACP_REQUEST_TIMEOUT`），**不是**固定 5s 硬顶。
+    /// - 取消：同一 `recv_timeout` 循环按 `turn_cancel_poll_ms`(≤100ms) 轮询令牌；触发即
+    ///   `session/cancel`，仍须 < 预算返回 `aborted` + `tool_cancelled`（不改变取消语义）。
+    /// - 归约口径：`ok` / `truncated` 仍为成功；`refused` → error `acp_agent_refused`；
+    ///   `cancelled` → aborted `tool_cancelled`（与 B162 前逐字段一致）。
     pub fn prompt(&self, blocks: Vec<ContentBlock>, sink: &dyn TurnEventSink) -> ToolResult {
         let started = Instant::now();
         // §3.2.1 串行闸：同一 session 的并发 prompt 必须排队（不并发打同一 session）。
@@ -350,19 +524,50 @@ impl AcpAgentSession {
             );
         }
 
-        let collector = Arc::new(UpdateCollector::default());
-        let observer = Arc::clone(&collector) as Arc<dyn AcpNotificationHandler>;
-
-        // §3.2.6 取消联动：`client.prompt` 在协议层阻塞等 agent 应答，因此把 prompt 放进行内
-        // 线程，本线程按 `turn_cancel_poll_ms`(≤100ms) 轮询取消令牌；一旦触发即发
-        // `session/cancel` notification（agent 随后以 `stopReason: cancelled` 回应本轮），
-        // 从而不必等满整轮预算。取消发送失败只记诊断，不改变 prompt 的归约结果。
+        // B162 实时语义：读线程回调经 mpsc 把 `SessionUpdate` 送回本线程，本线程
+        // `recv_timeout` 逐条 `emit_update`（**不**等 prompt 返回后批量 flush）；同一循环按
+        // `turn_cancel_poll_ms`(≤100ms) 轮询取消令牌（§3.2.6），触发即发 `session/cancel`。
+        let (update_tx, update_rx) = mpsc::channel::<SessionUpdate>();
+        let warnings = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observer = Arc::new(UpdateForwarder {
+            tx: update_tx,
+            warnings: Arc::clone(&warnings),
+        }) as Arc<dyn AcpNotificationHandler>;
+        let mut updates: Vec<SessionUpdate> = Vec::new();
         let (prompt_result, cancel_observed) = std::thread::scope(|scope| {
             let handle =
                 scope.spawn(move || self.client.prompt(&self.session_id, blocks, observer));
             let mut cancel_sent = false;
             let mut cancel_observed = false;
-            while !handle.is_finished() {
+            loop {
+                match update_rx.recv_timeout(CANCEL_POLL_INTERVAL) {
+                    Ok(update) => {
+                        // 一帧即映射：委派期间 UI 立即看到 turn:delta / turn:tool。
+                        self.emit_update(sink, &update);
+                        updates.push(update);
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        // prompt 线程结束且发送端已全部 drop：抽干剩余帧后退出循环。
+                        while let Ok(update) = update_rx.try_recv() {
+                            self.emit_update(sink, &update);
+                            updates.push(update);
+                        }
+                        break;
+                    }
+                }
+                // ⚠️ 终止条件必须看「prompt 线程是否结束」，不能只依赖通道断开：
+                // transport 持有 observer 的 `Arc`（直到下一次 prompt 替换 handler），
+                // 发送端因此**不会** drop ⇒ `recv_timeout` 永不返回 Disconnected。
+                // 这里先抽干已入队帧（不丢最后一条 update），再退出循环。
+                if handle.is_finished() {
+                    while let Ok(update) = update_rx.try_recv() {
+                        self.emit_update(sink, &update);
+                        updates.push(update);
+                    }
+                    break;
+                }
                 // 每一片都重读槽位：`set_cancellation_token` 是 `&self` 热替换，prompt 运行期
                 // 注入的令牌也必须被同一个轮询观察到（不能只读启动时的快照）。
                 if !cancel_sent && self.cancellation_requested() {
@@ -374,7 +579,6 @@ impl AcpAgentSession {
                         );
                     }
                 }
-                std::thread::sleep(CANCEL_POLL_INTERVAL);
             }
             (handle.join(), cancel_observed)
         });
@@ -385,12 +589,10 @@ impl AcpAgentSession {
                 "session/prompt 执行线程 panic。".to_string(),
             )),
         };
-
-        // 先按到达顺序把 update 映射进 TurnEventSink，再归约 stopReason。
-        let (updates, warnings) = collector.take();
-        for update in &updates {
-            self.emit_update(sink, update);
-        }
+        let warnings = warnings
+            .lock()
+            .map(|mut warnings| std::mem::take(&mut *warnings))
+            .unwrap_or_default();
 
         match response {
             Ok(response) => self.outcome_result(
@@ -457,37 +659,8 @@ impl AcpAgentSession {
             self.session_id,
             uuid::Uuid::new_v4()
         );
-        // 用 dispatcher 的公开镜像seam 注册审批：进入与 `approve_control_request` /
-        // `cancel_control_request` **同一张** CAS 表，审批不可被本层伪造或绕过。
-        let record = PersistedAsk {
-            request_id: request_id.clone(),
-            version: 1,
-            nonce: format!("acp-nonce-{}", uuid::Uuid::new_v4()),
-            session_id: request.session_id.clone(),
-            run_id: None,
-            turn_id: request.tool_call.tool_call_id.clone(),
-            call_id: request.tool_call.tool_call_id.clone(),
-            kind: PendingControlRequestKind::Approval,
-            prompt: format!(
-                "外部 ACP agent 请求工具权限：{}",
-                request
-                    .tool_call
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| request.tool_call.tool_call_id.clone())
-            ),
-            options: request
-                .options
-                .iter()
-                .map(|option| option.option_id.clone())
-                .collect(),
-            multi_select: false,
-            state: AskLifecycleState::Pending,
-            created_at_ms: now_ms(),
-            answered_at_ms: None,
-        };
-        let pending =
-            dispatcher.hydrate_persisted_ask(&record, PendingControlRequestState::Pending);
+        // 与 `DispatcherPermissionHandler::decide` 共用同一注册路径（单一真源）。
+        let pending = register_approval(dispatcher, request, &request_id);
         if let Ok(mut slots) = self.pending_permissions.lock() {
             slots.push(Arc::clone(&slot));
         }
@@ -696,39 +869,10 @@ impl AcpAgentSession {
         request: &RequestPermissionRequest,
         slot: &PermissionSlot,
     ) -> Result<RequestPermissionResponse, String> {
-        let deadline = Instant::now() + ACP_REQUEST_TIMEOUT;
-        loop {
-            match dispatcher.pending_request(&pending.request_id) {
-                Some(current) => match current.state {
-                    PendingControlRequestState::Pending => {}
-                    // 宿主已批准：把批准映射成请求 options 里的一个 optionId（绝不越界取值）。
-                    PendingControlRequestState::Consumed => {
-                        return selected_response(request, authorization)
-                    }
-                    // Cancelled / Expired：批准已不可能，fail-closed。
-                    _ => return Ok(cancelled_response()),
-                },
-                // 请求从 CAS 表消失（不该发生）：fail-closed，不静默当成 allow。
-                None => {
-                    eprintln!(
-                        "[acp][session] 审批请求 `{}` 已从 dispatcher 消失，fail-closed：cancelled",
-                        pending.request_id
-                    );
-                    return Ok(cancelled_response());
-                }
-            }
-
-            if slot.is_cancel_requested() || self.cancellation_requested() {
-                settle_cancel(dispatcher, &pending.request_id);
-                return Ok(cancelled_response());
-            }
-            if Instant::now() >= deadline {
-                // 超时不是批准：显式把待决审批置 Cancelled 后再回 cancelled（不留 Pending 悬挂）。
-                settle_cancel(dispatcher, &pending.request_id);
-                return Ok(cancelled_response());
-            }
-            std::thread::sleep(PERMISSION_POLL_INTERVAL);
-        }
+        // 单一判定真源：`await_approval`（与 DispatcherPermissionHandler 共用）。
+        await_approval(dispatcher, authorization, pending, request, &|| {
+            slot.is_cancel_requested() || self.cancellation_requested()
+        })
     }
 
     /// 归约结果 → `ToolResult`（`ok` / `truncated` / `refused` / `cancelled`）。
