@@ -77,6 +77,7 @@ fn spawn_with(manager: &ProcessManager, session: &str, program: &str, args: Vec<
             session_id: session.to_string(),
             program: program.to_string(),
             arguments: args.into_iter().map(str::to_string).collect(),
+            cwd: None,
             sandbox: SandboxRequest {
                 workspace_root: workspace,
                 allow_network: false,

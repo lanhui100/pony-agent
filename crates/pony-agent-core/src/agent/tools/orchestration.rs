@@ -179,12 +179,16 @@ impl ToolRouter {
         };
 
         // 每任务一个子进程（§3.2.1：不并发打同一 session）。
-        let mut session = match crate::acp::session::AcpAgentSession::spawn_with_mcp_and_handlers(
+        // B161：把 turn 级 ACP 权限 handler 一并装配（`None` ⇒ 会话侧
+        // FailClosedPermissionHandler 兜底，权限请求一律 cancelled）。
+        let permission = context.acp_permission.clone();
+        let mut session = match crate::acp::session::AcpAgentSession::spawn_with_full_options(
             &spec,
             &cwd,
             mcp_servers,
             fs_handler,
             terminal_handler,
+            permission,
         ) {
             Ok(session) => session,
             Err(error) => {

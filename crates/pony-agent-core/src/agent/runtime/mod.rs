@@ -451,6 +451,16 @@ impl AgentRuntime {
             plan_execution_approval: input.plan_execution_approval.clone(),
             tool_authorization_mode: input.tool_authorization_mode.clone(),
             turn_cancellation: None,
+            // B161：生产注入 ACP 权限 handler（Ask 面板往返入口）。
+            // 不预造 authorization：`ControlRequestAuthorization::for_request(pending, answer)`
+            // 是 per-request 事实，由宿主在消费时派生；handler 只持 dispatcher。
+            acp_permission: self.governed_dispatcher().map(|dispatcher| {
+                Arc::new(
+                    crate::acp::session::DispatcherPermissionHandler::without_pinned_authorization(
+                        dispatcher,
+                    ),
+                ) as Arc<dyn crate::acp::client::PermissionHandler>
+            }),
             is_goal_round,
             is_direct_human,
         })

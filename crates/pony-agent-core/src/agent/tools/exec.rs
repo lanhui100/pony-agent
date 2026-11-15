@@ -172,6 +172,11 @@ pub struct ToolExecutionContext {
     ///
     /// `None` = 调用方未注入（工具层不得自行猜测或回退任何全局 provider 状态）。
     pub provider_selection: Option<crate::agent::config::ResolvedProviderSelection>,
+    /// B161：本 turn 的 ACP 权限 handler 句柄（`acp_delegate` 装配给 ACP 会话的 Ask 往返入口）。
+    ///
+    /// 仅同进程运行时句柄（不序列化）；`None` ⇒ `acp_delegate` 回落 `FailClosedPermissionHandler`
+    /// （权限请求一律 cancelled，与 B161 前行为一致）。
+    pub acp_permission: Option<std::sync::Arc<dyn crate::acp::client::PermissionHandler>>,
 }
 
 /// wave-1 C5：工具参数未显式给 session 时回退到执行上下文注入的会话 id。

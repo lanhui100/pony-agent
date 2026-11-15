@@ -48,9 +48,8 @@ use std::time::Instant;
 // Invocation context
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Session/run/turn/workspace facts bound to one governed invocation. Facts are optional so a
-/// minimal `ToolDispatchRequest` (origin/descriptor/call/arguments) can still be dispatched.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Session/run/turn/workspace facts bound to one governed invocation (all optional; `acp_permission` is a same-process handle, never serialized ⇒ `None` means `acp_delegate` fail-closed).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DispatchContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,6 +79,7 @@ pub struct DispatchContext {
     /// `Cancelled`，沿用既有错误词表）；`None` ⇒ 行为与此前完全一致（向后兼容）。
     #[serde(skip)]
     pub turn_cancellation: Option<Arc<crate::agent::budget::CancellationToken>>,
+    #[serde(skip)] pub acp_permission: Option<Arc<dyn crate::acp::client::PermissionHandler>>,
     /// B128：是否为 goal 自动续轮（由 `<goal_round ...>` 消息识别）
     #[serde(default)]
     pub is_goal_round: bool,
@@ -115,7 +115,7 @@ impl Default for DispatchContext {
             host_control_available: true,
             plan_execution_approval: None,
             tool_authorization_mode: None,
-            turn_cancellation: None,
+            turn_cancellation: None, acp_permission: None,
             is_goal_round: false,
             is_direct_human: true,
         }

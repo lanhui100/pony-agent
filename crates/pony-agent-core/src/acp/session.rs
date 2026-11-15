@@ -112,6 +112,12 @@ impl PermissionSlot {
 /// fail-closed —— 这符合 §6 风险表第一条「绝不默认 allow」。
 struct FailClosedPermissionHandler;
 
+impl std::fmt::Debug for FailClosedPermissionHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FailClosedPermissionHandler")
+    }
+}
+
 impl PermissionHandler for FailClosedPermissionHandler {
     fn decide(&self, request: &RequestPermissionRequest) -> RequestPermissionResponse {
         eprintln!(
@@ -141,8 +147,20 @@ impl PermissionHandler for FailClosedPermissionHandler {
 pub struct DispatcherPermissionHandler {
     /// 既有治理往返面（与 ask/approval 共用同一 dispatcher）。
     dispatcher: Arc<GovernedDispatcher>,
-    /// CAS 授权凭据（`ControlRequestAuthorization`），由宿主既有授权链派生。
-    authorization: ControlRequestAuthorization,
+    /// 可选的 **per-request** CAS 授权模板（仅用于把宿主批准映射成 `optionId`）。
+    ///
+    /// B161 生产接线：`ControlRequestAuthorization::for_request(pending, answer)` 是 **per-request**
+    /// 事实，不能预造 ⇒ 生产路径用 [`Self::without_pinned_authorization`] 构造（本字段 `None`），
+    /// 由宿主在 approve/cancel 时自行用 `for_request` 消费 CAS；本 handler 只负责注册与等待。
+    /// 仅在测试/兼容路径可 pin 一份模板（`selected` 的 optionId 优先取其中的 `answer`）。
+    authorization: Option<ControlRequestAuthorization>,
+}
+
+impl std::fmt::Debug for DispatcherPermissionHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 只打角色名：dispatcher/authorization 是治理内部事实，不进日志。
+        formatter.write_str("DispatcherPermissionHandler")
+    }
 }
 
 impl DispatcherPermissionHandler {
@@ -154,7 +172,16 @@ impl DispatcherPermissionHandler {
     ) -> Self {
         Self {
             dispatcher,
-            authorization,
+            authorization: Some(authorization),
+        }
+    }
+
+    /// B161 生产构造：不预造 per-request 授权（宿主在消费时用
+    /// `ControlRequestAuthorization::for_request(pending, answer)` 派生 CAS 事实）。
+    pub fn without_pinned_authorization(dispatcher: Arc<GovernedDispatcher>) -> Self {
+        Self {
+            dispatcher,
+            authorization: None,
         }
     }
 }
@@ -175,7 +202,7 @@ impl PermissionHandler for DispatcherPermissionHandler {
         // 3) 无宿主 / 超时 / 已取消 ⇒ `cancelled`（绝不 allow、不 panic）。
         match await_approval(
             &self.dispatcher,
-            &self.authorization,
+            self.authorization.as_ref(),
             &pending,
             request,
             &|| false,
@@ -237,7 +264,7 @@ fn register_approval(
 /// `Cancelled/Expired`、请求消失、`is_cancelled()`、超时 ⇒ `cancelled`（fail-closed）。
 fn await_approval(
     dispatcher: &GovernedDispatcher,
-    authorization: &ControlRequestAuthorization,
+    authorization: Option<&ControlRequestAuthorization>,
     pending: &PendingControlRequest,
     request: &RequestPermissionRequest,
     is_cancelled: &dyn Fn() -> bool,
@@ -870,9 +897,13 @@ impl AcpAgentSession {
         slot: &PermissionSlot,
     ) -> Result<RequestPermissionResponse, String> {
         // 单一判定真源：`await_approval`（与 DispatcherPermissionHandler 共用）。
-        await_approval(dispatcher, authorization, pending, request, &|| {
-            slot.is_cancel_requested() || self.cancellation_requested()
-        })
+        await_approval(
+            dispatcher,
+            Some(authorization),
+            pending,
+            request,
+            &|| slot.is_cancel_requested() || self.cancellation_requested(),
+        )
     }
 
     /// 归约结果 → `ToolResult`（`ok` / `truncated` / `refused` / `cancelled`）。
@@ -1020,11 +1051,10 @@ fn settle_cancel(dispatcher: &GovernedDispatcher, request_id: &str) {
 /// **绝不**凭空构造 options 之外的 optionId。
 fn selected_response(
     request: &RequestPermissionRequest,
-    authorization: &ControlRequestAuthorization,
+    authorization: Option<&ControlRequestAuthorization>,
 ) -> Result<RequestPermissionResponse, String> {
     let from_answer = authorization
-        .answer
-        .as_ref()
+        .and_then(|authorization| authorization.answer.as_ref())
         .and_then(Value::as_object)
         .and_then(|answer| answer.get("optionId"))
         .and_then(Value::as_str)

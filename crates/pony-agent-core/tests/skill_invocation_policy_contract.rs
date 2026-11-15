@@ -179,6 +179,7 @@ fn test_skill_load_blocks_when_disable_model_invocation() {
         dispatch_context: None,
         cancellation: None,
         provider_selection: None,
+        ..Default::default()
     };
 
     // Q1: skill_load should succeed
@@ -445,6 +446,7 @@ fn test_session_hot_reload_delta_notice_and_dynamic_skill_load() {
         dispatch_context: None,
         cancellation: None,
         provider_selection: None,
+        ..Default::default()
     };
     let call = ToolCall {
         call_id: Some("call-dynamic-load".to_string()),

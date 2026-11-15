@@ -203,6 +203,8 @@ impl AgentRuntime {
             cancellation: governed_context.and_then(|context| context.turn_cancellation.clone()),
             // W2：快照化传入 —— `ToolExecutionContext` 自有该字段（工具调用跨 hop 存活）。
             provider_selection: provider_selection.cloned(),
+            // B161：turn 级 ACP 权限句柄随治理事实透传给工具层。
+            acp_permission: governed_context.and_then(|context| context.acp_permission.clone()),
             ..Default::default()
         };
         let (result, invocation_record, capability_hook_trace_records) =
