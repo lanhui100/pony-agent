@@ -13,13 +13,17 @@ Status: implemented
 ## Decision
 
 1. **Rust 全双工协作内核**：
-   - 核心层实现自主队员驱动循环、边沿通知总线（基于 Tokio Notify / 广播通道），支持智能体状态变化、消息入队与任务更新的亚毫秒级边沿唤醒；
-   - 交付 `spawn_teammate`、`send_message`、`wait_agent`、`interrupt_agent`、`drain_inbox` 等标准工具集；
+   - 核心层实现自主队员驱动循环与进程内**活动边沿**（`TeamActivity`：`Mutex<u64>` 版本号 + `Condvar`，任一边沿 bump 版本并 `notify_all`），边沿覆盖成员登记/状态变化、消息入队/出队/回填与任务看板流转；
+   - `wait_agent` 是**真等待**：记录基线版本后阻塞，边沿返回 `timed_out=false`，超时返回 `timed_out=true`；无活跃同伴（非 lead 且 `Running`/`Provisioning`）快速失败 `no-active-peer`。对外超时缺省 30s、下界 10s、上界 1h（对齐 DSH `waitForChange` 有界区间）；
+   - 交付 `spawn_teammate`、`send_message`、`wait_agent`、`interrupt_agent`、`drain_inbox` 等标准工具集；单条团队消息上限 64 KiB；
+   - **派生约束**：只有 Team Lead 可 `spawn_teammate`（工具层从 `ToolExecutionContext.session_id` 反查成员身份，未登记会话按 Lead 代理，与 `drain_inbox` 同源）；同名成员拒绝再派生（绝不静默覆盖），非 lead 成员数上限 16（防递归派生拖死进程）；
    - 保持严格职责边界：调度与沙箱执行位于 Rust 核心层，前端仅做状态展示与交互。
 2. **CAS 乐观锁共享任务看板**：
-   - 共享任务看板支持创建、认领（claim）、完成（complete）、释放（release）与删除流转；
-   - 每次任务状态流转均校验 `expected_revision` 版本号，杜绝并发踩踏；
-   - 支持写域（write_scopes）声明与依赖项（blocked_by）阻塞控制。
+   - 共享任务看板支持创建、认领（claim）、完成（complete）、释放（release）、编辑（edit）、依赖设置（set_dependencies）与删除流转；
+   - 每次任务状态流转均校验 `expected_revision` 版本号，杜绝并发踩踏；`deleted` 为终态，不得被 claim/complete 复活；删除仍有依赖者的任务必须拒绝；
+   - **授权**：任务当前 owner 或 Team Lead 才能变更；队友只能为自己认领（身份来源同 Decision 1）；
+   - **状态机与就绪**：claim 仅限 `pending` 且依赖全部 `completed`；complete/release 仅限 `in_progress`；
+   - **约束校验**：subject 非空且 ≤200 字符、description ≤16384 字符、每团队活跃任务 ≤256；写域拒绝绝对路径与 `..` 并去重保序；依赖拒绝自引用/重复/缺失并做环检测（缺失依赖视为未就绪，绝不默认放行）。
 3. **响应式前端全景面板**：
    - 前端通过 Pinia `useTeamStore` 订阅团队事件并同步数据；
    - 提供 `TeamRosterDrawer.vue` 与 `TeamTaskBoard.vue` 组件，实时可视化队员状态与任务看板。
@@ -40,3 +44,8 @@ Status: implemented
 - 团队协作能力下沉为内核基础资产，支持多角色（tester、reviewer、executor 等）并发求解；
 - 任务看板具备强一致 CAS 保证；
 - 桌面端具备完整的团队与任务看板可视化呈现。
+- **落地对齐（2026-11-15，对标审计 `docs/analysis/agent-team-audit-20261115.md` / DSH `de5d733a18`）**：
+  - P0-1「`wait_agent` 空实现返回假信号」已收口：改为真实边沿等待，并抽出可测原语（`wait_on_team_activity` 用局部实例，单测不碰进程级全局状态）；
+  - P0-3「伪授权」已收口：补齐调用者授权、状态机、依赖图校验与容量预算，并把工具层 `team_task_create`/`team_task_update` 接到 `TeamCaller`（此前一路按 Lead 放行，任何队友可改任意任务）；
+  - 事实订正：边沿机制是 `Condvar` + 版本号（进程内同步原语），**不是** Tokio `Notify`/广播通道；`wait_agent` 在同步工具线程上阻塞等待，符合当前工具面同步执行模型；
+  - 未收口（后续任务，审计文档已逐条登记）：团队状态仍为进程级全局 `static Mutex`（无会话隔离、无持久化、重启即失）、队友跨轮无会话延续、`team_history.rs` 仍为空桩。

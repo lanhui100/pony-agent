@@ -381,11 +381,11 @@ static PRIMITIVE_DISPATCH_TABLE: &[(&str, PrimitiveDispatchFn)] = &[
     (TOOL_DRAIN_INBOX, |router, call, context| {
         router.execute_drain_inbox(call, context)
     }),
-    (TOOL_TEAM_TASK_CREATE, |router, call, _context| {
-        router.execute_team_task_create(call)
+    (TOOL_TEAM_TASK_CREATE, |router, call, context| {
+        router.execute_team_task_create(call, context)
     }),
-    (TOOL_TEAM_TASK_UPDATE, |router, call, _context| {
-        router.execute_team_task_update(call)
+    (TOOL_TEAM_TASK_UPDATE, |router, call, context| {
+        router.execute_team_task_update(call, context)
     }),
     (TOOL_TEAM_TASK_LIST, |router, call, _context| {
         router.execute_team_task_list(call)

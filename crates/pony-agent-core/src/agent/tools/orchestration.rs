@@ -294,10 +294,11 @@ impl ToolRouter {
             // Wave-61 C7 + C8.4 + W2：派生队友后把它的初始 prompt 真正投递并驱动（引擎在位时），
             // 并把**宿主当前 provider 选择**作为继承源（`args` 的 provider/model 覆盖优先；
             // 解析失败在此前置返回 `spawn_failed`，绝不先返回 ok 再异步失败）。
-            Ok(args) => match spawn_teammate_in_workspace_with_provider(
+            Ok(args) => match crate::agent::orchestration::spawn_teammate_in_workspace_with_provider_as(
                 args,
                 Some(workspace_root.as_path()),
                 context.provider_selection.as_ref(),
+                &crate::agent::orchestration::TeamCaller::from_session(context.session_id.as_deref()),
             ) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_SPAWN_TEAMMATE.to_string(),
@@ -462,14 +463,21 @@ impl ToolRouter {
         }
     }
 
-    pub(super) fn execute_team_task_create(&self, call: &ToolCall) -> ToolResult {
+    pub(super) fn execute_team_task_create(
+        &self,
+        call: &ToolCall,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
         if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_TEAM_TASK_CREATE);
         }
 
         let args: Result<TeamTaskCreateArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            Ok(args) => match team_task_create(args) {
+            Ok(args) => match crate::agent::orchestration::team_task_create_as(
+                args,
+                &crate::agent::orchestration::TeamCaller::from_session(context.session_id.as_deref()),
+            ) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_TEAM_TASK_CREATE.to_string(),
                     status: "ok".to_string(),
@@ -491,14 +499,21 @@ impl ToolRouter {
         }
     }
 
-    pub(super) fn execute_team_task_update(&self, call: &ToolCall) -> ToolResult {
+    pub(super) fn execute_team_task_update(
+        &self,
+        call: &ToolCall,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
         if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_TEAM_TASK_UPDATE);
         }
 
         let args: Result<TeamTaskUpdateArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            Ok(args) => match team_task_update(args) {
+            Ok(args) => match crate::agent::orchestration::team_task_update_as(
+                args,
+                &crate::agent::orchestration::TeamCaller::from_session(context.session_id.as_deref()),
+            ) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_TEAM_TASK_UPDATE.to_string(),
                     status: "ok".to_string(),

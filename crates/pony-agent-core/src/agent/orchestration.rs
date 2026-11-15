@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::agent::config::{ProviderRegistryStore, ResolvedProviderSelection};
@@ -220,6 +221,10 @@ fn requeue_messages(target: &str, messages: &[QueuedMessage]) {
     for message in messages.iter().rev() {
         deque.push_front(message.clone());
     }
+    drop(inbox_lock);
+    if !messages.is_empty() {
+        bump_team_activity();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +345,84 @@ fn now_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// 团队活动边沿：成员状态、消息入队/出队、任务流转都会 bump 版本并唤醒 `wait_agent`。
+///
+/// 这是 `wait_agent` 的唯一事件来源：等待者记录基线版本，任一边沿发生即返回，
+/// 超时返回 `timed_out=true`。绝不返回"没有事件却宣称有进展"的假信号。
+struct TeamActivity {
+    version: Mutex<u64>,
+    changed: Condvar,
+}
+
+impl TeamActivity {
+    fn new() -> Self {
+        Self {
+            version: Mutex::new(0),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+static TEAM_ACTIVITY: OnceLock<TeamActivity> = OnceLock::new();
+
+fn team_activity() -> &'static TeamActivity {
+    TEAM_ACTIVITY.get_or_init(TeamActivity::new)
+}
+
+/// 发布一次团队边沿（版本 +1 并唤醒全部等待者）。
+fn bump_team_activity() {
+    bump_activity_instance(team_activity());
+}
+
+/// 实例级 bump：产品路径作用于全局实例，单测作用于局部实例（互不干扰、无串扰）。
+fn bump_activity_instance(activity: &TeamActivity) {
+    let mut version = activity
+        .version
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *version = version.wrapping_add(1);
+    activity.changed.notify_all();
+}
+
+/// 读取当前团队活动版本（`wait_agent` 的基线）。
+fn team_activity_version() -> u64 {
+    *team_activity()
+        .version
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 阻塞等待团队边沿：`baseline` 之后任一次 bump 返回 `true`，超时返回 `false`。
+///
+/// 抽成独立函数只为可测：`wait_agent` 的对外超时下界是 10s，单测不可能真等那么久，
+/// 而「假等待 / 假成功」正是这条边沿契约要根治的缺陷。
+fn wait_for_team_activity(baseline: u64, timeout: Duration) -> bool {
+    wait_on_team_activity(team_activity(), baseline, timeout)
+}
+
+/// 实例级等待（单测用局部实例验证"真等待/真唤醒"，不碰进程级全局状态）。
+fn wait_on_team_activity(activity: &TeamActivity, baseline: u64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut version = activity
+        .version
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        if *version != baseline {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let (next, _) = activity
+            .changed
+            .wait_timeout(version, deadline.saturating_duration_since(now))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        version = next;
+    }
 }
 
 static TEAM_TASKS: Mutex<Option<HashMap<String, TeamTaskItem>>> = Mutex::new(None);
@@ -691,7 +774,7 @@ pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {
 /// 依赖「派生本身不往收件箱塞消息」这一可观测事实。模型可见的工具入口用
 /// [`spawn_teammate_in_workspace`]（登记 + 投递初始 prompt + 驱动）。
 pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, String> {
-    let (result, _target, _prompt) = register_teammate(args)?;
+    let (result, _target, _prompt) = register_teammate(args, &TeamCaller::lead())?;
     Ok(result)
 }
 
@@ -719,6 +802,24 @@ pub fn spawn_teammate_in_workspace_with_provider(
     workspace_root: Option<&std::path::Path>,
     host_selection: Option<&ResolvedProviderSelection>,
 ) -> Result<SpawnTeammateResult, String> {
+    spawn_teammate_in_workspace_with_provider_as(
+        args,
+        workspace_root,
+        host_selection,
+        &TeamCaller::lead(),
+    )
+}
+
+/// 以显式调用者身份派生队友（**工具层必须走本入口**：只有 Team Lead 可派生）。
+///
+/// 为什么需要 `_as`：旧入口按 Lead 代理，工具层若沿用它，队友调用 `spawn_teammate`
+/// 也会被当作 Lead 放行 —— 授权形同虚设（审计 P0-3 的同类问题）。
+pub fn spawn_teammate_in_workspace_with_provider_as(
+    args: SpawnTeammateArgs,
+    workspace_root: Option<&std::path::Path>,
+    host_selection: Option<&ResolvedProviderSelection>,
+    caller: &TeamCaller,
+) -> Result<SpawnTeammateResult, String> {
     // 1) 失败前置：先解析（无 host 且无显式覆盖时允许 None，保持 legacy 语义）。
     let selection = resolve_optional_teammate_provider_selection(
         host_selection,
@@ -729,7 +830,7 @@ pub fn spawn_teammate_in_workspace_with_provider(
     let parent_traceparent = crate::agent::otel::current_traceparent();
 
     let auto_drive = crate::agent::subagent_runtime::subagent_engine().is_some();
-    let (result, target, initial_prompt) = register_teammate(args)?;
+    let (result, target, initial_prompt) = register_teammate(args, caller)?;
 
     // 2) 登记成功后持久化该 target 的 provider 选择（驱动阶段唯一真值源）。
     if let Some(selection) = selection {
@@ -765,10 +866,30 @@ pub fn normalize_target(raw: &str) -> String {
     raw.trim().to_lowercase().replace(' ', "-")
 }
 
+/// 成员上限：防止递归派生把进程拖死。
+const MAX_TEAM_MEMBERS: usize = 16;
+
 /// 登记队友（成员表 + 独立收件箱）并返回 (结果, target, 初始 prompt)。
-fn register_teammate(args: SpawnTeammateArgs) -> Result<(SpawnTeammateResult, String, String), String> {
+///
+/// 仅 Lead 可派生；同名成员绝不静默覆盖；成员数量有硬上限。
+fn register_teammate(
+    args: SpawnTeammateArgs,
+    caller: &TeamCaller,
+) -> Result<(SpawnTeammateResult, String, String), String> {
+    if !caller.is_lead {
+        return Err(format!(
+            "spawn_teammate requires the Team Lead; caller `{}` is a teammate",
+            caller.name
+        ));
+    }
     let initial_prompt = args.prompt.clone();
     let target = normalize_target(&args.name);
+    if target.is_empty() {
+        return Err("teammate name must not be empty".to_string());
+    }
+    if target == LEAD_TARGET {
+        return Err("teammate name `lead` is reserved".to_string());
+    }
     let member = TeammateMember {
         target: target.clone(),
         name: args.name,
@@ -795,6 +916,20 @@ fn register_teammate(args: SpawnTeammateArgs) -> Result<(SpawnTeammateResult, St
             *lock = Some(map);
         }
         let map = lock.as_mut().unwrap();
+        if map.contains_key(&target) {
+            return Err(format!(
+                "teammate `{target}` already exists; names are not silently replaced"
+            ));
+        }
+        let teammate_count = map
+            .keys()
+            .filter(|key| key.as_str() != LEAD_TARGET)
+            .count();
+        if teammate_count >= MAX_TEAM_MEMBERS {
+            return Err(format!(
+                "team member limit {MAX_TEAM_MEMBERS} reached; interrupt an existing teammate first"
+            ));
+        }
         map.insert(target.clone(), member.clone());
     }
 
@@ -813,6 +948,7 @@ fn register_teammate(args: SpawnTeammateArgs) -> Result<(SpawnTeammateResult, St
         inbox_map.insert(target.clone(), VecDeque::new());
     }
 
+    bump_team_activity();
     Ok((SpawnTeammateResult { member }, target, initial_prompt))
 }
 
@@ -916,6 +1052,11 @@ pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, Stri
     // D1 修复：查找前按登记侧同一规则归一化（"Lead"/"Probe Agent" 等 name 写法亦可命中）。
     let mut args = args;
     args.target = normalize_target(&args.target);
+    if args.message.len() > MAX_TEAM_MESSAGE_BYTES {
+        return Err(format!(
+            "team message exceeds {MAX_TEAM_MESSAGE_BYTES} bytes"
+        ));
+    }
     let mode = args.mode.unwrap_or(MessageDeliveryMode::Queue);
     let msg_id = format!("msg-{}", Uuid::new_v4());
 
@@ -967,6 +1108,8 @@ pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, Stri
         deque.len()
     };
 
+    bump_team_activity();
+
     Ok((
         SendMessageResult {
             message_id: msg_id,
@@ -982,12 +1125,19 @@ pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, Stri
 
 /// 队友状态写入（独立作用域持锁，绝不与收件箱锁嵌套，避免锁序反转）。
 fn set_teammate_status(target: &str, status: TeammateStatus) {
+    let mut changed = false;
     if let Ok(mut lock) = TEAMMATES.lock() {
         if let Some(map) = lock.as_mut() {
             if let Some(member) = map.get_mut(target) {
-                member.status = status;
+                if member.status != status {
+                    member.status = status;
+                    changed = true;
+                }
             }
         }
+    }
+    if changed {
+        bump_team_activity();
     }
 }
 
@@ -1056,6 +1206,10 @@ pub fn drain_inbox(args: ReadInboxArgs) -> Result<ReadInboxResult, String> {
         .ok_or_else(|| format!("No inbox for {}", args.target))?;
 
     let messages: Vec<QueuedMessage> = deque.drain(..).collect();
+    drop(inbox_lock);
+    if !messages.is_empty() {
+        bump_team_activity();
+    }
     Ok(ReadInboxResult {
         target: args.target,
         messages,
@@ -1077,14 +1231,191 @@ pub fn inbox_pending_len(target: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// 团队任务看板的容量与文本预算（拒绝无限增长与超长 prompt 注入）。
+const MAX_TEAM_TASKS: usize = 256;
+const MAX_TASK_SUBJECT_CHARS: usize = 200;
+const MAX_TASK_DESCRIPTION_CHARS: usize = 16_384;
+/// 单条团队消息的字节上限：避免一次消息把队友 prompt 撑爆。
+const MAX_TEAM_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// 任务变更的调用者身份：`lead` 或具名 teammate。
+#[derive(Debug, Clone)]
+pub struct TeamCaller {
+    pub name: String,
+    pub is_lead: bool,
+}
+
+impl TeamCaller {
+    /// 用户界面 / Tauri 命令 / 旧库调用：一律按 Lead 代理处理。
+    pub fn lead() -> Self {
+        Self {
+            name: LEAD_TARGET.to_string(),
+            is_lead: true,
+        }
+    }
+
+    /// 由工具调用会话反查成员身份；未登记 ⇒ Lead（与 `drain_inbox` 的判定同源）。
+    pub fn from_session(session_id: Option<&str>) -> Self {
+        match session_id.and_then(teammate_target_for_session) {
+            Some(target) => Self {
+                name: target,
+                is_lead: false,
+            },
+            None => Self::lead(),
+        }
+    }
+}
+
+/// 任务文本校验：非空 + 长度预算。
+fn validate_task_text(subject: &str, description: &str) -> Result<(), String> {
+    if subject.trim().is_empty() {
+        return Err("task subject must not be empty".to_string());
+    }
+    if subject.chars().count() > MAX_TASK_SUBJECT_CHARS {
+        return Err(format!(
+            "task subject exceeds {MAX_TASK_SUBJECT_CHARS} characters"
+        ));
+    }
+    if description.chars().count() > MAX_TASK_DESCRIPTION_CHARS {
+        return Err(format!(
+            "task description exceeds {MAX_TASK_DESCRIPTION_CHARS} characters"
+        ));
+    }
+    Ok(())
+}
+
+/// 写域归一化：拒绝绝对路径与 `..`，去重保序；重叠仅作运行期诊断，不是锁。
+fn normalize_write_scopes(scopes: Vec<String>) -> Result<Vec<String>, String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for scope in scopes {
+        let scope = scope.trim();
+        if scope.is_empty() {
+            return Err("write scope must not be empty".to_string());
+        }
+        if scope.starts_with('/') || scope.starts_with('\\') || scope.contains("..") {
+            return Err(format!(
+                "write scope `{scope}` must be workspace-relative without `..`"
+            ));
+        }
+        if !normalized.iter().any(|existing| existing == scope) {
+            normalized.push(scope.to_string());
+        }
+    }
+    Ok(normalized)
+}
+
+/// 依赖校验：不得自引用、不得重复、不得引用不存在的任务。
+fn validate_dependencies(
+    map: &HashMap<String, TeamTaskItem>,
+    task_id: &str,
+    deps: &[String],
+) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for dep in deps {
+        if dep == task_id {
+            return Err("a task cannot block itself".to_string());
+        }
+        if !seen.insert(dep.as_str()) {
+            return Err(format!("duplicate dependency `{dep}`"));
+        }
+        if !map.contains_key(dep) {
+            return Err(format!("dependency `{dep}` does not exist"));
+        }
+    }
+    Ok(())
+}
+
+/// 依赖环检测：从候选任务出发，沿 blocked_by 深度优先，回到自身即为环。
+fn has_dependency_cycle(map: &HashMap<String, TeamTaskItem>, task_id: &str, deps: &[String]) -> bool {
+    fn visit(
+        map: &HashMap<String, TeamTaskItem>,
+        root: &str,
+        current: &str,
+        root_deps: &[String],
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        let deps: &[String] = if current == root {
+            root_deps
+        } else {
+            match map.get(current) {
+                Some(task) => &task.blocked_by,
+                None => return false,
+            }
+        };
+        for dep in deps {
+            if dep == root {
+                return true;
+            }
+            if !visited.insert(dep.clone()) {
+                continue;
+            }
+            if visit(map, root, dep, root_deps, visited) {
+                return true;
+            }
+        }
+        false
+    }
+
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visit(map, task_id, task_id, deps, &mut visited)
+}
+
+/// 就绪判定：全部依赖已完成（缺失依赖视为未就绪，绝不默认放行）。
+fn task_ready(map: &HashMap<String, TeamTaskItem>, task: &TeamTaskItem) -> bool {
+    task.blocked_by.iter().all(|dep| {
+        map.get(dep)
+            .map(|blocker| blocker.status == "completed")
+            .unwrap_or(false)
+    })
+}
+
+/// 授权：任务当前 owner 或 Team Lead 才能变更。
+fn authorize_task(caller: &TeamCaller, task: &TeamTaskItem) -> Result<(), String> {
+    if caller.is_lead {
+        return Ok(());
+    }
+    match task.owner.as_deref() {
+        Some(owner) if owner == caller.name => Ok(()),
+        Some(owner) => Err(format!(
+            "task `{}` is owned by `{owner}`; caller `{}` is not authorized",
+            task.task_id, caller.name
+        )),
+        None => Err(format!(
+            "task `{}` has no owner; only the Team Lead can mutate it",
+            task.task_id
+        )),
+    }
+}
+
 pub fn team_task_create(args: TeamTaskCreateArgs) -> Result<TeamTaskItem, String> {
+    team_task_create_as(args, &TeamCaller::lead())
+}
+
+/// 以显式调用者身份创建任务（工具层必须走本入口）。
+pub fn team_task_create_as(
+    args: TeamTaskCreateArgs,
+    _caller: &TeamCaller,
+) -> Result<TeamTaskItem, String> {
+    validate_task_text(&args.subject, &args.description)?;
+    let write_scopes = normalize_write_scopes(args.write_scopes.unwrap_or_default())?;
+    let blocked_by = args.blocked_by.unwrap_or_default();
+
     let mut lock = TEAM_TASKS.lock().unwrap();
     if lock.is_none() {
         *lock = Some(HashMap::new());
     }
     let map = lock.as_mut().unwrap();
 
+    let active = map.values().filter(|task| task.status != "deleted").count();
+    if active >= MAX_TEAM_TASKS {
+        return Err(format!("Team task limit {MAX_TEAM_TASKS} reached"));
+    }
+
     let task_id = format!("task-{}", Uuid::new_v4());
+    validate_dependencies(map, &task_id, &blocked_by)?;
+    if has_dependency_cycle(map, &task_id, &blocked_by) {
+        return Err("task dependencies must not form a cycle".to_string());
+    }
     let task = TeamTaskItem {
         task_id: task_id.clone(),
         subject: args.subject,
@@ -1092,11 +1423,13 @@ pub fn team_task_create(args: TeamTaskCreateArgs) -> Result<TeamTaskItem, String
         status: "pending".to_string(),
         owner: None,
         revision: 1,
-        write_scopes: args.write_scopes.unwrap_or_default(),
-        blocked_by: args.blocked_by.unwrap_or_default(),
+        write_scopes,
+        blocked_by,
         created_at_ms: now_unix_ms(),
     };
     map.insert(task_id, task.clone());
+    drop(lock);
+    bump_team_activity();
 
     Ok(task)
 }
@@ -1109,55 +1442,133 @@ pub fn team_task_get(args: TeamTaskGetArgs) -> Result<TeamTaskItem, String> {
 }
 
 pub fn team_task_update(args: TeamTaskUpdateArgs) -> Result<TeamTaskItem, String> {
+    team_task_update_as(args, &TeamCaller::lead())
+}
+
+/// 以显式调用者身份执行 CAS 任务流转（授权 + 状态机 + 依赖就绪的唯一收口）。
+pub fn team_task_update_as(
+    args: TeamTaskUpdateArgs,
+    caller: &TeamCaller,
+) -> Result<TeamTaskItem, String> {
     let mut lock = TEAM_TASKS.lock().unwrap();
     let map = lock.as_mut().ok_or_else(|| "No tasks exist".to_string())?;
-    let task = map.get_mut(&args.task_id).ok_or_else(|| "Task not found".to_string())?;
+    let snapshot = map
+        .get(&args.task_id)
+        .ok_or_else(|| "Task not found".to_string())?
+        .clone();
 
-    if task.revision != args.expected_revision {
+    if snapshot.revision != args.expected_revision {
         return Err(format!(
             "CAS revision mismatch: expected {}, got {}",
-            args.expected_revision, task.revision
+            args.expected_revision, snapshot.revision
         ));
     }
+    if snapshot.status == "deleted" {
+        return Err(format!("Task {} is deleted", snapshot.task_id));
+    }
 
+    let mut next = snapshot.clone();
     match args.action {
         TeamTaskAction::Claim => {
-            task.status = "in_progress".to_string();
-            task.owner = args.owner;
+            if snapshot.status != "pending" {
+                return Err(format!(
+                    "only a pending task can be claimed (task {} is {})",
+                    snapshot.task_id, snapshot.status
+                ));
+            }
+            if let Some(owner) = snapshot.owner.as_deref() {
+                if owner != caller.name && !caller.is_lead {
+                    return Err(format!("task `{}` is owned by `{owner}`", snapshot.task_id));
+                }
+            }
+            if let Some(requested) = args.owner.as_deref() {
+                if !caller.is_lead && requested != caller.name {
+                    return Err("a teammate can only claim a task for itself".to_string());
+                }
+            }
+            if !task_ready(map, &snapshot) {
+                return Err(format!(
+                    "task `{}` is blocked by unfinished dependencies",
+                    snapshot.task_id
+                ));
+            }
+            next.status = "in_progress".to_string();
+            next.owner = Some(if caller.is_lead {
+                args.owner.unwrap_or_else(|| caller.name.clone())
+            } else {
+                caller.name.clone()
+            });
         }
         TeamTaskAction::Complete => {
-            task.status = "completed".to_string();
+            authorize_task(caller, &snapshot)?;
+            if snapshot.status != "in_progress" {
+                return Err(format!(
+                    "only an in-progress task can complete (task {} is {})",
+                    snapshot.task_id, snapshot.status
+                ));
+            }
+            next.status = "completed".to_string();
         }
         TeamTaskAction::Release => {
-            task.status = "pending".to_string();
-            task.owner = None;
+            authorize_task(caller, &snapshot)?;
+            if snapshot.status != "in_progress" {
+                return Err(format!(
+                    "only an in-progress task can be released (task {} is {})",
+                    snapshot.task_id, snapshot.status
+                ));
+            }
+            next.status = "pending".to_string();
+            next.owner = None;
         }
         TeamTaskAction::Delete => {
-            task.status = "deleted".to_string();
+            authorize_task(caller, &snapshot)?;
+            let dependent = map.values().find(|task| {
+                task.status != "deleted"
+                    && task.task_id != snapshot.task_id
+                    && task.blocked_by.iter().any(|dep| dep == &snapshot.task_id)
+            });
+            if let Some(dependent) = dependent {
+                return Err(format!(
+                    "task `{}` still blocks `{}`",
+                    snapshot.task_id, dependent.task_id
+                ));
+            }
+            next.status = "deleted".to_string();
         }
         TeamTaskAction::Edit => {
+            authorize_task(caller, &snapshot)?;
+            if args.subject.is_none() && args.description.is_none() && args.write_scopes.is_none() {
+                return Err("task edit requires subject, description, or write_scopes".to_string());
+            }
             if let Some(subject) = args.subject {
-                task.subject = subject;
+                next.subject = subject;
             }
             if let Some(description) = args.description {
-                task.description = description;
+                next.description = description;
             }
             if let Some(scopes) = args.write_scopes {
-                task.write_scopes = scopes;
+                next.write_scopes = normalize_write_scopes(scopes)?;
             }
-            if let Some(owner) = args.owner {
-                task.owner = Some(owner);
-            }
+            validate_task_text(&next.subject, &next.description)?;
         }
         TeamTaskAction::SetDependencies => {
-            if let Some(deps) = args.blocked_by {
-                task.blocked_by = deps;
+            authorize_task(caller, &snapshot)?;
+            let deps = args
+                .blocked_by
+                .ok_or_else(|| "set_dependencies requires blocked_by".to_string())?;
+            validate_dependencies(map, &snapshot.task_id, &deps)?;
+            if has_dependency_cycle(map, &snapshot.task_id, &deps) {
+                return Err("task dependencies must not form a cycle".to_string());
             }
+            next.blocked_by = deps;
         }
     }
 
-    task.revision += 1;
-    Ok(task.clone())
+    next.revision = snapshot.revision + 1;
+    map.insert(next.task_id.clone(), next.clone());
+    drop(lock);
+    bump_team_activity();
+    Ok(next)
 }
 
 /// 等待队友活动（对齐 DSH wait_agent 边沿机制）
@@ -1183,10 +1594,20 @@ pub fn wait_agent(args: WaitAgentArgs) -> Result<WaitAgentResult, String> {
         });
     }
 
-    let _timeout = args.timeout_ms.unwrap_or(30_000);
-    // 模拟等待返回
+    // 真等待：记录基线版本后阻塞，任一边沿（成员状态/消息入队出队/任务流转）即返回；
+    // 超时返回 `timed_out=true`。绝不返回"未超时且无进展"的假信号。
+    const DEFAULT_WAIT_MS: u64 = 30_000;
+    const MIN_WAIT_MS: u64 = 10_000;
+    const MAX_WAIT_MS: u64 = 3_600_000;
+
+    let timeout_ms = args
+        .timeout_ms
+        .unwrap_or(DEFAULT_WAIT_MS)
+        .clamp(MIN_WAIT_MS, MAX_WAIT_MS);
+    let baseline = team_activity_version();
+    let resumed = wait_for_team_activity(baseline, Duration::from_millis(timeout_ms));
     Ok(WaitAgentResult {
-        timed_out: false,
+        timed_out: !resumed,
         no_progress: None,
     })
 }
@@ -1348,4 +1769,148 @@ pub fn team_task_list() -> Result<TeamTaskListResult, String> {
             .then_with(|| a.task_id.cmp(&b.task_id))
     });
     Ok(TeamTaskListResult { tasks })
+}
+
+#[cfg(test)]
+mod team_activity_and_task_tests {
+    use super::*;
+
+    fn task(id: &str, status: &str, owner: Option<&str>, blocked_by: &[&str]) -> TeamTaskItem {
+        TeamTaskItem {
+            task_id: id.to_string(),
+            subject: format!("task {id}"),
+            description: "d".to_string(),
+            status: status.to_string(),
+            owner: owner.map(str::to_string),
+            revision: 1,
+            write_scopes: Vec::new(),
+            blocked_by: blocked_by.iter().map(|dep| dep.to_string()).collect(),
+            created_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn wait_on_activity_times_out_without_edges() {
+        let activity = TeamActivity::new();
+        let started = Instant::now();
+        let changed = wait_on_team_activity(&activity, 0, Duration::from_millis(80));
+        assert!(!changed, "无团队边沿时必须超时返回 false（禁止假成功）");
+        assert!(
+            started.elapsed() >= Duration::from_millis(60),
+            "必须真的等待，而不是立即返回"
+        );
+    }
+
+    #[test]
+    fn wait_on_activity_wakes_on_edge() {
+        let activity = std::sync::Arc::new(TeamActivity::new());
+        let bumper = std::sync::Arc::clone(&activity);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            bump_activity_instance(&bumper);
+        });
+        let started = Instant::now();
+        let changed = wait_on_team_activity(&activity, 0, Duration::from_secs(5));
+        handle.join().expect("bumper thread");
+        assert!(changed, "边沿发生后等待者必须被唤醒");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "唤醒不得落到超时分支"
+        );
+    }
+
+    #[test]
+    fn wait_on_activity_returns_immediately_when_baseline_is_stale() {
+        let activity = TeamActivity::new();
+        bump_activity_instance(&activity);
+        let started = Instant::now();
+        assert!(wait_on_team_activity(&activity, 0, Duration::from_secs(5)));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "基线之后已有边沿时必须立即返回"
+        );
+    }
+
+    #[test]
+    fn task_text_budget_and_write_scopes_fail_closed() {
+        assert!(validate_task_text("", "d").is_err());
+        assert!(validate_task_text(&"x".repeat(MAX_TASK_SUBJECT_CHARS + 1), "d").is_err());
+        assert!(validate_task_text(&"x".repeat(MAX_TASK_DESCRIPTION_CHARS + 1), "d").is_err());
+        assert!(validate_task_text("ok", "d").is_ok());
+
+        assert!(normalize_write_scopes(vec!["/etc".to_string()]).is_err());
+        assert!(normalize_write_scopes(vec!["../x".to_string()]).is_err());
+        assert!(normalize_write_scopes(vec![" ".to_string()]).is_err());
+        assert_eq!(
+            normalize_write_scopes(vec![
+                "src/a".to_string(),
+                "src/a".to_string(),
+                "src/b".to_string()
+            ])
+            .expect("normalize"),
+            vec!["src/a".to_string(), "src/b".to_string()]
+        );
+    }
+
+    #[test]
+    fn dependencies_are_validated_for_self_duplicates_cycles_and_readiness() {
+        let mut map: HashMap<String, TeamTaskItem> = HashMap::new();
+        map.insert("task-a".to_string(), task("task-a", "pending", None, &[]));
+        map.insert(
+            "task-b".to_string(),
+            task("task-b", "pending", None, &["task-a"]),
+        );
+
+        assert!(validate_dependencies(&map, "task-c", &["task-a".to_string()]).is_ok());
+        assert!(validate_dependencies(&map, "task-c", &["task-c".to_string()]).is_err());
+        assert!(validate_dependencies(
+            &map,
+            "task-c",
+            &["task-a".to_string(), "task-a".to_string()]
+        )
+        .is_err());
+        assert!(validate_dependencies(&map, "task-c", &["task-missing".to_string()]).is_err());
+
+        // task-b → task-a 无环；task-a → task-b 成环。
+        assert!(!has_dependency_cycle(&map, "task-c", &["task-b".to_string()]));
+        assert!(has_dependency_cycle(&map, "task-a", &["task-b".to_string()]));
+
+        let mut ready_map: HashMap<String, TeamTaskItem> = HashMap::new();
+        ready_map.insert(
+            "task-a".to_string(),
+            task("task-a", "completed", None, &[]),
+        );
+        assert!(task_ready(
+            &ready_map,
+            &task("task-b", "pending", None, &["task-a"])
+        ));
+        assert!(!task_ready(
+            &ready_map,
+            &task("task-b", "pending", None, &["task-a", "task-x"])
+        ));
+        ready_map.insert(
+            "task-a".to_string(),
+            task("task-a", "in_progress", None, &[]),
+        );
+        assert!(!task_ready(
+            &ready_map,
+            &task("task-b", "pending", None, &["task-a"])
+        ));
+    }
+
+    #[test]
+    fn task_mutation_authorization_is_owner_or_lead_only() {
+        let lead = TeamCaller::lead();
+        let teammate = TeamCaller {
+            name: "reviewer".to_string(),
+            is_lead: false,
+        };
+        let owned = task("task-a", "in_progress", Some("reviewer"), &[]);
+        let foreign = task("task-b", "in_progress", Some("executor"), &[]);
+        let unowned = task("task-c", "pending", None, &[]);
+        assert!(authorize_task(&lead, &owned).is_ok());
+        assert!(authorize_task(&teammate, &owned).is_ok());
+        assert!(authorize_task(&teammate, &foreign).is_err());
+        assert!(authorize_task(&teammate, &unowned).is_err());
+    }
 }
