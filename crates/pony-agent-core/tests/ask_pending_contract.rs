@@ -530,6 +530,7 @@ fn c1_7_get_ask_lifecycle_state_reports_truthful_state() {
 
     let ask1 = dispatch_ask(&h.dispatcher, "call-lifecycle-1", "问题1？");
     let ask2 = dispatch_ask(&h.dispatcher, "call-lifecycle-2", "问题2？");
+    let ask3 = dispatch_ask(&h.dispatcher, "call-lifecycle-3", "问题3？");
 
     let plane = HostControlPlaneBuilder::new()
         .ask_dispatcher(Arc::clone(&h.dispatcher))
@@ -539,21 +540,21 @@ fn c1_7_get_ask_lifecycle_state_reports_truthful_state() {
     // 1. Pending 态查询
     assert_eq!(
         plane.get_ask_lifecycle_state("session-1", &ask1.request_id),
-        Some(AskLifecycleState::Pending),
+        Ok(Some(AskLifecycleState::Pending)),
         "新建提问必须可查为 Pending 态"
     );
     assert_eq!(
         plane.get_ask_lifecycle_state("session-1", &ask2.request_id),
-        Some(AskLifecycleState::Pending)
+        Ok(Some(AskLifecycleState::Pending))
     );
 
     // 2. Answered 态查询（作答后从 pending 列表消失，但 lifecycle state 真实为 Answered）
     plane
-        .answer_ask_in_session("session-1", &ask1.request_id, ask1.version, json!("答案1"))
+        .answer_ask_in_session("session-1", &ask1.request_id, ask1.version, json!({"answer": "答案1"}))
         .expect("answer_ask_in_session");
     assert_eq!(
         plane.get_ask_lifecycle_state("session-1", &ask1.request_id),
-        Some(AskLifecycleState::Answered),
+        Ok(Some(AskLifecycleState::Answered)),
         "作答后的提问必须真实反映为 Answered 态，绝非失效"
     );
 
@@ -563,13 +564,111 @@ fn c1_7_get_ask_lifecycle_state_reports_truthful_state() {
         .expect("cancel_ask_in_session");
     assert_eq!(
         plane.get_ask_lifecycle_state("session-1", &ask2.request_id),
-        Some(AskLifecycleState::Cancelled),
+        Ok(Some(AskLifecycleState::Cancelled)),
         "忽略后的提问必须反映为 Cancelled 态"
     );
 
-    // 4. 不存在的请求与空作用域
-    assert_eq!(plane.get_ask_lifecycle_state("session-1", "non-existent"), None);
-    assert_eq!(plane.get_ask_lifecycle_state("", &ask1.request_id), None);
+    // 4. Superseded：被新用户消息取代（不是墙钟过期，也不是「失效」）
+    store
+        .supersede_pending_on_user_message("session-1", 9_999)
+        .expect("supersede pending asks");
+    assert_eq!(
+        plane.get_ask_lifecycle_state("session-1", &ask3.request_id),
+        Ok(Some(AskLifecycleState::Superseded)),
+        "被新消息取代的提问必须反映为 Superseded 态"
+    );
 
-    let _ = std::fs::remove_file(&db_path);
+    // 5. Orphaned：会话归档/删除后 GC 回收（用独立会话，避免与 supersede 的同会话语义互相污染）
+    let orphan_seed = pony_agent_core::agent::ask_persistence::PersistedAsk {
+        session_id: "session-orphan".to_string(),
+        request_id: "control-orphan-1".to_string(),
+        version: 1,
+        nonce: "nonce-orphan".to_string(),
+        run_id: None,
+        turn_id: "turn-orphan".to_string(),
+        call_id: "call-orphan".to_string(),
+        kind: pony_agent_core::agent::tool_runtime::PendingControlRequestKind::Interaction,
+        prompt: "孤儿问题？".to_string(),
+        options: Vec::new(),
+        state: AskLifecycleState::Pending,
+        created_at_ms: 1,
+        answered_at_ms: None,
+        multi_select: false,
+    };
+    store.upsert(&orphan_seed).expect("upsert orphan seed");
+    store.gc_orphans(&["session-orphan".to_string()], 9_999).expect("gc orphans");
+    assert_eq!(
+        plane.get_ask_lifecycle_state("session-orphan", "control-orphan-1"),
+        Ok(Some(AskLifecycleState::Orphaned)),
+        "会话归档后的提问必须反映为 Orphaned 态"
+    );
+
+    // 6. 不存在的记录 ⇒ Ok(None)（真值为「没有这条记录」）；空作用域 ⇒ Err（读不到真值）
+    assert_eq!(plane.get_ask_lifecycle_state("session-1", "non-existent"), Ok(None));
+    assert!(
+        plane.get_ask_lifecycle_state("", &ask1.request_id).is_err(),
+        "空作用域必须失败闭合，不得把「读不到」伪装成「没有记录」"
+    );
+
+    cleanup_sqlite(&db_path);
 }
+
+/// 读失败必须与「没有记录」区分开：UI 据此保留面板而不是静默收口。
+#[test]
+fn c1_8_get_ask_lifecycle_state_surfaces_read_failures_as_err() {
+    use pony_agent_core::agent::ask_persistence::{
+        AskPersistenceResult, AskPersistenceStore, PersistedAsk,
+    };
+
+    struct ReadFailingStore;
+    impl AskPersistenceStore for ReadFailingStore {
+        fn load_pending(&self, _session_id: &str) -> AskPersistenceResult<Vec<PersistedAsk>> {
+            Ok(Vec::new())
+        }
+        fn upsert(&self, _ask: &PersistedAsk) -> AskPersistenceResult<()> {
+            Ok(())
+        }
+        fn load_ask(
+            &self,
+            _session_id: &str,
+            _request_id: &str,
+        ) -> AskPersistenceResult<Option<PersistedAsk>> {
+            Err("ask_store_read_failed: simulated disk failure".to_string())
+        }
+        fn supersede_pending_on_user_message(
+            &self,
+            _session_id: &str,
+            _at_ms: u64,
+        ) -> AskPersistenceResult<usize> {
+            Ok(0)
+        }
+        fn gc_orphans(
+            &self,
+            _archived_session_ids: &[String],
+            _now_ms: u64,
+        ) -> AskPersistenceResult<usize> {
+            Ok(0)
+        }
+    }
+
+    let plane = HostControlPlaneBuilder::new()
+        .ask_store(Arc::from(Box::new(ReadFailingStore) as Box<dyn AskPersistenceStore>))
+        .build();
+    let error = plane
+        .get_ask_lifecycle_state("session-1", "control-anything")
+        .expect_err("读失败必须以 Err 暴露，绝不假装成 Ok(None)");
+    assert!(
+        error.contains("ask_store_read_failed"),
+        "错误应原样透出存储层诊断，实际 = {error:?}"
+    );
+}
+
+fn cleanup_sqlite(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    for suffix in ["-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(name));
+    }
+}
+

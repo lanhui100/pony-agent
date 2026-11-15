@@ -151,6 +151,20 @@ pub fn system_message_severity(content: &str) -> SystemMessageSeverity {
     if trimmed.starts_with(ERROR_SUMMARY_RATE_LIMITED) {
         return SystemMessageSeverity::Error;
     }
+    // B189 复审：Ask 收口文案按**生命周期**分派（中性句，不再含「失效」）。它们是「需要注意但
+    // 不是错误」的受控文案，必须显式判 Warning —— 靠关键词表会因文案改造静默降级成 Info。
+    if matches!(
+        trimmed,
+        ASK_STALE_NOTICE
+            | ASK_SETTLED_ANSWERED_NOTICE
+            | ASK_SETTLED_CANCELLED_NOTICE
+            | ASK_SETTLED_SUPERSEDED_NOTICE
+            | ASK_SETTLED_ORPHANED_NOTICE
+            | ASK_STILL_PENDING_NOTICE
+            | ASK_LIFECYCLE_READ_FAILED_NOTICE
+    ) {
+        return SystemMessageSeverity::Warning;
+    }
     let lower = trimmed.to_ascii_lowercase();
     let error_hints = [
         "error", "fail", "panic", "失败", "错误", "异常", "不可用", "未产出终态",

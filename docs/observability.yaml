@@ -2,6 +2,18 @@
 # 形状：~/.agents/skills/observability-onboarding/references/declaration.schema.json
 # 判定：声明说「该不该有」，巡检说「实际有没有」，两者交叉才是结论（规则家：declaration-rubric.md）。
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
+# B189 复审修复（2026-11-15）归属说明：TUI/桌面端 Ask 收口改为按**持久化生命周期**选文案。
+# (1) 变更面：`HostControlPlane::get_ask_lifecycle_state` 改为 `Result<Option<AskLifecycleState>, String>`
+#     （读失败与「无记录」分离）；TUI 收口/错误上报按终态分派中性文案；桌面端新增只读 IPC 命令
+#     `ask_lifecycle_state`（读本地 `sessions.db` 的 `pending_asks`，无网络出口、无后台任务、无 LLM 调用）。
+# (2) 新增**本地取证面**（非遥测出口，只落 stderr → `~/.pony-agent/tui-logs/tui-runtime.log`）：
+#     `ask_settled: request=… state=… reason=…` 与 `ask_lifecycle_read_failed: request=… reason=…`；
+#     字段只有 request_id / 生命周期枚举 / 原因标签，不含问题正文与凭据。
+# (3) 四维归属不变：tracing / issues 仍 applicable（落点不变 agent/otel/mod.rs、agent/ponysentry/client.rs），
+#     metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
+#     ⇒ 不新增 applicable 判定、不新增 enforcement_point。
+# (4) 行为收口（测试层）：`bin/tui/tests/ask_lifecycle_settle_tests.rs`（8 例）、
+#     `tests/ask_pending_contract.rs::c1_7/c1_8`（五态 + 读失败）、`tests/ask-store.spec.ts`（2 例）。
 # B190（ADR 2026-11-15-session-fold-precheck-loses-log-only-sessions）归属说明：折叠字节预检降级后的定向补折。
 # (1) 只改**本地**会话装载读路径（`crates/pony-agent-core/src/agent/session/fold.rs`）：字节预检降级后
 #     追加一轮「日志有、索引无」会话的定向折叠，读的仍是本地 `session.jsonl`；无新增对外接口、网络出口、

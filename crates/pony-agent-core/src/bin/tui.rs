@@ -15,6 +15,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen},
 };
 use std::io::Write;
+use pony_agent_core::agent::ask_persistence::AskLifecycleState;
 use pony_agent_core::agent::config::{
     ProviderCapabilityPreset, ProviderModelCapabilities, ProviderModelConfig, ProviderReasoningEffort,
     ProviderRegistryStore, ProviderRegistryView, ProviderSelectionResolver, ResolvedProviderSelection,
@@ -1004,13 +1005,43 @@ pub fn ask_submit_verdict(
     }
 }
 
-/// 提问/审批面板的**唯一**失效文案（ADR 0074 / 契约 §6.5）。
+/// 兼容兜底文案：**句柄种类未知**时对「请求已不在待决集合」的中性描述。
 ///
-/// 宿主不再有「墙钟过期」这条路：面板消失只有两种原因 —— 请求已被处理（Answered）、
-/// 被显式忽略（Cancelled）、被新消息取代（Superseded）或会话归档（Orphaned）。
-/// 用户可见文案统一走中文，宿主的英文内部串（含历史上的 `cannot be consumed …`）只进
-/// 运行时日志（stderr → `tui-runtime.log`），**绝不上屏**。
-pub const ASK_STALE_NOTICE: &str = "该提问已失效，已同步最新待处理请求";
+/// ADR 0074 / DSH 对齐：Ask 没有墙钟失效语义，因此这里**不得**再断言「失效」——
+/// 具体原因由 [`ask_settled_notice`] 按宿主真实生命周期给出；本常量只覆盖「不知道原因」的
+/// 兼容路径（审批另有 [`APPROVAL_STALE_NOTICE`]）。
+pub const ASK_STALE_NOTICE: &str = "该提问已收口，已同步最新状态";
+
+/// Ask 收口文案（按宿主**真实生命周期**分派，单一真源）。
+pub const ASK_SETTLED_ANSWERED_NOTICE: &str = "该提问已完成作答，已同步最新状态";
+pub const ASK_SETTLED_CANCELLED_NOTICE: &str = "该提问已忽略，已同步最新状态";
+pub const ASK_SETTLED_SUPERSEDED_NOTICE: &str = "该提问已被新对话取代，已同步最新状态";
+pub const ASK_SETTLED_ORPHANED_NOTICE: &str = "该提问所属会话已归档，已同步最新状态";
+
+/// 宿主真值显示**仍待作答**时的文案：用于「CAS 冲突但记录还是 Pending」的对账场景
+/// （例如另一终端刚改过版本），此时面板保留，文案不得宣称已收口。
+pub const ASK_STILL_PENDING_NOTICE: &str = "该提问仍在等待作答，已同步最新状态";
+
+/// 生命周期读取失败（本地库 IO / 锁异常）时的状态行提示：**面板保持**，等下一次同步重试。
+pub const ASK_LIFECYCLE_READ_FAILED_NOTICE: &str =
+    "提问状态读取失败，面板保持（详情见 tui-runtime.log）";
+
+/// 按宿主真实生命周期挑「已收口」文案（纯函数）。
+///
+/// 为什么不能靠错误散文猜：`ask_state_conflict: Ask `x` is Answered, not Pending` 这类宿主串
+/// 大小写/措辞随实现漂移，一处 `contains` 对不上就会把「已作答」误报成「失效」。真值只有
+/// 持久化层的那一个 `state`。
+pub fn ask_settled_notice(lifecycle: Option<AskLifecycleState>) -> &'static str {
+    match lifecycle {
+        Some(AskLifecycleState::Answered) => ASK_SETTLED_ANSWERED_NOTICE,
+        Some(AskLifecycleState::Cancelled) => ASK_SETTLED_CANCELLED_NOTICE,
+        Some(AskLifecycleState::Superseded) => ASK_SETTLED_SUPERSEDED_NOTICE,
+        Some(AskLifecycleState::Orphaned) => ASK_SETTLED_ORPHANED_NOTICE,
+        // `Pending`（对账窗口内仍待作答）与 `None`（记录不可得/GC）都不宣称「已收口」。
+        Some(AskLifecycleState::Pending) => ASK_STILL_PENDING_NOTICE,
+        None => ASK_STALE_NOTICE,
+    }
+}
 
 /// wave-65 R3（F3）：**审批**失效（过期 / 被宿主收口 / 已不可 CAS）的专属文案。
 ///
@@ -7786,54 +7817,17 @@ fn sync_pending_control_request(
 
     // 1) 已有面板：请求仍在待决集合里 ⇒ 保持；已被宿主收口 ⇒ 依据真实生命周期精准收口。
     if pending_panel_should_close(items, state.pending_request.as_ref()) {
-        let handle = state.pending_request.as_ref().cloned();
-        if let Some(ref handle) = handle {
-            if handle.is_approval {
-                // 审批有 TTL，到期或被收口走审批专属失效提示
-                close_stale_pending_request(state);
-                close_pending_request_overlay(state);
-                return true;
-            } else {
-                // 提问（Ask）：对齐 DSH —— 正常提问没有失效时间！
-                // 依据底层真实生命周期状态精确处理，绝不误把已作答当成失效。
-                let lifecycle = control_plane
-                    .get_ask_lifecycle_state(&state.session_id, &handle.request_id);
-                match lifecycle {
-                    Some(pony_agent_core::agent::ask_persistence::AskLifecycleState::Pending) => {
-                        // 底层事实证明仍处于 Pending，快照缺失仅为瞬时读偏或竞争，绝不误收面板
-                        return false;
-                    }
-                    Some(pony_agent_core::agent::ask_persistence::AskLifecycleState::Answered) => {
-                        // 已经作答完成（本端提交落地、或关联终端已提交）：静默关闭面板，绝不上屏失效通知
-                        state.pending_request = None;
-                        close_pending_request_overlay(state);
-                        state.set_status_notice("提问已作答".to_string());
-                        return true;
-                    }
-                    Some(pony_agent_core::agent::ask_persistence::AskLifecycleState::Cancelled) => {
-                        state.pending_request = None;
-                        close_pending_request_overlay(state);
-                        state.set_status_notice("提问已忽略".to_string());
-                        return true;
-                    }
-                    Some(pony_agent_core::agent::ask_persistence::AskLifecycleState::Superseded) => {
-                        state.pending_request = None;
-                        close_pending_request_overlay(state);
-                        state.set_status_notice("已同步最新对话，提问已收起".to_string());
-                        return true;
-                    }
-                    _ => {
-                        // 找不到记录或已归档，静默收口
-                        state.pending_request = None;
-                        close_pending_request_overlay(state);
-                        return true;
-                    }
-                }
-            }
+        let Some(handle) = state.pending_request.clone() else {
+            // `pending_panel_should_close(None)` 恒 false：这里只是防御，绝不臆造收口。
+            return false;
+        };
+        if handle.is_approval {
+            // 审批有墙钟 TTL 语义（Wave 65 R3）：到期/收口走审批专属文案。
+            close_stale_pending_request(state);
+            close_pending_request_overlay(state);
+            return true;
         }
-        close_stale_pending_request(state);
-        close_pending_request_overlay(state);
-        return true;
+        return settle_ask_panel_by_lifecycle(state, control_plane, &handle);
     }
     if state.pending_request.is_some() {
         return false;
@@ -7863,38 +7857,92 @@ fn sync_pending_control_request(
     true
 }
 
+/// Ask 面板收口：只认持久化层的**真实生命周期**，不拿「不在快照里」当失效证据。
+///
+/// - `Ok(Some(Pending))`：快照缺失只是读偏/竞争 ⇒ 保持面板，绝不误关；
+/// - `Ok(终态 / None)`：按终态选**中性**文案后收口（不注入 System 消息，不刷屏）；
+/// - `Err(_)`：生命周期读不到 ⇒ 同样**不关**面板，只在状态行提示并留结构化日志
+///   （同一失败只提示一次，避免 500ms 轮询把日志刷爆）。
+fn settle_ask_panel_by_lifecycle(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    handle: &PendingUiRequest,
+) -> bool {
+    match control_plane.get_ask_lifecycle_state(&state.session_id, &handle.request_id) {
+        Ok(Some(AskLifecycleState::Pending)) => false,
+        Ok(lifecycle) => {
+            eprintln!(
+                "[pony-tui] ask_settled: request={} state={:?} reason=absent_from_pending_snapshot",
+                handle.request_id, lifecycle
+            );
+            state.pending_request = None;
+            close_pending_request_overlay(state);
+            state.set_status_notice(ask_settled_notice(lifecycle).to_string());
+            true
+        }
+        Err(error) => {
+            // 读失败 ≠ 已收口：绝不静默关掉用户的提问（状态行提示一次即可）。
+            if state
+                .status_notice
+                .as_ref()
+                .map(|(text, _)| text.as_str())
+                != Some(ASK_LIFECYCLE_READ_FAILED_NOTICE)
+            {
+                eprintln!(
+                    "[pony-tui] ask_lifecycle_read_failed: request={} reason={error}",
+                    handle.request_id
+                );
+                state.set_status_notice(ASK_LIFECYCLE_READ_FAILED_NOTICE.to_string());
+                return true;
+            }
+            false
+        }
+    }
+}
+
 /// 把控制面错误转成用户可见文案：一律中文，宿主英文内部串只进运行时日志
 /// （stderr → `tui-runtime.log`）供排障，**绝不上屏**（契约 §6.5）。
 ///
 /// 与 [`close_stale_pending_request`] 一样**不收面板**：调用点各自收口一次。
+///
+/// `handle` 由调用方**在清句柄之前**取快照传进来：作答成功路径会先清 `state.pending_request`
+/// 再 resume，若此处回读 state 就会丢掉 `request_id`/`is_approval`，只能退回「原因不明」的兜底文案。
 fn report_control_request_error(
     state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     action: &str,
     error: &str,
+    handle: Option<PendingUiRequest>,
 ) {
     eprintln!("[pony-tui] {action}: {error}");
-    // CAS 家族（已被处理/忽略/取代、版本或 nonce 不符）⇒ 统一失效文案；
+    // CAS 家族（已被处理/忽略/取代、版本或 nonce 不符）⇒ 按**真实生命周期**选文案；
     // 其余（序列化/IO 等）也只给中文结论，原始串仅进运行时日志。
     let content = if is_stale_control_request_error(error) {
-        // 同一族错误都源于「请求已不在 Pending」：客户端不再自行 expire，只清句柄。
-        // R3（F3）：与 `close_stale_pending_request` 同源选文案 —— 审批失效不得复用 Ask 文案。
-        let notice = if let Some(ref handle) = state.pending_request {
-            if handle.is_approval {
-                APPROVAL_STALE_NOTICE
-            } else if error.contains("is answered") || error.contains("state=Answered") {
-                "该提问已完成作答，已同步最新状态"
-            } else if error.contains("is cancelled") || error.contains("state=Cancelled") {
-                "该提问已忽略，已同步最新状态"
-            } else if error.contains("is superseded") || error.contains("state=Superseded") {
-                "该提问已被新对话取代，已同步最新状态"
-            } else {
-                ASK_STALE_NOTICE
+        let notice = match handle {
+            Some(ref handle) if handle.is_approval => APPROVAL_STALE_NOTICE.to_string(),
+            Some(ref handle) => {
+                match control_plane.get_ask_lifecycle_state(&state.session_id, &handle.request_id) {
+                    Ok(lifecycle) => {
+                        eprintln!(
+                            "[pony-tui] ask_settled: request={} state={:?} reason=control_request_error",
+                            handle.request_id, lifecycle
+                        );
+                        ask_settled_notice(lifecycle).to_string()
+                    }
+                    Err(read_error) => {
+                        eprintln!(
+                            "[pony-tui] ask_lifecycle_read_failed: request={} reason={read_error}",
+                            handle.request_id
+                        );
+                        ASK_STALE_NOTICE.to_string()
+                    }
+                }
             }
-        } else {
-            ASK_STALE_NOTICE
+            // 句柄未知（兼容旧宿主/演示面板）：只给中性结论，不再断言「失效」。
+            None => ASK_STALE_NOTICE.to_string(),
         };
         state.pending_request = None;
-        notice.to_string()
+        notice
     } else {
         format!("{action}，请重试（详情见 tui-runtime.log）")
     };
@@ -8008,25 +8056,45 @@ pub fn apply_approval_decision(
         .as_ref()
         .filter(|handle| handle.is_approval)
         .map(|handle| (handle.request_id.clone(), handle.version))?;
+    // 失败上报要在清句柄之前拿到句柄快照：审批与 Ask 的文案不得互相顶替。
+    let report_handle = state.pending_request.clone();
     let plan = approval_plan(&approval_snapshot_hint(state), choice);
     // 先写 read 作用域授权，再消费审批请求：顺序反了会让「已批准但工具仍被拒绝」。
     // `authorize == None`（无结构化路径）⇒ 跳过授权直接 CAS，否则该审批永远批不掉（R2 F3）。
     if let Some(path) = plan.authorize.as_deref() {
         if let Err(error) = control_plane.authorize_path(path, "read") {
-            report_control_request_error(state, "审批授权失败", &error);
+            report_control_request_error(
+                state,
+                control_plane,
+                "审批授权失败",
+                &error,
+                report_handle.clone(),
+            );
             return None;
         }
     }
     match choice {
         PermissionChoice::AllowOnce | PermissionChoice::AllowSession => {
             if let Err(error) = control_plane.approve_control_request(&request_id, version) {
-                report_control_request_error(state, "审批同意失败", &error);
+                report_control_request_error(
+                    state,
+                    control_plane,
+                    "审批同意失败",
+                    &error,
+                    report_handle.clone(),
+                );
                 return None;
             }
         }
         PermissionChoice::Deny => {
             if let Err(error) = control_plane.cancel_approval_request(&request_id, version) {
-                report_control_request_error(state, "审批拒绝失败", &error);
+                report_control_request_error(
+                    state,
+                    control_plane,
+                    "审批拒绝失败",
+                    &error,
+                    report_handle.clone(),
+                );
                 return None;
             }
         }
@@ -8067,6 +8135,9 @@ fn submit_ask_answers(
     // 冲突/越权一律由宿主以稳定错误码拒绝，再由 `report_control_request_error` 转成中文文案。
     let answer_json = ask_answer_json(&answers);
     let mut resume_target: Option<String> = None;
+    // F2（复审）：作答成功后本端会**立刻**清句柄（消除 500ms 轮询抢跑），因此必须在清之前
+    // 把句柄快照留给失败上报 —— 否则 resume 失败时回读 state 只能得到「原因不明」的兜底文案。
+    let submitted_handle = state.pending_request.clone();
     match control_plane.answer_ask_in_session(
         &state.session_id,
         &request_id,
@@ -8102,7 +8173,13 @@ fn submit_ask_answers(
                         // 作答成功 ≠ 本轮已继续：这里只登记「需要续轮」，由事件循环发起。
                         Ok(_) => resume_target = Some(run_id),
                         Err(error) => {
-                            report_control_request_error(state, "恢复任务流失败", &error);
+                            report_control_request_error(
+                                state,
+                                control_plane,
+                                "恢复任务流失败",
+                                &error,
+                                submitted_handle.clone(),
+                            );
                         }
                     }
                 }
@@ -8125,7 +8202,13 @@ fn submit_ask_answers(
             }
         }
         Err(error) => {
-            report_control_request_error(state, "提交回答失败", &error);
+            report_control_request_error(
+                state,
+                control_plane,
+                "提交回答失败",
+                &error,
+                submitted_handle,
+            );
         }
     }
     let _ = tx.send(UiEvent::AskUserAnswered {
@@ -9865,7 +9948,13 @@ fn tui_event_loop(
                                         // 忽略失败**不得**关闭面板后让它再自己弹回来（"复活"）：
                                         // 立刻按宿主真值重拉一次，宿主仍 Pending 就如实保留面板
                                         // （用户可重试忽略或改为作答），已收口才真正关掉。
-                                        report_control_request_error(&mut state, "忽略提问失败", &e);
+                                        report_control_request_error(
+                                            &mut state,
+                                            &control_plane,
+                                            "忽略提问失败",
+                                            &e,
+                                            Some(handle.clone()),
+                                        );
                                         let snapshot = control_plane
                                             .list_pending_asks(Some(state.session_id.as_str()));
                                         let items: &[serde_json::Value] = snapshot
@@ -12440,6 +12529,11 @@ mod unknown_slash_command_tests;
 #[cfg(test)]
 #[path = "tui/tests/wave65_r3_approval_stale_notice_tests.rs"]
 mod wave65_r3_approval_stale_notice_tests;
+
+/// B189 复审修复：Ask 收口只认真实生命周期（终态分派 / Pending 保持 / 读失败保持）。
+#[cfg(test)]
+#[path = "tui/tests/ask_lifecycle_settle_tests.rs"]
+mod ask_lifecycle_settle_tests;
 
 /// W3b 单测：子会话导航纯函数 + 身份徽标的窄终端安全性。
 #[cfg(test)]

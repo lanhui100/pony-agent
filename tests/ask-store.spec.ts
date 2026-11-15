@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { ASK_STALE_MESSAGE, isStaleAskError, useAskStore } from "@/stores/ask";
+import { ASK_SETTLED_NOTICES, ASK_STALE_MESSAGE, isStaleAskError, useAskStore } from "@/stores/ask";
 import type { PendingAsk } from "@/types/ask-plan";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -317,6 +317,69 @@ describe("ask store", () => {
     expect(String(store.error)).not.toContain("ask_version_mismatch");
     // 也不得把已终结的卡片塞回待处理列表。
     expect(store.pendingAsks).toEqual([]);
+  });
+
+  it("settled notice follows the durable lifecycle state, never the host prose", async () => {
+    const ask = createPendingAsk({ requestId: "ask-lifecycle", version: 3 });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_answer") {
+        return Promise.reject(
+          new Error(
+            "ask_state_conflict: Ask `ask-lifecycle` is Answered, not Pending (terminal states are final)"
+          )
+        );
+      }
+      if (command === "ask_list_pending") {
+        return Promise.resolve([]);
+      }
+      if (command === "ask_lifecycle_state") {
+        return Promise.resolve("answered");
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useAskStore();
+    store.sessionId = "session-1";
+    store.pendingAsks = [ask];
+
+    await expect(store.answer(ask, "yes")).resolves.toBeNull();
+
+    // 真值是 Answered ⇒ 必须说「已完成作答」，而不是「失效」。
+    expect(store.error).toBe(ASK_SETTLED_NOTICES.answered);
+    expect(String(store.error)).not.toContain("失效");
+    // 生命周期查询必须带会话作用域（宿主 CAS 是 scoped 的）。
+    const lifecycleCall = tauriMocks.mockSafeInvoke.mock.calls.find(
+      ([command]) => command === "ask_lifecycle_state"
+    );
+    expect(lifecycleCall?.[1]).toEqual({ requestId: "ask-lifecycle", sessionId: "session-1" });
+  });
+
+  it("falls back to the neutral notice when the lifecycle cannot be read", async () => {
+    const ask = createPendingAsk({ requestId: "ask-unreadable", version: 2 });
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "ask_answer") {
+        return Promise.reject(
+          new Error("ask_state_conflict: Ask `ask-unreadable` is Cancelled, not Pending")
+        );
+      }
+      if (command === "ask_list_pending") {
+        return Promise.resolve([]);
+      }
+      if (command === "ask_lifecycle_state") {
+        return Promise.reject(new Error("ask_scope_required: no session scope"));
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useAskStore();
+    store.pendingAsks = [ask];
+
+    await expect(store.answer(ask, "yes")).resolves.toBeNull();
+
+    // 读不到真值时只给中性句：既不猜终态，也不宣称「失效」。
+    expect(store.error).toBe(ASK_STALE_MESSAGE);
+    expect(String(store.error)).not.toContain("失效");
+    expect(String(store.error)).not.toContain("ask_scope_required");
   });
 
   it("cancels a pending ask with the listed version and removes it locally", async () => {

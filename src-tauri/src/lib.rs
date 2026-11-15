@@ -234,6 +234,23 @@ fn ask_list_pending(
     control_plane.list_pending_asks(session_id.as_deref())
 }
 
+/// Read the durable lifecycle state of a single Ask (`pending` / `answered` / `cancelled` /
+/// `superseded` / `orphaned`).
+///
+/// ADR 0074 / DSH alignment: an Ask never expires by wall clock, so the UI must not infer
+/// "expired" from the record leaving the pending snapshot (that snapshot only lists `pending`).
+/// `Err` = the truth could not be read (IO / missing scope): the card must stay open instead of
+/// being silently dismissed.
+#[tauri::command]
+fn ask_lifecycle_state(
+    control_plane: State<'_, HostControlPlane>,
+    request_id: String,
+    session_id: Option<String>,
+) -> Result<Option<agent::ask_persistence::AskLifecycleState>, String> {
+    let scope = require_ask_scope(session_id.as_deref())?;
+    control_plane.get_ask_lifecycle_state(scope, &request_id)
+}
+
 /// Normalized session scope: trimmed, empty ⇒ `None` (host default = all sessions).
 fn session_scope(session_id: Option<&str>) -> Option<&str> {
     session_id.map(str::trim).filter(|scope| !scope.is_empty())
@@ -1528,6 +1545,7 @@ pub fn run() {
             stop_graph_run,
             fail_turn_for_watchdog,
             ask_list_pending,
+            ask_lifecycle_state,
             ask_answer,
             control_approve_request,
             ask_cancel,

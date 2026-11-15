@@ -57,11 +57,21 @@ fn severity_covers_auth_and_generic_summaries() {
         SystemMessageSeverity::Info,
         "普通提示不得被判为错误（避免满屏红）"
     );
-    assert_eq!(
-        system_message_severity(ASK_STALE_NOTICE),
-        SystemMessageSeverity::Warning,
-        "失效类提示应为 Warning 而非 Error"
-    );
+    for notice in [
+        ASK_STALE_NOTICE,
+        ASK_SETTLED_ANSWERED_NOTICE,
+        ASK_SETTLED_CANCELLED_NOTICE,
+        ASK_SETTLED_SUPERSEDED_NOTICE,
+        ASK_SETTLED_ORPHANED_NOTICE,
+        ASK_STILL_PENDING_NOTICE,
+        ASK_LIFECYCLE_READ_FAILED_NOTICE,
+    ] {
+        assert_eq!(
+            system_message_severity(notice),
+            SystemMessageSeverity::Warning,
+            "Ask 收口类提示应为 Warning 而非 Error/Info（B189 复审：文案改中性后仍须醒目）：{notice:?}"
+        );
+    }
 }
 
 #[test]

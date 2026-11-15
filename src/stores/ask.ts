@@ -5,12 +5,27 @@ import type { GraphAskWait, PendingAsk } from "@/types/ask-plan";
 export const ASK_POLL_INTERVAL_MS = 2500;
 
 /**
- * User-facing conflict/expiry hint. ADR 0074: wall-clock TTL is no longer product semantics, so
- * this is **not** an "expired" verdict — it only says "the host no longer has this request as
- * pending, the list has been re-synced". Mirrors the TUI `ASK_STALE_NOTICE` wording so both
- * clients speak the same Chinese sentence and never leak host internals.
+ * User-facing compat notice for "the host no longer holds this request as pending" when the real
+ * lifecycle state is unknown (older host / read failure). ADR 0074 / DSH alignment: this is
+ * **not** an "expired" verdict — it must not claim the question died of old age.
+ *
+ * Mirrors the TUI `ASK_STALE_NOTICE` wording so both clients speak the same Chinese sentence.
  */
-export const ASK_STALE_MESSAGE = "该提问已失效，已同步最新待处理请求";
+export const ASK_STALE_MESSAGE = "该提问已收口，已同步最新状态";
+
+/**
+ * Lifecycle-driven settled notices (mirror of the TUI `ask_settled_notice`).
+ *
+ * The durable `state` is the only truth: a request leaving the pending snapshot was answered,
+ * ignored, superseded by a newer message, or orphaned by session archival — never "expired".
+ */
+export const ASK_SETTLED_NOTICES = {
+  answered: "该提问已完成作答，已同步最新状态",
+  cancelled: "该提问已忽略，已同步最新状态",
+  superseded: "该提问已被新对话取代，已同步最新状态",
+  orphaned: "该提问所属会话已归档，已同步最新状态",
+  pending: "该提问仍在等待作答，已同步最新状态"
+} as const;
 
 /**
  * Single list entry point for the pending-Ask snapshot. `sessionId` is only sent when non-empty so
@@ -112,6 +127,41 @@ export function isStaleAskError(error: unknown): boolean {
 function askSessionScope(storeScope: string | null): string | undefined {
   const scoped = storeScope?.trim();
   return scoped ? scoped : undefined;
+}
+
+/**
+ * Ask the host for the **durable** lifecycle state and pick the matching notice.
+ *
+ * Why not parse the host error sentence: `ask_state_conflict: Ask `x` is Answered, not Pending`
+ * drifts in wording/casing, and a single `includes()` miss turns "already answered" into the
+ * misleading "your question went stale". The stored `state` is the only truth.
+ *
+ * A read failure (IPC/IO/scope) deliberately falls back to the neutral sentence instead of
+ * guessing a terminal state.
+ */
+async function askSettledNotice(requestId: string, sessionId?: string): Promise<string> {
+  try {
+    const lifecycle = await safeInvoke<string | null>("ask_lifecycle_state", {
+      requestId,
+      ...(sessionId ? { sessionId } : {})
+    });
+    switch (String(lifecycle ?? "").toLowerCase()) {
+      case "answered":
+        return ASK_SETTLED_NOTICES.answered;
+      case "cancelled":
+        return ASK_SETTLED_NOTICES.cancelled;
+      case "superseded":
+        return ASK_SETTLED_NOTICES.superseded;
+      case "orphaned":
+        return ASK_SETTLED_NOTICES.orphaned;
+      case "pending":
+        return ASK_SETTLED_NOTICES.pending;
+      default:
+        return ASK_STALE_MESSAGE;
+    }
+  } catch {
+    return ASK_STALE_MESSAGE;
+  }
 }
 
 export const useAskStore = defineStore("ask", {
@@ -256,10 +306,13 @@ export const useAskStore = defineStore("ask", {
       } catch (error) {
         if (isStaleAskError(error)) {
           // The request is already gone from the host's pending set: re-sync the list, then show
-          // the shared Chinese notice — never the bare host CAS sentence (contract §6.5).
+          // the lifecycle-derived Chinese notice — never the bare host CAS sentence (§6.5).
           // Order matters: `refresh()` resets `error`, so the notice must be set *after* it.
           await this.refresh().catch(() => {});
-          this.error = ASK_STALE_MESSAGE;
+          this.error = await askSettledNotice(
+            request.requestId,
+            askSessionScope(this.sessionId)
+          );
         } else {
           // Network/internal failure: restore the ask so the user can retry it.
           if (!this.pendingAsks.some((a) => a.requestId === request.requestId)) {
@@ -302,7 +355,9 @@ export const useAskStore = defineStore("ask", {
       } catch (error) {
         // The answer itself already landed; a resume failure is surfaced for observability only.
         // Same rule as everywhere else: host English stays out of the UI (contract §6.5).
-        this.error = isStaleAskError(error) ? ASK_STALE_MESSAGE : "恢复运行失败，请稍后重试";
+        this.error = isStaleAskError(error)
+          ? await askSettledNotice(request.requestId, askSessionScope(this.sessionId))
+          : "恢复运行失败，请稍后重试";
       }
     },
 

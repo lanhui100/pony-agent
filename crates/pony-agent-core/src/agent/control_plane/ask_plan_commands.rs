@@ -64,42 +64,59 @@ impl HostControlPlane {
 
     /// Returns the persisted lifecycle state for an Ask, if it exists.
     ///
-    /// ADR 0074 / DSH alignment: An Ask is session state and does not expire by time.
-    /// Distinguishes between `Pending`, `Answered`, `Cancelled`, and `Superseded`.
+    /// ADR 0074 / DSH alignment: an Ask is session state and never expires by wall clock. The
+    /// persisted `state` is the only truth — a caller must **not** infer "expired" from the
+    /// request disappearing out of the pending snapshot (that snapshot only lists `Pending`).
+    ///
+    /// `Err` is reserved for **read failures** (IO / lock / missing scope) so a UI can tell
+    /// "the truth could not be read" apart from "there is no record", and therefore keep a live
+    /// panel open instead of silently closing the user's question.
     pub fn get_ask_lifecycle_state(
         &self,
         session_id: &str,
         request_id: &str,
-    ) -> Option<AskLifecycleState> {
+    ) -> Result<Option<AskLifecycleState>, String> {
         let session_id = session_id.trim();
         let request_id = request_id.trim();
         if session_id.is_empty() || request_id.is_empty() {
-            return None;
+            return Err(format!(
+                "ask_scope_required: reading the lifecycle of `{request_id}` requires a non-empty session scope"
+            ));
         }
         if let Some(store) = self.ask_store.as_ref() {
-            if let Ok(Some(record)) = store.load_ask(session_id, request_id) {
-                if record.session_id == session_id {
-                    return Some(record.state);
+            match store.load_ask(session_id, request_id) {
+                Ok(Some(record)) if record.session_id == session_id => {
+                    return Ok(Some(record.state));
                 }
+                Ok(_) => {}
+                Err(error) => return Err(error),
             }
         }
-        self.ask_dispatcher
+        // No durable store (or no durable record): the dispatcher mirror is the only witness.
+        Ok(self
+            .ask_dispatcher
             .pending_request(request_id)
             .filter(|req| req.session_id.as_deref() == Some(session_id))
-            .map(|req| match req.state {
+            .and_then(|req| match req.state {
                 crate::agent::tool_runtime::PendingControlRequestState::Pending => {
-                    AskLifecycleState::Pending
+                    Some(AskLifecycleState::Pending)
                 }
                 crate::agent::tool_runtime::PendingControlRequestState::Consumed => {
-                    AskLifecycleState::Answered
+                    Some(AskLifecycleState::Answered)
                 }
                 crate::agent::tool_runtime::PendingControlRequestState::Cancelled => {
-                    AskLifecycleState::Cancelled
+                    Some(AskLifecycleState::Cancelled)
                 }
                 crate::agent::tool_runtime::PendingControlRequestState::Expired => {
-                    AskLifecycleState::Superseded
+                    // Ask has no wall-clock TTL (ADR 0074): `Expired` is an Approval-only mirror
+                    // state. Never translate it into `Superseded` — that would tell the user "a
+                    // newer message replaced your question", which is not what happened.
+                    eprintln!(
+                        "[pony-agent] ask_lifecycle: dispatcher reported Expired for Ask `{request_id}` (unexpected: Ask has no wall-clock TTL)"
+                    );
+                    None
                 }
-            })
+            }))
     }
 
     /// Legacy unscoped entry: **always fails closed** (`ask_scope_required`).
