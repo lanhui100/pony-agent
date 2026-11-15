@@ -404,6 +404,25 @@ function normalizeCapabilitiesForPersistence(
   };
 }
 
+/**
+ * 窗口显式声明优先：模型上已填写的正数窗口压过预设默认值，预设只补缺。
+ *
+ * 与 Rust `config.rs::normalize_model_capabilities` 同口径（ADR
+ * 2026-11-14-model-declared-context-window-precedence）：布尔能力仍由预设决定，
+ * 唯一例外是逐模型的上下文长度。此处若不保留，桌面端加载/保存会把用户手填的
+ * 窗口改回 `DEFAULT_CONTEXT_WINDOW_TOKENS`，后端随即按错的窗口算上下文占用。
+ */
+function withDeclaredContextWindow(
+  presetCapabilities: ProviderModelCapabilities,
+  declared: Partial<ProviderModelCapabilities> | null | undefined,
+): ProviderModelCapabilities {
+  const declaredWindow = normalizeNullablePositiveInteger(declared?.contextWindowTokens);
+
+  return declaredWindow === null
+    ? presetCapabilities
+    : { ...presetCapabilities, contextWindowTokens: declaredWindow };
+}
+
 export function resolveCapabilityDeclaration(
   protocol: ProviderProtocol,
   modelIdValue: string,
@@ -414,7 +433,10 @@ export function resolveCapabilityDeclaration(
     return {
       capabilityPreset: preset,
       capabilities: normalizeCapabilitiesForPersistence(
-        capabilitiesForPreset(preset, protocol, modelIdValue),
+        withDeclaredContextWindow(
+          capabilitiesForPreset(preset, protocol, modelIdValue),
+          capabilities,
+        ),
       ),
     };
   }

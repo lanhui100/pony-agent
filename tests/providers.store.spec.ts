@@ -43,6 +43,29 @@ describe("provider capability layering", () => {
     expect(declaration.capabilities.contextWindowTokens).toBe(1000000);
   });
 
+  it("keeps a declared context window over the preset default, still lets the preset own booleans", () => {
+    // 与 Rust `normalize_model_capabilities` 同口径：手填窗口不被预设覆盖…
+    const declared = resolveCapabilityDeclaration("openai", "gpt-4.1-mini", "open-ai-chat", {
+      contextWindowTokens: 200000,
+    });
+    expect(declared.capabilityPreset).toBe("open-ai-chat");
+    expect(declared.capabilities.contextWindowTokens).toBe(200000);
+    // …但布尔能力仍由预设决定（open-ai-chat 不带推理）。
+    expect(declared.capabilities.supportsReasoning).toBe(false);
+    expect(declared.capabilities.supportsImageInput).toBe(true);
+
+    // 未声明 / 非法（≤0）窗口才由预设补缺。
+    expect(
+      resolveCapabilityDeclaration("openai", "gpt-4.1-mini", "open-ai-chat", null).capabilities
+        .contextWindowTokens,
+    ).toBe(1000000);
+    expect(
+      resolveCapabilityDeclaration("openai", "gpt-4.1-mini", "open-ai-chat", {
+        contextWindowTokens: 0,
+      }).capabilities.contextWindowTokens,
+    ).toBe(1000000);
+  });
+
   it("normalizes user policy separately from capabilities", () => {
     const userPolicy = resolveModelUserPolicy(
       {
