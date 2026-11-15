@@ -7784,8 +7784,53 @@ fn sync_pending_control_request(
     merged.extend(snapshot.as_array().cloned().unwrap_or_default());
     let items: &[serde_json::Value] = merged.as_slice();
 
-    // 1) 已有面板：请求仍在待决集合里 ⇒ 保持；已被宿主收口 ⇒ 收面板 + 中文提示。
+    // 1) 已有面板：请求仍在待决集合里 ⇒ 保持；已被宿主收口 ⇒ 依据真实生命周期精准收口。
     if pending_panel_should_close(items, state.pending_request.as_ref()) {
+        let handle = state.pending_request.as_ref().cloned();
+        if let Some(ref handle) = handle {
+            if handle.is_approval {
+                // 审批有 TTL，到期或被收口走审批专属失效提示
+                close_stale_pending_request(state);
+                close_pending_request_overlay(state);
+                return true;
+            } else {
+                // 提问（Ask）：对齐 DSH —— 正常提问没有失效时间！
+                // 依据底层真实生命周期状态精确处理，绝不误把已作答当成失效。
+                let lifecycle = control_plane
+                    .get_ask_lifecycle_state(&state.session_id, &handle.request_id);
+                match lifecycle {
+                    Some(pony_agent_core::agent::ask_persistence::AskLifecycleState::Pending) => {
+                        // 底层事实证明仍处于 Pending，快照缺失仅为瞬时读偏或竞争，绝不误收面板
+                        return false;
+                    }
+                    Some(pony_agent_core::agent::ask_persistence::AskLifecycleState::Answered) => {
+                        // 已经作答完成（本端提交落地、或关联终端已提交）：静默关闭面板，绝不上屏失效通知
+                        state.pending_request = None;
+                        close_pending_request_overlay(state);
+                        state.set_status_notice("提问已作答".to_string());
+                        return true;
+                    }
+                    Some(pony_agent_core::agent::ask_persistence::AskLifecycleState::Cancelled) => {
+                        state.pending_request = None;
+                        close_pending_request_overlay(state);
+                        state.set_status_notice("提问已忽略".to_string());
+                        return true;
+                    }
+                    Some(pony_agent_core::agent::ask_persistence::AskLifecycleState::Superseded) => {
+                        state.pending_request = None;
+                        close_pending_request_overlay(state);
+                        state.set_status_notice("已同步最新对话，提问已收起".to_string());
+                        return true;
+                    }
+                    _ => {
+                        // 找不到记录或已归档，静默收口
+                        state.pending_request = None;
+                        close_pending_request_overlay(state);
+                        return true;
+                    }
+                }
+            }
+        }
         close_stale_pending_request(state);
         close_pending_request_overlay(state);
         return true;
@@ -7833,7 +7878,21 @@ fn report_control_request_error(
     let content = if is_stale_control_request_error(error) {
         // 同一族错误都源于「请求已不在 Pending」：客户端不再自行 expire，只清句柄。
         // R3（F3）：与 `close_stale_pending_request` 同源选文案 —— 审批失效不得复用 Ask 文案。
-        let notice = stale_pending_notice(state.pending_request.as_ref());
+        let notice = if let Some(ref handle) = state.pending_request {
+            if handle.is_approval {
+                APPROVAL_STALE_NOTICE
+            } else if error.contains("is answered") || error.contains("state=Answered") {
+                "该提问已完成作答，已同步最新状态"
+            } else if error.contains("is cancelled") || error.contains("state=Cancelled") {
+                "该提问已忽略，已同步最新状态"
+            } else if error.contains("is superseded") || error.contains("state=Superseded") {
+                "该提问已被新对话取代，已同步最新状态"
+            } else {
+                ASK_STALE_NOTICE
+            }
+        } else {
+            ASK_STALE_NOTICE
+        };
         state.pending_request = None;
         notice.to_string()
     } else {
@@ -8014,50 +8073,57 @@ fn submit_ask_answers(
         version,
         answer_json.clone(),
     ) {
-        Ok(_) => match run_id {
-            Some(run_id) => {
-                // 查找该 ask wait 当前绑定的期望版本；缺失时回退到提交时的版本。
-                let waits_val = control_plane.graph_list_ask_waits(&run_id);
-                let resume_version = waits_val
-                    .as_array()
-                    .and_then(|waits| {
-                        waits.iter().find(|wait| {
-                            wait.get("requestId").and_then(|value| value.as_str())
-                                == Some(request_id.as_str())
+        Ok(_) => {
+            state.pending_request = None;
+            state.cancel_ask_user();
+            match run_id {
+                Some(run_id) => {
+                    // 查找该 ask wait 当前绑定的期望版本；缺失时回退到提交时的版本。
+                    let waits_val = control_plane.graph_list_ask_waits(&run_id);
+                    let resume_version = waits_val
+                        .as_array()
+                        .and_then(|waits| {
+                            waits.iter().find(|wait| {
+                                wait.get("requestId").and_then(|value| value.as_str())
+                                    == Some(request_id.as_str())
+                            })
                         })
-                    })
-                    .and_then(|wait| wait.get("expectedVersion").and_then(|value| value.as_u64()))
-                    .unwrap_or(version);
-                match control_plane.graph_resume_ask(
-                    &run_id,
-                    &request_id,
-                    resume_version,
-                    answer_json,
-                ) {
-                    // 作答成功 ≠ 本轮已继续：这里只登记「需要续轮」，由事件循环发起。
-                    Ok(_) => resume_target = Some(run_id),
-                    Err(error) => {
-                        report_control_request_error(state, "恢复任务流失败", &error);
+                        .and_then(|wait| {
+                            wait.get("expectedVersion")
+                                .and_then(|value| value.as_u64())
+                        })
+                        .unwrap_or(version);
+                    match control_plane.graph_resume_ask(
+                        &run_id,
+                        &request_id,
+                        resume_version,
+                        answer_json,
+                    ) {
+                        // 作答成功 ≠ 本轮已继续：这里只登记「需要续轮」，由事件循环发起。
+                        Ok(_) => resume_target = Some(run_id),
+                        Err(error) => {
+                            report_control_request_error(state, "恢复任务流失败", &error);
+                        }
                     }
                 }
+                None => {
+                    // 挂起请求没有 run 身份 ⇒ 没有 ask-wait 可恢复（C3 的不可恢复形态）：
+                    // 必须上屏可读提示 + 结构化日志，绝不静默。
+                    // F4：错误码单一定义点 —— 引用 runtime 的常量拼文案，禁止在 TUI 再写一份字面量
+                    // （`docs/observability.yaml` 的 error_classifier 收口点靠这条纪律成立）。
+                    eprintln!(
+                        "[pony-tui] {}: request={request_id} reason=no_run_identity",
+                        pony_agent_core::agent::runtime::ASK_RESUME_UNAVAILABLE_CODE
+                    );
+                    state.set_status_notice(ASK_RESUME_UNAVAILABLE_NOTICE.to_string());
+                    state.messages.push(ChatMessage {
+                        role: MessageRole::System,
+                        content: ASK_RESUME_UNAVAILABLE_NOTICE.to_string(),
+                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    });
+                }
             }
-            None => {
-                // 挂起请求没有 run 身份 ⇒ 没有 ask-wait 可恢复（C3 的不可恢复形态）：
-                // 必须上屏可读提示 + 结构化日志，绝不静默。
-                // F4：错误码单一定义点 —— 引用 runtime 的常量拼文案，禁止在 TUI 再写一份字面量
-                // （`docs/observability.yaml` 的 error_classifier 收口点靠这条纪律成立）。
-                eprintln!(
-                    "[pony-tui] {}: request={request_id} reason=no_run_identity",
-                    pony_agent_core::agent::runtime::ASK_RESUME_UNAVAILABLE_CODE
-                );
-                state.set_status_notice(ASK_RESUME_UNAVAILABLE_NOTICE.to_string());
-                state.messages.push(ChatMessage {
-                    role: MessageRole::System,
-                    content: ASK_RESUME_UNAVAILABLE_NOTICE.to_string(),
-                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                });
-            }
-        },
+        }
         Err(error) => {
             report_control_request_error(state, "提交回答失败", &error);
         }

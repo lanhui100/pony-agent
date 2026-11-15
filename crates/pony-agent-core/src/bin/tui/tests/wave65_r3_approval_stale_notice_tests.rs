@@ -62,3 +62,81 @@ fn close_stale_pending_request_uses_approval_notice_for_approval_handle() {
         Some(APPROVAL_STALE_NOTICE)
     );
 }
+
+#[test]
+fn sync_pending_control_request_silently_closes_answered_ask_without_stale_notice() {
+    use pony_agent_core::agent::ask_persistence::{
+        open_ask_store, AskLifecycleState, AskPersistenceStore, PersistedAsk,
+    };
+    use std::sync::Arc;
+
+    let temp_dir = std::env::temp_dir();
+    let db_path = temp_dir.join(format!(
+        "tui-ask-close-test-{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store: Arc<dyn AskPersistenceStore> = Arc::from(
+        open_ask_store(&db_path).expect("open durable ask store"),
+    );
+
+    let session_id = "test-session-dsh-align";
+    let request_id = "control-answered-0001";
+
+    // 写入一条已经 Answered 的 Ask 记录（模拟用户刚作答落地或在其他端作答）
+    let ask = PersistedAsk {
+        session_id: session_id.to_string(),
+        request_id: request_id.to_string(),
+        version: 2,
+        nonce: "nonce-1".to_string(),
+        run_id: Some("run-1".to_string()),
+        turn_id: "turn-1".to_string(),
+        call_id: "call-1".to_string(),
+        kind: pony_agent_core::agent::tool_runtime::PendingControlRequestKind::Interaction,
+        prompt: "测试问题？".to_string(),
+        options: vec!["A".to_string(), "B".to_string()],
+        state: AskLifecycleState::Answered,
+        created_at_ms: 1000,
+        answered_at_ms: Some(2000),
+        multi_select: false,
+    };
+    store.upsert(&ask).expect("upsert answered ask");
+
+    let control_plane = pony_agent_core::agent::control_plane::HostControlPlaneBuilder::new()
+        .ask_store(Arc::clone(&store))
+        .build();
+
+    let mut state = TuiState::default();
+    state.session_id = session_id.to_string();
+    state.pending_request = Some(PendingUiRequest {
+        request_id: request_id.to_string(),
+        version: 2,
+        run_id: Some("run-1".to_string()),
+        expires_at_ms: None,
+        is_approval: false,
+    });
+    state.mode = InteractionMode::AskUserQuestion;
+
+    // Act
+    let changed = sync_pending_control_request(&mut state, &control_plane);
+
+    // Assert
+    assert!(changed, "状态应发生变化并置脏");
+    assert!(state.pending_request.is_none(), "面板句柄应已被清除");
+    assert_ne!(state.mode, InteractionMode::AskUserQuestion, "覆盖层应已退出");
+
+    // DSH 对齐关键断言：已作答的提问收口，绝不上屏「该提问已失效」！
+    let stale_messages = state
+        .messages
+        .iter()
+        .filter(|msg| msg.content == ASK_STALE_NOTICE)
+        .count();
+    assert_eq!(
+        stale_messages, 0,
+        "对齐 DSH：已作答的提问从待决列表移出时，绝不上屏「该提问已失效」"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}

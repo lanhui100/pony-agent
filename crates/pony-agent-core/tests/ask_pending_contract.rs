@@ -516,3 +516,60 @@ fn unique_temp_db_path(tag: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir.join("sessions.db")
 }
+
+#[test]
+fn c1_7_get_ask_lifecycle_state_reports_truthful_state() {
+    use pony_agent_core::agent::ask_persistence::{open_ask_store, AskLifecycleState, AskPersistenceStore};
+
+    let h = harness();
+    let db_path = unique_temp_db_path("lifecycle");
+    let store: Arc<dyn AskPersistenceStore> = Arc::from(
+        open_ask_store(&db_path).expect("open durable ask store"),
+    );
+    h.dispatcher.set_ask_store(Arc::clone(&store));
+
+    let ask1 = dispatch_ask(&h.dispatcher, "call-lifecycle-1", "问题1？");
+    let ask2 = dispatch_ask(&h.dispatcher, "call-lifecycle-2", "问题2？");
+
+    let plane = HostControlPlaneBuilder::new()
+        .ask_dispatcher(Arc::clone(&h.dispatcher))
+        .ask_store(Arc::clone(&store))
+        .build();
+
+    // 1. Pending 态查询
+    assert_eq!(
+        plane.get_ask_lifecycle_state("session-1", &ask1.request_id),
+        Some(AskLifecycleState::Pending),
+        "新建提问必须可查为 Pending 态"
+    );
+    assert_eq!(
+        plane.get_ask_lifecycle_state("session-1", &ask2.request_id),
+        Some(AskLifecycleState::Pending)
+    );
+
+    // 2. Answered 态查询（作答后从 pending 列表消失，但 lifecycle state 真实为 Answered）
+    plane
+        .answer_ask_in_session("session-1", &ask1.request_id, ask1.version, json!("答案1"))
+        .expect("answer_ask_in_session");
+    assert_eq!(
+        plane.get_ask_lifecycle_state("session-1", &ask1.request_id),
+        Some(AskLifecycleState::Answered),
+        "作答后的提问必须真实反映为 Answered 态，绝非失效"
+    );
+
+    // 3. Cancelled 态查询
+    plane
+        .cancel_ask_in_session("session-1", &ask2.request_id, ask2.version)
+        .expect("cancel_ask_in_session");
+    assert_eq!(
+        plane.get_ask_lifecycle_state("session-1", &ask2.request_id),
+        Some(AskLifecycleState::Cancelled),
+        "忽略后的提问必须反映为 Cancelled 态"
+    );
+
+    // 4. 不存在的请求与空作用域
+    assert_eq!(plane.get_ask_lifecycle_state("session-1", "non-existent"), None);
+    assert_eq!(plane.get_ask_lifecycle_state("", &ask1.request_id), None);
+
+    let _ = std::fs::remove_file(&db_path);
+}

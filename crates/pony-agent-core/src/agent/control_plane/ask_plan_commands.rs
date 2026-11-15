@@ -62,6 +62,46 @@ impl HostControlPlane {
         }
     }
 
+    /// Returns the persisted lifecycle state for an Ask, if it exists.
+    ///
+    /// ADR 0074 / DSH alignment: An Ask is session state and does not expire by time.
+    /// Distinguishes between `Pending`, `Answered`, `Cancelled`, and `Superseded`.
+    pub fn get_ask_lifecycle_state(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Option<AskLifecycleState> {
+        let session_id = session_id.trim();
+        let request_id = request_id.trim();
+        if session_id.is_empty() || request_id.is_empty() {
+            return None;
+        }
+        if let Some(store) = self.ask_store.as_ref() {
+            if let Ok(Some(record)) = store.load_ask(session_id, request_id) {
+                if record.session_id == session_id {
+                    return Some(record.state);
+                }
+            }
+        }
+        self.ask_dispatcher
+            .pending_request(request_id)
+            .filter(|req| req.session_id.as_deref() == Some(session_id))
+            .map(|req| match req.state {
+                crate::agent::tool_runtime::PendingControlRequestState::Pending => {
+                    AskLifecycleState::Pending
+                }
+                crate::agent::tool_runtime::PendingControlRequestState::Consumed => {
+                    AskLifecycleState::Answered
+                }
+                crate::agent::tool_runtime::PendingControlRequestState::Cancelled => {
+                    AskLifecycleState::Cancelled
+                }
+                crate::agent::tool_runtime::PendingControlRequestState::Expired => {
+                    AskLifecycleState::Superseded
+                }
+            })
+    }
+
     /// Legacy unscoped entry: **always fails closed** (`ask_scope_required`).
     ///
     /// Contract §4: answering requires a session scope so a record can never be consumed from
