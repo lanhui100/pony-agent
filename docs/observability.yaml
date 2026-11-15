@@ -7,6 +7,12 @@
 # 按段优先级整段让位，不新增对外接口 / 网络 IO / 后台任务 / LLM 调用，也不新增遥测出口；
 # metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立），
 # tracing / issues 判定不变 ⇒ 不新增 applicable 判定、不新增 enforcement_point。
+# B188（ADR 2026-11-15-tui-speed-segment-drop-inline-cadence）归属说明：TUI 速度段去噪。
+# 纯呈现层文本裁剪（`crates/pony-agent-core/src/bin/tui.rs::format_speed_segment`）：删掉
+# ` decode` 与 ` n=<样本量>` 两个后缀；口径/样本量真值仍留在快照（`turn_speed_basis` /
+# `turn_calls`，trace 与桌面 tooltip 照旧可取证），无新增对外接口 / 网络 IO / 后台任务 /
+# LLM 调用，也不新增遥测出口；metrics / logs 维持结构性 N-A（无常驻监听地址、无 /metrics），
+# tracing / issues 判定不变 ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # B148（ADR 2026-11-13-targeted-session-load-and-lazy-store）归属说明：会话库定向/懒装载。
 # (1) 读路径全部指向**本地 sqlite**（`sessions` / `normalized_*` 表的主键查询与单条投影），
 #     无新增网络出口、无新增依赖、无新增指标；`pony resume` 与 TUI 启动的后台装载线程沿用

@@ -3,10 +3,12 @@
 //! 缺陷：`decode n=<样本量>` 落地后指标簇变长，中等宽度终端仍走
 //! `ellipsize_width(&right_meta, budget)` 的**右截断**——它把最右端的「首token <ms>」
 //! 先砍掉，甚至砍成 `首t…`，用户看到的最后一项永远是半截文字。
+//! （该后缀已按 ADR 2026-11-15-tui-speed-segment-drop-inline-cadence 移除，缺陷成因历史归档；
+//! 本文件的让位契约与去噪后的字面量仍需长期锁定。）
 //!
 //! 契约（本文件锁定）：
 //! - 宽度不足时**整段**让位（从最左开始），绝不输出半段、绝不留悬挂分隔符；
-//! - 右端的轮级实时读数（速度含口径/样本量、首token）最后退出；
+//! - 右端的轮级实时读数（速度含剔突发标记、首token）最后退出；
 //! - 有让位时以 `… ` 自描述；
 //! - 只有连最后一段都放不下（极端窄屏）才允许段内省略。
 
@@ -75,7 +77,7 @@ fn header_row(state: &mut tui::TuiState, width: u16) -> String {
     row_text(&buf, 0)
 }
 
-/// 覆盖全部指标段的夹具：累计量 + 比率 + 带口径/样本量/剔突发的速度 + 首token。
+/// 覆盖全部指标段的夹具：累计量 + 比率 + 带突发出清标记的速度 + 首token。
 fn state_with_all_metrics() -> tui::TuiState {
     let mut state = tui::TuiState::default();
     state.workspace = "/home/dm/pony-agent".into();
@@ -119,7 +121,7 @@ fn c1_first_token_segment_survives_width_pressure() {
 }
 
 // ---------------------------------------------------------------------------
-// C2：中等宽度 —— 整段让位 + `… ` 自描述，速度段（含 decode/n=/剔突发）不被切半
+// C2：中等宽度 —— 整段让位 + `… ` 自描述，速度段（含 剔突发 后缀）不被切半
 // ---------------------------------------------------------------------------
 #[test]
 fn c2_overflow_drops_whole_segments_and_keeps_speed_self_description() {
@@ -133,36 +135,52 @@ fn c2_overflow_drops_whole_segments_and_keeps_speed_self_description() {
         "↑25k ↓5k",
         "缓存 60%",
         "上下文 25%",
-        "120 t/s decode n=1 剔突发2",
+        // ADR 2026-11-15-tui-speed-segment-drop-inline-cadence：解码口径不再行内自描述，
+        // 段内只剩「值 + 单位」与突发出清标记。
+        "120 t/s 剔突发2",
         "首token 800ms",
     ] {
         assert!(full.contains(needle), "宽屏缺少指标段 {needle:?}：{full:?}");
     }
 
-    let mut state = state_with_all_metrics();
-    let header = header_row(&mut state, 96);
+    // 去噪后速度段变短（ADR 2026-11-15-tui-speed-segment-drop-inline-cadence），
+    // 原先钉死的 96 列已不再让位 ⇒ 宽度不能写死：运行期扫出「确实发生整段让位」的宽度，
+    // 再在这些宽度上钉住不变量（整段不切半 / 首token 最后退出 / 无悬挂分隔符）。
+    let dropping: Vec<u16> = (60u16..=120)
+        .filter(|width| {
+            let mut state = state_with_all_metrics();
+            header_row(&mut state, *width).contains("… ")
+        })
+        .collect();
     assert!(
-        header.contains("… "),
-        "发生让位时必须用 `… ` 自描述，实际 {header:?}"
+        !dropping.is_empty(),
+        "60~120 列内必须存在触发整段让位的宽度，否则本用例失去钉子"
     );
-    assert!(
-        header.contains("120 t/s decode n=1 剔突发2"),
-        "速度段的口径/样本量/剔突发后缀是契约字面量，不得被拆散，实际 {header:?}"
-    );
-    assert!(
-        header.contains("首token 800ms"),
-        "首token 必须保留在右端，实际 {header:?}"
-    );
-    for orphan in [" ·  · ", "· …", "… ·"] {
+    for width in dropping {
+        let mut state = state_with_all_metrics();
+        let header = header_row(&mut state, width);
+        // 速度段优先级低于首token，允许被整段让位；但**只要出现碎片就必须完整**。
+        if header.contains("剔突") {
+            assert!(
+                header.contains("120 t/s 剔突发2"),
+                "w={width}：速度段的剔突发后缀是契约字面量，不得被拆散，实际 {header:?}"
+            );
+        }
         assert!(
-            !header.contains(orphan),
-            "让位后不得出现悬挂分隔符 {orphan:?}，实际 {header:?}"
+            header.contains("首token 800ms"),
+            "w={width}：首token 必须保留在右端，实际 {header:?}"
+        );
+        for orphan in [" ·  · ", "· …", "… ·"] {
+            assert!(
+                !header.contains(orphan),
+                "w={width}：让位后不得出现悬挂分隔符 {orphan:?}，实际 {header:?}"
+            );
+        }
+        assert!(
+            !header.trim_end().ends_with('·'),
+            "w={width}：让位后不得以分隔符收尾，实际 {header:?}"
         );
     }
-    assert!(
-        !header.trim_end().ends_with('·'),
-        "让位后不得以分隔符收尾，实际 {header:?}"
-    );
 }
 
 // ---------------------------------------------------------------------------

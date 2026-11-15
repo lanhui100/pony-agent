@@ -4219,32 +4219,31 @@ fn goal_banner_parts(state: &TuiState, goal: &TuiGoal) -> (String, String) {
     )
 }
 
-/// F1 I4：速度段必须**自描述三件套**（速度 + 样本量 + 口径），突发剔除 `> 0` 时必须可辨别。
+/// F1 I4（2026-11-15 修订，ADR 2026-11-15-tui-speed-segment-drop-inline-cadence）：
+/// 速度段只出「值 + 单位」，**不再行内自描述口径与样本量**——header 右槽宽度是稀缺资源，
+/// 每多一个后缀都在和「首token」抢位置（见 ADR 2026-11-14-tui-header-metrics-overflow）。
 ///
 /// 逐字格式（契约验收按后缀可辨识，勿随意改字面量）：
-/// - `stream_decode`：`120 t/s decode n=1`；
-/// - `end_to_end`：`≈120 t/s e2e n=1`（`≈` = 含排队/prefill，跨调用不可比）；
+/// - `stream_decode`（默认口径，绝大多数轮次）：`120 t/s`——与 `basis` 缺席同形；
+/// - `end_to_end`：`≈120 t/s e2e`（`≈` = 含排队/prefill，跨调用不可比）；
 /// - 突发剔除 `> 0`：末尾追加 ` 剔突发N`（N = `turnBurstExcluded`，只能进端到端回退的调用数）；
-/// - `basis` 缺席（旧快照 / legacy wire）：只出裸值 `120 t/s`（不伪造口径，向后兼容）；
-/// - `turn_calls == 0`（旧快照 / 无参与计算调用）：不写 `n=`（`n=0` 会被读成「0 次调用」）。
+/// - `basis` 缺席（旧快照 / legacy wire）：只出裸值 `120 t/s`。
 ///
+/// 口径与样本量真值仍在快照（`turn_speed_basis` / `turn_calls`）里，桌面 tooltip 与 trace
+/// 照旧可取证；TUI header 不再呈现，本函数也不再消费 `turn_calls`。
 /// 值全部直取快照（I9/I10：TUI 侧不自算速度/口径/样本量）。
 fn format_speed_segment(
     speed: f64,
     prefix: &str,
     basis: Option<TurnSpeedBasis>,
-    calls: u32,
     burst_excluded: u32,
 ) -> String {
     let mut segment = format!("{prefix}{:.0} t/s", speed.round());
     if let Some(basis) = basis {
         segment.push_str(match basis {
-            TurnSpeedBasis::StreamDecode => " decode",
+            TurnSpeedBasis::StreamDecode => "",
             TurnSpeedBasis::EndToEnd => " e2e",
         });
-    }
-    if calls > 0 {
-        segment.push_str(&format!(" n={calls}"));
     }
     if burst_excluded > 0 {
         segment.push_str(&format!(" 剔突发{burst_excluded}"));
@@ -4393,7 +4392,6 @@ fn metrics_segments(state: &TuiState) -> Vec<MetricsSegment> {
                     speed,
                     prefix,
                     metrics.turn_speed_basis,
-                    metrics.turn_calls,
                     metrics.turn_burst_excluded.unwrap_or(0),
                 ),
             ));

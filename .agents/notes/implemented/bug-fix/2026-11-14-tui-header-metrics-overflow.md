@@ -42,6 +42,9 @@ Status: implemented
 
 - **A. 缩短速度标签（`decode n=1` → `d/1`）**：直接违反 token-speed v2 I4 的
   「口径 + 样本量必须可辨识」，且治标不治本（样本量位数增长后仍会溢出）；否决。
+  > 2026-11-15 更新：该后缀已**整段删除**（口径/样本量改由桌面 tooltip + trace 承担，
+  > I4 在 TUI header 这一呈现位点被显式改判），见
+  > `.agents/notes/implemented/feature/2026-11-15-tui-speed-segment-drop-inline-cadence.md`。
 - **B. 继续整簇截断、把 `首token` 移到最左**：会让 `首token` 在中等宽度下优先保留，
   但破坏 header 的既有阅读顺序（累计 → 比率 → 实时），且其他段仍可能被切成半截；否决。
 - **C. 只从最左整段丢弃（纯尾部保留）**：实现最简，但会让 `↑in ↓out` 在 60 列时最先消失，
