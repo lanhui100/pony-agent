@@ -389,7 +389,8 @@ impl TurnEventSink for TerminalSink {
                 }
             }
             "turn:tool_call" => {
-                let call_info = payload.tool_activities
+                let call_info = payload
+                    .tool_activities
                     .as_ref()
                     .and_then(|a| a.last())
                     .map(|act| format!("{}: {:?}", act.name, act.arguments_text))
@@ -397,10 +398,16 @@ impl TurnEventSink for TerminalSink {
                 println!("\n\x1b[33m⚡ [Tool Call]\x1b[0m {:?}", call_info);
             }
             "turn:tool_result" => {
-                let res_info = payload.tool_activities
+                let res_info = payload
+                    .tool_activities
                     .as_ref()
                     .and_then(|a| a.last())
-                    .map(|act| format!("{}: status={:?}, res={:?}", act.name, act.status, act.result_text))
+                    .map(|act| {
+                        format!(
+                            "{}: status={:?}, res={:?}",
+                            act.name, act.status, act.result_text
+                        )
+                    })
                     .or(payload.text);
                 println!("\x1b[32m✔ [Tool Result]\x1b[0m {:?}", res_info);
             }
@@ -620,7 +627,12 @@ fn effective_authorization_mode(args: &CliArgs, options: &HeadlessOptions) -> Op
     if !explicit_or_structured {
         return None;
     }
-    Some(options.permission_mode.tool_authorization_mode().to_string())
+    Some(
+        options
+            .permission_mode
+            .tool_authorization_mode()
+            .to_string(),
+    )
 }
 
 /// 构造超时终止标记事件（宿主命名空间 `headless:timeout`）。
@@ -675,7 +687,10 @@ fn run_single_turn(
     let sink = Arc::new(CliTurnSink::new(options.output_format));
     let started = Instant::now();
 
-    human!(options.output_format, "\x1b[1;34m[Pony Agent] Running turn...\x1b[0m");
+    human!(
+        options.output_format,
+        "\x1b[1;34m[Pony Agent] Running turn...\x1b[0m"
+    );
 
     let authorization = effective_authorization_mode(args, options);
     // 裁定 B5（v5 收窄）：只有用户**显式**指定了非 read_only 档位时才外显已知局限 ——
@@ -762,9 +777,9 @@ fn run_single_turn(
 
     // 退出码：Failed 按失败原文分档（C2 穷举 match 落在 classify_failure 内），其余走冻结映射。
     let exit_code = match status {
-        TurnStatus::Failed => ExitCode::classify_failure(
-            facts.failure_reason.as_deref().unwrap_or("turn:failed"),
-        ),
+        TurnStatus::Failed => {
+            ExitCode::classify_failure(facts.failure_reason.as_deref().unwrap_or("turn:failed"))
+        }
         other => headless::exit_code_for(other),
     };
 
@@ -810,8 +825,8 @@ fn run_single_turn(
 /// * 文件权限 `0600`（仅属主可读写；封套含会话/输出内容）；
 /// * 写完 flush 再 `rename`，同目录 rename 原子（不会留下半个封套）。
 fn write_result_envelope(path: &Path, envelope: &ResultEnvelope) -> Result<(), String> {
-    let payload = serde_json::to_string_pretty(envelope)
-        .map_err(|err| format!("封套序列化失败: {err}"))?;
+    let payload =
+        serde_json::to_string_pretty(envelope).map_err(|err| format!("封套序列化失败: {err}"))?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -1023,95 +1038,298 @@ fn build_control_plane(args: &CliArgs) -> (HostControlPlane, PathBuf) {
 
 fn print_help(format: OutputFormat) {
     human!(format, "\x1b[1;33mCommands & Slash-commands:\x1b[0m");
-    human!(format, "  /clear    Clear the current context and start a fresh session");
-    human!(format, "  /compact  Compact the current conversation history");
+    human!(
+        format,
+        "  /clear    Clear the current context and start a fresh session"
+    );
+    human!(
+        format,
+        "  /compact  Compact the current conversation history"
+    );
     human!(format, "  /help     Show this help message");
     human!(format, "  /exit     Exit the interactive session");
 }
 
 /// `-h` / `--help` 用法说明（裁定 B5：必须外显审批档位的已知局限，禁止静默）。
 fn print_usage(format: OutputFormat) {
-    human!(format, "\x1b[1;32m=== Pony Agent CLI (Claude-Code Style) ===\x1b[0m");
+    human!(
+        format,
+        "\x1b[1;32m=== Pony Agent CLI (Claude-Code Style) ===\x1b[0m"
+    );
     human!(format, "Usage: ponycli [init] [OPTIONS] [-p <prompt>]");
     human!(format, "");
     human!(format, "Core options:");
-    human!(format, "  -p, --prompt <text>        Run a single turn with the given prompt");
-    human!(format, "  -m, --model <id>           Model id (default: gemini-3.8-flash)");
-    human!(format, "  -g, --gateway <url>        Provider gateway base url");
-    human!(format, "  -w, --workspace <path>     Workspace root (default: current dir)");
-    human!(format, "  -c, --continue             Continue the last session");
-    human!(format, "  -r, --resume <session-id>  Resume a specific session");
+    human!(
+        format,
+        "  -p, --prompt <text>        Run a single turn with the given prompt"
+    );
+    human!(
+        format,
+        "  -m, --model <id>           Model id (default: gemini-3.8-flash)"
+    );
+    human!(
+        format,
+        "  -g, --gateway <url>        Provider gateway base url"
+    );
+    human!(
+        format,
+        "  -w, --workspace <path>     Workspace root (default: current dir)"
+    );
+    human!(
+        format,
+        "  -c, --continue             Continue the last session"
+    );
+    human!(
+        format,
+        "  -r, --resume <session-id>  Resume a specific session"
+    );
     human!(format, "      --key, --api-key <key> Provider API key");
     human!(format, "");
     human!(format, "Headless delivery form (wave-59 / PA-164):");
-    human!(format, "  --output-format <fmt>      text | jsonl | sse (default: text)");
+    human!(
+        format,
+        "  --output-format <fmt>      text | jsonl | sse (default: text)"
+    );
     human!(format, "                             jsonl/sse: stdout carries events only, diagnostics go to stderr");
     human!(format, "  --result-json <path>       Write the result envelope (pony.headless.result.v1) atomically");
-    human!(format, "                             tmp `create_new` + 0600 + rename (no predictable temp name)");
-    human!(format, "  --permission-mode <mode>   Aliases: deny | read-only | read_only  → read_only");
+    human!(
+        format,
+        "                             tmp `create_new` + 0600 + rename (no predictable temp name)"
+    );
+    human!(
+        format,
+        "  --permission-mode <mode>   Aliases: deny | read-only | read_only  → read_only"
+    );
     human!(format, "                                        workspace-write | workspace_write → workspace_write");
-    human!(format, "                                        full-access | full_access         → full_access");
-    human!(format, "                             Default is MODE-DEPENDENT:");
+    human!(
+        format,
+        "                                        full-access | full_access         → full_access"
+    );
+    human!(
+        format,
+        "                             Default is MODE-DEPENDENT:"
+    );
     human!(format, "                               text      : NOT passed (None) — unrestricted, byte-compatible baseline");
-    human!(format, "                               jsonl/sse : deny (read_only) — fail-closed");
+    human!(
+        format,
+        "                               jsonl/sse : deny (read_only) — fail-closed"
+    );
     human!(format, "  --timeout-secs <n>         Bound the turn (0..=86400); expiry exits with code 7 (Timeout)");
     human!(format, "                             jsonl/sse: a `headless:timeout` marker line is emitted on expiry");
     human!(format, "  -h, --help                 Show this help");
     human!(format, "");
-    human!(format, "Machine-readable modes (jsonl / sse) require -p or piped stdin — no interactive REPL");
+    human!(
+        format,
+        "Machine-readable modes (jsonl / sse) require -p or piped stdin — no interactive REPL"
+    );
     human!(format, "(without either, the CLI exits 2 Usage).");
     human!(format, "");
-    human!(format, "\x1b[33mKnown limitation (PA-167):\x1b[0m `workspace-write` / `full-access` are declared");
-    human!(format, "permission tiers that the host currently decides exactly like \"not passed\" — only");
-    human!(format, "`deny` (read_only) has an enforced branch. A WARN is printed to stderr only when one of");
-    human!(format, "the two non-enforcing tiers is passed EXPLICITLY (text mode default passes None).");
+    human!(
+        format,
+        "\x1b[33mKnown limitation (PA-167):\x1b[0m `workspace-write` / `full-access` are declared"
+    );
+    human!(
+        format,
+        "permission tiers that the host currently decides exactly like \"not passed\" — only"
+    );
+    human!(
+        format,
+        "`deny` (read_only) has an enforced branch. A WARN is printed to stderr only when one of"
+    );
+    human!(
+        format,
+        "the two non-enforcing tiers is passed EXPLICITLY (text mode default passes None)."
+    );
     human!(format, "");
     human!(format, "Maintenance subcommands (ADR 0099):");
-    human!(format, "  ponycli sessions backfill [--dry-run] [--db <path>]");
-    human!(format, "  ponycli sessions rebuild-index [--dry-run | --explain <session-id>] [--db <path>]");
-    human!(format, "                             --explain: per-field diff summary (counts + first 80 chars),");
-    human!(format, "                             prints `no difference` when the log fold matches the index");
-    human!(format, "  ponycli sessions export <session-id> --out <path> [--db <path>] [--format dir|tar]");
-    human!(format, "                             Bundle = manifest.json + events.jsonl + attachments/;");
-    human!(format, "                             `tar` is uncompressed ustar (single file, no zstd yet)");
-    human!(format, "  ponycli sessions migrate-logs [--dry-run] [--db <path>] [--force]");
-    human!(format, "                             Grandfather→log backfill (synthesized streams are");
+    human!(
+        format,
+        "  ponycli sessions backfill [--dry-run] [--db <path>]"
+    );
+    human!(
+        format,
+        "  ponycli sessions rebuild-index [--dry-run | --explain <session-id>] [--db <path>]"
+    );
+    human!(
+        format,
+        "                             --explain: per-field diff summary (counts + first 80 chars),"
+    );
+    human!(
+        format,
+        "                             prints `no difference` when the log fold matches the index"
+    );
+    human!(
+        format,
+        "  ponycli sessions export <session-id> --out <path> [--db <path>] [--format dir|tar]"
+    );
+    human!(
+        format,
+        "                             Bundle = manifest.json + events.jsonl + attachments/;"
+    );
+    human!(
+        format,
+        "                             `tar` is uncompressed ustar (single file, no zstd yet)"
+    );
+    human!(
+        format,
+        "  ponycli sessions migrate-logs [--dry-run] [--db <path>] [--force]"
+    );
+    human!(
+        format,
+        "                             Grandfather→log backfill (synthesized streams are"
+    );
     human!(format, "                             tagged source.kind=migrated-from-blob; blob kept for rollback)");
-    human!(format, "  ponycli sessions vacuum [--dry-run] [--db <path>]");
-    human!(format, "                             Reclaim freelist holes (auto_vacuum=FULL +");
-    human!(format, "                             VACUUM) and truncate WAL. Disk footprint only —");
-    human!(format, "                             holes do NOT slow startup (A/B: identical read bytes).");
-    human!(format, "                             Takes `<db>.lock`; exit 3 when held elsewhere");
-    human!(format, "  ponycli sessions import <path> [--db <path>] [--dry-run] [--force]");
-    human!(format, "                             Import writes ONLY the session log + attachments:");
-    human!(format, "                             SQLite index is rebuilt by `sessions rebuild-index`.");
-    human!(format, "                             manifest is not self-hashed; the event stream is");
-    human!(format, "                             structurally re-validated (header/seq/eventCount)");
-    human!(format, "  ponycli config effective   One-line JSON: disk_policy vs effective_policy");
-    human!(format, "                             (+ clamped_fields, aggregate_budget_ms,");
-    human!(format, "                             per_attempt_effective_timeout_ms); no secrets");
+    human!(
+        format,
+        "  ponycli sessions vacuum [--dry-run] [--db <path>]"
+    );
+    human!(
+        format,
+        "                             Reclaim freelist holes (auto_vacuum=FULL +"
+    );
+    human!(
+        format,
+        "                             VACUUM) and truncate WAL. Disk footprint only —"
+    );
+    human!(
+        format,
+        "                             holes do NOT slow startup (A/B: identical read bytes)."
+    );
+    human!(
+        format,
+        "                             Takes `<db>.lock`; exit 3 when held elsewhere"
+    );
+    human!(
+        format,
+        "  ponycli sessions import <path> [--db <path>] [--dry-run] [--force]"
+    );
+    human!(
+        format,
+        "                             Import writes ONLY the session log + attachments:"
+    );
+    human!(
+        format,
+        "                             SQLite index is rebuilt by `sessions rebuild-index`."
+    );
+    human!(
+        format,
+        "                             manifest is not self-hashed; the event stream is"
+    );
+    human!(
+        format,
+        "                             structurally re-validated (header/seq/eventCount)"
+    );
+    human!(
+        format,
+        "  ponycli config effective   One-line JSON: disk_policy vs effective_policy"
+    );
+    human!(
+        format,
+        "                             (+ clamped_fields, aggregate_budget_ms,"
+    );
+    human!(
+        format,
+        "                             per_attempt_effective_timeout_ms); no secrets"
+    );
     human!(format, "  ponycli models list [--provider <id>]");
-    human!(format, "                             One JSON line per model: declaredContextWindowTokens");
-    human!(format, "                             (disk truth) / contextWindowTokens (effective) / source");
-    human!(format, "  ponycli models set-window --provider <id> --model <id> --window <v>");
-    human!(format, "                             v = 200000 | 200K | 1M | clear ('clear' removes the");
-    human!(format, "                             declaration so the capability preset fills it again).");
-    human!(format, "                             Touches only that one key; siblings are untouched.");
+    human!(
+        format,
+        "                             One JSON line per model: declaredContextWindowTokens"
+    );
+    human!(
+        format,
+        "                             (disk truth) / contextWindowTokens (effective) / source"
+    );
+    human!(
+        format,
+        "  ponycli models set-window --provider <id> --model <id> --window <v>"
+    );
+    human!(
+        format,
+        "                             v = 200000 | 200K | 1M | clear ('clear' removes the"
+    );
+    human!(
+        format,
+        "                             declaration so the capability preset fills it again)."
+    );
+    human!(
+        format,
+        "                             Touches only that one key; siblings are untouched."
+    );
     human!(format, "Sessions subcommand exit codes: 0 ok / 2 invalid bundle / 3 target exists or maintenance lock busy / 4 degraded");
     human!(format, "");
     human!(format, "ACP agent host mode (B151/P2):");
     human!(format, "  ponycli acp --list");
-    human!(format, "  ponycli acp --agent <id> -p <text> [--output-format text|jsonl|sse]");
-    human!(format, "              [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]");
-    human!(format, "  --agent     ACP agent id from acp-agents.json (opencode | antigravity | ...)");
-    human!(format, "  --list      Print configured agents as JSON lines ({{id,label,command,args,builtin}})");
-    human!(format, "  --resume    Resume a session; unsupported agents fail closed with acp_unavailable");
-    human!(format, "  --output-format jsonl/sse: stdout = events only (no banner, no REPL)");
-    human!(format, "  --timeout-secs <n>  Bound the delegated turn (1..=86400); expiry = exit 7");
-    human!(format, "  Run `ponycli acp --help` for the full ACP section.");
+    human!(
+        format,
+        "  ponycli acp --agent <id> --list-sessions [--session-cursor <c>] [--session-limit <n>]"
+    );
+    human!(
+        format,
+        "  ponycli acp --agent <id> -p <text> [--output-format text|jsonl|sse]"
+    );
+    human!(
+        format,
+        "              [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]"
+    );
+    human!(
+        format,
+        "  --agent     ACP agent id from acp-agents.json (opencode | antigravity | ...)"
+    );
+    human!(
+        format,
+        "  --list      Print configured agents as JSON lines ({{id,label,command,args,builtin}})"
+    );
+    human!(
+        format,
+        "  --list-sessions  List that agent's sessions as JSON lines (JSONL): one line per"
+    );
+    human!(
+        format,
+        "              session {{sessionId,cwd,title?,updatedAt?,additionalDirectories?}}, plus a"
+    );
+    human!(format, "              trailing {{\"nextCursor\"}} line when the agent returns one; empty list = exit 0,");
+    human!(
+        format,
+        "              zero lines; -32601 = acp_method_not_supported on stderr + non-zero exit."
+    );
+    human!(
+        format,
+        "              Mutually exclusive with -p/--prompt (mix = usage error)."
+    );
+    human!(
+        format,
+        "  --session-cursor <c>  Pass-through cursor for --list-sessions"
+    );
+    human!(
+        format,
+        "  --session-limit <n>   Pass-through page size (>=1) for --list-sessions"
+    );
+    human!(
+        format,
+        "  --resume    Resume a session; unsupported agents fail closed with acp_unavailable"
+    );
+    human!(
+        format,
+        "  --output-format jsonl/sse: stdout = events only (no banner, no REPL)"
+    );
+    human!(
+        format,
+        "  --timeout-secs <n>  Bound the delegated turn (1..=86400); expiry = exit 7"
+    );
+    human!(
+        format,
+        "  Run `ponycli acp --help` for the full ACP section."
+    );
     human!(format, "");
-    human!(format, "Exit codes: 0 success / 1 internal / 2 usage / 3 config / 4 provider-network");
-    human!(format, "            5 tool-failure / 6 permission-denied (incl. suspended) / 7 timeout");
+    human!(
+        format,
+        "Exit codes: 0 success / 1 internal / 2 usage / 3 config / 4 provider-network"
+    );
+    human!(
+        format,
+        "            5 tool-failure / 6 permission-denied (incl. suspended) / 7 timeout"
+    );
 }
 
 /// 可观测性引导（Wave-5 P0 修复：CLI/TUI 交付形态此前**完全没有** tracing 与 issue 引导）。
@@ -1367,7 +1585,11 @@ fn run_sessions_rebuild_index_if_requested() -> Option<i32> {
                 report.skipped_deleted
             );
             println!("failed({}): {:?}", report.failed.len(), report.failed);
-            println!("mismatched({}): {:?}", report.mismatched.len(), report.mismatched);
+            println!(
+                "mismatched({}): {:?}",
+                report.mismatched.len(),
+                report.mismatched
+            );
             Some(0)
         }
         Err(error) => {
@@ -1638,7 +1860,11 @@ fn run_sessions_migrate_logs_if_requested() -> Option<i32> {
             println!("scanned: {}", report.scanned);
             println!("migrated({}): {:?}", report.migrated.len(), report.migrated);
             println!("skipped_has_log: {}", report.skipped_has_log);
-            println!("remigrated({}): {:?}", report.remigrated.len(), report.remigrated);
+            println!(
+                "remigrated({}): {:?}",
+                report.remigrated.len(),
+                report.remigrated
+            );
             println!("mismatched({}):", report.mismatched.len());
             for (session_id, reason) in &report.mismatched {
                 println!("  - {session_id}: {reason}");
@@ -1650,9 +1876,7 @@ fn run_sessions_migrate_logs_if_requested() -> Option<i32> {
             println!(
                 "note: 合成日志 header 标记 source.kind = \"migrated-from-blob\"（不是原始过程流）；blob 行保留作回滚面"
             );
-            println!(
-                "note: 索引不受影响；这些会话此后「删掉索引行仍可读」由日志真源保证"
-            );
+            println!("note: 索引不受影响；这些会话此后「删掉索引行仍可读」由日志真源保证");
             Some(report.exit_code())
         }
         Err(error) => {
@@ -1774,9 +1998,7 @@ fn run_sessions_vacuum_if_requested() -> Option<i32> {
 /// 退出码：`0` 全成功 / `2` 参数或校验失败（会话不存在、目标已存在）/ `4` 包已产出但
 /// 附件降级（附件实体缺失等，报告逐条列出）/ `1` IO 失败。
 fn run_sessions_export_if_requested() -> Option<i32> {
-    use pony_agent_core::agent::session::{
-        export_session, session_log_root_for_db, BundleFormat,
-    };
+    use pony_agent_core::agent::session::{export_session, session_log_root_for_db, BundleFormat};
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) != Some("sessions")
         || args.get(2).map(String::as_str) != Some("export")
@@ -1797,7 +2019,9 @@ fn run_sessions_export_if_requested() -> Option<i32> {
     }
     let format_raw = flag_value(&args, "--format").unwrap_or_else(|| "dir".to_string());
     let Some(format) = BundleFormat::parse(&format_raw) else {
-        eprintln!("[ponycli] sessions export 不支持的 `--format {format_raw}`（可选 `dir` / `tar`）");
+        eprintln!(
+            "[ponycli] sessions export 不支持的 `--format {format_raw}`（可选 `dir` / `tar`）"
+        );
         return Some(2);
     };
     let db_path = flag_value(&args, "--db")
@@ -1823,7 +2047,11 @@ fn run_sessions_export_if_requested() -> Option<i32> {
             println!("format: {}", report.format_label);
             println!("events: {}", report.event_count);
             println!("lastSeq: {:?}", report.last_seq);
-            println!("attachments({}): {:?}", report.attachments.len(), report.attachments);
+            println!(
+                "attachments({}): {:?}",
+                report.attachments.len(),
+                report.attachments
+            );
             println!("bytes: {}", report.total_bytes);
             println!("files({}): {:?}", report.files.len(), report.files);
             if report.warnings.is_empty() {
@@ -1838,7 +2066,10 @@ fn run_sessions_export_if_requested() -> Option<i32> {
             Some(report.exit_code())
         }
         Err(error) => {
-            eprintln!("[ponycli] sessions export 失败（EXIT={}）：{error}", error.exit_code());
+            eprintln!(
+                "[ponycli] sessions export 失败（EXIT={}）：{error}",
+                error.exit_code()
+            );
             Some(error.exit_code())
         }
     }
@@ -1881,10 +2112,21 @@ fn run_sessions_import_if_requested() -> Option<i32> {
             println!("session: {}", report.session_id);
             println!("cwd: {}", report.cwd);
             println!("target: {}", report.target_dir.display());
-            println!("mode: {}", if report.dry_run { "dry-run（只校验，零写入）" } else { "apply（写日志与附件）" });
+            println!(
+                "mode: {}",
+                if report.dry_run {
+                    "dry-run（只校验，零写入）"
+                } else {
+                    "apply（写日志与附件）"
+                }
+            );
             println!("events: {}", report.event_count);
             println!("lastSeq: {:?}", report.last_seq);
-            println!("attachments({}): {:?}", report.attachments.len(), report.attachments);
+            println!(
+                "attachments({}): {:?}",
+                report.attachments.len(),
+                report.attachments
+            );
             if let Some(backup) = &report.backup {
                 println!("backup: {}", backup.display());
             }
@@ -1908,7 +2150,10 @@ fn run_sessions_import_if_requested() -> Option<i32> {
             Some(report.exit_code())
         }
         Err(error) => {
-            eprintln!("[ponycli] sessions import 失败（EXIT={}）：{error}", error.exit_code());
+            eprintln!(
+                "[ponycli] sessions import 失败（EXIT={}）：{error}",
+                error.exit_code()
+            );
             Some(error.exit_code())
         }
     }
@@ -2011,7 +2256,10 @@ fn main() {
     };
     let format = options.output_format;
 
-    human!(format, "\x1b[1;32m=== Pony Agent CLI (Claude-Code Style) ===\x1b[0m");
+    human!(
+        format,
+        "\x1b[1;32m=== Pony Agent CLI (Claude-Code Style) ===\x1b[0m"
+    );
     human!(format, "  Model:       {}", args.model);
     human!(format, "  Gateway:     {}", args.gateway_url);
     human!(format, "  Workspace:   {}", args.workspace.display());
@@ -2048,8 +2296,15 @@ fn main() {
     // 检查 stdin 管道是否有数据
     let piped_input = read_stdin_if_piped();
     let final_prompt = match (args.prompt.clone(), piped_input) {
-        (Some(p), Some(pipe)) => Some(format!("Context piped from stdin:\n```\n{}\n```\n\nPrompt:\n{}", pipe.trim(), p)),
-        (None, Some(pipe)) => Some(format!("Context piped from stdin:\n```\n{}\n```", pipe.trim())),
+        (Some(p), Some(pipe)) => Some(format!(
+            "Context piped from stdin:\n```\n{}\n```\n\nPrompt:\n{}",
+            pipe.trim(),
+            p
+        )),
+        (None, Some(pipe)) => Some(format!(
+            "Context piped from stdin:\n```\n{}\n```",
+            pipe.trim()
+        )),
         (Some(p), None) => Some(p),
         (None, None) => None,
     };
@@ -2084,7 +2339,10 @@ fn main() {
     }
 
     human!(format, "  Session ID:  {}", session_id);
-    human!(format, "\nType your message below (or '/help' for options, '/exit' to quit):");
+    human!(
+        format,
+        "\nType your message below (or '/help' for options, '/exit' to quit):"
+    );
     let stdin = io::stdin();
     let mut reader = stdin.lock();
 

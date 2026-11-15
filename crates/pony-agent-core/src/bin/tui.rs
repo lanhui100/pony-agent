@@ -47,8 +47,8 @@ use pony_agent_core::agent::orchestration::{
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::todo::{TodoItem, TodoStatus as StoreTodoStatus};
 use pony_agent_core::agent::runtime::{
-    compact_outcome_message, AgentRuntimeBuilder, ManualCompactionOutcome, TurnInput,
-    TurnStreamEvent,
+    compact_outcome_message, AgentRuntimeBuilder, ManualCompactionOutcome, SessionTitleOutcome,
+    TurnInput, TurnStreamEvent,
 };
 use pony_agent_core::agent::session::{
     is_main_session_id, last_context_input_tokens, new_session_id, session_usage_totals,
@@ -326,6 +326,14 @@ pub enum UiEvent {
     /// 契约 C-7：`/compact` 后台线程回执（真实压缩在后台线程执行，事件循环不阻塞 LLM）。
     CompactFinished {
         result: Result<ManualCompactionOutcome, String>,
+    },
+    /// `/title` 手动生成标题的后台回执（真实 LLM 调用在后台线程执行）。
+    SessionTitleFinished {
+        result: Result<SessionTitleOutcome, String>,
+    },
+    /// 首轮后自动生成标题的后台回执（`None` = 无需生成 / 静默跳过 / 失败已取证）。
+    AutoTitleFinished {
+        outcome: Option<SessionTitleOutcome>,
     },
     /// `/update` 检查更新后台回执
     UpdateCheckFinished {
@@ -645,6 +653,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/teams", "查看 Team 角色与状态（同 /agents）"),
     ("/clear", "清空当前消息上下文"),
     ("/compact", "压缩当前会话上下文"),
+    ("/title", "用 AI 重新生成当前会话标题"),
     ("/help", "查看命令与快捷键列表"),
     ("/update", "检查更新与升级新版本"),
     ("/quit", "安全退出 TUI 界面"),
@@ -1366,6 +1375,8 @@ pub struct TuiState {
     /// 输入光标（按 char 计数的插入点），与 input_buffer 严格同步。
     pub input_cursor: usize,
     pub is_streaming: bool,
+    /// AI 标题自动生成是否已在飞（防每轮 StreamCompleted 重复并发发起）。
+    pub auto_title_in_flight: bool,
     pub spinner_tick: usize,
     pub session_id: String,
     pub model: String,
@@ -1550,6 +1561,7 @@ impl Default for TuiState {
             input_buffer: String::new(),
             input_cursor: 0,
             is_streaming: false,
+            auto_title_in_flight: false,
             spinner_tick: 0,
             session_id: new_session_id(),
             model: "gemini-3.8-flash".to_string(),
@@ -10665,6 +10677,24 @@ fn tui_event_loop(
                                     });
                                     continue;
                                 }
+                                if known_command == Some("/title") {
+                                    // 手动重新生成当前会话的 AI 标题：真实 LLM 调用在后台线程
+                                    // 执行，事件循环不阻塞；成功/失败均经 UiEvent 回执。
+                                    if state.is_streaming {
+                                        state.set_status_notice("本轮结束后可用 /title");
+                                        continue;
+                                    }
+                                    state.status_text = "正在生成标题…".to_string();
+                                    let cp = control_plane.clone();
+                                    let title_target = state.session_id.clone();
+                                    let tx_title = tx.clone();
+                                    std::thread::spawn(move || {
+                                        let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+                                        let result = cp.generate_session_title(Some(title_target.as_str()));
+                                        let _ = tx_title.send(UiEvent::SessionTitleFinished { result });
+                                    });
+                                    continue;
+                                }
                                 if known_command == Some("/update") {
                                     state.status_text = "正在检查新版本…".to_string();
                                     let tx_update = tx.clone();
@@ -11147,6 +11177,20 @@ fn tui_event_loop(
                     if let Some(goal_data) = pony_agent_core::agent::goal::active_goal_for_session(&state.session_id) {
                         state.set_goal(tui_goal_from_goal(&goal_data));
                     }
+                    // AI 标题：首轮完成后自动生成（仅当标题来源仍为「派生」）。后台线程发起，
+                    // 结果经事件回主循环；in-flight 旗标防止每轮重复并发（生成成功即置 ai_title，
+                    // 次轮 `needs_ai_title` 即返回 false）。
+                    if !state.auto_title_in_flight {
+                        state.auto_title_in_flight = true;
+                        let cp = control_plane.clone();
+                        let auto_title_target = state.session_id.clone();
+                        let tx_title = tx.clone();
+                        std::thread::spawn(move || {
+                            let _guard = pony_agent_core::agent::runtime_helper::TestRuntimeGuard::new();
+                            let outcome = cp.maybe_generate_session_title(Some(auto_title_target.as_str()));
+                            let _ = tx_title.send(UiEvent::AutoTitleFinished { outcome });
+                        });
+                    }
                 }
                 // wave-60 §C2/C9：停止请求受理 ⇒ 只进「正在停止…」（流式态保持，终态未到）。
                 UiEvent::StopRequested { turn_id } => {
@@ -11302,6 +11346,37 @@ fn tui_event_loop(
                         content: compact_outcome_message(&result),
                         timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                     });
+                }
+                UiEvent::SessionTitleFinished { result } => {
+                    match &result {
+                        Ok(outcome) if outcome.generated => {
+                            state.status_text = format!("已生成会话标题：{}", outcome.title);
+                            state.messages.push(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("已用 AI 生成会话标题：{}", outcome.title),
+                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                            });
+                        }
+                        Ok(_) => {
+                            state.status_text = "未生成标题".to_string();
+                        }
+                        Err(error) => {
+                            state.status_text = "标题生成失败".to_string();
+                            state.messages.push(ChatMessage {
+                                role: MessageRole::System,
+                                content: format!("标题生成失败：{error}"),
+                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                            });
+                        }
+                    }
+                }
+                UiEvent::AutoTitleFinished { outcome } => {
+                    state.auto_title_in_flight = false;
+                    if let Some(outcome) = outcome {
+                        if outcome.generated && !state.is_streaming {
+                            state.status_text = format!("已生成会话标题：{}", outcome.title);
+                        }
+                    }
                 }
                 UiEvent::UpdateCheckFinished { result } => {
                     let content = match &result {
