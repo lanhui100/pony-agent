@@ -669,6 +669,7 @@ impl Folder {
             workspace_id: None,
             title_override: None,
             archived: false,
+            ai_title: None,
         })
     }
 
@@ -2753,6 +2754,7 @@ mod tests {
             workspace_id: Some("ws-index-only".to_string()),
             title_override: None,
             archived: false,
+            ai_title: None,
         }
     }
 

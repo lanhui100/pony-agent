@@ -219,6 +219,7 @@ fn index_only_row_payload(session: &SessionState) -> Result<String, String> {
         workspace_id: session.workspace_id.clone(),
         title_override: session.title_override.clone(),
         archived: session.archived,
+        ai_title: None,
     };
     // 标记键刻意放在**未知字段**位（`SessionState` 没有它）：老读者 serde 忽略，
     // 新读者用它区分「整包 blob」与「轻量索引行」。

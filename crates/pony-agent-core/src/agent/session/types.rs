@@ -78,6 +78,25 @@ pub enum MessageStatus {
     Error,
 }
 
+
+/// 会话标题的来源（「扩 title 来源字段」）。
+///
+/// 三条来源互斥、按优先级排列：
+/// - [`TitleSource::User`]：用户显式改名（`title_override`，优先级最高，永不被动覆盖）；
+/// - [`TitleSource::Ai`]：模型基于对话生成的标题（`ai_title`）；
+/// - [`TitleSource::Derived`]：默认来源——首条真实用户消息截断派生。
+///
+/// 投影侧（会话列表 / 快照头部）恒经 [`SessionState::effective_title`] 取值，
+/// 本枚举只描述「这条标题是谁定的」，不参与标题文本的拼装。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    #[default]
+    Derived,
+    Ai,
+    User,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryCursorMode {
@@ -425,16 +444,36 @@ pub struct SessionState {
     /// 数据不动；清标志即可恢复原账户位（恢复 UI 另立迭代）。serde default 兼容旧数据。
     #[serde(default)]
     pub archived: bool,
+    /// AI 生成的会话标题（模型出品）。与首条消息截断的派生标题（`title`）和用户显式
+    /// 改名（`title_override`）三线并存：优先级 override > ai_title > title。
+    /// 有值时 `refresh_session_metadata` 冻结派生标题重算，避免每轮被首条消息覆盖。
+    /// serde default 兼容旧数据（旧会话恒 `None` ⇒ 来源仍为派生）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_title: Option<String>,
 }
 
 impl SessionState {
-    /// 单一标题投影点：override 存在时优先，否则回退派生标题。
+    /// 单一标题投影点：`title_override`（用户改名）> `ai_title`（模型生成）> `title`（派生）。
     /// 所有面向用户的顶层标题字段（list_sessions 行、snapshot 头部——含
     /// 选中历史节点分支）必须经此取值，禁止直读 `.title` 或 `node.title`。
     pub fn effective_title(&self) -> &str {
-        match self.title_override.as_deref() {
-            Some(overridden) => overridden,
-            None => self.title.as_str(),
+        if let Some(overridden) = self.title_override.as_deref() {
+            return overridden;
+        }
+        if let Some(ai) = self.ai_title.as_deref() {
+            return ai;
+        }
+        self.title.as_str()
+    }
+
+    /// 当前生效标题的来源（与 [`Self::effective_title`] 同源判定，供列表/面板展示来源徽标）。
+    pub fn title_source(&self) -> TitleSource {
+        if self.title_override.is_some() {
+            TitleSource::User
+        } else if self.ai_title.is_some() {
+            TitleSource::Ai
+        } else {
+            TitleSource::Derived
         }
     }
 }
@@ -706,6 +745,9 @@ pub struct SessionOverview {
     /// 以「用户会话」为语义的入口据此过滤，避免把续轮碎片当历史会话。
     #[serde(default)]
     pub continuation_only: bool,
+    /// 生效标题的来源（派生 / AI / 用户改名）：列表与面板据此显示来源徽标。
+    #[serde(default)]
+    pub title_source: TitleSource,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

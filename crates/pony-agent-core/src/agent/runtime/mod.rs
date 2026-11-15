@@ -81,6 +81,7 @@ use std::time::Instant;
 pub mod turn_runner;
 
 mod compaction_ops;
+mod title_ops;
 mod ingress_mediation;
 mod session_ops;
 mod tool_exec;
@@ -107,7 +108,9 @@ pub use builder::{AgentRuntimeBuilder, DesktopRuntimePreset};
 // 不得再手写字面量（否则 `docs/observability.yaml` 的 error_classifier 收口点会出现第二定义点）。
 pub use turn_control::ASK_RESUME_UNAVAILABLE_CODE;
 pub use compaction_ops::{compact_outcome_message, ManualCompactionOutcome};
+pub use title_ops::{normalize_title_output, SessionTitleOutcome, TITLE_NO_USER_MESSAGE_ERROR_CODE};
 pub(crate) use compaction_ops::compact_session_with_sessions;
+pub(crate) use title_ops::generate_session_title_with_sessions;
 pub use types::{PlannerGraphDecisionDispatchOutcome, RunTurnFacts, SUSPENDED_TURN_PHASE, TurnInput, TurnResult, TurnStreamEvent};
 
 /// Which store key a peeked Ask injection came from (run-scoped vs session-scoped).

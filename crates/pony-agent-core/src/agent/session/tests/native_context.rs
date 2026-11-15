@@ -13,6 +13,7 @@ fn snapshot_heals_legacy_native_transcript_without_reasoning_content() {
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: vec![TurnHistoryMessage {
                 role: "user".to_string(),
@@ -91,6 +92,7 @@ fn snapshot_heals_incomplete_native_tool_roundtrip() {
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: vec![
                 TurnHistoryMessage {
@@ -430,6 +432,7 @@ fn snapshot_does_not_persist_tool_result_pruning() {
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: vec![TurnHistoryMessage {
                 role: "user".to_string(),
@@ -500,6 +503,7 @@ fn snapshot_truncates_tool_turn_transcript_when_final_assistant_lacks_reasoning(
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: vec![TurnHistoryMessage {
                 role: "user".to_string(),

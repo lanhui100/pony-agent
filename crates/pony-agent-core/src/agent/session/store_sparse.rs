@@ -43,6 +43,7 @@ pub(super) fn default_sessions() -> SessionMap {
         SessionState {
             conversation_id: DEFAULT_SESSION_ID.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: Vec::new(),
             provider_native_transcript: Vec::new(),
@@ -325,6 +326,7 @@ impl SessionStore {
                 workspace_id: session.workspace_id.clone(),
                 archived: session.archived,
                 continuation_only: session_is_continuation_fragment(session),
+                title_source: session.title_source(),
             })
             .collect::<Vec<_>>();
         for (session_id, entry) in &lazy.meta {
@@ -343,6 +345,13 @@ impl SessionStore {
                 // 元数据不含历史正文，续轮片段判据需要正文 ⇒ **保守取 false**：
                 // 宁可把碎片显示出来，也不静默隐藏用户会话（与「不静默空快照」同向）。
                 continuation_only: false,
+                // 索引行不载 ai_title：只能从 title_override 区分「用户改名 / 其它（含派生）」。
+                // AI 标题在此降级显示为派生来源，但标题文本本身正确（镜像进 title 列）。
+                title_source: if entry.title_override.is_some() {
+                    crate::agent::session::TitleSource::User
+                } else {
+                    crate::agent::session::TitleSource::Derived
+                },
             });
         }
         list.sort_by(|left, right| {

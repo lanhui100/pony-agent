@@ -1983,6 +1983,7 @@ impl SessionStore {
                 workspace_id: session.workspace_id.clone(),
                 archived: session.archived,
                 continuation_only: session_is_continuation_fragment(session),
+                title_source: session.title_source(),
             })
             .collect::<Vec<_>>();
 
@@ -2266,6 +2267,7 @@ impl SessionStore {
             .or_insert_with(|| SessionState {
                 conversation_id: session_id.to_string(),
                 title: DEFAULT_SESSION_TITLE.to_string(),
+                ai_title: None,
                 summary: DEFAULT_SESSION_SUMMARY.to_string(),
                 history: Vec::new(),
                 provider_native_transcript: Vec::new(),
@@ -2374,6 +2376,44 @@ impl SessionStore {
             self.save_to_backend();
         }
         Ok(())
+    }
+
+    /// 写入 AI 生成的会话标题：置 `ai_title` 并同步镜像到 `title` 字段（派生冻结基准，
+    /// 令纯 legacy/规范化投影即便读不到 `ai_title` 也能显示模型标题），再落盘。
+    /// 校验：trim 后非空、≤64 字符；会话必须已存在（不隐式创建）；模型标题不改用户
+    /// 显式改名（`title_override` 存在时仍然优先于 AI 标题，二者互不覆盖）。
+    pub fn set_ai_title(&mut self, session_id: &str, title: &str) -> Result<(), String> {
+        self.ensure_session_hydrated(session_id);
+        let trimmed = crate::agent::workspace::validate_display_name(title)
+            .map_err(|error| format!("AI 标题非法：{error}"))?;
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| format!("会话不存在：{session_id}"))?;
+        if session.ai_title.as_deref() != Some(trimmed.as_str()) {
+            session.ai_title = Some(trimmed.clone());
+            // 冻结基准同步：refresh_session_metadata 见到 ai_title 即不再重算 title。
+            session.title = trimmed;
+            self.persist_session_meta_command(session_id);
+            self.save_to_backend();
+        }
+        Ok(())
+    }
+
+    /// 自动标题生成的准入判据：会话存在、已有真实用户轮、且标题来源仍为「派生」
+    /// （未被用户改名、也未生成过 AI 标题）。用于首轮后自动生成，避免每轮重复生成。
+    pub fn needs_ai_title(&mut self, session_id: &str) -> bool {
+        self.ensure_session_hydrated(session_id);
+        match self.sessions.get(session_id) {
+            Some(session) => {
+                session.title_source() == crate::agent::session::TitleSource::Derived
+                    && session.turn_count >= 1
+                    && session.history.iter().any(|message| {
+                        message.role == "user" && !is_host_continuation_prompt(&message.content)
+                    })
+            }
+            None => false,
+        }
     }
 
     /// 归档会话：置 archived 标记并落盘；幂等（重复归档为 no-op 成功）。
@@ -3351,6 +3391,7 @@ pub fn ensure_history_graph(session: &mut SessionState) -> bool {
             let mut materialized = SessionState {
                 conversation_id: session.conversation_id.clone(),
                 title: DEFAULT_SESSION_TITLE.to_string(),
+                ai_title: None,
                 summary: DEFAULT_SESSION_SUMMARY.to_string(),
                 history,
                 provider_native_transcript: if turn_index + 1 == user_indexes.len() {
@@ -4338,10 +4379,10 @@ pub(in crate::agent::session) fn refresh_session_metadata(session: &mut SessionS
         .iter()
         .rev()
         .find_map(|message| extract_explicit_file_name(&message.content));
-    // 用户显式标题（override）存在时，两个派生分支都跳过 title 赋值：
-    // session.title 字段就此冻结在改名时点的派生值上，投影一律走
+    // 用户显式标题（override）或 AI 生成标题（ai_title）存在时，两个派生分支都跳过
+    // title 赋值：session.title 字段就此冻结在改名/AI 生成时点的值上，投影一律走
     // effective_title()。派生链路的其他产物（summary 等）不受影响。
-    let title_overridden = session.title_override.is_some();
+    let title_overridden = session.title_override.is_some() || session.ai_title.is_some();
     if session.history.is_empty() && !session.turn_trace_history.is_empty() {
         // 纯 trace 会话（history 未落库）同样要跳过续轮轮次标题。
         let trace = session

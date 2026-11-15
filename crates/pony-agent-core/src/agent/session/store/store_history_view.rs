@@ -96,6 +96,7 @@ pub(super) fn default_snapshot_for_session(
         workspace_id: None,
         title_override: None,
         archived: false,
+        ai_title: None,
     };
     snapshot_from_state(&session, Vec::new(), node_id, workspace_cwd)
 }

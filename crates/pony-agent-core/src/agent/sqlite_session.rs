@@ -1798,6 +1798,7 @@ impl SqliteSessionBackend {
                 history_cursor: HistoryCursor::default(),
                 workspace_id: None,
                 title_override: None,
+                ai_title: None,
                 archived: false,
                 event_watermark: 0,
                 last_commit_watermark: 0,
@@ -1989,6 +1990,7 @@ impl SqliteSessionBackend {
                 workspace_id,
                 title_override,
                 archived: archived != 0,
+                ai_title: None,
             };
             // 记忆四件套（memory_json）
             if let Some(raw) = memory_json {
@@ -3619,6 +3621,7 @@ mod tests {
             history_cursor: HistoryCursor::default(),
             workspace_id: None,
             title_override: None,
+            ai_title: None,
             archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,
@@ -4346,6 +4349,7 @@ mod tests {
             history_cursor: Default::default(),
             workspace_id: None,
             title_override: None,
+            ai_title: None,
             archived: false,
             event_watermark: 0,
             last_commit_watermark: 0,

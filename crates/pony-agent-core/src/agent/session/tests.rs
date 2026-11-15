@@ -94,6 +94,7 @@ fn snapshot_enriched_history_metadata() {
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: vec![
                 TurnHistoryMessage {
@@ -208,6 +209,7 @@ fn pa095_seed_single_node_session(store: &mut SessionStore, session_id: &str) {
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: Vec::new(),
             provider_native_transcript: Vec::new(),
@@ -414,6 +416,7 @@ fn checkout_history_node_metadata() {
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: vec![
                 TurnHistoryMessage {
@@ -533,6 +536,7 @@ fn ensure_history_graph_inserts_initial_root_node_for_legacy_sessions() {
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: vec![
                 TurnHistoryMessage {
@@ -2829,6 +2833,7 @@ fn snapshot_keeps_structured_reasoning_content_in_native_transcript() {
         SessionState {
             conversation_id: session_id.to_string(),
             title: DEFAULT_SESSION_TITLE.to_string(),
+            ai_title: None,
             summary: DEFAULT_SESSION_SUMMARY.to_string(),
             history: vec![TurnHistoryMessage {
                 role: "user".to_string(),
@@ -4408,6 +4413,7 @@ fn session_state_for_backend_strips_node_traces_and_writes_refs() {
     let session = SessionState {
         conversation_id: "s1".to_string(),
         title: "t".to_string(),
+        ai_title: None,
         summary: "s".to_string(),
         history: Vec::new(),
         provider_native_transcript: Vec::new(),
@@ -4496,6 +4502,7 @@ fn session_state_for_backend_keeps_legacy_blob_intact_under_write_separate() {
     let session = SessionState {
         conversation_id: "s1".to_string(),
         title: "t".to_string(),
+        ai_title: None,
         summary: "s".to_string(),
         history: Vec::new(),
         provider_native_transcript: Vec::new(),
@@ -4541,6 +4548,7 @@ fn collect_trace_union_merges_top_level_and_node_traces() {
     let session = SessionState {
         conversation_id: "s1".to_string(),
         title: "t".to_string(),
+        ai_title: None,
         summary: "s".to_string(),
         history: Vec::new(),
         provider_native_transcript: Vec::new(),

@@ -55,6 +55,7 @@ mod ask_plan_commands;
 mod ask_resume_commands;
 mod capability_commands;
 mod compaction_commands;
+mod title_commands;
 mod graph_projection;
 mod history_commands;
 mod message_projection;

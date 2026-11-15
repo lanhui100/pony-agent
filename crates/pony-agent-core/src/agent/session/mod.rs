@@ -124,7 +124,7 @@ pub use types::{
     CANCELLED_TURN_SENTINEL, HistoryMessageKind, HistoryNode, HistoryNodeKind, HistoryStateAuditActionSummary, HistoryStateAuditCurrentContext,
     HistoryStateAuditSummary, LongTermMemoryRecord, MessageStatus, RunControlAuditActionSummary,
     RunControlAuditCurrentContext, RunControlAuditSummary, SessionAttachment, SessionError,
-    SessionOverview, SessionSnapshot, SessionState, SessionVersion, SessionVersionMap,
+    SessionOverview, SessionSnapshot, SessionState, SessionVersion, SessionVersionMap, TitleSource,
     TraceTimelineEntry, TurnHistoryMessage, TurnTraceRecord, TurnTraceRef, WorkspaceRef,
     WorkspaceRefKind,
 };
