@@ -2247,6 +2247,12 @@ mod maintenance_help_guard_tests {
 struct AcpCliArgs {
     agent: Option<String>,
     list: bool,
+    /// B185：`--list-sessions`（列**该 agent 的会话**；与 `--list` 的 agent 清单语义严格区分）。
+    list_sessions: bool,
+    /// B185：`--list-sessions` 的分页游标（原样透传给 `session/list`）。
+    session_cursor: Option<String>,
+    /// B185：`--list-sessions` 的页大小（原样透传；0 为用法错误）。
+    session_limit: Option<u32>,
     prompt: Option<String>,
     output_format: OutputFormat,
     workspace: Option<PathBuf>,
@@ -2271,6 +2277,9 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
     let mut parsed = AcpCliArgs {
         agent: None,
         list: false,
+        list_sessions: false,
+        session_cursor: None,
+        session_limit: None,
         prompt: None,
         output_format: OutputFormat::Text,
         workspace: None,
@@ -2285,6 +2294,30 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
                 return ExitCode::Success.code();
             }
             "--list" => parsed.list = true,
+            "--list-sessions" => parsed.list_sessions = true,
+            "--session-cursor" => match next_value(args, &mut idx) {
+                Ok(value) => parsed.session_cursor = Some(value),
+                Err(message) => return acp_usage_error(&message),
+            },
+            "--session-limit" => {
+                let value = match next_value(args, &mut idx) {
+                    Ok(value) => value,
+                    Err(message) => return acp_usage_error(&message),
+                };
+                match value.parse::<u32>() {
+                    Ok(0) => {
+                        return acp_usage_error(
+                            "--session-limit 必须是 ≥1 的整数（0 不是合法页大小）",
+                        )
+                    }
+                    Ok(limit) => parsed.session_limit = Some(limit),
+                    Err(_) => {
+                        return acp_usage_error(&format!(
+                            "--session-limit 需要 ≥1 的整数，实际 `{value}`"
+                        ))
+                    }
+                }
+            }
             "--agent" => match next_value(args, &mut idx) {
                 Ok(value) => parsed.agent = Some(value),
                 Err(message) => return acp_usage_error(&message),
@@ -2347,6 +2380,13 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
         idx += 1;
     }
 
+    // 0) B185：`--list`（agent 清单）与 `--list-sessions`（会话清单）语义不同，不得混用。
+    if parsed.list && parsed.list_sessions {
+        return acp_usage_error(
+            "--list 与 --list-sessions 互斥（前者列 agent 清单，后者列某 agent 的会话）",
+        );
+    }
+
     // 1) `--list`：内置 + 用户清单逐行 JSON（缺文件回落内置两条默认）。
     if parsed.list {
         return acp_list_agents();
@@ -2371,6 +2411,24 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
             return ExitCode::Usage.code();
         }
     };
+
+    // 2.5) B185 `--list-sessions`：只列会话，与单轮 `-p` 互斥（择一：**拒绝并给用法错误**）。
+    if parsed.list_sessions {
+        if parsed.prompt.is_some() {
+            return acp_usage_error(
+                "--list-sessions 与 -p/--prompt 互斥（择一：列会话 或 跑一轮；不得混用）",
+            );
+        }
+        if parsed.resume.is_some() {
+            eprintln!("[ponycli] 提示：--list-sessions 只列会话，忽略 --resume。");
+        }
+        return acp_list_sessions(
+            &spec,
+            &workspace,
+            parsed.session_cursor.as_deref(),
+            parsed.session_limit,
+        );
+    }
 
     // 3) 单轮：无 `-p/--prompt` ⇒ 用法错误（本模式无 REPL，绝不在 stdin 上等输入）。
     let Some(prompt) = parsed.prompt.clone() else {
@@ -2474,9 +2532,59 @@ fn emit_stdout_line(line: &str) {
     emit_stdout_bytes(payload.as_bytes());
 }
 
+/// B185 契约：`--list-sessions` 的 JSONL 输出面（**冻结**；执行链路 B185-E 接线）。
+///
+/// 输出契约（stdout，JSONL；不打印 banner）：
+/// - 每会话**一行**：`{"sessionId":..., "cwd":..., "title"?:..., "updatedAt"?:...,
+///   "additionalDirectories"?:[...]}`（可选字段缺省时**不出现在该行**，不写 null）；
+/// - 若 `session/list` 响应带 `nextCursor`，**额外一行**：`{"nextCursor":"..."}`；
+/// - 空列表 ⇒ Exit 0 且**零行**（不打印 `[]`）；
+/// - `-32601` ⇒ stderr 输出 `acp_method_not_supported` 前缀 + **非 0** 退出（不静默空列表）；
+/// - 绝不调用 `session/new`（只 connect + `session/list`）。
+///
+/// 当前为契约桩：`AcpAgentSession::connect_for_cli` 在本批是签名空桩，执行链路由 B185-E 接线；
+/// 此处显式返回非 0，绝不 panic，也绝不伪造会话行。
+/// B185：`ponycli acp --list-sessions` 的 CLI 接线（JSONL 格式化在 `acp/session.rs`，单一真源）。
+///
+/// 契约：不建会话（`connect_for_cli` 只 initialize）；stdout 只有 JSONL；空列表 Exit 0 零行；
+/// `-32601` ⇒ stderr `acp_method_not_supported` + Exit 3 且 stdout 零行。
+fn acp_list_sessions(
+    spec: &pony_agent_core::acp::config::AcpAgentSpec,
+    workspace: &Path,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> i32 {
+    use pony_agent_core::acp::protocol::ListSessionsRequest;
+    let mut session =
+        match pony_agent_core::acp::session::AcpAgentSession::connect_for_cli(spec, workspace, &[]) {
+            Ok(session) => session,
+            Err(error) => return acp_session_error(error),
+        };
+    let request = ListSessionsRequest {
+        cwd: Some(workspace.to_string_lossy().into_owned()),
+        cursor: cursor.map(str::to_string),
+        limit,
+        meta: None,
+    };
+    let lines = match session.list_sessions_jsonl(request) {
+        Ok(lines) => lines,
+        Err(error) => {
+            // 错误发生在任何输出之前 ⇒ stdout 零行；Unsupported 由 acp_session_error 打
+            // `acp_method_not_supported` + Exit 3。
+            session.close();
+            return acp_session_error(error);
+        }
+    };
+    for line in lines {
+        emit_stdout_line(&line);
+    }
+    session.close();
+    ExitCode::Success.code()
+}
+
 fn acp_usage_error(message: &str) -> i32 {
     eprintln!("\x1b[31mArgument Error:\x1b[0m {message}");
-    eprintln!("用法：ponycli acp [--agent <id>] [--list] [-p|--prompt <text>] [--output-format jsonl|sse] [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]");
+    eprintln!("用法：ponycli acp [--agent <id>] [--list] [--list-sessions [--session-cursor <c>] [--session-limit <n>]] [-p|--prompt <text>] [--output-format jsonl|sse] [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]");
     ExitCode::Usage.code()
 }
 

@@ -587,6 +587,55 @@ impl AcpAgentSession {
         )
     }
 
+    /// B185 additive：CLI **只建连、不建会话**（供 `--list-sessions` / 将来的 `--close-session` 复用）。
+    ///
+    /// 语义（executor 实现时必须逐条兑现）：
+    /// 1. 与 [`Self::spawn_for_cli_with_dirs`] **同一 caps/handlers 口径**：`capabilities_hint`
+    ///    驱动 fs/terminal handler 与 `initialize.clientCapabilities`（caps 在 connect 前定稿；
+    ///    hint=false 不装配、不声明），permission 恒 fail-closed；
+    /// 2. connect 成功后装配 handler；
+    /// 3. **不得创建会话**（不调用 `session/new`、不调用 `session/load`）：本入口返回的会话对象
+    ///    `session_id()` 为空串（未建会话占位），仅可安全用于不依赖会话 id 的方法
+    ///    （`list_sessions` / 将来的 `close_session` 显式传 id）；
+    /// 4. 供 CLI `ponycli acp --list-sessions` 使用：只 connect → `session/list` → 输出 JSONL。
+    #[allow(unused_variables)]
+    pub fn connect_for_cli(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        additional_dirs: &[PathBuf],
+    ) -> Result<Self, AcpTransportError> {
+        // 1) caps/handlers 与 `spawn_for_cli_with_dirs` 同口径（caps 必须在 connect 前定稿）。
+        let (fs_handler, terminal_handler) = cli_capability_handlers(spec, cwd);
+        let capabilities = capabilities_for(spec, fs_handler.is_some(), terminal_handler.is_some());
+        let client = AcpAgentClient::connect_with_capabilities(spec, cwd, capabilities)?;
+        // 2) 装配次序同 `spawn_with_full_options`（permission 恒 fail-closed；fs/terminal 仅声明后装）。
+        client.install_handlers(
+            Arc::new(FailClosedPermissionHandler) as Arc<dyn PermissionHandler>,
+            None,
+            None,
+        );
+        if let Some(handler) = fs_handler {
+            client.install_fs_handler(handler);
+        }
+        if let Some(handler) = terminal_handler {
+            client.install_terminal_handler(handler);
+        }
+        // 3) `additionalDirectories` 与 `session/new|load` 同一 fail-closed 校验口径：即使本入口
+        //    不建会话，也提前把非法目录拒掉（调用方一旦复用该连接建会话不会带病下发）。
+        let _ = crate::acp::client::canonicalize_additional_directories(additional_dirs)?;
+        // 4) **不建会话**：不调 `session/new`、不调 `session/load`（建会话属 spawn/resume 职责），
+        //    `session_id` 用空串占位 —— 本入口只供 `--list-sessions` / 将来的 `--close-session`
+        //    这类**无会话操作**复用；依赖会话 id 的 prompt/cancel/load 在该对象上无意义。
+        Ok(Self {
+            client,
+            prompt_gate: Mutex::new(()),
+            session_id: String::new(),
+            cancellation: Mutex::new(Some(Arc::new(CancellationToken::new()))),
+            pending_permissions: Mutex::new(Vec::new()),
+            local_cancel: AtomicBool::new(false),
+        })
+    }
+
     /// B184 additive：CLI `--resume` 建连（**跳过 `session/new`**，用 `session/load` 接续既有会话）。
     ///
     /// 语义（executor 实现时必须逐条兑现）：
@@ -611,8 +660,7 @@ impl AcpAgentSession {
         // 1) caps/handlers 与 `spawn_for_cli_with_dirs` 同口径（caps 必须在 connect 前定稿）。
         let (fs_handler, terminal_handler) = cli_capability_handlers(spec, cwd);
         let capabilities = capabilities_for(spec, fs_handler.is_some(), terminal_handler.is_some());
-        let mut client =
-            AcpAgentClient::connect_with_capabilities(spec, cwd, capabilities)?;
+        let mut client = AcpAgentClient::connect_with_capabilities(spec, cwd, capabilities)?;
         // 2) 提前判定 agent 是否支持恢复：`loadSession` 缺省/false ⇒ Unsupported（绝不静默新建）。
         if !client.agent_capabilities().load_session {
             client.close();
@@ -678,6 +726,51 @@ impl AcpAgentSession {
     /// B175 additive：装配 `terminal/*` handler（热替换；保留既有 permission / fs 槽位）。
     pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) {
         self.client.install_terminal_handler(handler);
+    }
+
+    /// B185：把 `session/list` 结果格式化为**冻结 JSONL 行**（`ponycli acp --list-sessions` 共用）。
+    ///
+    /// 形状（`.dev-team/contract-matrix-acp-list-sessions.md` §2）：
+    /// - 每会话一行 `{sessionId, cwd, title?, updatedAt?, additionalDirectories?}`（缺省不写 null）；
+    /// - 响应带 `nextCursor` ⇒ 末尾追加一行 `{"nextCursor":"..."}`；
+    /// - 空列表 ⇒ 空 `Vec`（调用方不打印任何行）；`-32601` ⇒ `Unsupported`（由 client 归因）。
+    pub fn list_sessions_jsonl(
+        &self,
+        request: ListSessionsRequest,
+    ) -> Result<Vec<String>, AcpTransportError> {
+        let response = self.client.list_sessions(request)?;
+        let mut lines: Vec<String> = Vec::with_capacity(response.sessions.len() + 1);
+        for info in &response.sessions {
+            let mut record = serde_json::Map::new();
+            record.insert("sessionId".to_string(), serde_json::json!(info.session_id));
+            record.insert("cwd".to_string(), serde_json::json!(info.cwd));
+            if let Some(title) = &info.title {
+                record.insert("title".to_string(), serde_json::json!(title));
+            }
+            if let Some(updated_at) = &info.updated_at {
+                record.insert("updatedAt".to_string(), serde_json::json!(updated_at));
+            }
+            if !info.additional_directories.is_empty() {
+                record.insert(
+                    "additionalDirectories".to_string(),
+                    serde_json::json!(info.additional_directories),
+                );
+            }
+            let line = serde_json::to_string(&serde_json::Value::Object(record)).map_err(|error| {
+                AcpTransportError::Protocol(format!("session/list 结果序列化失败：{error}。"))
+            })?;
+            lines.push(line);
+        }
+        if let Some(next_cursor) = &response.next_cursor {
+            let line = serde_json::to_string(&serde_json::json!({ "nextCursor": next_cursor }))
+                .map_err(|error| {
+                    AcpTransportError::Protocol(format!(
+                        "session/list nextCursor 序列化失败：{error}。"
+                    ))
+                })?;
+            lines.push(line);
+        }
+        Ok(lines)
     }
 
     /// B179：`session/list` 签名空桩（executor 实现）。

@@ -39,6 +39,13 @@
 #                                 →output→wait_for_exit→kill→kill(幂等)→release，应答按序落 respFile
 #   probe_terminal_wait_first <initFile> <respFile> <markerFile>
 #                                 create(sleep 0.3; echo <marker>) → **wait_for_exit → output**（ACP 标准序）
+#   list_sessions_ok <reqFile> [empty]
+#                                 记录全部请求行；session/list 回 2 条会话（含可选字段），
+#                                 empty ⇒ 回 {"sessions":[]}（agy 形态，B185 L1/L5）
+#   list_sessions_cursor <reqFile>
+#                                 记录全部请求行；session/list 回 1 条会话 + nextCursor（B185 L2）
+#   list_sessions_unsupported <reqFile>
+#                                 记录全部请求行；session/list 回 -32601（B185 L3）
 #   resume_ok <reqFile> <sessionId>
 #                                 记录全部请求行；initialize 声明 loadSession=true，
 #                                 session/load 回 sessionId+modes，session/prompt 发一条
@@ -175,6 +182,33 @@ while IFS= read -r line; do
             id=$(id_of "$line")
             s=$(sentinel_of "$line")
             [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":\"$s\"}}"
+            ;;
+        list_sessions_ok|list_sessions_cursor|list_sessions_unsupported)
+            printf '%s\n' "$line" >> "$arg"
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/list)
+                    if [ "$mode" = "list_sessions_unsupported" ]; then
+                        [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"
+                    elif [ "$mode" = "list_sessions_cursor" ]; then
+                        [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessions\":[{\"sessionId\":\"sess-a\",\"cwd\":\"/tmp/ws\"}],\"nextCursor\":\"cur-2\"}}"
+                    elif [ "${arg2:-}" = "empty" ]; then
+                        [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessions\":[]}}"
+                    else
+                        [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessions\":[{\"sessionId\":\"sess-a\",\"cwd\":\"/tmp/ws\",\"title\":\"Alpha\",\"updatedAt\":\"2026-11-15T00:00:00Z\",\"additionalDirectories\":[\"/tmp/extra\"]},{\"sessionId\":\"sess-b\",\"cwd\":\"/tmp/ws2\"}]}}"
+                    fi
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                *)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+                    ;;
+            esac
             ;;
         resume_ok|resume_no_id|resume_disabled|resume_method_unsupported)
             printf '%s\n' "$line" >> "$arg"
