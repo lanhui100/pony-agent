@@ -35,6 +35,7 @@
 | **会话生命周期（B179）**：`session/list`（cursor/limit/nextCursor）、`session/load`（`session_id: Option` 兼容 opencode 无 id / agy 超集）、`session/close`（幂等）、`delete/fork/resume`（-32601 ⇒ `acp_method_not_supported` 降级） | `acp/{protocol,client,session,transport}.rs`；`tests/acp_session_lifecycle.rs`(9) |
 | **additionalDirectories（B181）**：client 侧 canonical/禁 glob/去重，非法即本地 fail-closed（不发 session/new） | `acp/client.rs::canonicalize_additional_directories`；`tests/acp_session_lifecycle.rs`(L5/L6) |
 | **代理零配置（B183）**：ACP 子进程 env 合并顺序 = 宿主白名单 → `<HOME>/.pony/proxy.env`（仅 `*_proxy`，逐键过 deny 表）→ `spec.env` → `extra_env`；`inheritProxyEnv` 缺省 true。`acp_delegate` 工具描述显式列 `opencode`/`antigravity` | `acp/config.rs`（`resolve_proxy_env`）；`acp/transport.rs`；`agent/tools/schema.rs`；`tests/acp_proxy_autowire.rs`(6) |
+| **CLI 管道与恢复（B184）**：stdout 输出 BrokenPipe 容忍（`ponycli ... \| head` 安静 exit 0）；`--resume` 走 `spawn_for_cli_resume`（connect→跳过 session/new→`session/load`），`-32601`/`loadSession:false` ⇒ 显式 `acp_unavailable` | `acp/session.rs`；`bin/cli.rs`；`tests/acp_cli_resume_and_epipe.rs`(5) |
 | **能力装配不对称（债）**：`execute_acp_delegate` 已按 hint 装配两 handler；`ponycli acp` 宿主形态仍走 `spawn`（无 AuthorizeStore/ProcessManager ⇒ 不声明能力，hint 在 CLI 侧暂不生效，见 B176） | `agent/tools/orchestration.rs` vs `bin/cli.rs` |
 | 未做（登记在 backlog）：transport 内联 permission 无 dispatcher 注入点（B161）、update 非实时 flush（B162）、Tauri 三命令与前端类型（B163） | `node scripts/backlog.mjs list` |
 | 既有 ACP 空壳测试（`wave4_4_acceptance.rs` 的 B084/B085/B086 字符串恒真断言）已替换为真契约 | `tests/wave4_4_acceptance.rs` |
