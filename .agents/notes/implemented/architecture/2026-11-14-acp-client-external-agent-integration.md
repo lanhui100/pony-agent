@@ -130,4 +130,14 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
     `reasoning delta ×2 → text "OK"`（同时证明 B162 实时流式在生产路径生效）。
     **教训**：ACP 子进程环境白名单必须包含代理变量（当前经 MCP 白名单透传），否则外部 agent 自身出网失败会被误读为「协议不兼容」。
   ③ 配置面形状：`acp-agents.json` **根是数组**（不是 `{"agents": [...]}`），写错报 `acp_config_parse: invalid type: map, expected a sequence`。
+- **B166/B180/B179/B181 收口决策（2026-11-15）**：
+  ① **update 面按官方 v1 全量**：`SessionUpdate` 扩到 14 变体并加 `#[serde(other)] Unknown` 兜底
+     （实测 opencode 发 usage_update、agy 另发 session_info_update/config_option_update，此前整条被丢）；
+     `usage_update` 的 cost 仅进诊断，不伪造 turn 事件（避免污染既有成本口径）。
+  ② **`_meta` 只透传不解读**：`clientCapabilities._meta` 由调用方按 agent 能力填（opencode 的
+     `child-session-updates` / `session.compaction` / `elicitation.form`），客户端不做语义分支。
+  ③ **会话生命周期按两 agent 实测兼容**：`LoadSessionResponse.session_id` 必须 `Option`（opencode 只回
+     configOptions）；`-32601` 归类为 `acp_method_not_supported`（agy 不支持 delete/fork），不能当通用错误。
+  ④ **additionalDirectories 由客户端兜**：opencode 强校验（绝对/禁 glob，否则 -32602）、agy 完全不校验，
+     故在 client 侧 canonical 化 + 去重 + 本地 fail-closed（不发请求）。
 - **人工验收缺口**：`opencode acp` 本机不可用（仅有 `agy`），端到端真机联调仍需人工跑一轮。
