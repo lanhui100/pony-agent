@@ -161,6 +161,11 @@ pub enum AcpTransportError {
     Refused(String),
     /// agent 要求认证（JSON-RPC `-32000`）。
     AuthRequired(String),
+    /// agent 不支持该方法（JSON-RPC `-32601 Method not found`）。
+    ///
+    /// B179：`session/delete` / `session/fork` 在 agy 上回 `-32601`；这是「不支持」而非会话
+    /// 故障，调用方据此降级（跳过/隐藏能力），不得当通用 `acp_agent_error` 报错。
+    Unsupported(String),
     /// 单次请求超过 deadline。
     Timeout(String),
     /// 会话不可用（stdin 已关 / 进程已退出）。
@@ -176,6 +181,7 @@ impl std::fmt::Display for AcpTransportError {
             Self::Agent(message) => (self.code(), message),
             Self::Refused(message) => (self.code(), message),
             Self::AuthRequired(message) => (self.code(), message),
+            Self::Unsupported(message) => (self.code(), message),
             Self::Timeout(message) => (self.code(), message),
             Self::Unavailable(message) => (self.code(), message),
         };
@@ -197,6 +203,7 @@ impl AcpTransportError {
             Self::Agent(_) => "acp_agent_error",
             Self::Refused(_) => "acp_agent_refused",
             Self::AuthRequired(_) => "acp_auth_required",
+            Self::Unsupported(_) => "acp_method_not_supported",
             Self::Timeout(_) => "acp_timeout",
             Self::Unavailable(_) => "acp_unavailable",
         }
@@ -909,6 +916,13 @@ fn extract_result(value: &Value) -> Result<Value, AcpTransportError> {
         // - 文案含认证/登录语义（auth / authenticate / unauthorized / login / credential / 登录）
         //   ⇒ AuthRequired；
         // - 其余 ⇒ Agent（`acp_agent_error`，保留原始码与文案）。
+        // B179：`-32601` 是「方法不存在/不支持」的协议语义（agy 对 session/delete|fork 即如此），
+        // 先于认证归类，降级为 `Unsupported`（`acp_method_not_supported`），调用方可跳过该能力。
+        if code == Some(JSONRPC_METHOD_NOT_FOUND) {
+            return Err(AcpTransportError::Unsupported(format!(
+                "agent 不支持该方法（code=-32601）：{message}。"
+            )));
+        }
         let lowered = message.to_ascii_lowercase();
         let auth_marker = [
             "auth",

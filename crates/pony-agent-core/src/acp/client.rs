@@ -22,13 +22,14 @@ use serde_json::{json, Value};
 use crate::acp::config::AcpAgentSpec;
 use crate::acp::protocol::{
     method, AgentCapabilities, AuthCapabilities, CancelNotification, ClientCapabilities,
-    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, FileSystemCapabilities,
-    Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest, McpServer,
-    PromptRequest, PromptResponse, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SessionNewRequest, SessionNewResponse, TerminalOutputRequest,
-    TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse, PROTOCOL_VERSION,
+    CloseSessionRequest, ContentBlock, CreateTerminalRequest, CreateTerminalResponse,
+    FileSystemCapabilities, Implementation, InitializeRequest, InitializeResponse,
+    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, McpServer, PromptRequest, PromptResponse, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionNewRequest, SessionNewResponse,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse, PROTOCOL_VERSION,
 };
 use crate::acp::transport::{
     AcpInboundRequest, AcpInboundRequestHandler, AcpInboundResponse, AcpNotificationHandler,
@@ -457,6 +458,33 @@ impl AcpAgentClient {
         cwd: &Path,
         mcp_servers: Vec<McpServer>,
     ) -> Result<SessionNewResponse, AcpTransportError> {
+        self.new_session_inner(cwd, mcp_servers, None)
+    }
+
+    /// B181 additive：带 `additionalDirectories` 的建会话。
+    ///
+    /// **校验责任在 client**（opencode 会强校验并回 `-32602`，agy 不校验 ⇒ 宿主必须自己把关）：
+    /// - 必须是**绝对路径**（相对路径直接拒绝，不做隐式 cwd 拼接）；
+    /// - **禁止 glob 元字符**（`*` `?` `[` `]` `{` `}`），否则拒绝；
+    /// - 必须存在且是目录，经 `std::fs::canonicalize` 归一后下行（去重、保持调用顺序）；
+    /// - 任一校验失败 ⇒ `AcpTransportError::Spawn`（fail-closed，绝不静默丢弃该目录）。
+    pub fn new_session_with_dirs(
+        &mut self,
+        cwd: &Path,
+        mcp_servers: Vec<McpServer>,
+        additional_directories: &[std::path::PathBuf],
+    ) -> Result<SessionNewResponse, AcpTransportError> {
+        let dirs = canonicalize_additional_directories(additional_directories)?;
+        let additional = if dirs.is_empty() { None } else { Some(dirs) };
+        self.new_session_inner(cwd, mcp_servers, additional)
+    }
+
+    fn new_session_inner(
+        &mut self,
+        cwd: &Path,
+        mcp_servers: Vec<McpServer>,
+        additional_directories: Option<Vec<String>>,
+    ) -> Result<SessionNewResponse, AcpTransportError> {
         if !cwd.is_absolute() {
             // 不静默 canonicalize 相对路径：调用方必须给绝对路径（§3.2.2）。
             return Err(AcpTransportError::Spawn(format!(
@@ -473,7 +501,7 @@ impl AcpAgentClient {
         let request = SessionNewRequest {
             cwd: canonical.to_string_lossy().into_owned(),
             mcp_servers,
-            additional_directories: None,
+            additional_directories,
         };
         let params = serde_json::to_value(request).map_err(|error| {
             AcpTransportError::Protocol(format!("序列化 session/new 请求失败：{error}。"))
@@ -599,6 +627,101 @@ impl AcpAgentClient {
         slots.terminal = Some(handler);
     }
 
+    /// B179：`session/list`（分页参数原样透传；`nextCursor` 缺省 ⇒ `None`）。
+    ///
+    /// 预算用握手档（[`ACP_HANDSHAKE_TIMEOUT`]）：agy 列已落盘会话可能较慢，5s 单请求易误杀；
+    /// `-32601` 由 transport 归因为 [`AcpTransportError::Unsupported`]（调用方降级跳过）。
+    pub fn list_sessions(
+        &self,
+        request: ListSessionsRequest,
+    ) -> Result<ListSessionsResponse, AcpTransportError> {
+        let params = serde_json::to_value(request).map_err(|error| {
+            AcpTransportError::Protocol(format!("序列化 session/list 请求失败：{error}。"))
+        })?;
+        let result = self
+            .transport
+            .request(method::SESSION_LIST, params, ACP_HANDSHAKE_TIMEOUT)?;
+        serde_json::from_value(result).map_err(|error| {
+            AcpTransportError::Protocol(format!(
+                "session/list 响应不符合 v1 schema：{error}。"
+            ))
+        })
+    }
+
+    /// B179：`session/load`（**两形态兼容**：响应缺 `sessionId` ⇒ 沿用请求 id + stderr 诊断）。
+    ///
+    /// `cwd` 必须绝对路径、`additionalDirectories` 与 `session/new` 同一 fail-closed 校验口径
+    ///（canonical 化 / 拒 glob / 拒相对 / 去重保序）。成功后把本 client 的会话标识更新为
+    /// `响应 sessionId ?? 请求 sessionId`。
+    pub fn load_session(
+        &mut self,
+        request: LoadSessionRequest,
+    ) -> Result<LoadSessionResponse, AcpTransportError> {
+        if !Path::new(&request.cwd).is_absolute() {
+            return Err(AcpTransportError::Spawn(format!(
+                "session/load 的 cwd 必须是绝对路径，实际 `{}`。",
+                request.cwd
+            )));
+        }
+        let requested: Vec<std::path::PathBuf> = request
+            .additional_directories
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        let canonical_dirs = canonicalize_additional_directories(&requested)?;
+        let mut request = request;
+        request.additional_directories = if canonical_dirs.is_empty() {
+            None
+        } else {
+            Some(canonical_dirs)
+        };
+        let fallback_session_id = request.session_id.clone();
+        let params = serde_json::to_value(request).map_err(|error| {
+            AcpTransportError::Protocol(format!("序列化 session/load 请求失败：{error}。"))
+        })?;
+        let result = self
+            .transport
+            .request(method::SESSION_LOAD, params, ACP_HANDSHAKE_TIMEOUT)?;
+        let response: LoadSessionResponse = serde_json::from_value(result).map_err(|error| {
+            AcpTransportError::Protocol(format!(
+                "session/load 响应不符合 v1 schema：{error}。"
+            ))
+        })?;
+        match response.session_id.as_deref() {
+            Some(session_id) => self.session_id = Some(session_id.to_string()),
+            None => {
+                // 两形态兼容：opencode 只回 configOptions/modes ⇒ 沿用请求 id（不伪造）。
+                eprintln!(
+                    "[acp][client] session/load 响应缺 sessionId，沿用请求中的会话标识 `{fallback_session_id}`。"
+                );
+                self.session_id = Some(fallback_session_id);
+            }
+        }
+        Ok(response)
+    }
+
+    /// B179：`session/close`（幂等；`-32601` ⇒ 能力降级，**不视为失败**）。
+    pub fn close_session(&self, request: CloseSessionRequest) -> Result<(), AcpTransportError> {
+        let params = serde_json::to_value(request).map_err(|error| {
+            AcpTransportError::Protocol(format!("序列化 session/close 请求失败：{error}。"))
+        })?;
+        match self
+            .transport
+            .request(method::SESSION_CLOSE, params, ACP_REQUEST_TIMEOUT)
+        {
+            // 成功与幂等（agent 回 `{}`）同路。
+            Ok(_) => Ok(()),
+            Err(AcpTransportError::Unsupported(message)) => {
+                // 能力降级：agent 不支持 session/close 不构成失败（调用方跳过该能力即可）。
+                eprintln!("[acp][client] session/close 不受支持，降级跳过：{message}");
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// 关闭会话与子进程（幂等；顺序由 [`AcpTransport::close`] 收口）。
     pub fn close(&mut self) {
         self.transport.close();
@@ -618,4 +741,51 @@ impl AcpAgentClient {
     pub fn agent_capabilities(&self) -> &AgentCapabilities {
         &self.agent_capabilities
     }
+}
+
+/// B181：`additionalDirectories` 的宿主侧校验 + canonical 化（`new_session_with_dirs` 唯一入口）。
+///
+/// 规则（fail-closed，任一不满足即 `AcpTransportError::Spawn`）：
+/// 1. 必须绝对路径；
+/// 2. 禁止 glob 元字符（`*` `?` `[` `]` `{` `}`）；
+/// 3. 必须存在且是目录，`canonicalize` 归一（符号链接按真实落点）；
+/// 4. 去重（保持首次出现顺序）。
+pub fn canonicalize_additional_directories(
+    directories: &[std::path::PathBuf],
+) -> Result<Vec<String>, AcpTransportError> {
+    const GLOB_META: [char; 6] = ['*', '?', '[', ']', '{', '}'];
+    let mut normalized: Vec<String> = Vec::with_capacity(directories.len());
+    for directory in directories {
+        let raw = directory.to_string_lossy().into_owned();
+        if !directory.is_absolute() {
+            return Err(AcpTransportError::Spawn(format!(
+                "acp_additional_directories_invalid: `{raw}` 必须是绝对路径（禁止相对路径）。"
+            )));
+        }
+        if raw.chars().any(|character| GLOB_META.contains(&character)) {
+            return Err(AcpTransportError::Spawn(format!(
+                "acp_additional_directories_invalid: `{raw}` 含 glob 元字符，additionalDirectories 只接受具体目录。"
+            )));
+        }
+        let canonical = std::fs::canonicalize(directory).map_err(|error| {
+            AcpTransportError::Spawn(format!(
+                "acp_additional_directories_invalid: `{raw}` 不可 canonical 化（{error}）。"
+            ))
+        })?;
+        let metadata = std::fs::metadata(&canonical).map_err(|error| {
+            AcpTransportError::Spawn(format!(
+                "acp_additional_directories_invalid: `{raw}` 元数据不可读（{error}）。"
+            ))
+        })?;
+        if !metadata.is_dir() {
+            return Err(AcpTransportError::Spawn(format!(
+                "acp_additional_directories_invalid: `{raw}` 不是目录。"
+            )));
+        }
+        let normalized_entry = canonical.to_string_lossy().into_owned();
+        if !normalized.contains(&normalized_entry) {
+            normalized.push(normalized_entry);
+        }
+    }
+    Ok(normalized)
 }

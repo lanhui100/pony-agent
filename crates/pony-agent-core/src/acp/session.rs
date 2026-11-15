@@ -9,7 +9,7 @@
 //! - 审批未决 / 超时 / 会话取消 ⇒ `cancelled`；
 //! - 子进程崩溃 / 协议错乱 ⇒ `ToolResult { status: error }` + 真源 `acp_*` 错误码，不 panic。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -22,9 +22,10 @@ use crate::acp::client::{
 };
 use crate::acp::config::AcpAgentSpec;
 use crate::acp::protocol::{
-    method, ContentBlock, McpServer, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionNotification, SessionUpdate,
-    StopReason, ToolCallLocation, ToolCallStatus, ToolKind,
+    method, CloseSessionRequest, ContentBlock, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, McpServer, PermissionOptionKind,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SessionNotification, SessionUpdate, StopReason, ToolCallLocation, ToolCallStatus, ToolKind,
 };
 use crate::acp::transport::{AcpNotificationHandler, AcpTransportError, ACP_REQUEST_TIMEOUT};
 use crate::agent::ask_persistence::{AskLifecycleState, PersistedAsk};
@@ -440,6 +441,34 @@ impl AcpAgentSession {
         terminal: Option<Arc<dyn TerminalHandler>>,
         permission: Option<Arc<dyn PermissionHandler>>,
     ) -> Result<Self, AcpTransportError> {
+        // 既有等价行为：不带 additionalDirectories。
+        Self::spawn_with_full_options_and_dirs(
+            spec,
+            cwd,
+            mcp_servers,
+            fs,
+            terminal,
+            permission,
+            &[],
+        )
+    }
+
+    /// B181 additive：`spawn_with_full_options` + `additionalDirectories` 透传。
+    ///
+    /// `additional_directories` 经 [`AcpAgentClient::new_session_with_dirs`] 校验/规范化：
+    /// 必须绝对路径、禁 glob、存在且是目录 ⇒ canonical 化后下行；任一失败 fail-closed
+    /// （`AcpTransportError::Spawn`，不静默丢弃）。能力声明/装配顺序与
+    /// [`Self::spawn_with_full_options`] 完全一致（声明在 connect 前定稿，handler 在
+    /// `new_session` 前装配）。
+    pub fn spawn_with_full_options_and_dirs(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        mcp_servers: Vec<McpServer>,
+        fs: Option<Arc<dyn FsHandler>>,
+        terminal: Option<Arc<dyn TerminalHandler>>,
+        permission: Option<Arc<dyn PermissionHandler>>,
+        additional_directories: &[PathBuf],
+    ) -> Result<Self, AcpTransportError> {
         // 1) 握手前的能力推导（initialize 是第一条报文）。
         let capabilities = capabilities_for(spec, fs.is_some(), terminal.is_some());
         // 2) 声明与装配一致性：声明为 true 却没有 handler ⇒ fail-closed，绝不谎报。
@@ -472,7 +501,12 @@ impl AcpAgentSession {
             client.install_terminal_handler(handler);
         }
         // 4) 会话建立在装配完成之后（杜绝「new_session 期间反向请求无 handler」窗口）。
-        let response = client.new_session(cwd, mcp_servers)?;
+        // B181：additionalDirectories 的校验与 canonical 化在 client 内收口。
+        let response = if additional_directories.is_empty() {
+            client.new_session(cwd, mcp_servers)?
+        } else {
+            client.new_session_with_dirs(cwd, mcp_servers, additional_directories)?
+        };
         Ok(Self {
             client,
             prompt_gate: Mutex::new(()),
@@ -494,6 +528,16 @@ impl AcpAgentSession {
     ///   绑定 workspace root 做 cwd 边界 ⇒ 可诚实声明；
     /// - **permission**：恒 `None`（CLI 无 Ask 面板 ⇒ `FailClosedPermissionHandler`，一律 cancelled）。
     pub fn spawn_for_cli(spec: &AcpAgentSpec, cwd: &Path) -> Result<Self, AcpTransportError> {
+        // 既有等价行为：不带 additionalDirectories。
+        Self::spawn_for_cli_with_dirs(spec, cwd, &[])
+    }
+
+    /// B181 additive：CLI 宿主形态 + `additionalDirectories` 透传（校验/规范化在 client）。
+    pub fn spawn_for_cli_with_dirs(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        additional_dirs: &[PathBuf],
+    ) -> Result<Self, AcpTransportError> {
         let mcp_servers = crate::acp::config::resolve_mcp_servers_in(spec, cwd)
             .map_err(|error| AcpTransportError::Unavailable(error.to_string()))?;
         let fs_handler: Option<Arc<dyn FsHandler>> = spec.capabilities_hint.fs.then(|| {
@@ -519,7 +563,15 @@ impl AcpAgentSession {
                 terminal_handler.is_some()
             );
         }
-        Self::spawn_with_full_options(spec, cwd, mcp_servers, fs_handler, terminal_handler, None)
+        Self::spawn_with_full_options_and_dirs(
+            spec,
+            cwd,
+            mcp_servers,
+            fs_handler,
+            terminal_handler,
+            None,
+            additional_dirs,
+        )
     }
 
     /// B175 additive：装配 `fs/*` handler（热替换；保留既有 permission / terminal 槽位）。
@@ -532,6 +584,45 @@ impl AcpAgentSession {
     /// B175 additive：装配 `terminal/*` handler（热替换；保留既有 permission / fs 槽位）。
     pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) {
         self.client.install_terminal_handler(handler);
+    }
+
+    /// B179：`session/list` 签名空桩（executor 实现）。
+    ///
+    /// 语义：请求参数按官方 schema（`cwd?` / `cursor?` / `limit?`），返回 `sessions` 数组 +
+    /// 可选 `nextCursor`（缺省 = 无更多页）；agy 只列已落盘会话。`-32601` ⇒
+    /// `AcpTransportError::Unsupported`（能力降级，不报通用错误）。
+    pub fn list_sessions(
+        &self,
+        request: ListSessionsRequest,
+    ) -> Result<ListSessionsResponse, AcpTransportError> {
+        // 分页/过滤参数原样透传；空 sessions 数组是合法结果；-32601 ⇒ Unsupported（由 client 归因）。
+        self.client.list_sessions(request)
+    }
+
+    /// B179：`session/load` 签名空桩（executor 实现）。
+    ///
+    /// **两形态兼容**：响应可能不含 `sessionId`（opencode 只回 configOptions/modes；agy 回
+    /// sessionId+models+modes 超集）⇒ 缺失时调用方沿用请求里的 session id；`additionalDirectories`
+    /// 与 `session/new` 同一校验口径（client 侧 canonical 化 + glob 拒绝）。
+    pub fn load_session(
+        &mut self,
+        request: LoadSessionRequest,
+    ) -> Result<LoadSessionResponse, AcpTransportError> {
+        // 两形态兼容由 client 收口（缺 sessionId ⇒ 沿用请求 id + stderr 诊断）；
+        // 这里把会话标识同步到 session 层（与响应/请求 id 同源，不伪造）。
+        let response = self.client.load_session(request)?;
+        if let Some(session_id) = self.client.session_id() {
+            self.session_id = session_id.to_string();
+        }
+        Ok(response)
+    }
+
+    /// B179：`session/close` 签名空桩（executor 实现）。
+    ///
+    /// 两者均幂等（不存在 id 回 `{}`）；`-32601` ⇒ `Unsupported` 降级（跳过该能力）。
+    pub fn close_session(&self, request: CloseSessionRequest) -> Result<(), AcpTransportError> {
+        // 幂等：不存在 id 由 agent 回 `{}`；-32601 由 client 降级为 Ok（能力跳过，不算失败）。
+        self.client.close_session(request)
     }
 
     /// 设置整轮 prompt 预算（additive；转发给 [`AcpAgentClient::set_prompt_budget`]）。

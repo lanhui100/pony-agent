@@ -26,6 +26,17 @@ pub mod method {
     pub const INITIALIZE: &str = "initialize";
     pub const SESSION_NEW: &str = "session/new";
     pub const SESSION_PROMPT: &str = "session/prompt";
+    // client → agent（B179 会话生命周期）
+    pub const SESSION_LIST: &str = "session/list";
+    pub const SESSION_LOAD: &str = "session/load";
+    pub const SESSION_RESUME: &str = "session/resume";
+    pub const SESSION_CLOSE: &str = "session/close";
+    pub const SESSION_DELETE: &str = "session/delete";
+    /// `session/fork`（官方 v1；实测仅 opencode 支持，agy 回 `-32601`）。
+    pub const SESSION_FORK: &str = "session/fork";
+    // client → agent（认证：本轮只做类型 + 不支持时降级，不做交互式登录）
+    pub const AUTHENTICATE: &str = "authenticate";
+    pub const LOGOUT: &str = "logout";
     // client → agent（notification）
     pub const SESSION_CANCEL: &str = "session/cancel";
     // agent → client（notification）
@@ -995,3 +1006,175 @@ pub struct CompactionSummaryChunk {
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
 }
+
+// ───────────── B179：会话生命周期类型（官方 v1 schema 对齐） ─────────────
+
+/// `session/list` 请求：`cwd` / `cursor` / `limit` 全部可选（agy 只列已落盘会话）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSessionsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/list` 返回的单条会话元数据（官方 `SessionInfo`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub session_id: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/list` 响应：会话数组 + 可选 nextCursor（缺省 = 无更多页）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSessionsResponse {
+    pub sessions: Vec<SessionInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/load` 请求：`cwd` 必须绝对路径；`additionalDirectories` 由 client 校验。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionRequest {
+    pub cwd: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_directories: Option<Vec<String>>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// 会话模式状态（`session/load` / `session/resume` 响应的 `modes`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModeState {
+    pub current_mode_id: String,
+    #[serde(default)]
+    pub available_modes: Vec<SessionMode>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// 单个会话模式。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMode {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/load` 响应（**两形态兼容**）：
+///
+/// - opencode 只回 `configOptions` / `modes`，**不含 `sessionId`**；
+/// - agy 回 `sessionId` + `models` + `modes` 超集（`models` 等未知字段由 serde 忽略）。
+///
+/// 因此 `session_id` 必须是 `Option<String>`：缺失 = 沿用请求里的 session id（调用方负责回填）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_options: Option<Vec<SessionConfigOption>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<SessionModeState>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/resume` 请求：不重放历史；参数字段与 load 基本同形（`mcpServers` 可选）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeSessionRequest {
+    pub cwd: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<McpServer>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_directories: Option<Vec<String>>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/resume` 响应：与 load 同形（无 sessionId ⇒ 沿用请求 id）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeSessionResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_options: Option<Vec<SessionConfigOption>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<SessionModeState>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/close` 请求（opencode/agy 均幂等：不存在的 id 回 `{}`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseSessionRequest {
+    pub session_id: String,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/close` 响应（空对象）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CloseSessionResponse {}
+
+/// `session/delete` 请求（agy 回 `-32601` ⇒ 客户端须降级为「不支持」，见 `Unsupported` 错误码）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSessionRequest {
+    pub session_id: String,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session/delete` 响应（空对象）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeleteSessionResponse {}
+
+/// `authenticate` 请求（本轮只做类型；交互式登录不实现）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticateRequest {
+    pub method_id: String,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `authenticate` 响应（空对象）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AuthenticateResponse {}
+
+/// `logout` 请求（本轮只做类型；不支持时按 `-32601` 降级）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LogoutRequest {}
+
+/// `logout` 响应（空对象）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LogoutResponse {}

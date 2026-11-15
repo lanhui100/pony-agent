@@ -2459,6 +2459,10 @@ fn acp_session_error(error: pony_agent_core::acp::transport::AcpTransportError) 
         AcpTransportError::Agent(_) | AcpTransportError::Refused(_) | AcpTransportError::Unavailable(_) => {
             ExitCode::ToolFailure.code()
         }
+        AcpTransportError::Unsupported(message) => {
+            eprintln!("[ponycli] acp_method_not_supported: {message}");
+            ExitCode::Config.code()
+        }
     }
 }
 

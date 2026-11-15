@@ -39,6 +39,13 @@
 #                                 →output→wait_for_exit→kill→kill(幂等)→release，应答按序落 respFile
 #   probe_terminal_wait_first <initFile> <respFile> <markerFile>
 #                                 create(sleep 0.3; echo <marker>) → **wait_for_exit → output**（ACP 标准序）
+#   session_list <initFile> <opencode|agy>
+#                                 记录全部请求行；session/list 回 2 条（opencode，含 nextCursor）或空列表（agy）
+#   session_load <initFile> <without-id|with-id>
+#                                 记录全部请求行；session/load 回「无 sessionId」或「含 sessionId+models+modes」
+#   session_close <initFile>      记录全部请求行；session/close 回 {}
+#   session_delete_unsupported <initFile>
+#                                 记录全部请求行；session/delete 回 -32601（能力降级）
 #   emit_updates <initFile> <updatesFile>
 #                                  记录 initialize；prompt 期间把 updatesFile 每行（一个 update JSON 对象）
 #                                  作为 session/update 通知依次发出，最后回 end_turn（B166 变体/兜底/usage）
@@ -154,6 +161,90 @@ while IFS= read -r line; do
             id=$(id_of "$line")
             s=$(sentinel_of "$line")
             [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":\"$s\"}}"
+            ;;
+        session_list)
+            printf '%s\n' "$line" >> "$arg"
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/list)
+                    if [ "${arg2:-opencode}" = "agy" ]; then
+                        emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessions\":[]}}"
+                    else
+                        emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessions\":[{\"sessionId\":\"sess-a\",\"cwd\":\"/tmp/ws\",\"title\":\"A\",\"updatedAt\":\"2026-11-15T00:00:00Z\"},{\"sessionId\":\"sess-b\",\"cwd\":\"/tmp/ws\",\"title\":\"B\"}],\"nextCursor\":\"cur-2\"}}"
+                    fi
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                *)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+                    ;;
+            esac
+            ;;
+        session_load)
+            printf '%s\n' "$line" >> "$arg"
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/load)
+                    if [ "${arg2:-without-id}" = "with-id" ]; then
+                        emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"sess-loaded\",\"models\":{\"currentModelId\":\"m-1\"},\"modes\":{\"currentModeId\":\"code\",\"availableModes\":[{\"id\":\"code\",\"name\":\"Code\"}]}}}"
+                    else
+                        emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"configOptions\":[{\"type\":\"boolean\",\"id\":\"fast\",\"name\":\"Fast\",\"currentValue\":true}],\"modes\":{\"currentModeId\":\"code\",\"availableModes\":[{\"id\":\"code\",\"name\":\"Code\"}]}}}"
+                    fi
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                *)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+                    ;;
+            esac
+            ;;
+        session_close)
+            printf '%s\n' "$line" >> "$arg"
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/close)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                *)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+                    ;;
+            esac
+            ;;
+        session_delete_unsupported)
+            printf '%s\n' "$line" >> "$arg"
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/delete)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                *)
+                    [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+                    ;;
+            esac
             ;;
         emit_updates)
             m=$(method_of "$line")
