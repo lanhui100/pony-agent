@@ -1128,19 +1128,19 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
     ]
 }
 
-
 /// B150/P1：`acp_delegate` 的定义体（从 `builtin_tools()` 抽出，避免该函数越过文件规模门）。
 fn acp_delegate_tool_definition() -> ToolDefinition {
-        // B150/P1：AcpDelegate —— 把一段任务委派给外部 ACP agent（opencode / antigravity）。
-        ToolDefinition {
+    // B150/P1：AcpDelegate —— 把一段任务委派给外部 ACP agent（opencode / antigravity）。
+    ToolDefinition {
             name: TOOL_ACP_DELEGATE,
-            description: "把一段任务委派给外部 ACP agent（如 opencode / antigravity）执行，返回该 agent 的最终结果；agent 名取自已配置的 ACP agent 清单。",
+            // B183：显式列出可用 builtin agent id（模型据此直接选 `agent` 参数，不必猜）。
+            description: "把一段任务委派给外部 ACP agent 执行，返回该 agent 的最终结果。可用 agent id：`opencode`、`antigravity`（内置）；自定义 agent 见 `ponycli acp --list`。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
                     "agent": {
                         "type": "string",
-                        "description": "ACP agent 标识（如 opencode / antigravity）"
+                        "description": "ACP agent id：`opencode` 或 `antigravity`（内置）；自定义 agent 见 `ponycli acp --list`"
                     },
                     "prompt": {
                         "type": "string",

@@ -61,6 +61,7 @@ fn spec_with_hint(hint: AcpCapabilitiesHint, mode: &str, extra: &[&str]) -> AcpA
         env: Vec::new(),
         default_cwd: None,
         capabilities_hint: hint,
+        inherit_proxy_env: true,
         mcp_servers: Some(Vec::new()),
     }
 }

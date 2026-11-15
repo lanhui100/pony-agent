@@ -25,6 +25,22 @@ pub const ACP_CONFIG_DIR_NAME: &str = "pony-agent";
 /// 清单文件名；完整路径 = `<用户配置目录>/pony-agent/acp-agents.json`。
 pub const ACP_AGENTS_FILE_NAME: &str = "acp-agents.json";
 
+/// 代理环境文件目录（B183）：缺省读 `<HOME>/.pony/`。
+pub const ACP_PROXY_ENV_DIR: &str = ".pony";
+
+/// 代理环境文件名：完整路径 = `<HOME>/.pony/proxy.env`。
+///
+/// 背景：`pony`（TUI）常在**没有代理变量**的 shell 里启动，而 ACP 子进程（agy/opencode）需要
+/// `*_proxy` 才能出网（agy 直连会被墙、`session/new` 挂 30s）。本文件让用户只需维护一份
+/// `KEY=VALUE`（可带 `export ` 前缀），宿主启动 ACP 子进程时自动注入——不再需要每次手动
+/// `source ~/.pony/proxy.env`。
+pub const ACP_PROXY_ENV_FILE_NAME: &str = "proxy.env";
+
+/// `inheritProxyEnv` 的缺省值（true：该 agent 读取代理文件）。
+fn default_true() -> bool {
+    true
+}
+
 /// 一条外部 ACP agent 的启动规格（用户可增删的清单条目）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +79,12 @@ pub struct AcpAgentSpec {
         skip_serializing_if = "Option::is_none"
     )]
     pub mcp_servers: Option<Vec<AcpMcpServerSpec>>,
+    /// B183 additive：是否继承 `<HOME>/.pony/proxy.env` 的 `*_proxy` 变量（缺省 `true`）。
+    ///
+    /// `false` ⇒ 该 agent 不读代理文件（只保留宿主白名单 + 显式 `env`），用于「直连/自定义
+    /// 代理」场景；`true` ⇒ spawn 时把 `resolve_proxy_env()` 结果并入子进程 env。
+    #[serde(default = "default_true", rename = "inheritProxyEnv")]
+    pub inherit_proxy_env: bool,
 }
 
 /// 清单里的环境变量条目（独立于协议 `EnvVariable`，避免与线上 wire 类型耦合）。
@@ -231,6 +253,7 @@ pub fn builtin_agent_specs() -> Vec<AcpAgentSpec> {
             default_cwd: None,
             capabilities_hint: AcpCapabilitiesHint::default(),
             mcp_servers: None,
+            inherit_proxy_env: true,
         })
         .collect()
 }
@@ -529,4 +552,100 @@ fn convert_explicit_mcp_server(spec: &AcpMcpServerSpec) -> Result<McpServer, Acp
             }))
         }
     }
+}
+
+// ───────────────────────────── B183：代理环境自动注入 ─────────────────────────────
+
+/// 解析 `<HOME>/.pony/proxy.env` 为可注入的代理变量（B183 契约；实现由 task-26 落地）。
+///
+/// 语义（executor 实现时必须逐条兑现）：
+/// 1. 行格式：`KEY=VALUE`；忽略空行与 `#` 注释行；可选 `export ` 前缀；值两侧单/双引号去掉；
+/// 2. **只保留 `*_proxy` 键**（大小写不敏感：`http_proxy` / `HTTPS_PROXY` / `all_proxy` /
+///    `no_proxy` …；其余键一律丢弃）；
+/// 3. 逐键过 [`crate::agent::plugin_host::capability::is_denied_env_key`]：命中即丢弃
+///    （`LD_*` / `SSH_AUTH_SOCK` / provider key 等进程/凭据通道向量，绝不注入）；
+/// 4. **文件不存在 ⇒ 返回空 `Vec`，不报错**（无代理环境是合法常态）；读取/解码失败也只记
+///    stderr 诊断并返回空，不阻断 ACP 启动；
+/// 5. 返回值按文件出现顺序（后者覆盖前者的语义由下游合并顺序决定，见 `transport::spawn` 文档）。
+pub fn resolve_proxy_env() -> Vec<(String, String)> {
+    // `<HOME>` 走 `dirs` 既有口径（Unix = `$HOME`；Windows 缺 HOME 时回退用户目录）。
+    let Some(home) = dirs::home_dir() else {
+        // 无 HOME 是合法环境（如最小容器）：无代理可继承，不报错。
+        return Vec::new();
+    };
+    let path = home.join(ACP_PROXY_ENV_DIR).join(ACP_PROXY_ENV_FILE_NAME);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            // 缺文件 = 无代理（常态）；其余读失败只记诊断，绝不阻断 ACP 启动。
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "[acp][config] 读取代理文件 {} 失败（{error}），按无代理处理。",
+                    path.display()
+                );
+            }
+            return Vec::new();
+        }
+    };
+    parse_proxy_env(&raw)
+}
+
+/// 解析 `KEY=VALUE` 行（`resolve_proxy_env` 的纯函数部分，便于无 I/O 单测）。
+///
+/// 只保留 `*_proxy` 键（大小写不敏感）；同键**后者覆盖前者**；命中 `is_denied_env_key`
+/// 的键丢弃并只记键名（绝不回显值）。非法行（无 `=` / 空键）跳过且不 panic。
+fn parse_proxy_env(raw: &str) -> Vec<(String, String)> {
+    let mut resolved: Vec<(String, String)> = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let body = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        let Some((key, value)) = body.split_once('=') else {
+            eprintln!("[acp][config] 代理文件行缺少 `=`，已跳过（键名=`{body}`）。");
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if !is_proxy_env_key(key) {
+            // G2：只注入 `*_proxy`；其余键一律丢弃（静默，多为用户的其它 shell 变量）。
+            continue;
+        }
+        if crate::agent::plugin_host::capability::is_denied_env_key(key) {
+            // G3：即使形如 `*_proxy`，命中 deny 表也不注入；只记键名，绝不记值。
+            eprintln!("[acp][config] 代理变量 `{key}` 命中 deny 表，已丢弃（不注入）。");
+            continue;
+        }
+        let value = unquote_env_value(value.trim());
+        match resolved
+            .iter_mut()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(key))
+        {
+            Some(existing) => existing.1 = value,
+            None => resolved.push((key.to_string(), value)),
+        }
+    }
+    resolved
+}
+
+/// 是否为可注入的代理键：大小写不敏感地以 `_proxy` 结尾
+///（覆盖 `http_proxy` / `HTTPS_PROXY` / `all_proxy` / `no_proxy` 及其大写形态）。
+fn is_proxy_env_key(key: &str) -> bool {
+    key.to_ascii_lowercase().ends_with("_proxy")
+}
+
+/// 去掉值两侧成对的单/双引号（只剥一层；不成对时原样保留）。
+fn unquote_env_value(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
 }

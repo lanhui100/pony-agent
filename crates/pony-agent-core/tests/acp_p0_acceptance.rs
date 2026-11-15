@@ -92,6 +92,7 @@ fn fake_spec(mode: &str, arg: Option<&str>) -> AcpAgentSpec {
         env: Vec::new(),
         default_cwd: None,
         capabilities_hint: AcpCapabilitiesHint::default(),
+        inherit_proxy_env: true,
         mcp_servers: None,
     }
 }
@@ -378,6 +379,7 @@ fn sample_spec(id: &str, command: &str) -> AcpAgentSpec {
         env: Vec::new(),
         default_cwd: None,
         capabilities_hint: AcpCapabilitiesHint { fs: false, terminal: false },
+        inherit_proxy_env: true,
         mcp_servers: None,
     }
 }

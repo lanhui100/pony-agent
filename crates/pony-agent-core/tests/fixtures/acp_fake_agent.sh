@@ -39,6 +39,7 @@
 #                                 →output→wait_for_exit→kill→kill(幂等)→release，应答按序落 respFile
 #   probe_terminal_wait_first <initFile> <respFile> <markerFile>
 #                                 create(sleep 0.3; echo <marker>) → **wait_for_exit → output**（ACP 标准序）
+#   env_dump <outFile>             initialize 时把子进程实收 env 全量写 outFile（B183 代理合并顺序）
 #   session_list <initFile> <opencode|agy>
 #                                 记录全部请求行；session/list 回 2 条（opencode，含 nextCursor）或空列表（agy）
 #   session_load <initFile> <without-id|with-id>
@@ -161,6 +162,25 @@ while IFS= read -r line; do
             id=$(id_of "$line")
             s=$(sentinel_of "$line")
             [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":\"$s\"}}"
+            ;;
+        env_dump)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    env > "$arg"
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                session/prompt)
+                    [ -n "$id" ] && respond_stop "$id" end_turn
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+            esac
             ;;
         session_list)
             printf '%s\n' "$line" >> "$arg"

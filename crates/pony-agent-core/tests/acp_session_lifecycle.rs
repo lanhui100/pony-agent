@@ -63,6 +63,7 @@ fn spec(mode: &str, extra: &[&str]) -> AcpAgentSpec {
         env: Vec::new(),
         default_cwd: None,
         capabilities_hint: AcpCapabilitiesHint::default(),
+        inherit_proxy_env: true,
         mcp_servers: Some(Vec::new()),
     }
 }

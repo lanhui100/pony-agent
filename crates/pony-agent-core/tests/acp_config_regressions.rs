@@ -72,6 +72,7 @@ fn spec_with_hint(hint: AcpCapabilitiesHint, mode: &str, extra: &[&str]) -> AcpA
         env: Vec::new(),
         default_cwd: None,
         capabilities_hint: hint,
+        inherit_proxy_env: true,
         // Some([]) ⇒ 显式禁用 inherit（h2 例外：需要 inherit 路径时单独构造）。
         mcp_servers: Some(Vec::new()),
     }

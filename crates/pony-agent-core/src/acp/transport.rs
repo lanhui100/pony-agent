@@ -251,6 +251,19 @@ impl AcpTransport {
     /// 隔离面在此收口：`env_clear()` + 白名单（复用
     /// `agent::plugin_host::capability::apply_child_env`）、`current_dir = cwd`（必须是
     /// canonicalize 过的绝对路径）、Unix `process_group(0)`。
+    ///
+    /// # env 合并顺序（B183 冻结契约，后者覆盖前者）
+    /// 1. **宿主白名单**：`apply_child_env` 的 `ENV_ALLOWLIST` 基础项（`env_clear()` 后的唯一
+    ///    基础来源；未列入白名单的宿主变量一律不继承）；
+    /// 2. **代理文件**：`spec.inherit_proxy_env == true` 时注入
+    ///    [`crate::acp::config::resolve_proxy_env`] 的结果（`<HOME>/.pony/proxy.env` 的
+    ///    `*_proxy`，已过 `is_denied_env_key`）；`false` ⇒ 跳过（该 agent 直连/自定义代理）；
+    /// 3. **`spec.env`**：清单里显式声明的键值（覆盖同名代理键）；
+    /// 4. **`extra_env`**：调用方本次 spawn 的显式覆盖（最高优先）。
+    ///
+    /// 上述所有来源最终仍经 `apply_child_env` 的白名单/拒绝键二次收口：任何来源都不得把
+    /// provider key / `SSH_AUTH_SOCK` / `LD_*` 带进子进程。**task-26 接线前**，代码只做
+    /// 步骤 1/3/4（步骤 2 待实现），不得据此认为代理注入已生效。
     pub fn spawn(
         spec: &AcpAgentSpec,
         cwd: &Path,
@@ -279,15 +292,26 @@ impl AcpTransport {
             use std::os::unix::process::CommandExt;
             process.process_group(0);
         }
-        // 隔离面唯一入口（F8a）：清单 env 与调用方 extra_env 合并后仍受白名单/拒绝键约束，
+        // 隔离面唯一入口（F8a）：所有 env 来源最终经 `apply_child_env` 的白名单/拒绝键收口，
         // provider key、`SSH_AUTH_SOCK`、`LD_*` 等一律不外泄。
-        let mut env_extra: Vec<(String, String)> = spec
-            .env
-            .iter()
-            .map(|item| (item.name.clone(), item.value.clone()))
-            .collect();
-        env_extra.extend(extra_env.iter().cloned());
-        apply_child_env(&mut process, &env_extra);
+        //
+        // B183 合并顺序（后者覆盖前者，单次注入避免多次 `Command::env` 的顺序歧义）：
+        // 1. 宿主白名单（`apply_child_env` 内部先 `env_clear()` 再透传 `ENV_ALLOWLIST`）；
+        // 2. `proxy.env`（仅 `spec.inherit_proxy_env == true`；已按 `*_proxy` + deny 表过滤）；
+        // 3. `spec.env`（清单显式声明，覆盖同名代理键）；
+        // 4. `extra_env`（调用方本次 spawn 的显式覆盖，最高优先）。
+        // 无 `<HOME>/.pony/proxy.env` 时 `resolve_proxy_env()` 返回空 ⇒ 行为与 B183 前逐字一致。
+        let mut merged_env: Vec<(String, String)> = Vec::new();
+        if spec.inherit_proxy_env {
+            merged_env.extend(crate::acp::config::resolve_proxy_env());
+        }
+        merged_env.extend(
+            spec.env
+                .iter()
+                .map(|item| (item.name.clone(), item.value.clone())),
+        );
+        merged_env.extend(extra_env.iter().cloned());
+        apply_child_env(&mut process, &merged_env);
         // B178：ACP 专属扩展（见 [`ACP_CHILD_ENV_EXTRA_ALLOWLIST`]），仍逐键过 deny 表。
         apply_acp_child_env_extras(&mut process);
 
