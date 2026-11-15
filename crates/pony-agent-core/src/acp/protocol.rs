@@ -92,6 +92,12 @@ pub struct ClientCapabilities {
     pub terminal: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthCapabilities>,
+    /// `_meta` 扩展位（B180）：与 agent 协商私有能力。ACP v1 的 `_meta` 约定为「实现方不得
+    /// 假设其内容」的透传面包；opencode 要求客户端回显
+    /// `{"opencode/child-session-updates": true}` 才推送子会话更新，另有
+    /// `session.compaction` / `elicitation.form` 等私有键。宿主只透传，不解读。
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }
 
 /// 文件系统能力：仅在 Pony 真正能执行 `fs/*` 治理链时才声明（fail-closed）。
@@ -461,6 +467,23 @@ pub enum SessionUpdate {
     },
     #[serde(rename_all = "camelCase")]
     CurrentModeUpdate { current_mode_id: String },
+    // ── B166：官方 v1 余下 6 个变体（此前封闭枚举会把整条 update 反序列化失败并丢弃）──
+    /// `config_option_update`：会话配置项全量更新。
+    ConfigOptionUpdate(ConfigOptionUpdate),
+    /// `session_info_update`：会话元数据（标题 / 最近活动时间）部分更新。
+    SessionInfoUpdate(SessionInfoUpdate),
+    /// `usage_update`：上下文窗口用量与累计 cost（opencode 实测在发）。
+    UsageUpdate(UsageUpdate),
+    /// `notice`：面向用户的即时通知（需客户端声明 `session.notices` 私有能力）。
+    Notice(Notice),
+    /// `compaction_update`：上下文压缩实体 upsert（需 `session.compaction` 私有能力）。
+    CompactionUpdate(CompactionUpdate),
+    /// `compaction_summary_chunk`：压缩摘要的内容块追加。
+    CompactionSummaryChunk(CompactionSummaryChunk),
+    /// **未知变体兜底**：未来/厂商私有 `sessionUpdate` 一律降级到本变体，不整条丢弃；
+    /// 调用方按诊断记录（stderr + warning），不得 panic。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 工具调用类别（官方 v1 全量）。
@@ -753,4 +776,222 @@ pub struct TerminalExitStatus {
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
+}
+
+// ───────────── B166/B180：SessionUpdate 扩展类型（官方 v1 schema 对齐） ─────────────
+
+/// `config_option_update` 载荷：会话配置项全量快照。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigOptionUpdate {
+    pub config_options: Vec<SessionConfigOption>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// 会话配置项：`type` 判别的 select / boolean 两形态。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionConfigOption {
+    #[serde(rename_all = "camelCase")]
+    Select {
+        id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// 语义分类（`mode` / `model` / `model_config` / `thought_level` / 私有 `_*`）；
+        /// 客户端必须容忍缺失与未知值。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+        current_value: String,
+        options: SessionConfigSelectOptions,
+        #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Boolean {
+        id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+        current_value: bool,
+        #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
+    },
+}
+
+/// select 选项集合：扁平数组或「分组 → 组内数组」两种官方形态。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SessionConfigSelectOptions {
+    Grouped(Vec<SessionConfigSelectGroup>),
+    Ungrouped(Vec<SessionConfigSelectOption>),
+}
+
+/// 分组的 select 选项。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionConfigSelectGroup {
+    pub name: String,
+    pub options: Vec<SessionConfigSelectOption>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// 单个 select 选项值。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionConfigSelectOption {
+    pub value: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `session_info_update` 载荷：全部字段可选（支持部分更新；`null` 表示清除）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfoUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `usage_update` 载荷：上下文窗口用量 + 可选累计 cost（opencode 实测）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageUpdate {
+    /// 当前上下文内 token 数。
+    pub used: u64,
+    /// 上下文窗口总大小（token）。
+    pub size: u64,
+    /// 会话累计 cost（可选）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// 累计 cost（`amount` + `currency`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cost {
+    pub amount: f64,
+    pub currency: String,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// `notice` 载荷：面向用户的即时通知。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub severity: NoticeSeverity,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// notice 严重级别：官方 3 值 + 未知值兜底（保留原始字符串）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoticeSeverity {
+    Info,
+    Warning,
+    Error,
+    /// 未知/厂商扩展值（原样保留）。
+    Unknown(String),
+}
+
+impl Serialize for NoticeSeverity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Unknown(raw) => raw,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for NoticeSeverity {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "info" => Self::Info,
+            "warning" => Self::Warning,
+            "error" => Self::Error,
+            _ => Self::Unknown(raw),
+        })
+    }
+}
+
+/// `compaction_update` 载荷：压缩实体 upsert（patch 语义：省略=不变、null=清除）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionUpdate {
+    pub compaction_id: String,
+    pub status: CompactionStatus,
+    /// 完整替换的摘要内容块；`None` = 字段缺省（patch 语义保留旧值），
+    /// 「显式 null 清除」由后续 executor 用三态解析补（当前按缺省处理）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Vec<ContentBlock>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+/// 压缩生命周期状态：官方 4 值 + 未知值兜底。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionStatus {
+    InProgress,
+    Completed,
+    Failed,
+    Cancelled,
+    /// 未知/厂商扩展值（原样保留）。
+    Unknown(String),
+}
+
+impl Serialize for CompactionStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Unknown(raw) => raw,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactionStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "in_progress" => Self::InProgress,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Unknown(raw),
+        })
+    }
+}
+
+/// `compaction_summary_chunk` 载荷：向压缩摘要追加一个内容块。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionSummaryChunk {
+    pub compaction_id: String,
+    pub content: ContentBlock,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }

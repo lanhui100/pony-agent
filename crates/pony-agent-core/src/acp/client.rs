@@ -371,6 +371,24 @@ impl AcpAgentClient {
         cwd: &Path,
         capabilities: AcpClientCapabilities,
     ) -> Result<Self, AcpTransportError> {
+        // 既有入口等价：`_meta` 缺省不发送。
+        Self::connect_with_capabilities_and_meta(spec, cwd, capabilities, None)
+    }
+
+    /// B180 additive：`connect_with_capabilities` + `clientCapabilities._meta` 透传。
+    ///
+    /// `_meta` 是 ACP v1 的扩展面包（实现方不得假设内容）：opencode 需要客户端回显
+    /// `{"opencode/child-session-updates": true}` 才推子会话/compaction 更新；另有
+    /// `session.compaction` / `elicitation.form` 等私有键。宿主**只透传**，不做语义解读。
+    ///
+    /// 既有 4 个入口（`connect` / `connect_with_capabilities` / `spawn*`）签名不变，均等价于
+    /// 本入口的 `client_meta = None`。
+    pub fn connect_with_capabilities_and_meta(
+        spec: &AcpAgentSpec,
+        cwd: &Path,
+        capabilities: AcpClientCapabilities,
+        client_meta: Option<Value>,
+    ) -> Result<Self, AcpTransportError> {
         let mut transport = AcpTransport::spawn(spec, cwd, &[])?;
 
         // 反向请求转发壳必须在首次 `initialize` 应答前就位：agent 可能在 initialize 期间就发
@@ -393,6 +411,7 @@ impl AcpAgentClient {
             }),
             terminal: capabilities.terminal.then_some(true),
             auth: Some(AuthCapabilities { terminal: false }),
+            meta: client_meta,
         };
         let request = InitializeRequest {
             protocol_version: PROTOCOL_VERSION,

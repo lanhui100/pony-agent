@@ -836,6 +836,57 @@ impl AcpAgentSession {
                     available_commands.len()
                 );
             }
+            // B166：余下 6 个官方变体 + 未知兜底。按 §3.2.7 口径，这些 update 不进 UI 事件流，
+            // 只做结构化诊断日志（usage/cost 后续可映射 telemetry；notice/compaction 待 P2 UI）。
+            SessionUpdate::ConfigOptionUpdate(update) => {
+                eprintln!(
+                    "[acp][session] config_option_update: {} 项配置",
+                    update.config_options.len()
+                );
+            }
+            SessionUpdate::SessionInfoUpdate(update) => {
+                eprintln!(
+                    "[acp][session] session_info_update: title={:?} updatedAt={:?}",
+                    update.title, update.updated_at
+                );
+            }
+            SessionUpdate::UsageUpdate(update) => {
+                // usage→turn 事件映射位置：本 arm 是唯一入口；当前为结构化日志（不进 UI），
+                // 保留 used/size/cost 供 P1 telemetry/预算消费。
+                match &update.cost {
+                    Some(cost) => eprintln!(
+                        "[acp][session] usage_update: used={} size={} cost={} {}",
+                        update.used, update.size, cost.amount, cost.currency
+                    ),
+                    None => eprintln!(
+                        "[acp][session] usage_update: used={} size={}",
+                        update.used, update.size
+                    ),
+                }
+            }
+            SessionUpdate::Notice(notice) => {
+                eprintln!(
+                    "[acp][session] notice({:?}): {} — {:?}",
+                    notice.severity, notice.title, notice.description
+                );
+            }
+            SessionUpdate::CompactionUpdate(update) => {
+                eprintln!(
+                    "[acp][session] compaction_update: id={} status={:?}",
+                    update.compaction_id, update.status
+                );
+            }
+            SessionUpdate::CompactionSummaryChunk(update) => {
+                eprintln!(
+                    "[acp][session] compaction_summary_chunk: id={}",
+                    update.compaction_id
+                );
+            }
+            // 未知/厂商私有 sessionUpdate：已由 `#[serde(other)]` 兜底反序列化，这里只记诊断，
+            // 绝不 panic、绝不整条丢弃（B166）。
+            SessionUpdate::Unknown => {
+                eprintln!("[acp][session] 未知 sessionUpdate 变体（已降级诊断，不中断本轮流）");
+            }
         }
     }
 
@@ -936,13 +987,9 @@ impl AcpAgentSession {
         slot: &PermissionSlot,
     ) -> Result<RequestPermissionResponse, String> {
         // 单一判定真源：`await_approval`（与 DispatcherPermissionHandler 共用）。
-        await_approval(
-            dispatcher,
-            Some(authorization),
-            pending,
-            request,
-            &|| slot.is_cancel_requested() || self.cancellation_requested(),
-        )
+        await_approval(dispatcher, Some(authorization), pending, request, &|| {
+            slot.is_cancel_requested() || self.cancellation_requested()
+        })
     }
 
     /// 归约结果 → `ToolResult`（`ok` / `truncated` / `refused` / `cancelled`）。

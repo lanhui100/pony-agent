@@ -39,6 +39,9 @@
 #                                 →output→wait_for_exit→kill→kill(幂等)→release，应答按序落 respFile
 #   probe_terminal_wait_first <initFile> <respFile> <markerFile>
 #                                 create(sleep 0.3; echo <marker>) → **wait_for_exit → output**（ACP 标准序）
+#   emit_updates <initFile> <updatesFile>
+#                                  记录 initialize；prompt 期间把 updatesFile 每行（一个 update JSON 对象）
+#                                  作为 session/update 通知依次发出，最后回 end_turn（B166 变体/兜底/usage）
 #   init_delay <delaySeconds>       initialize 内延迟再应答（B178 握手预算 i1）
 #   env_capture <outFile>          initialize 时把实收 XDG_CONFIG_HOME/TERM/LANG/PATH 写 outFile（i2）
 #   init_error <code> <message>    initialize 回 JSON-RPC error 帧（i3 错误归因）
@@ -151,6 +154,30 @@ while IFS= read -r line; do
             id=$(id_of "$line")
             s=$(sentinel_of "$line")
             [ -n "$id" ] && emit "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"echo\":\"$s\"}}"
+            ;;
+        emit_updates)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    printf '%s\n' "$line" >> "$arg"
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                session/prompt)
+                    prompt_id="$id"
+                    while IFS= read -r update_json <&3; do
+                        [ -z "$update_json" ] && continue
+                        emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"acp-sess-1\",\"update\":$update_json}}"
+                    done 3< "$arg2"
+                    [ -n "$prompt_id" ] && respond_stop "$prompt_id" end_turn
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+            esac
             ;;
         init_delay)
             m=$(method_of "$line")
