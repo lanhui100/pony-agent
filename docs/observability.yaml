@@ -2,6 +2,16 @@
 # 形状：~/.agents/skills/observability-onboarding/references/declaration.schema.json
 # 判定：声明说「该不该有」，巡检说「实际有没有」，两者交叉才是结论（规则家：declaration-rubric.md）。
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
+# B193/B194（2026-11-15，ADR 2026-11-15-tui-goal-round-and-queue-visibility）归属说明：
+# (1) 变更面全在**本地 TUI 呈现层与输入层**：`bin/tui/goal_round_stop.rs`（首轮终态 → 停止原因纯函数）、
+#     `bin/tui/queue_panel.rs`（排队正文内联面板）、`bin/tui.rs` 的 Alt+S 键位分支与覆盖层几何；
+#     无新增对外接口、网络 IO、后台任务、LLM 调用与依赖；新键位不改变派发真值
+#     （仍走既有 C15/C21/C24 单飞闸门），只把「立即发送」提前触发。
+# (2) 结构化日志只有**既有事件枚举扩容**：`goal_rounds_stopped.reason` 新增取值
+#     `first_round_not_succeeded`（字段集合不变），唯一落点仍是 `bin/tui.rs::log_goal_rounds_stopped`。
+# (3) ⇒ 四维归属不变：tracing / issues 仍 applicable（落点不变 agent/otel/mod.rs、agent/ponysentry/client.rs），
+#     metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
+#     不新增 applicable 判定、不新增 enforcement_point。
 # B189 复审修复（2026-11-15）归属说明：TUI/桌面端 Ask 收口改为按**持久化生命周期**选文案。
 # (1) 变更面：`HostControlPlane::get_ask_lifecycle_state` 改为 `Result<Option<AskLifecycleState>, String>`
 #     （读失败与「无记录」分离）；TUI 收口/错误上报按终态分派中性文案；桌面端新增只读 IPC 命令

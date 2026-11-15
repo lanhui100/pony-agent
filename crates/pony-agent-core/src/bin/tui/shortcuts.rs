@@ -97,6 +97,7 @@ pub const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
         title: "流式与队列",
         items: &[
             ShortcutItem { keys: "Enter（有正文）", description: "排队，本轮结束自动发送（不并发第二个 turn）" },
+            ShortcutItem { keys: "Alt+S", description: "立即发送排队首条：在飞时先停止本轮，收口后自动派发" },
             ShortcutItem { keys: "Esc Esc（流式中）", description: "双击停止生成，终态由事件驱动" },
             ShortcutItem { keys: "Ctrl+C（流式中）", description: "中断本轮（不退出；有草稿时先清草稿）" },
         ],

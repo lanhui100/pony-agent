@@ -528,6 +528,16 @@ pub use self::input::*;
 mod queue;
 #[path = "tui/goal_command.rs"]
 mod goal_command;
+// B193：首轮门非成功终态 → 可见停止原因的纯函数（唯一判定点）。
+#[path = "tui/goal_round_stop.rs"]
+mod goal_round_stop;
+pub use self::goal_round_stop::first_round_stop_reason;
+// B194：排队消息正文可见（内联面板）+ Alt+S 立即发送裁决。
+#[path = "tui/queue_panel.rs"]
+mod queue_panel;
+pub use self::queue_panel::{
+    inline_queue_height, queue_immediate_action, render_inline_queue, QueueImmediateAction,
+};
 #[path = "tui/shortcuts.rs"]
 mod shortcuts;
 #[path = "tui/goal_panel.rs"]
@@ -5886,6 +5896,29 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     } else {
         Rect::default()
     };
+    // B194：排队面板与 Ask 同构 —— **覆盖层**，不参与消息区几何（契约 C8 不变）。
+    // Ask 是必须由人回答的阻塞面板，二者同时存在时让位给 Ask（计数仍在指标行）。
+    let queue_inline_h = if ask_inline_h > 0 {
+        0
+    } else {
+        inline_queue_height(state, content.width as usize)
+    };
+    let queue_rect = if queue_inline_h > 0 {
+        let queue_y = chat_rect.y.max(bottom_top.saturating_sub(queue_inline_h));
+        let queue_bottom = chat_rect
+            .y
+            .saturating_add(chat_rect.height)
+            .saturating_add(CHAT_BOTTOM_GAP)
+            .min(bottom_top);
+        Rect {
+            x: content.x,
+            y: queue_y,
+            width: content.width,
+            height: queue_bottom.saturating_sub(queue_y).min(queue_inline_h),
+        }
+    } else {
+        Rect::default()
+    };
     state.last_chat_rect = Some(chat_rect);
 
     // ── 会话正文：轨道标记 + 单色正文 + 分层工具行 ─────────────────────────
@@ -6144,6 +6177,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         // 仅清自己的覆盖矩形：既抹掉底层字形/宽字符占位，又不影响未遮挡历史。
         f.render_widget(ratatui::widgets::Clear, ask_rect);
         render_ask_inline(f, ask_rect, state);
+    }
+
+    // ── 排队面板覆盖层（B194）：正文逐条可见，Alt+S 立即发送 ────────────────
+    if queue_rect.height > 0 {
+        f.render_widget(ratatui::widgets::Clear, queue_rect);
+        render_inline_queue(f, queue_rect, state);
     }
 
     // ── Composer：整宽表面色带 = 1 行顶部内边距 + 输入区；指标行紧贴其下 ──────
@@ -9056,6 +9095,8 @@ fn goal_round_stop_reason_tag(
         // PA-172 §8 B4/B5：additive 两变体的日志 reason tag（pa171-a1 扩容）。
         GoalRoundStopReason::BudgetPersistFailed => "budget_persist_failed",
         GoalRoundStopReason::NoActiveGoal => "no_active_goal",
+        // B193：首轮门未通过（续轮从未启动）——与「已停止」区分，便于日志侧统计。
+        GoalRoundStopReason::FirstRoundNotSucceeded => "first_round_not_succeeded",
     }
 }
 
@@ -10214,6 +10255,69 @@ fn tui_event_loop(
                         continue;
                     }
 
+                    // B194：Alt+S = **立即发送队首**（对齐桌面端 Queue/Steer 的插队心智）。
+                    // 裁决是纯函数 `queue_immediate_action`；三条分支都不静默吞键。
+                    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::ALT) {
+                        let turn_in_flight = turn_loop_in_flight
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .contains(&state.session_id);
+                        match queue_immediate_action(
+                            state.queued_count(),
+                            state.is_streaming,
+                            turn_in_flight,
+                        ) {
+                            QueueImmediateAction::Empty => {
+                                state.status_notice = Some((
+                                    "排队为空：无需立即发送".to_string(),
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                            QueueImmediateAction::StopThenDispatch => {
+                                // 与 Esc 同一停止通道（先置取消令牌，再取 turn id，绝不持锁调 stop_turn）。
+                                goal_round_cancel.cancel_for(&state.session_id);
+                                let stopping_turn = { current_turn_id.lock().unwrap().take() };
+                                if let Some(turn_id) = stopping_turn {
+                                    control_plane.stop_turn(StopTurnCommand {
+                                        turn_id: turn_id.clone(),
+                                        stop_reason: Some(StopReason::User),
+                                    });
+                                    state.apply_stop_requested(&turn_id);
+                                }
+                                // 流式期 `status_notice` 会被抑制，故结论走 status_text。
+                                state.status_text =
+                                    "已请求停止：收口后立即发送排队首条".to_string();
+                            }
+                            QueueImmediateAction::DispatchNow => {
+                                if !state.input_buffer.trim().is_empty() {
+                                    // 绝不覆盖用户正在打的草稿（与 C15 派发前哨同口径）。
+                                    state.status_notice = Some((
+                                        "输入框有草稿：先发送或清空，再立即发送排队消息"
+                                            .to_string(),
+                                        std::time::Instant::now(),
+                                    ));
+                                } else if let Some(next_message) = drain_next_queued(&mut state) {
+                                    queue_dispatch_payload = Some(next_message.clone());
+                                    // C14：写回经净化缓冲区（尾部空格），与自动派发逐字一致。
+                                    state.set_input(&composer_buffer_for_dispatch(&next_message));
+                                    state.selected_command_index = 0;
+                                    // C24：同样置时间窗闩，避免与常规闸门重复派发。
+                                    queue_dispatch_deadline = Some(
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_millis(
+                                                QUEUE_DISPATCH_LATCH_MS,
+                                            ),
+                                    );
+                                    state.queue_notice = None;
+                                    // C21：不注入 Enter，由带标记事件在空闲态回灌。
+                                    let _ = tx.send(UiEvent::QueuedAutoSubmit);
+                                }
+                            }
+                        }
+                        dirty = true;
+                        continue;
+                    }
+
                     // 2. 流式态 Esc = 停止本轮（双击）；静态下 Esc 仅用于清空输入缓冲区，不退出程序
                     if key.code == KeyCode::Esc {
                         if state.is_streaming {
@@ -11099,11 +11203,33 @@ fn tui_event_loop(
                                         .start_turn_stream_checked(sink.as_ref(), cmd);
                                     drop(initial_turn_sink_guard);
 
-                                    let first_completed = matches!(
-                                        first_outcome,
-                                        Ok(pony_agent_core::agent::control_plane::TurnStreamOutcome::Completed)
-                                    );
-                                    if !first_completed {
+                                    // B193：首轮门未通过时**必须**给出可见停止原因。旧实现是裸
+                                    // `return`：用户只看到「这一轮结束了」，不知道自动续轮从未启动，
+                                    // 于是误判会话终止、手动发「继续」才发现还能推进。
+                                    // `Err` = 该轮已执行但收口失败（无可用终态），与 `Unknown` 同口径。
+                                    let first_stop = match &first_outcome {
+                                        Ok(outcome) => first_round_stop_reason(outcome),
+                                        Err(_) => {
+                                            Some(pony_agent_core::agent::goal::GoalRoundStopReason::TurnUnclassified)
+                                        }
+                                    };
+                                    if let Some(reason) = first_stop {
+                                        // 失败轮不推进预算（C2）；这里只回读快照供日志字段，不写盘。
+                                        // 连续失败计数保持 0：首轮从未进入续轮循环，不得冒充「连跑 N 轮」。
+                                        let (rounds_started, max_rounds) =
+                                            pony_agent_core::agent::goal::active_goal_for_session(
+                                                &session_id,
+                                            )
+                                            .map(|goal| (goal.rounds_started, goal.max_goal_rounds))
+                                            .unwrap_or((0, 0));
+                                        report_goal_rounds_stopped(
+                                            sink.as_ref(),
+                                            &session_id,
+                                            reason,
+                                            0,
+                                            rounds_started,
+                                            max_rounds,
+                                        );
                                         return;
                                     }
 

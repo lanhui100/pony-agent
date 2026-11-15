@@ -524,6 +524,16 @@ pub enum GoalRoundStopReason {
     /// additive 第 9 变体，由 TUI 侧构造（原先该路径是裸 `break`，用户看不到原因）；
     /// [`goal_round_stop_reason`] 三值真值表**不产出**它。
     NoActiveGoal,
+    /// B193（2026-11-15）：**首轮门未通过** ⇒ 自动续轮从未启动。
+    ///
+    /// PA-171 C1-T1 的首轮门规定「只有本轮真正成功收口才进入自动续轮」，但旧实现在首轮
+    /// 终态非 `Completed`（provider 失败 / 取消 / 挂起 / 无可用终态）时**裸 `return`**，
+    /// 既不产生 `GoalRoundsStopped`，也不写状态行、消息区 ⇒ 用户只看到「这一轮结束了」，
+    /// 误判会话终止，需手动发「继续」才发现还能推进（症状取证见 backlog B193）。
+    ///
+    /// additive 第 10 变体，由 TUI 侧按首轮 `TurnStreamOutcome` 构造；
+    /// [`goal_round_stop_reason`] 三值真值表**不产出**它。
+    FirstRoundNotSucceeded,
 }
 
 impl GoalRoundStopReason {
@@ -557,6 +567,10 @@ impl GoalRoundStopReason {
             }
             // PA-172 §8 B5：逐字冻结——无进行中的目标，无轮可续。
             Self::NoActiveGoal => "goal 续轮已停止（当前会话无进行中的目标）".to_string(),
+            // B193：首轮门未通过 ⇒ 续轮从未启动，措辞用「未启动」而非「已停止」。
+            Self::FirstRoundNotSucceeded => {
+                "goal 续轮未启动（首轮未成功收口，未进入自动续轮）".to_string()
+            }
         }
     }
 }

@@ -676,3 +676,24 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String;
    `turn_loop_in_flight` 由单 bool 改按 `session_id` 分区（遗留 #8）。
 10. **a1-10 TS 契约（遗留 #2）**：`errorClass` 进 `docs/contracts/ts-contract.snapshot.json`（38 → 39 键）与
     `src/types/runtime.ts` 两处类型；`scripts/check-ts-contract.mjs` 红绿方向冻结。
+
+---
+
+### Amendment: b193-1（2026-11-15，首轮门静默退出补可见原因 · backlog B193）
+
+> 只**追加**登记，不改写 §2–§5 任何冻结断言文字。
+
+1. **C1-S3 变体表扩容（九变体 → 十变体，additive）**：
+   | 变体 | `visible_line()` | 性质 |
+   |---|---|---|
+   | `FirstRoundNotSucceeded` | `goal 续轮未启动（首轮未成功收口，未进入自动续轮）` | B193 新增（首轮门 `TurnStreamOutcome::Failed` 时构造） |
+
+   措辞为「**未启动**」而非「已停止」：首轮门（C1-T1）不通过时续轮**从未进入**，说「已停止」会与事实相反。
+   该变体**不由** `goal_round_stop_reason` 产出（其三值真值表 C1-S1 不变），由 TUI 侧纯函数
+   `bin/tui/goal_round_stop.rs::first_round_stop_reason` 构造。
+2. **C1-T3′（每个非成功 break 都带可见原因）覆盖面补齐**：首轮终态映射为
+   `Completed ⇒ 无（进入续轮）`、`Cancelled ⇒ Cancelled`、`Suspended ⇒ TurnSuspended`、
+   `Unknown ⇒ TurnUnclassified`、`Failed ⇒ FirstRoundNotSucceeded`；
+   旧实现的裸 `return` 由 `report_goal_rounds_stopped` 取代（状态行 + 消息区 + 结构化日志三通道）。
+3. **§6.1 结构化日志 `goal_rounds_stopped.reason` 枚举扩容**：新增 `first_round_not_succeeded`
+   （字段集合不变，仍为 `trace_id` / `session_id` / `reason` / `consecutive_failures` / `rounds_started` / `max_rounds`）。
