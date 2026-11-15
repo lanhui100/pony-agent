@@ -122,7 +122,12 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
      因 transport 持 observer Arc 而**永不退出**——真死循环缺陷，已修）。
   ③ **CLI 宿主形态**：`spawn_for_cli` 按 `hint ∧ 可构造性` 装配 fs/terminal 并如实声明；CLI 无 turn 治理
      ⇒ permission 恒 None（Ask 恒 cancelled，stderr 诊断），不再假装支持。
-- **真机验收（2026-11-15）**：`opencode v2.2.7 acp` 端到端单轮通过（CLI 路径，Exit 0，
-  `turn:delta.text=="OK"`）；`agy 1.5.9` 本机未登录（`agy -p` 返回 `Authentication required` + OAuth URL），
-  其真机轮次待登录后补。配置面形状：`acp-agents.json` **根是数组**（不是 `{"agents": [...]}`）。
+- **真机验收（2026-11-15）**：
+  ① `opencode v2.2.7 acp`（绝对路径 `/home/dm/.opencode/bin/opencode`）端到端单轮通过（Exit 0，`turn:delta.text=="OK"`）；
+  ② `agy 1.5.9 acp` 端到端单轮通过 —— 但**必须带代理环境**（`source ~/.pony/proxy.env`）：agy 会直连
+    `daily-cloudcode-pa.googleapis.com` 的 IPv6 地址，本机 IPv6 出口被墙 ⇒ `session/new` 既不回结果也不回错误，
+    最终 `-32603 Failed to start Antigravity conversation`；带代理后 Exit 0，事件序
+    `reasoning delta ×2 → text "OK"`（同时证明 B162 实时流式在生产路径生效）。
+    **教训**：ACP 子进程环境白名单必须包含代理变量（当前经 MCP 白名单透传），否则外部 agent 自身出网失败会被误读为「协议不兼容」。
+  ③ 配置面形状：`acp-agents.json` **根是数组**（不是 `{"agents": [...]}`），写错报 `acp_config_parse: invalid type: map, expected a sequence`。
 - **人工验收缺口**：`opencode acp` 本机不可用（仅有 `agy`），端到端真机联调仍需人工跑一轮。
