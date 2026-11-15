@@ -776,150 +776,106 @@ fn test_should_bypass_proxy_external_uses_env_proxy() {
     assert!(!should_bypass_proxy("not a url"));
 }
 
-// ── 配置根隔离（Windows CI 修复）──────────────────────────────────────────────
+// B187：进程级配置根隔离 helper（`ConfigRootGuard` / `assert_config_root_isolated` /
+// `REGISTRY_ENV_LOCK` / `run_in_isolated_registry`）已删除。
 //
-// 产品侧配置根统一走 `dirs::config_dir()`（`app_settings.rs:193`、`config.rs:265`）：
-// - Linux/BSD：`$XDG_CONFIG_HOME`（其次 `$HOME/.config`）→ 设 XDG 即可重定向；
-// - macOS：`$HOME/Library/Application Support`（`$HOME` 生效，XDG 不生效）；
-// - **Windows：`SHGetKnownFolderPath(FOLDERID_RoamingAppData)`**（`dirs-6.0.0/src/win.rs:8`
-//   → `dirs-sys-0.5.0/src/lib.rs:150-178`），**完全不读任何环境变量**：
-//   `XDG_CONFIG_HOME` 无效，`%APPDATA%` 同样无效（已知文件夹路径由注册表/Shell 决定，
-//   改进程环境变量不会改变它；同类工程结论见 rtk-ai/rtk#3874："dirs::config_dir() 与
-//   data_local_dir() 都走 known folder API，忽略环境，LOCALAPPDATA/HOME 均无效果"）。
-//
-// 因此本文件原先「只设 `XDG_CONFIG_HOME`」的隔离方式在 Windows 上必然失效：配置根仍是真实
-// APPDATA（读空→回落 gateway，或读到真实注册表），这正是那两个用例只在 Linux 绿的根因；
-// 而「前一个用例持锁 panic 毒化 Mutex」只是级联放大（PoisonError）。
-//
-// 注意：**刻意不设 `%APPDATA%`**——(1) 对 known folder API 无效，属于安慰剂；
-// (2) 它会被产品里直接读 `APPDATA` 的路径看到（如 `graph.rs:1044-1046` 的兜底），
-// 在本进程并行测试间互相污染。Windows 上依赖隔离的用例改为「明确 ignore + 等价契约」
-// 覆盖（见 `test_resolve_active_provider_id_reads_default_registry`），不做假绿。
-struct ConfigRootGuard {
-    saved: Option<std::ffi::OsString>,
-}
+// 原因：它们靠改进程环境 `XDG_CONFIG_HOME` 重定向 `dirs::config_dir()`，依赖「测试窗口内没有
+// 并发线程解析配置根」——同二进制并行用例一旦在窗口内构造 `ProviderRegistryStore::new()`
+// 就会读到本用例的临时注册表，造成低概率互相污染（B187 偶发失败根因）。
+// 产品侧已有注入接缝 `TuiState::provider_registry_path`（`tui.rs:1523` 字段 /
+// `registry_store():1667`），测试改为直接注入注册表路径后**完全不碰进程环境**，
+// 因而跨平台一致（Windows 走 known folder API 这一点不再相关），也不需要 Windows ignore。
 
-impl ConfigRootGuard {
-    /// 把 `dirs::config_dir()` 指向 `dir/xdg-config`（仅在实际读取 XDG 的平台生效）。
-    fn isolate(dir: &std::path::Path) -> Self {
-        let saved = std::env::var_os("XDG_CONFIG_HOME");
-        let root = dir.join("xdg-config");
-        std::fs::create_dir_all(root.join("pony-agent")).expect("create isolated config root");
-        std::env::set_var("XDG_CONFIG_HOME", &root);
-        Self { saved }
-    }
-}
-
-impl Drop for ConfigRootGuard {
-    fn drop(&mut self) {
-        match self.saved.take() {
-            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-    }
-}
-
-// wave-35c：resolve_active_provider_id 三分支解析（with_path 临时注册表隔离）。
-// helper 内部用 ProviderRegistryStore::new()（dirs::config_dir），故用互斥锁串行化对进程级
-// 环境变量的切换，避免与并行测试互踩。
-static REGISTRY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// 取注册表环境锁，**容忍毒化**：单个用例 panic 后不应把后续用例级联炸成 PoisonError。
-/// 串行化本身保留（拿到的是毒化前那份 guard 的内部数据，语义等价）。
-fn registry_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    REGISTRY_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// 前置断言：本平台 `dirs::config_dir()` 确实被 `XDG_CONFIG_HOME` 重定向。
-///
-/// 目的：让「平台不支持 env 重定向」当场红在**前提**上（附可读诊断），而不是让后面的路径/注册表
-/// 断言以「读到别的目录」的形式给出难以定位的假红。Windows 上该断言必然失败，故依赖隔离的
-/// 用例在 Windows 上以 `#[cfg_attr(windows, ignore = ...)]` 明确跳过。
-fn assert_config_root_isolated(expected_root: &std::path::Path) {
-    let resolved = dirs::config_dir().expect("dirs::config_dir() must resolve");
-    let normalize = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    assert_eq!(
-        normalize(&resolved),
-        normalize(expected_root),
-        "前置条件失效：dirs::config_dir() 未随 XDG_CONFIG_HOME 重定向（解析到 {}）。\
-         该平台走 known folder API，不接受环境变量重定向；应改为注入 seam 而非隔离环境。",
-        resolved.display()
-    );
-}
-
-fn run_in_isolated_registry(dir: &std::path::Path, selected: Option<&str>, ids: &[&str]) -> Option<String> {
-    let _g = registry_env_lock();
-    let _root = ConfigRootGuard::isolate(dir);
-    assert_config_root_isolated(&dir.join("xdg-config"));
-
-    use pony_agent_core::agent::config::{ProviderConfigView, ProviderRegistryStore};
-    let store = ProviderRegistryStore::with_path(dir.join("xdg-config/pony-agent/providers.json"));
-    let mut view = store.load_view();
-    view.providers = ids.iter().map(|id| ProviderConfigView {
-        id: id.to_string(),
-        name: id.to_string(),
-        protocol: pony_agent_core::agent::provider::ProviderProtocol::OpenAiCompletions,
-        base_url: "http://127.0.0.1:1/v1".to_string(),
-        auth_type: pony_agent_core::agent::provider::ProviderAuthType::Auto,
-        api_key_env_var: format!("{id}_KEY"),
-        api_key_value: "k".to_string(),
-        api_key_present: true,
-        supported_protocols: vec![],
-        endpoints: vec![],
-        models: vec![],
-        selected_model_id: None,
-    }).collect();
-    view.selected_provider_id = selected.map(|s| s.to_string());
-    store.save_view(view).unwrap();
-
-    let result = tui::resolve_active_provider_id(&tui::TuiState::default());
-
-    result
-}
-
-/// 三分支解析：Windows 上无法把默认注册表重定向到临时目录（known folder API 不读环境，
-/// 见文件头 `ConfigRootGuard` 说明），故明确 ignore，改由
-/// `test_resolve_active_provider_id_reads_default_registry` 覆盖等价契约；不做假绿。
-#[cfg_attr(
-    windows,
-    ignore = "dirs::config_dir() 在 Windows 走 SHGetKnownFolderPath，不接受 XDG/APPDATA 进程内重定向；需产品侧给 resolve_active_provider_id 加注册表路径注入 seam（见 task 汇报）"
-)]
+// B187：三条分支改为**纯路径注入**（与 `test_resolve_active_provider_id_reads_default_registry`
+// 同款），不再改进程级 `XDG_CONFIG_HOME`：
+// - 原实现依赖「测试窗口内没有并发线程解析 `dirs::config_dir()`」；同二进制并行用例在窗口内
+//   构造 `ProviderRegistryStore::new()` 就会读到本用例的临时注册表 ⇒ 低概率互相污染（全量
+//   首跑偶发失败，48 轮压测 0 复现的低频 flake）。
+// - 现改为注入 `TuiState::provider_registry_path`（`tui.rs:1523` 字段，`registry_store():1667`
+//   消费），注册表读写全部落在显式路径上；**不碰进程环境**是根治手段，而不是加锁掩盖。
+// - 因此与平台无关：Windows 的 `dirs::config_dir()` 走 known folder API 不再相关，
+//   原有 `#[cfg_attr(windows, ignore = ...)]` 一并去掉。
 #[test]
 fn test_resolve_active_provider_three_branches() {
+    use pony_agent_core::agent::config::{ProviderConfigView, ProviderRegistryStore};
+
     let pid = std::process::id();
-    let mk = |tag: &str| std::env::temp_dir().join(format!("tui-resolve-{tag}-{pid}"));
-
-    let dir = mk("a"); let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
-    assert_eq!(run_in_isolated_registry(&dir, Some("beta"), &["alpha", "beta"]).as_deref(), Some("beta"));
+    let dir = std::env::temp_dir().join(format!("tui-resolve-path-{pid}"));
     let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let registry_path = dir.join("pony-agent").join("providers.json");
+    std::fs::create_dir_all(registry_path.parent().expect("parent")).expect("create registry dir");
 
-    let dir = mk("b"); let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
-    assert_eq!(run_in_isolated_registry(&dir, Some("ghost"), &["alpha", "beta"]).as_deref(), Some("alpha"));
-    let _ = std::fs::remove_dir_all(&dir);
-
-    // 分支3：无 providers.json → None（helper 的防御分支）。
-    // 产品语义说明：ProviderRegistryStore::load_storage 对缺失/空注册表会注入出厂默认
-    // provider（config.rs normalize_storage:829-832），故 None 在生产路径上不可达；
-    // 此处通过绕开 load_view 归一化的最小 JSON（空 providers + 非法 key 不行——normalize
-    // 同样兜底）仍不可构造。改测「缺失文件 → 回落首个出厂默认 provider」的可观测行为，
-    // 并保持 helper 的 None 防御分支由代码评审覆盖。
-    let dir = mk("c"); let _ = std::fs::remove_dir_all(&dir); std::fs::create_dir_all(&dir).unwrap();
-    std::fs::create_dir_all(dir.join("xdg-config/pony-agent")).unwrap();
-    std::fs::write(
-        dir.join("xdg-config/pony-agent/providers.json"),
-        String::from(r#"{"providers":[],"selectedProviderId":null}"#),
-    )
-    .unwrap();
-    let result = {
-        let _g = registry_env_lock();
-        let _root = ConfigRootGuard::isolate(&dir);
-        assert_config_root_isolated(&dir.join("xdg-config"));
-        tui::resolve_active_provider_id(&tui::TuiState::default())
+    let write_registry = |selected: Option<&str>, ids: &[&str]| {
+        let store = ProviderRegistryStore::with_path(registry_path.clone());
+        let mut view = store.load_view();
+        view.providers = ids
+            .iter()
+            .map(|id| ProviderConfigView {
+                id: (*id).to_string(),
+                name: (*id).to_string(),
+                protocol: pony_agent_core::agent::provider::ProviderProtocol::OpenAiCompletions,
+                base_url: "http://127.0.0.1:1/v1".to_string(),
+                auth_type: pony_agent_core::agent::provider::ProviderAuthType::Auto,
+                api_key_env_var: format!("{id}_KEY"),
+                api_key_value: "k".to_string(),
+                api_key_present: true,
+                supported_protocols: vec![],
+                endpoints: vec![],
+                models: vec![],
+                selected_model_id: None,
+            })
+            .collect();
+        view.selected_provider_id = selected.map(|value| value.to_string());
+        store.save_view(view).expect("save registry view");
     };
-    // 可观测行为：normalize_storage 注入出厂默认 → 返回 Some(首个默认 id)。
-    assert!(result.is_some(), "缺失注册表回落首个注入 provider: {result:?}");
+
+    // 分支 1：selected=beta 命中注册表选中项 ⇒ beta。
+    write_registry(Some("beta"), &["alpha", "beta"]);
+    let mut state = tui::TuiState::default();
+    state.provider_registry_path = Some(registry_path.clone());
+    assert_eq!(
+        tui::resolve_active_provider_id(&state).as_deref(),
+        Some("beta"),
+        "分支1：注册表 selected=beta 命中时必须返回 beta"
+    );
+
+    // 分支 2：selected=ghost 未命中 ⇒ 回落首个 provider（alpha）。
+    write_registry(Some("ghost"), &["alpha", "beta"]);
+    let mut state = tui::TuiState::default();
+    state.provider_registry_path = Some(registry_path.clone());
+    assert_eq!(
+        tui::resolve_active_provider_id(&state).as_deref(),
+        Some("alpha"),
+        "分支2：selected 未命中时必须回落首个 provider alpha"
+    );
+
+    // 分支 3：路径指向**不存在**的注册表文件。
+    // 等价性依据：`ProviderRegistryStore::load_view` 对缺失/空注册表会经 `normalize_storage`
+    // 注入出厂默认（`agent/config.rs:1470-1472 default_registry()`），这与「用户从未写 XDG
+    // 注册表」的生产行为一致；因此断言仍是 `is_some()`，并进一步断言返回 id ∈ 注入默认集合
+    // （直接从同一缺失路径 load_view 观测得到，不硬编码 id，断言强度不降）。
+    let missing_path = dir.join("pony-agent").join("missing-providers.json");
+    let injected_defaults: Vec<String> =
+        ProviderRegistryStore::with_path(missing_path.clone())
+            .load_view()
+            .providers
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect();
+    assert!(
+        !injected_defaults.is_empty(),
+        "B187 前置：缺失注册表必须注入出厂默认 provider，实际 {injected_defaults:?}"
+    );
+    let mut state = tui::TuiState::default();
+    state.provider_registry_path = Some(missing_path);
+    let resolved = tui::resolve_active_provider_id(&state)
+        .expect("分支3：缺失注册表时必须回落到注入的出厂默认 provider（normalize_storage）");
+    assert!(
+        injected_defaults.contains(&resolved),
+        "分支3 违约：返回 id 必须属于注入的出厂默认集合，实际 {resolved} / {injected_defaults:?}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -927,7 +883,7 @@ fn test_resolve_active_provider_three_branches() {
 // 兜底分支仅在注册表缺失该 provider 时使用。
 //
 // Windows 修复：本用例原先靠 `XDG_CONFIG_HOME` 把 `ProviderRegistryStore::new()` 的读路径
-// 指到临时目录，但 Windows 上 `dirs::config_dir()` 走 known folder API、不读环境（见文件头），
+// 指到临时目录，但 Windows 上 `dirs::config_dir()` 走 known folder API、不读环境（见上方 B187 注释），
 // 于是「写临时目录 / 读真实 APPDATA」错位 → 注册表查空 → 回落 gateway → 断言假红。
 // 本用例的断言对象是「解析器优先用注册表，而不是空则回落 gateway」，与"注册表从哪里解析到"
 // 无关；`DynamicProviderResolver` 本就以字段形式注入注册表，故直接注入 `with_path` 同一文件：
