@@ -112,6 +112,16 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
   ⑤ `terminal/create` 支持 `cwd`（绝对 + canonical + `is_dir`，绑定 workspace root 时须在 root 内）；
      env 键按 `split('=')` 归一化后查 deny 表（杜绝 `KEY=VALUE` 绕过）；读切片改为「先按 line/limit
      切、再对实际返回内容判 120KB 上限」。
+- **B161/B162/B176 收口决策（2026-11-15）**：
+  ① **权限询问走真治理链**：`DispatcherPermissionHandler` 注册 `PendingControlRequestKind::Approval`，
+     有界等待宿主 approve/cancel；句柄经 `DispatchContext.acp_permission`（`#[serde(skip)]`，非线缆字段）
+     由 `HostControlPlane::governed_dispatcher()` 注入 → `ToolExecutionContext` → `spawn_with_full_options`。
+     CAS 授权由宿主 `ControlRequestAuthorization::for_request(pending, answer)` 派生，**不预造**。
+  ② **update 实时**：`TurnEventSink` 无 `Send+Sync`，故实时性靠「旁路线程 + mpsc + 调用线程 recv_timeout
+     逐帧 emit」实现；终止条件用 `handle.is_finished()` + 结束前抽干队列（此前只等 `Disconnected`，
+     因 transport 持 observer Arc 而**永不退出**——真死循环缺陷，已修）。
+  ③ **CLI 宿主形态**：`spawn_for_cli` 按 `hint ∧ 可构造性` 装配 fs/terminal 并如实声明；CLI 无 turn 治理
+     ⇒ permission 恒 None（Ask 恒 cancelled，stderr 诊断），不再假装支持。
 - **真机验收（2026-11-15）**：`opencode v2.2.7 acp` 端到端单轮通过（CLI 路径，Exit 0，
   `turn:delta.text=="OK"`）；`agy 1.5.9` 本机未登录（`agy -p` 返回 `Authentication required` + OAuth URL），
   其真机轮次待登录后补。配置面形状：`acp-agents.json` **根是数组**（不是 `{"agents": [...]}`）。
