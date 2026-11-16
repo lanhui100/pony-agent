@@ -17,9 +17,12 @@ const FALLBACK_SUMMARY_MAX_CHARS: usize = 120;
 /// - **单行**：所有空白折叠为单空格，绝不产出换行；
 /// - **不含内部细节**：`error` 只用于 [`fallback_error_category`] 归类，原文**绝不进正文**；
 ///   URL / `elapsed=` / provider source / 堆栈一类技术串一律剥离（它们是 trace 的载体）；
+/// - **工具名只做不可见字符剥离 + 单行折叠**（见 [`single_line_identifier`]）：MCP 工具名本来就
+///   含 `.`/`/`（`mcp__server__tool.v2`、`fs/read`），走 summary 的 URL/路径 token 过滤会被整段
+///   丢弃，正文退化成「该工具」——那等于没点名，违背本函数的第一条组成要求；
 /// - 摘要按 [`FALLBACK_SUMMARY_MAX_CHARS`] 按 `char` 截断（不切 UTF-8 码点）。
 pub fn fallback_body_text(tool_name: &str, error: &str, summary: &str) -> String {
-    let scrubbed_tool = scrub_fallback_fragment(tool_name);
+    let scrubbed_tool = single_line_identifier(tool_name);
     let tool: &str = if scrubbed_tool.is_empty() {
         "该工具"
     } else {
@@ -95,6 +98,22 @@ fn is_plain_decimal(token: &str) -> bool {
     !body.is_empty()
         && body.chars().filter(|ch| *ch == '.').count() <= 1
         && body.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+/// A3/L3：把**结构化标识**（工具名）折叠成单行——剥离零宽/格式字符 + 空白折叠，
+/// **不做** token 级 URL/路径过滤。
+///
+/// 与 [`scrub_fallback_fragment`] 的分工是刻意的：工具名是「点名」用的标识，`. `/`/`_` 是
+/// 其正常语法（`mcp__server__tool.v2`、`fs/read`）；摘要才可能夹带 URL / 域名 / 计时串。
+/// 两处共用同一套 token 判据会互相误伤（要么丢工具名，要么放行摘要里的 host）。
+fn single_line_identifier(fragment: &str) -> String {
+    fragment
+        .chars()
+        .filter(|ch| !is_invisible_format_char(*ch))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// B221/A3：正文片段消毒——先剥离零宽格式字符，再丢弃承载内部细节的 token，折叠为单行。
@@ -240,5 +259,26 @@ mod tests {
         );
         assert!(text.contains("主机"), "无害摘要仍需保留：{text:?}");
         assert!(text.chars().count() <= 400, "压成单行后总长受限：{text:?}");
+    }
+
+    /// A3-4：含 `.` 的 MCP 工具名必须**原样点名**（路径/域名判据只作用于摘要）。
+    #[test]
+    fn dotted_mcp_tool_name_is_kept_verbatim() {
+        let text = fallback_body_text("mcp__server__tool.v2", "type=timeout+request", "");
+        assert_user_facing(&text);
+        assert!(
+            text.contains("mcp__server__tool.v2"),
+            "点号工具名必须逐字出现：{text:?}"
+        );
+        assert!(!text.contains("`该工具`"), "不得回落占位工具名：{text:?}");
+    }
+
+    /// A3-5：含 `/` 的工具名同样原样保留（`fs/read` 不得被当成路径片段丢弃）。
+    #[test]
+    fn slashed_tool_name_is_kept_verbatim() {
+        let text = fallback_body_text("fs/read", "boom", "");
+        assert_user_facing(&text);
+        assert!(text.contains("fs/read"), "斜杠工具名必须逐字出现：{text:?}");
+        assert!(!text.contains("`该工具`"), "不得回落占位工具名：{text:?}");
     }
 }

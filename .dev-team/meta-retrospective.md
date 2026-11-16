@@ -29,3 +29,10 @@
 2. **写域声明与衍生豁免显式化**：`start` 增加 `--allow-derivative`；波次内扩域走 `backlog.mjs edit <ID> --paths ... --reason ...`，让 `git show --name-only` 与 `touched_paths` 可机械对齐（本轮缺口正是缺这条命令）。
 3. **重测试隔离**：把「全量套件里再跑全量套件」的 V10-3/V10-4 迁到 `npm run verify:slow` 独立入口，或把嵌套超时提到实测上限 2×；否则每次 verify 都以 ~10 分钟换一个环境超时假红。
 4. **TUI 集成测试接缝分片**：47 个 `tests/tui_*.rs` 各自 `#[path]` 引入 12.9k 行 bin；建议抽共享 `tui_test_harness` 编译单元，把每 target 成本从「全量 bin」降到「harness + 用例」。
+
+## 5. 审查收口记录（L3 Join）
+
+- 首轮 L3（reviewed_commit c912def2）verdict=FAIL：1 BLOCKING（store 层幂等早退击穿冻结用例 ADR0123 T-A1b）+ 3 ADVISORY（turn_started_at 累计、事件物化覆盖检查点正文、兜底正文消毒可绕过）。
+- 处置：BLOCKING 走「显式契约变更（Owner 批准）」——在 ADR 2026-11-16-session-history-turn-id-idempotency 增补「契约变更登记」章节并把 T-A1b 断言迁移到新语义（保留首写、同轮两条）；3 条 ADVISORY 全部落地（TurnStarted 无条件重置锚点、`close_out_assistant_contents` 让 kind=Some 走调用方检查点、零宽/拆分/裸 host 消毒）。
+- 复审（reviewed_commit 7f3ebd2f）verdict=PASS，`dev-review-lint.py` Exit 0；新增 1 条不阻断 ADVISORY（消毒判据误伤含点/斜杠的工具名）已在本轮收口。
+- 教训：把「冻结用例被新契约击穿」当作**契约演进**处理（Owner 批准 + ADR 登记 + 用例迁移），而不是回退实现——回退等于保留一个已被现场证伪的契约。
