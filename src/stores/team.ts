@@ -26,6 +26,12 @@ const PROGRESS_GROUP_ORDER: Record<TeamTaskItem["status"], number> = {
   deleted: 3,
 };
 
+// 团队面板是「拉取式」可视化（后端无事件流）：面板挂载期间按固定间隔刷新，
+// 引用计数保证多个面板共用同一个定时器，卸载时全部释放。
+const TEAM_POLL_INTERVAL_MS = 2_000;
+let teamPollTimer: ReturnType<typeof setInterval> | null = null;
+let teamPollRefCount = 0;
+
 export const useTeamStore = defineStore("team", {
   state: (): TeamState => ({
     members: [],
@@ -63,6 +69,23 @@ export const useTeamStore = defineStore("team", {
   actions: {
     setSortMode(mode: TeamSortMode): void {
       this.sortMode = mode;
+    },
+
+    /// 面板挂载期间启动轮询（引用计数，多面板共用同一 timer）。
+    startPolling(): void {
+      teamPollRefCount += 1;
+      if (teamPollTimer !== null) return;
+      teamPollTimer = setInterval(() => {
+        void this.fetchTeamOverview();
+      }, TEAM_POLL_INTERVAL_MS);
+    },
+
+    /// 面板卸载时释放一次引用；归零后停止轮询。
+    stopPolling(): void {
+      teamPollRefCount = Math.max(0, teamPollRefCount - 1);
+      if (teamPollRefCount > 0 || teamPollTimer === null) return;
+      clearInterval(teamPollTimer);
+      teamPollTimer = null;
     },
 
     async fetchTeamOverview(): Promise<void> {

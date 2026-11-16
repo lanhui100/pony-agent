@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, onUnmounted } from "vue";
 import { ChevronRight, Users } from "lucide-vue-next";
 import { useTeamStore } from "@/stores/team";
 import { shouldUseTeamPreview, TEAM_PREVIEW_MEMBERS } from "@/components/team/team-preview-fixtures";
@@ -35,9 +35,12 @@ function memberDotClass(status: TeammateStatus) {
 }
 
 onMounted(() => {
-  // B098/B105「UI 状态恢复」尚未实现：e3bfca93 只落了本调用而无 resetState 定义，
-  // 运行期会抛 ReferenceError 打断挂载。此处按「挂载即初始态」处理，语义与未实现一致。
   void teamStore.fetchTeamOverview();
+  teamStore.startPolling();
+});
+
+onUnmounted(() => {
+  teamStore.stopPolling();
 });
 </script>
 

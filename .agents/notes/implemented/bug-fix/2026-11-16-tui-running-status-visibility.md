@@ -54,5 +54,27 @@ Status: implemented
 
 ## 影响与验证
 
-- 单测：`cargo test -p pony-agent-core --bin pony running_status_visibility`
-- 回归面：`cargo check -p pony-agent-core --all-targets`（`bin/tui.rs` 为大文件，改动集中在两个纯函数与一个 `if`）
+- 单测：`cargo test -p pony-agent-core --bin pony running_status_visibility`（10 例，含 4 例时钟驱动门）
+- 回归面：`cargo check -p pony-agent-core --all-targets`（`bin/tui.rs` 为大文件，改动集中在三个纯函数与两个 `if`）
+
+## 补充（2026-11-16 收口）：驱动门必须与渲染门同源
+
+首版修复只改了**渲染门**，主循环节拍仍是 `if (state.is_streaming || awaiting_answer)`。这是同一缺陷的第二个真源：`is_streaming` 未置位的续轮入口会把状态行画出来，但 `spinner_tick` 与 `elapsed_label` 不再推进（无 dirty ⇒ 不重绘），用户看到的是「秒数定格」的假进行中——与没有这一行同样会被读成卡死。
+
+- `bin/tui.rs` 新增 `should_drive_running_clock(state, awaiting_answer) = awaiting_answer || should_render_running_status(state)`，节拍条件改为它；`is_streaming` 只保留在 `tick_ms`（160ms 流式 / 450ms 静默段）这一处频率选择上，不再充当门。
+- 契约测试补 4 例：无流式的续轮入口要驱动、工具执行期无流式要驱动、终态空转、Ask 等待期独立驱动。
+- 登记为 `backlog:B210`（B197 的残余缺口，独立成条而不改写已闭环的 B197）。
+
+## 对照 deepseek harness 的复核（含对首版结论的纠偏）
+
+| 维度 | dsh 事实（本仓路径） | 我们的实现 | 判定 |
+|---|---|---|---|
+| 挂载条件 | `ChatFlow.tsx:60` `running ? [<RunningStatus/>] : []`，`running` 来自 `useSession(snapshot => snapshot.running)`，即 `ui-session/index.ts` 的 host `api-session/status` 事件 | `should_render_running_status(state)`，由 `RuntimeMode` 正典派生 | 等价（都以「运行态」为唯一真源，不认流式增量） |
+| 计时驱动 | `RunningStatus.tsx` 自带 `setInterval(..., LIVE_RUN_CLOCK_INTERVAL_MS=1000)`，与 React 消息渲染解耦 | 主循环帧节拍驱动（本次修正为运行态门） | **首版漏项**：只改渲染门会留下定格秒数，已由 `B210` 闭合 |
+| 文案 | `chat.deepDivingFor`「深度求索中，用时 {duration} ···」，`Math.max(1000, now - startTime)`；`startTime` 缺失时退化为无时长文案 | `状态词 + format_elapsed_seconds`；`turn_started_at` 缺失时只出状态词（`elapsed_label` 返回空串） | 等价（含「无起点就不编时长」的退化路径） |
+| 重试进度 | 无 per-request 重试文案 | 「正在重试（n/N）…」取自真实 `RetryNotice` | 我们更精确，保留 |
+| 审批等待 | host 仍 running ⇒ 尾行继续显示 | `WaitingApproval` 不渲染该行（Ask 面板承载） | 刻意差异：面板已占焦点，底部再挂一行属噪音；若将来需要，改 `should_render_running_status` 一处并补例 |
+| 停滞提示 | 无独立 stall 文案，仅靠时长 + shimmer | 同上（时长 + spinner 帧） | 一致；「已等待 N 秒」被首版 Alternatives E 否决，本次复核维持 |
+
+纠偏结论：首版 ADR 的「差异只剩文案与动画」低估了时钟独立性——dsh 的时钟不依赖任何上层事件，而我们的时钟依赖主循环是否 dirty。它不是文案差异，是**反馈能否持续成立**的差异，故单列 `B210` 并在本次一并闭合。
+

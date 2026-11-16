@@ -175,6 +175,19 @@ reviewed_at: "2026-11-09"
 #     不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+# B197/B210（ADR 2026-11-16-tui-running-status-visibility）归属说明：TUI 进行中状态行恒显 + 时钟门同源。
+# (1) 变更面全在本地呈现层（`crates/pony-agent-core/src/bin/tui.rs`）：新增
+#     `should_render_running_status` / `should_drive_running_clock` 两个纯判定入口，并把它接到
+#     `ui()` 的正文末尾状态行与主循环既有帧节拍上；无新增对外接口、无网络出口、无新增线程 /
+#     后台任务、无 LLM 调用、无持久化格式变更（节拍沿用既有主循环，`is_streaming` 仅剩
+#     `tick_ms` 频率选择）。
+# (2) 不新增遥测出口：可见信号只有终端文本（状态词 + 已耗时），本地取证仍沿用既有
+#     stderr → `~/.pony-agent/tui-logs/tui-runtime.log`；tracing / issues 落点与判定不变；
+#     metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
+# (3) 行为收口（测试层）：`bin/tui/tests/running_status_visibility_tests.rs`（10 例，含 4 例时钟驱动门）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
 # B203（ADR 2026-11-16-tui-scrollbar-mouse-drag）归属说明：TUI 滚动条补鼠标命中与拖拽。
 # 纯输入/呈现层变更（`crates/pony-agent-core/src/bin/tui.rs`）：新增 `scrollbar_offset_for_row` /
 # `scrollbar_hit` / `apply_scrollbar_row` 三个纯逻辑入口，消费的是既有的 crossterm `Event::Mouse`
@@ -182,6 +195,16 @@ reviewed_at: "2026-11-09"
 # `auto_scroll` 两个既有内存字段；无网络 IO、无 LLM 调用、无新增对外接口或持久化格式，
 # 也不新增遥测出口；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无
 # `/metrics`、pull 模型不成立），tracing / issues 判定与落点不变
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
+# 团队面板轮询（ADR 2026-11-16-team-panel-live-polling）归属说明：看板/花名册改为挂载期轮询。
+# (1) 变更面纯前端 + 既有只读 IPC（`src/stores/team.ts` 的 `startPolling` / `stopPolling`，
+#     调 `team_get_roster` / `team_get_tasks`）：新增的是**前端定时器**，每 2s 两次本地进程内
+#     invoke，面板全部卸载即停（引用计数归零）；无网络出口、无新后端命令、无新事件通道、
+#     无落盘格式变更、无 LLM 调用。
+# (2) 不新增遥测出口：tracing / issues 落点与判定不变；metrics / logs 维持结构性 N-A
+#     （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 

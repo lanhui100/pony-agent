@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted } from "vue";
 import { ChevronRight, ListChecks } from "lucide-vue-next";
 import { useTeamStore } from "@/stores/team";
 import {
@@ -38,6 +38,15 @@ function taskDotClass(status: TeamTaskItem["status"]) {
       return "bg-stone-300";
   }
 }
+
+onMounted(() => {
+  void teamStore.fetchTeamOverview();
+  teamStore.startPolling();
+});
+
+onUnmounted(() => {
+  teamStore.stopPolling();
+});
 
 function taskStatusLabel(status: TeamTaskItem["status"]) {
   switch (status) {
