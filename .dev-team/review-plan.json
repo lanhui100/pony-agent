@@ -2,89 +2,80 @@
   "schema_version": 2,
   "reviewer": {
     "kind": "subagent",
-    "session_id": "gate1-acp-r4-4368",
+    "session_id": "plan-audit-b218-b223",
     "fresh_context": true
   },
-  "executed_by": "gate1-acp-r4-4368",
-  "reviewed_commit": "be302170faed1fa728bf29f76e001cea3c318d6c",
-  "verdict": "PASS",
+  "executed_by": "plan-audit-b218-b223",
+  "reviewed_commit": "d821f003fd9fe4058f3e2e89afd0cf75d7065ff1",
+  "attestation": {
+    "self_signed": true,
+    "note": "方案对抗审核（只读）：仅凭 git/backlog/测试实跑取证，未参与本波任何写码或测试冻结；FAIL 判定不依赖自签，故 self_signed=true 不影响独立性主张"
+  },
+  "verdict": "FAIL",
   "audited_scopes": [
-    "crates/pony-agent-core/src/acp/",
-    "crates/pony-agent-core/src/agent/tools/",
-    "crates/pony-agent-core/src/bin/cli.rs",
-    "crates/pony-agent-core/tests/",
-    "docs/architecture/acp-client-integration.md",
-    ".dev-team/contract-matrix-acp-p0.md",
-    ".dev-team/contract-matrix-acp-p1.md",
-    ".agents/notes/implemented/architecture/2026-11-14-acp-client-external-agent-integration.md",
-    "docs/observability.yaml"
+    "backlog/tasks.jsonl",
+    "backlog/archive/tasks-2026.jsonl",
+    "scripts/file-size-baseline.json",
+    "docs/observability.yaml",
+    "crates/pony-agent-core/tests",
+    "crates/pony-agent-core/src/bin/tui/tests"
   ],
   "findings": [
     {
-      "file": "crates/pony-agent-core/src/agent/tools/orchestration.rs",
-      "line": 165,
-      "rule": "CORRECTNESS",
-      "severity": "ADVISORY",
-      "claim": "`timeoutMs=0` 的入参校验发生在 `AcpAgentSession::spawn` 之后（先 spawn/session/new 再在 Some(0) 分支 close 并返回），因此「0 => invalid_arguments」只在 agent 可启动时成立：agent 命令不可执行时同一入参返回 `acp_spawn_failed`，且一个纯输入错误也真的起了一次子进程（实测 23ms）。建议把 timeoutMs 校验前移到 spawn 之前，让错误码与 agent 可用性解耦（fail-closed 未破，故非阻断）。",
-      "counterexample_cmd": "/home/dm/pony-agent/target/debug/gate1-r4 zero-missing 6.500  # 实跑：CASE=zero-missing-agent status=error code=acp_spawn_failed elapsed_ms=0；对照 /home/dm/pony-agent/target/debug/gate1-r4 zero 6.500 → status=error code=invalid_arguments elapsed_ms=23"
+      "file": "backlog/tasks.jsonl",
+      "line": 16,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "claim": "B199（provider::followup::local_fallback_masquerades_as_completed，status=todo）与 B219（runtime::turn_end::degraded_fallback，status=done）是同一缺陷同一代码面：两者取证同为会话 pa_01a1df2f 的 local_tool_followup_fallback_response + 同轮 turn_end reason=completed；B219 的修法（fallback_reason 非空 ⇒ reason=Degraded、投影 kind=Interrupted 复用检查点真源）正是 B199『不得伪装成 assistant，走 kind=Interrupted + 检查点 + 可续跑』的交付物，b7ef1da7 已落地且验收 4 passed。但 B199 未去重闭环、也未写承接（对比同波 b3dc49c6 对 B215→B218 的显式去重做法），账本出现『同一缺陷一边 done 一边 todo』的双真值，下一波按 P1 领租会重复修码并二次改动 turn_persist/projection。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'provider::followup::local_fallback_masquerades_as_completed' backlog/tasks.jsonl | cut -c1-140 && git show HEAD:backlog/archive/tasks-2026.jsonl | grep -n 'runtime::turn_end::degraded_fallback' | cut -c1-140 && git show b7ef1da7 -- crates/pony-agent-core/src/agent/runtime/turn_persist.rs | grep -c 'HistoryMessageKind::Interrupted'"
     },
     {
-      "file": "crates/pony-agent-core/tests/acp_p1_blockers.rs",
-      "line": 625,
+      "file": "backlog/archive/tasks-2026.jsonl",
+      "line": 139,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "claim": "实现提交 b7ef1da7 越出 B219/B221 各自声明的 touched_paths：B219 声明 6 条、B221 声明 1 条（provider/mod.rs），实际改动 14 个文件（13 个 .rs + 1 篇 ADR），未声明的 .rs 有 7 条——新增模块 agent/provider/fallback_body.rs（161 行）、agent/runtime/turn_stream.rs、agent/runtime/turn_sync.rs、agent/session/sqlite_session.rs、agent/control_plane/mod.rs，以及两个测试模块 agent/runtime/tests.rs、agent/session/tests.rs。写域声明是并发租约的唯一判据，声明不准意味着本波『正交』是在错误的文件集合上验证的（B222/B223 的 lane 同样写 agent/session/*，只是恰好没撞上）；且 runtime/tests.rs 里既有断言被实施者从 assert!(contains(..)) 反写为 assert!(!contains(..))，测试面改动未登记。对照：13c9a35e（B218+B220）与 18394ecd（B222+B223）与声明写域一致，问题只在这一条合并提交。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show --name-only --format='' b7ef1da7 && git show HEAD:backlog/archive/tasks-2026.jsonl | grep -E '\"id\":\"(B219|B221)\"' | grep -oE '\"touched_paths\":\\[[^]]*\\]'"
+    },
+    {
+      "file": "backlog/tasks.jsonl",
+      "line": 15,
       "rule": "CONTRACT_BREAK",
       "severity": "ADVISORY",
-      "claim": "P1-14 只机械守护「缺省预算不受 5s 硬顶」这一条；工具入口的显式预算面（timeoutMs=1000 ⇒ acp_timeout、timeoutMs=0 ⇒ invalid_arguments）与 CLI `--timeout-secs 0` ⇒ Exit 2 均无冻结用例（P1-12 只跑 30s/1s 两个值，acp_p1_blockers 全文无 timeoutMs=0 断言）。三条行为经本审判独立实测正确，但缺机械守护，回归时会静默漂移。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'timeoutMs\": 0\\|\"0\"' crates/pony-agent-core/tests/acp_p1_blockers.rs crates/pony-agent-core/tests/acp_client_contract.rs  # 空输出 ⇒ 无断言；行为仅靠 code review"
+      "claim": "B198（provider::followup::stream_fallback_silent_window，todo）与 B220（tui::status_line::upstream_stall_hint，done）在同一症状面重叠：B198 现场之一『流式读空闲预算内无心跳、界面只有生成中』已被 B220 的 5s/15s stall_hint 覆盖；B198 的剩余增量（stream→sync→fallback 阶段机、按最近字节/keepalive 计空闲而非墙钟）确未落地，故『留 todo』成立，但账本未记录承接关系与剩余范围，后续实施者易与 B220 已交付的静默提示重复设计。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'stream_fallback_silent_window' backlog/tasks.jsonl | cut -c1-140 && git show HEAD:backlog/archive/tasks-2026.jsonl | grep -n 'upstream_stall_hint' | cut -c1-140 && grep -n 'fn stall_hint' crates/pony-agent-core/src/bin/tui/status_dwell.rs"
     },
     {
-      "file": "crates/pony-agent-core/src/acp/session.rs",
-      "line": 299,
-      "rule": "CORRECTNESS",
-      "severity": "ADVISORY",
-      "claim": "取消已触发（宿主令牌在 600ms 置位、session 已发 session/cancel）但外部 agent 仍回 `stopReason=end_turn` 时，`prompt()` 走 `Ok(response) => reduce_stop_reason` 分支，取消归因只覆盖 Err 分支（306-319）与入口早检（246），于是本轮归约成 `status=ok`（实测 3128ms / status=ok / stopReason=end_turn）。生产治理路径被 dispatcher `finalize_execution` 的 `_ if turn_cancelled => cancelled`（dispatcher.rs:1554-1557）兜住，故只影响直接调 `ToolRouter::execute_with_context` 的消费者（测试/遗留路径）；建议在 Ok 分支也做 `cancel_observed` 归因，避免两层口径不一致。",
-      "counterexample_cmd": "/home/dm/pony-agent/target/debug/gate1-r4 cancel-race 3.000  # 实跑：CASE=cancel-race status=ok elapsed_ms=3128（宿主令牌 600ms 取消）"
-    },
-    {
-      "file": "crates/pony-agent-core/src/acp/session.rs",
-      "line": 207,
+      "file": "backlog/tasks.jsonl",
+      "line": 17,
       "rule": "CONTRACT_BREAK",
       "severity": "ADVISORY",
-      "claim": "反回归锚点漂移/自相矛盾：`set_turn_budget` 文档仍写「默认值 = ACP_REQUEST_TIMEOUT（5000ms）」——这正是被固化的旧口径（三入口现总是注入预算，缺省 120s）；`.dev-team/contract-matrix-acp-p1.md` §5 的行号与实测不符（写 session.rs:227/259/282，实测 prompt=231 / scope.spawn=265 / sleep=280；写「cancel() 181/200」，实测 cancel() 在 326，181/200 是 local_cancel 字段与初始化）。文档行号是审查者的定位入口，失准会让下一轮复核误判代码未改。",
-      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'pub fn prompt(\\|scope.spawn\\|sleep(CANCEL_POLL_INTERVAL)\\|local_cancel\\|pub fn cancel(' crates/pony-agent-core/src/acp/session.rs"
+      "claim": "B200（session::append_turn::duplicate_user_message，todo）与 B222 同代码面同现场：B200 取证引用的两行日志（append_turn: no turn-scoped events ... falling back to caller text / history_rebuilt_from_turn_events）与 B222 描述逐字相同；B222 已加 history_contains_turn 写路径幂等闸 + 重建按 turn_id 去重，功能上很可能已覆盖 B200，但账本未做去重判定，也未记录『append_turn 在无 turn 事件时是否仍与事件投影并存』这一残余分支，B200 的 P2 租约随时会被重复领取。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && grep -n 'session::append_turn::duplicate_user_message' backlog/tasks.jsonl | cut -c1-140 && grep -n 'history_contains_turn' crates/pony-agent-core/src/agent/session/store.rs crates/pony-agent-core/src/agent/session/history.rs | head -4"
+    },
+    {
+      "file": "docs/observability.yaml",
+      "line": 223,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "claim": "13c9a35e 追加的四维归属块（B218–B221）与实际落点不符：(1c) 写兜底正文落点 `agent/provider/mod.rs`，实际 B221 的文案分层整体搬进新模块 `agent/provider/fallback_body.rs`（161 行，mod.rs 只剩调用改造）；(1b) 的终态记账落点漏列真正做判定的 agent/runtime/turn_sync.rs、turn_stream.rs 与 agent/session/sqlite_session.rs；(1) 声称『变更面（三块）』而 b7ef1da7 实改 14 个文件。另外 18394ecd（B222 会话历史幂等 / B223 沙箱错误契约）整卡没有四维归属与收口点声明，同波两张卡落在声明盲区。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && sed -n '223,225p' docs/observability.yaml && git show --name-only --format='' b7ef1da7 | grep -E 'fallback_body|turn_sync|turn_stream|sqlite_session' && git show --name-only --format='' 18394ecd"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/tests/running_status_visibility_tests.rs",
+      "line": 191,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "claim": "B218 与 B220 两卡验收测试共用同一物理文件：冻结提交 6dae287b（wave1，B218）写入该文件，随后 fe3c647d（wave2，B220）继续写同一文件（+168/−0）。按卡冻结在文件粒度不可分离——后一 lane 可改到前一卡已冻结的 b218_* 断言而门禁无法区分；本轮实测 0 删除/0 改写（无篡改），但分权边界靠自觉而非机器。B219/B221/B222/B223 的四份 tests/*.rs 各自独立，未见同类问题。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show --numstat --format='%h' 6dae287b fe3c647d -- crates/pony-agent-core/src/bin/tui/tests/running_status_visibility_tests.rs"
+    },
+    {
+      "file": "backlog/archive/tasks-2026.jsonl",
+      "line": 139,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "claim": "收据不可复现：B219 evidence 写『cargo test -p pony-agent-core --lib = 1592 passed / 0 failed』，但在 d821f003 上实跑全量 lib 为 1591 passed / 1 failed（agent::runtime::tests::start_turn_stream_fail_turn_policy_emits_failed_terminal_with_hook_evidence，panic 于 runtime/tests.rs:886 mock server 有界 join 超时）；该用例单跑 ok（0.14s），属全量并发下的既有 flaky，非本波功能回归。影响的是收据本身：本波六卡『机器收据』里的这条数字在 HEAD 不可复现，全量门禁当前为红，下一位审核者无法以该收据作为物理凭证。",
+      "counterexample_cmd": "cd /home/dm/pony-agent && cargo test -p pony-agent-core --lib 2>&1 | grep -E '^test result|panicked at crates/pony-agent-core/src/agent/runtime/tests.rs:886' | tail -4"
     }
-  ],
-  "prior_round_disposition": {
-    "r3_blocking": {
-      "id": "TIMEOUT: 工具入口不传 timeoutMs 时仍被 5000ms 硬顶（orchestration.rs:161 无 else 分支）",
-      "status": "CLOSED",
-      "evidence": "真实 ToolRouter::execute_with_context 调 acp_delegate 不带 timeoutMs：status=ok，elapsed_ms=6532（fixture 延迟 baseline+1500ms=6.5s，>5s）⇒ 既非 5s 砍断也非秒回假绿；同一 harness 以 delay=125s 复跑 ⇒ status=error/acp_timeout，elapsed_ms=120536，报错文本「超过 120s 未响应」⇒ 缺省预算确为 120s（有限、非 5s、非无限）。代码面：orchestration.rs:178 无条件 set_turn_budget；names.rs:207 / cli.rs:2251 / orchestration.rs:176 均引用 acp/mod.rs:30 ACP_DEFAULT_TURN_BUDGET；ACP 面除该常量外无 120s 字面量（names.rs:201 的 120_000 属 subagent/workflow，不在 ACP 面）。"
-    },
-    "code_commit_reviewed": "de3f7a5ed7644ce1ae2bd62edbc9aee26b90c355（HEAD be302170 为其上 docs-only 提交：契约矩阵 §5 + ADR fix-round 决策，无代码变更）"
-  },
-  "executed_evidence": {
-    "independent_harness": {
-      "what": "自建 /tmp/gate1-r4（path 依赖 pony-agent-core，不落地任何仓库文件）直调 ToolRouter::execute_with_context，XDG_CONFIG_HOME 隔离 acp-agents.json，fixture=tests/fixtures/acp_fake_agent.sh slow_prompt",
-      "cases": [
-        "default(no timeoutMs) delay=6.5s ⇒ status=ok elapsed=6532ms updates=1 stopReason=end_turn",
-        "default(no timeoutMs) delay=125s ⇒ status=error code=acp_timeout elapsed=120536ms（『超过 120s 未响应』）",
-        "timeoutMs=1000 delay=6.5s ⇒ status=error code=acp_timeout elapsed=1518ms",
-        "timeoutMs=0 delay=6.5s ⇒ status=error code=invalid_arguments elapsed=23ms",
-        "timeoutMs=0 + 不可启动 agent ⇒ status=error code=acp_spawn_failed（见 finding 1）",
-        "宿主令牌 600ms 取消 + delay=3s ⇒ status=ok elapsed=3128ms（见 finding 3）"
-      ]
-    },
-    "cli_zero_budget": "HOME/XDG 隔离后 `target/debug/ponycli acp --agent fake -p hi --timeout-secs 0` ⇒ EXIT=2，stderr「--timeout-secs 必须 ≥ 1（0 不是合法预算；缺省预算请省略该参数）」；`--help` ACP 段文本「(1..=86400)」与之自洽（注：headless 段的 `--timeout-secs <n>` 自述 0..=86400，属另一模式既有句柄，未在本轮变更）。",
-    "regression": "cargo test -p pony-agent-core --no-fail-fast --test acp_p1_blockers --test acp_client_contract --test acp_host_surface --test acp_p0_acceptance --test acp_p0_adversarial --test wave4_4_acceptance --test tool_surface_singularity --test mcp_channel_closure ⇒ CARGO_EXIT=0；8 个 target 合计 90 passed / 0 failed（acp_p1_blockers 6 / acp_client_contract 11 / acp_host_surface 5 / acp_p0_acceptance 19 / acp_p0_adversarial 7 / wave4_4 3 / tool_surface_singularity 23 / mcp_channel_closure 16）。注：首轮以 `| tail -60` 取尾部会掩盖 cargo 退出码，已改为落盘全日志重跑取值。",
-    "gates": {
-      "npm run cargo:check:shared": "EXIT=0（Finished dev profile in 0.51s）",
-      "npm run size:check": "EXIT=0（0 new violation / 61 over limit / 61 grandfathered / 0 shrunken）",
-      "npm run adr:check": "EXIT=0（verify-note 全部通过 + 117 条归档件 sha256 一致）"
-    },
-    "red_phase": ".dev-team/acp-p1-blockers-red.log RUN 4 记录 p1_14 FAILED：status=error/acp_timeout「超过 5s 未响应」duration_ms=5521；RUN 5（修复后）p1_14 ok ⇒ 『先红后绿』有物理红相，非事后补绿。",
-    "single_source_grep": "grep -rn 'ACP_DEFAULT_TURN_BUDGET\\|from_secs(120)\\|120_000' 在 ACP 面仅命中 acp/mod.rs:30（唯一字面量）与 names.rs:207 / cli.rs:2251 / orchestration.rs:176 三处引用；names.rs:201 的 120_000 属 TOOL_SUBAGENT|TOOL_WORKFLOW，非 ACP 面。",
-    "fix_round_risk_scan": "预算与 CANCEL_POLL_INTERVAL(100ms) 交互：轮询仅在 prompt 未完成时 sleep，预算 <1 tick 也由 client.prompt 自己的 deadline 裁决，无抢占式 bug；local_cancel 粘滞：工具入口每调用新建 session 并 close，跨调用无粘滞（CLI resume 路径不进入 prompt）；dispatcher 的 BudgetLedger 120s 只在 preflight check_deadline，不与 session 预算争抢（无双超时竞态）。"
-  },
-  "attestation": {
-    "self_signed": false
-  }
+  ]
 }

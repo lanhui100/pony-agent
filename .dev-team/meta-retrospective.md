@@ -1,63 +1,31 @@
-# 元复盘 · wave-acp-client-p0-p2（ACP 外部 Agent 接入，B149/B150/B151）
+# 元复盘：B218–B223 状态行/降级终态/会话幂等波次（2026-11-17）
 
-> 复盘对象：本次 Agent Team 的**协作元框架与组织协议**，不是业务代码细节。
-> 波次：acp-client-p0-p2（tier C，基线 f4146970）。成员：Lead + protocol-agent + test-agent + executor；审查以 fresh-context subagent 挂载（Gate-1 / Gate-2）。
+> 复盘对象：本次 Agent Team 的协作元框架与组织协议，不是业务代码细节。
+> 波次：B218–B223（tier B，基线 0489b4c6 之后的实现窗口）。成员：Lead + test-agent + exec-tui + exec-core；审查以 fresh-context subagent 挂载（方案对抗 / Join 代码审查）。
 
 ## 1. 通信拓扑与信噪比（Topology & Noise）
 
-- **拓扑**：3 名常驻 teammate（协议特派员 / 独立测试者 / 战术实施者）+ 2 路按需 subagent 审查，常驻 4 人 ≤ 8 上限。角色边界基本成立：空桩/契约由 protocol-agent 落盘、验收测试由 test-agent 独占写权、业务实现由 executor 独占。
-- **信噪比**：回报统一要求 ≤15 行且带 `path:line` + 机器 Exit Code，实际落在 6~14 行、无过程性吹捧；两次审查收据走严苛 JSON（`schema_version=2` + `attestation.self_signed=false`），`dev-review-lint.py` 均 Exit 0。
-- **真实损耗**：executor 前两轮**空转失败**（一次 claim 后无落盘、一次读完 800 行测试后上下文压垮），根因是「一个 task = client.rs + session.rs + orchestration.rs 三文件 + 800 行测试」的超大切片；拆成「只改 client.rs」后当轮产出 484 行并附收据。test-agent 亦出现 2 次 turn 失败（丢失 prep 结果后重做）。
-- **改进**：单轮切片上限应写成**机械阈值**（≤1 个文件族、预期改动 ≤400 行、必读材料 ≤300 行），而非依赖 Lead 临场判断。
+- **拓扑**：Lead（编排/冻结/门禁/裁决）+ test-agent（独立测试者，3 波红相）+ 2 条常驻 Executor lane（exec-tui：B218/B220/B223；exec-core：B219/B221/B222）+ 2 个 Subagent 审查者，常驻名册 4 人（≤8），审查不占槽位。
+- **推进节奏**：每波「红相冻结提交 → 实现 → 定向测试」。3 次红相提交（6dae287b/fe3c647d/0489b4c6）均早于对应实现提交（13c9a35e/b7ef1da7/18394ecd），git 写主唯一（Lead），Executor 只留工作树、零 commit。
+- **信噪比**：Executor 报告统一为「符号 + 行号 + 真实 exit code + 未接线项」，无吹捧；Lead 把三次只读侦察（provider/tui/session+sandbox）下沉为 Subagent 执行，主代理只保留裁决所需事实。
+- **真实损耗**：`#[path]` 引入 12.9k 行 `bin/tui.rs` 使 5 个 TUI 集成 target 各耗 200–400s；全量 `--lib` 单次 210s、前端全量单测 15min。这是既有成本结构，对策是「定向测试由 Executor 跑、全量由 Lead 在栅栏跑一次」，本轮未出现重复全量跑。
 
 ## 2. 门禁穿透与误杀率（Gate Penetration）
 
-- **有效拦截（本轮最大价值）**：红相在 3 个波次各锚定一次（P0 26 用例 / P1 14 用例 / P2 5 用例），跨轮冻结未被实现者改写；Gate-1 与 Gate-2 **各自独立**抓到同一条真缺陷——`session/prompt` 被 `ACP_REQUEST_TIMEOUT=5000` 硬顶，使 `timeoutMs`/`--timeout-secs`/执行策略全部不可兑现（真实 agent 一轮 >5s 必失败）；Gate-1 另抓到「取消令牌未联动，`stop_turn` 杀不掉外部 agent」。两条若漏放，交付即「测试全绿但生产不可用」。
-- **穿透（漏网）**：`npm run verify` **不跑 Rust 集成测试**（仅 `cargo:check:shared`），因此工具面 38→39/45→46 引发 4 份冻结契约测试（6 用例）变红时 verify 仍 Exit 0；该回归由 Gate-2 的 Q6 反例发现。这是**结构性门禁缺口**，非个案。
-- **误杀/噪音**：Gate-1 报 8 条 ADVISORY、Gate-2 报 5 条，复核后无一条属误杀（均有 path:line）；5 条转 backlog（B164~B168），2 条当场修复（exit code 映射、dead code），1 条改文档（observability 曾声明不存在的 `acp.session` span）。
-- **时序违规（自证）**：`review-plan.json` 语义属**实施前**门禁，本轮实际在实施完成后执行（首轮收据 reviewed_commit=b61682e1）。收据合法但时序失真，须在下一波纠正，否则「方案冻结」形同虚设。
+- **有效拦截**：①红相阶段 10 条编译错误精确指向缺失契约符号；B222 红相为**断言红**（user 2≠1），拒绝「编译失败冒充红相」；②`file-size` 门在实施中途拦下 4 条新增越界（provider/mod.rs 7116>6975、store.rs fn 210>206、control_plane fn 267>265、runtime/tests.rs 13898>13894），迫使把 B221 家族拆成独立模块 `provider/fallback_body.rs`，属正向收敛；③`contract:check` 复核 TurnStreamEvent Rust/TS 39/39 键无漂移；④`audit-diff` D1 拦住「改声明未显式批准」，提交带 `[decl-change-approved]` 后复跑 PASS。
+- **误杀/环境假红**：①`npm run verify` 的 T7-PONYGO-OB2-GATE 在全量并发下偶发 exit=3（audit-diff 判「证据不可得」），单跑稳定 PASS；②V10-3/V10-4 是「全量套件里再跑一遍全量套件」，嵌套 2 worker 实测 608s 撞 600s 上限而失败，属既有环境约束（改前 verify 同样失败）；③`runtime/tests.rs:886` mock server join 曾在一次并行跑中 flaky（单跑 PASS；Lead 全量跑 1592 passed / 0 failed）。三项均在交付说明点名，未当作绿相。
+- **基线诚实性**：`scripts/file-size-baseline.json` 同步提交（7582e3c6）只下调本波条目（6975→6963、213→206、388→378、10828→10675），仅 `process.rs 275→308` 一条上调，已用 `7582e3c6^` 基线复跑证明来自 B206（2026-11-16），非本波夹带。
 
 ## 3. 分工契约与隔离有效性（Contract Isolation）
 
-- **隔离成立面**：写入域按波次切分（protocol: `acp/` + `.dev-team/`；test: `tests/` + fixtures；executor: `acp/` 实现 + `agent/tools/orchestration.rs` + `bin/cli.rs`），无两人同时改同一文件；git 写操作全程只有 Lead（10 次提交，每次先取 `git status --porcelain` + `git diff --cached --stat` 暂存区收据）。
-- **越界（两处，均已留痕）**：① protocol-agent 为工具面变更同步了 `agent/provider/tests.rs`（编译兼容衍生写入，事后补声明 `allow_derivative_scopes`，方向可接受但应事前声明）；② protocol-agent 在「空桩」amend 里**顺手实现**了 `set_prompt_budget` 函数体（空桩纯度被破坏）——好处是 BLOCKING 修得快，坏处是「契约层不含逻辑」不再成立，且 Lead 只能事后核出。
-- **Lead 边界自查**：Lead 未写业务逻辑，只做 (a) 文档/ADR/可观测性声明、(b) 过文件规模门的**约 10 行**纯抽取（`acp_delegate_tool_definition` + 注释合并，零行为变更）、(c) 若干 1 行注释合并。均 < 50 行阈值，但严格说 (b) 应下发给 executor。
-- **契约账本**：滚动契约矩阵（`contract-matrix-acp-p0.md` / `-p1.md`）经历两轮 amend 仍保持原地改写 + 单行变更流水，未膨胀；但 P1-9/P1-10 断言面是在**阻断被发现之后**才补，说明矩阵「先于实现」的属性只在 P0 守住。
+- **有效项**：B218（`bin/tui/*`）与 B219（`agent/*`）文件集合不相交；并行期间仅一次跨 lane 编译红（exec-core 加字段导致 `--lib` 红），经 Lead 授权「编译兼容衍生写入豁免」在 12 处测试字面量补 `provider_fallback: None` 后解除，未发生互相覆盖。
+- **被击穿项（方案审查 BLOCKING #2）**：实现提交 b7ef1da7 实际改 14 个文件，超出 B219(6)+B221(1) 的 `touched_paths` 声明——扩域包含 Lead 中途显式授权的 `turn_stream.rs`/`turn_sync.rs`（为满足「历史含检查点」验收）、尺寸门禁强制拆出的 `provider/fallback_body.rs`、以及衍生测试模块。写域是并发租约唯一判据，声明滞后意味着「正交性在错误文件集合上被验证」。纠正：本报复盘显式登记实际文件集合；后续波次在 `start` 时即登记 `allow_derivative_scopes`，中途扩域须先更新 `touched_paths` 再动文件。
+- **被击穿项（BLOCKING #1）**：同缺陷未判重——B199 与 B219、B200 与 B222 是同一现场同一代码面，新卡落地后未同步闭环旧卡，形成「一边 done 一边 todo」的双真值。已在复盘时闭环（B199→B219、B200→B222，证据含 commit + 测试）。B215→B218 的同波去重（b3dc49c6）是正例；规则应固化为「实现卡 resolve 前必须 grep 同 fingerprint/同现场日志的活跃卡」。
+- **测试分权**：5 份验收文件无 `#[ignore]`/`todo!()`/`assert!(true)`；实现提交零改动冻结测试（`git show --name-only` 交叉）。残余弱点：B218/B220 共用同一物理测试文件（fe3c647d +168/−0，实测无篡改，但按卡冻结在文件粒度不可分离）——后续同主题两卡应各自新建文件。
 
 ## 4. 元协议迭代建议（Self-Evolving Protocol）
 
-1. **verify 门禁必须覆盖冻结契约清单**：把「工具面/契约类」测试二进制纳入 `npm run verify`（或新增 `verify:contracts` 并由 verify 调用）。本轮 6 个红用例穿透 verify 即为反例。
-2. **空桩纯度需机械门**：`dev-stub-lint.py` 只覆盖 Python AST；Rust 侧应加轻量检查（`unimplemented!` 计数 + 禁止 `Command::new`/`fs::` 出现在 stub 文件），否则「契约层不含逻辑」只能靠 review 抓。
-3. **executor 切片机械化**：把「单轮 ≤1 文件族 / ≤400 行改动 / 必读 ≤300 行」写入 skill，并在 `team_task_create` 阶段按此拆分（本轮是失败两次后才拆）。
-4. **计划门禁时序前移**：`review-plan.json` 必须在红相锚定前产出，并让 `dev-meta-lint.py` 校验其 `reviewed_commit` 早于首个实现提交（当前只校验文件存在）。
-5. **derivative 写域事前声明**：凡工具面/枚举基数变化必然连带既有契约测试，应在建任务时登记 `allow_derivative_scopes`，避免事后补票。
-
-## 4.1 审查轮次流水（机器收据：`.dev-team/review-plan.json` / `review-join.json`，schema_version=2）
-
-| 轮次 | Gate-1（方案对抗） | Gate-2（L3-P 六问） | 本轮被抓住的真缺陷 |
-|---|---|---|---|
-| r2 @3ebb0742 | FAIL（2 BLOCKING） | FAIL（2 BLOCKING） | ①prompt 被 5000ms 硬顶 ②取消令牌未联动 ③工具面 38→39/45→46 漏同步 4 份冻结契约 |
-| r3 @4ba50955 | FAIL（1 BLOCKING） | FAIL（1 BLOCKING） | ④cli/orchestration 两入口未接线（库层 setter 零调用点）⑤工具入口缺省仍 5s 硬顶 |
-| r4 @be302170 | **PASS**（0 BLOCKING / 4 ADVISORY） | **PASS**（0 BLOCKING / 5 ADVISORY） | 无 |
-| 处置 | 逐条修复并以提交闭环 | 同上 | ADVISORY 转 B164~B170；当场修 3 条（exit code、dead code、capabilities 不虚报） |
-
-**保真声明**：r2/r3 的 FAIL 收据不做美化，保留在 git 历史与 backlog 归档里；r4 PASS 的审查对象是 `be302170`（源码面 `de3f7a5e`）。共 5 条 BLOCKING，全部由独立审查在交付前钉住，零漏放到用户手上。
-
-## 4.2 追加波次（B174 mcpServers / B175 fs-terminal，同日 21:30–22:45）
-
-- **并发写者首次出现**：本次作业期间同仓另有会话在提交（`4c914dab`/`80bf5d30`）并持有未提交改动（agent/config.rs、bin/cli.rs、bin/tui*、src/stores/*、docs/observability.yaml）。处置：向全部 teammate 下发「只碰自己写域 / 禁 `git add -A` / 失败点不在自身范围只回报不修」的纪律，Lead 全部按**路径级**暂存提交 —— 未发生一例跨写域污染，也未误提交他人 WIP。**教训**：多会话共享工作区时，`git add -A` 与「顺手修编译错」是最大的两个事故源。
-- **协议特派员的角色漂移（第二次）**：B174 的 `resolve_mcp_servers` 与 B175 的 `connect_with_capabilities`/`capabilities_for`/handler 装配逻辑都由 protocol-agent 以「空桩会让既有入口 panic」为由写成了真实实现。功能上更稳（未击穿既有测试），但「契约层不含逻辑」这条已连续两次失守 —— 建议下一波把该理由制度化：**允许 protocol-agent 在既有实现文件里写「最小可编译实现」，但必须在回报首行声明 `stub-overreach: <原因>`**，由 Lead 决定是否转 executor 复核。
-- **测试缺陷 vs 实现缺陷的判定**：g7（terminal 残留）初判为「实现没回收」，实为**测试自命中**（marker 在 fake agent argv 里、且在 close 之前 pgrep）。由 Executor 提出假设、Test Agent 修正（marker 改文件传递 + 断言后移 + NFR 派生有界轮询），Lead 只做裁决。这条链路是本次分工协作最健康的一次：实现者不许改测试、测试者不许改实现，缺陷归属被强制说清。
-- **门禁覆盖再次暴露同一缺口**：`npm run verify` 仍不含 Rust 集成测试，本波新增的 `acp_mcp_wiring`/`acp_capabilities_contract` 只能靠显式目标清单跑到 —— 与 §4 建议 1 完全一致，优先级应保持最高。
-
-## 4.3 配置面第二波（B174/B175 审查与修复，22:00–23:20）
-
-- **审查效率**：两轮独立审查（r1 FAIL 4 BLOCKING / r2 关 4 条但报 1 条新 BLOCKING）共钉住 5 条真缺陷，其中 2 条属「新修复引入的回归」（B1 修 drain 丢输出 → 变成无界累积；r2 实测 8s `yes` 洪水 50.7MB/RSS 153MB）。**教训**：修复「丢数据」类缺陷时，必须同时给出**新的不变量**（这里是有界窗口 + truncated 语义），否则只是把 bug 换个方向推。
-- **测试判据的有效性分层**：h1~h4 是「先红后绿」的真红相；h5（缓冲上限）是「实现先于用例」的 POST-HOC 守护 —— 两者都保留，但必须在文件与回报里标注，否则门禁会误以为「有红相 ⇒ 无回归」。
-- **复审的独立价值**：r2 不只跑测试，还自带 `/tmp` 探针证明「wait 在途时 prompt 应答 0.100s 可读」与「红相判别力真实」，这类结构性证据无法由测试套件本身给出。
-- **写域扩大的一次例外**：B4 需要把入站请求移出读线程、ADV① 需要 `ProcessStartRequest.cwd`，因此改动溢出到 `agent/{process,tool_runtime,jobs}.rs` 与 `tools/run.rs`。处置：全部按路径级暂存、逐文件 diff 归属核对（确认无并发会话改动混入）后才提交，并在提交信息里点名每个文件的作用。
-- **时间成本观察**：配置面两波（含 2 轮修复）约 1.5 小时，其中 ~40% 花在「审查发现→红相→修复→再审查」的往返。**建议**：下一次同类接线应在**方案阶段**就把「上限/回收/声明闸门/线程归属」四类不变量写进契约矩阵，可显著减少后期返工。
-
-## 5. 结论
-
-本轮团队在**红相独立分权**与**双路对抗审查**上取得真实收益（4 条 BLOCKING 全部在交付前被机器反例钉住并修复），代价是 2 次 executor 空转 + 1 次门禁时序失真。下一波优先落地建议 1（verify 覆盖契约测试）与建议 3（切片机械阈值），这两条直接决定「门禁是否被穿透」与「token 是否被空转吃掉」。
+1. **判重前移**：`record` 阶段强制填 `metadata.duplicate_of` 候选（同 fingerprint 前缀/同现场会话 id），`resolve` 时 lint 拒绝「同 fingerprint 前缀仍有活跃卡」。
+2. **写域声明与衍生豁免显式化**：`start` 增加 `--allow-derivative`；波次内扩域走 `backlog.mjs edit <ID> --paths ... --reason ...`，让 `git show --name-only` 与 `touched_paths` 可机械对齐（本轮缺口正是缺这条命令）。
+3. **重测试隔离**：把「全量套件里再跑全量套件」的 V10-3/V10-4 迁到 `npm run verify:slow` 独立入口，或把嵌套超时提到实测上限 2×；否则每次 verify 都以 ~10 分钟换一个环境超时假红。
+4. **TUI 集成测试接缝分片**：47 个 `tests/tui_*.rs` 各自 `#[path]` 引入 12.9k 行 bin；建议抽共享 `tui_test_harness` 编译单元，把每 target 成本从「全量 bin」降到「harness + 用例」。
