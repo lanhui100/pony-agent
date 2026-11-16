@@ -3075,7 +3075,7 @@ fn file_backend_roundtrip_restores_turn_trace_history() {
             context_input_tokens: None,
             usage_origin: None,
             degraded: None,
-            tool_failures: None,
+            tool_failures: None, provider_fallback: None,
         },
     );
 
@@ -3230,6 +3230,7 @@ fn file_backend_roundtrip_restores_runtime_generated_multi_boundary_hook_traces(
             context_input_tokens: None,
             degraded: None,
             tool_failures: None,
+            provider_fallback: None,
         },
     );
 
@@ -3346,6 +3347,7 @@ fn file_backend_roundtrip_restores_terminal_event_annotation_after_trace_update(
             context_input_tokens: None,
             degraded: None,
             tool_failures: None,
+            provider_fallback: None,
         },
     );
 
@@ -3468,6 +3470,7 @@ fn append_turn_trace_hook_records_updates_existing_trace_and_roundtrips() {
             context_input_tokens: None,
             degraded: None,
             tool_failures: None,
+            provider_fallback: None,
         },
     );
 
@@ -3746,6 +3749,7 @@ fn file_backend_roundtrip_restores_checkpoint_persist_evidence() {
             context_input_tokens: None,
             degraded: None,
             tool_failures: None,
+            provider_fallback: None,
         },
     );
 
@@ -3915,6 +3919,7 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
             usage_origin: None,
             degraded: None,
             tool_failures: None,
+            provider_fallback: None,
         },
     );
 
@@ -4033,6 +4038,7 @@ fn file_backend_roundtrip_persists_failed_turn_into_visible_history() {
             context_input_tokens: None,
             degraded: None,
             tool_failures: None,
+            provider_fallback: None,
         },
     );
 
@@ -4199,6 +4205,7 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
             usage_origin: None,
             degraded: None,
             tool_failures: None,
+            provider_fallback: None,
         },
     );
 

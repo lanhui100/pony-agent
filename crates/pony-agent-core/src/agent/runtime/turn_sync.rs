@@ -691,8 +691,7 @@ impl AgentRuntime {
         // PA-095：同步入口事件 turn_id 一次性计算——started/failed/completed 全路径
         // 复用同一 id，保证"每个 turn:started 必有配对 turn:end"的配对不变式。
         let sync_turn_id = Self::sync_turn_event_id(&input);
-        // Wave43 task-8 挂载切片：turn root span（agent.turn）在入口创建，函数返回时 Drop
-        // 自动结束 span，覆盖同步轮全部终态出口。
+        // Wave43 task-8：turn root span（agent.turn）在入口创建、函数返回时 Drop 结束，覆盖同步轮全部终态出口。
         // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
         let sync_turn_sequence = self.session_turn_sequence(input.session_id.as_deref());
         // W3 trace：队友/子代理 runtime 继承宿主 traceparent（宿主 runtime 为 `None` ⇒ root）。
@@ -1024,7 +1023,7 @@ impl AgentRuntime {
                 return result;
             }
         };
-        let persisted = self.persist_turn_outcome(
+        let persisted = self.persist_completed_turn_outcome(
             input.session_id.as_deref(),
             // A1：成功轮同样写轮次身份（gate 历史腿对任意轮一致成立）。
             Some(sync_turn_id.as_str()),
@@ -1036,7 +1035,8 @@ impl AgentRuntime {
             provider_native_transcript,
             attachments,
             input.workspace_mode.as_deref(),
-            None,
+            &tool_activities,
+            fallback_reason.as_deref(),
         );
         let turn_duration_ms = Some(turn_started_at.elapsed().as_millis() as u64);
         let checkpoint_hook_outcome =

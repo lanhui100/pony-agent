@@ -4690,7 +4690,7 @@ mod tests {
                     usage_origin: None,
                     context_input_tokens: None,
                     degraded: None,
-                    tool_failures: None,
+                    tool_failures: None, provider_fallback: None,
                 },
             );
         }
@@ -4829,7 +4829,7 @@ mod tests {
                     context_input_tokens: None,
                     usage_origin: None,
                     degraded: None,
-                    tool_failures: None,
+                    tool_failures: None, provider_fallback: None,
                 },
             );
             runtime.record_turn_trace_for_test(
@@ -4930,7 +4930,7 @@ mod tests {
                     context_input_tokens: None,
                     usage_origin: None,
                     degraded: None,
-                    tool_failures: None,
+                    tool_failures: None, provider_fallback: None,
                 },
             );
         }

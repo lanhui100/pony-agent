@@ -92,10 +92,9 @@ impl AgentRuntime {
         let mut accumulated_token_usage = first_decision.token_usage.clone();
         let first_token_latency = Rc::new(Cell::new(initial_turn_first_token_latency_ms));
         let mut hook_trace_records = initial_hook_trace_records;
-        // 同签名重复调用闸（契约矩阵 C2/C3）：同一工具 + 同一归一化参数允许**有限次**执行，
-        // 第 `limit + 1` 次命中闸后走恢复式收尾。**本 turn 起始一律建空计数（`new()`）**——
-        // 若按首批调用预置计数（note 最初的 `from_batch`），预置 1 次 + 执行点再记 1 次构成
-        // 双重计数，默认 limit=2 时第 2 次即熔断，直接违反「前 2 次放行」契约。
+        // 同签名重复调用闸（契约矩阵 C2/C3）：同一工具 + 同一归一化参数允许**有限次**执行，第 `limit + 1` 次
+        // 命中闸后走恢复式收尾。**本 turn 起始一律建空计数（`new()`）**——若按首批调用预置计数（note
+        // 最初的 `from_batch`），预置 1 次 + 执行点再记 1 次构成双重计数，默认 limit=2 时第 2 次即熔断。
         let mut same_signatures = SameSignatureTracker::new();
         let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
@@ -1338,7 +1337,7 @@ impl AgentRuntime {
                     return;
                 }
             };
-            let persisted = self.persist_turn_outcome(
+            let persisted = self.persist_completed_turn_outcome(
                 input.session_id.as_deref(),
                 // A1：成功轮同样写轮次身份（gate 历史腿对任意轮一致成立）。
                 Some(turn_id),
@@ -1355,7 +1354,8 @@ impl AgentRuntime {
                 ),
                 attachments,
                 input.workspace_mode.as_deref(),
-                None,
+                &tool_activities,
+                accumulated_fallback_reason.as_deref(),
             );
             emit_stream_event(
                 sink,

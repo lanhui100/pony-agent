@@ -6838,7 +6838,7 @@ fn start_turn_stream_preserves_tool_error_activity_when_tool_execution_errors() 
     assert_eq!(persisted_trace.tool_activities.len(), 1);
     let completed_text = completed.text.as_deref().unwrap_or_default();
     assert!(completed_text.contains("provider 在整合工具结果时失败"));
-    assert!(completed_text.contains("tool workspace_list_files failed in test"));
+    assert!(!completed_text.contains("tool workspace_list_files failed in test") && !completed_text.contains('\n'), "B221：降级正文必须单行且不含结果预览（内部细节只进 trace/fallback_reason），实际 = {completed_text:?}");
     assert!(completed_text.contains("status=error"));
 }
 

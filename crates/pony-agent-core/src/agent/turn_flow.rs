@@ -1244,21 +1244,21 @@ fn build_provider_usage_event(
     }]
 }
 
-/// PA-094：turn/end 事件化——turn:completed 额外构造 `TurnEnd`（reason=Completed）。
-/// 此前 completed 只落 assistant/message，投影的 turn/end 结算（token 指标、
-/// timeline 挂载、event_type 标记）永不触发——审核 P0 修复。failed/cancelled
-/// 已由 build_turn_event 发射 TurnEnd，此处不重复。
+/// PA-094：turn/end 事件化——turn:completed 额外构造 `TurnEnd`（reason 由
+/// `completed_turn_end_reason` 派生：`fallback_reason` 非空 ⇒ Degraded，error 恒 None）。
+/// 此前 completed 只落 assistant/message，投影的 turn/end 结算（token 指标、timeline 挂载、
+/// event_type 标记）永不触发——审核 P0 修复。failed/cancelled 已由 build_turn_event 发射。
 fn build_turn_end_event(
     name: &str,
     payload: &TurnStreamEvent,
 ) -> Option<crate::agent::turn_event::TurnEvent> {
-    use crate::agent::turn_event::{TurnEndReason, TurnEvent};
+    use crate::agent::turn_event::{completed_turn_end_reason, TurnEvent};
     if name != "turn:completed" {
         return None;
     }
     Some(TurnEvent::TurnEnd {
         turn_id: payload.turn_id.clone(),
-        reason: TurnEndReason::Completed,
+        reason: completed_turn_end_reason(payload.fallback_reason.as_deref()),
         turn_duration_ms: payload.turn_duration_ms,
         error: None,
     })

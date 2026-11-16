@@ -20,7 +20,14 @@ pub const EVENT_SCHEMA_VERSION: u64 = 1;
 pub const IGNORABLE_EVENT_TYPES: &[&str] = &[];
 
 /// turn 结束原因（turn/end 事件的 reason）。
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+///
+/// B219：`Degraded` = 本轮由 provider **本地兜底**收尾（`fallback_reason` 非空）的降级终态。
+/// 与 trace 的 `degraded` 字段（工具失败语义）**严格分离**：两者不同源、不得互相复用。
+///
+/// 读取兼容契约（手写 `Deserialize`，故不 derive）：未知 wire 值一律退化为
+/// [`TurnEndReason::Completed`]——旧读取端读新日志**不得炸开**（fail-soft 读）。
+/// 写侧仍走 derive 的 `Serialize`（snake_case），写读两向不对称是刻意取舍。
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnEndReason {
     #[default]
@@ -28,6 +35,38 @@ pub enum TurnEndReason {
     Error,
     Aborted,
     Cancelled,
+    /// B219：provider 本地兜底收尾（非正常完成，但不是失败）。
+    Degraded,
+}
+
+impl<'de> Deserialize<'de> for TurnEndReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = String::deserialize(deserializer)?;
+        Ok(match wire.as_str() {
+            "completed" => Self::Completed,
+            "error" => Self::Error,
+            "aborted" => Self::Aborted,
+            "cancelled" => Self::Cancelled,
+            "degraded" => Self::Degraded,
+            // 未知 wire 值（旧版本读新日志）⇒ 兼容读为 Completed，不得让读取端炸开。
+            _ => Self::Completed,
+        })
+    }
+}
+
+/// B219：`turn:completed` 的终态派生口径（唯一真源；写路径与验收测试共用）。
+///
+/// `fallback_reason` 是本轮 provider 兜底收尾的失败原因：非空 ⇒ 本轮**不是**正常完成，
+/// 必须以 [`TurnEndReason::Degraded`] 收尾；`None` / 空白串 ⇒ [`TurnEndReason::Completed`]
+/// （空白不得伪造降级）。
+pub fn completed_turn_end_reason(fallback_reason: Option<&str>) -> TurnEndReason {
+    match fallback_reason.map(str::trim) {
+        Some(reason) if !reason.is_empty() => TurnEndReason::Degraded,
+        _ => TurnEndReason::Completed,
+    }
 }
 
 /// 一条 turn 内过程事件（append-only，落盘后不可变）。

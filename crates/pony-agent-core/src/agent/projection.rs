@@ -163,6 +163,107 @@ impl HistoryProjectionState {
     }
 }
 
+/// B219：降级轮（provider 本地兜底收尾）的固定失败原因行。
+///
+/// 降级轮的 `turn/end.error` **恒为 `None`**（长 error 文本只进 trace 的 `fallback_reason`，
+/// 不得塞进 wire 事件），但检查点仍需要一行人读的失败原因——故由本函数族给出固定短句。
+const DEGRADED_TURN_FAILURE_REASON: &str = "本轮由 provider 本地兜底收尾";
+
+/// B219：降级轮的最小检查点正文（空过程事实：既无正文也无工具步骤时使用）。
+///
+/// 前缀 `[中断轮次检查点` 是 `is_interrupt_placeholder_text` 的判据，逐字不可改。
+const DEGRADED_TURN_MIN_CHECKPOINT: &str = "[中断轮次检查点]\n（本轮由 provider 本地兜底收尾）";
+
+/// B219：非正常终态的检查点文本取值。
+///
+/// 除 `Degraded` 外**逐字沿用**既有真源（`PendingTurnArtifacts::checkpoint_text`；
+/// 无过程事实 ⇒ `None` ⇒ 不造空壳消息）。`Degraded` 在没有过程事实时补最小正文：
+/// 降级轮必须在历史里可辨识，否则重启后只剩一条悬空 user。
+fn terminal_checkpoint_text(
+    reason: &TurnEndReason,
+    pending: &PendingTurnArtifacts,
+) -> Option<String> {
+    match reason {
+        TurnEndReason::Degraded => pending
+            .checkpoint_text()
+            .or_else(|| Some(DEGRADED_TURN_MIN_CHECKPOINT.to_string())),
+        _ => pending.checkpoint_text(),
+    }
+}
+
+/// B219：降级轮已在事件流里落过 `assistant/message`（`turn:completed` 先落正文）时，
+/// 把该条正文**就地**升级为失败检查点形态（`session::failed_turn_checkpoint_text`）。
+///
+/// 目的：历史同时含 `[中断轮次检查点` 前缀与「失败原因」行；**同一轮只保留一条** assistant
+/// （用户/模型可见的历史里不得出现两条并列 assistant）。无命中消息或 reason 非降级 ⇒ 不动。
+fn upgrade_degraded_assistant_message(
+    messages: &mut [(u64, TurnHistoryMessage)],
+    turn_id: &str,
+    reason: &TurnEndReason,
+    pending: &PendingTurnArtifacts,
+) {
+    if !matches!(reason, TurnEndReason::Degraded) {
+        return;
+    }
+    let Some((_, message)) = messages.iter_mut().rev().find(|(_, message)| {
+        message.role == "assistant" && message.turn_id.as_deref() == Some(turn_id)
+    }) else {
+        return;
+    };
+    let failure_reason = pending
+        .failure_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or(DEGRADED_TURN_FAILURE_REASON);
+    if let Some(text) = crate::agent::session::failed_turn_checkpoint_text(
+        &message.content,
+        pending.checkpoint_tool_lines(),
+        failure_reason,
+    ) {
+        message.content = text;
+        message.kind = Some(HistoryMessageKind::Interrupted);
+    }
+}
+
+/// B219：非正常终态的 assistant 承载消息收口（合成检查点 / 就地升级，二选一）。
+///
+/// - 本轮没有 `assistant/message` ⇒ 按既有行为合成一条检查点（`kind = checkpoint_kind`），
+///   文本真源仍是 `PendingTurnArtifacts::checkpoint_text`（Degraded 例外见
+///   [`terminal_checkpoint_text`]）；
+/// - 已有正文（`turn:completed` 先落 `assistant/message`）且终态为 `Degraded` ⇒ 就地升级为
+///   检查点形态，**不新增第二条** assistant。
+fn settle_terminal_turn_message(
+    messages: &mut Vec<(u64, TurnHistoryMessage)>,
+    seq: u64,
+    turn_id: &str,
+    reason: &TurnEndReason,
+    checkpoint_kind: HistoryMessageKind,
+    pending: &PendingTurnArtifacts,
+) {
+    if pending.has_assistant_message {
+        upgrade_degraded_assistant_message(messages, turn_id, reason, pending);
+        return;
+    }
+    let Some(text) = terminal_checkpoint_text(reason, pending) else {
+        return;
+    };
+    messages.push((
+        seq,
+        TurnHistoryMessage {
+            role: "assistant".to_string(),
+            content: text,
+            attachments: Vec::new(),
+            turn_id: Some(turn_id.to_string()),
+            status: Some(crate::agent::session::MessageStatus::Error),
+            model_name: None,
+            token_count: None,
+            reasoning_content: None,
+            kind: Some(checkpoint_kind),
+        },
+    ));
+}
+
 impl Projection<HistoryProjectionState> for HistoryProjectionState {
     fn init() -> Self {
         // 与写路径共用**同一个**紧急上限：投影侧自己留一个 24 的副本，等于在读路径上
@@ -313,23 +414,16 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                             // 旧日志无该字段 ⇒ None ⇒ 文本逐字退化为既有中断形态。
                             pending.failure_reason = error.clone();
                         }
-                        if pending.turn_id == *turn_id && !pending.has_assistant_message {
-                            if let Some(text) = pending.checkpoint_text() {
-                                state.messages.push((
-                                    seq,
-                                    TurnHistoryMessage {
-                                        role: "assistant".to_string(),
-                                        content: text,
-                                        attachments: Vec::new(),
-                                        turn_id: Some(turn_id.clone()),
-                                        status: Some(crate::agent::session::MessageStatus::Error),
-                                        model_name: None,
-                                        token_count: None,
-                                        reasoning_content: None,
-                                        kind: Some(checkpoint_kind),
-                                    },
-                                ));
-                            }
+                        // B219：无 assistant 正文 ⇒ 合成检查点；已有正文 ⇒ 就地升级（不新增第二条）。
+                        if pending.turn_id == *turn_id {
+                            settle_terminal_turn_message(
+                                &mut state.messages,
+                                seq,
+                                turn_id,
+                                reason,
+                                checkpoint_kind,
+                                &pending,
+                            );
                         }
                     }
                 }
@@ -902,24 +996,14 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         });
                     let _ = text;
                 }
-                // 终态信封：event_type 由 reason 映射；title/sequence 等
+                // 终态信封：event_type/phase 由 reason 确定性映射；title/sequence 等
                 // 由外层 annotate_turn_trace_terminal_event 补写（投影不自洽字段）。
-                trace.event_type = Some(match reason {
-                    TurnEndReason::Completed => "turn.completed".to_string(),
-                    TurnEndReason::Error => "turn.failed".to_string(),
-                    TurnEndReason::Aborted | TurnEndReason::Cancelled => {
-                        "turn.cancelled".to_string()
-                    }
-                });
-                // PA-095 #3：phase 由 reason 确定性映射（对拍约定字段集包含
-                // phase——重建须自洽；annotate 补写同值，语义一致）。
-                trace.phase = match reason {
-                    TurnEndReason::Completed => "completed".to_string(),
-                    TurnEndReason::Error => "failed".to_string(),
-                    TurnEndReason::Aborted | TurnEndReason::Cancelled => {
-                        "cancelled".to_string()
-                    }
-                };
+                // B219：Degraded 归入 completed 信封（canonical phase 词表不扩列），
+                // 降级事实由 `provider_fallback` 承载。
+                let (event_type, phase) = terminal_envelope(reason);
+                trace.event_type = Some(event_type.to_string());
+                trace.phase = phase.to_string();
+                trace.provider_fallback = degraded_fallback_flag(reason);
                 trace.sequence = Some(seq);
                 if let Some((provider, model)) = provider_model {
                     trace.provider_name = Some(provider);
@@ -942,6 +1026,25 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
             _ => {}
         }
     }
+}
+
+/// B219/PA-095 #3：终态信封 `(event_type, phase)` 由 reason 确定性映射（对拍约定字段的
+/// 自洽真源，`annotate_turn_trace_terminal_event` 补写同值）。
+///
+/// `Degraded` 归入 **completed** 信封：`CanonicalTurnPhase` 的 phase 词表只有
+/// completed/failed/cancelled，降级事实改由 [`degraded_fallback_flag`] 承载
+/// （不让读端遇到未登记 phase）。
+fn terminal_envelope(reason: &TurnEndReason) -> (&'static str, &'static str) {
+    match reason {
+        TurnEndReason::Completed | TurnEndReason::Degraded => ("turn.completed", "completed"),
+        TurnEndReason::Error => ("turn.failed", "failed"),
+        TurnEndReason::Aborted | TurnEndReason::Cancelled => ("turn.cancelled", "cancelled"),
+    }
+}
+
+/// B219：降级轮的 provider 兜底事实（仅 `Degraded` ⇒ `Some(true)`，其余 ⇒ `None` 不写键）。
+fn degraded_fallback_flag(reason: &TurnEndReason) -> Option<bool> {
+    matches!(reason, TurnEndReason::Degraded).then_some(true)
 }
 
 /// plan 投影：`plan/update` 覆盖式折叠（whole-value）。

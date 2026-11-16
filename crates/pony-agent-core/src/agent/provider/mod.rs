@@ -32,6 +32,8 @@ use self::responses_api::{
 pub mod model_catalog;
 pub use self::model_catalog::fetch_model_ids;
 
+mod fallback_body;
+pub use self::fallback_body::fallback_body_text;
 mod openai_wire;
 mod usage;
 pub(crate) use self::openai_wire::openai_safe_tool_name;
@@ -6004,13 +6006,10 @@ fn local_tool_followup_fallback_response(
 ) -> ProviderResponse {
     let fallback_reason = format!("provider_followup_failed: {}", preview_text(&error, 240));
     let summary = local_tool_followup_summary(tool_result);
-    let output_text = format!(
-        "工具 `{}` 已执行完成，但 provider 在整合工具结果时失败。\n失败原因：{}\n\n本地兜底摘要：{}\n\n结果预览：\n{}",
-        tool_call.name,
-        preview_text(&error, 240),
-        summary,
-        preview_text(&tool_result.output, 2200)
-    );
+    // B221：正文 = 单行人读文案（工具名 + 已执行 + 原因**类别** + 建议动作）。
+    // `error` 原文只进 `fallback_reason`（trace / provider 日志），结果预览不再进正文
+    // ——正文会被落库成历史消息，内部细节（URL / elapsed / 域名）不得污染后续上下文。
+    let output_text = fallback_body_text(tool_call.name.as_str(), &error, &summary);
 
     ProviderResponse {
         output_text: output_text.clone(),

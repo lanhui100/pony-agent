@@ -3465,6 +3465,7 @@ mod tests {
             context_input_tokens: None,
             degraded: None,
             tool_failures: None,
+            provider_fallback: None,
         }
     }
 

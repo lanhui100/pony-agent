@@ -111,6 +111,59 @@ fn estimate_trace_cost(
 }
 
 impl AgentRuntime {
+    /// B219：**completed 轮的历史收口**（成功轮与降级轮的唯一入口）。
+    ///
+    /// `fallback_reason` 非空（provider 本地兜底收尾 ⇒ 降级轮）时，历史承载文本走
+    /// [`Self::build_degraded_turn_close_out`]：与失败/取消轮**同一**检查点真源
+    /// （已交付正文 + 已执行步骤 + 「失败原因」行），载体 kind = `Interrupted`；
+    /// 正常 completed 轮原样透传（正文 / transcript / `kind = None` 逐字不变）。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn persist_completed_turn_outcome(
+        &self,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        user_message: &str,
+        assistant_message: &str,
+        provider_name: &str,
+        provider_mode: &str,
+        token_usage: Option<&TokenUsage>,
+        provider_native_transcript: Option<Vec<Value>>,
+        attachments: Vec<SessionAttachment>,
+        workspace_mode: Option<&str>,
+        tool_activities: &[TurnToolActivity],
+        fallback_reason: Option<&str>,
+    ) -> PersistedTurnOutcome {
+        // 降级判据与 `completed_turn_end_reason` 同口径（trim 非空才算降级）。
+        let degraded_reason = fallback_reason
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty());
+        let (history_text, history_transcript, history_kind) = match degraded_reason {
+            Some(reason) => {
+                let (text, transcript) = Self::build_degraded_turn_close_out(
+                    assistant_message,
+                    tool_activities,
+                    reason,
+                    provider_native_transcript,
+                );
+                (text, transcript, Some(HistoryMessageKind::Interrupted))
+            }
+            None => (assistant_message.to_string(), provider_native_transcript, None),
+        };
+        self.persist_turn_outcome(
+            session_id,
+            turn_id,
+            user_message,
+            &history_text,
+            provider_name,
+            provider_mode,
+            token_usage,
+            history_transcript,
+            attachments,
+            workspace_mode,
+            history_kind,
+        )
+    }
+
     pub(crate) fn persist_turn_outcome(
         &self,
         session_id: Option<&str>,
@@ -269,6 +322,13 @@ impl AgentRuntime {
         let error_class = error
             .as_deref()
             .map(|text| crate::agent::retry::classify_error_class(text).to_string());
+        // B219：provider 本地兜底事实——`fallback_reason` 非空 ⇒ 本轮以**降级**收尾
+        // （与 `degraded` 的工具失败语义严格分离）。必须在 `fallback_reason` 被移进
+        // `TurnTraceRecord` 之前求值；空白串视同无原因（与 `completed_turn_end_reason` 同口径）。
+        let provider_fallback = fallback_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty())
+            .map(|_| true);
         let trace_timeline = build_persisted_trace_timeline_with_provider_calls(
             user_message,
             phase,
@@ -356,6 +416,8 @@ impl AgentRuntime {
                     output_text: return_text.as_deref().map(str::to_string),
                     degraded,
                     tool_failures,
+                    // B219：provider 本地兜底事实（None ⇒ 键缺席；与 `degraded` 不同源）。
+                    provider_fallback,
                     updated_at: 0,
                 },
             );
@@ -952,6 +1014,40 @@ impl AgentRuntime {
         )
     }
 
+    /// B219：**降级轮**（provider 本地兜底收尾，`fallback_reason` 非空）的历史承载文本与
+    /// native transcript 片段。
+    ///
+    /// 与失败/取消轮共用**同一个**收口真源 [`Self::build_interrupted_turn_close_out`]：
+    /// 已交付正文 + 已执行步骤（`name + description`，历史断言依赖该格式）+ 一行
+    /// `失败原因：<fallback_reason>`（由 `failed_turn_checkpoint_text` 折叠成单行）。
+    /// 本函数**不新写任何文案**——降级轮的检查点与失败轮逐字同构，差别只在原因来源。
+    pub(crate) fn build_degraded_turn_close_out(
+        prior_assistant_text: &str,
+        tool_activities: &[TurnToolActivity],
+        failure_reason: &str,
+        legacy_transcript: Option<Vec<Value>>,
+    ) -> (String, Option<Vec<Value>>) {
+        let header_step_lines: Vec<String> = tool_activities
+            .iter()
+            .map(|activity| {
+                if activity.description.trim().is_empty() {
+                    activity.name.clone()
+                } else {
+                    format!("{} {}", activity.name, activity.description.trim())
+                }
+            })
+            .collect();
+        // 降级轮的调用都已结算（无「已宣告未执行」），pending_calls 恒为空。
+        Self::build_interrupted_turn_close_out(
+            prior_assistant_text,
+            &header_step_lines,
+            tool_activities,
+            &[],
+            Some(failure_reason),
+            legacy_transcript,
+        )
+    }
+
     pub(crate) fn fail_sync_turn_result(
         &self,
         provider_meta: Option<&ProviderEventMeta>,
@@ -1091,6 +1187,8 @@ impl AgentRuntime {
                     // （与根 span 语义一致：degraded 只在「有工具失败但轮次 completed」时成立）。
                     degraded: failed_turn_health.0,
                     tool_failures: failed_turn_health.1,
+                    // B219：失败轮不写 provider 兜底事实（降级终态只在 completed 路径派生）。
+                    provider_fallback: None,
                     updated_at: 0,
                 },
             );
@@ -1208,6 +1306,8 @@ impl AgentRuntime {
                     // （与根 span 语义一致：degraded 只在「有工具失败但轮次 completed」时成立）。
                     degraded: failed_turn_health.0,
                     tool_failures: failed_turn_health.1,
+                    // B219：失败轮不写 provider 兜底事实（降级终态只在 completed 路径派生）。
+                    provider_fallback: None,
                     updated_at: 0,
                 },
             );
@@ -1412,5 +1512,68 @@ mod usage_ledger_entry_tests {
         );
         assert!(entry.cost_usd.is_none());
         assert!(!entry.is_priced());
+    }
+}
+
+/// B219：降级轮收口文本的定向断言（纯函数层，不需要 runtime 装配）。
+///
+/// 接线（`turn_stream.rs` / `turn_sync.rs` 的 completed 分支 → `persist_completed_turn_outcome`）
+/// 只做「降级判据 → 本函数」的选择；文本真源由这里钉住：必须是失败/取消轮同形的检查点
+/// （前缀 + 已执行步骤 + 单行「失败原因」），且**保留**已交付正文。
+#[cfg(test)]
+mod degraded_turn_close_out_tests {
+    use super::*;
+
+    fn tool_activity(name: &str, description: &str) -> TurnToolActivity {
+        TurnToolActivity {
+            id: format!("call-{name}"),
+            name: name.to_string(),
+            canonical_tool_name: None,
+            display_name_zh: None,
+            status: "ok".to_string(),
+            description: description.to_string(),
+            arguments_text: None,
+            result_text: None,
+            duration_seconds: Some(1.0),
+            parent_activity_id: None,
+            artifacts: None,
+            error: None,
+            capability_invocation: None,
+        }
+    }
+
+    #[test]
+    fn degraded_close_out_is_interrupt_checkpoint_with_failure_reason() {
+        // Arrange：已交付正文 + 一条已执行步骤 + 现场型 fallback_reason（多行/超长）。
+        let prior = "已排查 8080 端口，结论：被 nginx 占用。";
+        let activities = vec![tool_activity("Run", "检查端口监听")];
+        let reason = "provider_followup_failed: error sending request\nfor url (https://tokens.ponyjob.top/v1)";
+
+        // Act
+        let (text, transcript) =
+            AgentRuntime::build_degraded_turn_close_out(prior, &activities, reason, None);
+
+        // Assert 1：检查点前缀（TUI 逐字回放 / is_interrupt_placeholder_text 的判据）。
+        assert!(
+            crate::agent::session::is_interrupt_placeholder_text(&text),
+            "降级轮承载文本必须是中断检查点形态，实际 = {text:?}"
+        );
+        // Assert 2：已交付正文与步骤行都保留（不因降级丢掉本轮产出）。
+        assert!(text.contains(prior), "检查点必须保留已交付正文：{text:?}");
+        assert!(text.contains("- Run 检查端口监听"), "检查点必须列已执行步骤：{text:?}");
+        // Assert 3：失败原因折叠成**单行**（多行 reason 不得撑破检查点）。
+        let reason_lines: Vec<&str> = text.lines().filter(|line| line.contains("失败原因")).collect();
+        assert_eq!(reason_lines.len(), 1, "失败原因必须恰好一行：{text:?}");
+        assert!(
+            reason_lines[0].contains("provider_followup_failed"),
+            "失败原因行必须保留原因事实：{text:?}"
+        );
+        // Assert 4：无步骤时也要有载体（transcript 允许 None，文本不许为空）。
+        let (bare, _) = AgentRuntime::build_degraded_turn_close_out("", &[], "boom", None);
+        assert!(bare.starts_with("[中断轮次检查点"), "空轮次也必须产出检查点：{bare:?}");
+        assert!(
+            transcript.is_none() || transcript.as_ref().is_some_and(|items| !items.is_empty()),
+            "transcript 要么缺省、要么非空片段"
+        );
     }
 }

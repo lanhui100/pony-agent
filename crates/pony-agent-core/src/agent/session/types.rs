@@ -869,6 +869,13 @@ pub struct TurnTraceRecord {
     /// 序列化按**值**过滤：`None`/`Some(0)` 都不写键（`0` 不是「信息」，只是噪音）。
     #[serde(default, skip_serializing_if = "tool_failure_count_is_absent")]
     pub tool_failures: Option<usize>,
+    /// B219：本轮是否走了 **provider 本地兜底**收尾（`fallback_reason` 非空 ⇒ `Some(true)`）。
+    ///
+    /// 与上面的 `degraded`（**工具失败**语义）严格分离：两者不同源，禁止互相复用——混用会
+    /// 让 UI 把「工具零星失败但正常完成」错标成 provider 降级。
+    /// additive：`None` ⇒ 键缺席（旧轮次没有该事实，不得伪造成 `false`）；camelCase `providerFallback`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_fallback: Option<bool>,
     #[serde(default)]
     pub updated_at: u64,
 }
