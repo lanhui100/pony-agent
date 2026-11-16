@@ -171,3 +171,194 @@ fn running_clock_drives_while_awaiting_answer() {
         "问答等待期的呼吸提醒不得被运行态门吞掉"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// B218：状态行生命周期门 + 合成纯函数（本段为新增验收，不得改动上方 B197 已冻结用例）
+//
+// 红线：`should_render_running_status` 与「生命周期」必须同源（唯一门），渲染文案由
+// `compose_running_status_text` 单点合成 —— 杜绝「门开了但文案为空」「终态残留进行中」
+// 「折叠态丢工具名」三类复发。时间不取自真实时钟：已耗时一律由调用方注入字符串。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 只经由公开的状态迁移入口进入运行态；不写 `turn_started_at`，避免用例依赖真实时钟。
+fn b218_state_in(mode: RuntimeMode) -> TuiState {
+    let mut state = TuiState::default();
+    state.transition_runtime_mode(mode);
+    state
+}
+
+/// 运行态模式下「生产侧同一状态词真源」产出的状态词（与渲染点同源，不自造文案）。
+fn b218_word(state: &TuiState) -> String {
+    status_word_base(state).0
+}
+
+/// 现场回归（B218 主症）：工具执行期、非折叠、`is_streaming=false` 且**无任何事件流入**时，
+/// 状态行必须是可渲染的非空文本，且逐字点名工具与已耗时。
+#[test]
+fn b218_tool_execution_line_non_empty_with_elapsed() {
+    // Arrange：只进入工具执行态，不投递任何 UI 事件、不置 is_streaming。
+    let mut state = b218_state_in(RuntimeMode::ExecutingTool("Bash".to_string()));
+    state.is_streaming = false;
+    assert!(
+        !state.hide_process,
+        "前提：默认过程可见（工具行随正文滚动，这正是长输出顶出视口的现场）"
+    );
+    let word = b218_word(&state);
+
+    // Act
+    let text = compose_running_status_text(&state, &word, "1m20s").expect(
+        "轮次进行中（ExecutingTool）必须合成状态行：返回 None 就等于整段工具执行期零反馈",
+    );
+
+    // Assert
+    assert!(!text.trim().is_empty(), "状态行不得为空白，实际 = {text:?}");
+    assert!(
+        text.contains("Bash"),
+        "状态行必须点名正在执行的工具，实际 = {text:?}"
+    );
+    assert!(
+        text.contains("1m20s"),
+        "elapsed 非空时必须逐字出现在状态行，实际 = {text:?}"
+    );
+    assert!(
+        should_render_running_status(&state),
+        "工具执行期渲染门必须为开，否则纯函数算得出、渲染点却不画"
+    );
+}
+
+/// 反向门禁：`is_streaming` 不是生命周期门。非流式续轮入口（goal 自动续轮）同样要有
+/// 状态行与逐字耗时，防止「以 is_streaming 当门」的缺陷换个入口复发。
+#[test]
+fn b218_non_streaming_continuation_keeps_line() {
+    // Arrange
+    let mut state = b218_state_in(RuntimeMode::Thinking);
+    state.is_streaming = false;
+    let word = b218_word(&state);
+
+    // Act
+    let text = compose_running_status_text(&state, &word, "5s")
+        .expect("思考期即便没有流式增量，轮次仍在进行中，状态行不得缺席");
+
+    // Assert
+    assert!(!text.trim().is_empty(), "状态行不得为空白，实际 = {text:?}");
+    assert!(
+        text.contains("5s"),
+        "非流式续轮也必须带上已耗时（秒数定格会被读成卡死），实际 = {text:?}"
+    );
+    assert!(
+        should_render_running_status(&state),
+        "非流式续轮的渲染门必须为开"
+    );
+}
+
+/// 折叠态（`hide_process=true`）没有任何工具行，状态行是唯一过程信号：不得因折叠而丢工具名。
+#[test]
+fn b218_collapsed_process_keeps_tool_line() {
+    // Arrange
+    let mut state = b218_state_in(RuntimeMode::ExecutingTool("Bash".to_string()));
+    state.hide_process = true;
+    state.is_streaming = false;
+    assert!(state.hide_process, "前提：折叠态下工具行整块不渲染");
+    let word = b218_word(&state);
+
+    // Act
+    let text = compose_running_status_text(&state, &word, "2s")
+        .expect("折叠态必须合成状态行：此时界面没有其他过程信号");
+
+    // Assert
+    assert!(!text.trim().is_empty(), "状态行不得为空白，实际 = {text:?}");
+    assert!(
+        text.contains("Bash"),
+        "折叠态状态行必须点名工具（否则用户只看到一句无内容的副词），实际 = {text:?}"
+    );
+}
+
+/// 终态四态一律不合成、不渲染：终态由 status_notice / 消息区 / Ask 面板承载。
+#[test]
+fn b218_terminal_lifecycle_hides_line() {
+    for mode in [
+        RuntimeMode::Ready,
+        RuntimeMode::Completed,
+        RuntimeMode::Failed("x".to_string()),
+        RuntimeMode::WaitingApproval,
+    ] {
+        // Arrange
+        let state = b218_state_in(mode.clone());
+        let word = "处理中";
+
+        // Act
+        let text = compose_running_status_text(&state, word, "3s");
+
+        // Assert
+        assert_eq!(
+            text,
+            None,
+            "终态 {mode:?} 不得合成进行中状态行（否则残留一行假「进行中」）"
+        );
+        assert!(
+            !should_render_running_status(&state),
+            "终态 {mode:?} 渲染门必须为关"
+        );
+    }
+}
+
+/// 门与生命周期同源：运行态 ⇒ Running + 门开；终态 ⇒ Terminal + 门关。
+///
+/// 两套口径分家时会出现「门按 A 判、文案按 B 判」——本用例逐态钉住两边同源。
+#[test]
+fn b218_turn_lifecycle_matches_gate() {
+    for mode in [
+        RuntimeMode::Connecting,
+        RuntimeMode::Thinking,
+        RuntimeMode::Responding,
+        RuntimeMode::ExecutingTool("Bash".to_string()),
+    ] {
+        let state = b218_state_in(mode.clone());
+        assert!(
+            matches!(turn_lifecycle(&state), TurnLifecycle::Running),
+            "运行态 {mode:?} 的生命周期必须是 Running"
+        );
+        assert!(
+            should_render_running_status(&state),
+            "运行态 {mode:?} 的渲染门必须与 Running 同源为开"
+        );
+    }
+
+    for mode in [
+        RuntimeMode::Ready,
+        RuntimeMode::Completed,
+        RuntimeMode::Failed("x".to_string()),
+        RuntimeMode::WaitingApproval,
+    ] {
+        let state = b218_state_in(mode.clone());
+        assert!(
+            matches!(turn_lifecycle(&state), TurnLifecycle::Terminal),
+            "终态 {mode:?} 的生命周期必须是 Terminal"
+        );
+        assert!(
+            !should_render_running_status(&state),
+            "终态 {mode:?} 的渲染门必须与 Terminal 同源为关"
+        );
+    }
+}
+
+/// `word` 为空白时必须回落非空占位：空词不得把整行变成一串空白（视觉等价于没有状态行）。
+#[test]
+fn b218_blank_word_falls_back_to_placeholder() {
+    // Arrange：轮次进行中（门开），但调用方这次拿到的状态词是空白。
+    let state = b218_state_in(RuntimeMode::Thinking);
+    assert!(
+        should_render_running_status(&state),
+        "前提：思考期渲染门为开，空白状态词必须由合成纯函数兜住"
+    );
+
+    // Act
+    let text = compose_running_status_text(&state, "   ", "")
+        .expect("运行态即便入参全空也必须给出占位状态行");
+
+    // Assert
+    assert!(
+        !text.trim().is_empty(),
+        "word 为空白时不得产出空白行，实际 = {text:?}"
+    );
+}
