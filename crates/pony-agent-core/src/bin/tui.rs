@@ -1529,6 +1529,14 @@ pub struct TuiState {
     pub anim_composer_h: Option<u16>,
     /// 最近一次计算的正文渲染区域 chat_rect
     pub last_chat_rect: Option<Rect>,
+    /// 最近一帧**已绘制**滚动条的列矩形（`None` ⇒ 本帧没有滚动条：不溢出 / 空态 / 面板态）。
+    ///
+    /// 鼠标命中只认这里回写的真实几何：正文矩形恒为滚动条列让位（右缘 ≤ `width-2`），
+    /// 「指针在最右列」永远落不进 `chat_rect`，故滚动条不能借用正文矩形做命中判定。
+    pub last_scrollbar_rect: Option<Rect>,
+    /// 滚动条拖拽会话：`Some(grab)` ⇒ 正按住滑块，`grab` = 抓取点相对滑块顶部的行偏移。
+    /// 保留抓取偏移是为了「拖起来跟手」——指针下的那段滑块不会瞬间跳到指针位置。
+    pub scrollbar_drag: Option<u16>,
     /// 输入框文本区矩形（不含提示符与右侧留白）；鼠标选区据此判断是否落在 Composer 上。
     pub last_input_rect: Option<Rect>,
     /// 输入框本帧可视窗口的逻辑起始行（超过可视高度时窗口跟随光标）。
@@ -1664,6 +1672,8 @@ impl Default for TuiState {
             tool_activity: ToolActivity::default(),
             anim_composer_h: None,
             last_chat_rect: None,
+            last_scrollbar_rect: None,
+            scrollbar_drag: None,
             last_input_rect: None,
             last_input_view_start: 0,
             last_input_lines: Vec::new(),
@@ -1830,6 +1840,10 @@ impl TuiState {
         self.max_scroll_offset = 0;
         self.effective_scroll_offset = 0;
         self.auto_scroll = true;
+        // 滚动条交互态同属会话瞬时态：切走后旧轨道矩形与抓取偏移一律作废，
+        // 否则新会话首帧前的鼠标拖动会按上一个会话的几何折算。
+        self.last_scrollbar_rect = None;
+        self.scrollbar_drag = None;
         self.selected_command_index = 0;
         self.spinner_tick = 0;
         self.selected_session_index = 0;
@@ -5048,6 +5062,37 @@ fn status_tone_style(tone: StatusTone) -> Style {
     }
 }
 
+/// 轮次是否处于「进行中」：正文末尾状态行的**唯一**渲染门。
+///
+/// 为什么不以 `is_streaming` 为先决条件：该标志由**派发点**置位（提交消息 / Ask 续轮），
+/// 而 goal 自动续轮等入口在轮次线程内直接开轮（`status_word_base` 有同一取舍说明），
+/// 以它作门会让这些轮次整段没有「进行中」反馈。
+///
+/// 为什么工具执行期也渲染：非折叠态下工具行只随正文滚动可见（长输出会把它顶出视口），
+/// 折叠态（`hide_process`）下更是完全没有工具行。deepseek harness 的 RunningStatus 在
+/// **整个运行期**恒显且带实时耗时 —— 对齐后，长耗时工具/思考不会再被误判成会话停止。
+fn should_render_running_status(state: &TuiState) -> bool {
+    if state.stopping_turn_id.is_some() || state.provider_retry.is_some() {
+        return true;
+    }
+    matches!(
+        state.runtime_mode,
+        RuntimeMode::Connecting
+            | RuntimeMode::Thinking
+            | RuntimeMode::Responding
+            | RuntimeMode::ExecutingTool(_)
+    )
+}
+
+/// 运行期动效与「已耗时」刷新的**唯一**驱动门（每帧节拍是否推进）。
+///
+/// 必须与 [`should_render_running_status`] 同源：只改渲染门而不改这里，`is_streaming`
+/// 未置位的续轮入口会出现「行画出来了，但秒数与动画定格」——视觉上仍是卡死，缺陷只是
+/// 换了个位置复发。Ask 等待期另走低频呼吸（与运行态无关），故在此单独并入。
+fn should_drive_running_clock(state: &TuiState, awaiting_answer: bool) -> bool {
+    awaiting_answer || should_render_running_status(state)
+}
+
 /// 底部状态词：克制到只有一个短语（耗时与动画只在正文活动行出现一次）。
 ///
 /// C7（`tui-streaming-input`）：队列非空时把「排队 N 条」追加在同一行 —— 流式期的
@@ -5609,6 +5654,120 @@ pub fn scrollbar_thumb(total: usize, visible: usize, offset: usize) -> Option<(u
     ))
 }
 
+/// 契约 C1 的反解（拖拽滑块 / 点击轨道共用）：`(total, visible, row, grab)` ⇒ 目标滚动偏移。
+///
+/// - `row`：指针在轨道内的行号（`chat_rect.y` 起算，0 起）；**故意不截断**——
+///   指针拖到轨道外（更下方）时仍需继续朝末端饱和，否则「抓住滑块中部往下拖」会差
+///   `grab` 行贴不到底；
+/// - `grab`：按下点相对滑块**顶部**的行偏移（保留它才是「拖起来跟手」，否则滑块会瞬跳）；
+///   点轨道空白处时传 `thumb_len / 2`，语义即「让滑块中心吸附到指针」。
+///
+/// `None` ⇒ 内容未溢出（没有轨道），调用方不得改动偏移。
+/// 反向映射与 `scrollbar_thumb` 同一取整口径：`start = round(offset * track / denom)`
+/// 的逆运算 `offset = round(start * denom / track)`，因此拖动到两端的落点与绘制严格一致。
+pub fn scrollbar_offset_for_row(total: usize, visible: usize, row: u16, grab: u16) -> Option<u32> {
+    let (_, thumb_len) = scrollbar_thumb(total, visible, 0)?;
+    let track = visible.saturating_sub(thumb_len as usize);
+    let denom = total - visible;
+    if track == 0 {
+        return Some(0);
+    }
+    let start = (row as usize).saturating_sub(grab as usize).min(track);
+    let offset = (start * denom + track / 2) / track;
+    Some(u32::try_from(offset.min(denom)).unwrap_or(u32::MAX))
+}
+
+/// 滚动条命中：`Some((row, grab))` ⇒ 指针落在**当前帧已绘制**的滚动条列内。
+///
+/// 命中判定只认 `last_scrollbar_rect`（渲染回写的真实列几何）与 `max_scroll_offset`：
+/// 没有轨道时恒 `None`，正文列永不吞鼠标事件。
+/// `grab` 语义：指针在滑块内 ⇒ 指针相对滑块顶部的行偏移；落在轨道空白 ⇒ 滑块中心
+/// （`thumb_len / 2`），配合 `scrollbar_offset_for_row` 即「点哪跳哪」。
+pub fn scrollbar_hit(state: &TuiState, x: u16, y: u16) -> Option<(u16, u16)> {
+    let rect = state.last_scrollbar_rect?;
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    if x < rect.x || x >= rect.x.saturating_add(rect.width) {
+        return None;
+    }
+    if y < rect.y || y >= rect.y.saturating_add(rect.height) {
+        return None;
+    }
+    let visible = rect.height as usize;
+    let total = state.max_scroll_offset as usize + visible;
+    let (thumb_start, thumb_len) =
+        scrollbar_thumb(total, visible, state.effective_scroll_offset as usize)?;
+    let row = y - rect.y;
+    let grab = if row >= thumb_start && row < thumb_start.saturating_add(thumb_len) {
+        row - thumb_start
+    } else {
+        thumb_len / 2
+    };
+    Some((row, grab))
+}
+
+/// 把指针行号折算成滚动偏移并落到状态（滑块拖拽与轨道点击的唯一写入口）。
+///
+/// 越界行号（拖到轨道之外）由 `scrollbar_offset_for_row` 饱和到首/末行；落到底部时
+/// 恢复 `auto_scroll` 贴底跟随，非底部则解除跟随（与滚轮/方向键同一判据）。
+pub fn apply_scrollbar_row(state: &mut TuiState, row: u16, grab: u16) {
+    let Some(rect) = state.last_scrollbar_rect else {
+        return;
+    };
+    let visible = rect.height as usize;
+    let total = state.max_scroll_offset as usize + visible;
+    let Some(offset) = scrollbar_offset_for_row(total, visible, row, grab) else {
+        return;
+    };
+    state.scroll_offset = offset;
+    state.auto_scroll = offset >= state.max_scroll_offset;
+}
+
+/// 鼠标事件投影到滚动条（Down / Drag / Up 三态的唯一实现，事件循环与测试共用）。
+///
+/// 返回 `true` ⇒ 本事件已被滚动条消费，调用方**不得**再走文本选区分支：两种鼠标手势互斥，
+/// 同时活跃会出现「拖滚动条时半屏高亮」的错乱。几何只认本帧已绘制的
+/// `last_scrollbar_rect`，所以没有轨道的模式（面板态 / 空态 / 不溢出）恒返回 `false`，
+/// 正文点击与拖选行为完全不变。
+pub fn scrollbar_mouse_event(
+    state: &mut TuiState,
+    kind: crossterm::event::MouseEventKind,
+    x: u16,
+    y: u16,
+) -> bool {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some((row, grab)) = scrollbar_hit(state, x, y) else {
+                return false;
+            };
+            state.scrollbar_drag = Some(grab);
+            apply_scrollbar_row(state, row, grab);
+            if state.mouse_selection.active || state.mouse_selection.anchor.is_some() {
+                state.mouse_selection.clear();
+            }
+            true
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(grab) = state.scrollbar_drag else {
+                return false;
+            };
+            let Some(rect) = state.last_scrollbar_rect else {
+                // 轨道消失（面板打开 / 内容缩到不溢出）⇒ 结束会话，
+                // 否则它会一直吞掉后续的正文拖选。
+                state.scrollbar_drag = None;
+                return false;
+            };
+            // 越出轨道由 `apply_scrollbar_row` 的行号饱和兜住：指针跑到窗口外仍能滚到首/末。
+            apply_scrollbar_row(state, y.saturating_sub(rect.y), grab);
+            true
+        }
+        MouseEventKind::Up(MouseButton::Left) => state.scrollbar_drag.take().is_some(),
+        _ => false,
+    }
+}
+
 /// 契约（修订11 步骤3）：从按消息分块的布局缓存里取出 `[start, end)` 行。
 ///
 /// 复杂度是「跨块定位」而非「拼接全部行」：只 clone 落在窗口内的行。
@@ -5666,7 +5825,7 @@ fn chat_line_plain_text(state: &TuiState, abs_line: usize) -> Option<String> {
 /// 位置固定在**终端最右列**（不侵占正文列：内容列在超宽终端里居中，左右恒有 `GUTTER` 留白），
 /// 纵向只覆盖消息区 `chat_rect`。内容未溢出（`max_scroll_offset == 0`）或空态时不绘制，
 /// 该列保持画布背景 —— 与「无滚动条时视觉零变化」的诉求一致。
-fn render_scrollbar(f: &mut Frame, chat_rect: Rect, state: &TuiState) {
+fn render_scrollbar(f: &mut Frame, chat_rect: Rect, state: &mut TuiState) {
     if state.messages.is_empty() || state.max_scroll_offset == 0 {
         return;
     }
@@ -5679,6 +5838,14 @@ fn render_scrollbar(f: &mut Frame, chat_rect: Rect, state: &TuiState) {
     };
     let screen = f.area();
     let x = screen.x.saturating_add(screen.width).saturating_sub(1);
+    // 回写命中几何（宽度恒 1：滚动条只占最右列）。鼠标拖拽/点击轨道据此判定，
+    // 写在这一处是为了让「画了什么」与「能点到什么」永远同源，不做第二份几何推导。
+    state.last_scrollbar_rect = Some(Rect {
+        x,
+        y: chat_rect.y,
+        width: 1,
+        height: chat_rect.height,
+    });
     let thumb_start = thumb_start as usize;
     let thumb_end = thumb_start + thumb_len as usize;
     let buffer = f.buffer_mut();
@@ -5747,6 +5914,9 @@ fn render_settings_panel(f: &mut Frame, state: &TuiState) {
 pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let area = f.area();
     fill(f, area, theme::CANVAS);
+    // 滚动条命中几何每帧先清空：只有本帧真的画了滚动条才会由 `render_scrollbar` 回写。
+    // 否则面板态 / 不溢出态会残留上一帧的列矩形，鼠标点击最右列就会落到不存在的轨道上。
+    state.last_scrollbar_rect = None;
 
     // 极小终端降级：不 panic，也不输出半截布局，只给一句可读提示。
     if area.width < 24 || area.height < 10 {
@@ -5976,14 +6146,9 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         // 进行中的一行极简状态（不打断阅读节奏，紧凑规整，不晃动）
         // wave-60 §C9：stopping 是用户此刻唯一关心的进行中态 ⇒ 即便正处于工具执行也保留该行，
         // 否则「正在停止…」在工具执行期不可见（终态由 turn:cancelled 驱动，见 apply_stop_terminal）。
-        // wave-60 §C9：stopping 是用户此刻唯一关心的进行中态 ⇒ 即便正处于工具执行也保留该行，
-        // 否则「正在停止…」在工具执行期不可见（终态由 turn:cancelled 驱动，见 apply_stop_terminal）。
-        // 本轮 C10：过程隐藏后工具行不再占位，工具执行期必须恢复状态行，否则用户看不到任何进行中反馈。
-        if state.is_streaming
-            && (state.stopping_turn_id.is_some()
-                || state.hide_process
-                || !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)))
-        {
+        // 本轮 C10 → 对齐 dsh RunningStatus：**整个运行期恒显**（含工具执行期与非折叠态），
+        // 门只在 `should_render_running_status` 一处定义，杜绝「候选算得出、渲染点却不画」。
+        if should_render_running_status(state) {
             let need_blank = state
                 .render_cache
                 .cache_lines
@@ -9283,7 +9448,9 @@ fn tui_event_loop(
             state.invalidate_render_cache();
             dirty = true;
         }
-        // 流式态 160ms 驱动动效；问答等待期用 450ms 的低频呼吸提醒（不闪、不抢注意力）。
+        // 流式态 160ms 驱动动效；运行期静默段 / 问答等待期用 450ms 低频呼吸（不闪、不抢注意力）。
+        // 门与状态行渲染门同源（`should_drive_running_clock`）：goal 自动续轮等入口
+        // `is_streaming` 未必置位，只认它会让状态行「画出来但秒数/动画定格」。
         let awaiting_answer = matches!(
             state.mode,
             InteractionMode::AskUserQuestion
@@ -9291,7 +9458,7 @@ fn tui_event_loop(
                 | InteractionMode::EditingModelWindow
         );
         let tick_ms = if state.is_streaming { 160 } else { 450 };
-        if (state.is_streaming || awaiting_answer)
+        if should_drive_running_clock(&state, awaiting_answer)
             && last_tick_instant.elapsed() >= Duration::from_millis(tick_ms)
         {
             state.spinner_tick = state.spinner_tick.wrapping_add(1);
@@ -9421,6 +9588,10 @@ fn tui_event_loop(
                     use crossterm::event::{MouseButton, MouseEventKind};
                     if state.mode == InteractionMode::AskUserQuestion {
                         // Ask 覆盖正文下部；禁止选中被面板遮住的隐藏历史行。
+                        // 滚动条拖拽会话同理必须收口：面板态没有轨道，留着只会吞后续鼠标事件。
+                        if state.scrollbar_drag.take().is_some() {
+                            dirty = true;
+                        }
                         if state.mouse_selection.active || state.mouse_selection.anchor.is_some() {
                             state.mouse_selection.clear();
                             dirty = true;
@@ -9430,7 +9601,10 @@ fn tui_event_loop(
                         let y = mouse.row;
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some(coord) = selection_point_at(&state, x, y) {
+                                // 滚动条优先：命中轨道 ⇒ 起拖并把滑块吸附到指针（手势互斥）。
+                                if scrollbar_mouse_event(&mut state, mouse.kind, x, y) {
+                                    dirty = true;
+                                } else if let Some(coord) = selection_point_at(&state, x, y) {
                                     state.mouse_selection.active = true;
                                     state.mouse_selection.anchor = Some(coord);
                                     state.mouse_selection.head = Some(coord);
@@ -9445,7 +9619,9 @@ fn tui_event_loop(
                                 }
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
-                                if state.mouse_selection.active {
+                                if scrollbar_mouse_event(&mut state, mouse.kind, x, y) {
+                                    dirty = true;
+                                } else if state.mouse_selection.active {
                                     // 拖出正文矩形时吸附到边缘行列：继续拖仍能连续扩选，而不是断在半路。
                                     if let Some(coord) = selection_drag_point(&state, x, y) {
                                         state.mouse_selection.head = Some(coord);
@@ -9459,7 +9635,9 @@ fn tui_event_loop(
                                 }
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
-                                if state.mouse_selection.active {
+                                if scrollbar_mouse_event(&mut state, mouse.kind, x, y) {
+                                    dirty = true;
+                                } else if state.mouse_selection.active {
                                     state.mouse_selection.active = false;
                                     if state.mouse_selection.anchor == state.mouse_selection.head {
                                         state.mouse_selection.clear();
@@ -12677,6 +12855,11 @@ mod transient_error_terminal_tests;
 #[cfg(test)]
 #[path = "tui/tests/provider_retry_status_tests.rs"]
 mod provider_retry_status_tests;
+
+/// 2026-11-16：正文末尾「进行中」状态行的可见性门（backlog:B197）。
+#[cfg(test)]
+#[path = "tui/tests/running_status_visibility_tests.rs"]
+mod running_status_visibility_tests;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // wave-67：`pony update` CLI 自更新验收测试（契约矩阵 C2 / C4 / C7；Test Agent 冻结）

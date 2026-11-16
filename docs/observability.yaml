@@ -175,6 +175,16 @@ reviewed_at: "2026-11-09"
 #     不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+# B203（ADR 2026-11-16-tui-scrollbar-mouse-drag）归属说明：TUI 滚动条补鼠标命中与拖拽。
+# 纯输入/呈现层变更（`crates/pony-agent-core/src/bin/tui.rs`）：新增 `scrollbar_offset_for_row` /
+# `scrollbar_hit` / `apply_scrollbar_row` 三个纯逻辑入口，消费的是既有的 crossterm `Event::Mouse`
+# 通道（鼠标捕获早已开启，无新增终端协议、无新增线程、无新增后台任务），只改 `scroll_offset` /
+# `auto_scroll` 两个既有内存字段；无网络 IO、无 LLM 调用、无新增对外接口或持久化格式，
+# 也不新增遥测出口；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无
+# `/metrics`、pull 模型不成立），tracing / issues 判定与落点不变
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
 dimensions:
   tracing:
     applicable: true
