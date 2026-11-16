@@ -21,11 +21,53 @@
 //! `projection::fold_all_with_branches`（既有唯一判据：血缘链 + `checkpoint/checkout` 重放），
 //! 本模块只提供「事件流 → 消息历史」这一层的入口，不复制第二套血缘逻辑。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::agent::projection::{fold_all_with_branches, HistoryProjectionState, Projection};
 use crate::agent::session::{HistoryBranch, TurnHistoryMessage};
 use crate::agent::turn_event::TurnEvent;
+
+/// B222：写路径的幂等判据 —— 本会话历史里是否已有该 `turn_id` 的行。
+///
+/// 与重建路径的 user 去重**共用同一身份口径**：只认 `turn_id`，不按内容判；
+/// 缺失 `turn_id`（旧直连用法、摘要行）一律视为「未写过」，老行为不变。
+pub(crate) fn history_contains_turn(
+    history: Option<&[TurnHistoryMessage]>,
+    turn_id: Option<&str>,
+) -> bool {
+    let (Some(history), Some(turn_id)) = (history, turn_id) else {
+        return false;
+    };
+    history
+        .iter()
+        .any(|message| message.turn_id.as_deref() == Some(turn_id))
+}
+
+/// B222：重建按 `turn_id` 幂等 —— 同一轮**重复的 user 行**只保留第一条。
+///
+/// 现场：写路径对同一 turn 二次 push（`session/store.rs:748` 一带）+ 事件层同一 turn 的两条
+/// `user/message`，重建后界面与请求携带里出现「同一句话问两遍」，模型据此重复作答。
+/// 口径（严格最小）：
+/// - 只作用于 `role == "user"`：assistant 行是模型真实产出，不参与去重（去重不得连带吞掉回复）；
+/// - 判据**只认轮次身份**（`turn_id`），不按内容：不同轮次即使文本相同也各留一条
+///   （按内容去重会把用户重复提问误合并）；
+/// - `turn_id` 缺失（旧事件/摘要行）⇒ 无轮次身份可判，一律保留；
+/// - 保留**第一条**（与写路径「幂等重放 = 不覆盖首次写入」同口径）。
+fn dedupe_user_messages_by_turn(messages: Vec<TurnHistoryMessage>) -> Vec<TurnHistoryMessage> {
+    let mut seen_turn_ids: HashSet<String> = HashSet::new();
+    let mut kept: Vec<TurnHistoryMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        let duplicate_user = message.role == "user"
+            && message
+                .turn_id
+                .as_deref()
+                .is_some_and(|turn_id| !seen_turn_ids.insert(turn_id.to_string()));
+        if !duplicate_user {
+            kept.push(message);
+        }
+    }
+    kept
+}
 
 /// 按事件顺序（装载侧已 `ORDER BY seq`）把事件流还原成会话历史。
 ///
@@ -47,7 +89,8 @@ pub fn history_from_turn_events(events: &[(u64, TurnEvent)]) -> Vec<TurnHistoryM
     for (seq, event) in events {
         HistoryProjectionState::apply(&mut state, *seq, event);
     }
-    state.messages()
+    // B222：折叠口径仍只有一份（`HistoryProjectionState`），本轮只补「按 turn_id 幂等」这一层。
+    dedupe_user_messages_by_turn(state.messages())
 }
 
 /// PA-174 B1：按**活动血缘**重建历史（复用 `fold_all_with_branches` 的可见性判据）。
@@ -63,13 +106,15 @@ pub(crate) fn history_from_branch_events(
     node_branch: &HashMap<&str, &str>,
     branches: &[HistoryBranch],
 ) -> Vec<TurnHistoryMessage> {
-    fold_all_with_branches::<HistoryProjectionState, HistoryProjectionState>(
+    let messages = fold_all_with_branches::<HistoryProjectionState, HistoryProjectionState>(
         events,
         initial_branch,
         node_branch,
         branches,
     )
-    .messages()
+    .messages();
+    // B222：血缘重建路径与 `history_from_turn_events` 共用同一幂等口径（不留第二套判据）。
+    dedupe_user_messages_by_turn(messages)
 }
 
 #[cfg(test)]

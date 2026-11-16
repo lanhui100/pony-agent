@@ -92,16 +92,46 @@ impl PermissionError {
     }
 
     pub fn outside_workspace_write_denied(message: impl Into<String>) -> Self {
-        let msg = message.into();
-        let hint = "[sandbox: escalation available — retry with explicit authorization]";
-        let full_msg = if msg.contains("[sandbox: escalation available") {
-            msg
+        Self {
+            code: PermissionErrorCode::OutsideWorkspaceWriteDenied,
+            message: with_escalation_hint(message.into()),
+        }
+    }
+
+    /// B223：workspace 外写拒绝 + **可执行替代**（受控可写目录 `<root>/.tmp`）。
+    ///
+    /// 现场：旧文案只说「已拒绝写入」+ escalation，用户不知道往哪写、下一步做什么。
+    /// 本构造器在既有 escalation 提示之外追加一句可执行纠正（改写到该可写目录后重试），
+    /// 结构化错误码**不换码**（前端审批 UI 依赖 `outside_workspace_write_denied`）。
+    ///
+    /// 幂等：`message` 已含 escalation 片段 ⇒ 不重复追加；已含受控可写目录提示 ⇒ 不叠加。
+    /// 判定一律按 `trim_end` 后的文本，避免尾随空白把「已带提示」误判成「未带提示」。
+    pub fn outside_workspace_write_denied_with_workspace(
+        message: impl Into<String>,
+        workspace_root: &Path,
+    ) -> Self {
+        let base = message.into();
+        let base = base.trim_end();
+        let with_escalation = if base.is_empty() {
+            ESCALATION_HINT.to_string()
         } else {
-            format!("{msg} {hint}")
+            with_escalation_hint(base.to_string())
+        };
+        let message = if with_escalation.contains(WRITABLE_HINT_MARKER) {
+            with_escalation
+        } else {
+            // 受控可写目录真源：`<workspace_root>/.tmp`（见 `agent::tools::paths`
+            // 的 `controlled_tmp_dir`，PA-080 约定）。此处只呈现路径文本，不做 IO。
+            let tmp_dir = workspace_root.join(CONTROLLED_TMP_DIR_NAME);
+            let hint = format!(
+                "{WRITABLE_HINT_MARKER}：{}（工作区内的可写替代目录）。请改写到该目录后重试。",
+                tmp_dir.display()
+            );
+            format!("{with_escalation} {hint}")
         };
         Self {
             code: PermissionErrorCode::OutsideWorkspaceWriteDenied,
-            message: full_msg,
+            message,
         }
     }
 
@@ -110,6 +140,27 @@ impl PermissionError {
             code: PermissionErrorCode::RequiresAuthorization,
             message: message.into(),
         }
+    }
+}
+
+/// 既有 escalation 提示（逐字保持：旧构造器与 acp 侧同码文案共用这段措辞）。
+const ESCALATION_HINT: &str = "[sandbox: escalation available — retry with explicit authorization]";
+
+/// escalation 提示的判定前缀（幂等：已带提示的 message 不再重复追加）。
+const ESCALATION_MARKER: &str = "[sandbox: escalation available";
+
+/// B223 可写替代提示的去重标记（同一 message 二次经过构造器不得叠加）。
+const WRITABLE_HINT_MARKER: &str = "受控可写目录";
+
+/// 受控 tmp 目录名（真源 `agent::tools::paths::controlled_tmp_dir`：`<root>/.tmp`）。
+const CONTROLLED_TMP_DIR_NAME: &str = ".tmp";
+
+/// 追加 escalation 提示（幂等；已带则原样返回）。
+fn with_escalation_hint(message: String) -> String {
+    if message.contains(ESCALATION_MARKER) {
+        message
+    } else {
+        format!("{message} {ESCALATION_HINT}")
     }
 }
 
@@ -518,10 +569,17 @@ impl PathPermissionChecker {
                         });
                     }
                 }
-                Err(PermissionError::outside_workspace_write_denied(format!(
-                    "写入路径 {} 位于工作区根与受控临时目录之外，已拒绝写入。",
-                    canonical.display()
-                )))
+                // B223：拒绝文案必须给出**可执行替代**——受控可写目录 `<root>/.tmp`。
+                // 传真实 workspace root（取归一化后的根，路径可直接照着用）。
+                Err(
+                    PermissionError::outside_workspace_write_denied_with_workspace(
+                        format!(
+                            "写入路径 {} 位于工作区根与受控临时目录之外，已拒绝写入。",
+                            canonical.display()
+                        ),
+                        &root_normalized,
+                    ),
+                )
             }
         }
     }

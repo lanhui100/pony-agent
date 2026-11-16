@@ -668,13 +668,16 @@ impl SessionStore {
         turn_id: Option<&str>,
     ) -> Result<SessionSnapshot, SessionError> {
         let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
-        // PA-095 #2：事件源物化——事件能力后端先请求提交本会话缓冲（commit 先于
-        // 清空，由注册闭包保证），再按事件表物化本 turn 的消息文本；消息文本以
-        // 事件为源。回退仅限三类（均记录可观测日志）：真无事件后端
-        // （Memory/File）；事件流无 turn 归属事件（直连 store 的 legacy 用法）；
-        // 缓冲 flush 失败（提交不完整时按事件物化有错 turn 风险，整体回退更安全
-        // ——并行测试下全局注册表被外来 control plane 抢占亦落入此路径）。
-        // 事件读取失败（degraded/版本不匹配）属数据完整性错误，fail loud 上抛。
+        // B222：按 `turn_id` 幂等 —— 同一轮已写过历史（重放/补写）⇒ 只回快照：不追加第二条
+        // user/assistant，也不覆盖首次写入。判据只认轮次身份，缺失 `turn_id` 的旧用法不拦。
+        let history = self.sessions.get(&session_key).map(|s| s.history.as_slice());
+        if super::history::history_contains_turn(history, turn_id) {
+            return Ok(self.snapshot_for_session(&session_key));
+        }
+        // PA-095 #2：事件源物化——事件能力后端先提交本会话缓冲（commit 先于清空，由注册闭包保证），再按
+        // 事件表物化本 turn 的消息文本（**事件为源**）。回退仅限三类（均记日志）：真无事件后端（Memory/File）、
+        // 无 turn 归属事件（直连 store 的 legacy 用法）、缓冲 flush 失败（不完整提交下整体回退更安全——并行
+        // 测试中全局注册表被外来 control plane 抢占亦落此路径）；事件读取失败（degraded/版本不匹配）fail loud。
         let (mut event_user, mut event_assistant) = (None, None);
         let current_watermark = self.sessions.get(&session_key).map(|s| s.event_watermark).unwrap_or(0);
         if self.backend.supports_turn_events() {
@@ -706,11 +709,9 @@ impl SessionStore {
         let user_content = event_user.unwrap_or_else(|| user_message.to_string());
         let (assistant_content, assistant_reasoning) =
             event_assistant.unwrap_or_else(|| (assistant_message.to_string(), None));
-        // RC3/C5（L3-C H2）：**落库边界**清洗——历史正文只留已交付正文（协议块整块丢弃、
-        // 不写占位符）。展示侧的折叠语义（含 `［工具调用］` 占位）不动；事件载荷的同类清洗
-        // 在 `control_plane::flush_events` 的同一口径里完成。
-        let assistant_content =
-            crate::agent::provider::strip_dsml_protocol_text(&assistant_content);
+        // RC3/C5（L3-C H2）：**落库边界**清洗——历史正文只留已交付正文（协议块整块丢弃、不写占位符）。展示侧
+        // 折叠语义（含 `［工具调用］` 占位）不动；事件载荷的同类清洗在 `control_plane::flush_events` 同口径完成。
+        let assistant_content = crate::agent::provider::strip_dsml_protocol_text(&assistant_content);
         let assistant_reasoning = assistant_reasoning
             .map(|reasoning| crate::agent::provider::strip_dsml_protocol_text(&reasoning));
         let memory_write_hook_executor = Arc::clone(&self.memory_write_hook_executor);
@@ -722,8 +723,7 @@ impl SessionStore {
         let before_state = self.ensure_session(&session_key).clone();
         let mut staged_session = before_state.clone();
         let transcript_delta: Vec<Value> = provider_native_transcript.clone().unwrap_or_default();
-        // 合成记录（取消/中断）在历史图上即「未完成轮」：`TurnCancelled` 是既有分类口径
-        // （见 `classify_turn_node_kind`），kind 与文本嗅探必须同判，不得分叉。
+        // 合成记录（取消/中断）即「未完成轮」：`TurnCancelled` 是既有分类口径（见 `classify_turn_node_kind`）。
         let node_kind = match kind {
             Some(_) => HistoryNodeKind::TurnCancelled,
             None => HistoryNodeKind::TurnCommitted,
@@ -732,10 +732,10 @@ impl SessionStore {
             ensure_history_graph(&mut staged_session);
             if kind.is_some() {
                 // C3 / RC2：中断收口**不降级成隐式 fork**。`prepare_session_for_new_turn` 会在
-                // `visible ≠ branch_head` 时新建 `…-branch-N` 并把 cursor 置 `HistoricalDirty`
-                // （事故现场 `…-branch-2` 的来历）。收口只是把本轮的闭合事实挂到**当前分支头**，
-                // 因此先把漂移的 visible 拉回 head（写路径与 `ensure_history_graph` 的 head 口径
-                // 一致），再原地续写；只有显式 rewind/checkout/fork 才允许增加分支。
+                // `visible ≠ branch_head` 时新建 `…-branch-N` 并置 cursor `HistoricalDirty`（事故现场
+                // `…-branch-2` 的来历）。收口只把本轮闭合事实挂到**当前分支头**：先把漂移的 visible 拉回
+                // head（与 `ensure_history_graph` 的 head 口径一致）再原地续写；只有显式
+                // rewind/checkout/fork 才允许增加分支。
                 let branch_head = staged_session.history_cursor.branch_head_node_id.clone();
                 if branch_head.is_some() {
                     staged_session.history_cursor.visible_node_id = branch_head;
@@ -776,8 +776,7 @@ impl SessionStore {
                 memory_write_hook_executor.as_ref(),
             );
             refresh_session_metadata(&mut staged_session, true);
-            // 合成记录（取消/中断）在历史图上就是「未完成轮」，与文本嗅探同口径；
-            // 成功轮恒为 TurnCommitted。
+            // 合成记录（取消/中断）就是「未完成轮」（与文本嗅探同口径）；成功轮恒为 TurnCommitted。
             commit_history_node_from_live_state(&mut staged_session, node_kind, None);
             let window_start = history_len_before.min(staged_session.history.len());
             appended_user = staged_session.history.get(window_start).cloned();
