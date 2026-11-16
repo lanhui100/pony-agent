@@ -708,7 +708,7 @@ impl SessionStore {
         }
         let user_content = event_user.unwrap_or_else(|| user_message.to_string());
         let (assistant_content, assistant_reasoning) =
-            event_assistant.unwrap_or_else(|| (assistant_message.to_string(), None));
+            super::history::close_out_assistant_contents(kind, event_assistant, assistant_message);
         // RC3/C5（L3-C H2）：**落库边界**清洗——历史正文只留已交付正文（协议块整块丢弃、不写占位符）。展示侧
         // 折叠语义（含 `［工具调用］` 占位）不动；事件载荷的同类清洗在 `control_plane::flush_events` 同口径完成。
         let assistant_content = crate::agent::provider::strip_dsml_protocol_text(&assistant_content);

@@ -24,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::agent::projection::{fold_all_with_branches, HistoryProjectionState, Projection};
-use crate::agent::session::{HistoryBranch, TurnHistoryMessage};
+use crate::agent::session::{HistoryBranch, HistoryMessageKind, TurnHistoryMessage};
 use crate::agent::turn_event::TurnEvent;
 
 /// B222：写路径的幂等判据 —— 本会话历史里是否已有该 `turn_id` 的行。
@@ -41,6 +41,23 @@ pub(crate) fn history_contains_turn(
     history
         .iter()
         .any(|message| message.turn_id.as_deref() == Some(turn_id))
+}
+
+/// A2（B219/L3）：收口轮的 assistant 承载文本**优先级** —— 调用方文本（检查点真源）优先。
+///
+/// 取消/失败/降级轮由运行时构造检查点正文（`[中断轮次检查点…`），而事件流里该轮只有
+/// 单行兜底正文；若让事件物化文本覆盖它，DB 历史就没有检查点，而「按事件重投影」
+/// （`projection` 的收口合成）却会补出来 ⇒ live 历史与重投影分叉。因此只有正常完成轮
+/// （`kind = None`）才采用事件物化文本（事件为源），其余一律用调用方文本。
+pub(crate) fn close_out_assistant_contents(
+    kind: Option<HistoryMessageKind>,
+    event_assistant: Option<(String, Option<String>)>,
+    caller_text: &str,
+) -> (String, Option<String>) {
+    match (kind, event_assistant) {
+        (None, Some(materialized)) => materialized,
+        _ => (caller_text.to_string(), None),
+    }
 }
 
 /// B222：重建按 `turn_id` 幂等 —— 同一轮**重复的 user 行**只保留第一条。
@@ -128,6 +145,45 @@ mod tests {
             .enumerate()
             .map(|(seq, event)| (seq as u64, event))
             .collect()
+    }
+
+    /// A2（B219/L3）：收口轮（`kind = Some`，取消/失败/降级）即使事件流有物化正文，
+    /// 落盘 assistant 文本也必须等于**调用方检查点文本**；正常完成轮仍以事件为源。
+    #[test]
+    fn close_out_turn_text_wins_over_event_materialization() {
+        // Arrange：事件物化文本（单行兜底正文）与调用方检查点文本刻意不同。
+        let event_assistant = Some((
+            "事件单行兜底正文".to_string(),
+            Some("事件推理".to_string()),
+        ));
+        let checkpoint = "事件单行兜底正文\n[中断轮次检查点]\n（本轮由 provider 本地兜底收尾）";
+
+        // Act 1：收口轮（kind = Interrupted）。
+        let (text, reasoning) = close_out_assistant_contents(
+            Some(HistoryMessageKind::Interrupted),
+            event_assistant.clone(),
+            checkpoint,
+        );
+
+        // Assert 1：调用方文本取胜，且不带事件侧 reasoning（收口轮无理由承载推理）。
+        assert_eq!(text, checkpoint, "收口轮必须使用调用方检查点文本，实际 = {text:?}");
+        assert_eq!(reasoning, None, "收口轮不得残留事件侧 reasoning");
+
+        // Act 2：正常完成轮（kind = None）。
+        let (text, reasoning) =
+            close_out_assistant_contents(None, event_assistant, "调用方正文");
+
+        // Assert 2：正常轮仍以事件物化文本为源（既有行为不变）。
+        assert_eq!(text, "事件单行兜底正文", "正常完成轮必须以事件为源");
+        assert_eq!(reasoning.as_deref(), Some("事件推理"));
+
+        // Assert 3：无事件（旧后端/直连用法）⇒ 两类轮次都回落调用方文本。
+        let (text, _) = close_out_assistant_contents(
+            Some(HistoryMessageKind::Cancelled),
+            None,
+            "取消轮检查点",
+        );
+        assert_eq!(text, "取消轮检查点");
     }
 
     #[test]

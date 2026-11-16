@@ -373,10 +373,12 @@ fn t_a1a_history_messages_carry_explicit_turn_id() {
     assert_eq!(legacy_assistant.stable_id(), "unknown-assistant");
 }
 
-/// T-A1b（A1-1 幂等键语义）：同一 turn_id 连续两次直连 append 时，**store 层不做替換**
-/// （幂等由运行时 gate `turn_outcome_persisted` 的历史腿保证，不在 store 去重）——
-/// 实测口径：history 新增 4 条（2×user + 2×assistant）；同时断言去重键派生规则
-/// （`{turn_id}-{role}`）使同键可被识别，这正是 gate/回填可据以对账的键。
+/// T-A1b（A1-1 幂等键语义）：同一 turn_id 连续两次直连 append 时，**store 层按 turn_id 幂等**
+/// （保留首次写入，不追加重复的 user/assistant）——契约变更来源 B222 与
+/// ADR 2026-11-16-session-history-turn-id-idempotency：现场 58 个节点快照出现重复 user，
+/// 证明「幂等由运行时 gate `turn_outcome_persisted` 的历史腿保证」的前提已被证伪，故
+/// 去重下沉到 store 写入层。实测口径：该 turn 仍为 2 条（user + assistant）；同时断言去重键
+/// 派生规则（`{turn_id}-{role}`）不变，仍是 gate/回填可据以对账的键。
 #[test]
 fn t_a1b_same_turn_id_append_semantics_and_dedupe_key() {
     // Arrange
@@ -384,7 +386,7 @@ fn t_a1b_same_turn_id_append_semantics_and_dedupe_key() {
     let session_id = "r2-a1b-session";
     let turn_id = "dup-turn";
 
-    // Act：同一 turn_id 连续两次 append
+    // Act：同一 turn_id 连续两次 append（第二次文案刻意不同，用于验证「保留首次写入」）
     let first = store.append_turn_with_kind(
         Some(session_id),
         "第一次用户提问",
@@ -415,20 +417,33 @@ fn t_a1b_same_turn_id_append_semantics_and_dedupe_key() {
         "单次 append 必须为同一 turn_id 落下 user+assistant 两条，实际: {first_turn_count}"
     );
 
-    // Assert 2：store 层语义是 append（不 REPLACE）—— 两次同 turn_id ⇒ 4 条并列
-    let duplicated: Vec<&str> = second
+    // Assert 2：store 层按 turn_id 幂等 —— 两次同 turn_id 仍只有 user+assistant 两条
+    let turn_roles: Vec<&str> = second
         .history
         .iter()
         .filter(|message| message.turn_id.as_deref() == Some(turn_id))
         .map(|message| message.role.as_str())
         .collect();
     assert_eq!(
-        duplicated,
-        vec!["user", "assistant", "user", "assistant"],
-        "store 层不做同 turn_id 去重（幂等由运行时 gate 的历史腿保证），实际顺序: {duplicated:?}"
+        turn_roles,
+        vec!["user", "assistant"],
+        "B222/ADR 2026-11-16-session-history-turn-id-idempotency：store 层按 turn_id 幂等（保留首次写入），\
+         幂等重放不得追加重复消息，实际顺序: {turn_roles:?}"
     );
 
-    // Assert 3：去重键派生 —— 同一 turn_id 的 (turn_id, role) 键必然撞键（gate 据此对账）
+    // Assert 2b：幂等重放必须保留**首次**写入的正文（不是被末次覆盖）
+    let replay_user = second
+        .history
+        .iter()
+        .find(|message| message.turn_id.as_deref() == Some(turn_id) && message.role == "user")
+        .expect("前提：该 turn 必须仍有一条 user 消息");
+    assert_eq!(
+        replay_user.content, "第一次用户提问",
+        "B222：同一 turn_id 的幂等重放必须保留首次写入的 user 正文，实际: {:?}",
+        replay_user.content
+    );
+
+    // Assert 3：去重键派生不变 —— 该 turn 恰 2 条，键互不相同且为 `{turn_id}-{role}`
     let stable_ids: Vec<String> = second
         .history
         .iter()
@@ -436,14 +451,14 @@ fn t_a1b_same_turn_id_append_semantics_and_dedupe_key() {
         .map(|message| message.stable_id())
         .collect();
     assert_eq!(
+        stable_ids.len(),
+        2,
+        "该 turn 恰有 2 条消息（幂等后不追加），实际: {stable_ids:?}"
+    );
+    assert_eq!(
         stable_ids,
-        vec![
-            "dup-turn-user".to_string(),
-            "dup-turn-assistant".to_string(),
-            "dup-turn-user".to_string(),
-            "dup-turn-assistant".to_string()
-        ],
-        "去重键必须是 `{{turn_id}}-{{role}}` 派生（同 turn 重复写会撞出同一键），实际: {stable_ids:?}"
+        vec!["dup-turn-user".to_string(), "dup-turn-assistant".to_string()],
+        "去重键必须是 `{{turn_id}}-{{role}}` 派生且同一 turn 内两键互不相同，实际: {stable_ids:?}"
     );
 }
 

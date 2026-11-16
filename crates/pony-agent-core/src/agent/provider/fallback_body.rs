@@ -58,23 +58,62 @@ fn fallback_error_category(error: &str) -> &'static str {
     }
 }
 
-/// B221：正文片段消毒——剥离 URL / 计时 / provider source 技术串，并折叠为单行。
+/// A3：会破坏字面匹配的零宽/格式字符（U+200B–200F / U+202A–202E / U+2060–2064 / U+FEFF）。
 ///
-/// 实现取向是「删 token 而不是删子串」：命中禁词的那**一个空白分隔片段**整段丢弃，
+/// 攻击形态：`ht\u{200B}tps://host/x`、`h\u{FEFF}ttps`——不先剥离就会绕过 `://` / `http` 判据，
+/// 把整条 URL 当成「普通 token」带进正文并落库。剥离而非替换成空格：零宽字符本来就不该占位，
+/// 合并两侧字母后才能让 `https` / `://` 判据命中。
+fn is_invisible_format_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}'
+    )
+}
+
+/// A3：单个 token 是否承载内部细节（fail-closed，命中任一判据即整段丢弃）。
+///
+/// 判据面：URL scheme（`://` / `http…` / `www.`）、路径与凭据（`/` / `@`）、计时键值
+/// （`elapsed=`）、域名 / IP / 文件名（含 `.` 且非纯十进制数）、provider 内部标记。
+/// 纯数字与 `status=error` 这类**无人读敌意**的普通键值保留——正文要有信息量，不是越空越安全。
+fn token_is_internal_detail(token: &str) -> bool {
+    let lowered = token.to_ascii_lowercase();
+    lowered.contains("://")
+        || lowered.starts_with("http")
+        || lowered.starts_with("www.")
+        || lowered.contains("provider_source")
+        || lowered.contains("elapsed=")
+        || token.contains('/')
+        || token.contains('@')
+        || (token.contains('.') && !is_plain_decimal(token))
+}
+
+/// A3：纯十进制数（`3` / `1.5` / `-2`）——数字本身不是内部细节，只有域名/IP/文件名才丢弃。
+///
+/// 至多**一个**小数点：`1.5` 是数值，`127.0.0.1` 是 IP（内部细节），二者不能同判。
+fn is_plain_decimal(token: &str) -> bool {
+    let body = token.strip_prefix('-').unwrap_or(token);
+    !body.is_empty()
+        && body.chars().filter(|ch| *ch == '.').count() <= 1
+        && body.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+}
+
+/// B221/A3：正文片段消毒——先剥离零宽格式字符，再丢弃承载内部细节的 token，折叠为单行。
+///
+/// 实现取向是「删 token 而不是删子串」：命中禁词的**一个空白分隔片段**整段丢弃，
 /// 避免残留半截 URL（`https://host/x` 被切出 `https:` 之类）或半截计时串。
+/// 空白被 `split_whitespace` 吃掉后，`https :// host` 这种「拆开写」的形态会分别命中
+/// `http…` 前缀与 `://` 判据——三个片段一起丢弃，不留残余。
 fn scrub_fallback_fragment(fragment: &str) -> String {
-    fragment
+    let stripped: String = fragment
+        .chars()
+        .filter(|ch| !is_invisible_format_char(*ch))
+        .collect();
+    stripped
         .split_whitespace()
-        .filter(|token| {
-            let lowered = token.to_ascii_lowercase();
-            !lowered.contains("://")
-                && !lowered.contains("elapsed=")
-                && !lowered.contains("provider_source")
-                && !lowered.starts_with("www.")
-                && !lowered.starts_with("http")
-        })
+        .filter(|token| !token_is_internal_detail(token))
         .collect::<Vec<_>>()
         .join(" ")
+
 }
 
 /// B221：按 `char` 截断（不切 UTF-8 码点），超限时含 `…` 总长 ≤ `max_chars`。
@@ -157,5 +196,49 @@ mod tests {
             !text.contains("本地兜底摘要"),
             "空摘要不得留空段：{text:?}"
         );
+    }
+
+    /// A3-1：零宽字符插入 URL（`ht\u{200B}tps://…`）必须被识别并整段剥离。
+    #[test]
+    fn zero_width_obfuscated_url_is_stripped() {
+        let summary = "已执行 https://exa\u{200B}mple.com/secret\u{FEFF}path 命令";
+        let text = fallback_body_text("Bash", "boom", summary);
+        assert_user_facing(&text);
+        for forbidden in ["exa", "mple.com", "secret", "://", "https"] {
+            assert!(
+                !text.contains(forbidden),
+                "零宽混淆的 URL 片段 {forbidden:?} 不得进正文：{text:?}"
+            );
+        }
+        assert!(text.contains("命令"), "无害摘要仍需保留：{text:?}");
+    }
+
+    /// A3-2：scheme 与 host 被空白拆开（`https :// host`）时三个片段都要丢弃。
+    #[test]
+    fn whitespace_split_scheme_and_host_are_stripped() {
+        let summary = "上游 https :// tokens.ponyjob.top/v1 无响应";
+        let text = fallback_body_text("Bash", "type=timeout+request", summary);
+        assert_user_facing(&text);
+        for forbidden in ["https", "://", "tokens.ponyjob.top", "ponyjob"] {
+            assert!(
+                !text.contains(forbidden),
+                "拆分书写的 {forbidden:?} 不得进正文：{text:?}"
+            );
+        }
+        assert!(text.contains("超时"), "原因类别仍需保留：{text:?}");
+    }
+
+    /// A3-3：裸 host（无 scheme、无路径）同样不得进正文。
+    #[test]
+    fn bare_host_token_is_stripped() {
+        let summary = "主机 tokens.ponyjob.top 拒绝连接";
+        let text = fallback_body_text("Bash", "connect error", summary);
+        assert_user_facing(&text);
+        assert!(
+            !text.contains("tokens.ponyjob.top") && !text.contains("ponyjob"),
+            "裸 host 不得进正文：{text:?}"
+        );
+        assert!(text.contains("主机"), "无害摘要仍需保留：{text:?}");
+        assert!(text.chars().count() <= 400, "压成单行后总长受限：{text:?}");
     }
 }

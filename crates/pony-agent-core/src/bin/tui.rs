@@ -11813,9 +11813,13 @@ fn tui_event_loop(
                     // B218：轮次起点是**所有**开轮入口的公共时间锚。派发点之外的入口
                     // （goal 自动续轮 / Ask 续轮）此前不写 `turn_started_at` ⇒ 状态行的已耗时
                     // 整段为空（正是「看不到已耗时 = 被读成卡死」的复发面）。
-                    if state.turn_started_at.is_none() {
-                        state.turn_started_at = Some(std::time::Instant::now());
-                    }
+                    //
+                    // B218/A1（L3 复核）：锚点必须**无条件**重置 —— `turn_started_at` 只在
+                    // `reset_session_scope` 清空，若用 `is_none()` 守卫，goal 自动续轮会继承
+                    // 上一轮的锚点，elapsed 被显示成「会话累计」而不是本轮耗时。每个真实轮次
+                    // 起点事件都重置；派发点（提交消息 / 续轮）先写入的值被同一时刻覆盖，
+                    // 差异仅毫秒级。终态**不清空**锚点：终态行本就不渲染状态行，无需清。
+                    state.turn_started_at = Some(std::time::Instant::now());
                 }
                 // B220：模型调用真实发起（`turn:trace` 的 `calling_model`）⇒ 静默计时起点。
                 // 时间取 TUI 唯一时钟 `now_ms()`，不伪造、不用渲染帧时间。

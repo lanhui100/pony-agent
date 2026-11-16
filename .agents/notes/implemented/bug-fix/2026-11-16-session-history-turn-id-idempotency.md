@@ -38,3 +38,8 @@ Status: implemented
 - 事件层与索引层无需迁移：去重发生在「写进内存历史/节点快照」和「事件重建」两个入口，历史数据保持原样，旧会话按现有内容读取（已被污染的 58 个节点不做自动改写，需要时按既有折叠/重建路径重算）。
 - `turn_id == None` 的旧直连用法行为逐字不变（无身份可判 ⇒ 不幂等），这是已知边界：那类调用本来就在一条「无轮次身份」的路径上。
 - 验收：`tests/b222_history_rebuild_idempotent.rs`（6 例，含 store 级重复 append 与「不同轮次不得合并」守护）。
+
+## 契约变更登记（ADR 0123 T-A1b 迁移）
+
+`tests/adr0123_supplement_r2_test.rs::t_a1b_same_turn_id_append_semantics_and_dedupe_key` 原先断言「同 turn_id 两次 append ⇒ 四条并列，store 层不去重，幂等由运行时 gate 的历史腿保证」。这条契约的前提被现场证伪：`normalized_history_nodes` 有 58 个节点快照含重复 user 行，说明运行时 gate 并未兜住所有重放路径（`sqlite_session_commit.rs` 的重建日志与 `store.rs` 的回退日志同时出现）。因此本卡把幂等责任从「调用方自觉」下移到存储写入口，并按 owner 批准显式迁移该用例断言（保留首次写入、同 turn 两条、去重键两条）。迁移不是测试放水：新断言的强度更高（覆盖重放文案不同时仍保留首写），且与验收测试 `b222_store_append_same_turn_id_is_idempotent` 同口径。
+
