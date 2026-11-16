@@ -362,3 +362,170 @@ fn b218_blank_word_falls_back_to_placeholder() {
         "word 为空白时不得产出空白行，实际 = {text:?}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// B220：上游静默探测（`status_dwell` 的 `UpstreamIdle` + 阈值化提示纯函数）
+//
+// 现场：provider 已受理请求却迟迟没有首字节/增量，界面只有「生成中」这一句 —— 用户无法
+// 区分「慢」与「上游已静默」。本段钉住三件事：阈值边界（5s 提示 / 15s 告警）、阶段可辨识
+// （请求已发出 vs 已收到首字节 vs 增量为 0）、无事件时不得伪造静默。
+//
+// 时间一律由调用方以 `now_ms: u64` 注入（假时间），不读真实时钟、不 sleep。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// B220 阈值常量必须与契约逐字一致（改动即跨端呈现口径变更，必须显式可见）。
+#[test]
+fn b220_stall_thresholds() {
+    // Assert 1：阈值常量。
+    assert_eq!(
+        UPSTREAM_STALL_HINT_MS, 5_000,
+        "提示阈值必须是 5s，实际 = {UPSTREAM_STALL_HINT_MS}"
+    );
+    assert_eq!(
+        UPSTREAM_STALL_ALERT_MS, 15_000,
+        "告警阈值必须是 15s，实际 = {UPSTREAM_STALL_ALERT_MS}"
+    );
+
+    // Assert 2：阈值前一刻不提示（4999 不得提前报警）。
+    assert_eq!(
+        stall_hint(UpstreamPhase::Delta, 4_999),
+        None,
+        "静默 4999ms 未达 5s 门，不得提示"
+    );
+
+    // Assert 3：恰好 5s 进提示档，且带静默秒数与可辨识阶段。
+    let hint_5s = stall_hint(UpstreamPhase::Delta, 5_000)
+        .expect("静默 5000ms 必须给出提示（否则「慢」与「死了」不可区分）");
+    assert!(
+        hint_5s.contains('5'),
+        "提示必须点名静默秒数 5，实际 = {hint_5s:?}"
+    );
+    assert!(
+        hint_5s != stall_hint(UpstreamPhase::RequestSent, 5_000).unwrap_or_default(),
+        "阶段必须可辨识（同一静默时长下 RequestSent 与 Delta 的文案不得相同），实际 = {hint_5s:?}"
+    );
+
+    // Assert 4：14999 仍在提示档（未到告警）。
+    assert!(
+        stall_hint(UpstreamPhase::Delta, 14_999).is_some(),
+        "静默 14999ms 必须仍给出提示"
+    );
+
+    // Assert 5：15000 进告警档 —— 文本与 5s 档不同，且含「上游」与静默秒数。
+    let alert_15s = stall_hint(UpstreamPhase::Delta, 15_000)
+        .expect("静默 15000ms 必须给出告警级提示");
+    assert!(
+        alert_15s.contains("上游"),
+        "告警档必须点名「上游」故障面，实际 = {alert_15s:?}"
+    );
+    assert!(
+        alert_15s.contains("15"),
+        "告警档必须点名静默秒数 15，实际 = {alert_15s:?}"
+    );
+    assert_ne!(
+        alert_15s, hint_5s,
+        "告警档与提示档必须是不同文案，否则用户感知不到升级"
+    );
+
+    // Assert 6：超长静默不 panic 且仍给出提示。
+    assert!(
+        stall_hint(UpstreamPhase::Delta, 60_000).is_some(),
+        "静默 60s 仍必须给出提示（不得因越界回落成 None/panic）"
+    );
+}
+
+/// B220 阶段生命周期：无事件 ⇒ 无静默；request_sent ⇒ 请求已发出；首个 delta ⇒ 首字节；
+/// 其后 delta ⇒ 增量；每次 delta 把静默计时归零。
+#[test]
+fn b220_phase_lifecycle() {
+    // Arrange：刚创建 + reset 后没有任何上游事件。
+    let mut idle = UpstreamIdle::default();
+    idle.reset();
+
+    // Assert 1：无事件不得伪造静默提示。
+    assert_eq!(
+        idle.hint(0),
+        None,
+        "尚未发出任何请求时不得提示「上游静默」（那是假事实）"
+    );
+
+    // Act / Assert 2：请求已发出。
+    idle.note_request_sent(0);
+    assert!(
+        matches!(idle.phase(), UpstreamPhase::RequestSent),
+        "note_request_sent 后阶段必须是 RequestSent"
+    );
+
+    // Act / Assert 3：首个增量 ⇒ 首字节。
+    idle.note_delta(1_000);
+    assert!(
+        matches!(idle.phase(), UpstreamPhase::FirstByte),
+        "首次 note_delta 后阶段必须是 FirstByte"
+    );
+
+    // Act / Assert 4：其后增量 ⇒ Delta。
+    idle.note_delta(2_000);
+    assert!(
+        matches!(idle.phase(), UpstreamPhase::Delta),
+        "第二次 note_delta 后阶段必须是 Delta"
+    );
+
+    // Assert 5：delta 持续刷新 ⇒ 静默归零；再过一个间隔才重新计时。
+    assert_eq!(
+        idle.silent_ms(2_000),
+        0,
+        "刚收到增量时静默时长必须归零"
+    );
+    assert_eq!(
+        idle.silent_ms(2_500),
+        500,
+        "静默时长必须自最近一次增量起算，实际 = {}",
+        idle.silent_ms(2_500)
+    );
+}
+
+/// B220 阶段可辨识：同一静默时长下，不同阶段的提示文本必须不同（否则用户看不出卡在哪一步）。
+#[test]
+fn b220_hint_mentions_phase() {
+    // Arrange：同一静默时长（已越过提示阈值）。
+    const SILENT: u64 = 8_000;
+
+    // Act
+    let request_sent = stall_hint(UpstreamPhase::RequestSent, SILENT);
+    let first_byte = stall_hint(UpstreamPhase::FirstByte, SILENT);
+    let delta = stall_hint(UpstreamPhase::Delta, SILENT);
+
+    // Assert
+    let request_sent = request_sent.expect("RequestSent 阶段静默 8s 必须提示");
+    let first_byte = first_byte.expect("FirstByte 阶段静默 8s 必须提示");
+    let delta = delta.expect("Delta 阶段静默 8s 必须提示");
+    assert!(
+        request_sent != delta,
+        "RequestSent 与 Delta 的提示必须可区分，实际两者同为 {request_sent:?}"
+    );
+    assert!(
+        request_sent != first_byte,
+        "RequestSent 与 FirstByte 的提示必须可区分，实际两者同为 {request_sent:?}"
+    );
+}
+
+/// B220 阈值前不提示：只发出请求、未到 5s 时不得提示；到 5s 才提示。
+#[test]
+fn b220_no_hint_before_threshold() {
+    // Arrange
+    let mut idle = UpstreamIdle::default();
+    idle.note_request_sent(0);
+
+    // Assert 1
+    assert_eq!(
+        idle.hint(4_999),
+        None,
+        "请求发出后 4999ms 仍不得提示（避免开局就闪警告）"
+    );
+
+    // Assert 2
+    assert!(
+        idle.hint(5_000).is_some(),
+        "请求发出后 5000ms 必须提示上游未响应"
+    );
+}
