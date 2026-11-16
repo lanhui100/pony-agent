@@ -174,3 +174,31 @@ cargo test -p pony-agent-core --test pa110_teams_acceptance --test team_drain_sc
 5. `task-graph.assertTaskGraphCandidate` + `taskReady` + `writeScopeWarnings`：把"能不能做"与"谁在做"分离。
 6. 双层权限（scoped tool install + 服务端 role 校验）。
 7. `TeamError` 稳定 code + schema 版本化投影（`stateVersion` / `version: 2`）。
+
+## 10. 实施状态与验收回执（2026-11-15）
+
+| 审计项 | 状态 | 落地方式 |
+| :-- | :-- | :-- |
+| P0-1 `wait_agent` 假信号 | 已修复 | `TeamActivity`（`Mutex<u64>` + `Condvar`）真边沿；`wait_agent` 真等待，超时返回 `timed_out=true`；模型入口合并为 `list_agents(wait_ms)`，避免新增工具名导致 8 处工具面清单与 schema hash 漂移 |
+| P0-2 队友跨轮失忆 | 已修复 | `register_teammate` 预分配并登记固定会话 id（`team-<name>-<8hex>`）；驱动改用 `run_turn_request` 复用该 id（宿主 `HostTurnEngine` 已注入共享会话存储） |
+| P0-3 伪授权/无状态机 | 已修复 | `TeamCaller` + `authorize_task`；claim 需 `pending` 且依赖全 `completed`；complete/release 需 `in_progress`；`deleted` 终态；删除仍有依赖者拒绝；依赖自引用/重复/缺失/环校验；成员 16、任务 256、消息 64KiB、subject 200、description 16384 预算 |
+| P0-4 lead 回执死信 | 部分修复 | 提示词显式要求 `drain_inbox target=lead`；回执仍只入队，未 steer 进 lead turn |
+| P0-5 权限边界 | 已修复（服务端） | `spawn_teammate`/`interrupt_agent_as` 强制 Lead-only；工具层 `team_task_*`/`interrupt_agent`/`list_agents` 均按 `ToolExecutionContext.session_id` 传真实调用者；teammate 工具面裁剪未做（越权已在服务端阻断） |
+| P1-5 `team_history` 空桩 | 已修复 | 模块与自引用测试已删除；恢复条件写入 ADR（按事件溯源重建，不得恢复 `todo!()`） |
+| P1-3 无持久化/隔离、P1-4 前端不刷新、P2 `team_task_get` 未注册 | 未修复 | 团队状态仍为进程级 `static Mutex`；前端仍一次性拉取；`team_task_get` 仅有内核函数 |
+| P2 `write_scopes` 重叠告警 | 未修复 | 已做归一化与去重，无重叠诊断 |
+
+### 验收命令与结果
+
+```bash
+cargo check -p pony-agent-core --lib                 # exit 0
+cargo test -p pony-agent-core --lib agent::orchestration   # 6 passed
+cargo test -p pony-agent-core --test pa110_teams_acceptance --test team_drain_scope_test \
+  --test team_link_fixes_test --test team_task_order_contract \
+  --test teammate_e2e_communication_test --test team_authority_and_session_test \
+  --test wave61_team_activation --test w3_team_visibility_test -- --test-threads=1
+# 结果：198 passed / 0 failed（前 7 个文件）+ 新增 3 passed；wave61 15/16
+# 唯一失败：c1_team_tools_are_model_visible 期望 38 项、实际 39 项（`acp_delegate` 新增未同步清单，非本变更域）
+```
+
+新增回归：`crates/pony-agent-core/tests/team_authority_and_session_test.rs`（会话身份登记、teammate 不可派生/中断、无活跃同伴快速失败）。

@@ -48,4 +48,8 @@ Status: implemented
   - P0-1「`wait_agent` 空实现返回假信号」已收口：改为真实边沿等待，并抽出可测原语（`wait_on_team_activity` 用局部实例，单测不碰进程级全局状态）；
   - P0-3「伪授权」已收口：补齐调用者授权、状态机、依赖图校验与容量预算，并把工具层 `team_task_create`/`team_task_update` 接到 `TeamCaller`（此前一路按 Lead 放行，任何队友可改任意任务）；
   - 事实订正：边沿机制是 `Condvar` + 版本号（进程内同步原语），**不是** Tokio `Notify`/广播通道；`wait_agent` 在同步工具线程上阻塞等待，符合当前工具面同步执行模型；
-  - 未收口（后续任务，审计文档已逐条登记）：团队状态仍为进程级全局 `static Mutex`（无会话隔离、无持久化、重启即失）、队友跨轮无会话延续、`team_history.rs` 仍为空桩。
+  - P0-2「队友跨轮失忆」已收口：`register_teammate` 预分配并登记固定会话 id（`team-<name>-<8hex>`），驱动改用 `run_turn_request` 复用该 id（宿主 `HostTurnEngine` 已注入共享会话存储）；同一登记同时修复「队友 turn 内身份被误判为 Lead」的授权漏斗；
+  - P0-5「任何成员可派生/中断」已收口：内核 `spawn_teammate`/`interrupt_agent_as` 强制 Lead-only，工具层经 `TeamCaller::from_session` 传真实调用者；
+  - 工具面：`wait_agent` 保持内核真等待，模型可见入口合并为 `list_agents(wait_ms)`（避免新增工具名导致 8 处工具面清单与 schema hash 漂移）；
+  - `team_history.rs` 空桩已删除（生产零调用点，仅自引用测试）；恢复条件：需要跨会话团队历史投影时按事件溯源重建，不得恢复 `todo!()` 桩；
+  - 未收口（后续任务）：团队状态仍为进程级全局 `static Mutex`（无会话隔离、无持久化、重启即失）；前端团队面板仍是一次性拉取（无订阅/轮询）；`write_scopes` 无重叠告警（仅记录）。

@@ -679,10 +679,15 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_LIST_AGENTS,
-            description: "列出当前团队中所有活跃及持久化智能体花名册及其运行状态。",
+            description: "列出团队花名册与运行状态。可选 wait_ms：先等待下一次团队边沿（成员状态 / 消息 / 任务流转）再列举；无活跃同伴时立即返回。",
             input_schema: with_description(json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "wait_ms": {
+                        "type": "integer",
+                        "description": "可选等待毫秒数（10000-3600000）。省略则立即列举；给出时按团队边沿等待，超时后照常列举。"
+                    }
+                },
                 "additionalProperties": false
             })),
         },

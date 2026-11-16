@@ -948,6 +948,16 @@ fn register_teammate(
         inbox_map.insert(target.clone(), VecDeque::new());
     }
 
+    // 预分配并登记该队友的固定会话 id：
+    // - 驱动每轮复用同一会话 ⇒ 队友跨轮保留上下文（不再是每轮失忆的新会话）；
+    // - 首轮 turn 内部即可由 session_id 反查成员身份 ⇒ 队友调用团队工具时不会被当成 Lead 放行。
+    let teammate_session = format!(
+        "team-{}-{}",
+        target,
+        &Uuid::new_v4().simple().to_string()[..8]
+    );
+    set_teammate_session(&target, &teammate_session);
+
     bump_team_activity();
     Ok((SpawnTeammateResult { member }, target, initial_prompt))
 }
@@ -1143,6 +1153,20 @@ fn set_teammate_status(target: &str, status: TeammateStatus) {
 
 /// 打断正在运行的智能体（保留其信箱队列）
 pub fn interrupt_agent(args: InterruptAgentArgs) -> Result<InterruptAgentResult, String> {
+    interrupt_agent_as(args, &TeamCaller::lead())
+}
+
+/// 以显式调用者身份中断队友：**只有 Team Lead 可中断**（队友不得中断 Lead 或兄弟成员）。
+pub fn interrupt_agent_as(
+    args: InterruptAgentArgs,
+    caller: &TeamCaller,
+) -> Result<InterruptAgentResult, String> {
+    if !caller.is_lead {
+        return Err(format!(
+            "interrupt_agent requires the Team Lead; caller `{}` is a teammate",
+            caller.name
+        ));
+    }
     // D1 修复：与登记侧同一归一化（is_driving / 成员表 / 中断标记三处共用同一 target）。
     let mut args = args;
     args.target = normalize_target(&args.target);
@@ -1573,11 +1597,22 @@ pub fn team_task_update_as(
 
 /// 等待队友活动（对齐 DSH wait_agent 边沿机制）
 pub fn wait_agent(args: WaitAgentArgs) -> Result<WaitAgentResult, String> {
+    wait_agent_as(args, &TeamCaller::lead())
+}
+
+/// 以显式调用者身份等待团队边沿：调用者自己不计入「活跃同伴」。
+pub fn wait_agent_as(
+    args: WaitAgentArgs,
+    caller: &TeamCaller,
+) -> Result<WaitAgentResult, String> {
     let has_active_peer = {
         let lock = TEAMMATES.lock().unwrap();
         if let Some(ref map) = *lock {
             map.iter().any(|(target, member)| {
-                target != "lead" && (member.status == TeammateStatus::Running || member.status == TeammateStatus::Provisioning)
+                target != "lead"
+                    && target != &caller.name
+                    && (member.status == TeammateStatus::Running
+                        || member.status == TeammateStatus::Provisioning)
             })
         } else {
             false
@@ -1675,13 +1710,21 @@ pub fn drive_teammate_turn_in(
     let parent_traceparent = teammate_traceparent(target);
     let final_reply = match engine {
         Some(engine) => {
-            match engine.run_turn_with_selection_and_parent(
-                &combined_prompt,
-                SUBAGENT_TURN_TIMEOUT_MS,
+            // 会话延续：复用 register_teammate 预分配的固定 session_id。引擎以同一 id 建栈/续写
+            // ⇒ 队友跨轮保留上下文；该 id 也已登记，turn 内工具调用可按 session 反查成员身份。
+            let teammate_session = teammate_session_id(target);
+            let request = crate::agent::subagent_runtime::SubagentRunRequest {
+                prompt: &combined_prompt,
+                timeout_ms: SUBAGENT_TURN_TIMEOUT_MS,
                 workspace_root,
-                selection.as_ref(),
-                parent_traceparent.as_deref(),
-            ) {
+                provider_selection: selection.as_ref(),
+                parent_traceparent: parent_traceparent.as_deref(),
+                session_id: teammate_session.as_deref(),
+                parent_session_id: None,
+                workspace_id: None,
+                fork_context: false,
+            };
+            match engine.run_turn_request(&request) {
                 Ok(outcome) => {
                     // W3：成功 turn 的会话 id 登记进进程内可见性缓存（失败路径不写：避免
                     // `/agents` 把一次失败的孤儿会话当成可进入的子会话）。

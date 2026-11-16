@@ -321,9 +321,32 @@ impl ToolRouter {
         }
     }
 
-    pub(super) fn execute_list_agents(&self, _call: &ToolCall) -> ToolResult {
+    pub(super) fn execute_list_agents(
+        &self,
+        call: &ToolCall,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
         if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_LIST_AGENTS);
+        }
+
+        // 可选 wait_ms：把内核真边沿等待暴露给模型（工具名不变，避免工具面清单漂移）。
+        // 等待期间任一团队边沿（成员状态 / 消息入队出队 / 任务流转）都会醒来；
+        // 无活跃同伴时内核立即返回 no_progress，不会阻塞。
+        if let Some(wait_ms) = call
+            .arguments
+            .get("wait_ms")
+            .and_then(|value| value.as_u64())
+        {
+            match crate::agent::orchestration::wait_agent_as(
+                WaitAgentArgs {
+                    timeout_ms: Some(wait_ms),
+                },
+                &crate::agent::orchestration::TeamCaller::from_session(context.session_id.as_deref()),
+            ) {
+                Ok(_) => {}
+                Err(err) => return error_result(TOOL_LIST_AGENTS, "list_agents_failed", err, None),
+            }
         }
 
         match list_agents() {
@@ -380,14 +403,21 @@ impl ToolRouter {
         }
     }
 
-    pub(super) fn execute_interrupt_agent(&self, call: &ToolCall) -> ToolResult {
+    pub(super) fn execute_interrupt_agent(
+        &self,
+        call: &ToolCall,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
         if !subagent_runtime_wired() {
             return capability_unavailable_result(TOOL_INTERRUPT_AGENT);
         }
 
         let args: Result<InterruptAgentArgs, _> = serde_json::from_value(call.arguments.clone());
         match args {
-            Ok(args) => match interrupt_agent(args) {
+            Ok(args) => match crate::agent::orchestration::interrupt_agent_as(
+                args,
+                &crate::agent::orchestration::TeamCaller::from_session(context.session_id.as_deref()),
+            ) {
                 Ok(res) => ToolResult {
                     tool_name: TOOL_INTERRUPT_AGENT.to_string(),
                     status: "ok".to_string(),

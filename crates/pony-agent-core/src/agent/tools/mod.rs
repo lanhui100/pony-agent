@@ -83,7 +83,8 @@ pub use crate::agent::goal::{
     GoalActivation, GoalData, UpdateGoalAction, UpdateGoalArgs, UpdateGoalResult,
 };
 pub use crate::agent::orchestration::{
-    drain_inbox, interrupt_agent, list_agents, send_message, send_message_in_workspace,
+    drain_inbox, interrupt_agent, interrupt_agent_as, list_agents, send_message,
+    send_message_in_workspace, wait_agent_as, TeamCaller,
     spawn_teammate, spawn_teammate_in_workspace, spawn_teammate_in_workspace_with_provider,
     subagent, subagent_in_workspace, subagent_in_workspace_with_context,
     subagent_in_workspace_with_provider, team_task_create,
@@ -369,14 +370,14 @@ static PRIMITIVE_DISPATCH_TABLE: &[(&str, PrimitiveDispatchFn)] = &[
     (TOOL_SPAWN_TEAMMATE, |router, call, context| {
         router.execute_spawn_teammate(call, context)
     }),
-    (TOOL_LIST_AGENTS, |router, call, _context| {
-        router.execute_list_agents(call)
+    (TOOL_LIST_AGENTS, |router, call, context| {
+        router.execute_list_agents(call, context)
     }),
     (TOOL_SEND_MESSAGE, |router, call, context| {
         router.execute_send_message(call, context)
     }),
-    (TOOL_INTERRUPT_AGENT, |router, call, _context| {
-        router.execute_interrupt_agent(call)
+    (TOOL_INTERRUPT_AGENT, |router, call, context| {
+        router.execute_interrupt_agent(call, context)
     }),
     (TOOL_DRAIN_INBOX, |router, call, context| {
         router.execute_drain_inbox(call, context)
