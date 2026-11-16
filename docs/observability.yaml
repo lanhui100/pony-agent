@@ -208,6 +208,28 @@ reviewed_at: "2026-11-09"
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+# B218/B219/B220/B221（ADR 2026-11-16-tui-turn-lifecycle-status-line、
+# 2026-11-16-degraded-turn-reason-and-trace、2026-11-16-tui-upstream-stall-heartbeat、
+# 2026-11-16-provider-fallback-body-layering；backlog:B218/B219/B220/B221）归属说明：
+# (1) 变更面（三块，均无新增遥测出口）：
+#     (1a) TUI 呈现层（`crates/pony-agent-core/src/bin/tui.rs` + `bin/tui/status_dwell.rs`）：
+#          `TurnLifecycle` 生命周期门、状态行组装纯函数、上游静默心跳（5s/15s 两档，阶段取自
+#          真实事件 `turn:trace(phase=calling_model)` / `turn:delta`）。局部终端渲染，无新增对外
+#          接口、网络 IO、线程/后台任务或 LLM 调用；时间来自进程内单调时钟。
+#     (1b) 终态记账（`agent/turn_event.rs`、`agent/turn_flow.rs`、`agent/projection.rs`、
+#          `agent/runtime/turn_persist.rs`、`agent/session/types.rs`）：`turn_end.reason` 新增
+#          `degraded` 取值、`TurnTraceRecord` 新增 `providerFallback` 键（additive、`None` 缺席）。
+#          两者都是**本地事件溯源/会话持久化**字段（`session_turn_traces`），不是遥测上报通道。
+#     (1c) provider 兜底正文（`agent/provider/mod.rs`）：用户文案与诊断细节分层，完整 error 只进
+#          `fallback_reason`（trace/provider 日志），不新增上报通道。
+# (2) 四维归属不变：tracing / issues 仍 applicable（落点不变 `agent/otel/mod.rs`、
+#     `agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、
+#     无 `/metrics`、pull 模型不成立）。
+# (3) 收口点：不新增 enforcement_point；行为门落在单测/集成测试——
+#     `bin/tui/tests/running_status_visibility_tests.rs`（b218_*/b220_*）、
+#     `tests/b219_degraded_turn_acceptance.rs`、`tests/b221_fallback_body_acceptance.rs`。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
 dimensions:
   tracing:
     applicable: true

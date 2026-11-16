@@ -18,6 +18,7 @@ backlog:B218 与已闭环的 backlog:B215 是同一缺陷（同一渲染门、�
 
 1. `bin/tui/status_dwell.rs` 新增 `pub enum TurnLifecycle { Running, Terminal }`（无 ratatui 依赖，与既有 `StatusDwell` / `ToolActivity` 同层）。
 2. `bin/tui.rs` 新增 `pub(crate) fn turn_lifecycle(state: &TuiState) -> TurnLifecycle` 作为**唯一**生命周期判定点；`should_render_running_status` 与 `status_urgency` 全部改为消费它，删除各自重复的 `matches!`。运行态集合只在这一处列举，未来新增模式漏写会直接落到 `Terminal` 分支并被既有「终态不渲染」测试抓住。
+   - 生命周期还吸收两类**运行期覆盖**：`stopping_turn_id.is_some()`（用户已请求停止、终态未到）与 `provider_retry.is_some()`（上游正在重试）一律判 `Running`。它们不改变 `runtime_mode`，但此刻「轮次仍在跑」是用户唯一关心的事实；这条覆盖只写在 `turn_lifecycle` 里，不再由渲染门与 `status_urgency` 各写一份。
 3. 新增 `pub(crate) fn compose_running_status_text(state: &TuiState, word: &str, elapsed: &str) -> Option<String>`：
    - `Terminal` ⇒ `None`（终态不得残留假进行中）；
    - `Running` ⇒ `Some(非空文本)`，`elapsed` 非空时**逐字**出现在文本中；`word` 为空白时回落非空占位（`处理中`），不允许产出空行。

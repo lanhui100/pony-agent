@@ -262,6 +262,12 @@ pub enum UiEvent {
     /// 若不复位，上一轮快照会整轮泄漏到下一轮。由事件流承担复位 ⇒ 所有入口自动覆盖
     /// （goal 续轮、stop→resume 等），不依赖调用点自觉。
     TurnStarted,
+    /// B220：后端真实「模型调用开始」事件（`turn:trace` 且 `phase == "calling_model"`）
+    /// ⇒ 进入「等待上游首字节」窗口（上游静默提示的起点）。
+    ///
+    /// 为什么必须是真事件：静默阈值只能由**真实发生**的请求发出时刻起算，不得用渲染帧
+    /// 或本地猜测的时间戳伪造；`turn:trace` 此前被 sink 的 `_ => {}` 静默丢弃。
+    ModelCallStarted,
     /// /models 触发的远程模型目录拉取成功：ids 已由后台线程取得，由主循环持久化并打开面板。
     ModelsDiscovered { provider_id: String, ids: Vec<String> },
     /// /models 远程拉取失败：仅上报错误，由主循环以 System 消息呈现，不 panic、不退出。
@@ -1525,6 +1531,9 @@ pub struct TuiState {
     pub status_dwell: StatusDwell,
     /// 轮内工具活动聚合（调用计数 + 当前/最近工具）：折叠态下状态行的信息补充。
     pub tool_activity: ToolActivity,
+    /// 上游静默跟踪（B220）：只由真实事件推进（`calling_model` / 增量 / 轮次收口），
+    /// 状态行据此在长静默期追加「仍在等待上游首字节…」提示（只在 Running 时呈现）。
+    pub upstream_idle: UpstreamIdle,
     /// Composer 高度平滑收拢过渡（每帧衰减 1 行直至 target_input_h）
     pub anim_composer_h: Option<u16>,
     /// 最近一次计算的正文渲染区域 chat_rect
@@ -1670,6 +1679,7 @@ impl Default for TuiState {
             turn_started_at: None,
             status_dwell: StatusDwell::new(),
             tool_activity: ToolActivity::default(),
+            upstream_idle: UpstreamIdle::default(),
             anim_composer_h: None,
             last_chat_rect: None,
             last_scrollbar_rect: None,
@@ -1733,6 +1743,9 @@ impl TuiState {
     /// 不需要也不应该堆历史）。
     pub fn note_provider_retry(&mut self, attempt: u32, max_attempts: u32) {
         self.provider_retry = Some((attempt, max_attempts.max(1)));
+        // B220：重试意味着上一跳的等待窗口已作废（下一次真实 `calling_model` 会重新起算）；
+        // 不复位会让「正在重试（1/5）」旁边挂着一条上一跳的上游静默告警。
+        self.upstream_idle.reset();
     }
 
     /// 2026-11-14：清空重试进度（重试恢复或任一终态到达）。
@@ -1793,8 +1806,10 @@ impl TuiState {
         self.stopping_turn_id = None;
         self.streaming_turn_id = None;
         self.is_streaming = false;
-        // 终态不再渲染流式状态行：驻留态一并清空，避免下一轮首帧闪出旧工具文案。
+        // 终态不再渲染流式状态行：驻留态一律清空，避免下一轮首帧闪出旧工具文案。
         self.status_dwell.reset();
+        // B220：上游静默窗口同属本轮瞬时态，终态必须退出（不得跨轮报告静默）。
+        self.upstream_idle.reset();
         self.transition_runtime_mode(RuntimeMode::Ready);
         self.status_text = match stop_reason {
             Some("user") => "已停止（用户中断）".to_string(),
@@ -1863,6 +1878,8 @@ impl TuiState {
         // 状态行：工具活动与驻留文本同属会话作用域（跨会话不得残留旧工具文案）。
         self.tool_activity.reset();
         self.status_dwell.reset();
+        // B220：上游静默窗口同属会话作用域（旧会话的等待窗口不得带进新会话）。
+        self.upstream_idle.reset();
         // W3：花名册面板与"返回主会话"目标都绑定会话作用域，复位时一并清空
         //（调用方若需要保留 return_session_id，必须在 reset 之后再写入）。
         self.agent_roster_state = None;
@@ -2046,6 +2063,9 @@ impl TuiState {
         // 状态行：轮内工具活动与可见文本同属轮次作用域（跨轮不得残留计数 / 旧工具文案）。
         self.tool_activity.reset();
         self.status_dwell.reset();
+        // B220：本轮开始的唯一复位点（含 goal 自动续轮等绕过派发点的入口）⇒
+        // 上一轮的上游静默窗口立即失效，本轮要等到真实的 `calling_model` 事件才重新计时。
+        self.upstream_idle.reset();
     }
 
     /// P0：应用一条指标结算快照（`TurnStreamEvent.metrics` → `UiEvent::StreamMetrics`）。
@@ -3038,6 +3058,7 @@ impl TuiState {
         // 状态行聚合文本同属会话作用域（旧会话的工具计数不得带进新会话）。
         self.tool_activity.reset();
         self.status_dwell.reset();
+        self.upstream_idle.reset();
     }
 }
 
@@ -3347,6 +3368,14 @@ impl TurnEventSink for TuiTurnSink {
             let _ = self.tx.send(UiEvent::StreamMetrics(metrics.clone()));
         }
         match name {
+            // B220：`turn:trace` 此前被 `_ => {}` 丢弃。这里**只**取「模型调用开始」这一
+            // 真实时刻（`turn_flow` 的 `phase=calling_model`），推进上游静默窗口；
+            // 其余 trace 相位（executing_tool / response_ready …）与正文无关，一律不消费。
+            "turn:trace" => {
+                if payload.phase.as_deref() == Some("calling_model") {
+                    let _ = self.tx.send(UiEvent::ModelCallStarted);
+                }
+            }
             // P0：轮次起点 ⇒ 事件驱动的复位（详见 `UiEvent::TurnStarted`）。
             // 必须在轮内任何 `metrics` 事件之前投递：`turn:started` 是该轮首个事件。
             "turn:started" => {
@@ -5072,16 +5101,41 @@ fn status_tone_style(tone: StatusTone) -> Style {
 /// 折叠态（`hide_process`）下更是完全没有工具行。deepseek harness 的 RunningStatus 在
 /// **整个运行期**恒显且带实时耗时 —— 对齐后，长耗时工具/思考不会再被误判成会话停止。
 fn should_render_running_status(state: &TuiState) -> bool {
-    if state.stopping_turn_id.is_some() || state.provider_retry.is_some() {
-        return true;
-    }
-    matches!(
-        state.runtime_mode,
+    // 门与生命周期**同源**（B218）：只判一次，杜绝「门按 A 判、文案按 B 判」。
+    turn_lifecycle(state) == TurnLifecycle::Running
+}
+
+/// `RuntimeMode` 自身的生命周期（**不含** `stopping_turn_id` / `provider_retry` 覆盖）。
+///
+/// 单独拆出的理由：抢占级别要区分「基座仍是终态、但此刻在报重试进度」这一特例
+/// （见 [`status_urgency`]），本函数是该判定的唯一私有真源。
+fn runtime_mode_lifecycle(mode: &RuntimeMode) -> TurnLifecycle {
+    match mode {
         RuntimeMode::Connecting
-            | RuntimeMode::Thinking
-            | RuntimeMode::Responding
-            | RuntimeMode::ExecutingTool(_)
-    )
+        | RuntimeMode::Thinking
+        | RuntimeMode::Responding
+        | RuntimeMode::ExecutingTool(_) => TurnLifecycle::Running,
+        RuntimeMode::Ready
+        | RuntimeMode::Completed
+        | RuntimeMode::Failed(_)
+        | RuntimeMode::WaitingApproval => TurnLifecycle::Terminal,
+    }
+}
+
+/// 轮次生命周期（**唯一**真源，B218）。
+///
+/// - `stopping_turn_id` / `provider_retry` 存在 ⇒ `Running`：停止请求受理与重试进度都是
+///   「轮次仍在收口 / 仍在重试」，此时模型未必在产出，但界面必须持续给出反馈
+///   （B197 现场：一次 provider follow-up 连续失败 75s+，界面整段无反馈被读成「无故停止」）；
+/// - 其余按 [`runtime_mode_lifecycle`]。
+///
+/// 不拿 `is_streaming` 当门：该标志由**派发点**置位，而 goal 自动续轮等入口在轮次线程内
+/// 直接开轮，以它作门会让这些轮次整段没有「进行中」反馈。
+pub(crate) fn turn_lifecycle(state: &TuiState) -> TurnLifecycle {
+    if state.stopping_turn_id.is_some() || state.provider_retry.is_some() {
+        return TurnLifecycle::Running;
+    }
+    runtime_mode_lifecycle(&state.runtime_mode)
 }
 
 /// 运行期动效与「已耗时」刷新的**唯一**驱动门（每帧节拍是否推进）。
@@ -5105,19 +5159,23 @@ fn status_word(state: &TuiState) -> (String, Style) {
 }
 
 /// 状态候选的抢占级别：终态 / 用户动作反馈立即抢占，过程态受 min-dwell 约束。
+///
+/// 与渲染门**同源**（B218）：是否「进行中」只由 [`turn_lifecycle`] 判定，本函数不再重复
+/// 罗列 `RuntimeMode`（重复的 `matches!` 正是两套口径分家的温床）。
 fn status_urgency(state: &TuiState) -> StatusUrgency {
     if state.stopping_turn_id.is_some() {
         return StatusUrgency::Immediate;
     }
-    match state.runtime_mode {
-        RuntimeMode::Ready
-        | RuntimeMode::WaitingApproval
-        | RuntimeMode::Completed
-        | RuntimeMode::Failed(_) => StatusUrgency::Immediate,
-        RuntimeMode::Connecting
-        | RuntimeMode::Thinking
-        | RuntimeMode::Responding
-        | RuntimeMode::ExecutingTool(_) => StatusUrgency::Normal,
+    match turn_lifecycle(state) {
+        // 「就绪 + 重试进度」：生命周期因真实重试进入 Running，但基座仍是终态文案 ⇒
+        // 这条候选替换的是「就绪 / 完成」这类终态词，立即抢占（B197 既有语义不变）。
+        TurnLifecycle::Running
+            if runtime_mode_lifecycle(&state.runtime_mode) == TurnLifecycle::Terminal =>
+        {
+            StatusUrgency::Immediate
+        }
+        TurnLifecycle::Running => StatusUrgency::Normal,
+        TurnLifecycle::Terminal => StatusUrgency::Immediate,
     }
 }
 
@@ -5259,6 +5317,65 @@ fn status_line_now(state: &mut TuiState, budget: usize) -> (String, Style) {
         // 防御性回落：`observe` 之后可见文本必然存在。
         _ => status_word(state),
     }
+}
+
+/// 运行态状态行缺词时的稳定占位：`word` 为空白时不得把整行渲染成一串空白
+/// （视觉上等价于「没有状态行」，正是 B218 要根治的缺陷）。
+const RUNNING_STATUS_FALLBACK_WORD: &str = "处理中…";
+
+/// 状态行文案的**唯一**合成点（B218）：渲染点与单测走同一函数。
+///
+/// 语义（时间一律由调用方注入字符串，函数本身不读时钟 ⇒ 可确定性断言）：
+/// - 生命周期为 [`TurnLifecycle::Terminal`] ⇒ `None`（终态不残留一行假「进行中」）；
+/// - `Running` ⇒ `Some(非空)`：`word` 空白时回落 [`RUNNING_STATUS_FALLBACK_WORD`]，
+///   `elapsed` 非空时逐字包含（已自带同一 `elapsed` 结尾则不重复拼接）。
+///
+/// B220 起渲染点走带静默提示的 4 参数版，本 3 参数版是**冻结验收测试的稳定契约面**
+/// （测试只调这一版），故非测试构建下允许「未使用」。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn compose_running_status_text(
+    state: &TuiState,
+    word: &str,
+    elapsed: &str,
+) -> Option<String> {
+    compose_running_status_text_with_hint(state, word, elapsed, None)
+}
+
+/// [`compose_running_status_text`] 的扩展面（B220）：追加「上游静默」提示。
+///
+/// 冻结测试只调用 3 参数版 ⇒ 该版委托本函数并传 `None`，签名向后兼容。
+/// `stall_hint` 亦只在 `Running` 时才有意义（终态提前返回 `None`，不会带上任何提示）。
+pub(crate) fn compose_running_status_text_with_hint(
+    state: &TuiState,
+    word: &str,
+    elapsed: &str,
+    stall_hint: Option<&str>,
+) -> Option<String> {
+    if turn_lifecycle(state) != TurnLifecycle::Running {
+        return None;
+    }
+    let elapsed = elapsed.trim();
+    let trimmed = word.trim();
+    let fallback;
+    let word = if trimmed.is_empty() {
+        fallback = RUNNING_STATUS_FALLBACK_WORD.to_string();
+        fallback.as_str()
+    } else {
+        trimmed
+    };
+    // 幂等：状态词本身可能已以同一 elapsed 结尾（工具摘要带秒数）⇒ 不得拼成「1m20s  1m20s」。
+    let mut text = if elapsed.is_empty() || word.ends_with(elapsed) {
+        word.to_string()
+    } else {
+        format!("{word}  {elapsed}")
+    };
+    if let Some(hint) = stall_hint.map(str::trim).filter(|hint| !hint.is_empty()) {
+        if !text.contains(hint) {
+            text.push_str("  ·  ");
+            text.push_str(hint);
+        }
+    }
+    Some(text)
 }
 
 /// 契约 C10：隐藏过程态的「当前工具信息」。
@@ -6169,11 +6286,18 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 .saturating_sub(16)
                 .saturating_sub(str_width(&elapsed));
             let (word, style) = status_line_now(state, budget);
-            let text = if elapsed.is_empty() {
-                word
-            } else {
-                format!("{}  {}", word, elapsed)
-            };
+            // B218：文本合成单点（门已由 `should_render_running_status` 判为开，故恒 `Some`；
+            // 防御性回落保证「算不出文案」也不会整行消失）。
+            // B220：上游静默提示只在本轮 Running 时随行追加（终态/空闲时 `hint` 恒为 `None`；
+            // 阈值与阶段全部来自真实事件，重绘沿用既有 450ms 节拍，不新增线程/定时器）。
+            let stall_hint = state.upstream_idle.hint(now_ms());
+            let text = compose_running_status_text_with_hint(
+                state,
+                &word,
+                &elapsed,
+                stall_hint.as_ref().map(|hint| hint.text()),
+            )
+            .unwrap_or(word);
             let prefix = vec![Span::styled(
                 format!("{} ", mode_status_icon(&state.runtime_mode, state.spinner_tick)),
                 Style::default().fg(theme::ACCENT_DIM),
@@ -11595,6 +11719,8 @@ fn tui_event_loop(
                 UiEvent::StreamDelta(delta) => {
                     // 上游已开始产出 ⇒ 重试真的恢复了，进度位立即摘除（不留假状态）。
                     state.clear_provider_retry();
+                    // B220：正文增量是「上游仍活着」的最硬证据 ⇒ 刷新静默计时（首增量 ⇒ 首字节）。
+                    state.upstream_idle.note_delta(now_ms());
                     state.append_assistant_chunk(&delta);
                     if !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
                         state.transition_runtime_mode(RuntimeMode::Responding);
@@ -11604,6 +11730,8 @@ fn tui_event_loop(
                     // 契约 C1/C5：思考增量走独立入库面（末条 Thinking 续写 + 运行态推进）。
                     // 思考增量同样证明上游已恢复 ⇒ 一并摘除重试进度位。
                     state.clear_provider_retry();
+                    // B220：思考增量同样是上游产出（推理模型可能长时间只有 reasoning）⇒ 一并刷新。
+                    state.upstream_idle.note_delta(now_ms());
                     state.apply_stream_reasoning(&delta);
                 }
                 UiEvent::StreamToolCall(call) => {
@@ -11612,6 +11740,9 @@ fn tui_event_loop(
                     state.add_or_update_tool_event(&call, false);
                     // 状态行聚合的唯一写入点①：记录本轮工具调用（折叠态下「刚做了什么」）。
                     state.tool_activity.record_call(&call);
+                    // B220：工具执行期不等待上游 ⇒ 退出静默窗口（否则「正在执行工具」的
+                    // 状态行会挂着一条与当前事实无关的「上游已静默」告警）。
+                    state.upstream_idle.reset();
                 }
                 UiEvent::StreamToolResult(res) => {
                     state.add_or_update_tool_event(&res, true);
@@ -11626,6 +11757,8 @@ fn tui_event_loop(
                     state.clear_provider_retry();
                     // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
                     state.status_dwell.reset();
+                    // B220：轮次收口 ⇒ 上游静默窗口退出（终态 / 下一轮不得继承）。
+                    state.upstream_idle.reset();
                     // wave-60 §C8：本轮结束 ⇒ 双击 Esc 的上膛失效。
                     stop_sequence.reset();
                     state.transition_runtime_mode(RuntimeMode::Completed);
@@ -11677,6 +11810,17 @@ fn tui_event_loop(
                     // 这种绕过派发点开轮的入口，本事件是它们的唯一复位点）。
                     state.clear_provider_retry();
                     state.begin_turn_usage();
+                    // B218：轮次起点是**所有**开轮入口的公共时间锚。派发点之外的入口
+                    // （goal 自动续轮 / Ask 续轮）此前不写 `turn_started_at` ⇒ 状态行的已耗时
+                    // 整段为空（正是「看不到已耗时 = 被读成卡死」的复发面）。
+                    if state.turn_started_at.is_none() {
+                        state.turn_started_at = Some(std::time::Instant::now());
+                    }
+                }
+                // B220：模型调用真实发起（`turn:trace` 的 `calling_model`）⇒ 静默计时起点。
+                // 时间取 TUI 唯一时钟 `now_ms()`，不伪造、不用渲染帧时间。
+                UiEvent::ModelCallStarted => {
+                    state.upstream_idle.note_request_sent(now_ms());
                 }
                 // P0：本轮指标快照 → 指标行唯一来源（快照存在时不再读 legacy 计量字段）。
                 UiEvent::StreamMetrics(metrics) => {
@@ -11703,6 +11847,7 @@ fn tui_event_loop(
                     state.streaming_turn_id = None;
                     // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
                     state.status_dwell.reset();
+                    state.upstream_idle.reset();
                     state.clear_provider_retry();
                     stop_sequence.reset();
                     // wave-tui-session-resilience C3/C4：只显示一句话摘要，原始 400 字符
@@ -12129,6 +12274,8 @@ fn tui_event_loop(
                 UiEvent::TurnSuspended { .. } => {
                     state.is_streaming = false;
                     state.status_text = "等待用户输入确认...".to_string();
+                    // B220：挂起期在等**用户**，不是在等上游 ⇒ 静默窗口退出（否则会误报上游告警）。
+                    state.upstream_idle.reset();
                     let _ = sync_pending_control_request(&mut state, &control_plane);
                 }
                 }
