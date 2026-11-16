@@ -1197,11 +1197,21 @@ const VERIFY_INSTALLED_TIMEOUT: Duration = Duration::from_secs(10);
 fn run_version_with_deadline(target: &Path) -> Result<std::process::Output, UpdateError> {
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new(target)
+    let mut command = std::process::Command::new(target);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // B208：POSIX 上让新二进制自成进程组长（pgid == pid）。否则超时/出错时只能杀直接子进程，
+    // 它派生的孙进程会变孤儿（PPID=1）继续跑 —— 与 B009/B205 同族缺口。
+    // 闸门与形态照抄 `agent/process.rs` 的既有写法；Windows 侧语义不变。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| {
             UpdateError::Signature(format!(
@@ -1215,6 +1225,14 @@ fn run_version_with_deadline(target: &Path) -> Result<std::process::Output, Upda
             Ok(Some(_status)) => break,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
+                    // B208：先收整组（进程组由 spawn 时的 process_group(0) 建立，pgid == pid），
+                    // 再对直接子进程 kill + wait 兜底。组已空时 killpg 返回 ESRCH，无副作用。
+                    #[cfg(unix)]
+                    {
+                        let pgid = child.id() as i32;
+                        // SAFETY：killpg 只发送信号，不读写任何内存；pgid 来自本函数刚 spawn 的子进程。
+                        let _ = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(UpdateError::Signature(format!(
@@ -1225,6 +1243,13 @@ fn run_version_with_deadline(target: &Path) -> Result<std::process::Output, Upda
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(error) => {
+                // B208：同一回收顺序（killpg 收整组 → kill → wait）。
+                #[cfg(unix)]
+                {
+                    let pgid = child.id() as i32;
+                    // SAFETY：killpg 只发送信号，不读写任何内存；pgid 来自本函数刚 spawn 的子进程。
+                    let _ = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(UpdateError::Signature(format!(

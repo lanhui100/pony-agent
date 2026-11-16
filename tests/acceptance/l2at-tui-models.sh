@@ -48,7 +48,49 @@ PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 tmux_cleanup() { tmux kill-server >/dev/null 2>&1 || true; }
-trap tmux_cleanup EXIT
+# B208：整组回收——早退/中断/超时都必须带走后台 server（CX-SAFE-1 / CX-SAFE-5）。
+# 每个 server 用 `setsid` 自成会话/进程组；清理只按「真实 pgid」杀该组（先 TERM，0.2s 后 KILL 升级）。
+# 绝不 `kill 0`（CI 非交互时脚本与调用者同组，会连带 TERM 掉调用者），也绝不 `pkill -f`（按名杀）。
+# pid/pgid 必须落盘而非用变量：本脚本用 `PORT=$(start_server)` 在子 shell 里起 server，
+# 子 shell 里的变量赋值传不回父 shell。pidfile 每行「pid pgid」两列。
+# 已知限制：若 `setsid` 在调用者**已是进程组长**时自行 fork（$! 只拿到 setsid 自己），
+# server pid 就无从得知；这类记录写 `0 0`，清理体只报警、不按名杀（宁可不猜也不误杀）。
+# 本脚本不启作业控制（无 `set -m`），后台子进程不是进程组长，正常路径不会落到该分支。
+B208_PIDFILE="$RECEIPTS/b208-server.pids"
+: > "$B208_PIDFILE"
+b208_kill_servers() { # $1 = TERM | KILL
+  local pid pgid own_pgid sig="${1:-TERM}"
+  [ -f "$B208_PIDFILE" ] || return 0
+  own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+  while read -r pid pgid; do
+    [ -n "${pid:-}" ] || continue
+    if [ "$pid" = "0" ]; then
+      # B208：pid 不可知 ⇒ 只报警跳过。CX-SAFE-5 禁止 `pkill -f` 按名清理。
+      [ "$sig" = "TERM" ] && echo "WARN: 有 server 的 pid 不可知，无法精确回收（不按名杀，请按 receipt 端口手查）" >&2
+      continue
+    fi
+    # B208：绝不向**本脚本所在进程组**发信号——非 setsid 降级时 pgid 就是本组，
+    # 盲信会重演「kill 0 连带 TERM 掉调用者」事故；此时只用 pid 精确回收。
+    # 组 kill 写成两条字面信号语句：便于静态门禁识别「精确组 kill」形态。
+    if [ -n "${pgid:-}" ] && [ "$pgid" != "$own_pgid" ]; then
+      if [ "$sig" = "KILL" ]; then
+        kill -KILL -- "-$pgid" 2>/dev/null || true   # 收整组（ESRCH 无害）
+      else
+        kill -TERM -- "-$pgid" 2>/dev/null || true   # 收整组（ESRCH 无害）
+      fi
+    fi
+    kill -"$sig" "$pid" 2>/dev/null || true          # 再按 pid 兜底
+  done < "$B208_PIDFILE"
+}
+cleanup_all() {
+  tmux_cleanup
+  b208_kill_servers TERM
+  sleep 0.2                                  # B208：给 TERM 落地时间
+  b208_kill_servers KILL                     # B208：忽略 TERM 的 server 升级 KILL，不留残余
+}
+trap cleanup_all EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------------------------------------------------------------
 # Fake OpenAI-compatible server (python3, stdlib only)
@@ -90,8 +132,33 @@ EOF
 pick_port() { python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()"; }
 start_server() { # $1 outfile-pid-var
   local port; port=$(pick_port)
-  python3 "$RECEIPTS/fake_server.py" "$port" >/dev/null 2>&1 &
-  echo $! > "$RECEIPTS/fake-server.pid"
+  # B208：setsid 让 server 自成会话/进程组（$! == pid == pgid），供 trap 精确回收整组。
+  if command -v setsid >/dev/null 2>&1; then
+    setsid python3 "$RECEIPTS/fake_server.py" "$port" >/dev/null 2>&1 &
+  else
+    python3 "$RECEIPTS/fake_server.py" "$port" >/dev/null 2>&1 &
+    echo "WARN: setsid 不可用，按 pid 精确回收" >&2
+  fi
+  local srv_pid=$!
+  # B208：util-linux `setsid` 在调用者**已是进程组长**时会 fork，此时 `$!` 只是 setsid 自己的
+  # pid（随即退出），按它 kill 会打空 ⇒ server 静默泄漏。故启动后复核真实 pgid 再落盘。
+  sleep 0.1
+  local real_pgid
+  real_pgid=$(ps -o pgid= -p "$srv_pid" 2>/dev/null | tr -d ' ')
+  if [ -z "$real_pgid" ]; then
+    echo "WARN: server pid $srv_pid 启动即消失（疑似 setsid fork），pid 不可知 ⇒ 仅报警、不按名杀" >&2
+    echo "0 0" >> "$B208_PIDFILE"
+  else
+    # B208：非 setsid 降级时 pgid 就是本脚本的组 ⇒ 不能当回收目标，归一为 pid（只用 pid 回收）。
+    if [ "$real_pgid" = "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" ]; then
+      echo "WARN: server 与本脚本同进程组（setsid 未生效），仅按 pid 精确回收" >&2
+      real_pgid="$srv_pid"
+    elif [ "$real_pgid" != "$srv_pid" ]; then
+      echo "WARN: server pgid=$real_pgid 与 pid=$srv_pid 不一致，按真实 pgid 回收" >&2
+    fi
+    echo "$srv_pid" > "$RECEIPTS/fake-server.pid"
+    echo "$srv_pid $real_pgid" >> "$B208_PIDFILE"
+  fi
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.5
     curl -sf -o /dev/null "http://127.0.0.1:$port/v1/models" && break
