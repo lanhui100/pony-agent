@@ -43,6 +43,7 @@
 - **前端测试**：`npm test`
 - **Rust 编译检查**：`npm run cargo:check:shared`
 - **并发构建预算（强制）**：并行 lane 的构建/测试一律走 `bash scripts/cargo-lane.sh <cargo 参数>`（4 job + 跨 target 目录全局 flock + nice 5）；release / 全量回归只由 Lead 走 `bash scripts/cargo-lane.sh --heavy …` 独跑且与 lane 编译互斥；`uptime` 负载持续 > 1.5×核数即停一条 lane。契约真源 `.dev-team/build-budget.json`（`python3 ~/.agents/skills/dev-team/scripts/dev-build-budget-lint.py .` 校验），负样本自检 `bash scripts/cargo-lane.spec.sh`。背景见 `.dev-team/rfc-2026-11-17-build-budget.md`（4 条 target 目录 × 16 job ⇒ load 45.86，release 90min 未完成 vs 单跑 3m07s）。
+- **构建产物保留深度（分层）**：`bash scripts/artifacts-status.sh` 看体积与磁盘水位（>70% 非零退出，`--json` 供 CI）；清理只用 `bash scripts/clean-targets.sh`——**默认 light 只删可再生产物**（`target-check*`/`target-test*`/`target-perf`/`target-codex-*`），根 `target/`（含 `target/release`）是热缓存**不删**；`--with-frontend` 才删 `dist`/`coverage`/`playwright-report`/`test-results`；`--deep` 才动根 `target/`，仅限四类触发：工具链升级、C/link 失败（`failed to run custom build`）、依赖大换血、磁盘 <20%。产物一律不入库；证据类落 `docs/release/evidence/`，过程类落 `/tmp` 并收口清理。负样本自检 `bash scripts/artifacts-tools.spec.sh`。当前实测产物 ≈80G（target 46G + target-test 23G + target-check 9.4G），故禁止「多槽位同时长驻」。
 - **可观测性归属先决**：新增/修改对外接口、网络 IO、后台任务、LLM 调用或 UI 交互前，先更新 `docs/observability.yaml` 的四维归属（适用 / N-A + 结构性理由）与收口点；验收跑
   `~/.agents/skills/observability-onboarding/scripts/audit-diff.sh` 与 `check-declaration.sh`（判定口径见该 skill 的 `references/declaration-rubric.md`）。N-A 必须写结构性理由，不得为让门禁变绿而伪造 `/metrics` 或改 `applicable`。
 <!-- BEGIN constitution -->

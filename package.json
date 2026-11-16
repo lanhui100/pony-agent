@@ -67,7 +67,10 @@
     "backlog:doctor": "node scripts/backlog.mjs doctor",
     "backlog:gate": "node scripts/backlog.mjs lint && node scripts/backlog.mjs doctor",
     "backlog:list": "node scripts/backlog.mjs list",
-    "hooks:install": "git config core.hooksPath .githooks"
+    "hooks:install": "git config core.hooksPath .githooks",
+    "artifacts:status": "bash scripts/artifacts-status.sh",
+    "artifacts:spec": "bash scripts/artifacts-tools.spec.sh",
+    "clean:targets": "bash scripts/clean-targets.sh"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",
