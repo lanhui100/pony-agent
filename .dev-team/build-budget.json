@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "max_jobs_per_lane": 4,
+  "job_env": {
+    "name": "CARGO_BUILD_JOBS",
+    "value": "4"
+  },
+  "serialize_across_output_dirs": true,
+  "serialize_lock_path": "/tmp/pony-agent-build.lock",
+  "heavy_build_owner": "lead",
+  "heavy_nice": 10,
+  "load_ceiling_factor": 1.5,
+  "lane_wrapper_cmd": "bash scripts/cargo-lane.sh",
+  "heavy_wrapper_cmd": "bash scripts/cargo-lane.sh --heavy",
+  "notes": "2026-11-17 事故：4 条 target 目录（debug/test/check/release）各持独立 cargo 锁 × 16 job ⇒ load 45.86（16 核），release 构建 90min 未完成，单跑 3m07s–5m32s。lane 一律 4 job + 全局 flock；release/全量回归只由 Lead 走 --heavy 独跑；load > 1.5×核数停一条 lane。"
+}
