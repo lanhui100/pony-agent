@@ -19,7 +19,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 10828
+      "value": 10675
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
@@ -103,21 +103,21 @@
       "kind": "fn-lines",
       "name": "start_inner",
       "occurrence": 0,
-      "value": 275
+      "value": 308
     },
     {
       "path": "crates/pony-agent-core/src/agent/projection.rs",
       "kind": "fn-lines",
       "name": "apply",
       "occurrence": 0,
-      "value": 213
+      "value": 206
     },
     {
       "path": "crates/pony-agent-core/src/agent/projection.rs",
       "kind": "fn-lines",
       "name": "apply",
       "occurrence": 1,
-      "value": 388
+      "value": 378
     },
     {
       "path": "crates/pony-agent-core/src/agent/projection.rs",
@@ -131,7 +131,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6975
+      "value": 6963
     },
     {
       "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
@@ -243,28 +243,28 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 5773
+      "value": 5761
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
       "kind": "fn-lines",
       "name": "append_turn_fallible_with_kind",
       "occurrence": 0,
-      "value": 206
+      "value": 205
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
       "kind": "fn-lines",
       "name": "ensure_history_graph",
       "occurrence": 0,
-      "value": 278
+      "value": 249
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/tests.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6656
+      "value": 6528
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/tests.rs",
@@ -309,13 +309,6 @@
       "value": 203
     },
     {
-      "path": "crates/pony-agent-core/src/agent/team_history.rs",
-      "kind": "fn-depth",
-      "name": "team_history_snapshot_from_events",
-      "occurrence": 0,
-      "value": 10
-    },
-    {
       "path": "crates/pony-agent-core/src/agent/tools/composite.rs",
       "kind": "fn-lines",
       "name": "gather_context",
@@ -348,7 +341,7 @@
       "kind": "fn-lines",
       "name": "builtin_tools",
       "occurrence": 0,
-      "value": 1074
+      "value": 1079
     },
     {
       "path": "crates/pony-agent-core/src/agent/tools/workspace.rs",
