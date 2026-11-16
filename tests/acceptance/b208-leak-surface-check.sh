@@ -7,8 +7,9 @@
 # 2. `tests/acceptance/l2at-tui-models*.sh` 起的后台 server 必须由 `trap` 在 EXIT / INT / TERM
 #    三条路径上回收，且清理体必须能**按进程组**回收（`kill 0` 或 `kill -TERM -- -"$pid"` 形态）。
 # 3. 反误伤正控：`process.rs` 的 B009/B205 进程组收口不得被回退。
-# 4. 判别力自证（负控）：用 `git show HEAD:<path>` 取**改前**版本，断言改前必然**失败**本条门禁
-#    —— 否则门禁是「永远绿」的假门禁。
+# 4. 判别力自证（负控）：用 `git show <改前基线 sha>:<path>` 取**改前**版本，断言改前必然**失败**
+#    本条门禁 —— 否则门禁是「永远绿」的假门禁。锚点**不得**用 `HEAD`（提交修复后 HEAD 即修好版本，
+#    负控会自破，见 [`B208_PREFIX_BASELINE`]）。
 #
 # ## 判定口径说明（为什么 `kill 0` 只在非注释行计数）
 # 两个脚本第 53 行左右有一句注释 `# 绝不使用 \`kill 0\`：…会连带 TERM 掉调用者。`
@@ -28,6 +29,10 @@ PROCESS="crates/pony-agent-core/src/agent/process.rs"
 PROCESS_RANGE="crates/pony-agent-core/src/agent/process_range.rs"
 SCRIPT_A="tests/acceptance/l2at-tui-models.sh"
 SCRIPT_B="tests/acceptance/l2at-tui-models-auth.sh"
+
+# B208 负控基线：D8 需要「修复前」的源码。不能用 HEAD（提交修复后 HEAD 就是修好的版本，
+# 负控会自破）。此处固定为修复前的最后一个提交；深度克隆下永久可达，浅克隆下走 SKIP。
+B208_PREFIX_BASELINE="d21e403aab2e5b149742200e94b3f49cc9ee925b"
 
 FAILED=0
 CHECKS=0
@@ -203,19 +208,25 @@ else
 fi
 
 # ── D. 判别力自证：改前版本必须**失败**本门禁 ───────────────────────────────────────────────
-if git -C "$REPO_ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
-    head_updater="$(git -C "$REPO_ROOT" show "HEAD:$UPDATER" 2>/dev/null)" || head_updater=""
+# 锚点（自证型门禁的经典坑）：D8 必须取「修复前」的源码做负控。若锚在 `HEAD` 上，一旦把修复
+# 提交进 HEAD，`git show HEAD:` 取到的就是修好的版本 ⇒ 负控自己判红（门禁在提交后自破）。
+# 因此锚定到**固定的改前基线 sha**（[`B208_PREFIX_BASELINE`]）；历史被改写 / 浅克隆取不到时
+# 优雅降级为 SKIP —— 环境不具备不等于门禁通过，但也不该判红，故仍 exit 0，且必须打印（不许静默）。
+if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    fail "D8 负控无法执行：不是 git 仓库或 git 不可用（$REPO_ROOT）"
+elif git -C "$REPO_ROOT" cat-file -e "${B208_PREFIX_BASELINE}^{commit}" 2>/dev/null; then
+    head_updater="$(git -C "$REPO_ROOT" show "$B208_PREFIX_BASELINE:$UPDATER" 2>/dev/null)" || head_updater=""
     if [[ -z "$head_updater" ]]; then
-        fail "D8a 无法用 git show 取得改前的 $UPDATER"
+        fail "D8a 无法用 git show 取得改前的 $UPDATER（基线 $B208_PREFIX_BASELINE）"
     else
         require_no_match_stream \
             "D8a 负控：改前的 updater.rs 不含 process_group/setpgid（门禁在改前必然失败）" \
             "$head_updater" "$RE_PROCESS_GROUP"
     fi
     for script in "$SCRIPT_A" "$SCRIPT_B"; do
-        head_script="$(git -C "$REPO_ROOT" show "HEAD:$script" 2>/dev/null)" || head_script=""
+        head_script="$(git -C "$REPO_ROOT" show "$B208_PREFIX_BASELINE:$script" 2>/dev/null)" || head_script=""
         if [[ -z "$head_script" ]]; then
-            fail "D8b 无法用 git show 取得改前的 $script"
+            fail "D8b 无法用 git show 取得改前的 $script（基线 $B208_PREFIX_BASELINE）"
             continue
         fi
         head_stripped="$(printf '%s\n' "$head_script" | sed -E 's/^[[:space:]]*#.*$//')"
@@ -224,7 +235,7 @@ if git -C "$REPO_ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
             "$head_stripped" "$RE_KILL_ZERO" "$RE_KILL_GROUP"
     done
 else
-    fail "D8 负控无法执行：不是 git 仓库或 HEAD 不可解析（$REPO_ROOT）"
+    pass "D8 负控 SKIP：基线提交不可达（浅克隆或历史改写）—— 判别力自证仅在完整克隆下执行"
 fi
 
 printf '== 结果：%d 项检查，%d 项失败 ==\n' "$CHECKS" "$FAILED"
