@@ -44,6 +44,15 @@ mod windows_job;
 #[cfg(windows)]
 use windows_job::Job;
 
+// B207：托管范围 owner 抽象（signal / 静默等待 / 成员数 / 清理正交分离）。
+// 默认 `RangeOwnership::Pid` ⇒ 本模块的既有语义（B206 唯一终止路径）**零行为变更**；
+// 新行为只在 `ProcessManager::with_range_ownership(RangeOwnership::SystemdScope)` 时启用。
+#[path = "process_range.rs"]
+pub mod process_range;
+pub use process_range::RangeOwnership;
+#[cfg(not(windows))]
+use process_range::{RangeOwner, RangeQuiescence};
+
 /// Windows: 让 GUI 宿主（Tauri 无控制台）派生的控制台子进程（cmd/powershell/git 等）
 /// 不弹出可见控制台窗口。父进程无控制台时，Windows 默认会为控制台子进程分配一个新的
 /// 控制台窗口（用户可见的"闪窗/弹 PowerShell 窗口"）；`CREATE_NO_WINDOW` 抑制该窗口。
@@ -61,6 +70,42 @@ const DRAIN_SETTLE_MAX: Duration = Duration::from_millis(500);
 /// Best-effort reap budget after `kill` (30 × 10 ms = 300 ms).
 const KILL_REAP_ATTEMPTS: u32 = 30;
 const KILL_REAP_INTERVAL: Duration = Duration::from_millis(10);
+/// B206：范围静默轮询间隔 —— 每一轮都**重新探测**（不是「睡到自以为干净」）。
+const QUIESCE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// B206 / C2：终止限额（公开可注入）。
+///
+/// 默认值就是契约默认值：`term_grace = 250ms`、`quiesce_deadline = 5s`（自**首次信号**起算）。
+/// 生产路径一律走默认值；只有验收/单测为了构造**确定性**结论（例如 `Duration::ZERO` 让
+/// 「死线耗尽 ⇒ `Err`」在不依赖时机的前提下必然发生）才注入更小的值。
+///
+/// **禁止**为了换绿灯把默认值改小后回填 —— 默认值本身就是契约条款（C2 判据）。
+///
+/// `quiesce_deadline == Duration::ZERO` 的语义（实现必须遵守）：信号发出后**不再等待**，
+/// 只在信号发出后立刻做一次探测；范围非空即 `Err`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminationLimits {
+    /// `SIGTERM` 之后、升级到 `SIGKILL` 之前的宽限期。
+    pub term_grace: Duration,
+    /// 自首次信号起算的总死线；耗尽仍未证明范围为空 ⇒ `Err`（fail loud）。
+    pub quiesce_deadline: Duration,
+}
+
+impl TerminationLimits {
+    /// 契约默认 `term_grace`（C2）。
+    pub const DEFAULT_TERM_GRACE: Duration = Duration::from_millis(250);
+    /// 契约默认 `quiesce_deadline`（C2）。
+    pub const DEFAULT_QUIESCE_DEADLINE: Duration = Duration::from_secs(5);
+}
+
+impl Default for TerminationLimits {
+    fn default() -> Self {
+        Self {
+            term_grace: Self::DEFAULT_TERM_GRACE,
+            quiesce_deadline: Self::DEFAULT_QUIESCE_DEADLINE,
+        }
+    }
+}
 
 #[cfg(windows)]
 fn failed_start_cleanup(child: &mut Child, job: &Job, cause: String) -> String {
@@ -140,6 +185,366 @@ fn kill_and_reap(child: &mut Child, context: &str) -> Result<(), String> {
         ));
     }
     Err(format!("{context}; {}", details.join("; ")))
+}
+
+// ── B206：POSIX 范围静默判据（FENCE / PROBE-A / PROBE-B / LADDER）────────────────────────────
+//
+// C1-U（唯一终止路径）：这些判据原语**只允许**被 `terminate_range_path` 使用。任何第二处
+// 「发信号」或「做空证明」的实现都会让 `kill` 与 `shutdown` 重新分叉成两套严格度（U1/U2/U4）。
+
+/// 一次范围探测的结论：PROBE-A（`kill(-pgid,0)`）与 PROBE-B（`/proc` 扫描）取 **OR**。
+#[cfg(not(windows))]
+#[derive(Debug)]
+struct RangeProbe {
+    /// `true` = 范围**已证明为空**（PROBE-A 给 `ESRCH`，或 PROBE-B 给出空列表）。
+    empty: bool,
+    /// 仍存活的成员 pid（升序去重；僵尸不计）。**空列表 ≠ 范围为空**，除非 `empty`。
+    members: Vec<i32>,
+    /// 证据字段（契约 §5.1 `probe=`）：`kill0-esrch` / `proc-empty` / `proc-members` /
+    /// `kill0-alive` / `kill0-eperm` / `unavailable`。
+    source: &'static str,
+}
+
+/// B206 / FENCE：读 `/proc/<pid>/stat` 字段 22（`starttime`，boot 后 jiffies）。
+///
+/// `comm` 可含空格与括号，故以**最后一个** `)` 为界；其后从整体字段 3（state）起算，
+/// 因此字段 22 == 该切片里的第 20 项（下标 19）。
+#[cfg(not(windows))]
+fn read_start_time(pid: i32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let tail = &stat[stat.rfind(')')? + 1..];
+    tail.split_whitespace().nth(19)?.parse::<u64>().ok()
+}
+
+/// B206 / PROBE-B：扫描 `/proc`，返回 `pgrp == pgid` 且**非僵尸**的成员 pid（升序去重）。
+///
+/// `None` = `/proc` 不可读（探针**不可用 ≠ 范围为空**，见契约 §6.2 降级要求）。
+/// 僵尸（`state == 'Z'`）已无 CPU/内存占用、只等收尸，计入会造成「杀干净却判失败」的假红相。
+#[cfg(not(windows))]
+fn scan_range_members(pgid: i32) -> Option<Vec<i32>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    let mut members = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            // 进程在扫描途中消失：它已不构成存活成员。
+            continue;
+        };
+        let Some(paren) = stat.rfind(')') else {
+            continue;
+        };
+        let mut fields = stat[paren + 1..].split_whitespace();
+        let Some(state) = fields.next().and_then(|value| value.chars().next()) else {
+            continue;
+        };
+        let Some(_ppid) = fields.next() else {
+            continue;
+        };
+        let Some(pgrp) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        if pgrp == pgid && state != 'Z' {
+            members.push(pid);
+        }
+    }
+    members.sort_unstable();
+    members.dedup();
+    Some(members)
+}
+
+/// B206 / PROBE-A + PROBE-B：两条判据取 **OR**，任一给出「空」即视为已证明为空。
+///
+/// 两者都拿不到「空」结论时**不可证明** —— 按契约 §6.2 必须走 `Err`，不得当成空。
+#[cfg(not(windows))]
+fn probe_range(pgid: i32) -> RangeProbe {
+    // SAFETY：`kill(-pgid, 0)` 只做存在性/权限检查，不投递信号、不读写任何内存。
+    let rc = unsafe { libc::kill(-pgid, 0) };
+    let errno = if rc == 0 {
+        0
+    } else {
+        io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    };
+    if rc != 0 && errno == libc::ESRCH {
+        // PROBE-A 成立：组内已无任何成员（含僵尸）。
+        return RangeProbe {
+            empty: true,
+            members: Vec::new(),
+            source: "kill0-esrch",
+        };
+    }
+    match scan_range_members(pgid) {
+        Some(members) if members.is_empty() => RangeProbe {
+            empty: true,
+            members: Vec::new(),
+            source: "proc-empty",
+        },
+        Some(members) => RangeProbe {
+            empty: false,
+            members,
+            source: "proc-members",
+        },
+        // PROBE-B 不可用 ⇒ 降级为 PROBE-A only（必须有 `probe=` 证据，不得静默当成空）。
+        None => {
+            let source = match (rc, errno) {
+                (0, _) => "kill0-alive",
+                (_, libc::EPERM) | (_, libc::EACCES) => "kill0-eperm",
+                _ => "unavailable",
+            };
+            RangeProbe {
+                empty: false,
+                members: Vec::new(),
+                source,
+            }
+        }
+    }
+}
+
+/// B206 / C5：start-time 身份栅栏结论。
+#[cfg(not(windows))]
+#[derive(Debug)]
+enum FenceVerdict {
+    /// 身份成立（`reaped = true` 表示组长已由本管理器的 `wait()` 收尸）。
+    Ok { reaped: bool },
+    /// 身份不匹配：**不发任何信号**，按「我方范围已消失」处理。
+    Stale { recorded: u64, observed: Option<u64> },
+}
+
+/// B206 / C5：发信号与探测**之前**的身份比对（FENCE），防 PID 复用误杀。
+#[cfg(not(windows))]
+fn fence_verdict(pgid: i32, recorded_start: u64, leader_reaped: bool) -> FenceVerdict {
+    match read_start_time(pgid) {
+        Some(observed) if observed == recorded_start => FenceVerdict::Ok { reaped: false },
+        Some(observed) => FenceVerdict::Stale {
+            recorded: recorded_start,
+            observed: Some(observed),
+        },
+        // B206：组长已被本管理器的 `wait()` 收尸 ⇒ `/proc/<pid>` 必然消失。此时「该 pid 是否仍是
+        // 我的进程」已由内核 wait 语义直接证明（同一 pid 在 wait 之前不可被复用），故栅栏通过；
+        // 否则「组长正常 exit 0 + 孙进程仍在组内」这一事故形态将永远拿不到收组权，等于回退 B205。
+        // 残余风险只剩「收尸后 leader pid 被复用成新的组长」：它的代价是 pid 计数器绕回一整圈，
+        // 且只要旧组仍有成员，内核就不会把该 pgroup 号分配给别的组；一旦真的复用，读到的
+        // starttime 必然不同 ⇒ 命中的是上面的 `Stale` 分支（不发信号）。
+        None if leader_reaped => FenceVerdict::Ok { reaped: true },
+        // 组长未被我方收尸却已从 `/proc` 消失：不可能由我方造成 ⇒ 按身份失效处理（安全侧）。
+        None => FenceVerdict::Stale {
+            recorded: recorded_start,
+            observed: None,
+        },
+    }
+}
+
+/// B206：向受管范围（进程组）投递一个信号。只发信号，不探测、不等待。
+#[cfg(not(windows))]
+fn signal_range(pgid: i32, signal: i32) {
+    // SAFETY：`killpg` 只投递信号，不读写任何内存；`pgid` 来自本管理器 spawn 的子进程
+    // （`process_group(0)` 保证 pgid == pid），组已空时返回 ESRCH 且无任何副作用。
+    unsafe {
+        let _ = libc::killpg(pgid, signal);
+    }
+}
+
+/// B206 / LADDER：条件轮询直到范围为空或到达死线，返回**最后一次**探测结论。
+///
+/// 死线已过期（含 `Duration::ZERO` 的「不再等待」语义）时**只探测一次**即返回 ——
+/// 这正是 ZERO 死线要求的行为：信号发出后立刻探测，非空即由调用方转 `Err`。
+#[cfg(not(windows))]
+fn wait_range_empty(pgid: i32, deadline: Instant) -> RangeProbe {
+    loop {
+        let probe = probe_range(pgid);
+        if probe.empty || Instant::now() >= deadline {
+            return probe;
+        }
+        std::thread::sleep(QUIESCE_POLL_INTERVAL);
+    }
+}
+
+/// B206：有界回收直系子进程（**不**持锁等待：每轮单独取锁，绝不阻塞 `poll`）。
+#[cfg(not(windows))]
+fn reap_direct_child(entry: &Arc<ManagedProcess>) {
+    for _ in 0..KILL_REAP_ATTEMPTS {
+        let attempt = {
+            let mut child = entry.child.lock().expect("process child poisoned");
+            child.try_wait()
+        };
+        match attempt {
+            Ok(Some(status)) => {
+                let exit_code = status.code().unwrap_or(-1);
+                *entry.state.lock().expect("process state poisoned") =
+                    ExitState::Exited { exit_code };
+                return;
+            }
+            Ok(None) => std::thread::sleep(KILL_REAP_INTERVAL),
+            Err(_) => return,
+        }
+    }
+}
+
+/// B206 / C1-U：**唯一**终止路径。完成条件 = 「范围已证明为空」。
+///
+/// 五个入口（`kill` / `kill_if_exists` / `cancel` / `kill_after` / `shutdown(_checked)`）全部
+/// 汇聚到这里；PROBE / FENCE / LADDER 只允许出现在本函数内（U2）。
+///
+/// 顺序固定：FENCE（身份）→ PROBE（快路径）→ `SIGTERM` → `term_grace` → `SIGKILL` →
+/// `quiesce_deadline` → 仍未空则 `Err`（fail loud，绝不谎报静止）。
+///
+/// 锁纪律：只在 O(1) 取数与单次 `try_wait` 期间持 `state`/`child`，任何等待都在锁外
+/// （否则 `poll` 会被最长 5s 的死线阻塞）。
+#[cfg(not(windows))]
+fn terminate_range_path(
+    limits: &TerminationLimits,
+    handle: &str,
+    entry: &Arc<ManagedProcess>,
+    ownership: RangeOwnership,
+) -> Result<(), String> {
+    // ① 组长身份与当前状态：锁内只做 O(1) 取数 + 一次非阻塞 `try_wait`，随后立即释放两把锁。
+    let (pgid, leader_reaped) = {
+        let mut state = entry.state.lock().expect("process state poisoned");
+        let mut child = entry.child.lock().expect("process child poisoned");
+        if matches!(*state, ExitState::Running) {
+            if let Ok(Some(status)) = child.try_wait() {
+                *state = ExitState::Exited {
+                    exit_code: status.code().unwrap_or(-1),
+                };
+            }
+        }
+        // B206：`Child::id()` 是 spawn 时缓存的 pid，即使子进程已被 `wait()` 回收仍然有效 ——
+        // 这是「组长已退出仍能取到 pgid 收组」的前提（B205 成果不回退的依据）。
+        (child.id() as i32, matches!(*state, ExitState::Exited { .. }))
+    };
+
+    // ② FENCE：先于任何信号、先于任何探测（C5）。
+    match fence_verdict(pgid, entry.start_time_jiffies, leader_reaped) {
+        FenceVerdict::Stale { recorded, observed } => {
+            let observed = observed
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "ENOENT".to_string());
+            tracing::warn!(
+                target: "pony_core",
+                code = "B206-fence-stale",
+                pgid,
+                handle,
+                recorded_start = recorded,
+                observed_start = %observed,
+                "B206: fence-stale pgid={pgid} handle={handle} recorded_start={recorded} observed_start={observed} — 身份不匹配，未发送任何信号，视为范围已消失"
+            );
+            // 不发信号；「我方范围的消失」已由身份判据证明 ⇒ 允许调用方移除条目。
+            return Ok(());
+        }
+        FenceVerdict::Ok { reaped: true } => {
+            tracing::debug!(
+                target: "pony_core",
+                code = "B206-fence-reaped",
+                pgid,
+                handle,
+                "B206: fence=reaped —— 组长已由本管理器的 wait() 收尸，身份由内核 wait 语义证明"
+            );
+        }
+        FenceVerdict::Ok { reaped: false } => {}
+    }
+
+    // ③ 快路径：组长退出时组可能已经空了 —— 先看一眼，不为空则继续走阶梯。
+    // B207：该快路径与最终探测都是 **pgid 语义**（PROBE-A/B），只在 `Pid` owner 下有效；
+    // `SystemdScope` 的“空”必须由 cgroup 侧证明，故整段跳过、交给 owner 判定（不混口径）。
+    let is_pid_owner = matches!(ownership, RangeOwnership::Pid);
+    if is_pid_owner {
+        let initial = probe_range(pgid);
+        if initial.empty {
+            let _ = reap_direct_child(entry);
+            drop(entry.stdin.lock().expect("process stdin poisoned").take());
+            tracing::debug!(
+                target: "pony_core",
+                code = "B206-range-quiescent",
+                pgid,
+                handle,
+                probe = initial.source,
+                "B206: 范围在发出任何信号前已证明为空"
+            );
+            return Ok(());
+        }
+    }
+
+    // ④ LADDER：首枪必须是 SIGTERM（C2 rung-1）。
+    // B207：投递与静默判定统一经 `RangeOwner` 分派 —— `PidRangeOwner` 直接复用上面的
+    // B206 原语（单一口径，不复制第二份逻辑）；`SystemdScopeOwner` 走 cgroup 语义。
+    #[cfg(not(windows))]
+    let scope_unit = entry.scope_unit.as_deref();
+    let owner = process_range::owner_for(ownership, pgid, scope_unit);
+    let first_signal_at = Instant::now();
+    let mut ladder: Vec<&'static str> = Vec::with_capacity(2);
+    owner.signal(libc::SIGTERM);
+    ladder.push("TERM");
+    let mut probe = probe_via_owner(owner.as_ref(), first_signal_at + limits.term_grace);
+    if !probe.empty {
+        owner.signal(libc::SIGKILL);
+        ladder.push("KILL");
+        probe = probe_via_owner(owner.as_ref(), first_signal_at + limits.quiesce_deadline);
+    }
+
+    // ⑤ 回收直系子进程（有界、锁外），再做最后一次探测作为完成证据。
+    reap_direct_child(entry);
+    drop(entry.stdin.lock().expect("process stdin poisoned").take());
+    // B207：非 Pid owner 的最终证据必须来自 owner（pgid 探针对逃逸者无权威性）。
+    let final_probe = if is_pid_owner {
+        probe_range(pgid)
+    } else {
+        probe_via_owner(owner.as_ref(), Instant::now())
+    };
+    let elapsed_ms = first_signal_at.elapsed().as_millis();
+    let ladder_text = format!("[{}]", ladder.join(","));
+    if final_probe.empty {
+        if !is_pid_owner {
+            owner.cleanup();
+        }
+        tracing::info!(
+            target: "pony_core",
+            code = "B206-range-quiescent",
+            pgid,
+            handle,
+            probe = final_probe.source,
+            ladder = %ladder_text,
+            elapsed_ms,
+            "B206: 范围已证明为空（完成条件是「空」，不是「信号已发送」）"
+        );
+        return Ok(());
+    }
+    let members = if final_probe.members.is_empty() {
+        probe.members
+    } else {
+        final_probe.members
+    };
+    // B207：非 Pid owner 把 cgroup 成员数一并回显（拿不到 = `None`，绝不补 0 假装可查）。
+    let tasks_note = if is_pid_owner {
+        String::new()
+    } else {
+        format!(" tasks={:?}", owner.inspect_task_count())
+    };
+    let outcome = Err(format!(
+        "B206: range-not-quiescent pgid={pgid} handle={handle} members={members:?} ladder={ladder_text} elapsed_ms={elapsed_ms} deadline_ms={} probe={}{tasks_note} fence=ok — 信号阶梯已耗尽但范围仍未证明为空，绝不谎报静止",
+        limits.quiesce_deadline.as_millis(),
+        final_probe.source,
+    ));
+    if !is_pid_owner {
+        owner.cleanup();
+    }
+    outcome
+}
+
+/// B207：把 owner 的 [`RangeQuiescence`] 映射回 B206 的 `RangeProbe` 口径（**单一证据格式**）；
+/// `Unavailable` ⇒ `empty = false`（阶梯耗尽后由调用方转 `Err`，契约 §6.2 保守路径）。
+#[cfg(not(windows))]
+fn probe_via_owner(owner: &dyn RangeOwner, deadline: Instant) -> RangeProbe {
+    let (empty, members, source) = match owner.wait_quiescent(deadline) {
+        RangeQuiescence::Empty { source } => (true, Vec::new(), source),
+        RangeQuiescence::NotEmpty { members, source } => (false, members, source),
+        RangeQuiescence::Unavailable { source } => (false, Vec::new(), source),
+    };
+    RangeProbe { empty, members, source }
 }
 
 /// Minimal environment a sandboxed child is allowed to inherit even after `env_clear()`, so it can
@@ -309,6 +714,14 @@ struct ManagedProcess {
     /// 契约 v6 / CT-P7a：本次退出是否由 `kill_after` 安全网造成。Run 的 poll 循环据此把
     /// 「被安全网 SIGKILL」与「自然退出」区分开，避免把真超时误报成 `non_zero_exit(-1)`。
     kill_after_fired: AtomicBool,
+    /// B206 / C5：spawn 时记录的组长 start-time（`/proc/<pid>/stat` 字段 22），用于终止前的
+    /// 身份栅栏（防 PID 复用误杀）。读不到即 spawn 失败，不允许「记不住就跳过栅栏」。
+    #[cfg(not(windows))]
+    start_time_jiffies: u64,
+    /// B207b：该进程所属的 systemd scope unit 名（只有 `RangeOwnership::SystemdScope` 才有；
+    /// `Pid` 路径恒 `None`）。终止期据此构造 `SystemdScopeOwner`，按 cgroup 整组投递/判静默。
+    #[cfg(not(windows))]
+    scope_unit: Option<String>,
     child: Mutex<Child>,
     state: Mutex<ExitState>,
     stdin: Mutex<Option<ChildStdin>>,
@@ -325,6 +738,13 @@ struct Inner {
     seq: AtomicU64,
     stdout_cap: usize,
     stderr_cap: usize,
+    /// B206：终止限额（默认 250ms / 5s）。生产不得改小；测试注入只在构造期生效。
+    #[cfg_attr(windows, allow(dead_code))]
+    limits: TerminationLimits,
+    /// B207：托管范围 owner。默认 [`RangeOwnership::Pid`]（= B206 语义，零行为变更）；
+    /// [`RangeOwnership::SystemdScope`] 必须显式 opt-in（见 `with_range_ownership`）。
+    #[cfg_attr(windows, allow(dead_code))]
+    range_ownership: RangeOwnership,
     #[cfg(all(windows, test))]
     job_failure: Mutex<Option<windows_job::FailureInjection>>,
     #[cfg(all(windows, test))]
@@ -376,6 +796,32 @@ fn apply_sandbox_environment(command: &mut Command, sandbox: &SandboxRequest) {
     }
 }
 
+/// B207b：按 owner 类型构造 spawn 用的 [`Command`]，并返回「是否应处于 systemd scope 中」。
+///
+/// - [`RangeOwnership::Pid`]（默认）⇒ `Command::new(program).args(args)`：与 B207 之前**逐字相同**，
+///   零行为变更（B205/B206 的 12 条冻结测试全部走这条分支）。
+/// - [`RangeOwnership::SystemdScope`] ⇒ `systemd-run --user --scope --quiet --collect
+///   --expand-environment=no -- <program> <args…>`：目标进程成为临时 scope 的成员，
+///   cgroup 成员资格在组长退出后依然存在（这是 pgid 拿不到的保证）。
+///
+/// **不回退重放**：`systemd-run` 启动失败时由调用方的 `.spawn()` 直接冒泡成 spawn `Err`，
+/// 绝不静默改用 `Pid` 重跑 —— 无法证明目标没执行过，重放可能重复副作用（DSH 硬规矩）。
+fn spawn_command(ownership: RangeOwnership, request: &ProcessStartRequest) -> (Command, bool) {
+    match ownership {
+        RangeOwnership::SystemdScope => {
+            let mut command = Command::new(process_range::systemd_run_bin());
+            let argv = process_range::scope_wrapped_argv(&request.program, &request.arguments);
+            command.args(&argv);
+            (command, true)
+        }
+        RangeOwnership::Pid => {
+            let mut command = Command::new(&request.program);
+            command.args(&request.arguments);
+            (command, false)
+        }
+    }
+}
+
 impl ProcessManager {
     /// A manager with the default 64 KiB per-stream output caps.
     pub fn new() -> Self {
@@ -384,12 +830,62 @@ impl ProcessManager {
 
     /// A manager with explicit per-stream output caps (useful for truncation tests).
     pub fn with_buffer_caps(stdout_cap: usize, stderr_cap: usize) -> Self {
+        Self::build(stdout_cap, stderr_cap, TerminationLimits::default())
+    }
+
+    /// B206：带自定义终止限额的构造器（公开可注入，契约 C2 要求）。
+    ///
+    /// 生产路径一律使用 [`TerminationLimits::default`]；测试用它注入确定性的限额
+    /// （例如两个 `Duration::ZERO`：信号发出后不再等待、只探测一次 ⇒ 探测那一刻仍非空即 `Err`）。
+    pub fn with_limits(limits: TerminationLimits) -> Self {
+        Self::build(DEFAULT_BUFFER_CAP, DEFAULT_BUFFER_CAP, limits)
+    }
+
+    /// B207：显式选择托管范围 owner（**opt-in**；默认构造一律 [`RangeOwnership::Pid`]）。
+    ///
+    /// 请求 [`RangeOwnership::SystemdScope`] 时先做**一次性**探测（`OnceLock` 缓存，进程内只探一次）：
+    /// 探测失败 ⇒ 一次 `tracing::warn!`（`code = "B207-range-owner-degraded"`，正文含降级原因原文
+    /// 与「escaped descendants 不再有保证」）并**降级回 `Pid`**。禁止静默降级；既有公开签名、
+    /// `kill` / `kill_if_exists` / `cancel` / `kill_after` / `shutdown(_checked)` 语义均不变。
+    pub fn with_range_ownership(ownership: RangeOwnership) -> Self {
+        let effective = process_range::resolve_range_ownership(ownership);
+        Self::build_with_ownership(
+            DEFAULT_BUFFER_CAP,
+            DEFAULT_BUFFER_CAP,
+            TerminationLimits::default(),
+            effective,
+        )
+    }
+
+    /// B207：读取本实例生效的托管范围 owner（供上层观测/断言；不参与终止语义）。
+    pub fn range_ownership(&self) -> RangeOwnership {
+        self.inner.range_ownership
+    }
+
+    /// B206：读取本实例生效的终止限额（供上层观测/断言，不参与语义）。
+    pub fn termination_limits(&self) -> TerminationLimits {
+        self.inner.limits
+    }
+
+    fn build(stdout_cap: usize, stderr_cap: usize, limits: TerminationLimits) -> Self {
+        Self::build_with_ownership(stdout_cap, stderr_cap, limits, RangeOwnership::Pid)
+    }
+
+    /// B207：唯一的 `Inner` 组装点（`range_ownership` 只在构造期决定，运行期不可变）。
+    fn build_with_ownership(
+        stdout_cap: usize,
+        stderr_cap: usize,
+        limits: TerminationLimits,
+        range_ownership: RangeOwnership,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 processes: Mutex::new(BTreeMap::new()),
                 seq: AtomicU64::new(0),
                 stdout_cap,
                 stderr_cap,
+                limits,
+                range_ownership,
                 #[cfg(all(windows, test))]
                 job_failure: Mutex::new(None),
                 #[cfg(all(windows, test))]
@@ -441,25 +937,21 @@ impl ProcessManager {
             *entry.state.lock().expect("process state poisoned"),
             ExitState::Exited { .. }
         );
+        // B206 / C1-U：无论组长是否已退出，都汇聚到**同一条**终止路径（`terminate`）。
+        // 该路径自己完成 FENCE + LADDER + 「范围为空证明」；这里不得再自带发信号或自带 `Ok`。
+        // 失败一律上抛（fail loud）—— 条目**保留**，以便后续补刀（C3）。
+        self.terminate(handle, &entry)?;
         if already_exited {
-            // Even if the direct child has already exited, ensure any descendants
-            // contained in the Windows Job Object are unconditionally terminated.
-            #[cfg(windows)]
-            if let Err(error) = entry.job.terminate(1) {
-                entry.job.close();
-                return Err(error);
-            }
-
-            // Idempotent cleanup: close stdin and drop the stale handle.
+            // B206 / C3：只有「范围已证明为空」（`terminate` 返回 `Ok`）才移除条目。
+            // 直系子进程已 Exited 但范围非空时绝不能走到这里 —— 那时 `terminate` 已经 `Err`。
             drop(entry.stdin.lock().expect("process stdin poisoned").take());
             self.inner
                 .processes
                 .lock()
                 .expect("process map poisoned")
                 .remove(handle);
-            return Ok(());
         }
-        self.terminate(&entry)
+        Ok(())
     }
 
     /// Cancellation alias for `kill` (used for session shutdown / run cancellation).
@@ -535,7 +1027,34 @@ impl ProcessManager {
 
     /// Terminate and remove every process owned by `session_id`. Returns the number of processes
     /// shut down. Processes owned by other sessions are untouched.
+    ///
+    /// B206 / S-3（加法式 fail-loud）：签名保持不变，内部委托 [`ProcessManager::shutdown_checked`]。
+    /// **返回值只统计「范围已证明为空」的条目**；未静默条目保留在册并走结构化日志
+    /// `[B206][shutdown-not-quiescent]`（需要失败信号的调用方请改用 `shutdown_checked`）。
     pub fn shutdown(&self, session_id: &str) -> usize {
+        let (proven, not_quiescent) = self.shutdown_inner(session_id);
+        for failure in &not_quiescent {
+            eprintln!("[B206][shutdown-not-quiescent] {failure}");
+        }
+        proven
+    }
+
+    /// B206 / C1：`shutdown` 的 fail-loud 版本。
+    ///
+    /// 只有**范围已证明为空**的条目计入返回值；任一条目未静默即 `Err`，消息按契约 §5 逐条给出
+    /// （含 `handle` / `pgid` / 仍存活 `members` / 已用信号 `ladder`），多条以 `; ` 分隔。
+    pub fn shutdown_checked(&self, session_id: &str) -> Result<usize, String> {
+        let (proven, not_quiescent) = self.shutdown_inner(session_id);
+        if not_quiescent.is_empty() {
+            Ok(proven)
+        } else {
+            Err(not_quiescent.join("; "))
+        }
+    }
+
+    /// B206：`shutdown` 与 `shutdown_checked` 的共用实现 —— 逐条走**唯一**终止路径，
+    /// 只移除（并计数）已证明为空的条目；未静默条目保留以支持后续补刀（C3）。
+    fn shutdown_inner(&self, session_id: &str) -> (usize, Vec<String>) {
         let entries: Vec<(String, Arc<ManagedProcess>)> = {
             let map = self.inner.processes.lock().expect("process map poisoned");
             map.iter()
@@ -543,20 +1062,25 @@ impl ProcessManager {
                 .map(|(handle, entry)| (handle.clone(), Arc::clone(entry)))
                 .collect()
         };
-        let count = entries.len();
+        let mut proven = 0usize;
+        let mut not_quiescent = Vec::new();
         for (handle, entry) in entries {
-            if let Err(err) = self.terminate(&entry) {
-                eprintln!("[process] shutdown termination error for `{handle}`: {err}");
+            match self.terminate(&handle, &entry) {
+                Ok(()) => {
+                    #[cfg(windows)]
+                    entry.job.close();
+                    self.inner
+                        .processes
+                        .lock()
+                        .expect("process map poisoned")
+                        .remove(&handle);
+                    proven += 1;
+                }
+                // B206 / C3：未证明为空 ⇒ **不**移除、**不**计数（绝不谎报静止）。
+                Err(error) => not_quiescent.push(error),
             }
-            #[cfg(windows)]
-            entry.job.close();
-            self.inner
-                .processes
-                .lock()
-                .expect("process map poisoned")
-                .remove(&handle);
         }
-        count
+        (proven, not_quiescent)
     }
 
     /// Cumulative dropped-bytes evidence per stream `(stdout_dropped, stderr_dropped)` for a
@@ -667,9 +1191,11 @@ impl ProcessManager {
         if request.program.trim().is_empty() {
             return Err("program must not be empty".to_string());
         }
-        let mut command = Command::new(&request.program);
+        // B207b：spawn 侧接线 —— **只有**显式 opt-in `SystemdScope` 才把目标进程包进
+        // `systemd-run --user --scope …`（让它成为临时 scope 成员：cgroup 成员资格在组长退出后
+        // 依然存在，pgid 可被复用而 cgroup 不会）。默认 `Pid` 走下面的第一条分支 ⇒ 零行为变更。
+        let (mut command, wants_scope) = spawn_command(self.inner.range_ownership, request);
         command
-            .args(&request.arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -876,6 +1402,23 @@ impl ProcessManager {
         };
         let stdin_pipe = child.stdin.take();
 
+        // B206 / C5：spawn 后**立刻**记录组长 start-time，作为终止前的身份栅栏依据。
+        // 读不到 ⇒ fail closed（返回 Err），且先把已 spawn 的子进程收掉，绝不泄漏。
+        #[cfg(not(windows))]
+        let start_time_jiffies = match read_start_time(child.id() as i32) {
+            Some(value) => value,
+            None => {
+                signal_range(child.id() as i32, libc::SIGKILL);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "B206: failed to record start-time identity for `{}` (pid {}); spawn rejected (fail closed)",
+                    request.program,
+                    child.id()
+                ));
+            }
+        };
+
         let stdout = Arc::new(Mutex::new(BoundedBuffer::new(self.inner.stdout_cap)));
         let stderr = Arc::new(Mutex::new(BoundedBuffer::new(self.inner.stderr_cap)));
         let stdout_done = Arc::new(AtomicBool::new(false));
@@ -892,6 +1435,31 @@ impl ProcessManager {
             std::thread::spawn(move || drain_pipe(stderr_pipe, buffer, done));
         }
 
+        // B207b：`systemd-run` 的 argv 里**没有** `--unit`（契约要求 argv 逐字透传），
+        // 因此 unit 名由 systemd 生成，必须从 `/proc/<pid>/cgroup` 事后解析。
+        // 解析不到 ⇒ 立刻收掉子进程并返回 spawn `Err`：**禁止**静默改用 `Pid` 重跑
+        // （无法证明目标没执行过，重放可能重复副作用），也禁止记一个假 unit 名去骗终止期。
+        #[cfg(not(windows))]
+        let scope_unit = if wants_scope {
+            match std::fs::read_to_string(format!("/proc/{}/cgroup", child.id()))
+                .ok()
+                .and_then(|contents| process_range::parse_scope_unit_from_cgroup(&contents))
+            {
+                Some(unit) => Some(unit),
+                None => {
+                    signal_range(child.id() as i32, libc::SIGKILL);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "B207: systemd-run spawn 成功但无法从 /proc/{}/cgroup 解析 scope unit 名；已收掉子进程并拒绝交付（禁止回退 Pid 重放，fail loud）",
+                        child.id()
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
         #[cfg(all(windows, test))]
         let child_pid = child.id();
         let handle = self.next_handle(child.id());
@@ -900,6 +1468,10 @@ impl ProcessManager {
             description: describe_command(&request.program, &request.arguments),
             kill_after_disarmed: AtomicBool::new(false),
             kill_after_fired: AtomicBool::new(false),
+            #[cfg(not(windows))]
+            start_time_jiffies,
+            #[cfg(not(windows))]
+            scope_unit,
             child: Mutex::new(child),
             state: Mutex::new(ExitState::Running),
             stdin: Mutex::new(stdin_pipe),
@@ -1010,7 +1582,11 @@ impl ProcessManager {
     /// Kill and best-effort reap a process. The entry is retained so a subsequent `poll` can
     /// report the final `Exited` state; entry removal is handled by `kill` (idempotent cleanup)
     /// and `shutdown`.
-    fn terminate(&self, entry: &Arc<ManagedProcess>) -> Result<(), String> {
+    ///
+    /// B206 / C6：Windows 语义**不变** —— `TerminateJobObject(1)` 成功 + kill-on-close 兜底即视为
+    /// 「范围为空」的等价判据；POSIX 的 PROBE/FENCE 不得进入本分支。
+    #[cfg(windows)]
+    fn terminate(&self, _handle: &str, entry: &Arc<ManagedProcess>) -> Result<(), String> {
         #[cfg(windows)]
         let job_terminate_res = entry.job.terminate(1);
 
@@ -1028,33 +1604,11 @@ impl ProcessManager {
         }
         {
             let mut child = entry.child.lock().expect("process child poisoned");
+            // B206 / C1-U：POSIX 侧的「收组 + 空证明」已统一到唯一终止路径
+            // （`terminate_range_path`），本函数只服务 Windows，故此处不再保留
+            // 第二份 `killpg` 实现（旧 B009 分支已迁出，语义由 LADDER 覆盖）。
             #[cfg(windows)]
             let reap_result = kill_and_reap(&mut child, "failed to terminate managed child");
-            #[cfg(not(windows))]
-            let reap_result: Result<(), String> = {
-                // B009：子进程是进程组长（spawn 时 process_group(0)），先 killpg 收整个组，
-                // 再对直接子进程 kill + reap 兜底（killpg 对非组长返回 ESRCH，无害）。
-                let pgid = child.id() as i32;
-                // SAFETY：killpg 只发信号，不读写内存；pgid 来自本管理器刚 spawn 的子进程。
-                unsafe {
-                    let _ = libc::killpg(pgid, libc::SIGKILL);
-                }
-                let _ = child.kill();
-                for _ in 0..KILL_REAP_ATTEMPTS {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            *state = ExitState::Exited {
-                                exit_code: status.code().unwrap_or(-1),
-                            };
-                            break;
-                        }
-                        Ok(None) => {}
-                        Err(_) => break,
-                    }
-                    std::thread::sleep(KILL_REAP_INTERVAL);
-                }
-                Ok(())
-            };
             if let Ok(Some(status)) = child.try_wait() {
                 *state = ExitState::Exited {
                     exit_code: status.code().unwrap_or(-1),
@@ -1080,6 +1634,21 @@ impl ProcessManager {
         #[cfg(windows)]
         entry.job.close();
         Ok(())
+    }
+
+    /// B206 / C1-U：POSIX 侧的**唯一**终止路径 —— 完成条件 = 「范围已证明为空」。
+    ///
+    /// `kill` / `kill_if_exists` / `cancel` / `kill_after` / `shutdown(_checked)` 全部经由
+    /// [`terminate_range_path`]（FENCE + LADDER + PROBE 只在那里出现），因此「kill 严格、
+    /// shutdown 宽松」的双口径在本平台上不存在。
+    #[cfg(not(windows))]
+    fn terminate(&self, handle: &str, entry: &Arc<ManagedProcess>) -> Result<(), String> {
+        terminate_range_path(
+            &self.inner.limits,
+            handle,
+            entry,
+            self.inner.range_ownership,
+        )
     }
 
     /// After the child has exited, wait briefly for the drain threads to flush so the final
@@ -1124,6 +1693,52 @@ impl ProcessManager {
             .unwrap_or(0);
         let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
         format!("proc-{nanos:016x}-{child_pid:08x}-{seq:06x}")
+    }
+}
+
+impl Drop for Inner {
+    /// B206：最后一个 owner 消失时收组 —— 有界、不 panic、不无限阻塞。
+    ///
+    /// 为什么落在 `Inner` 而不是 `ProcessManager`：`ProcessManager` 是 `Clone`，对它实现 `Drop`
+    /// 会在**每一个克隆**析构时收组，等于随手丢一个克隆就把别的调用方正在用的进程杀掉；
+    /// `Inner` 由 `Arc` 共享，其 `Drop` 恰好等价于「最后一个 owner 消失」这一正确时机。
+    ///
+    /// 收组动作**复用唯一终止路径**（PROBE/FENCE/LADDER 不在此处复制，满足 U2），并且只作用于
+    /// **仍在册**的条目 —— 这正是 C3「不提前 remove」的前置价值。
+    fn drop(&mut self) {
+        #[cfg(not(windows))]
+        let limits = self.limits;
+        #[cfg(not(windows))]
+        let range_ownership = self.range_ownership;
+        // 先取快照，避免在 Drop 内持有进程表锁做任何等待。
+        let entries: Vec<(String, Arc<ManagedProcess>)> = match self.processes.lock() {
+            Ok(map) => map
+                .iter()
+                .map(|(handle, entry)| (handle.clone(), Arc::clone(entry)))
+                .collect(),
+            // 锁被毒化：Drop 不得 panic，也不得假装收组成功（直接放弃表内条目）。
+            Err(_) => return,
+        };
+        for (handle, entry) in entries {
+            #[cfg(windows)]
+            {
+                let _ = entry.job.terminate(1);
+                entry.job.close();
+            }
+            #[cfg(not(windows))]
+            {
+                // 有界：最长 `term_grace + quiesce_deadline`，失败只记日志，绝不 panic。
+                if let Err(error) = terminate_range_path(&limits, &handle, &entry, range_ownership) {
+                    tracing::warn!(
+                        target: "pony_core",
+                        code = "B206-drop-not-quiescent",
+                        handle,
+                        error = %error,
+                        "B206: Drop 收组未能证明范围为空（进程已随 owner 消失，残留需外部接管）"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -2139,5 +2754,101 @@ mod tests {
         assert_eq!(res.state, ProcessState::Exited);
         assert_eq!(res.exit_code, Some(0));
         assert!(res.stdout.contains("fast"));
+    }
+
+    // ── B206 自检（非验收裁决；验收红相由 tests/range_quiescence_test.rs 冻结）──────────────
+
+    /// B206 自检（**非**验收裁决）：公开可注入限额 + `quiesce_deadline == ZERO` 的语义。
+    ///
+    /// ZERO 语义 =「信号发出后**不再等待**，只做一次探测；非空即 `Err`」。本自检锁住其中
+    /// **可确定性观测**的一半：死线已过期时轮询原语只探测一次、立刻返回**非空**结论
+    /// （对一个吞掉 SIGTERM 的组），从而证明实现没有把「不再等待」实现成「默认认为已空」。
+    ///
+    /// 为什么不断言端到端的 `Err`：`Err` 要求 `SIGKILL` 之后范围**仍非空**，那需要一个连
+    /// `SIGKILL` 都杀不掉的成员（D 状态 / 特权构造）。本机实测：`killpg(SIGKILL)` 之后第一次
+    /// `/proc` 扫描时非僵尸成员数就已归零（投递窗口 < 一次扫描，本自检初版 3/3 实测拿到 `Ok`），
+    /// 因此端到端 `Err` 在本机不可确定性构造；写死该断言只会得到 flaky 用例（假红/假绿），
+    /// 违反「零假测试」。端到端红相归 test-agent 冻结（契约 §7 亦登记为待冻结）。
+    #[cfg(unix)]
+    #[test]
+    fn b206_zero_deadline_probes_once_without_waiting() {
+        let manager = ProcessManager::with_limits(TerminationLimits {
+            term_grace: Duration::ZERO,
+            quiesce_deadline: Duration::ZERO,
+        });
+        // 公开 API 自证：注入的限额必须原样读回（默认值 250ms/5s 不被这条路径污染）。
+        let limits = manager.termination_limits();
+        assert_eq!(limits.term_grace, Duration::ZERO);
+        assert_eq!(limits.quiesce_deadline, Duration::ZERO);
+        assert_eq!(
+            TerminationLimits::default(),
+            TerminationLimits {
+                term_grace: Duration::from_millis(250),
+                quiesce_deadline: Duration::from_secs(5),
+            }
+        );
+
+        // 受管范围形态：组长 `sh` 在前台 `wait`，孙进程 `trap "" TERM; exec sleep` —— **吞掉
+        // SIGTERM**，因此 rung-1 清不空范围，探测结论必须是非空。
+        let (program, arguments) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "/bin/bash -c 'trap \"\" TERM; exec /bin/sleep 60' &\nwait\n".to_string(),
+            ],
+        );
+        let session = "session-b206-zero-deadline";
+        let handle = start(&manager, session, &program, arguments);
+        let pgid = manager
+            .pid_of(session, &handle)
+            .expect("pid_of must resolve the leader pid") as i32;
+
+        // 反空跑前置：组内必须先出现组长 + 孙进程两个成员（否则「非空」结论没有意义）。
+        let setup_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let members = scan_range_members(pgid).unwrap_or_default();
+            if members.len() >= 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < setup_deadline,
+                "B206: 前置失败 —— 受管组未在 5s 内出现 ≥2 个成员（pgid={pgid}，实际 {members:?}）"
+            );
+            std::thread::sleep(QUIESCE_POLL_INTERVAL);
+        }
+
+        // rung-1：TERM 杀掉组长，孙进程忽略 TERM ⇒ 范围此刻**必然**非空。
+        signal_range(pgid, libc::SIGTERM);
+        let started = Instant::now();
+        // 死线已过期 == ZERO 语义：只探测一次，不进入轮询。
+        let probe = wait_range_empty(pgid, Instant::now());
+        let elapsed = started.elapsed();
+        assert!(
+            !probe.empty,
+            "B206: ZERO 死线不得把「未探测到空」当成空（probe={} members={:?}）",
+            probe.source, probe.members
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "B206: ZERO 死线不得进入等待（实测 {elapsed:?}，应只做一次探测）"
+        );
+
+        // 清场：由本测试自己 SIGKILL 整组并等到空，绝不留孤儿（不用 kill/pkill，不按名字杀）。
+        signal_range(pgid, libc::SIGKILL);
+        let clean_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if probe_range(pgid).empty {
+                break;
+            }
+            assert!(
+                Instant::now() < clean_deadline,
+                "B206: ZERO 死线用例清场超时（pgid={pgid}）"
+            );
+            std::thread::sleep(QUIESCE_POLL_INTERVAL);
+        }
+        // 范围已空 ⇒ 管理器可正常收口该条目（同一路径，ZERO 限额下也不会谎报）。
+        manager
+            .kill_if_exists(session, &handle)
+            .expect("B206: 范围已空时 kill_if_exists 必须返回 Ok");
     }
 }
