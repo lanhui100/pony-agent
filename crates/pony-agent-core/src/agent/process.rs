@@ -1253,6 +1253,9 @@ impl ProcessManager {
         }
         // B207b：spawn 侧接线（scope 包装 + 管道 / cwd / 平台隔离 / 沙箱环境）收在
         // `configured_command` 一处：装配细节与「spawn 之后如何纳管」是两件事。
+        // `wants_scope` 只在 unix 分支被消费（Windows 走 Job Object），非 Windows 构建必须显式 allow
+        // —— 发版构建带 `RUSTFLAGS=-D warnings`，缺这行会让 Windows 打包在 deny-warnings 上失败。
+        #[cfg_attr(windows, allow(unused_variables))]
         let (mut command, wants_scope) = configured_command(self.inner.range_ownership, request)?;
         #[cfg(windows)]
         let job = {
