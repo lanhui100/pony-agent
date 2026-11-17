@@ -281,6 +281,77 @@ fn test_permission_request_from_pending_mapping() {
     assert_eq!(req.timestamp_ms, 55555);
 }
 
+/// B236：面板标题只显示**人类可读**工具名（`options.tool`），不得把内建 descriptorId
+/// （`builtin:workspace_read_file`）当工具名上屏。
+#[test]
+fn permission_request_uses_human_tool_name_not_builtin_descriptor_id() {
+    let with_options = json!({
+        "requestId": "req-1",
+        "descriptorId": "builtin:workspace_read_file",
+        "prompt": "读取工作区外路径：/home/u/.agents/skills/demo/SKILL.md",
+        "options": {
+            "approvalKind": "path_authorization",
+            "tool": "Read",
+            "path": "/home/u/.agents/skills/demo/SKILL.md"
+        },
+        "callId": "call-1"
+    });
+    let req = permission_request_from_pending(&with_options, "sess");
+    assert_eq!(req.tool_name, "Read");
+    assert!(
+        !req.tool_name.contains("builtin:"),
+        "内建 descriptorId 不得出现在工具名位置: {:?}",
+        req.tool_name
+    );
+
+    // 无结构化 tool 且仅有内建 descriptorId ⇒ 宁可不显示，也不上屏工程 id。
+    let descriptor_only = json!({
+        "requestId": "req-2",
+        "descriptorId": "builtin:workspace_read_file",
+        "prompt": "读取工作区外路径：/tmp/x",
+    });
+    let req = permission_request_from_pending(&descriptor_only, "sess");
+    assert_eq!(req.tool_name, "");
+
+    // 外部来源（MCP / 插件）的 descriptorId 本身就是产品可见工具名，保留兜底。
+    let external = json!({
+        "requestId": "req-3",
+        "descriptorId": "mcp:github:create_issue",
+        "prompt": "需要审批",
+    });
+    let req = permission_request_from_pending(&external, "sess");
+    assert_eq!(req.tool_name, "mcp:github:create_issue");
+}
+
+/// B236：说明里已带路径时不再重复渲染「目标」行；说明不含路径时目标行必须保留。
+#[test]
+fn permission_panel_hides_duplicate_target_when_description_carries_path() {
+    let path = "/home/u/.claude/skills/demo/SKILL.md";
+    let req = PermissionRequest {
+        request_id: "req-4".to_string(),
+        session_id: "sess".to_string(),
+        tool_name: "Read".to_string(),
+        description: format!("读取工作区外路径：{path}"),
+        command_or_path: Some(path.to_string()),
+        approval_path: Some(path.to_string()),
+        timestamp_ms: 0,
+    };
+    let state = PermissionState::new(req);
+    assert!(
+        !permission_panel::show_target_line(&state),
+        "说明已包含路径时不得再渲染目标行（同一事实不写两遍）"
+    );
+
+    let mut generic = state.clone();
+    generic.request.description =
+        "该工具调用需要审批后才能执行（策略或外部来源要求）。".to_string();
+    generic.request.command_or_path = Some("/tmp/x".to_string());
+    assert!(
+        permission_panel::show_target_line(&generic),
+        "说明不含路径时必须保留目标行"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // wave-ask-panel-multiselect：多选语义 + 版式（留白 / 折行）的纯函数契约
 // ─────────────────────────────────────────────────────────────────────────────

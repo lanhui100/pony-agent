@@ -1,0 +1,109 @@
+{
+  "wave": "approval-resume-context",
+  "status": "completed",
+  "task_tier": "A",
+  "tier_basis": "单模块（crates/pony-agent-core/src/bin/tui.rs）+ 1 个 bin 测试文件；无并发原语/线程/锁改动、无外部 IO、无 schema 或序列化契约变更、无新增对外接口；命中快速路径（A）——按 dev-team 分级规则无强制升 B/C 的机械触发。回归基线豁免理由：A 级快速路径，用 bin 全量用例（含 wave65* 审批族）替代独立基线快照。",
+  "baseline_commit": "c5761b27",
+  "branch": "fix/approval-resume-ctx",
+  "red_commit": "985d0e02",
+  "regression_baseline": {
+    "cmd": "cargo check -p pony-agent-core --bin pony; cargo test --bin pony approval (21) / running_status_visibility (23) / composer_history_recall (3)",
+    "result": "check exit 0；approval 21 passed；running_status_visibility 23 passed；composer_history_recall 3 passed；approval_resume_context 12 passed",
+    "exit_code": 0,
+    "log": "/tmp/b232-final-gates.log",
+    "exemption": "bin 全量套件豁免：既有 ask_lifecycle 单例 >60s，并行跑 load 37 (>1.5×16 预算)，见契约 §4 豁免登记"
+  },
+  "observability_dynamic": "已补 docs/observability.yaml 归属段（B232）；audit-diff --base c5761b27 --decl-approved exit 0；check-declaration exit 0（四维 PASS）。",
+  "tasks": [
+    {
+      "id": "task-1",
+      "backlog": "B232",
+      "role": "lead",
+      "owner": "lead",
+      "deliverable": "契约矩阵 + 冻结红相测试 + ADR + 可观测性归属 + backlog 留痕 + Join Barrier/审查裁决",
+      "write_scopes": [
+        ".dev-team",
+        "crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs",
+        "docs/observability.yaml",
+        ".agents/notes"
+      ],
+      "status": "completed"
+    },
+    {
+      "id": "task-2",
+      "backlog": "B232",
+      "role": "executor",
+      "owner": "exec-tui",
+      "blocked_by": [
+        "task-1"
+      ],
+      "deliverable": "tui.rs 实现：SuspendedTurnContext + capture/take + 三处接线（ApprovalResumeTurn/TurnSuspended/AskResumeTurn）+ 提交与复位的陈旧清理",
+      "write_scopes": [
+        "crates/pony-agent-core/src/bin/tui.rs"
+      ],
+      "status": "completed"
+    }
+  ],
+  "artifacts": {
+    "contract_matrix": ".dev-team/contract-matrix-approval-resume-context.md",
+    "adr": ".agents/notes/implemented/bug-fix/2026-11-17-approval-resume-suspended-context.md",
+    "backlog": "B232",
+    "followups": [
+      "B233",
+      "B234",
+      "B235"
+    ],
+    "evidence": [
+      "/tmp/b232-red.log (红相 22 errors)",
+      "/tmp/b232-final-gates.log (check+12 例)",
+      "/tmp/b232-gates.log (回归子集)"
+    ]
+  },
+  "decisions": [
+    "宿主侧最小闭包（不在运行时/存储层改历史契约）：挂起即捕获、续轮注入、一次性消费；拒绝路径共用同一注入逻辑",
+    "不采用「挂起时单独 append user 消息」：会与 B222 turn_id 幂等判据冲突，导致续轮 assistant 被整轮跳过",
+    "不做 run-bound 续轮（B233）：需 dispatcher 一次性豁免 + 迁移 approval_resume_e2e 冻结用例，超出本轮爆炸半径",
+    "宿主文案角色改造（B235）与 skill_load 全局解析（B234）出界，仅登记",
+    "v2：续轮 display_message=None（落库取 display_message，置 None 才把组合正文写入历史，INV-7）",
+    "v2：捕获只认 composer 提交登记 pending_user_turn + 轮次一致，禁止反查 UI 气泡",
+    "v3：链式挂起重 seed（resume_instruction + seed_pending_after_resume），终态清空三槽位"
+  ],
+  "gate_history": [
+    "Review-1 方案/测试对抗（fresh subagent）：3 BLOCKING（B1 落库取 display_message / B2 捕获反查 UI 气泡 / B3 接线零断言）+ 6 ADVISORY → 全部采纳进 v2",
+    "Review-2 实现 diff 靶向（fresh subagent）：确认 C6/C7/C8 实现一致、无错误注入；新增链式挂起丢失（Ask→审批、审批→审批）→ 升 v3 修复；另报会话元数据派生受影响（转 B238）",
+    "机器门禁：check exit 0；approval 21 passed / running_status_visibility 23 passed / composer_history_recall 3 passed；approval_resume_context 12 passed",
+    "可观测性：audit-diff(--decl-approved) exit 0；check-declaration exit 0；ADR verify-note exit 0；backlog lint/doctor PASS"
+  ],
+  "history": [
+    {
+      "wave": "interrupted-turn-resume",
+      "status": "done",
+      "task_tier": "B",
+      "baseline_commit": "a7393954",
+      "branch": "fix/interrupted-turn-resume",
+      "regression_baseline": {
+        "cmd": "cargo test -p pony-agent-core --lib",
+        "result": "1518 passed; 0 failed; 795.84s",
+        "exit_code": 0,
+        "log": ".dev-team/regression/baseline-lib.log"
+      },
+      "artifacts": {
+        "contract_matrix": ".dev-team/contract-matrix-interrupted-turn-resume.md",
+        "adr": ".agents/notes/implemented/bug-fix/2026-11-12-interrupted-turn-content-preservation.md",
+        "backlog": "B113"
+      }
+    },
+    {
+      "wave": "acp-client-p0-p2",
+      "status": "done",
+      "task_tier": "C",
+      "baseline_commit": "f4146970",
+      "branch": "main"
+    }
+  ],
+  "red_commits": [
+    "985d0e02",
+    "b51eaea7",
+    "2cfc6973"
+  ]
+}

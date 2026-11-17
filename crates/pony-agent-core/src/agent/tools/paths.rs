@@ -139,7 +139,9 @@ impl ToolRouter {
                 Ok(permission) => {
                     if matches!(
                         permission.zone,
-                        PermissionZone::WorkspaceRoot | PermissionZone::ControlledTmp
+                        PermissionZone::WorkspaceRoot
+                            | PermissionZone::ControlledTmp
+                            | PermissionZone::TrustedSkillRoot
                     ) {
                         return Ok(permission.canonical);
                     }

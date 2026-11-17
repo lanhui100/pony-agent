@@ -200,6 +200,32 @@ reviewed_at: "2026-11-09"
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+# B231（ADR 2026-11-17-tui-status-waiting-copy）归属说明：等待首字节的用户可见文案收敛。
+# (1) 变更面全在本地呈现层：TUI `crates/pony-agent-core/src/bin/tui.rs` 的状态词分支
+#     （等待窗口 ⇒ 「等待响应中…」）与 `bin/tui/status_dwell.rs` 的 `UpstreamIdle` 布尔窗口；
+#     桌面端 `src/lib/runtime/status.ts` 的 `calling_model && hasStreamingContent === false` 文案。
+#     无新增对外接口、无网络出口、无新增线程 / 后台任务、无 LLM 调用、无持久化格式变更。
+# (2) 四维归属不变：tracing / issues 落点与判定不变；metrics / logs 维持结构性 N-A
+#     （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。删除的 5s/15s 静默阈值
+#     只影响终端文案，不影响任何遥测出口。
+# (3) 行为收口（测试层）：`bin/tui/tests/running_status_visibility_tests.rs`（b231_* 4 例，含
+#     「状态行不含上游 / 首字节 / 静默 / token」白名单断言）、`tests/runtime-status.test.ts`、
+#     `tests/runtime-status.spec.ts`、`tests/acceptance/wave59/wave59-f1-waiting-animation.spec.ts`（F1-2）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
+# B241（ADR 2026-11-17-tui-speed-segment-drop-annotations）归属说明：TUI header 速度段去注释文字。
+# (1) 变更面全在本地呈现层：`crates/pony-agent-core/src/bin/tui.rs` 的 `format_speed_segment`
+#     只输出「值 + t/s」，不再追加 ` e2e` / ` 剔突发N` 后缀（快照字段 `turn_speed_basis` /
+#     `turn_burst_excluded` 不动，桌面 tooltip 与 trace 照旧取证）。无新增对外接口、网络出口、
+#     线程 / 后台任务、LLM 调用或持久化格式变更。
+# (2) 四维归属不变：tracing / issues 落点与判定不变；metrics / logs 维持结构性 N-A
+#     （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
+# (3) 行为收口（测试层）：`crates/pony-agent-core/tests/tui_header_metrics_overflow.rs` C2
+#     （字面量 `120 t/s` + header 不得出现 `e2e` / `剔突` 的反向钉子）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
 # B203（ADR 2026-11-16-tui-scrollbar-mouse-drag）归属说明：TUI 滚动条补鼠标命中与拖拽。
 # 纯输入/呈现层变更（`crates/pony-agent-core/src/bin/tui.rs`）：新增 `scrollbar_offset_for_row` /
 # `scrollbar_hit` / `apply_scrollbar_row` 三个纯逻辑入口，消费的是既有的 crossterm `Event::Mouse`
@@ -226,8 +252,8 @@ reviewed_at: "2026-11-09"
 # backlog:B218/B219/B220/B221/B222/B223）归属说明：
 # (1) 变更面（五块，均无新增遥测出口）：
 #     (1a) TUI 呈现层（`crates/pony-agent-core/src/bin/tui.rs` + `bin/tui/status_dwell.rs`）：
-#          `TurnLifecycle` 生命周期门、状态行组装纯函数、上游静默心跳（5s/15s 两档，阶段取自
-#          真实事件 `turn:trace(phase=calling_model)` / `turn:delta`）。局部终端渲染，无新增对外
+#          `TurnLifecycle` 生命周期门、状态行组装纯函数、等待响应窗口（只由真实事件
+#          `turn:trace(phase=calling_model)` / `turn:delta` 推进；5s/15s 静默阈值已由 B231 撤销）。局部终端渲染，无新增对外
 #          接口、网络 IO、线程/后台任务或 LLM 调用；时间来自进程内单调时钟。
 #     (1b) 终态记账（`agent/turn_event.rs`、`agent/turn_flow.rs`、`agent/projection.rs`、
 #          `agent/runtime/turn_persist.rs`、`agent/runtime/turn_stream.rs`、`agent/runtime/turn_sync.rs`、
@@ -246,7 +272,7 @@ reviewed_at: "2026-11-09"
 #     `agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、
 #     无 `/metrics`、pull 模型不成立）。
 # (3) 收口点：不新增 enforcement_point；行为门落在单测/集成测试——
-#     `bin/tui/tests/running_status_visibility_tests.rs`（b218_*/b220_*）、
+#     `bin/tui/tests/running_status_visibility_tests.rs`（b218_*/b231_*）、
 #     `tests/b219_degraded_turn_acceptance.rs`、`tests/b221_fallback_body_acceptance.rs`、
 #     `tests/b222_history_rebuild_idempotent.rs`、`tests/b223_write_denied_hint_acceptance.rs`。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。

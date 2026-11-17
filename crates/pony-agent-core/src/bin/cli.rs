@@ -1367,6 +1367,17 @@ fn resolve_cli_session_id(
 ) -> String {
     let session_id = if let Some(res) = &args.resume_session_id {
         human!(format, "  Session:     Resuming {}", res);
+        // C3.1 迁移必要条件（诊断面）：`--resume` 不新建会话、沿用请求的会话标识，必须留一条
+        // **结构化**日志（json + trace_id；message 含 "session"），不再依赖裸 stderr 诊断。
+        pony_agent_core::agent::otel::log::log_json_with_fields(
+            "info",
+            "acp resume: session 沿用请求的会话标识（不新建会话）",
+            None,
+            &[
+                ("session_id", serde_json::json!(res)),
+                ("resume", serde_json::json!(true)),
+            ],
+        );
         res.clone()
     } else if args.continue_last {
         if let Some(last) = tracker.get_last() {

@@ -2,6 +2,10 @@
 
 Status: implemented
 
+> **2026-11-17 部分被取代**：[`implemented/feature/2026-11-17-tui-speed-segment-drop-annotations.md`](2026-11-17-tui-speed-segment-drop-annotations.md)
+> 撤销下面 Decision 表内「保留 `≈e2e` 与 ` 剔突发N`」的两条理由：速度数值之后的注释文字一律不再上屏
+> （只留 `{值} t/s`，`≈` 前缀保留）。`decode` / `n=` 的初判与数据面（快照字段、桌面 tooltip、trace）不动。
+
 ## Problem
 
 TUI header 右上角的速度段此前按 F1 I4 的「自描述三件套」渲染：`120 t/s decode n=1`，

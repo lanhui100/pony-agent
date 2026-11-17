@@ -389,11 +389,23 @@ pub fn permission_request_from_pending(
             .and_then(|id| id.as_str())
             .unwrap_or(session_id)
             .to_string(),
+        // 工具名只呈现**人类可读**的模型名（`options.tool`，如 `Read`）：
+        // `descriptorId` 是运行时身份（`builtin:workspace_read_file`），属工程信息，不上屏。
+        // 仅当来源不是内建工具（如 MCP / 插件）且没有结构化 `tool` 时，才用 descriptorId 兜底
+        // —— 那些 id 本身就是产品可见的工具名，而不是 `builtin:` 内部原语。
         tool_name: value
-            .get("descriptorId")
-            .and_then(|id| id.as_str())
-            .unwrap_or("tool")
-            .to_string(),
+            .get("options")
+            .and_then(|options| options.get("tool"))
+            .and_then(|tool| tool.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                value
+                    .get("descriptorId")
+                    .and_then(|id| id.as_str())
+                    .filter(|id| !id.starts_with("builtin:"))
+                    .map(str::to_string)
+            })
+            .unwrap_or_default(),
         description: value
             .get("prompt")
             .and_then(|prompt| prompt.as_str())

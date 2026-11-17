@@ -372,6 +372,9 @@ impl AgentRuntime {
             }
 
             // ── 2) 批后**一次** followup：N==1 走既有 1:1 入口（逐字不变），N>1 走批量入口 ──
+            // wave-acp-delegate C6.1：step 边界增量落盘（上一 hop 已闭合，先落盘再发下一跳；
+            // drain-on-success：失败保留缓冲可重试，终态 flush 仍负责剩余事件）。
+            let _ = flush_step_boundary_events(session_id);
             // F2（重试窗口纯净）：账本起点即 per-call 计时起点，重试/退避在
             // `provider_followup_with_mode` 内部，不共源就会被算进 dur。
             let provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
@@ -412,13 +415,14 @@ impl AgentRuntime {
             };
             let mut response = response;
             // F2：per-call dur 收敛为「只覆盖最后一次成功 attempt」（同步 followup 无首包观测）。
-            let provider_call_duration_ms =
-                crate::agent::retry::take_pure_call_window(provider_call_started_at, None).duration_ms;
+            // wave-acp-delegate C5.1：账本（window）整体下传，重试元数据不得在中途被丢掉。
+            let pure_call_window =
+                crate::agent::retry::take_pure_call_window(provider_call_started_at, None);
             push_buffered_followup_call_record(
                 provider_call_records,
                 provider,
                 &response,
-                provider_call_duration_ms,
+                &pure_call_window,
                 &context_observation,
             );
             (accumulated_token_usage, accumulated_fallback_reason) =
@@ -827,6 +831,8 @@ impl AgentRuntime {
             first_decision,
             resolved_tool_call,
             initial_decision_duration_ms,
+            // wave-acp-delegate C5.1：首跳决策的重试账本（`plan_turn` 结算点带回）。
+            initial_decision_retry,
             planner_hook_trace_records,
         } = planned;
         let PreparedTurn {
@@ -849,6 +855,8 @@ impl AgentRuntime {
             initial_decision_duration_ms,
             ProviderLatencyKind::BufferedResponse,
             Some(&build_context_observation),
+            // wave-acp-delegate C5.1：首跳决策的重试元数据（无重试 ⇒ attempts=1、另两键缺席）。
+            initial_decision_retry,
         )];
 
         if let Some(error) = provider_failure_message(

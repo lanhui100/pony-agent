@@ -21,16 +21,22 @@ use crate::acp::client::{
     AcpAgentClient, AcpClientCapabilities, FsHandler, PermissionHandler, TerminalHandler,
 };
 use crate::acp::config::AcpAgentSpec;
+use crate::acp::delegate_events::{map_acp_tool_status, ParentTurnRef};
 use crate::acp::protocol::{
     method, CloseSessionRequest, ContentBlock, ListSessionsRequest, ListSessionsResponse,
     LoadSessionRequest, LoadSessionResponse, McpServer, PermissionOptionKind,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionNotification, SessionUpdate, StopReason, ToolCallLocation, ToolCallStatus, ToolKind,
 };
+use crate::acp::result::{
+    reduce_final_text, reduce_usage, DelegateFinalText, DelegateUsage,
+    ACP_DELEGATE_FINAL_TEXT_MAX_CHARS,
+};
 use crate::acp::transport::{AcpNotificationHandler, AcpTransportError, ACP_REQUEST_TIMEOUT};
 use crate::agent::ask_persistence::{AskLifecycleState, PersistedAsk};
 use crate::agent::budget::CancellationToken;
 use crate::agent::dispatcher::{ControlRequestAuthorization, GovernedDispatcher};
+use crate::agent::otel::log::{log_json, log_json_with_fields};
 use crate::agent::runtime::TurnStreamEvent;
 use crate::agent::telemetry::TurnToolActivity;
 use crate::agent::tool_runtime::{
@@ -111,10 +117,15 @@ fn cli_capability_handlers(
             ) as Arc<dyn TerminalHandler>
         });
     if spec.capabilities_hint.fs || spec.capabilities_hint.terminal {
-        eprintln!(
-            "[ponycli] acp capabilities: fs={} terminal={}（声明由真实 handler 装配决定；permission 恒 fail-closed）",
-            fs_handler.is_some(),
-            terminal_handler.is_some()
+        log_json_with_fields(
+            "info",
+            "acp capabilities 按真实 handler 装配推导（声明=可否决上限 ∧ handler 存在；permission 恒 fail-closed）",
+            None,
+            &[
+                ("scope", json!("ponycli-acp")),
+                ("fs", json!(fs_handler.is_some())),
+                ("terminal", json!(terminal_handler.is_some())),
+            ],
         );
     }
     (fs_handler, terminal_handler)
@@ -156,9 +167,11 @@ impl std::fmt::Debug for FailClosedPermissionHandler {
 
 impl PermissionHandler for FailClosedPermissionHandler {
     fn decide(&self, request: &RequestPermissionRequest) -> RequestPermissionResponse {
-        eprintln!(
-            "[acp][session] 无宿主审批 dispatcher 绑定，session/request_permission(toolCallId={}) fail-closed：cancelled",
-            request.tool_call.tool_call_id
+        log_json_with_fields(
+            "info",
+            "acp 无宿主审批 dispatcher 绑定，session/request_permission fail-closed：cancelled",
+            None,
+            &[("tool_call_id", json!(request.tool_call.tool_call_id))],
         );
         RequestPermissionResponse {
             outcome: RequestPermissionOutcome::Cancelled,
@@ -245,9 +258,11 @@ impl PermissionHandler for DispatcherPermissionHandler {
         ) {
             Ok(response) => response,
             Err(error) => {
-                eprintln!(
-                    "[acp][session] 宿主审批往返失败（{}），fail-closed：cancelled",
-                    error
+                log_json_with_fields(
+                    "warn",
+                    "acp 宿主审批往返失败，fail-closed：cancelled",
+                    None,
+                    &[("error", json!(error))],
                 );
                 cancelled_response()
             }
@@ -319,9 +334,11 @@ fn await_approval(
             },
             // 请求从 CAS 表消失（不该发生）：fail-closed，不静默当成 allow。
             None => {
-                eprintln!(
-                    "[acp][session] 审批请求 `{}` 已从 dispatcher 消失，fail-closed：cancelled",
-                    pending.request_id
+                log_json_with_fields(
+                    "warn",
+                    "acp 审批请求已从 dispatcher 消失，fail-closed：cancelled",
+                    None,
+                    &[("request_id", json!(pending.request_id))],
                 );
                 return Ok(cancelled_response());
             }
@@ -362,7 +379,12 @@ impl AcpNotificationHandler for UpdateForwarder {
         if method != method::SESSION_UPDATE {
             // 非 update 通知不静默：结构化日志 + 记一条 warning（不进 UI 事件流）。
             let warning = format!("acp_unexpected_notification: `{method}`");
-            eprintln!("[acp][session] 收到未处理的入站通知 `{method}`：{params}");
+            log_json_with_fields(
+                "info",
+                "acp 收到未处理的入站通知（不计入 update 流）",
+                None,
+                &[("method", json!(method)), ("params", json!(params))],
+            );
             if let Ok(mut warnings) = self.warnings.lock() {
                 warnings.push(warning);
             }
@@ -403,6 +425,12 @@ pub struct AcpAgentSession {
     /// 本会话的**本地**取消标志：`cancel()` 只翻它，绝不去 cancel 宿主注入的共享 turn 令牌
     /// （单次委派超时取消不得连带取消整轮 turn）。
     local_cancel: AtomicBool,
+    /// wave-acp-delegate C1（additive）：本次委派的**父 turn 身份**（三要素缺一即视同无上下文）。
+    ///
+    /// 由 [`AcpAgentSession::set_parent_turn`] 在 prompt 之前注入；委派期间的
+    /// `tool_call` / `tool_call_update` 经 `acp::delegate_events::emit_parent_tool_activity`
+    /// 以父 session/turn 落 `turn:tool`（C1.1/C1.5）。`None` ⇒ 只走本地 sink（C1.3 静默跳过）。
+    parent_turn: Mutex<Option<ParentTurnRef>>,
 }
 
 impl AcpAgentSession {
@@ -549,6 +577,7 @@ impl AcpAgentSession {
             cancellation: Mutex::new(Some(Arc::new(CancellationToken::new()))),
             pending_permissions: Mutex::new(Vec::new()),
             local_cancel: AtomicBool::new(false),
+            parent_turn: Mutex::new(None),
         })
     }
 
@@ -633,6 +662,7 @@ impl AcpAgentSession {
             cancellation: Mutex::new(Some(Arc::new(CancellationToken::new()))),
             pending_permissions: Mutex::new(Vec::new()),
             local_cancel: AtomicBool::new(false),
+            parent_turn: Mutex::new(None),
         })
     }
 
@@ -713,6 +743,7 @@ impl AcpAgentSession {
             cancellation: Mutex::new(Some(Arc::new(CancellationToken::new()))),
             pending_permissions: Mutex::new(Vec::new()),
             local_cancel: AtomicBool::new(false),
+            parent_turn: Mutex::new(None),
         })
     }
 
@@ -832,6 +863,17 @@ impl AcpAgentSession {
         }
     }
 
+    /// wave-acp-delegate C1（additive）：注入父 turn 身份三要素（父 session / 父 turn / call id）。
+    ///
+    /// 语义：委派期间的 ACP `tool_call` / `tool_call_update` 以**父 turn 身份**归集为 `turn:tool`
+    /// 并落盘（C1.1）；文本 chunk 不发射到父正文（C1.2）。未注入 ⇒ 归集静默跳过（C1.3），
+    /// 既有构造签名与行为不变（不新增必填构造参数）。
+    pub(crate) fn set_parent_turn(&self, parent: ParentTurnRef) {
+        if let Ok(mut slot) = self.parent_turn.lock() {
+            *slot = Some(parent);
+        }
+    }
+
     /// 跑一轮 prompt（**实时** update 语义，B162）：串行闸 → `client.prompt` 在旁路线程执行 →
     /// 读线程回调把 `SessionUpdate` 经 `mpsc` 送回**调用线程** → 调用线程 `recv_timeout` 循环
     /// 把每一帧立即 [`Self::emit_update`]（不批量 flush）→ `stopReason` 归约成 [`ToolResult`]。
@@ -918,8 +960,11 @@ impl AcpAgentSession {
                     cancel_sent = true;
                     cancel_observed = true;
                     if let Err(error) = self.client.cancel(&self.session_id) {
-                        eprintln!(
-                            "[acp][session] session/cancel 发送失败（取消仍按 aborted 归约）：{error}"
+                        log_json_with_fields(
+                            "warn",
+                            "acp session/cancel 发送失败（取消仍按 aborted 归约）",
+                            None,
+                            &[("error", json!(error.to_string()))],
                         );
                     }
                 }
@@ -949,8 +994,11 @@ impl AcpAgentSession {
             // 取消已触发但 agent 不配合（根本没回包 ⇒ 传输层 timeout/断链）：归因优先于传输层
             // 错误分类，必须归约 aborted + tool_cancelled，不得退化成 acp_timeout。
             Err(error) if cancel_observed || self.cancellation_requested() => {
-                eprintln!(
-                    "[acp][session] 取消已触发但 agent 未回 cancelled（{error}），按 aborted 归约"
+                log_json_with_fields(
+                    "warn",
+                    "acp 取消已触发但 agent 未回 cancelled，按 aborted 归约",
+                    None,
+                    &[("error", json!(error.to_string()))],
                 );
                 self.outcome_result(
                     AcpTurnOutcome::Cancelled,
@@ -1060,6 +1108,16 @@ impl AcpAgentSession {
                     raw_output.as_ref(),
                 );
                 sink.emit("turn:tool", self.tool_event(activity));
+                // wave-acp-delegate C1.1：同一活动以**父 turn 身份**归集（无父上下文 ⇒ 静默跳过）。
+                self.relay_parent_tool_activity(
+                    tool_call_id,
+                    title,
+                    kind.as_ref(),
+                    status.as_ref(),
+                    Some(locations.as_slice()),
+                    raw_input.as_ref(),
+                    raw_output.as_ref(),
+                );
             }
             SessionUpdate::ToolCallUpdate {
                 tool_call_id,
@@ -1071,9 +1129,10 @@ impl AcpAgentSession {
                 raw_output,
                 ..
             } => {
+                let title = title.as_deref().unwrap_or("ACP tool_call_update");
                 let activity = tool_activity(
                     tool_call_id,
-                    title.as_deref().unwrap_or("ACP tool_call_update"),
+                    title,
                     kind.as_ref(),
                     status.as_ref(),
                     locations.as_deref(),
@@ -1081,6 +1140,16 @@ impl AcpAgentSession {
                     raw_output.as_ref(),
                 );
                 sink.emit("turn:tool", self.tool_event(activity));
+                // wave-acp-delegate C1.1：父 turn 归集（与本地 sink 同一活动、不同词表）。
+                self.relay_parent_tool_activity(
+                    tool_call_id,
+                    title,
+                    kind.as_ref(),
+                    status.as_ref(),
+                    locations.as_deref(),
+                    raw_input.as_ref(),
+                    raw_output.as_ref(),
+                );
             }
             SessionUpdate::Plan { entries } => {
                 let summary = entries
@@ -1106,66 +1175,128 @@ impl AcpAgentSession {
                 sink.emit("turn:tool", self.tool_event(activity));
             }
             SessionUpdate::CurrentModeUpdate { current_mode_id } => {
-                eprintln!("[acp][session] current_mode_update: mode={current_mode_id}");
+                log_json_with_fields(
+                    "info",
+                    "acp current_mode_update",
+                    None,
+                    &[("current_mode_id", json!(current_mode_id))],
+                );
             }
             SessionUpdate::AvailableCommandsUpdate { available_commands } => {
-                eprintln!(
-                    "[acp][session] available_commands_update: {} 条命令",
-                    available_commands.len()
+                log_json_with_fields(
+                    "info",
+                    "acp available_commands_update",
+                    None,
+                    &[("command_count", json!(available_commands.len()))],
                 );
             }
             // B166：余下 6 个官方变体 + 未知兜底。按 §3.2.7 口径，这些 update 不进 UI 事件流，
             // 只做结构化诊断日志（usage/cost 后续可映射 telemetry；notice/compaction 待 P2 UI）。
             SessionUpdate::ConfigOptionUpdate(update) => {
-                eprintln!(
-                    "[acp][session] config_option_update: {} 项配置",
-                    update.config_options.len()
+                log_json_with_fields(
+                    "info",
+                    "acp config_option_update",
+                    None,
+                    &[("config_option_count", json!(update.config_options.len()))],
                 );
             }
             SessionUpdate::SessionInfoUpdate(update) => {
-                eprintln!(
-                    "[acp][session] session_info_update: title={:?} updatedAt={:?}",
-                    update.title, update.updated_at
+                log_json_with_fields(
+                    "info",
+                    "acp session_info_update",
+                    None,
+                    &[
+                        ("title", json!(update.title)),
+                        ("updated_at", json!(update.updated_at)),
+                    ],
                 );
             }
             SessionUpdate::UsageUpdate(update) => {
                 // usage→turn 事件映射位置：本 arm 是唯一入口；当前为结构化日志（不进 UI），
                 // 保留 used/size/cost 供 P1 telemetry/预算消费。
-                match &update.cost {
-                    Some(cost) => eprintln!(
-                        "[acp][session] usage_update: used={} size={} cost={} {}",
-                        update.used, update.size, cost.amount, cost.currency
-                    ),
-                    None => eprintln!(
-                        "[acp][session] usage_update: used={} size={}",
-                        update.used, update.size
-                    ),
+                // C2.1：用量快照结构化落日志（数值保持 JSON number，供指标化采集）；
+                // 结果 JSON 的 `usage` 由 `acp::result::reduce_usage` 在终局归约（单一真源）。
+                let mut fields = vec![("used", json!(update.used)), ("size", json!(update.size))];
+                if let Some(cost) = &update.cost {
+                    fields.push(("cost_amount", json!(cost.amount)));
+                    fields.push(("cost_currency", json!(cost.currency)));
                 }
+                log_json_with_fields("info", "acp usage_update", None, &fields);
             }
             SessionUpdate::Notice(notice) => {
-                eprintln!(
-                    "[acp][session] notice({:?}): {} — {:?}",
-                    notice.severity, notice.title, notice.description
+                log_json_with_fields(
+                    "info",
+                    "acp notice",
+                    None,
+                    &[
+                        ("severity", json!(notice.severity)),
+                        ("title", json!(notice.title)),
+                        ("description", json!(notice.description)),
+                    ],
                 );
             }
             SessionUpdate::CompactionUpdate(update) => {
-                eprintln!(
-                    "[acp][session] compaction_update: id={} status={:?}",
-                    update.compaction_id, update.status
+                log_json_with_fields(
+                    "info",
+                    "acp compaction_update",
+                    None,
+                    &[
+                        ("compaction_id", json!(update.compaction_id)),
+                        ("status", json!(update.status)),
+                    ],
                 );
             }
             SessionUpdate::CompactionSummaryChunk(update) => {
-                eprintln!(
-                    "[acp][session] compaction_summary_chunk: id={}",
-                    update.compaction_id
+                log_json_with_fields(
+                    "info",
+                    "acp compaction_summary_chunk",
+                    None,
+                    &[("compaction_id", json!(update.compaction_id))],
                 );
             }
             // 未知/厂商私有 sessionUpdate：已由 `#[serde(other)]` 兜底反序列化，这里只记诊断，
             // 绝不 panic、绝不整条丢弃（B166）。
             SessionUpdate::Unknown => {
-                eprintln!("[acp][session] 未知 sessionUpdate 变体（已降级诊断，不中断本轮流）");
+                log_json(
+                    "warn",
+                    "acp 未知 sessionUpdate 变体（已降级诊断，不中断本轮流）",
+                    None,
+                );
             }
         }
+    }
+
+    /// 把一条 ACP 工具活动归集为**父 turn** 的 `turn:tool`（C1.1–C1.5）。
+    ///
+    /// - 状态词表走 [`map_acp_tool_status`]（C1.4 单一真源），与本地 sink 的 ACP 词表分离：
+    ///   本地事件保持 `pending|in_progress|completed|failed`（既有语义不变），父 turn 事件用
+    ///   `running|done|failed|aborted`（父 turn 据此判 ToolCall/ToolResult）；
+    /// - 无父上下文（未注入 / 三要素不完整）⇒ 直接返回，静默跳过（C1.3）；
+    /// - 文本 chunk 不走本方法（C1.2：外部正文不得混入父 assistant 正文流）。
+    fn relay_parent_tool_activity(
+        &self,
+        tool_call_id: &str,
+        title: &str,
+        kind: Option<&ToolKind>,
+        status: Option<&ToolCallStatus>,
+        locations: Option<&[ToolCallLocation]>,
+        raw_input: Option<&Value>,
+        raw_output: Option<&Value>,
+    ) {
+        let parent = self.parent_turn.lock().ok().and_then(|slot| slot.clone());
+        let Some(parent) = parent else {
+            return;
+        };
+        let activity = tool_activity_with_status(
+            tool_call_id,
+            title,
+            kind,
+            map_acp_tool_status(status),
+            locations,
+            raw_input,
+            raw_output,
+        );
+        crate::acp::delegate_events::emit_parent_tool_activity(&parent, &activity);
     }
 
     /// stopReason → Pony 归约（§3.2.8）。纯函数，无 I/O。
@@ -1290,10 +1421,21 @@ impl AcpAgentSession {
             updates: updates.len(),
             warnings: warnings.to_vec(),
         };
+        // 正文 / 用量归约与是否「成功轮」解耦：**所有**成功面（`end_turn` 与 stopReason 上限收尾的
+        // `max_tokens`/`max_turn_requests`）都必须带回正文，否则模型调用方拿到「成功但没有内容」
+        // 的结果就只能凭 summary 猜（Gate-1 P0 语义修正）。失败面（refused/cancelled/error）
+        // 一律走 `build_failure_result`，**不**产 `finalText`。
+        let stop_reason_limit_hit = matches!(outcome, AcpTurnOutcome::Truncated);
+        let final_text = reduce_final_text(updates);
+        let usage = reduce_usage(updates);
         match outcome {
-            AcpTurnOutcome::Ok | AcpTurnOutcome::Truncated => {
-                build_ok_result(&labels, outcome == AcpTurnOutcome::Truncated, started)
-            }
+            AcpTurnOutcome::Ok | AcpTurnOutcome::Truncated => build_ok_result_with_final_text(
+                &labels,
+                &final_text,
+                usage.as_ref(),
+                stop_reason_limit_hit,
+                started,
+            ),
             AcpTurnOutcome::Refused => build_failure_result(
                 &labels,
                 "error",
@@ -1333,27 +1475,65 @@ struct Labels {
     warnings: Vec<String>,
 }
 
-fn build_ok_result(labels: &Labels, truncated: bool, started: Instant) -> ToolResult {
-    let summary = if truncated {
-        "外部 agent 达到输出/轮次上限，结果可能被截断（stopReason 非 end_turn）。"
+/// 成功面结果 + 归约正文 / 用量（C0.1 / C0.2 / C0.3 / C2.1，additive）。
+///
+/// 覆盖两种成功轮：`end_turn`（`stop_reason_limit_hit=false`）与 stopReason 上限收尾的
+/// `max_tokens`/`max_turn_requests`（`stop_reason_limit_hit=true`，既有 `truncated: true` 语义）。
+///
+/// 键面 = 既有成功键（`ok/tool/agent/sessionId/stopReason/truncated/updates/warnings/summary`）
+/// + `finalText`（string）+ `finalTextTruncated`（bool）+ 有 `usage_update` 时的 `usage`。
+/// `finalTextTruncated` 语义 = **正文不完整**：本侧 32k 截断，或外部 agent 因输出/轮次上限提前收尾。
+/// 空正文时 `summary.text` 必须明示「未返回文本正文」，不得复用「已完成本轮任务」让调用方误判。
+fn build_ok_result_with_final_text(
+    labels: &Labels,
+    final_text: &DelegateFinalText,
+    usage: Option<&DelegateUsage>,
+    stop_reason_limit_hit: bool,
+    started: Instant,
+) -> ToolResult {
+    // 摘要优先级：空正文（C0.2 诚实提示）> stopReason 上限（C0.4 既有文案逐字保留）
+    // > 本侧 32k 截断 > 正常完成。
+    let summary = if final_text.text.is_empty() {
+        format!(
+            "外部 agent 未返回文本正文（updates={}），无可用内容可归约。",
+            labels.updates
+        )
+    } else if stop_reason_limit_hit {
+        "外部 agent 达到输出/轮次上限，结果可能被截断（stopReason 非 end_turn）。".to_string()
+    } else if final_text.truncated {
+        format!(
+            "外部 agent 已完成本轮任务；正文超过 {ACP_DELEGATE_FINAL_TEXT_MAX_CHARS} 字符上限，已保留前缀。"
+        )
     } else {
-        "外部 agent 已完成本轮任务。"
+        "外部 agent 已完成本轮任务。".to_string()
     };
+    let mut payload = serde_json::Map::new();
+    payload.insert("ok".to_string(), json!(true));
+    payload.insert("tool".to_string(), json!(TOOL_ACP_DELEGATE));
+    payload.insert("agent".to_string(), json!(labels.agent));
+    payload.insert("sessionId".to_string(), json!(labels.session_id));
+    payload.insert("stopReason".to_string(), json!(labels.stop_reason));
+    // 既有 `truncated` 键语义不变：stopReason 是否撞上限（max_tokens/max_turn_requests）。
+    payload.insert("truncated".to_string(), json!(stop_reason_limit_hit));
+    payload.insert("updates".to_string(), json!(labels.updates));
+    payload.insert("warnings".to_string(), json!(labels.warnings));
+    payload.insert("summary".to_string(), json!({ "text": summary }));
+    // C0.1/C0.2/C0.3：正文恒存在（无正文 ⇒ 空串），截断标志恒为布尔。
+    payload.insert("finalText".to_string(), json!(final_text.text));
+    payload.insert(
+        "finalTextTruncated".to_string(),
+        json!(final_text.truncated || stop_reason_limit_hit),
+    );
+    // C2.1：无 usage_update ⇒ 键缺席（不用 null/0 占位，避免伪造用量）。
+    if let Some(usage) = usage {
+        payload.insert("usage".to_string(), usage.to_json());
+    }
     ToolResult {
         tool_name: TOOL_ACP_DELEGATE.to_string(),
         status: "ok".to_string(),
-        output: serde_json::to_string(&json!({
-            "ok": true,
-            "tool": TOOL_ACP_DELEGATE,
-            "agent": labels.agent,
-            "sessionId": labels.session_id,
-            "stopReason": labels.stop_reason,
-            "truncated": truncated,
-            "updates": labels.updates,
-            "warnings": labels.warnings,
-            "summary": { "text": summary },
-        }))
-        .unwrap_or_else(|error| format!("{{\"ok\":true,\"tool\":\"acp_delegate\",\"warnings\":[\"序列化输出失败：{error}\"]}}")),
+        output: serde_json::to_string(&Value::Object(payload)).unwrap_or_else(|error| {
+            format!("{{\"ok\":true,\"tool\":\"acp_delegate\",\"warnings\":[\"序列化输出失败：{error}\"]}}")
+        }),
         duration_ms: started.elapsed().as_millis() as u64,
     }
 }
@@ -1407,7 +1587,15 @@ fn settle_cancel(dispatcher: &GovernedDispatcher, request_id: &str) {
     };
     if let Err(error) = dispatcher.cancel_control_request(request_id, &cas) {
         // 不吞：CAS 冲突说明宿主抢先在消费，记录诊断；调用方仍按 fail-closed 回 cancelled。
-        eprintln!("[acp][session] 置 Cancelled 失败（{request_id}）：{error}");
+        log_json_with_fields(
+            "warn",
+            "acp 置 Cancelled 失败（CAS 冲突：宿主可能抢先在消费）",
+            None,
+            &[
+                ("request_id", json!(request_id)),
+                ("error", json!(error.to_string())),
+            ],
+        );
     }
 }
 
@@ -1471,10 +1659,14 @@ fn content_text(content: &ContentBlock) -> Option<String> {
         ContentBlock::Text { text } => Some(text.clone()),
         other => {
             // 不静默：非文本块记结构化诊断（Pony 侧当前无富内容渲染通道）。
-            eprintln!(
-                "[acp][session] 非文本内容块不映射为 turn:delta：{}",
-                serde_json::to_string(other)
-                    .unwrap_or_else(|error| format!("<unserializable:{error}>"))
+            log_json_with_fields(
+                "info",
+                "acp 非文本内容块不映射为 turn:delta（当前无富内容渲染通道）",
+                None,
+                &[(
+                    "content",
+                    serde_json::to_value(other).unwrap_or(Value::Null),
+                )],
             );
             None
         }
@@ -1491,13 +1683,35 @@ fn tool_activity(
     raw_input: Option<&Value>,
     raw_output: Option<&Value>,
 ) -> TurnToolActivity {
+    // 本地 sink 沿用 ACP 原生词表（既有语义不变）；父 turn 归集走 `map_acp_tool_status`。
+    tool_activity_with_status(
+        tool_call_id,
+        title,
+        kind,
+        status.map(tool_status_str).unwrap_or("pending"),
+        locations,
+        raw_input,
+        raw_output,
+    )
+}
+
+/// [`tool_activity`] 的「状态词表外置」版：同一载荷构造，状态串由调用方按通道词表决定。
+fn tool_activity_with_status(
+    tool_call_id: &str,
+    title: &str,
+    kind: Option<&ToolKind>,
+    status: &str,
+    locations: Option<&[ToolCallLocation]>,
+    raw_input: Option<&Value>,
+    raw_output: Option<&Value>,
+) -> TurnToolActivity {
     TurnToolActivity {
         id: tool_call_id.to_string(),
         name: title.to_string(),
         canonical_tool_name: None,
         // 外部 agent 的工具体系与 Pony 隔离（方案 B 边界），展示名标注来源。
         display_name_zh: Some("外部代理工具".to_string()),
-        status: status.map(tool_status_str).unwrap_or("pending").to_string(),
+        status: status.to_string(),
         description: describe_tool_call(title, kind, locations),
         arguments_text: raw_input.map(json_text),
         result_text: raw_output.map(json_text),
@@ -1515,6 +1729,8 @@ fn tool_status_str(status: &ToolCallStatus) -> &'static str {
         ToolCallStatus::InProgress => "in_progress",
         ToolCallStatus::Completed => "completed",
         ToolCallStatus::Failed => "failed",
+        // C1.4 additive：ACP `cancelled` 不再是「反序列化失败整帧丢弃」。
+        ToolCallStatus::Cancelled => "cancelled",
     }
 }
 

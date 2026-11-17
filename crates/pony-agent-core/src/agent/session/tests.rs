@@ -3035,6 +3035,9 @@ fn file_backend_roundtrip_restores_turn_trace_history() {
                 prefix_mutation_reasons: Vec::new(),
                 usage_origin: None,
                 context_input_tokens: None,
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             }],
             hook_trace_records: vec![HookTraceRecord {
                 hook_name: "audit.observe".to_string(),
@@ -3875,6 +3878,9 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
                 ],
                 usage_origin: None,
                 context_input_tokens: None,
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             }],
             hook_trace_records: vec![HookTraceRecord {
                 hook_name: "observe.sync-finalize-failturn".to_string(),
@@ -4162,6 +4168,9 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
                 ],
                 usage_origin: None,
                 context_input_tokens: None,
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             }],
             hook_trace_records: vec![HookTraceRecord {
                 hook_name: "observe.cancelled-finalize".to_string(),
@@ -4935,6 +4944,7 @@ fn pa094_trace_and_message_views_same_source() {
                 arguments: "{}".into(),
                 started_at_ms: None,
                 description: None,
+                parent_activity_id: None,
             },
         ),
         (
@@ -4950,6 +4960,7 @@ fn pa094_trace_and_message_views_same_source() {
                 duration_ms: Some(500),
                 artifacts: None,
                 capability_invocation: None,
+                parent_activity_id: None,
             },
         ),
         (

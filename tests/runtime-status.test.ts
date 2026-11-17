@@ -176,7 +176,7 @@ describe("status.ts Contract & Runtime State Machine Tests", () => {
       expect(status?.startTime).toBe(1700000400);
     });
 
-    it("identifies thinking mode when calling_model and hasStreamingContent is false", () => {
+    it("shows waiting copy when calling_model and hasStreamingContent is false", () => {
       // Arrange
       const options: ResolveRuntimeStatusOptions = {
         isSubmitting: true,
@@ -188,10 +188,13 @@ describe("status.ts Contract & Runtime State Machine Tests", () => {
       // Act
       const status = resolveAgentRuntimeStatus(options);
 
-      // Assert
+      // Assert：等待首字节只说「在等」，不出现上游/首字节/静默等工程细节。
       expect(status).not.toBeNull();
       expect(status?.mode).toBe("thinking");
-      expect(status?.label).toBe("思考中...");
+      expect(status?.label).toBe("等待响应中…");
+      for (const banned of ["上游", "首字节", "静默", "token", "TTFT"]) {
+        expect(status?.label).not.toContain(banned);
+      }
     });
 
     it("identifies responding mode when calling_model with streaming content", () => {

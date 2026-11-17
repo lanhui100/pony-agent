@@ -1152,7 +1152,7 @@ impl HostControlPlaneBuilder {
                 std::sync::Mutex<
                     std::collections::HashMap<
                         (String, String),
-                        Vec<crate::agent::turn_event::TurnEvent>,
+                        Vec<BufferedTurnEvent>,
                     >,
                 >,
             > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1163,6 +1163,10 @@ impl HostControlPlaneBuilder {
                                 turn_id: &str,
                                 event: crate::agent::turn_event::TurnEvent,
                                 is_terminal: bool| {
+                // wave-acp-delegate C6.2：**产生时刻在入缓冲的这一刻取**——persist 由发射方
+                // 同步调用，此刻即事件真实产生时间；落库时逐事件写入 `created_at_ms`，
+                // 不得整批塌缩到 flush 时刻。
+                let produced_at_ms = now_event_ms();
                 // PA-095 #3（实施后审核 P0）：缓冲锁不得跨越 flush——persist 闭包
                 // 持 buf mutex 调 flush_events（阻塞 sessions.write），而 history
                 // 命令线程持 sessions.write 发射全局事件时要抢同一把 buf mutex，
@@ -1173,7 +1177,7 @@ impl HostControlPlaneBuilder {
                 let mut flush_batch: Option<(
                     String,
                     String,
-                    Vec<crate::agent::turn_event::TurnEvent>,
+                    Vec<BufferedTurnEvent>,
                 )> = None;
                 {
                     let mut buf = buffer.lock().unwrap_or_else(|e| {
@@ -1185,6 +1189,7 @@ impl HostControlPlaneBuilder {
                     let key = (session_id.to_string(), turn_id.to_string());
                     // 写时聚合：同一 turn 的连续 AssistantChunk 合并为一条（
                     // append-only 不可变 + seq 连续与聚合的一致性由"emit 时合并"保证）。
+                    // 聚合后保留**首条**chunk 的产生时刻（合并段的时间下界）。
                     let mut merged_chunk = false;
                     if let crate::agent::turn_event::TurnEvent::AssistantChunk { text, .. } =
                         &event
@@ -1193,7 +1198,7 @@ impl HostControlPlaneBuilder {
                             if let crate::agent::turn_event::TurnEvent::AssistantChunk {
                                 text: last_text,
                                 ..
-                            } = last
+                            } = &mut last.event
                             {
                                 last_text.push_str(text);
                                 merged_chunk = true;
@@ -1201,7 +1206,12 @@ impl HostControlPlaneBuilder {
                         }
                     }
                     if !merged_chunk {
-                        buf.entry(key.clone()).or_default().push(event);
+                        buf.entry(key.clone())
+                            .or_default()
+                            .push(BufferedTurnEvent {
+                                event,
+                                produced_at_ms,
+                            });
                     }
                     if is_terminal {
                         // PA-095 #2：commit 先于 clear——flush 成功才移除缓冲
@@ -1231,6 +1241,9 @@ impl HostControlPlaneBuilder {
             // 缓冲事件已提交事件表。逐 key 提交成功才移除（commit 先于 clear）。
             // 用 try_write：append_turn 在生产路径于 sessions 写锁内被调用，
             // 阻塞式 write 会自锁死锁——锁忙时返回 Err（fail loud）而非挂死。
+            //
+            // wave-acp-delegate C6.1：本通道同时是**step 边界增量落盘**的执行体
+            //（`turn_flow::flush_step_boundary_events` → 同一 drain-on-success 语义）。
             let flush_requester = move |session_id: &str| -> Result<usize, String> {
                 let mut buf = buffer_for_flush.lock().unwrap_or_else(|e| {
                     tracing::warn!(target: "control_plane", error = %e, "[pony-agent][runtime] event buffer lock poisoned");
@@ -1338,15 +1351,33 @@ impl Default for HostControlPlaneBuilder {
     }
 }
 
+/// wave-acp-delegate C6.1/C6.2：控制面事件缓冲项——事件本体 + **真实产生时刻**。
+///
+/// 缓冲项的 `produced_at_ms` 在 `persist` 闭包入口（= 发射方同步调用点）取值，
+/// 落库时逐事件写入 `turn_events.created_at_ms`；旧记录/无时间戳的批回落批首时间。
+#[derive(Clone, Debug)]
+pub(crate) struct BufferedTurnEvent {
+    pub event: crate::agent::turn_event::TurnEvent,
+    pub produced_at_ms: u64,
+}
+
+/// 当前时刻（Unix ms），用作事件产生时刻与旧批回落时间。
+pub(crate) fn now_event_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// PA-095 #2：单批事件提交核心（调用方已持 sessions 写锁）——persist 成功后
 /// 同步水位；返回是否提交成功。
 fn commit_event_batch(
     sessions: &mut crate::agent::session::SessionStore,
     session_id: &str,
     turn_id: &str,
-    events: Vec<crate::agent::turn_event::TurnEvent>,
+    batch: Vec<BufferedTurnEvent>,
 ) -> bool {
-    if events.is_empty() {
+    if batch.is_empty() {
         return true;
     }
     if session_id.is_empty() {
@@ -1359,14 +1390,27 @@ fn commit_event_batch(
     if !sessions.supports_turn_events() {
         eprintln!(
             "[pony-agent][runtime] event flush dropped: backend without event support session={session_id} turn={turn_id} events={}",
-            events.len()
+            batch.len()
         );
         return true;
     }
     let branch_id = sessions
         .session_active_branch_id(session_id)
         .unwrap_or_else(|| "main".to_string());
-    if !sessions.persist_events(session_id, turn_id, &branch_id, events.clone()) {
+    let (events, event_times_ms): (
+        Vec<crate::agent::turn_event::TurnEvent>,
+        Vec<u64>,
+    ) = batch
+        .into_iter()
+        .map(|entry| (entry.event, entry.produced_at_ms))
+        .unzip();
+    if !sessions.persist_events_with_times(
+        session_id,
+        turn_id,
+        &branch_id,
+        events.clone(),
+        event_times_ms,
+    ) {
         eprintln!(
             "[pony-agent][runtime] event flush failed: session={session_id} turn={turn_id} events={} first_type={}",
             events.len(),
@@ -1390,13 +1434,16 @@ fn commit_event_batch(
 /// 失败只记日志（contained，不阻断流）；session_id 缺失时丢弃并告警。
 /// PA-095 #2：返回 persist 是否成功——调用方据此决定是否清空缓冲
 /// （commit 先于 clear 的原子序保证；失败保留缓冲可重试）。
+///
+/// wave-acp-delegate C6.1/C6.2：入参是**带产生时刻**的缓冲项；终态 flush 与
+/// step 边界增量 flush 共用本入口（同一 drain-on-success 语义）。
 fn flush_events(
     sessions: &Arc<RwLock<crate::agent::session::SessionStore>>,
     session_id: &str,
     turn_id: &str,
-    events: Vec<crate::agent::turn_event::TurnEvent>,
+    batch: Vec<BufferedTurnEvent>,
 ) -> bool {
-    if events.is_empty() {
+    if batch.is_empty() {
         return true;
     }
     // wave-interrupted-turn-resume RC3/C5（L3-C H2）：**落库边界**清洗。
@@ -1405,9 +1452,12 @@ fn flush_events(
     // 不能改（`tui_session_resilience_chunk_split.rs` / `tui_session_resilience_acceptance.rs`
     // 钉住该断言）。但事件是持久化真源（→ `normalized_messages` / 折叠历史 / 续跑上下文），
     // 因此在此处把 assistant 正文的协议文本按持久化口径整块剥离：事件里不留占位符与残片。
-    let events = events
+    let batch = batch
         .into_iter()
-        .map(strip_protocol_from_persisted_event)
+        .map(|entry| BufferedTurnEvent {
+            event: strip_protocol_from_persisted_event(entry.event),
+            produced_at_ms: entry.produced_at_ms,
+        })
         .collect();
     // PA-095 #3：阻塞式写锁（基线语义）——终态内联 flush 与 trace 持久化
     // worker 的毫秒级锁竞争等待即可；同线程自锁面已由 emit_global_event 改
@@ -1416,7 +1466,7 @@ fn flush_events(
         tracing::warn!(target: "control_plane", error = %e, "[pony-agent][runtime] sessions lock poisoned");
         e.into_inner()
     });
-    commit_event_batch(&mut sessions, session_id, turn_id, events)
+    commit_event_batch(&mut sessions, session_id, turn_id, batch)
 }
 
 /// RC3/C5（落库边界）：把事件里的 assistant 正文换成**持久化口径**（整块丢弃协议文本、
@@ -4784,6 +4834,9 @@ mod tests {
                         ],
                         usage_origin: None,
                         context_input_tokens: None,
+                        attempts: None,
+                        failed_attempt_ms: None,
+                        prelude_ms: None,
                     }],
                     hook_trace_records: vec![crate::agent::hooks::HookTraceRecord {
                         hook_name: "observe.failed-finalize".to_string(),
@@ -4888,6 +4941,9 @@ mod tests {
                         ],
                         usage_origin: None,
                         context_input_tokens: None,
+                        attempts: None,
+                        failed_attempt_ms: None,
+                        prelude_ms: None,
                     }],
                     hook_trace_records: vec![crate::agent::hooks::HookTraceRecord {
                         hook_name: "observe.cancelled-finalize".to_string(),
@@ -8509,6 +8565,9 @@ mod tests {
                     prefix_mutation_reasons: Vec::new(),
                     usage_origin: None,
                     context_input_tokens: None,
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 }],
                 ..crate::agent::session::TurnTraceRecord::default()
             },
@@ -8554,6 +8613,9 @@ mod tests {
                     prefix_mutation_reasons: Vec::new(),
                     usage_origin: None,
                     context_input_tokens: None,
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 }],
                 ..crate::agent::session::TurnTraceRecord::default()
             },

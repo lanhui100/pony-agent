@@ -8,7 +8,7 @@
 //!
 //! 契约（本文件锁定）：
 //! - 宽度不足时**整段**让位（从最左开始），绝不输出半段、绝不留悬挂分隔符；
-//! - 右端的轮级实时读数（速度含剔突发标记、首token）最后退出；
+//! - 右端的轮级实时读数（速度、首token）最后退出；
 //! - 有让位时以 `… ` 自描述；
 //! - 只有连最后一段都放不下（极端窄屏）才允许段内省略。
 
@@ -77,7 +77,8 @@ fn header_row(state: &mut tui::TuiState, width: u16) -> String {
     row_text(&buf, 0)
 }
 
-/// 覆盖全部指标段的夹具：累计量 + 比率 + 带突发出清标记的速度 + 首token。
+/// 覆盖全部指标段的夹具：累计量 + 比率 + 异常口径（`end_to_end`，故带 `≈` 前缀且曾带 ` e2e`）
+/// + 突发出清标记 + 首token —— 后两者的行内注释必须都不出现（ADR 2026-11-17）。
 fn state_with_all_metrics() -> tui::TuiState {
     let mut state = tui::TuiState::default();
     state.workspace = "/home/dm/pony-agent".into();
@@ -90,7 +91,7 @@ fn state_with_all_metrics() -> tui::TuiState {
         output_tokens: Some(5_000),
         turn_output_tokens: 5_000,
         turn_speed_tokens_per_second: Some(120.0),
-        turn_speed_basis: Some(TurnSpeedBasis::StreamDecode),
+        turn_speed_basis: Some(TurnSpeedBasis::EndToEnd),
         turn_calls: 1,
         turn_burst_excluded: Some(2),
         first_token_latency_ms: Some(800),
@@ -121,10 +122,10 @@ fn c1_first_token_segment_survives_width_pressure() {
 }
 
 // ---------------------------------------------------------------------------
-// C2：中等宽度 —— 整段让位 + `… ` 自描述，速度段（含 剔突发 后缀）不被切半
+// C2：中等宽度 —— 整段让位 + `… ` 自描述，速度段只出「值 + 单位」不被切半
 // ---------------------------------------------------------------------------
 #[test]
-fn c2_overflow_drops_whole_segments_and_keeps_speed_self_description() {
+fn c2_overflow_drops_whole_segments_and_keeps_speed_value_only() {
     let mut full_state = state_with_all_metrics();
     let full = header_row(&mut full_state, 160);
     assert!(
@@ -135,15 +136,21 @@ fn c2_overflow_drops_whole_segments_and_keeps_speed_self_description() {
         "↑25k ↓5k",
         "缓存 60%",
         "上下文 25%",
-        // ADR 2026-11-15-tui-speed-segment-drop-inline-cadence：解码口径不再行内自描述，
-        // 段内只剩「值 + 单位」与突发出清标记。
-        "120 t/s 剔突发2",
+        // ADR 2026-11-17-tui-speed-segment-drop-annotations：速度数值之后不留注释文字。
+        "120 t/s",
         "首token 800ms",
     ] {
         assert!(full.contains(needle), "宽屏缺少指标段 {needle:?}：{full:?}");
     }
+    // 反向钉子：口径（`e2e`）与末端样本量（`剔突发N`）都不得回到 header（夹具两者都非零）。
+    for banned in ["e2e", "剔突"] {
+        assert!(
+            !full.contains(banned),
+            "速度段数值后不得带注释文字 {banned:?}：{full:?}"
+        );
+    }
 
-    // 去噪后速度段变短（ADR 2026-11-15-tui-speed-segment-drop-inline-cadence），
+    // 去噪后速度段变短（ADR 2026-11-15 / 2026-11-17 两条），
     // 原先钉死的 96 列已不再让位 ⇒ 宽度不能写死：运行期扫出「确实发生整段让位」的宽度，
     // 再在这些宽度上钉住不变量（整段不切半 / 首token 最后退出 / 无悬挂分隔符）。
     let dropping: Vec<u16> = (60u16..=120)
@@ -159,11 +166,11 @@ fn c2_overflow_drops_whole_segments_and_keeps_speed_self_description() {
     for width in dropping {
         let mut state = state_with_all_metrics();
         let header = header_row(&mut state, width);
-        // 速度段优先级低于首token，允许被整段让位；但**只要出现碎片就必须完整**。
-        if header.contains("剔突") {
+        // 速度段优先级低于首token，允许被整段让位；但**只要出现就必须完整**。
+        if header.contains("t/s") {
             assert!(
-                header.contains("120 t/s 剔突发2"),
-                "w={width}：速度段的剔突发后缀是契约字面量，不得被拆散，实际 {header:?}"
+                header.contains("120 t/s"),
+                "w={width}：速度段字面量不得被拆散，实际 {header:?}"
             );
         }
         assert!(

@@ -2678,7 +2678,7 @@ impl SessionStore {
         (history, trace)
     }
 
-    /// PA-091：turn 终态 flush 事件批次（与快照写入同事务，由 backend 保证）。
+    /// PA-091：turn 事件批次落盘（与快照写入同事务，由 backend 保证）。
     /// 返回是否成功；失败时调用方只记日志（contained，不阻断流）。
     pub fn persist_events(
         &self,
@@ -2686,6 +2686,22 @@ impl SessionStore {
         turn_id: &str,
         branch_id: &str,
         events: Vec<crate::agent::turn_event::TurnEvent>,
+    ) -> bool {
+        // 旧调用面（无逐事件时间戳）⇒ 空 `event_times_ms`（落库回落批首时间）。
+        self.persist_events_with_times(session_id, turn_id, branch_id, events, Vec::new())
+    }
+
+    /// wave-acp-delegate C6.2：带**逐事件产生时刻**的事件批次落盘。
+    ///
+    /// `event_times_ms` 与 `events` 平行（缺失位 ⇒ 落库回落批首时间，legacy 兼容）。
+    /// C6.1 的 step 边界增量 flush 与终态 flush 共用本入口。
+    pub fn persist_events_with_times(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        branch_id: &str,
+        events: Vec<crate::agent::turn_event::TurnEvent>,
+        event_times_ms: Vec<u64>,
     ) -> bool {
         if events.is_empty() {
             return true;
@@ -2696,6 +2712,7 @@ impl SessionStore {
             turn_id: turn_id.to_string(),
             branch_id: branch_id.to_string(),
             events,
+            event_times_ms,
         });
         matches!(outcome, PersistCommandOutcome::Succeeded)
     }

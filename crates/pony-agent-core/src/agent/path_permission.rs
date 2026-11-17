@@ -3,8 +3,8 @@
 //! 所有触碰文件的工具统一经本模块做路径级权限判定，取代各工具内联的
 //! `resolve_inside_workspace` / `prepare_workspace_file_path` 逻辑：
 //!
-//! - 权限分区：`WorkspaceRoot`（写+读）/ `ControlledTmp`（写+读）/ `AuthorizedExternal`（只读）/
-//!   `Denied`。
+//! - 权限分区：`WorkspaceRoot`（写+读）/ `ControlledTmp`（写+读）/ `TrustedSkillRoot`（只读）/
+//!   `AuthorizedExternal`（只读）/ `Denied`。
 //! - 判定核心：canonicalize（写新文件复用"最近存在祖先 + 后缀组件校验"语义）→ **组件级前缀
 //!   比较**（Windows 上逐组件 ASCII 小写折叠，杜绝 `/ws-1` vs `/ws-10` 字符串前缀混淆）→
 //!   未命中且 Read 时查授权清单（祖先链，止于卷根不越过）。
@@ -31,6 +31,8 @@ pub enum PermissionZone {
     WorkspaceRoot,
     /// 受控 tmp 目录内（写 + 读放行）
     ControlledTmp,
+    /// 受信技能根内（产品只读资产：读取默认放行，写入仍按 workspace 边界拒绝）
+    TrustedSkillRoot,
     /// workspace 外、经显式授权（只读）
     AuthorizedExternal,
     /// 拒绝
@@ -42,6 +44,7 @@ impl PermissionZone {
         match self {
             Self::WorkspaceRoot => "workspace_root",
             Self::ControlledTmp => "controlled_tmp",
+            Self::TrustedSkillRoot => "trusted_skill_root",
             Self::AuthorizedExternal => "authorized_external",
             Self::Denied => "denied",
         }
@@ -494,7 +497,8 @@ impl PathPermissionChecker {
     /// 1. 规范化：Write 且目标不存在 → "最近存在祖先 canonicalize + 后缀组件校验"；
     ///    其余 canonicalize（失败 fail-closed）。canonical 输出归一化（Windows 去 `\\?\`）。
     /// 2. 组件级前缀判定：命中 root → WorkspaceRoot；命中 tmp_dir → ControlledTmp。
-    /// 3. 未命中且 Read → 授权祖先链命中 → AuthorizedExternal；未命中 → RequiresAuthorization。
+    /// 3. 未命中且 Read → 授权祖先链命中 → AuthorizedExternal；受信技能根内 →
+    ///    TrustedSkillRoot；均未命中 → RequiresAuthorization。
     /// 4. Write 未命中 → OutsideWorkspaceWriteDenied（授权清单本轮仅覆盖读）。
     pub fn classify(
         &self,
@@ -509,6 +513,9 @@ impl PathPermissionChecker {
             return Err(PermissionError::denied("文件路径不能为空。"));
         }
 
+        // 读用途保留**词法绝对输入**：技能根信任按分域策略判定 —— 全局根以词法归属为准
+        // （用户自有域允许符号链接解析到根外，Wave-58 D1），不能只看 canonical 结果。
+        let mut read_lexical: Option<PathBuf> = None;
         let canonical = match purpose {
             PathPurpose::Write => {
                 self.canonicalize_for_write(Path::new(trimmed), root, tmp_dir)?
@@ -522,6 +529,7 @@ impl PathPermissionChecker {
                 } else {
                     root.join(input)
                 };
+                read_lexical = Some(normalize_win_prefix(&absolute));
                 self.canonicalize_for_read(&absolute)?
             }
         };
@@ -552,7 +560,7 @@ impl PathPermissionChecker {
             });
         }
 
-        // workspace 外：Read → 授权祖先链；Write → 授权祖先链或拒绝。
+        // workspace 外：Read → 显式授权 / 受信技能根；Write → 授权祖先链或拒绝。
         match purpose {
             PathPurpose::Read => {
                 if let Some(entry) = authorizations.find_authorization(&canonical) {
@@ -561,6 +569,15 @@ impl PathPermissionChecker {
                         canonical,
                         matched_authorization: Some(entry),
                     });
+                }
+                if let Some(lexical) = read_lexical.as_deref() {
+                    if is_read_within_trusted_skill_roots(lexical, &canonical, Some(root)) {
+                        return Ok(PathPermission {
+                            zone: PermissionZone::TrustedSkillRoot,
+                            canonical,
+                            matched_authorization: None,
+                        });
+                    }
                 }
                 Err(PermissionError::requires_authorization(format!(
                     "读取路径 {} 位于工作区之外且未获得授权，需要用户显式授权后才能读取。",
@@ -850,6 +867,49 @@ pub fn is_within_trusted_skill_roots(path: &Path, workspace_root: Option<&Path>)
     trusted_skill_roots(workspace_root)
         .iter()
         .any(|root| canonical_path.starts_with(root))
+}
+
+/// 读用途：路径是否落在受信技能根内（技能是产品只读资产，读取默认放行）。
+///
+/// 分域策略与加载侧 [`trusted_skill_roots_with_policy`] **完全一致**：
+/// - 全局根（`allow_symlink_escape = true`，用户自有域）：按**词法**归属判定，允许技能目录 /
+///   文件为符号链接并解析到根外（`npx skills` 与 Claude Code 的标准安装形态）；
+/// - 项目级根（`allow_symlink_escape = false`，仓库内容不可信）：按 **canonical 包含**判定，
+///   `<ws>/.claude/skills -> /tmp/evil` 不得把外部目录变成可默认读取的技能根。
+///
+/// 只服务 `PathPurpose::Read`：写入仍按 workspace 边界拒绝（技能目录不是可写域）。
+fn is_read_within_trusted_skill_roots(
+    lexical: &Path,
+    canonical: &Path,
+    workspace_root: Option<&Path>,
+) -> bool {
+    read_within_skill_roots(
+        lexical,
+        canonical,
+        &trusted_skill_roots_with_policy(workspace_root),
+    )
+}
+
+/// [`is_read_within_trusted_skill_roots`] 的纯函数本体（根清单注入，便于 hermetic 单测）。
+fn read_within_skill_roots(
+    lexical: &Path,
+    canonical: &Path,
+    roots: &[SkillTrustRoot],
+) -> bool {
+    roots.iter().any(|root| {
+        let canonical_hit = root
+            .canonical_root
+            .as_deref()
+            .map(|canonical_root| {
+                components_within(&normalize_win_prefix(canonical_root), canonical)
+            })
+            .unwrap_or(false);
+        if root.allow_symlink_escape {
+            components_within(&normalize_win_prefix(&root.root), lexical) || canonical_hit
+        } else {
+            canonical_hit
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1403,5 +1463,136 @@ mod tests {
         assert_eq!(permission.zone, PermissionZone::AuthorizedExternal);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    // ── 受信技能根：读取默认放行（B236）────────────────────────────────────
+
+    /// 仓库根技能目录不在会话 workspace 内时：读默认放行（TrustedSkillRoot），写仍拒绝，
+    /// 非技能路径照旧要授权 —— 三条断言锁死「只放宽技能只读」的边界。
+    #[test]
+    fn read_within_project_skill_root_is_trusted_but_write_is_not() {
+        let repo = test_root("skillrepo");
+        prepare_root(&repo);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let ws = repo.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let skill_dir = repo.join(".agents/skills/demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_file = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_file, "# demo").unwrap();
+        let other = repo.join("notes.txt");
+        std::fs::write(&other, "notes").unwrap();
+
+        let checker = PathPermissionChecker::with_default();
+        let tmp = ws.join(".tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let read = checker
+            .classify(
+                &skill_file.display().to_string(),
+                &ws,
+                &tmp,
+                &no_auth(),
+                PathPurpose::Read,
+            )
+            .expect("skill file read must be default-allowed");
+        assert_eq!(read.zone, PermissionZone::TrustedSkillRoot);
+
+        let write = checker
+            .classify(
+                &skill_file.display().to_string(),
+                &ws,
+                &tmp,
+                &no_auth(),
+                PathPurpose::Write,
+            )
+            .expect_err("skill roots are read-only");
+        assert_eq!(
+            write.code,
+            PermissionErrorCode::OutsideWorkspaceWriteDenied
+        );
+
+        let err = checker
+            .classify(
+                &other.display().to_string(),
+                &ws,
+                &tmp,
+                &no_auth(),
+                PathPurpose::Read,
+            )
+            .expect_err("non-skill external reads still need authorization");
+        assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// 项目级技能根的符号链接逃逸不得变成可默认读取的外部目录（D1：项目内容不可信）。
+    #[cfg(unix)]
+    #[test]
+    fn project_skill_root_symlink_escape_still_requires_authorization() {
+        use std::os::unix::fs::symlink;
+        let repo = test_root("skilllinkrepo");
+        prepare_root(&repo);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let ws = repo.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let outside = test_root("skilllinkoutside");
+        prepare_root(&outside);
+        std::fs::write(outside.join("SKILL.md"), "# evil").unwrap();
+        let link = repo.join(".claude/skills");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        if symlink(&outside, &link).is_err() {
+            let _ = std::fs::remove_dir_all(&repo);
+            let _ = std::fs::remove_dir_all(&outside);
+            return;
+        }
+        let checker = PathPermissionChecker::with_default();
+        let tmp = ws.join(".tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let err = checker
+            .classify(
+                &link.join("SKILL.md").display().to_string(),
+                &ws,
+                &tmp,
+                &no_auth(),
+                PathPurpose::Read,
+            )
+            .expect_err("project skill root escape must stay fail-closed");
+        assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// 读放行策略必须与加载侧分域策略逐字一致：全局根允许词法归属（符号链接解析到根外），
+    /// 项目根只认 canonical 包含。
+    #[test]
+    fn skill_root_read_policy_matches_load_side_domains() {
+        let global_root = PathBuf::from("/home/u/.claude/skills");
+        let lexical = global_root.join("demo/SKILL.md");
+        let escaped = PathBuf::from("/opt/shared/demo/SKILL.md");
+
+        let global_policy = vec![SkillTrustRoot {
+            root: global_root.clone(),
+            canonical_root: Some(global_root.clone()),
+            allow_symlink_escape: true,
+        }];
+        assert!(
+            read_within_skill_roots(&lexical, &escaped, &global_policy),
+            "全局根（用户自有域）允许符号链接解析到根外"
+        );
+
+        let project_policy = vec![SkillTrustRoot {
+            root: global_root,
+            canonical_root: Some(PathBuf::from("/home/u/.claude/skills")),
+            allow_symlink_escape: false,
+        }];
+        assert!(
+            !read_within_skill_roots(&lexical, &escaped, &project_policy),
+            "项目根逃逸目标不得默认放行"
+        );
+        assert!(
+            read_within_skill_roots(&lexical, &lexical, &project_policy),
+            "canonical 落在根内的技能文件仍应放行"
+        );
     }
 }

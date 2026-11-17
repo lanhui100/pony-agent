@@ -2209,27 +2209,27 @@ fn approval_options_from_arguments(
     })
 }
 
-/// wave-65 C2：审批请求的**中文可读**文案（含工具名；仅路径授权类才提“工作区外路径”）。
+/// wave-65 C2：审批请求的**中文可读**文案（宿主面板给人看）。
 ///
-/// 为什么不用 digest 文案：审批面板是给人看的，`final_args_digest` 对用户毫无信息量；
-/// digest 仍保留在 `PendingControlRequest::final_args_digest`（CAS 真值），只是不再上屏。
-/// R3：文案同样按**成因**区分 —— 规则/外部审批说「需要审批」，不能谎报成「工作区外路径」。
+/// 为什么不用 digest 文案：`final_args_digest` 对用户毫无信息量；digest 仍保留在
+/// `PendingControlRequest::final_args_digest`（CAS 真值），只是不再上屏。
+/// 为什么不再重复工具名：工具身份是**结构化字段**（`options.tool` / `descriptorId`），
+/// 面板标题单独渲染；正文只回答「为什么需要审批」，同一事实不写两遍。
+/// R3：文案按**成因**区分 —— 规则/外部审批说「需要审批」，不能谎报成「工作区外路径」。
 fn approval_prompt_from_arguments(
     decision_source: &str,
-    tool_name: &str,
+    _tool_name: &str,
     arguments: &Value,
 ) -> String {
     match (
         approval_kind_from_decision_source(decision_source),
         approval_path_from_arguments(arguments),
     ) {
-        ("path_authorization", Some(path)) => {
-            format!("工具 {tool_name} 需要读取工作区外路径 {path}，请授权后重试。")
-        }
+        ("path_authorization", Some(path)) => format!("读取工作区外路径：{path}"),
         // 成因声称路径门禁却取不到 path 实参：与 `approval_options_from_arguments` 的降级
         // 保持同步（那条也会降级为 `approvalKind:"approval"`），文案因此**不再**声称
         // 「工作区外路径」—— 否则文案与 `approvalKind` 互相矛盾，用户会按错误的信息去排障。
-        _ => format!("工具 {tool_name} 需要审批后才能执行（策略或外部来源要求），请确认后重试。"),
+        _ => "该工具调用需要审批后才能执行（策略或外部来源要求）。".to_string(),
     }
 }
 
@@ -4205,8 +4205,19 @@ mod wave65_r3_approval_kind_tests {
                 "非路径成因的文案不得谎报工作区外路径，实际 = {prompt:?}"
             );
             assert!(
-                prompt.contains("Bash") && prompt.contains("审批"),
-                "普通审批文案必须含工具名并说明需要审批，实际 = {prompt:?}"
+                prompt.contains("审批"),
+                "普通审批文案必须说明需要审批，实际 = {prompt:?}"
+            );
+            // B236：正文不再重复工具名（工具身份由结构化 `options.tool` 承载），
+            // 因此身份断言改为只看 options，正文反向断言不得含工具名。
+            assert_eq!(
+                options.get("tool").and_then(Value::as_str),
+                Some("Bash"),
+                "普通审批的结构化 options.tool 必须承载工具身份，实际 = {options}"
+            );
+            assert!(
+                !prompt.contains("Bash"),
+                "B236：普通审批正文不得重复工具名（面板标题单独渲染），实际 = {prompt:?}"
             );
         }
     }

@@ -104,7 +104,7 @@ describe("wave-59 F1：移除重复的等待动画", () => {
     wrapper.unmount();
   });
 
-  it("F1-2: 同一状态下底部状态条必须可见且标签非空（承载「思考中/准备就绪中」唯一指示）", async () => {
+  it("F1-2: 同一状态下底部状态条必须可见且标签非空（承载「等待响应中/思考中/准备就绪中」唯一指示）", async () => {
     // Arrange
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -122,11 +122,11 @@ describe("wave-59 F1：移除重复的等待动画", () => {
       "F1-2：等待首个信号期间底部状态条必须可见（data-visible=\"true\"）"
     ).toBe("true");
 
-    // Assert（唯一指示：标签非空且语义为思考/准备就绪）
+    // Assert（唯一指示：标签非空且语义为等待/思考/准备就绪）
     const label = wrapper.get('[data-testid="agent-runtime-status-label"]');
     const labelText = label.text().trim();
     expect(labelText.length, "F1-2：agent-runtime-status-label 文本不得为空").toBeGreaterThan(0);
-    expect(labelText).toMatch(/思考中|准备就绪/);
+    expect(labelText).toMatch(/等待响应中|思考中|准备就绪/);
 
     wrapper.unmount();
   });

@@ -1,0 +1,74 @@
+{
+  "suite": "acp_delegate_p0p2_contract",
+  "cmd": "PONY_BUILD_LOCK=/tmp/pony-agent-build-acp-delegate.lock bash scripts/cargo-lane.sh test -p pony-agent-core --test acp_delegate_p0p2_contract",
+  "exit_code": 101,
+  "log": ".dev-team/red-phase/acp_delegate_p0p2_contract.log",
+  "result": {
+    "passed": 4,
+    "failed": 8
+  },
+  "failures": [
+    {
+      "test": "c3_1_acp_sources_have_no_bare_eprintln",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:628",
+      "assert": "## 67:thread 'c0_2_absent_chunks_yield_empty_final_text_and_honest_summary' (201173) panicked at crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:322:"
+    },
+    {
+      "test": "c2_1_usage_update_lands_in_result_json_usage",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:514",
+      "assert": "## 82:thread 'c0_1_final_text_concatenates_chunks_in_arrival_order' (201172) panicked at crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:249:9:"
+    },
+    {
+      "test": "c0_3_oversize_final_text_keeps_prefix_and_marks_truncated",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:367",
+      "assert": "## 116:thread 'c5_1_no_retry_keeps_single_attempt_and_omits_retry_windows' (201183) panicked at crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:1333:"
+    },
+    {
+      "test": "c4_1_tool_event_step_is_the_turn_step_index",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:1137",
+      "assert": "## 186:thread 'c5_1_retry_populates_attempts_and_retry_windows' (201184) panicked at crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:1231:9:"
+    },
+    {
+      "test": "c3_1_acp_sources_have_no_bare_eprintln",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:628",
+      "assert": "C3.1 违约：`crates/pony-agent-core/src/acp/**` 非测试代码存在 32 处裸 `eprintln!`，诊断必须走 `agent::otel::log`（结构化 json + trace_id）。违约点："
+    },
+    {
+      "test": "c0_2_absent_chunks_yield_empty_final_text_and_honest_summary",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:322",
+      "assert": "assertion `left == right` failed: C0.2 违约：无 AgentMessageChunk ⇒ `finalText` 必须是空串（不得缺键/不得 null/不得伪造内容），实际 = {\"agent\":\"fake-empty\",\"ok\":true,\"sessionId\":\"acp-ses"
+    },
+    {
+      "test": "c2_1_usage_update_lands_in_result_json_usage",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:514",
+      "assert": "C2.1 违约：收到 usage_update ⇒ 结果 JSON 必须带 `usage` 字段，实际 = {\"agent\":\"fake-usage\",\"ok\":true,\"sessionId\":\"acp-sess-1\",\"stopReason\":\"end_turn\",\"summary\":{\"text\":\"外部 age"
+    },
+    {
+      "test": "c0_1_final_text_concatenates_chunks_in_arrival_order",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:249",
+      "assert": "C0.1 违约：结果 JSON 缺字符串字段 `/finalText`，实际 = {\"agent\":\"fake-order\",\"ok\":true,\"sessionId\":\"acp-sess-1\",\"stopReason\":\"end_turn\",\"summary\":{\"text\":\"外部 agent 已完成本轮任务。\"}"
+    },
+    {
+      "test": "c0_3_oversize_final_text_keeps_prefix_and_marks_truncated",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:367",
+      "assert": "assertion `left == right` failed: C0.3 违约：正文 > 32000 字符 ⇒ `finalTextTruncated` 必须为 true，实际 = {\"agent\":\"fake-long\",\"ok\":true,\"sessionId\":\"acp-sess-1\",\"stopReason"
+    },
+    {
+      "test": "c5_1_no_retry_keeps_single_attempt_and_omits_retry_windows",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:1333",
+      "assert": "assertion `left == right` failed: C5.1 违约：无重试路径 `attempts` 必须为 Some(1)，实际 = None"
+    },
+    {
+      "test": "c4_1_tool_event_step_is_the_turn_step_index",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:1137",
+      "assert": "C4.1 违约：ToolCall(call_step_probe).step = 4 不在 StepStart 的 step 集合 [0, 1] 中—— step 取了事件 sequence，而不是产生该调用的 turn step index"
+    },
+    {
+      "test": "c5_1_retry_populates_attempts_and_retry_windows",
+      "site": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs:1231",
+      "assert": "C5.1 违约：`ProviderCallCacheRecord.attempts` 必须恒为 Some(≥1)，实际 None（重试剧本应记录 2 次尝试）"
+    }
+  ],
+  "recorded_by": "lead",
+  "recorded_at": "2026-11-17T19:58+08:00"
+}

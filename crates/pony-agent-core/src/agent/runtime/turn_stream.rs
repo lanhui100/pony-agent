@@ -220,7 +220,11 @@ impl AgentRuntime {
                     self.dispatch_hook_trace_records(TurnHookPoint::ToolCallStart);
                 let tool_start_hook_trace_records = tool_start_hook_outcome.trace_records.clone();
                 hook_trace_records.extend(tool_start_hook_trace_records.clone());
-                emit_stream_event(
+                // C4.1：`turn:tool` 必须携带**产生该调用的 turn step index**（hop 索引），
+                // 与 `StepStart`/`AssistantChunk.step` 同源；`completed_hops` 在预阶段已自增，
+                // 故当前 hop 索引 = `completed_hops - 1`。此前未传 step，下游只能拿事件
+                // sequence 冒充 step（契约 C4.1 违约的真因）。
+                emit_stream_event_with_step(
                     sink,
                     "turn:tool",
                     turn_id.to_string(),
@@ -263,6 +267,7 @@ impl AgentRuntime {
                     Some(tool_start_hook_trace_records),
                     None,
                     input.session_id.clone(),
+                    Some(completed_hops.saturating_sub(1) as u32),
                 );
                 if let Some(error) = tool_start_hook_outcome.fail_turn_error {
                     let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
@@ -393,7 +398,9 @@ impl AgentRuntime {
                     self.dispatch_hook_trace_records(TurnHookPoint::ToolCallEnd);
                 let tool_end_hook_trace_records = tool_end_hook_outcome.trace_records.clone();
                 hook_trace_records.extend(tool_end_hook_trace_records.clone());
-                emit_stream_event(
+                // C4.1：同预阶段——`turn:tool`（工具结果）的 step 也取当前 hop 索引
+                // （`completed_hops` 只在预阶段自增，故后阶段仍是 `completed_hops - 1`）。
+                emit_stream_event_with_step(
                     sink,
                     "turn:tool",
                     turn_id.to_string(),
@@ -432,6 +439,7 @@ impl AgentRuntime {
                     Some(tool_end_hook_trace_records),
                     None,
                     input.session_id.clone(),
+                    Some(completed_hops.saturating_sub(1) as u32),
                 );
                 if let Some(error) = tool_end_hook_outcome.fail_turn_error {
                     let trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
@@ -831,6 +839,27 @@ impl AgentRuntime {
                 Some(completed_hops as u32),
             );
 
+            // wave-acp-delegate C6.1：**step 边界增量落盘**——上一 hop（含其工具调用/结果
+            // 与正文 chunk）到此已闭合，必须在发起下一 hop 的 provider 调用**之前**提交，
+            // 否则「已闭合 step 的事件」只能等 turn 终态整批落盘（崩溃即整轮丢失）。
+            // drain-on-success 由 flush 通道保证：提交失败 ⇒ 缓冲保留、可重试。
+            let flushed_at_step_boundary =
+                flush_step_boundary_events(input.session_id.as_deref());
+            if flushed_at_step_boundary > 0 {
+                // 只在真提交了事件时留痕（常态一行；无事件不制造噪声）。
+                crate::agent::otel::log::log_json_with_fields(
+                    "info",
+                    "turn events flushed at step boundary",
+                    None,
+                    &[
+                        ("session_id", serde_json::json!(input.session_id)),
+                        ("turn_id", serde_json::json!(turn_id)),
+                        ("step", serde_json::json!(completed_hops)),
+                        ("events", serde_json::json!(flushed_at_step_boundary)),
+                    ],
+                );
+            }
+
             let delta_turn_id = turn_id.to_string();
             let first_token_latency_for_emit = Rc::clone(&first_token_latency);
             let turn_started_at_for_latency = *turn_started_at;
@@ -1046,6 +1075,8 @@ impl AgentRuntime {
                     ProviderLatencyKind::BufferedResponse
                 },
                 Some(&context_observation),
+                // C5.1：把本次 followup 调用的重试账本结算成三键（无重试 ⇒ attempts=1）。
+                ProviderCallRetryMeta::from_window(pure_call_window.window.as_ref()),
             ));
             accumulated_token_usage =
                 merge_token_usage(accumulated_token_usage, response.token_usage.as_ref());
@@ -1981,6 +2012,12 @@ impl AgentRuntime {
         // 取消收口（`cancel_stream_turn`）把它落成中断检查点正文；否则被中断那轮已经出现在
         // 界面上的内容不会进入下一轮会话历史（只剩占位文案）。
         let streamed_assistant_text = Rc::new(RefCell::new(String::new()));
+        // wave-acp-delegate C5.1：首跳决策那次 provider 调用的**重试账本结算结果**——
+        // 真流式与同步兜底两条闭包各自在成功结算处写入（账本是 thread_local 且取值即消费），
+        // per-call 记录统一从这里取，避免只留 `.duration_ms` 把重试事实丢掉。
+        let initial_decision_retry = Rc::new(Cell::new(ProviderCallRetryMeta::single_attempt()));
+        let initial_decision_retry_for_stream = Rc::clone(&initial_decision_retry);
+        let initial_decision_retry_for_sync = Rc::clone(&initial_decision_retry);
         let stream_initial_decision = || -> Result<
             (
                 ProviderDecision,
@@ -2211,6 +2248,9 @@ impl AgentRuntime {
                 initial_decision_started_at,
                 initial_call_first_token_latency.get(),
             );
+            initial_decision_retry_for_stream.set(ProviderCallRetryMeta::from_window(
+                pure_call_window.window.as_ref(),
+            ));
             Ok((
                 decision,
                 Some(pure_call_window.duration_ms),
@@ -2278,6 +2318,9 @@ impl AgentRuntime {
             )?;
             let pure_call_window =
                 crate::agent::retry::take_pure_call_window(started_at, None);
+            initial_decision_retry_for_sync.set(ProviderCallRetryMeta::from_window(
+                pure_call_window.window.as_ref(),
+            ));
             Ok((
                 decision,
                 Some(pure_call_window.duration_ms),
@@ -2788,6 +2831,8 @@ impl AgentRuntime {
             initial_decision_duration_ms,
             initial_latency_kind.clone(),
             Some(&build_context_observation),
+            // C5.1：首跳决策的重试元数据（真流式 / 同步兜底两条路径都在结算处写入）。
+            initial_decision_retry.get(),
         )];
 
         if let Some(error) = provider_failure_message(

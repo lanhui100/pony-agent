@@ -9,6 +9,15 @@
 
 use super::*;
 
+/// 「目标」行是否还要单独渲染：正文已经包含同一路径时不重复（说明优先，路径不写两遍）。
+pub(crate) fn show_target_line(perm: &PermissionState) -> bool {
+    let Some(target) = perm.request.command_or_path.as_deref() else {
+        return false;
+    };
+    let target = target.trim();
+    !target.is_empty() && !perm.request.description.contains(target)
+}
+
 /// 内联权限面板高度（渲染与 `ui()` 布局共用的**唯一**口径）。
 ///
 /// 结构自上而下：发丝线 1 + 上呼吸 1 + 标题 1 + 信息行(≤3) + 呼吸 1 + 选项行 + 提示 1。
@@ -19,7 +28,7 @@ pub fn inline_permission_height(state: &TuiState, available_height: u16) -> u16 
     let Some(perm) = state.permission_state.as_ref() else {
         return 0;
     };
-    let info_rows = 2 + usize::from(perm.request.command_or_path.is_some());
+    let info_rows = 2 + usize::from(show_target_line(perm));
     let choices = perm.choices.len().max(1);
     let needed = 1 + 1 + 1 + info_rows + 1 + choices + 1;
     // 上限 40% 屏：审批是「必须回答」，但不能把上下文全吃掉。
@@ -45,14 +54,18 @@ pub fn render_permission_inline(f: &mut Frame, area: Rect, state: &TuiState) {
         lines.push(hairline(width));
     }
     lines.push(blank());
-    lines.push(Line::from(vec![
+    let tool_name = perm.request.tool_name.trim();
+    let mut header = vec![
         Span::raw(" ".repeat(RAIL)),
         Span::styled("◆ 审批", accent),
-        Span::styled(
-            format!("  {}", truncate_chars(&perm.request.tool_name, 40)),
+    ];
+    if !tool_name.is_empty() {
+        header.push(Span::styled(
+            format!("  {}", truncate_chars(tool_name, 40)),
             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-        ),
-    ]));
+        ));
+    }
+    lines.push(Line::from(header));
     lines.push(Line::from(vec![
         Span::raw(" ".repeat(RAIL)),
         Span::styled("  说明：", label),
@@ -61,7 +74,13 @@ pub fn render_permission_inline(f: &mut Frame, area: Rect, state: &TuiState) {
             Style::default().fg(theme::INK),
         ),
     ]));
-    if let Some(command) = perm.request.command_or_path.as_ref() {
+    if show_target_line(perm) {
+        let command = perm
+            .request
+            .command_or_path
+            .as_deref()
+            .unwrap_or_default()
+            .trim();
         lines.push(Line::from(vec![
             Span::raw(" ".repeat(RAIL)),
             Span::styled("  目标：", label),

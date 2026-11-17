@@ -64,6 +64,14 @@ fn current_event_persist() -> Option<Arc<EventPersistFn>> {
         .clone()
 }
 
+/// wave-acp-delegate C1.3：该会话当前是否有可用的事件持久化通道（会话绑定优先，回退全局单槽）。
+///
+/// 外部（ACP 子活动）事件助手据此决定「落盘」还是「静默跳过」：无通道时返回 `false`，
+/// 绝不 panic、也不发一条只存在于内存的事件白占序号。
+pub(super) fn has_event_persist_channel(session_id: &str) -> bool {
+    resolve_event_persist(session_id).is_some()
+}
+
 /// PA-095：分发事件到生产通道与测试多播 sink。生产单槽可被任意
 /// HostControlPlane 构建覆盖（并行测试下互相抢占），测试多播 sink 只能被
 /// 注册它的测试清除——依赖全局通道断言的测试必须走多播 sink。

@@ -135,6 +135,77 @@ pub struct ProviderCallCacheRecord {
     pub latency_kind: ProviderLatencyKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
+    /// wave-acp-delegate C5.1：本 call 的**尝试次数**（恒 `Some(≥1)`：1 = 无重试；
+    /// `None` 仅表示旧记录/未知，不表示「0 次」）。
+    ///
+    /// additive：旧记录反序列化缺省 `None`，旧消费者不读即行为不变；值由 W2b 在成功结算处
+    /// 填入（本波 W1 只冻结字段，不赋业务值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+    /// wave-acp-delegate C5.1：失败尝试的累计耗时（毫秒）。**仅重试时** `Some(>0)`，
+    /// 无重试 ⇒ `None` ⇒ 键缺席（禁止 0 占位冒充真值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_attempt_ms: Option<u64>,
+    /// wave-acp-delegate C5.1：首个**成功** attempt 之前的等待/预热时长（毫秒）。
+    /// **仅重试时** `Some(>0)`，无重试 ⇒ `None` ⇒ 键缺席（禁止 0 占位冒充真值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prelude_ms: Option<u64>,
+}
+
+/// wave-acp-delegate C5.1：一次 provider 调用的**重试观测口径**——上面三个 additive 字段的
+/// 唯一赋值真源（避免六处 `build_provider_call_cache_record` 调用点各自重算口径而漂移）。
+///
+/// 口径（契约矩阵 C5.1）：
+/// - `attempts` 恒 `Some(≥1)`：1 = 无重试（含「无账本可读」的诚实下限，不得省略成 `None`）；
+/// - `failed_attempt_ms` / `prelude_ms` **仅当真的发生过失败重试**时 `Some(>0)`，
+///   否则 `None`（键缺席）——禁止 0 占位冒充真值。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderCallRetryMeta {
+    pub attempts: Option<u32>,
+    pub failed_attempt_ms: Option<u64>,
+    pub prelude_ms: Option<u64>,
+}
+
+impl Default for ProviderCallRetryMeta {
+    fn default() -> Self {
+        Self::single_attempt()
+    }
+}
+
+impl ProviderCallRetryMeta {
+    /// 无重试账本（第三方直调 / 测试桩 / 恢复路径）⇒ 只知「至少尝试过 1 次」。
+    pub fn single_attempt() -> Self {
+        Self {
+            attempts: Some(1),
+            failed_attempt_ms: None,
+            prelude_ms: None,
+        }
+    }
+
+    /// 由 [`crate::agent::retry::take_pure_call_window`] 的重试账本结算三键。
+    ///
+    /// `window == None` ⇒ 未开启账本（未观测到重试循环）⇒ 退化为 [`Self::single_attempt`]。
+    /// 毫秒取整可能让极快的失败尝试落到 0：此时宁可让键缺席（诚实），也不伪造正数。
+    pub fn from_window(window: Option<&crate::agent::retry::ProviderAttemptWindow>) -> Self {
+        let Some(window) = window else {
+            return Self::single_attempt();
+        };
+        // `attempts == 0` 只会出现在「账本开启但一次 attempt 都没记账」的异常路径上，
+        // 但本函数只在调用**成功结算**处被调用 ⇒ 至少发生过 1 次尝试（恒 ≥1）。
+        let attempts = window.attempts.max(1);
+        if attempts <= 1 {
+            return Self {
+                attempts: Some(attempts),
+                failed_attempt_ms: None,
+                prelude_ms: None,
+            };
+        }
+        Self {
+            attempts: Some(attempts),
+            failed_attempt_ms: (window.failed_attempt_ms > 0).then_some(window.failed_attempt_ms),
+            prelude_ms: (window.prelude_ms() > 0).then_some(window.prelude_ms()),
+        }
+    }
 }
 
 pub trait TurnTelemetryBuilder: Send + Sync {

@@ -44,6 +44,9 @@ fn record(input: u64, cache_hit: u64, output: u64, duration: u64) -> ProviderCal
         context_input_tokens: Some(input),
         latency_kind: ProviderLatencyKind::ProviderStream,
         prefix_mutation_reasons: Vec::new(),
+        attempts: None,
+        failed_attempt_ms: None,
+        prelude_ms: None,
     }
 }
 

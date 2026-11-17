@@ -1,32 +1,23 @@
-# 元复盘：B232 审批续轮上下文（A 级，wave approval-resume-context）
+# 元复盘：wave-acp-delegate（ACP 委派结果与 trace 完整性，P0–P2）
 
-> 交付：分支 `fix/approval-resume-ctx`（红相 985d0e02 / b51eaea7 / 2cfc6973，实现 533bce0c）。
-> 收据：`.dev-team/review-plan-b232.json`、`.dev-team/review-join-b232.json`、`/tmp/b232-final-gates.log`。
+## 通信拓扑与信噪比
 
-## 1. 通信拓扑与信噪比
+本轮采用 Lead + Protocol Agent(1) + Test Agent(多轮替换) + Executor(2) 的拓扑，审查全部走 Subagent 池（Gate-1 计划审查 1 路、L3-A/L3-B 两路互补、L3-P 六问 1 路、L2-AT 独立池 1 路），名册峰值 8（含 Lead），符合容量上界。信噪比问题集中在 **Test Agent 反复外派子代理导致上下文耗尽**（test-agent、test-agent-2/3/4 与三个子代理均报 "ran out of room"），产出为空或半成品，直接拉长墙钟并迫使 Lead 三次换人；有效产出集中在窄任务（test-agent-4 的 C6 红相、test-agent-3 的断言迁移）。探索者两路（落盘链路、sink/step/ACP 链路）一次性给出高密度 path:line 事实，证明 E2 侦察外派是本轮最高 ROI 动作。重复命令率偏高来自构建锁排他：全局 flock 被其他会话长测试占用时，同一套件被重跑 3 次（均已记录），后续应以锁状态探测替代盲目重试。
 
-- 角色：Lead（契约/测试/ADR/裁决）+ exec-tui（唯一实现者）+ 2 个 fresh subagent（方案审查、实现审查）。Roster=2，符合 A 级容量。
-- 有效信号：两次审查各命中 3 条 BLOCKING（方案 3 条、实现 1 条新增链式缺陷），全部在合并前修复；无「先吹后改」套话。
-- 噪音与浪费：①第一次全量 bin 回归在 16 核上把 load 推到 37（超 1.5× 预算），被及时 kill 并改为三条子集——教训是「全量回归也要先评估既有慢用例（ask_lifecycle 单例 >60s）」；②冻结测试经历 985d0e02→b51eaea7→2cfc6973 三次重锚，其中 v2/v3 各由一次审查直接驱动，属必要成本，但首版测试设计（从 UI 气泡取数）本可在写测试前用一次 30 秒 grep 证伪。
-- 重复执行：构建队列争用导致同一测试命令排队 5–10 分钟，未重跑同一命令（遵守反重试纪律），改用后台作业 + 等待，未产生重复构建浪费。
+## 门禁穿透与误杀率
 
-## 2. 门禁穿透与误杀率
+红相门禁真实生效：契约套件 8 failed（C0.1/C0.2/C0.3/C2.1/C3.1/C4.1/C5.1×2）、对抗套件 4 failed、C6 套件 3 failed，全部为断言失败而非编译错误；W2/W3 落地后逐套件转绿（12/6/3），全量 lib 1614 passed/0 failed、ACP 19 套件全绿。对抗门禁的独立价值在 at_03b：它同时暴露 C0.1 与 C1.1/C1.5 两类违约，L2-AT 主动把早退断言改为违例聚合（只增断言，已按 test-defect rewrite 重锚）。L3 门禁的误杀/漏杀：L3-A/L3-B 均 PASS（0 BLOCKING，共 12 条 ADVISORY），L3-P 抓到真实 BLOCKING——`ponycli acp` 在子命令分派前未改道 stderr，jsonl/sse 下结构化日志污染 stdout，破坏 wave-59 C1（若只信 L3-A/B 会漏放）；Gate-1 计划审查补做时又抓到 truncated 成功轮仍不回传正文（C0.4 语义缺口）与 C0.5/C1.2 零断言，两条均修复并补测。误判方面无 BLOCKING 被误杀；C4.1 仅断言 step==0、C6.1 仅串行证据属真实覆盖缺口，已登记。Join 复审又抓到 1 条 BLOCKING：`schema.rs` 模型可见描述仍称「截断轮不返回 finalText」，与新实现矛盾，而 T-ACP-05 的逃逸子句恰好放过它——同一契约的「描述面」与「行为面」必须由同一用例双向锁定，这是本轮最有价值的门禁教训。残余 12 条 ADVISORY 已登记 backlog B239（flush 并发去重/eventTimes 解码）与 B240（projection 丢归因/日志脱敏/协议兜底），并在 state.json 记录 owner 与到期。
 
-- 穿透修复（真实拦截）：Review-1 的 B1（落库取 `display_message`）击穿了「组合正文随续轮持久化」这一承诺——若放行则 F-12 只修一轮；B2 击穿「捕获来源正确性」（会张冠李戴旧轮指令）；B3 击穿「测试有效性」（纯函数自证、接线零断言）。Review-2 又抓出链式挂起（Ask→审批、审批→审批），属同一缺陷的第二现场。
-- 误杀：0 条 BLOCKING 被证伪；1 条 ADVISORY（T6 断言别模块常量）属装饰性断言，已改为比较两条组合结果；1 条报告「8 例」与 v2 契约不一致，已修文档。
-- 机械门禁：`cargo check` exit 0、approval 21 / running_status_visibility 23 / composer_history_recall 3 全绿、12 例冻结验收全绿；`audit-diff(--decl-approved)` 与 `check-declaration` exit 0；ADR `verify-note` 与 backlog `lint+doctor` PASS。
-- 盲区（如实登记）：bin 全量套件未跑（预算+慢用例）；接线点（事件循环调用 capture/seam）仍无自动化断言，靠「唯一接缝 + 代码审查」兜底；审批请求不持久化 ⇒ 重启/多实例下仍会退回旧行为（A1，ADR 已登记为边界）。
+## 分工契约与隔离有效性
 
-## 3. 分工契约与隔离有效性
+写域正交总体成立：Executor-A（acp/tools + bin/cli）与 Executor-B（runtime/turn_flow/telemetry/持久化）并行无文件冲突；turn_flow/runtime 在 W3 与 W2 存在同文件依赖，已显式串行并合并为单一绿色检查点（state.json 记录）。隔离层的关键决策是**独立 worktree**（主工作区有他人未提交改动 + 另一个 worktree 在跑），避免污染；代价是两次 frozen-test drift（L2-AT 改写对抗用例、Test Agent 压缩 C6 文件），均以 `git checkout` 恢复或重锚收口，并在 state.json 留痕。公共接线（bin/cli.rs 诊断、CLI 日志改道）由 Lead 裁决后单点授权，未出现多人同改。构建预算方面，全局 flock 被跨会话长测试占用（load 一度 32.9，超 1.5×16 上限），Lead 启用专用锁 `/tmp/pony-agent-build-acp-delegate.lock` 并记录覆盖理由；这是本轮最明显的共享设施争用成本。
 
-- 写域隔离：实现者仅写 `bin/tui.rs`，Lead 仅写测试/契约/ADR/状态账本/docs；两次审查均为只读 subagent，零越界。`git status` 与 write_scopes 机械比对通过。
-- 测试分权：冻结测试由 Lead 编写并在实现前锚定（红相 22 个编译错误为证），实现者全程只读测试文件；三次重锚均由审查结论驱动并留流水，不是「为了让测试变绿而改测试」。
-- 共享工作区风险：主工作树有并行会话 18 项未提交改动（含 `tui.rs`），本卡改用独立 worktree（`/home/dm/pony-agent-worktrees/approval-resume-ctx`），零冲突；但 backlog 账本是跨 worktree 单例（写入主工作树），B232 的 record/start/resolve 落在主树未提交文件中，交付时需由主树使用者随其提交带入。
-- 契约演化：v1→v2→v3 均按「审查→Lead 一票裁决→原地改写契约+流水」推进，未出现口头继承。
+## 元协议迭代建议
 
-## 4. 元协议迭代建议
-
-1. 冻结测试前增加**最小证伪步骤**：凡「数据来源」类设计（如从 UI 气泡取数），要求先用一条 grep/read 证明该来源在生产时序下确实存在对应记录，再写断言——本轮 v1 的 T4/T7 就是缺这一步而返工。
-2. A 级也建议强制「实现 diff 的第二路审查」（本轮正是第二路抓出链式缺陷）；成本约 1 次 subagent，收益是阻断同病第二现场。
-3. 回归范围在契约里必须写**具体坐标**（本次三条 filter），而不是「bin 全量」——慢用例会让全量回归与构建预算直接冲突，最后只能豁免，等于没写门禁。
-4. 建议在 dev-team skill 中补一条「跨 worktree 单例账本（backlog）的交付归属」处理约定：明确由哪个工作树提交、如何避免与并行会话的 in_progress 行混入同一提交。
+1) **Test Agent 禁用子代理派生**：在 `spawn_teammate` 初始 Prompt 中硬性禁止，并把测试任务限制为单文件、≤15 分钟、可独立验收；本轮三任 Test Agent 均因外派失败，此条为最高优先修正。
+2) **冻结测试前要求"版式定稿"**：先由 Test Agent 报告最终行数与用例清单，Lead 再锚定；否则行号漂移导致收据与冻结件不一致（本轮 C6 红相收据来自 785 行草稿，冻结件为 673 行等价压缩，已在 state 登记）。
+3) **评审产物按波次唯一命名**：`review-l3-<wave>.json`，避免覆盖历史波次收据（本轮已先备份再恢复，若直接提交会误删旧证据）。
+4) **构建锁增加挂起检测/公平性**：跨会话 flock 被长测试占用时应有 stale 提示与等待上限，否则 lane 排队不可观测（本轮靠 ps/flock 手工诊断）。
+5) **L3-P 前置到文档提交之前**：本轮 L3-P 在 docs/ADR 提交后发现 CLI stdout 契约冲突，导致二次改文档 + 二次测试迁移；六问应在代码绿色检查点后立即跑，文档最后写。
+6) **把"轮内增量落盘"拆成独立波次**：C6 触及 control_plane/sqlite/log/fold 五层，与 C0–C5 的表情混合在一个绿色提交里，回滚粒度变粗；建议后续把持久化语义变更单列 DAG 节点。
+7) **Gate-1 计划审查不得后补**：本轮因先开工后补 Gate-1，其 BLOCKING（truncated 正文、缺测）在实现后才被发现，返工成本高于前置评审；流程上应在 Protocol 冻结后立即开 Gate-1。

@@ -40,7 +40,7 @@ describe("resolveAgentRuntimeStatus", () => {
     expect(status?.label).toBe("思考中...");
   });
 
-  it("identifies thinking phase when calling model before first content token arrives", () => {
+  it("shows waiting copy when calling model before first content token arrives", () => {
     const status = resolveAgentRuntimeStatus({
       isSubmitting: true,
       phase: "calling_model",
@@ -51,7 +51,8 @@ describe("resolveAgentRuntimeStatus", () => {
     });
     expect(status).not.toBeNull();
     expect(status?.mode).toBe("thinking");
-    expect(status?.label).toBe("思考中...");
+    // 等待首字节只呈现「在等」这一事实，不出现工程细节。
+    expect(status?.label).toBe("等待响应中…");
   });
 
   it("identifies executing tool phase with fallback label when tool name is missing", () => {

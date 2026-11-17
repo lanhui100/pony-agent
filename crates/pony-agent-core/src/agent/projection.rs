@@ -1310,6 +1310,9 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     // context_input_tokens 留空（UI 回退上下文解析，禁止臆造口径）。
                     usage_origin: usage.origin.map(str::to_string),
                     context_input_tokens: None,
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 });
                 // PA-094：per-turn ProviderCallCacheRecord 重建（design.md §5）。
                 // 重建字段集：request_kind、usage 四桶、cache_hit/cache_miss、
@@ -1340,6 +1343,9 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     // context_input_tokens 留空（UI 回退上下文解析，禁止臆造口径）。
                     usage_origin: usage.origin.map(str::to_string),
                     context_input_tokens: None,
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 };
                 // addReplacing：同一 (turn_id, step) 原位覆盖（与 totals 替换语义一致）。
                 if let Some(index) = state.record_index.get(&(turn_id.clone(), *step)).copied() {
@@ -1692,6 +1698,7 @@ mod tests {
                     arguments: "{}".into(),
                     started_at_ms: None,
                     description: description.map(str::to_string),
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -1836,6 +1843,7 @@ mod tests {
                     arguments: "{}".into(),
                     started_at_ms: None,
                     description: None,
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -1850,6 +1858,7 @@ mod tests {
                     duration_ms: Some(500),
                     artifacts: None,
                     capability_invocation: None,
+                    parent_activity_id: None,
                 },
             ),
         ]);
@@ -1879,6 +1888,7 @@ mod tests {
             arguments: "{}".into(),
             started_at_ms: None,
             description: None,
+            parent_activity_id: None,
         };
         let mut state = TraceProjectionState::init();
         TraceProjectionState::apply(&mut state, 5, &event);
@@ -2110,6 +2120,7 @@ mod tests {
                     arguments: "{}".into(),
                     started_at_ms: Some(1000),
                     description: None,
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -2124,6 +2135,7 @@ mod tests {
                     duration_ms: Some(500),
                     artifacts: None,
                     capability_invocation: None,
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -2265,6 +2277,7 @@ mod tests {
             arguments: "{}".into(),
             started_at_ms: None,
             description: None,
+            parent_activity_id: None,
         };
         let mut state = TraceProjectionState::init();
         TraceProjectionState::apply(&mut state, 5, &event);
@@ -2291,6 +2304,7 @@ mod tests {
             arguments: "{}".into(),
             started_at_ms: None,
             description: None,
+            parent_activity_id: None,
         };
         let mut state = TraceProjectionState::init();
         TraceProjectionState::apply(&mut state, 0, &event);
@@ -2370,6 +2384,7 @@ mod tests {
                     arguments: "{}".into(),
                     started_at_ms: None,
                     description: None,
+                    parent_activity_id: None,
                 },
             ),
             // turn:tool(completed) → seq 5（ToolResult step=5，与 ToolCall 不同）
@@ -2385,6 +2400,7 @@ mod tests {
                     duration_ms: Some(500),
                     artifacts: None,
                     capability_invocation: None,
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -2525,6 +2541,7 @@ mod tests {
                     arguments: "{}".into(),
                     started_at_ms: None,
                     description: None,
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -2539,6 +2556,7 @@ mod tests {
                     duration_ms: Some(500),
                     artifacts: None,
                     capability_invocation: None,
+                    parent_activity_id: None,
                 },
             ),
             (

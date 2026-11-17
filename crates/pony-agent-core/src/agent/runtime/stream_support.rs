@@ -317,6 +317,10 @@ pub(super) fn build_provider_call_cache_record(
     turn_duration_ms: Option<u64>,
     latency_kind: ProviderLatencyKind,
     build_context_observation: Option<&BuildContextObservation>,
+    // wave-acp-delegate C5.1：本次 call 的**重试观测**（`attempts` / `failed_attempt_ms` /
+    // `prelude_ms` 三键的唯一赋值入口）。调用点必须把 `take_pure_call_window` 返回的
+    // **账本**带到这里，不能只留 `.duration_ms`——否则重试事实在中途被丢掉（C5.1 红相根因）。
+    retry: ProviderCallRetryMeta,
 ) -> ProviderCallCacheRecord {
     let (input_tokens, cache_hit_input_tokens, reasoning_tokens, output_tokens, total_tokens) =
         token_usage_parts(token_usage);
@@ -349,6 +353,11 @@ pub(super) fn build_provider_call_cache_record(
         prefix_mutation_reasons: build_context_observation
             .map(|observation| observation.prefix_mutation_reasons.clone())
             .unwrap_or_default(),
+        // wave-acp-delegate C5.1：重试元数据（additive）。口径由 `ProviderCallRetryMeta`
+        // 单点裁定：`attempts` 恒 Some(≥1)；另两键仅真发生失败重试时 Some(>0)。
+        attempts: retry.attempts,
+        failed_attempt_ms: retry.failed_attempt_ms,
+        prelude_ms: retry.prelude_ms,
     }
 }
 
@@ -432,11 +441,14 @@ pub(super) fn merge_response_usage_into_accumulators(
 /// 与内联 `records.push(build_provider_call_cache_record(...))` **逐字等价**：
 /// 固定 `ProviderRequestKind::ToolFollowup` / `ProviderLatencyKind::BufferedResponse`，
 /// 无首包观测（`first_token_latency_ms = None`）。
+///
+/// wave-acp-delegate C5.1：入参收 `PureCallWindow` 而不是裸 `duration_ms`——账本（window）
+/// 必须随记录一路带到结算点，只留耗时会把「重试事实」丢掉。
 pub(super) fn push_buffered_followup_call_record(
     records: &mut Vec<ProviderCallCacheRecord>,
     provider: &ProviderManager,
     response: &ProviderResponse,
-    duration_ms: u64,
+    pure_call_window: &crate::agent::retry::PureCallWindow,
     context_observation: &BuildContextObservation,
 ) {
     records.push(build_provider_call_cache_record(
@@ -447,9 +459,10 @@ pub(super) fn push_buffered_followup_call_record(
         Some(provider.protocol_label()),
         response.token_usage.as_ref(),
         None,
-        Some(duration_ms),
+        Some(pure_call_window.duration_ms),
         ProviderLatencyKind::BufferedResponse,
         Some(context_observation),
+        ProviderCallRetryMeta::from_window(pure_call_window.window.as_ref()),
     ));
 }
 

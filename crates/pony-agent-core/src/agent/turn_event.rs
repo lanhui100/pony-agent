@@ -150,6 +150,12 @@ pub enum TurnEvent {
         /// 与 turn_persist 写路径同形）。additive：旧日志无该键 ⇒ None ⇒ 工具行只含 name。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// wave-acp-delegate C1.1：该工具活动所属的**父活动 id**（ACP 子活动归集时
+        /// = 触发委派的 `acp_delegate` call_id；顶层工具活动 ⇒ `None`）。
+        ///
+        /// additive（键缺席 = 顶层活动）：旧日志/旧消费者不读即行为不变。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_activity_id: Option<String>,
     },
     ToolResult {
         turn_id: String,
@@ -168,6 +174,10 @@ pub enum TurnEvent {
         artifacts: Option<Vec<Value>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capability_invocation: Option<CapabilityInvocationRecord>,
+        /// wave-acp-delegate C1.1：同 `ToolCall::parent_activity_id`（父活动 call_id；
+        /// 顶层工具活动 ⇒ `None`）。additive：旧日志无该键 ⇒ 顶层语义不变。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_activity_id: Option<String>,
     },
     PlanUpdate {
         plan_state: Value,
@@ -437,6 +447,7 @@ mod tests {
                 arguments: "{}".into(),
                 started_at_ms: Some(1000),
                 description: None,
+                parent_activity_id: None,
             },
             TurnEvent::ToolResult {
                 turn_id: "t1".into(),
@@ -448,6 +459,7 @@ mod tests {
                 duration_ms: Some(50),
                 artifacts: None,
                 capability_invocation: None,
+                parent_activity_id: None,
             },
             TurnEvent::PlanUpdate {
                 plan_state: serde_json::json!({"steps": ["a"]}),

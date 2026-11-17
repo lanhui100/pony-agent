@@ -181,7 +181,7 @@ impl AgentRuntime {
             preflight_decision.as_ref(),
         ));
 
-        let (mut first_decision, initial_decision_duration_ms) =
+        let (mut first_decision, initial_decision_duration_ms, initial_decision_retry) =
             if prepared.provider.requires_provider_native_tool_flow() {
                 // native tool flow（reasoning 模型，如 DeepSeek thinking 模式）下必须由
                 // provider 生成决策：工具执行后的 follow-up 请求需要把 assistant 消息的
@@ -196,12 +196,19 @@ impl AgentRuntime {
                     &prepared.tools,
                     crate::agent::turn_flow::LlmRequestMode::Initial,
                 )?;
-                let duration_ms =
-                    crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
-                (decision, Some(duration_ms))
+                // wave-acp-delegate C5.1：账本（window）随 `PlannedTurn` 一路带到 per-call
+                // 记录结算点——只取 `.duration_ms` 会把重试事实丢掉。
+                let pure_call_window =
+                    crate::agent::retry::take_pure_call_window(started_at, None);
+                (
+                    decision,
+                    Some(pure_call_window.duration_ms),
+                    ProviderCallRetryMeta::from_window(pure_call_window.window.as_ref()),
+                )
             } else {
                 match preflight_decision {
-                    Some(decision) => (decision, None),
+                    // 本地 planner 已给决策 ⇒ 本跳没有 provider 调用（duration/重试元数据均无观测）。
+                    Some(decision) => (decision, None, ProviderCallRetryMeta::single_attempt()),
                     None => {
                         // F2：同上（同步首跳 decision 的 per-call dur 必须纯净）。
                         let started_at = crate::agent::retry::begin_provider_attempt_window();
@@ -211,9 +218,13 @@ impl AgentRuntime {
                             &prepared.tools,
                             crate::agent::turn_flow::LlmRequestMode::Initial,
                         )?;
-                        let duration_ms =
-                            crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
-                        (decision, Some(duration_ms))
+                        let pure_call_window =
+                            crate::agent::retry::take_pure_call_window(started_at, None);
+                        (
+                            decision,
+                            Some(pure_call_window.duration_ms),
+                            ProviderCallRetryMeta::from_window(pure_call_window.window.as_ref()),
+                        )
                     }
                 }
             };
@@ -280,6 +291,7 @@ impl AgentRuntime {
             first_decision,
             resolved_tool_call,
             initial_decision_duration_ms,
+            initial_decision_retry,
             planner_hook_trace_records,
         })
     }

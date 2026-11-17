@@ -115,11 +115,15 @@ impl WorkspaceFsHandler {
             .map(|permission| permission.canonical)
             .map_err(|error| {
                 // 结构化诊断带用途标签（`purpose` 是构造时注入的用途上下文，不只用于审计）。
-                eprintln!(
-                    "[acp][fs] purpose={} 拒绝 {}：{}",
-                    self.purpose_label(),
-                    raw_path,
-                    error.code.as_str()
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "acp fs 反向请求被拒（fail-closed）",
+                    None,
+                    &[
+                        ("purpose", serde_json::json!(self.purpose_label())),
+                        ("path", serde_json::json!(raw_path)),
+                        ("code", serde_json::json!(error.code.as_str())),
+                    ],
                 );
                 map_permission_error(error)
             })
@@ -534,9 +538,11 @@ impl TerminalHandler for ManagedTerminalHandler {
                 let name = variable.name.trim();
                 let key = name.split('=').next().unwrap_or(name).trim();
                 if key.is_empty() || name.contains('=') || crate::agent::mcp_client::is_denied_spec_env_key(key) {
-                    eprintln!(
-                        "[acp][terminal] 丢弃 env 条目 `{}`（空键 / 含 `=` 的非法键 / 命中 deny 表）",
-                        key
+                    crate::agent::otel::log::log_json_with_fields(
+                        "warn",
+                        "acp terminal env 条目被丢弃（空键 / 含 `=` 的非法键 / 命中 deny 表；只记键名，绝不记值）",
+                        None,
+                        &[("key", serde_json::json!(key))],
                     );
                     return None;
                 }
