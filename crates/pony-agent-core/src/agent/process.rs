@@ -824,6 +824,64 @@ fn spawn_command(ownership: RangeOwnership, request: &ProcessStartRequest) -> (C
     }
 }
 
+/// B207b / Design Decision 7：装配待 spawn 的命令（scope 包装 + 管道 + cwd + 平台隔离 +
+/// 沙箱最小环境），返回 `(command, wants_scope)`。
+///
+/// 从 `ProcessManager::start_inner` 抽出：装配细节与「spawn 之后如何纳管」是两件事，
+/// 且 `start_inner` 已触函数规模基线（`npm run size:check`）。
+///
+/// **不回退重放**：`systemd-run` 启动失败时由调用方的 `.spawn()` 直接冒泡，绝不静默改用
+/// `Pid` 重跑（见 [`spawn_command`]）。
+fn configured_command(
+    ownership: RangeOwnership,
+    request: &ProcessStartRequest,
+) -> Result<(Command, bool), String> {
+    // B207b：**只有**显式 opt-in `SystemdScope` 才把目标进程包进 `systemd-run --user --scope …`
+    // （cgroup 成员资格在组长退出后依然存在，pgid 可被复用而 cgroup 不会）。
+    // 默认 `Pid` 走第一条分支 ⇒ 零行为变更。`wants_scope` 只在 unix 分支被消费（Windows 走
+    // Job Object）；两条路径都要编译过。
+    #[cfg_attr(windows, allow(unused_variables))]
+    let (mut command, wants_scope) = spawn_command(ownership, request);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // B175 ADVISORY①：可选子进程工作目录（`None` = 既有行为不变）。
+    if let Some(cwd) = request
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        command.current_dir(require_existing_dir(cwd)?);
+    }
+    // Windows 弹窗修复：控制台子进程（cmd/powershell）不得弹出可见控制台窗口。
+    #[cfg(windows)]
+    hide_console_window(&mut command);
+    // B009：POSIX 上让子进程自成进程组长（pgid == pid）。否则 `terminate` 只能杀直接子进程，
+    // shell 被杀后它派生的孙进程（`sleep 5` 之类）会变孤儿（PPID=1）继续跑。
+    // Windows 侧维持 Job Object（kill-on-close）语义，不做改动。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    // P2-1：以 CREATE_SUSPENDED 创建子进程，使 Job 纳管严格先于子进程执行，收敛
+    // spawn→assign 逃逸窗口。`creation_flags` 是覆盖语义，故此处必须同时带上
+    // CREATE_NO_WINDOW（与上一行等价）；主线程在 assign_and_verify 成功后恢复。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+        );
+    }
+    // Design Decision 7：沙箱子进程只带最小环境（见 `apply_sandbox_environment`）。
+    apply_sandbox_environment(&mut command, &request.sandbox);
+    Ok((command, wants_scope))
+}
+
 impl ProcessManager {
     /// A manager with the default 64 KiB per-stream output caps.
     pub fn new() -> Self {
@@ -1193,44 +1251,9 @@ impl ProcessManager {
         if request.program.trim().is_empty() {
             return Err("program must not be empty".to_string());
         }
-        // B207b：spawn 侧接线 —— **只有**显式 opt-in `SystemdScope` 才把目标进程包进
-        // `systemd-run --user --scope …`（让它成为临时 scope 成员：cgroup 成员资格在组长退出后
-        // 依然存在，pgid 可被复用而 cgroup 不会）。默认 `Pid` 走下面的第一条分支 ⇒ 零行为变更。
-        // `wants_scope` 只在 unix 分支被消费（Windows 走 Job Object）；两条路径都要编译过。
-        #[cfg_attr(windows, allow(unused_variables))]
-        let (mut command, wants_scope) = spawn_command(self.inner.range_ownership, request);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // B175 ADVISORY①：可选子进程工作目录（`None` = 既有行为不变）。
-        if let Some(cwd) = request.cwd.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-            command.current_dir(require_existing_dir(cwd)?);
-        }
-        // Windows 弹窗修复：控制台子进程（cmd/powershell）不得弹出可见控制台窗口。
-        #[cfg(windows)]
-        hide_console_window(&mut command);
-        // B009：POSIX 上让子进程自成进程组长（pgid == pid）。否则 `terminate` 只能杀直接子进程，
-        // shell 被杀后它派生的孙进程（`sleep 5` 之类）会变孤儿（PPID=1）继续跑。
-        // Windows 侧维持 Job Object（kill-on-close）语义，不做改动。
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        // P2-1：以 CREATE_SUSPENDED 创建子进程，使 Job 纳管严格先于子进程执行，收敛
-        // spawn→assign 逃逸窗口。`creation_flags` 是覆盖语义，故此处必须同时带上
-        // CREATE_NO_WINDOW（与上一行等价）；主线程在 assign_and_verify 成功后恢复。
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(
-                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
-                    | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
-            );
-        }
-        // Design Decision 7：沙箱子进程只带最小环境（见 `apply_sandbox_environment`）。
-        apply_sandbox_environment(&mut command, &request.sandbox);
+        // B207b：spawn 侧接线（scope 包装 + 管道 / cwd / 平台隔离 / 沙箱环境）收在
+        // `configured_command` 一处：装配细节与「spawn 之后如何纳管」是两件事。
+        let (mut command, wants_scope) = configured_command(self.inner.range_ownership, request)?;
         #[cfg(windows)]
         let job = {
             #[cfg(test)]

@@ -38,6 +38,9 @@ TUI 里与「任务」有关的信息原本分散在六个互不相干的入口�
 4. **后台作业接入投影层**：`crates/pony-agent-core/src/bin/tui/jobs_panel.rs` 提供
    `sync_jobs_from_registry`（读 `jobs::job_list()` → `TuiJobsState`），与 `sync_tasks_from_store`
    同构；状态条摘要与抽屉的 Jobs 页签共用这份投影。
+   刷新按 `status_bar::GLANCE_REFRESH_MS`（500ms）节流：`job_list()` 对 `owned` 作业走
+   `child.try_wait()`、对 `promoted` 作业走 `ProcessManager::poll()` 并推进缓冲，**不是纯读**，
+   不能按帧率（流式期 16ms）调用。
 5. **打断层统一在底部**：Ask 与排队面板已是「覆盖层贴 Composer 上缘」的内联形态（`inline_ask_height`
    / `inline_queue_height`），权限审批从居中弹窗改为同一内联形态，保持「阻塞性请求紧贴输入框」的规则。
 

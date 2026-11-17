@@ -28,11 +28,27 @@ pub struct TaskGlance {
     pub agents_attention: usize,
 }
 
+/// 摘要刷新周期（毫秒）。
+///
+/// 事件循环每轮都调用 [`sync_task_glance`]（空闲 ~120ms / 流式 ~16ms 一次）。其中
+/// `jobs::job_list()` **不是纯读**：`owned` 作业走 `child.try_wait()`，`promoted` 作业走
+/// `ProcessManager::poll()` 并把增量输出追加进 ring buffer。按 16ms 刷新等于每秒 60 次系统调用
+/// 与 60 次缓冲推进，既浪费 CPU 又扰动 `job_output` 的增量语义。故按固定周期节流，
+/// `TuiState::last_glance_sync` 是唯一时间戳。
+pub const GLANCE_REFRESH_MS: u64 = 500;
+
 /// 刷新常驻任务摘要：三条数据源都是**进程内**注册表（无网络、无 LLM、无磁盘）。
 ///
 /// 与 `sync_tasks_from_store` / `sync_jobs_from_registry` 同一投影纪律：失败只写状态文案，
-/// 不让既有快照瞬间归零。
+/// 不让既有快照瞬间归零。节流口径见 [`GLANCE_REFRESH_MS`]：作业起止最多延迟一个周期可见。
 pub fn sync_task_glance(state: &mut TuiState) {
+    if let Some(last) = state.last_glance_sync {
+        if last.elapsed().as_millis() < GLANCE_REFRESH_MS as u128 {
+            return;
+        }
+    }
+    state.last_glance_sync = Some(std::time::Instant::now());
+
     match team_task_list() {
         Ok(list) => {
             let mut open = 0usize;

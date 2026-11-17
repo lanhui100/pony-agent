@@ -1596,6 +1596,9 @@ pub struct TuiState {
     pub goal_state: Option<TuiGoal>,
     /// 常驻任务摘要计数（状态条左槽的数据源；与面板生命周期无关）。
     pub task_glance: TaskGlance,
+    /// 摘要刷新的单调时间戳（节流，见 `status_bar::GLANCE_REFRESH_MS`）：
+    /// `job_list()` 会 `try_wait`/`poll` 子进程，不能按帧率刷新。
+    pub last_glance_sync: Option<std::time::Instant>,
     /// 后台作业快照（状态条右槽计数与抽屉 Jobs 页签共用；`None` = 从未同步）。
     pub jobs_state: Option<JobsViewState>,
     /// 底部任务抽屉（`None` = 关闭）。非模态：不改 `mode`，正文与输入框照常工作。
@@ -1731,6 +1734,7 @@ impl Default for TuiState {
             task_board_state: None,
             goal_state: None,
             task_glance: TaskGlance::default(),
+            last_glance_sync: None,
             jobs_state: None,
             task_center: None,
             goal_rounds_stopped: None,

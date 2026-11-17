@@ -7,6 +7,11 @@
 //! 独立成文件的理由：`provider/mod.rs` 已触规模门禁上限，且「用户文案」与「HTTP/协议层」
 //! 本就不该混居（改文案不该动传输代码）。
 
+use super::{
+    estimate_token_usage, local_tool_followup_summary, preview_text,
+    provider_native_assistant_message, ProviderRequest, ProviderResponse, ToolCall, ToolResult,
+};
+
 /// B221：本地兜底摘要进正文的字符上限（含省略号）——超长摘要不得把单行正文撑开。
 const FALLBACK_SUMMARY_MAX_CHARS: usize = 120;
 
@@ -143,6 +148,38 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
     truncated.push('…');
     truncated
+}
+
+/// B221：provider 本地兜底响应（`provider_followup_local_fallback`）的**唯一构造点**。
+///
+/// 正文只放人读文案（[`fallback_body_text`]）；`error` 原文只进 `fallback_reason`
+/// （trace / provider 日志）——正文会被落库成历史消息，内部细节（URL / `elapsed=` /
+/// 域名）不得污染后续上下文。
+///
+/// 迁自 `provider/mod.rs`：该文件已触文件规模基线（`npm run size:check`），且本函数与
+/// [`fallback_body_text`] 同属「本地兜底」语义面（改文案不该动传输代码）。
+pub fn local_tool_followup_fallback_response(
+    request: &ProviderRequest,
+    tool_call: &ToolCall,
+    tool_result: &ToolResult,
+    error: String,
+) -> ProviderResponse {
+    let fallback_reason = format!("provider_followup_failed: {}", preview_text(&error, 240));
+    let summary = local_tool_followup_summary(tool_result);
+    let output_text = fallback_body_text(tool_call.name.as_str(), &error, &summary);
+
+    ProviderResponse {
+        output_text: output_text.clone(),
+        tool_calls: Vec::new(),
+        tool_call: None,
+        reasoning_content: None,
+        reasoning_content_value: None,
+        assistant_message: Some(provider_native_assistant_message(&output_text)),
+        provider_source: "provider_followup_local_fallback".to_string(),
+        provider_mode: "fallback".to_string(),
+        fallback_reason: Some(fallback_reason),
+        token_usage: Some(estimate_token_usage(request, &output_text)),
+    }
 }
 
 #[cfg(test)]

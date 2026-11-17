@@ -33,7 +33,7 @@ pub mod model_catalog;
 pub use self::model_catalog::fetch_model_ids;
 
 mod fallback_body;
-pub use self::fallback_body::fallback_body_text;
+pub use self::fallback_body::{fallback_body_text, local_tool_followup_fallback_response};
 mod openai_wire;
 mod usage;
 pub(crate) use self::openai_wire::openai_safe_tool_name;
@@ -6008,33 +6008,6 @@ fn openai_followup_tool_result_content(tool_result: &ToolResult) -> String {
             original_chars
         )
     })
-}
-
-fn local_tool_followup_fallback_response(
-    request: &ProviderRequest,
-    tool_call: &ToolCall,
-    tool_result: &ToolResult,
-    error: String,
-) -> ProviderResponse {
-    let fallback_reason = format!("provider_followup_failed: {}", preview_text(&error, 240));
-    let summary = local_tool_followup_summary(tool_result);
-    // B221：正文 = 单行人读文案（工具名 + 已执行 + 原因**类别** + 建议动作）。
-    // `error` 原文只进 `fallback_reason`（trace / provider 日志），结果预览不再进正文
-    // ——正文会被落库成历史消息，内部细节（URL / elapsed / 域名）不得污染后续上下文。
-    let output_text = fallback_body_text(tool_call.name.as_str(), &error, &summary);
-
-    ProviderResponse {
-        output_text: output_text.clone(),
-        tool_calls: Vec::new(),
-        tool_call: None,
-        reasoning_content: None,
-        reasoning_content_value: None,
-        assistant_message: Some(provider_native_assistant_message(&output_text)),
-        provider_source: "provider_followup_local_fallback".to_string(),
-        provider_mode: "fallback".to_string(),
-        fallback_reason: Some(fallback_reason),
-        token_usage: Some(estimate_token_usage(request, &output_text)),
-    }
 }
 
 fn local_tool_followup_summary(tool_result: &ToolResult) -> String {

@@ -216,6 +216,35 @@ pub fn record_export_failure(
     Some(path)
 }
 
+/// B202：导出**放弃**时的完整告警文案（分类 + spool 落盘结果 + 「未上送」措辞）。
+///
+/// 从 `mod.rs` 的导出循环内联块抽出：文案与落盘口径同住一个文件，且 `mod.rs` 已触文件
+/// 规模基线（`npm run size:check`），内联 20 余行会让门禁红。
+pub fn give_up(error: &str, attempt: usize, span_count: usize) -> String {
+    let max_attempts = super::EXPORT_MAX_ATTEMPTS;
+    let kind = classify_export_error(error);
+    let spool_tail = match record_export_failure(kind, span_count, error, now_ms()) {
+        Some(path) => format!("失败摘要已落本地 spool：{}", path.display()),
+        None => "失败摘要落本地 spool 失败（可观测性自身降级，不影响主流程）".to_string(),
+    };
+    format!(
+        "OTLP 导出失败（{}，{attempt}/{max_attempts} 次尝试后放弃，本批 {span_count} 个 span 未上送）：{error}；{spool_tail}",
+        kind.label()
+    )
+}
+
+/// B202：导出**重试前**的告警文案（与 [`give_up`] 同住，避免 `mod.rs` 内联 `format!`）。
+///
+/// 重试上限与退避时长**不**在本文件另立常量：策略真源仍是 `super`（`mod.rs`）的同名常量，
+/// 这里只读不写，避免「文案里的 2 次」与「循环里的 2 次」漂移。
+pub fn retry(error: &str, attempt: usize, span_count: usize) -> String {
+    let max_attempts = super::EXPORT_MAX_ATTEMPTS;
+    let delay_ms = super::EXPORT_RETRY_DELAY_MS;
+    format!(
+        "OTLP 导出第 {attempt}/{max_attempts} 次尝试失败，{delay_ms}ms 后重试（本批 {span_count} 个 span）：{error}"
+    )
+}
+
 fn truncate_chars(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_string();

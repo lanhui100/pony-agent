@@ -404,13 +404,7 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                 if !matches!(reason, TurnEndReason::Completed) {
                     // 合成记录的结构化身份：终态决定 kind。在结构体字面量**之外**求值，
                     // 避免把展示语义的 match 埋到嵌套深处（也是 file-size 门禁要的形状）。
-                    let checkpoint_kind = match reason {
-                        TurnEndReason::Cancelled => HistoryMessageKind::Cancelled,
-                        // B217：失败与进程中断不再共用一种历史行 —— 前者是本轮真失败，
-                        // 后者是「没跑完就被进程终止」，续跑判断与人读文案都不同。
-                        TurnEndReason::Error => HistoryMessageKind::Error,
-                        _ => HistoryMessageKind::Interrupted,
-                    };
+                    let checkpoint_kind = checkpoint_kind_for(&reason);
                     if let Some(mut pending) = state.pending.take() {
                         if pending.turn_id == *turn_id {
                             // 失败原因随 turn/end 事件到达（写路径同源载体）；仅本轮采纳。
@@ -1028,6 +1022,18 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
             }
             _ => {}
         }
+    }
+}
+
+/// B217：终态 → 历史行种类。失败（`Error`）与进程中断（其余非取消终态）必须分开：
+/// 前者是本轮真失败，后者是「没跑完就被进程终止」，续跑判断与人读文案都不同。
+///
+/// 独立成函数而非内联在 `apply` 里：`apply` 已触函数规模基线（`npm run size:check`）。
+fn checkpoint_kind_for(reason: &TurnEndReason) -> HistoryMessageKind {
+    match reason {
+        TurnEndReason::Cancelled => HistoryMessageKind::Cancelled,
+        TurnEndReason::Error => HistoryMessageKind::Error,
+        _ => HistoryMessageKind::Interrupted,
     }
 }
 
