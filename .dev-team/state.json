@@ -135,6 +135,7 @@
   "backlog": {
     "id": "B237",
     "status": "in_progress",
-    "owner": "lead"
+    "owner": "lead",
+    "note": "scripts/backlog.mjs 以 git common-dir 定位仓根，B237/租约落在主工作区 /home/dm/pony-agent/backlog（该处另有他人未提交账本改动）；本分支不携带 backlog 变更以避免合并冲突，闭环时在主账本 resolve。"
   }
 }
