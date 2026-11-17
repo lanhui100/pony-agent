@@ -4205,8 +4205,19 @@ mod wave65_r3_approval_kind_tests {
                 "非路径成因的文案不得谎报工作区外路径，实际 = {prompt:?}"
             );
             assert!(
-                prompt.contains("Bash") && prompt.contains("审批"),
-                "普通审批文案必须含工具名并说明需要审批，实际 = {prompt:?}"
+                prompt.contains("审批"),
+                "普通审批文案必须说明需要审批，实际 = {prompt:?}"
+            );
+            // B236：正文不再重复工具名（工具身份由结构化 `options.tool` 承载），
+            // 因此身份断言改为只看 options，正文反向断言不得含工具名。
+            assert_eq!(
+                options.get("tool").and_then(Value::as_str),
+                Some("Bash"),
+                "普通审批的结构化 options.tool 必须承载工具身份，实际 = {options}"
+            );
+            assert!(
+                !prompt.contains("Bash"),
+                "B236：普通审批正文不得重复工具名（面板标题单独渲染），实际 = {prompt:?}"
             );
         }
     }
