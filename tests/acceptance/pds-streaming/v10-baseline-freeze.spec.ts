@@ -47,6 +47,17 @@ const NESTED_GUARD_ENV = "PDS_V10_NESTED";
 const NESTED_RUN = process.env[NESTED_GUARD_ENV] === "1";
 
 /**
+ * 时间预算（2026-11-17 环境门修复）：
+ * V10-3 的子进程是「全量套件里再跑一遍全量套件」（`--no-file-parallelism` 串行 167 文件），
+ * 实测单跑约 600s；原 600_000ms 预算正好压在实测值上，满载机器必然被 SIGTERM 打死，
+ * 表现为「退出码 143 / 断言 exitCode=0 失败」——这是**机器忙**，不是基线回归。
+ * 现预算 900s（用例 1200s），V10-4 的守卫自证从 180s/200s 抬到 480s/700s。
+ * 判据强度不变：仍是「真实子进程 exit 0 + 用例计数自检」，只放宽环境时间。
+ */
+const V10_NESTED_TIMEOUT_MS = 900_000;
+const V10_GUARD_TIMEOUT_MS = 480_000;
+
+/**
  * 冻结文件内容锚（SHA-256，2026-11-02 红相锚定前实测）。
  * 这些文件**只读**：契约 §7 规定 Executor 禁止修改 `tests/**`，Test Agent 禁止修改 wave59 目录。
  */
@@ -234,7 +245,7 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
           "--exclude",
           "tests/acceptance/pds-streaming/**"
         ],
-        600_000
+        V10_NESTED_TIMEOUT_MS
       );
 
       // Assert ①：退出码
@@ -260,7 +271,7 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
         "V10-3 自检：既有全量单测通过数必须显著大于 0（防止空跑当绿）"
       ).toBeGreaterThan(500);
     },
-    660_000
+    1_200_000
   );
 
   /**
@@ -281,7 +292,7 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
       // Act：真实 spawn 一次「嵌套运行」（runVitest 会注入 PDS_V10_NESTED=1）
       const receipt = runVitest(
         ["run", "--reporter=default", "tests/acceptance/pds-streaming/v10-baseline-freeze.spec.ts"],
-        180_000
+        V10_GUARD_TIMEOUT_MS
       );
 
       // Assert ①：跳过不算失败
@@ -308,6 +319,6 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
         `V10-4：嵌套运行不得执行 V10-2/V10-3 的实跑判据（否则递归未被拦住）；实际输出：\n${receipt.combined.slice(-3000)}`
       ).toBe(false);
     },
-    200_000
+    700_000
   );
 });
