@@ -2,6 +2,11 @@
 
 Status: implemented
 
+> **2026-11-17 部分被取代**：[`implemented/bug-fix/2026-11-17-tui-status-waiting-copy.md`](../bug-fix/2026-11-17-tui-status-waiting-copy.md)
+> 撤销本条的第 2、3 项「阈值化提示文案」：5s/15s 两档阈值、`UpstreamPhase` 三阶段与 `StallHint` 已删除，
+> 等待首字节改为状态词「等待响应中…」。第 1 项的事件驱动骨架（真实 `calling_model` / `turn:delta`
+> 起点、不伪造静默）保留，现由 `UpstreamIdle` 的布尔等待窗口承载。
+
 ## Problem
 
 现场会话 `pa_01a1df2f-8315` 末段单次 provider 交互静默约 180s（`providerCallRecords` 可证），期间 TUI 状态行只显示「生成中 + 轮次总耗时」：

@@ -147,10 +147,13 @@ export function resolveAgentRuntimeStatus(
 
   // 4. 模型回复输出阶段
   if (phase === "calling_model") {
-    if (streamingReasoning || hasStreamingContent === false) {
+    // 请求已发出、尚无任何增量 ⇒ 只呈现「在等」这一事实。
+    // 「上游 / 首字节 / 静默秒数」属于运行日志与 trace，不进用户可见状态条；
+    // mode 沿用 thinking（同一条脉冲动画），等待时长仍由 startTime 的已耗时承担。
+    if (hasStreamingContent === false) {
       return {
         mode: "thinking",
-        label: "思考中...",
+        label: "等待响应中…",
         startTime: turnStartedAt,
       };
     }

@@ -269,10 +269,10 @@ pub enum UiEvent {
     /// 若不复位，上一轮快照会整轮泄漏到下一轮。由事件流承担复位 ⇒ 所有入口自动覆盖
     /// （goal 续轮、stop→resume 等），不依赖调用点自觉。
     TurnStarted,
-    /// B220：后端真实「模型调用开始」事件（`turn:trace` 且 `phase == "calling_model"`）
-    /// ⇒ 进入「等待上游首字节」窗口（上游静默提示的起点）。
+    /// 后端真实「模型调用开始」事件（`turn:trace` 且 `phase == "calling_model"`）
+    /// ⇒ 进入「等待响应中」窗口（用户可见的等待态起点）。
     ///
-    /// 为什么必须是真事件：静默阈值只能由**真实发生**的请求发出时刻起算，不得用渲染帧
+    /// 为什么必须是真事件：等待态只能由**真实发生**的请求发出时刻点亮，不得用渲染帧
     /// 或本地猜测的时间戳伪造；`turn:trace` 此前被 sink 的 `_ => {}` 静默丢弃。
     ModelCallStarted,
     /// /models 触发的远程模型目录拉取成功：ids 已由后台线程取得，由主循环持久化并打开面板。
@@ -1563,8 +1563,9 @@ pub struct TuiState {
     pub status_dwell: StatusDwell,
     /// 轮内工具活动聚合（调用计数 + 当前/最近工具）：折叠态下状态行的信息补充。
     pub tool_activity: ToolActivity,
-    /// 上游静默跟踪（B220）：只由真实事件推进（`calling_model` / 增量 / 轮次收口），
-    /// 状态行据此在长静默期追加「仍在等待上游首字节…」提示（只在 Running 时呈现）。
+    /// 上游等待窗口：只由真实事件推进（`calling_model` / 增量 / 工具执行 / 轮次收口）。
+    /// 窗口内状态行显示用户可读的「等待响应中…」——不追加「上游 / 首字节 / 已静默」这类
+    /// 工程细节（那些属于运行日志与 trace，不是给用户看的状态）。
     pub upstream_idle: UpstreamIdle,
     /// Composer 高度平滑收拢过渡（每帧衰减 1 行直至 target_input_h）
     pub anim_composer_h: Option<u16>,
@@ -1785,15 +1786,15 @@ impl TuiState {
     /// 不需要也不应该堆历史）。
     pub fn note_provider_retry(&mut self, attempt: u32, max_attempts: u32) {
         self.provider_retry = Some((attempt, max_attempts.max(1)));
-        // B220：重试意味着上一跳的等待窗口已作废（下一次真实 `calling_model` 会重新起算）；
-        // 不复位会让「正在重试（1/5）」旁边挂着一条上一跳的上游静默告警。
+        // 重试意味着上一跳的等待窗口已作废（下一次真实 `calling_model` 会重新点亮）；
+        // 不复位会让「正在重试（1/5）」被上一跳的等待词覆盖。
         self.upstream_idle.reset();
     }
 
     /// B198：记录一次**真实发生**的 followup 阶段切换（幂等覆盖，只保留当前阶段）。
     pub fn note_provider_phase(&mut self, phase: pony_agent_core::agent::retry::ProviderPhase) {
         self.provider_phase = Some(phase);
-        // 阶段切换意味着上一跳的静默计时窗口作废（下一次真实 `calling_model` 重新起算）。
+        // 阶段切换意味着上一跳的等待窗口作废（下一次真实 `calling_model` 重新点亮）。
         self.upstream_idle.reset();
     }
 
@@ -1880,7 +1881,7 @@ impl TuiState {
         self.is_streaming = false;
         // 终态不再渲染流式状态行：驻留态一律清空，避免下一轮首帧闪出旧工具文案。
         self.status_dwell.reset();
-        // B220：上游静默窗口同属本轮瞬时态，终态必须退出（不得跨轮报告静默）。
+        // 等待窗口同属本轮瞬时态，终态必须退出（不得跨轮残留等待词）。
         self.upstream_idle.reset();
         self.transition_runtime_mode(RuntimeMode::Ready);
         self.status_text = match stop_reason {
@@ -1951,7 +1952,7 @@ impl TuiState {
         // 状态行：工具活动与驻留文本同属会话作用域（跨会话不得残留旧工具文案）。
         self.tool_activity.reset();
         self.status_dwell.reset();
-        // B220：上游静默窗口同属会话作用域（旧会话的等待窗口不得带进新会话）。
+        // 等待窗口同属会话作用域（旧会话的等待窗口不得带进新会话）。
         self.upstream_idle.reset();
         // W3：花名册面板与"返回主会话"目标都绑定会话作用域，复位时一并清空
         //（调用方若需要保留 return_session_id，必须在 reset 之后再写入）。
@@ -2136,8 +2137,8 @@ impl TuiState {
         // 状态行：轮内工具活动与可见文本同属轮次作用域（跨轮不得残留计数 / 旧工具文案）。
         self.tool_activity.reset();
         self.status_dwell.reset();
-        // B220：本轮开始的唯一复位点（含 goal 自动续轮等绕过派发点的入口）⇒
-        // 上一轮的上游静默窗口立即失效，本轮要等到真实的 `calling_model` 事件才重新计时。
+        // 本轮开始的唯一复位点（含 goal 自动续轮等绕过派发点的入口）⇒
+        // 上一轮的等待窗口立即失效，本轮要等到真实的 `calling_model` 事件才重新点亮。
         self.upstream_idle.reset();
     }
 
@@ -3459,8 +3460,8 @@ impl TurnEventSink for TuiTurnSink {
             let _ = self.tx.send(UiEvent::StreamMetrics(metrics.clone()));
         }
         match name {
-            // B220：`turn:trace` 此前被 `_ => {}` 丢弃。这里**只**取「模型调用开始」这一
-            // 真实时刻（`turn_flow` 的 `phase=calling_model`），推进上游静默窗口；
+            // `turn:trace` 此前被 `_ => {}` 丢弃。这里**只**取「模型调用开始」这一真实时刻
+            // （`turn_flow` 的 `phase=calling_model`），点亮等待响应窗口；
             // 其余 trace 相位（executing_tool / response_ready …）与正文无关，一律不消费。
             "turn:trace" => {
                 if payload.phase.as_deref() == Some("calling_model") {
@@ -4344,36 +4345,18 @@ pub(crate) fn workspace_header_label_with_home(
 /// Goal 可见性由状态条左槽的常驻摘要承担（ADR `2026-11-17-tui-task-visibility-bottom-drawer`）。
 pub const METRICS_HOLD_MS: u64 = 8_000;
 
-/// F1 I4（2026-11-15 修订，ADR 2026-11-15-tui-speed-segment-drop-inline-cadence）：
-/// 速度段只出「值 + 单位」，**不再行内自描述口径与样本量**——header 右槽宽度是稀缺资源，
-/// 每多一个后缀都在和「首token」抢位置（见 ADR 2026-11-14-tui-header-metrics-overflow）。
+/// F1 I4（2026-11-17 改判，ADR 2026-11-17-tui-speed-segment-drop-annotations）：
+/// 速度段只出「值 + 单位」——header 右槽是**扫读位**，速度数值之后不再挂任何注释文字
+/// （口径 ` e2e` 与末端样本量 ` 剔突发N` 都不上屏）。
 ///
-/// 逐字格式（契约验收按后缀可辨识，勿随意改字面量）：
-/// - `stream_decode`（默认口径，绝大多数轮次）：`120 t/s`——与 `basis` 缺席同形；
-/// - `end_to_end`：`≈120 t/s e2e`（`≈` = 含排队/prefill，跨调用不可比）；
-/// - 突发剔除 `> 0`：末尾追加 ` 剔突发N`（N = `turnBurstExcluded`，只能进端到端回退的调用数）；
-/// - `basis` 缺席（旧快照 / legacy wire）：只出裸值 `120 t/s`。
+/// 逐字格式：一律 `{值} t/s`。`end_to_end` 时保留 `≈` 前缀（它修饰数值本身、不是注释文字），
+/// 其余基线与 `basis` 缺席同形；`turnBurstExcluded > 0` 也不再追加末端说明。
 ///
-/// 口径与样本量真值仍在快照（`turn_speed_basis` / `turn_calls`）里，桌面 tooltip 与 trace
-/// 照旧可取证；TUI header 不再呈现，本函数也不再消费 `turn_calls`。
+/// 口径与样本量真值仍在快照（`turn_speed_basis` / `turn_calls` / `turn_burst_excluded`）里，
+/// 桌面 tooltip 与 trace 照旧可取证；TUI header 不再呈现。
 /// 值全部直取快照（I9/I10：TUI 侧不自算速度/口径/样本量）。
-fn format_speed_segment(
-    speed: f64,
-    prefix: &str,
-    basis: Option<TurnSpeedBasis>,
-    burst_excluded: u32,
-) -> String {
-    let mut segment = format!("{prefix}{:.0} t/s", speed.round());
-    if let Some(basis) = basis {
-        segment.push_str(match basis {
-            TurnSpeedBasis::StreamDecode => "",
-            TurnSpeedBasis::EndToEnd => " e2e",
-        });
-    }
-    if burst_excluded > 0 {
-        segment.push_str(&format!(" 剔突发{burst_excluded}"));
-    }
-    segment
+fn format_speed_segment(speed: f64, prefix: &str) -> String {
+    format!("{prefix}{:.0} t/s", speed.round())
 }
 
 /// P1 自描述后缀：轮首沿用上一轮末值时，必须让读者知道这不是本轮读数。
@@ -4506,19 +4489,14 @@ fn metrics_segments(state: &TuiState) -> Vec<MetricsSegment> {
     if let Some(metrics) = snapshot {
         if let Some(speed) = metrics.turn_speed_tokens_per_second {
             // I9/I10：口径只从快照读，TUI 侧禁止另算；`end_to_end`（含排队+prefill，
-            // 跨调用不可比）必须带 `≈` 前缀，`stream_decode` 才是可比的解码速度。
+            // 跨调用不可比）只保留 `≈` 前缀：数值之后的注释（`e2e` / `剔突发N`）不上屏。
             let prefix = match metrics.turn_speed_basis {
                 Some(TurnSpeedBasis::EndToEnd) => "≈",
                 _ => "",
             };
             segments.push(MetricsSegment::new(
                 MetricsKind::Speed,
-                format_speed_segment(
-                    speed,
-                    prefix,
-                    metrics.turn_speed_basis,
-                    metrics.turn_burst_excluded.unwrap_or(0),
-                ),
+                format_speed_segment(speed, prefix),
             ));
         }
         if let Some(ttft_ms) = metrics.first_token_latency_ms {
@@ -5115,6 +5093,12 @@ fn status_word_base(state: &TuiState) -> (String, StatusTone) {
     if let Some(phase) = state.provider_phase.as_ref() {
         return (followup_phase_text(phase), StatusTone::Warn);
     }
+    // 等待首字节：请求已发出、但还没有任何增量 ⇒ 状态词直接说「等待响应中」。
+    // 用户只需要「在等」这一事实；「上游 / 首字节 / 已静默 Ns」属于工程细节（归运行日志与
+    // trace），不得出现在状态消息里。等待时长由既有 elapsed 承担，不另造静默附注。
+    if state.upstream_idle.awaiting_first_byte() {
+        return ("等待响应中…".to_string(), StatusTone::Muted);
+    }
     let transient = compact_status(&state.status_text);
     match &state.runtime_mode {
         RuntimeMode::Ready => {
@@ -5238,26 +5222,19 @@ const RUNNING_STATUS_FALLBACK_WORD: &str = "处理中…";
 /// - `Running` ⇒ `Some(非空)`：`word` 空白时回落 [`RUNNING_STATUS_FALLBACK_WORD`]，
 ///   `elapsed` 非空时逐字包含（已自带同一 `elapsed` 结尾则不重复拼接）。
 ///
-/// B220 起渲染点走带静默提示的 4 参数版，本 3 参数版是**冻结验收测试的稳定契约面**
-/// （测试只调这一版），故非测试构建下允许「未使用」。
-#[cfg_attr(not(test), allow(dead_code))]
+/// 状态行文案的**唯一**合成点（B218）：渲染点与单测走同一函数。
+///
+/// 语义（时间一律由调用方注入字符串，函数本身不读时钟 ⇒ 可确定性断言）：
+/// - 生命周期为 [`TurnLifecycle::Terminal`] ⇒ `None`（终态不残留一行假「进行中」）；
+/// - `Running` ⇒ `Some(非空)`：`word` 空白时回落 [`RUNNING_STATUS_FALLBACK_WORD`]，
+///   `elapsed` 非空时逐字包含（已自带同一 `elapsed` 结尾则不重复拼接）。
+///
+/// B231：状态行只由「状态词 + 耗时」两段构成 —— 不追加「上游 / 首字节 / 已静默」这类
+/// 工程细节附注（等待态由状态词本身表达，见 `status_word_base`）。
 pub(crate) fn compose_running_status_text(
     state: &TuiState,
     word: &str,
     elapsed: &str,
-) -> Option<String> {
-    compose_running_status_text_with_hint(state, word, elapsed, None)
-}
-
-/// [`compose_running_status_text`] 的扩展面（B220）：追加「上游静默」提示。
-///
-/// 冻结测试只调用 3 参数版 ⇒ 该版委托本函数并传 `None`，签名向后兼容。
-/// `stall_hint` 亦只在 `Running` 时才有意义（终态提前返回 `None`，不会带上任何提示）。
-pub(crate) fn compose_running_status_text_with_hint(
-    state: &TuiState,
-    word: &str,
-    elapsed: &str,
-    stall_hint: Option<&str>,
 ) -> Option<String> {
     if turn_lifecycle(state) != TurnLifecycle::Running {
         return None;
@@ -5272,17 +5249,11 @@ pub(crate) fn compose_running_status_text_with_hint(
         trimmed
     };
     // 幂等：状态词本身可能已以同一 elapsed 结尾（工具摘要带秒数）⇒ 不得拼成「1m20s  1m20s」。
-    let mut text = if elapsed.is_empty() || word.ends_with(elapsed) {
+    let text = if elapsed.is_empty() || word.ends_with(elapsed) {
         word.to_string()
     } else {
         format!("{word}  {elapsed}")
     };
-    if let Some(hint) = stall_hint.map(str::trim).filter(|hint| !hint.is_empty()) {
-        if !text.contains(hint) {
-            text.push_str("  ·  ");
-            text.push_str(hint);
-        }
-    }
     Some(text)
 }
 
@@ -6224,16 +6195,8 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             let (word, style) = status_line_now(state, budget);
             // B218：文本合成单点（门已由 `should_render_running_status` 判为开，故恒 `Some`；
             // 防御性回落保证「算不出文案」也不会整行消失）。
-            // B220：上游静默提示只在本轮 Running 时随行追加（终态/空闲时 `hint` 恒为 `None`；
-            // 阈值与阶段全部来自真实事件，重绘沿用既有 450ms 节拍，不新增线程/定时器）。
-            let stall_hint = state.upstream_idle.hint(now_ms());
-            let text = compose_running_status_text_with_hint(
-                state,
-                &word,
-                &elapsed,
-                stall_hint.as_ref().map(|hint| hint.text()),
-            )
-            .unwrap_or(word);
+            // B231：只拼「状态词 + 耗时」——状态行不追加「上游 / 首字节 / 已静默」等工程附注。
+            let text = compose_running_status_text(state, &word, &elapsed).unwrap_or(word);
             let prefix = vec![Span::styled(
                 format!("{} ", mode_status_icon(&state.runtime_mode, state.spinner_tick)),
                 Style::default().fg(theme::ACCENT_DIM),
@@ -11707,8 +11670,8 @@ fn tui_event_loop(
                 UiEvent::StreamDelta(delta) => {
                     // 上游已开始产出 ⇒ 重试真的恢复了，进度位立即摘除（不留假状态）。
                     state.clear_provider_retry();
-                    // B220：正文增量是「上游仍活着」的最硬证据 ⇒ 刷新静默计时（首增量 ⇒ 首字节）。
-                    state.upstream_idle.note_delta(now_ms());
+                    // 正文增量 = 上游已开始产出 ⇒ 退出「等待响应中」窗口（首增量即首字节）。
+                    state.upstream_idle.note_delta();
                     state.append_assistant_chunk(&delta);
                     if !matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)) {
                         state.transition_runtime_mode(RuntimeMode::Responding);
@@ -11718,8 +11681,8 @@ fn tui_event_loop(
                     // 契约 C1/C5：思考增量走独立入库面（末条 Thinking 续写 + 运行态推进）。
                     // 思考增量同样证明上游已恢复 ⇒ 一并摘除重试进度位。
                     state.clear_provider_retry();
-                    // B220：思考增量同样是上游产出（推理模型可能长时间只有 reasoning）⇒ 一并刷新。
-                    state.upstream_idle.note_delta(now_ms());
+                    // 思考增量同样是上游产出（推理模型可能长时间只有 reasoning）⇒ 同退等待窗口。
+                    state.upstream_idle.note_delta();
                     state.apply_stream_reasoning(&delta);
                 }
                 UiEvent::StreamToolCall(call) => {
@@ -11728,8 +11691,8 @@ fn tui_event_loop(
                     state.add_or_update_tool_event(&call, false);
                     // 状态行聚合的唯一写入点①：记录本轮工具调用（折叠态下「刚做了什么」）。
                     state.tool_activity.record_call(&call);
-                    // B220：工具执行期不等待上游 ⇒ 退出静默窗口（否则「正在执行工具」的
-                    // 状态行会挂着一条与当前事实无关的「上游已静默」告警）。
+                    // 工具执行期不等待上游 ⇒ 退出等待窗口（否则「执行 · 工具」的状态词
+                    // 会被残留的等待态覆盖成一条与当前事实无关的等待文案）。
                     state.upstream_idle.reset();
                 }
                 UiEvent::StreamToolResult(res) => {
@@ -11745,7 +11708,7 @@ fn tui_event_loop(
                     state.clear_provider_retry();
                     // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
                     state.status_dwell.reset();
-                    // B220：轮次收口 ⇒ 上游静默窗口退出（终态 / 下一轮不得继承）。
+                    // 轮次收口 ⇒ 等待窗口退出（终态 / 下一轮不得继承）。
                     state.upstream_idle.reset();
                     // wave-60 §C8：本轮结束 ⇒ 双击 Esc 的上膛失效。
                     stop_sequence.reset();
@@ -11813,10 +11776,10 @@ fn tui_event_loop(
                     // 差异仅毫秒级。终态**不清空**锚点：终态行本就不渲染状态行，无需清。
                     state.turn_started_at = Some(std::time::Instant::now());
                 }
-                // B220：模型调用真实发起（`turn:trace` 的 `calling_model`）⇒ 静默计时起点。
-                // 时间取 TUI 唯一时钟 `now_ms()`，不伪造、不用渲染帧时间。
+                // 模型调用真实发起（`turn:trace` 的 `calling_model`）⇒ 进入「等待响应中」窗口。
+                // 门只看真实事件，不用渲染帧/本地猜测时间伪造等待态。
                 UiEvent::ModelCallStarted => {
-                    state.upstream_idle.note_request_sent(now_ms());
+                    state.upstream_idle.note_request_sent();
                 }
                 // P0：本轮指标快照 → 指标行唯一来源（快照存在时不再读 legacy 计量字段）。
                 UiEvent::StreamMetrics(metrics) => {

@@ -244,97 +244,44 @@ impl ToolActivity {
     }
 }
 
-/// 上游静默**提示档**阈值：超过 5s 没有任何 delta ⇒ 状态行追加一句「仍在等待…」。
+/// 上游等待窗口：模型调用请求已发出、但还没有收到任何增量。
 ///
-/// 现场依据（backlog:B220）：长静默期界面无任何变化，用户无法区分「上游在慢」与「会话死了」。
-pub const UPSTREAM_STALL_HINT_MS: u64 = 5_000;
-
-/// 上游静默**告警档**阈值：超过 15s ⇒ 文案升级为「上游已静默」。
-pub const UPSTREAM_STALL_ALERT_MS: u64 = 15_000;
-
-/// 上游等待阶段（真实事件驱动，不伪造）。
+/// 状态行据此把「思考中」换成用户可读的「等待响应中…」——用户只需要「在等」这一事实，
+/// 不需要「上游 / 首字节 / 已静默 Ns」这类工程细节（那些属于运行日志与 trace）。
 ///
-/// - `RequestSent`：已发出模型调用请求（后端 `turn:trace` 的 `phase=calling_model`），尚未见任何增量；
-/// - `FirstByte`：已见到本次调用的**首个**增量（首个 delta）；
-/// - `Delta`：已在读流（首个之后的增量）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum UpstreamPhase {
-    /// 已发起请求，等待首字节。
-    #[default]
-    RequestSent,
-    /// 首字节已到（首增量之后进入 `Delta`）。
-    FirstByte,
-    /// 读流中。
-    Delta,
+/// 只由真实事件推进（请求已发出 / 增量到达 / 轮次收口），不读时钟、不另造静默计时：
+/// 等待时长由状态行既有的 elapsed 承担。`Default` = 不在等待窗口内。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UpstreamIdle {
+    awaiting_first_byte: bool,
 }
 
-impl UpstreamPhase {
-    /// 名词式阶段文案（告警档用）。
-    pub fn label(self) -> &'static str {
-        match self {
-            UpstreamPhase::RequestSent => "等待首字节",
-            UpstreamPhase::FirstByte => "等待上游响应",
-            UpstreamPhase::Delta => "读流中",
-        }
+impl UpstreamIdle {
+    /// 模型调用请求已发出（`turn:trace` 的 `calling_model`）⇒ 进入等待首字节窗口。
+    pub fn note_request_sent(&mut self) {
+        self.awaiting_first_byte = true;
     }
 
-    /// 进行式阶段文案（提示档用，接在「仍在…」之后）。
-    ///
-    /// 三个阶段必须**两两可区分**：同一静默时长下若 `RequestSent` 与 `FirstByte` 文案相同，
-    /// 用户就看不出卡在「请求还没被受理」还是「首个增量还没来」。
-    pub fn waiting_label(self) -> &'static str {
-        match self {
-            UpstreamPhase::RequestSent => "仍在等待上游首字节",
-            UpstreamPhase::FirstByte => "已收到首字节，仍在等待上游更多响应",
-            UpstreamPhase::Delta => "仍在接收增量",
-        }
-    }
-}
-
-/// 上游静默提示（纯函数产物，渲染层只读文本与档位）。
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct StallHint {
-    /// 产生该提示的阶段。
-    pub phase: UpstreamPhase,
-    /// 该阶段的静默时长（毫秒）。
-    pub silent_ms: u64,
-    text: String,
-}
-
-impl StallHint {
-    /// 是否已进入告警档（`silent_ms >= UPSTREAM_STALL_ALERT_MS`）。
-    pub fn is_alert(&self) -> bool {
-        self.silent_ms >= UPSTREAM_STALL_ALERT_MS
+    /// 任一增量到达（正文或思考）⇒ 上游已开始产出，退出等待窗口（幂等）。
+    pub fn note_delta(&mut self) {
+        self.awaiting_first_byte = false;
     }
 
-    /// 可渲染文案（非空；含阶段与静默秒数）。
-    pub fn text(&self) -> &str {
-        &self.text
+    /// 轮次边界 / 终态 / 工具执行期：退出等待窗口。
+    pub fn reset(&mut self) {
+        *self = Self::default();
     }
-}
 
-/// 纯函数：阶段 + 静默时长 ⇒ 提示文案。
-///
-/// 三档，边界是**闭区间语义**（`silent_ms` 恰为阈值即进入该档）：
-/// - `< 5s` ⇒ `None`（正常抖动，不打扰）；
-/// - `5s..<15s` ⇒ 提示档：`仍在等待上游首字节…（已静默 8s）`；
-/// - `>=15s` ⇒ 告警档：`上游已静默 16s · 等待首字节`（含「上游已静默」+ 阶段，与提示档可区分）。
-pub fn stall_hint(phase: UpstreamPhase, silent_ms: u64) -> Option<String> {
-    if silent_ms < UPSTREAM_STALL_HINT_MS {
-        return None;
+    /// 是否处于「已请求、尚无任何增量」的等待窗口。
+    pub fn awaiting_first_byte(&self) -> bool {
+        self.awaiting_first_byte
     }
-    let secs = silent_ms / 1_000;
-    Some(if silent_ms < UPSTREAM_STALL_ALERT_MS {
-        format!("{}…（已静默 {}s）", phase.waiting_label(), secs)
-    } else {
-        format!("上游已静默 {}s · {}", secs, phase.label())
-    })
 }
 
 /// B198：followup 阶段 ⇒ 状态行文案（固定短语，不拼接 URL / elapsed / provider 细节）。
 ///
-/// 与 [`stall_hint`] 正交：`stall_hint` 回答「静默多久」（时间维度），本函数回答
-/// 「现在卡在哪个阶段」（流程维度）。渲染层可叠加：阶段在前，静默提示在后。
+/// 与 [`UpstreamIdle`] 正交：`UpstreamIdle` 只回答「是否在等首字节」（渲染层据此切等待态），
+/// 本函数回答「兜底链路卡在哪个阶段」（流程维度）——两者都只给用户可读短语，不拼接工程细节。
 ///
 /// 为什么文案在这里而不是 provider 层：provider 只上报**事实**（阶段枚举），
 /// 用户可见措辞归展示层（同一事实一个家，避免库层被 UI 文案污染）。
@@ -385,74 +332,6 @@ pub fn settled_turn_summary(
         head
     } else {
         format!("{head} · 工具 {tool_calls} 次")
-    }
-}
-
-/// 上游静默跟踪器：**只**由真实事件推进（请求已发出 / 增量到达 / 轮次收口）。
-///
-/// 时间由调用方注入（`now_ms`），本类型不读时钟 ⇒ 单测可喂假时间。
-/// `Default` = 「没有任何活动事件」：此时 `hint` 恒为 `None`（不凭空报告上游静默）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct UpstreamIdle {
-    /// 是否处于「已发起请求 / 正在读流、尚未收口」的等待窗口。
-    active: bool,
-    phase: UpstreamPhase,
-    last_activity_ms: u64,
-}
-
-impl UpstreamIdle {
-    /// 模型调用请求已发出（`turn:trace` 的 `calling_model`）⇒ 进入等待首字节阶段。
-    pub fn note_request_sent(&mut self, now_ms: u64) {
-        self.active = true;
-        self.phase = UpstreamPhase::RequestSent;
-        self.last_activity_ms = now_ms;
-    }
-
-    /// 增量到达（正文或思考）⇒ 首次进入 `FirstByte`，其后进入 `Delta`，并刷新活动时刻。
-    pub fn note_delta(&mut self, now_ms: u64) {
-        self.phase = match (self.active, self.phase) {
-            // 首增量（含「没见到 calling_model 就先来增量」的路径）⇒ 首字节已到。
-            (false, _) | (true, UpstreamPhase::RequestSent) => UpstreamPhase::FirstByte,
-            (true, _) => UpstreamPhase::Delta,
-        };
-        self.active = true;
-        self.last_activity_ms = now_ms;
-    }
-
-    /// 轮次边界 / 终态：退出等待窗口（`hint` 立即变 `None`）。
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
-    /// 当前阶段（无活动事件时为默认阶段 `RequestSent`，但 `hint` 仍为 `None`）。
-    pub fn phase(&self) -> UpstreamPhase {
-        self.phase
-    }
-
-    /// 是否处于等待窗口。
-    pub fn is_active(&self) -> bool {
-        self.active
-    }
-
-    /// 距上次真实活动的静默时长；不在等待窗口内 ⇒ `0`。
-    pub fn silent_ms(&self, now_ms: u64) -> u64 {
-        if !self.active {
-            return 0;
-        }
-        now_ms.saturating_sub(self.last_activity_ms)
-    }
-
-    /// 本帧的静默提示（`None` ⇒ 不追加任何文案）。
-    pub fn hint(&self, now_ms: u64) -> Option<StallHint> {
-        if !self.active {
-            return None;
-        }
-        let silent_ms = self.silent_ms(now_ms);
-        stall_hint(self.phase, silent_ms).map(|text| StallHint {
-            phase: self.phase,
-            silent_ms,
-            text,
-        })
     }
 }
 
@@ -618,94 +497,42 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // B220：上游静默提示（阈值边界 / 阶段切换 / 复位）
+    // B231：上游等待窗口（只回答「是否在等首字节」，不产生任何工程细节文案）
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// 阈值边界：4999 无提示、5000 进提示档、14999 仍是提示档、15000 进告警档。
+    /// 窗口生命周期：无事件 ⇒ 不在等待；请求发出 ⇒ 等待；任一增量 ⇒ 退出；复位 ⇒ 退出。
     #[test]
-    fn stall_hint_thresholds_are_closed_intervals() {
-        assert_eq!(
-            stall_hint(UpstreamPhase::RequestSent, 4_999),
-            None,
-            "5s 以内是正常抖动，不得提示"
+    fn upstream_idle_tracks_first_byte_window() {
+        let mut idle = UpstreamIdle::default();
+        assert!(!idle.awaiting_first_byte(), "Default = 还没有任何上游事件");
+
+        idle.note_request_sent();
+        assert!(
+            idle.awaiting_first_byte(),
+            "请求已发出、尚无增量 ⇒ 必须处于等待首字节窗口"
         );
 
-        let hint_tier = stall_hint(UpstreamPhase::RequestSent, 5_000)
-            .expect("恰为 5s 必须进入提示档（边界闭区间）");
+        idle.note_delta();
         assert!(
-            hint_tier.contains("已静默 5s"),
-            "提示档文案必须含静默秒数，实际 = {hint_tier:?}"
+            !idle.awaiting_first_byte(),
+            "任一增量到达 ⇒ 上游已开始产出，退出等待窗口"
         );
+        idle.note_delta();
         assert!(
-            hint_tier.contains("上游首字节"),
-            "提示档文案必须点名阶段，实际 = {hint_tier:?}"
-        );
-        assert!(
-            !hint_tier.contains("上游已静默"),
-            "提示档不得使用告警档措辞，实际 = {hint_tier:?}"
-        );
-
-        let still_hint_tier = stall_hint(UpstreamPhase::Delta, 14_999)
-            .expect("14999ms 仍在提示档");
-        assert!(
-            !still_hint_tier.contains("上游已静默"),
-            "14999ms 不得提前进入告警档，实际 = {still_hint_tier:?}"
-        );
-
-        let alert = stall_hint(UpstreamPhase::Delta, 15_000)
-            .expect("恰为 15s 必须进入告警档（边界闭区间）");
-        assert!(
-            alert.contains("上游已静默 15s"),
-            "告警档文案必须含「上游已静默」+ 秒数，实际 = {alert:?}"
-        );
-        assert!(
-            alert.contains("读流中"),
-            "告警档文案必须点名阶段，实际 = {alert:?}"
-        );
-        assert_ne!(
-            alert, still_hint_tier,
-            "5s 档与 15s 档文案必须可区分"
+            !idle.awaiting_first_byte(),
+            "后续增量保持退出状态（幂等）"
         );
     }
 
-    /// 阶段切换：请求发出 ⇒ RequestSent；首增量 ⇒ FirstByte；其后 ⇒ Delta。
+    /// 复位：轮次边界 / 终态 / 工具执行期后不得残留等待态（否则下一轮开局就挂「等待响应中」）。
     #[test]
-    fn upstream_idle_phase_transitions() {
+    fn upstream_idle_reset_clears_waiting_window() {
         let mut idle = UpstreamIdle::default();
-        assert!(!idle.is_active(), "Default = 无任何活动事件");
-        assert_eq!(idle.silent_ms(10_000), 0, "无活动事件时静默时长恒为 0");
-
-        idle.note_request_sent(1_000);
-        assert_eq!(idle.phase(), UpstreamPhase::RequestSent);
-        assert_eq!(idle.silent_ms(9_000), 8_000);
-        let first = idle.hint(9_000).expect("静默 8s 必须提示");
-        assert!(!first.is_alert(), "8s 仍是提示档");
-        assert!(first.text().contains("仍在等待上游首字节"));
-
-        idle.note_delta(9_500);
-        assert_eq!(idle.phase(), UpstreamPhase::FirstByte, "首个 delta ⇒ 首字节已到");
-        idle.note_delta(10_000);
-        assert_eq!(idle.phase(), UpstreamPhase::Delta, "首增量之后 ⇒ 读流中");
-        assert_eq!(idle.silent_ms(10_000), 0, "刚到的增量刷新活动时刻");
-        assert_eq!(idle.hint(10_500), None, "刚有活动 ⇒ 不提示");
-
-        let streaming = idle.hint(30_000).expect("读流期静默 20s 必须告警");
-        assert!(streaming.is_alert());
-        assert!(streaming.text().contains("上游已静默"));
-        assert!(streaming.text().contains("读流中"));
-    }
-
-    /// 复位：`reset()` 后既无提示也不残留阶段（轮次边界不得把上一轮静默带进下一轮）。
-    #[test]
-    fn upstream_idle_reset_clears_hint() {
-        let mut idle = UpstreamIdle::default();
-        idle.note_request_sent(0);
-        assert!(idle.hint(20_000).is_some(), "前提：静默 20s 有告警");
+        idle.note_request_sent();
+        assert!(idle.awaiting_first_byte(), "前提：复位前处于等待窗口");
 
         idle.reset();
-        assert!(!idle.is_active());
-        assert_eq!(idle.silent_ms(20_000), 0);
-        assert_eq!(idle.hint(20_000), None, "复位后不得报告任何上游静默");
+        assert!(!idle.awaiting_first_byte(), "复位后不得残留等待窗口");
     }
 
     /// B198：followup 三阶段各有**可区分**的固定文案，且不泄漏内部细节
