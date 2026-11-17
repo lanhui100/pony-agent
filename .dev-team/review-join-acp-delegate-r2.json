@@ -1,0 +1,101 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/agent/tools/schema.rs",
+    "crates/pony-agent-core/src/acp/session.rs",
+    "crates/pony-agent-core/src/acp/result.rs",
+    "crates/pony-agent-core/src/bin/cli/acp.rs",
+    "crates/pony-agent-core/src/agent/mcp_config.rs",
+    "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs",
+    "crates/pony-agent-core/tests/acp_cli_resume_and_epipe.rs",
+    "crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs",
+    ".dev-team/state.json",
+    ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+    ".dev-team/meta-retrospective.md",
+    "docs/architecture/acp-client-integration.md",
+    "docs/release/evidence/acp-delegate/all-acp-final.log",
+    "docs/release/evidence/acp-delegate/final-lib.log"
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "3fe8b39f-9cf8-4211-b442-30c62ba8389d",
+    "fresh_context": true
+  },
+  "executed_by": "3fe8b39f-9cf8-4211-b442-30c62ba8389d",
+  "reviewed_commit": "5a914c4cbf0c321edb73d54c65eaeb55fc08ad14",
+  "attestation": {
+    "self_signed": false,
+    "note": "Join Barrier 复审 r2（只读）：复核上轮 1 BLOCKING + 6 ADVISORY 的修复面。未改 src/测试/契约/证据，未做 git 写；仅跑 2 个契约套件 + C6.2 单例（cargo-lane，Exit 0）、1 次隔离 env CLI 探针、只读 grep/sed；全量收据为引用（/tmp/final2-lib.log 1614/0、/tmp/final2-acp.log 19 套件 ok，均与仓内证据 diff 一致）。"
+  },
+  "summary": {
+    "blocking": 0,
+    "advisory": 7,
+    "blocking_fix_schema_desc": "PASS（描述与 session.rs:1303-1310/1431-1438/1522-1526/1541-1557 逐键一致；flag 组合表述精度见 findings）",
+    "A1_t_acp_05_strict": "PASS（逃逸 OR 子句删除；子句级 finalText/finalTextTruncated/不含『不返回』）",
+    "A3_r3_stdout_negative": "PASS（tests/acp_cli_resume_and_epipe.rs:444-452）",
+    "A4_c0_4a2_non_empty": "PASS（tests/acp_delegate_p0p2_contract.rs:508-553）",
+    "A2_early_redirect": "PASS（位置 acp.rs:70 < parse :72 < help :187）；help 文本仍 stdout ⇒ ADVISORY",
+    "A6_evidence_refreshed": "PASS（证据与 /tmp/final2-*.log 字节一致，含 t_acp_05/c0_4a2，15 passed/19 套件）",
+    "A5_residual_registered": "PASS（六项在册）；台账保真度 ⇒ ADVISORY",
+    "live_suites": "acp_delegate_p0p2_contract 15 passed + acp_cli_resume_and_epipe 5 passed，Exit 0"
+  },
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/cli/acp.rs",
+      "line": 585,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2; HOME=/tmp/r2-probe-home XDG_CONFIG_HOME=/tmp/r2-probe-home/.config target/debug/ponycli acp --help --output-format jsonl >/tmp/r2-help.out 2>/tmp/r2-help.err; echo exit=$?; wc -c /tmp/r2-help.out /tmp/r2-help.err",
+      "detail": "acp_early_log_redirection 已在 parse/help 之前（acp.rs:70 < :72 < :187）调用，日志改道成立；但 --help 文本仍经 print_acp_usage（:566-588，全 println!）打到 stdout：实测 jsonl 模式下 stdout=1498B、stderr=0B，与 :576 自述『jsonl/sse: stdout = events only』口径不符。state.json 已登记残余 A2（描述过时：『--help 在改道前打印 stdout』），契约矩阵未登记豁免。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs",
+      "line": 1523,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2; python3 -c \"desc='成功轮与截断轮都回传 finalText 与 finalTextTruncated；截断轮不返回 finalText。'; c=[s for s in desc.split('；') if '截断' in s][0]; print('selected=',c); print('current_assert_passes=', ('finalText' in c) and ('不返回' not in c) and ('finalTextTruncated' in c))\"",
+      "detail": "T-ACP-05 已删除 OR 逃逸子句（A1 主诉求达成），但 .find() 只检查第一个含『截断』的子句；同构反例（首句合规、次句『截断轮不返回 finalText』）实测 current_assert_passes=True，后续追加矛盾子句仍可逃逸。建议改为 filter(...).all(...)。"
+    },
+    {
+      "file": "docs/architecture/acp-client-integration.md",
+      "line": 168,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2; grep -n \"costAmount\" docs/architecture/acp-client-integration.md; sed -n '81,92p' crates/pony-agent-core/src/acp/result.rs",
+      "detail": "文档声明 usage{used,size,costAmount?,costCurrency?}，实现与测试为 usage{used,size,cost{amount,currency}}（result.rs:87-89；contract 测试 :648-655）。模型可见描述（schema.rs:1145 的 used/size/cost）与实现一致，仅架构文档键名失真。"
+    },
+    {
+      "file": ".dev-team/state.json",
+      "line": 197,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2; python3 -c \"import json; r=json.load(open('.dev-team/state.json'))['residual_advisories']; print([a['id'] for a in r]); print(sorted({k for a in r for k in a}))\"; grep -n \"到期\" .dev-team/meta-retrospective.md",
+      "detail": "六项（B239/B240/A2/A3/A4/F2）确实在册（上轮 A5 主诉求达成），但台账保真度不足：A3（R3 负向断言）与 A4（c0_4a2 非空正文）本轮已修复却仍列残余；每项仅 id/owner/desc，无到期与重跑验收字段，与 meta-retrospective.md:9『并在 state.json 记录 owner 与到期』及『残余 12 条已登记』不符。"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs",
+      "line": 628,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2; sed -n '620,630p' crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs",
+      "detail": "C6.2 后半在 db_session_created_at 返回 None 时仅 println! 空过（无断言）。本轮 --nocapture 实跑未出现 [C6.2] IS NULL 输出 ⇒ 当前命中 Some 分支、断言确实执行，属潜在空过分支（上轮 A5 曾点名，仍未登记 residual_advisories）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools/schema.rs",
+      "line": 1145,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2; grep -n \"32000\" crates/pony-agent-core/src/agent/tools/schema.rs; grep -n \"ACP_DELEGATE_FINAL_TEXT_MAX_CHARS: usize\" crates/pony-agent-core/src/acp/result.rs; sed -n '1496,1545p' crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs | grep -n \"32000\\|MAX_CHARS\"",
+      "detail": "模型可见描述把上限硬编码为『32000 字符』，与 ACP_DELEGATE_FINAL_TEXT_MAX_CHARS=32_000（result.rs:25）无机器耦合，T-ACP-05 也不断言该数值 ⇒ 常量变更时描述面静默漂移（C0.3『上限为单一常量真源』在描述面失守）。"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/tools/schema.rs",
+      "line": 1145,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2; sed -n '1145p' crates/pony-agent-core/src/agent/tools/schema.rs | grep -o '超过 32000 字符只保留前缀并置 `finalTextTruncated=true`'; sed -n '1517,1527p' crates/pony-agent-core/src/acp/session.rs",
+      "detail": "描述把 finalTextTruncated=true 明确绑定在『超过 32000 字符』条件上，并以『截断轮另带 truncated=true』收尾；而实现对 max_tokens/max_turn_requests 轮无条件置 finalTextTruncated=true（session.rs:1523-1526 = final_text.truncated || stop_reason_limit_hit，短正文亦然）。语义不矛盾（截断轮确实 true），但模型可见口径未显式给出『截断轮 finalTextTruncated 亦为 true』这一组合，属可再收紧的表述精度（T-ACP-05 子句级断言只查子句内含该 token，无法区分条件绑定）。"
+    }
+  ]
+}

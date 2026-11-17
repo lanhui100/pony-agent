@@ -1,6 +1,6 @@
 {
   "wave": "acp-delegate-p0p2",
-  "status": "in_progress",
+  "status": "completed",
   "task_tier": "C",
   "tier_basis": "跨模块（acp/tools/runtime/session/sqlite/control_plane）+ 外部进程 IO（ACP spawn/stdio）+ 事件持久化契约变更 + 命中 blast 关键字（thread/lock/io/fs/spawn/unsafe/saturating_add）；无裁量降级权",
   "baseline_commit": "c5761b27",
@@ -74,7 +74,7 @@
       "members": [
         "task-6"
       ],
-      "status": "in_progress",
+      "status": "completed",
       "blocked_by": [
         "wave-w3"
       ]
@@ -182,17 +182,11 @@
     ]
   },
   "join": {
-    "verdict": "FAIL",
-    "blocking": 1,
-    "advisory": 6,
-    "file": ".dev-team/review-join-acp-delegate.json",
-    "reviewed_commit": "aaec5ae3",
-    "blocking_fix": {
-      "id": "schema-desc",
-      "desc": "模型可见工具描述仍称截断轮不返回 finalText",
-      "owner": "executor-a",
-      "test_fix": "test-agent-3"
-    }
+    "verdict": "PASS",
+    "blocking": 0,
+    "advisory": 7,
+    "file": ".dev-team/review-join-acp-delegate-r2.json",
+    "reviewed_commit": "5a914c4c"
   },
   "residual_advisories": [
     {
@@ -224,6 +218,32 @@
       "id": "F2",
       "owner": "B239",
       "desc": "终态 flush 快照→提交→移除重复窗口"
+    },
+    {
+      "id": "A2-help",
+      "owner": "B240",
+      "desc": "acp --help 文本在 jsonl 下仍走 stdout（契约未登记豁免）"
+    },
+    {
+      "id": "A3-test",
+      "owner": "B240",
+      "desc": "T-ACP-05 只查首个截断子句，追加矛盾子句可逃逸"
+    },
+    {
+      "id": "A4-null",
+      "owner": "B240",
+      "desc": "C6.2 持久化测试 NULL 分支 println 空过未登记"
+    },
+    {
+      "id": "schema-hardcode",
+      "owner": "B240",
+      "desc": "工具描述硬编码 32000，未与常量耦合；截断轮 finalTextTruncated 未显式表述"
+    },
+    {
+      "id": "usage-key",
+      "owner": "B240",
+      "desc": "architecture 文档 usage 键名与实际 JSON 不一致"
     }
-  ]
+  ],
+  "final_head_expected": "pending"
 }
