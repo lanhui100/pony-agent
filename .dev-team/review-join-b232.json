@@ -1,0 +1,64 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "8cbc025c-74ca-4e32-a73c-91121161babf",
+    "fresh_context": true
+  },
+  "executed_by": "8cbc025c-74ca-4e32-a73c-91121161babf",
+  "reviewed_commit": "2cfc6973",
+  "review_scope_note": "实现 diff 靶向审查（只读 subagent，Lead 按其原始输出机械转写为 JSON 收据）。对象 = tui.rs 未提交 diff + 12 例冻结测试 + C6/C7/C8。BLOCKING：链式挂起（Ask→审批、审批→审批）第二次续轮丢指令 → v3 已修（C9 resume_instruction + seed_pending_after_resume + 终态清空）。ADVISORY：终态槽位残留（已在 StreamCompleted/StreamFailed 清理）；组合正文作为首条 user 行影响会话元数据派生（转 B238）。",
+  "attestation": {
+    "self_signed": true
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs",
+    "docs/observability.yaml",
+    ".dev-team/contract-matrix-approval-resume-context.md"
+  ],
+  "resolutions": [
+    {
+      "id": "J1",
+      "claim": "链式挂起第二次续轮丢原指令",
+      "result": "RESOLVED",
+      "evidence_cmd": "grep -n 'resume_instruction\\|seed_pending_after_resume' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "id": "J2",
+      "claim": "终态分支只清 streaming_turn_id，槽位残留",
+      "result": "RESOLVED",
+      "evidence_cmd": "sed -n '11890,11905p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "id": "J3",
+      "claim": "会话元数据派生受组合正文影响",
+      "result": "DEFERRED_TO_BACKLOG",
+      "evidence_cmd": "grep -n 'B238' backlog/tasks.jsonl"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 1926,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '1920,1940p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 11896,
+      "rule": "LEAK",
+      "counterexample_cmd": "sed -n '11890,11905p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs",
+      "line": 75,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '70,85p' crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}
