@@ -12966,6 +12966,14 @@ mod wave65_approval_unit_tests;
 #[path = "tui/tests/wave65_r2_approval_plan_tests.rs"]
 mod wave65_r2_approval_plan_tests;
 
+/// F-12 冻结验收（B232）：审批续轮必须带回「被挂起回合的原用户指令」。
+///
+/// 契约：`.dev-team/contract-matrix-approval-resume-context.md` §2 C6/C7/C8。
+/// 现场：`pa_01a1e905` 的 `turn-45f905c5` 挂起后，批准续轮请求里第二轮指令完全缺席。
+#[cfg(test)]
+#[path = "tui/tests/approval_resume_context_tests.rs"]
+mod approval_resume_context_tests;
+
 
 /// ADR 0113 单测：双击 Esc 上膛 + 撤回面板两段式按键裁决 + 菜单文案归约。
 #[cfg(test)]
