@@ -1,3 +1,8 @@
+// Windows/macOS 无 systemd：本模块的 cgroup/scope 面只被 Linux cfg 分支消费。
+// 非 Linux 构建里这些类型是「不可达但保留」的基础设施（不是死代码债），故只在非 Linux 上允许 dead_code；
+// Linux 构建仍受 `-D warnings` 约束（CI 的 deny-warnings 检查不被削弱）。
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 //! B207：托管范围 owner 抽象（signal / 静默等待 / 成员数 / 清理正交分离）。
 //!
 //! ## 为什么需要一层 owner

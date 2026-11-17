@@ -71,6 +71,8 @@ const DRAIN_SETTLE_MAX: Duration = Duration::from_millis(500);
 const KILL_REAP_ATTEMPTS: u32 = 30;
 const KILL_REAP_INTERVAL: Duration = Duration::from_millis(10);
 /// B206：范围静默轮询间隔 —— 每一轮都**重新探测**（不是「睡到自以为干净」）。
+/// 只在 Linux 的 cgroup 静默路径使用；非 Linux 构建保留常量（跨平台同一份限额定义）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const QUIESCE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// B206 / C2：终止限额（公开可注入）。
@@ -1194,6 +1196,8 @@ impl ProcessManager {
         // B207b：spawn 侧接线 —— **只有**显式 opt-in `SystemdScope` 才把目标进程包进
         // `systemd-run --user --scope …`（让它成为临时 scope 成员：cgroup 成员资格在组长退出后
         // 依然存在，pgid 可被复用而 cgroup 不会）。默认 `Pid` 走下面的第一条分支 ⇒ 零行为变更。
+        // `wants_scope` 只在 unix 分支被消费（Windows 走 Job Object）；两条路径都要编译过。
+        #[cfg_attr(windows, allow(unused_variables))]
         let (mut command, wants_scope) = spawn_command(self.inner.range_ownership, request);
         command
             .stdin(Stdio::piped())
@@ -1719,6 +1723,8 @@ impl Drop for Inner {
             // 锁被毒化：Drop 不得 panic，也不得假装收组成功（直接放弃表内条目）。
             Err(_) => return,
         };
+        // Windows 分支只用 `entry`（Job Object），`handle` 仅非 Windows 的 terminate_range_path 使用。
+        #[cfg_attr(windows, allow(unused_variables))]
         for (handle, entry) in entries {
             #[cfg(windows)]
             {

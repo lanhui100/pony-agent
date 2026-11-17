@@ -140,12 +140,16 @@ mkdir -p "$h"
   cp "$ROOT/.githooks/pre-commit" .githooks/pre-commit
   chmod +x .githooks/pre-commit
   cp "$CLI" scripts/backlog.mjs
+  # H fixture 必须与真实仓的 pre-commit 前提一致：装了 pwsh 的机器上 hook 会调 scripts/git-guard.ps1，
+  # 缺它就变成「fixture 自身缺陷」造成的假红（CI ubuntu runner 预装 pwsh，本机没有 pwsh 时永远发现不了）。
+  cp "$ROOT/scripts/git-guard.ps1" scripts/git-guard.ps1
   cp "$GATE" .meta/gates/backlog-gate.sh
   printf '5\n' > backlog/.next-id
   valid_record > backlog/tasks.jsonl
   echo hello > a.txt
   git add a.txt
 )
+[ -f "$h/scripts/git-guard.ps1" ] || fail "H fixture 缺 scripts/git-guard.ps1（有 pwsh 的机器会假红）"
 if ! ( cd "$h" && git commit -qm control ) >"$h/hook.out" 2>&1; then
   cat "$h/hook.out" >&2
   fail "H 门在场时合法提交被误拒"
