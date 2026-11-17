@@ -1624,6 +1624,20 @@ pub struct TuiState {
     /// wave-60 §C9：当前流式轮的 turn_id（新一轮开始时覆盖）。
     /// 用于 `apply_stop_terminal` 在**无在飞停止请求**时拒绝旧轮迟到的终态。
     pub streaming_turn_id: Option<String>,
+    /// F-12：被挂起回合的续轮上下文（`TurnSuspended` 时捕获，审批续轮一次性消费）。
+    /// `None` = 无可用上下文（fail-open：续轮正文退回宿主固定文案）。
+    pub suspended_turn_context: Option<SuspendedTurnContext>,
+    /// F-12（B2）：composer 提交时登记的「本回合用户指令 + turn_id」，供挂起时一次性认领。
+    ///
+    /// 为什么不能从 `messages` 反查：goal 轮 / Ask 续轮 / 审批续轮都**不** `add_user_message`，
+    /// 反查会命中更早某轮的用户气泡，把旧指令贴成「挂起前指令」（张冠李戴）。
+    pub pending_user_turn: Option<SuspendedTurnContext>,
+    /// F-12（C9）：本轮续轮所携带的「原始用户指令」（`take_approval_resume_message` 记下）。
+    ///
+    /// 为什么需要：续轮自身也可能再次挂起（连续读两个工作区外文件 / Ask 应答后又撞审批）。
+    /// 若不在续轮开跑前把它登记为自身 `pending_user_turn`，链式第二次挂起就会认领失败，
+    /// 第二次续轮再次丢原指令（同一个病只修一轮）。
+    pub resume_instruction: Option<String>,
     /// W3：Team 角色花名册面板（`None` = 未打开/已关闭）。
     pub agent_roster_state: Option<AgentRosterState>,
     /// W3：进入 teammate 子会话前保存的主会话 id（`r` 返回用；`None` = 当前不在队友会话）。
@@ -1744,6 +1758,9 @@ impl Default for TuiState {
             provider_registry_path: None,
             stopping_turn_id: None,
             streaming_turn_id: None,
+            suspended_turn_context: None,
+            pending_user_turn: None,
+            resume_instruction: None,
             agent_roster_state: None,
             return_session_id: None,
             sub_session: None,
@@ -1892,6 +1909,63 @@ impl TuiState {
         self.set_status_notice(notice);
     }
 
+    /// F-12（C6 v2）：挂起时捕获本回合用户指令（一次性；无提交登记或轮次身份不符则保持 `None`）。
+    ///
+    /// 判据：
+    /// - 只认 composer 提交时登记的 `pending_user_turn`（**不**从 `messages` 反查：goal 轮 /
+    ///   Ask 续轮 / 审批续轮都不产生用户气泡，反查会把旧轮指令贴成「挂起前指令」）；
+    /// - 且登记的 `turn_id` 必须与当前 `streaming_turn_id` 一致（迟到旧 sink 事件 / 轮次已切换
+    ///   ⇒ 丢弃，绝不串轮）。
+    pub fn capture_suspended_turn_context(&mut self) {
+        let Some(pending) = self.pending_user_turn.take() else {
+            return;
+        };
+        if self.streaming_turn_id.as_deref() != Some(pending.turn_id.as_str()) {
+            return;
+        }
+        self.suspended_turn_context = Some(pending);
+    }
+
+    /// F-12（C6/C7）：审批续轮取用 —— 组合模型面正文并清空捕获（一次性消费）。
+    ///
+    /// 一次性是契约：不清空会让后续无关续轮重复注入旧指令（模型误以为用户说了两遍）。
+    pub fn take_approval_resume_message(&mut self, prompt: &str) -> String {
+        let context = self.suspended_turn_context.take();
+        // C9：把本轮所携带的原始指令留痕 —— 续轮自身再次挂起时据此 re-seed（链式不丢）。
+        if let Some(captured) = context.as_ref() {
+            let instruction = captured.user_message.trim();
+            if !instruction.is_empty() {
+                self.resume_instruction = Some(instruction.to_string());
+            }
+        }
+        // 诊断（该文件既有风格：`eprintln!` 落 tui-runtime.log）；绝不吞异常、绝不 panic。
+        match context.as_ref() {
+            Some(captured) => eprintln!(
+                "[pony-tui] approval_resume_context: injected=true turn={} user_chars={}",
+                captured.turn_id,
+                captured.user_message.trim().chars().count()
+            ),
+            None => eprintln!(
+                "[pony-tui] approval_resume_context: injected=false turn=- user_chars=0"
+            ),
+        }
+        compose_approval_resume_message(context.as_ref(), prompt)
+    }
+
+    /// C9：续轮开跑前把「本轮所携带的原始用户指令」登记为自身 pending，供再次挂起时认领（链式挂起不丢）。
+    pub fn seed_pending_after_resume(&mut self, turn_id: &str) {
+        let Some(text) = self.resume_instruction.clone() else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        self.pending_user_turn = Some(SuspendedTurnContext {
+            turn_id: turn_id.to_string(),
+            user_message: text,
+        });
+    }
+
     /// 契约 P-2：复位「会话作用域」状态（`/clear` 与 `/resume` 共用）。
     ///
     /// **不改 `session_id`**：切换会话由调用方负责（`/clear` 换新 id，`/resume` 用目标 id）。
@@ -1948,6 +2022,11 @@ impl TuiState {
         // wave-60 §C8/C9：会话作用域复位 ⇒ 停止请求态、当前流式轮与双击上膛一并失效。
         self.stopping_turn_id = None;
         self.streaming_turn_id = None;
+        // F-12（INV-5）：挂起上下文是会话作用域的瞬时态 —— 不清会让上一会话/上一轮的
+        // 原用户指令被下一次审批续轮张冠李戴地注入（跨会话错误归因）。
+        self.suspended_turn_context = None;
+        self.pending_user_turn = None;
+        self.resume_instruction = None;
         // 状态行：工具活动与驻留文本同属会话作用域（跨会话不得残留旧工具文案）。
         self.tool_activity.reset();
         self.status_dwell.reset();
@@ -8282,6 +8361,41 @@ pub struct ApprovalPlan {
     pub prompt: &'static str,
 }
 
+/// F-12：被挂起回合的续轮上下文（审批续轮用它把原用户指令带回模型面）。
+///
+/// 为什么需要：被挂起的回合**从不 commit**（无 assistant 消息 / 无 `turn_end` / 无 history
+/// node），审批续轮的消息只从已提交历史重建 ⇒ 该回合的用户原始指令在续轮请求里完全缺席
+/// （现场反例 `pa_01a1e905` 的 `turn-45f905c5`），模型退回上一轮任务。这里在挂起瞬间
+/// 捕获「本回合 turn_id + 最近一条非空用户指令」，由续轮一次性消费。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuspendedTurnContext {
+    pub turn_id: String,
+    pub user_message: String,
+}
+
+/// 把"被挂起回合的原用户指令"与"宿主续轮文案"拼成模型面正文（提示词上下文），
+/// 让批准/拒绝续轮不丢原任务意图。context 缺失或指令为空白 ⇒ 原样返回 prompt（fail-open，保持旧行为）。
+///
+/// 输出格式（契约 C6，逐字）：
+/// ```text
+/// 【挂起前用户指令（宿主补录）】
+/// <user_message.trim()>
+///
+/// 【宿主续轮】
+/// <prompt>
+/// ```
+pub fn compose_approval_resume_message(context: Option<&SuspendedTurnContext>, prompt: &str) -> String {
+    let Some(context) = context else {
+        return prompt.to_string();
+    };
+    let instruction = context.user_message.trim();
+    // fail-open：空白指令不得产出「只有段标的空壳」（旧行为逐字保留）。
+    if instruction.is_empty() {
+        return prompt.to_string();
+    }
+    format!("【挂起前用户指令（宿主补录）】\n{instruction}\n\n【宿主续轮】\n{prompt}")
+}
+
 /// wave-65 R2（F3）：从**待决快照项**推导审批计划（唯一决策口径，纯函数、可单测）。
 ///
 /// - 授权路径**只**取结构化 `options.path`（**不回退** `callId` —— 它不是路径，
@@ -8382,6 +8496,27 @@ pub fn apply_approval_decision(
         }
     }
     Some(plan.prompt.to_string())
+}
+
+/// F-12（C8/B3）：审批续轮的 `TurnInput` 组装（唯一生产口径，事件循环与单测共用同一符号）。
+///
+/// 两条不可替换的语义：
+/// - `message` 必须是「原用户指令 + 宿主续轮文案」的组合正文（模型面），由
+///   [`TuiState::take_approval_resume_message`] 一次性消费捕获；
+/// - `display_message` **必须为 `None`**：运行时落库 user 行取 `display_message`
+///   （`runtime/turn_prep.rs` 的回落 + `runtime/turn_persist.rs` 的 append），置 `Some` 会让
+///   历史里只留宿主文案，下一轮又从历史重建 ⇒ F-12 只修一轮。
+fn build_approval_resume_turn_input(
+    state: &mut TuiState,
+    prompt: &str,
+    provider_id: String,
+    model_id: String,
+) -> TurnInput {
+    let model_message = state.take_approval_resume_message(prompt);
+    let mut input = build_turn_input(state, model_message, provider_id, model_id);
+    // B1：落库取 display_message ⇒ 置 None 才会把组合正文写进历史（也借此让界面无用户气泡）。
+    input.display_message = None;
+    input
 }
 
 /// 契约 F-M：**全部问题答完后**一次性提交答案并恢复任务流。
@@ -11289,6 +11424,11 @@ fn tui_event_loop(
                                             prov_name, env_name
                                         );
                                         state.add_user_message(&input);
+                                        // F-12（INV-5/A5）：提交失败（未进入流式态）⇒ 挂起上下文与
+                                        // 未消费的提交登记一并作废，避免污染下一轮。
+                                        state.suspended_turn_context = None;
+                                        state.pending_user_turn = None;
+                                        state.resume_instruction = None;
                                         state.messages.push(ChatMessage {
                                             role: MessageRole::System,
                                             content: err_msg,
@@ -11394,6 +11534,11 @@ fn tui_event_loop(
                                 state.status_notice = None;
                                 state.context_window_tokens = resolve_context_window_tokens(&state);
                                 state.add_user_message(&input);
+                                // F-12（INV-5）：用户新提交消息 ⇒ 旧挂起上下文作废，
+                                // 避免陈旧的「上一被挂起回合指令」污染下一轮续轮。
+                                state.suspended_turn_context = None;
+                                // C9：新一轮用户提交是新的意图真源，续轮留痕一并作废。
+                                state.resume_instruction = None;
                                 state.is_streaming = true;
                                 // C24②：提交成功 ⇒ 立即清单飞闩（此后由 is_streaming 兜住并发）。
                                 queue_dispatch_deadline = None;
@@ -11405,6 +11550,13 @@ fn tui_event_loop(
                                 state.turn_started_at = Some(std::time::Instant::now());
 
                                 let turn_id_str = format!("turn-{}", uuid::Uuid::new_v4());
+                                // F-12（B2）：登记本回合用户指令 + 轮次身份，供挂起时一次性认领
+                                //（**不**从 UI 气泡反查：goal 轮 / Ask 续轮 / 审批续轮都不产生
+                                // 用户气泡，反查会把更早某轮的旧指令贴成「挂起前指令」）。
+                                state.pending_user_turn = Some(SuspendedTurnContext {
+                                    turn_id: turn_id_str.clone(),
+                                    user_message: input.clone(),
+                                });
                                 let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
                                 let _turn_sink_guard =
                                     TuiTurnSinkGuard::new(&control_plane, &turn_id_str, Arc::clone(&sink));
@@ -11742,6 +11894,11 @@ fn tui_event_loop(
                     state.is_streaming = false;
                     state.stopping_turn_id = None;
                     state.streaming_turn_id = None;
+                    // F-12（C9/INV-5）：轮次终态后不存在「再挂起」⇒ 挂起/提交/链式留痕三个槽位
+                    // 一并作废；残留只会被后续 goal 自动续轮的审批误 seed（旧链指令当本轮指令）。
+                    state.suspended_turn_context = None;
+                    state.pending_user_turn = None;
+                    state.resume_instruction = None;
                     state.clear_provider_retry();
                     // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
                     state.status_dwell.reset();
@@ -11841,6 +11998,10 @@ fn tui_event_loop(
                     // wave-60 §C7/C9：失败是终态之一 ⇒ 必须清 stopping 兜底态（不得卡在「正在停止…」）。
                     state.stopping_turn_id = None;
                     state.streaming_turn_id = None;
+                    // F-12（C9/INV-5）：失败同为终态 ⇒ 同源清空三个会话瞬时槽位（见 StreamCompleted）。
+                    state.suspended_turn_context = None;
+                    state.pending_user_turn = None;
+                    state.resume_instruction = None;
                     // 终态不再渲染流式状态行：驻留态一并清空（下一轮首帧不得闪出旧工具文案）。
                     state.status_dwell.reset();
                     state.upstream_idle.reset();
@@ -12012,6 +12173,16 @@ fn tui_event_loop(
                     // 复用既有轮次线程基建：TuiTurnSink + TuiTurnSinkGuard + current_turn_id +
                     // turn_loop_in_flight + inflight_turns；界面进入流式态。
                     // **不** add_user_message：续轮提示是宿主文案，不得新增用户气泡。
+                    // F-12（C8）：`TurnSuspended` 为 Ask 与 Approval 共用 ⇒ Ask 挂起时也会写入
+                    // 捕获；Ask 续轮是 run-bound 续跑（自带上下文），宿主文案不进模型面，但
+                    // **原用户指令必须留痕**：应答后若又撞审批（链式挂起），后续续轮仍要带回它。
+                    if let Some(ctx) = state.suspended_turn_context.take() {
+                        let text = ctx.user_message.trim().to_string();
+                        if !text.is_empty() {
+                            state.resume_instruction = Some(text);
+                        }
+                    }
+                    state.pending_user_turn = None;
                     state.begin_turn_usage();
                     state.status_notice = None;
                     state.context_window_tokens = resolve_context_window_tokens(&state);
@@ -12035,6 +12206,8 @@ fn tui_event_loop(
                     turn_input.display_message = Some(ASK_RESUME_CONTINUATION_PROMPT.to_string());
 
                     let turn_id_str = format!("turn-ask-resume-{}", uuid::Uuid::new_v4());
+                    // F-12（C9）：Ask 续轮自身也可能再次挂起 ⇒ 以本轮 turn_id 登记 pending。
+                    state.seed_pending_after_resume(&turn_id_str);
                     let turn_id_for_log = turn_id_str.clone();
                     let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
                     let resume_sink_guard =
@@ -12139,17 +12312,19 @@ fn tui_event_loop(
                     let resume_provider_id = resolve_active_provider_id(&state)
                         .unwrap_or_else(|| state.current_provider_id.clone());
                     let resume_model_id = state.model.clone();
-                    let mut turn_input = build_turn_input(
-                        &state,
-                        prompt.clone(),
+                    // F-12（C8/B3）：续轮 `TurnInput` 只经唯一生产接缝组装 —— 组合正文进
+                    // `message`（模型面 + 落库面），`display_message=None`（见接缝注释）。
+                    let turn_input = build_approval_resume_turn_input(
+                        &mut state,
+                        &prompt,
                         resume_provider_id,
                         resume_model_id,
                     );
-                    // 固定宿主续轮文案：非空（`prepare_turn` 的 reject_empty）+ 与展示一致。
-                    turn_input.message = prompt.clone();
-                    turn_input.display_message = Some(prompt.clone());
 
                     let turn_id_str = format!("turn-approval-resume-{}", uuid::Uuid::new_v4());
+                    // F-12（C9）：续轮自身再次挂起（链式：连续两个工作区外路径）时，必须有
+                    // 本轮 pending 才能认领原指令 ⇒ 以本轮 turn_id 登记。
+                    state.seed_pending_after_resume(&turn_id_str);
                     let turn_id_for_log = turn_id_str.clone();
                     let turn_id_for_failure = turn_id_str.clone();
                     let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
@@ -12274,6 +12449,10 @@ fn tui_event_loop(
                     }
                 }
                 UiEvent::TurnSuspended { .. } => {
+                    // F-12：挂起瞬间捕获本回合原用户指令（被挂起回合从不 commit ⇒ 续轮
+                    // 只能靠这里把意图带回模型面）。Ask 与 Approval 共用本事件，Ask 侧由
+                    // `UiEvent::AskResumeTurn` 负责清理。
+                    state.capture_suspended_turn_context();
                     state.is_streaming = false;
                     state.status_text = "等待用户输入确认...".to_string();
                     // B220：挂起期在等**用户**，不是在等上游 ⇒ 静默窗口退出（否则会误报上游告警）。

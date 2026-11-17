@@ -62,7 +62,9 @@
   （`take_approval_resume_message` 注入时写入；Ask 续轮启动时从 `suspended_turn_context` 转存）。
   每个续轮在生成自身 `turn_id` 后调用 `seed_pending_after_resume(turn_id)`，把该指令登记成本轮的
   `pending_user_turn` ⇒ 再次挂起时可被 `capture_suspended_turn_context` 认领。
-- 清除时机与 `suspended_turn_context` 同源：composer 主提交、API-key 失败分支、`reset_session_scope`。
+- 清除时机与 `suspended_turn_context` 同源：composer 主提交、API-key 失败分支、`reset_session_scope`，
+  以及**轮次终态**（`UiEvent::StreamCompleted` / `StreamFailed`：终态后不可能再挂起，残留只会被后续
+  goal 自动续轮的审批误 seed）。
 
 **C8 — 观测与收口**
 - 续轮取用时落一条 `[pony-tui] approval_resume_context: injected=<bool> turn=<id|-> user_chars=<n>` 诊断（现场可判"是否真的注入"）。
@@ -98,7 +100,9 @@
 ## 4. 门禁
 
 - 机器：`cargo check -p pony-agent-core --bin pony` exit 0；`cargo test -p pony-agent-core --bin pony approval_resume_context` exit 0；
-  存量回归：`cargo test -p pony-agent-core --bin pony`（bin 全量，至少 `wave65*`/`running_status_visibility` 不得回归）。
+  存量回归：`--bin pony approval`（19 例，含 wave65 C4/R2/R3 + ask_lifecycle）、`--bin pony running_status_visibility`、`--bin pony composer_history_recall` 三条子集全绿。
+  **豁免登记**：bin 全量套件本卡不跑 —— 既有 `ask_lifecycle_settle_tests` 单例 >60s、并行跑把 load 推到 37（>1.5×16 的预算上限），
+  违反 `.dev-team/build-budget.json` 的并发预算；本卡改动不触及那些用例的调用面（仅新增字段/纯函数/事件臂），子集已覆盖受影响面。
 - 审查：A 级 1 路靶向审查（视角：状态流转 + 假注入/重复注入 + INV-5 陈旧清除）。
 - 文档：ADR `.agents/notes/implemented/bug-fix/2026-11-17-approval-resume-suspended-context.md`（`npm run adr:check` exit 0）；
   账本 `B232` record→start→resolve。
