@@ -1,0 +1,70 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "ec2b8387-2641-485f-b779-d284bbdcec67",
+    "fresh_context": true
+  },
+  "executed_by": "ec2b8387-2641-485f-b779-d284bbdcec67",
+  "reviewed_commit": "985d0e02",
+  "review_scope_note": "计划/冻结测试对抗审查（只读 subagent，Lead 按其原始输出机械转写为 JSON 收据）。对象 = 契约 C6/C7/C8 + 8 例冻结测试；3 BLOCKING 全部在 v2 采纳（B1 display_message 落库口径、B2 捕获不得反查 UI 气泡、B3 接线零断言→生产接缝），6 条 ADVISORY 中 A5（API-key 失败分支清空）采纳、其余登记。",
+  "attestation": {
+    "self_signed": true
+  },
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs",
+    ".dev-team/contract-matrix-approval-resume-context.md"
+  ],
+  "resolutions": [
+    {
+      "id": "B1",
+      "claim": "续轮 display_message=Some(prompt) ⇒ 落库 user 行取 display_message，组合正文只进本轮请求",
+      "result": "RESOLVED",
+      "evidence_cmd": "sed -n '120,132p' crates/pony-agent-core/src/agent/runtime/turn_prep.rs; sed -n '196,212p' crates/pony-agent-core/src/agent/runtime/turn_persist.rs"
+    },
+    {
+      "id": "B2",
+      "claim": "capture 从 state.messages 反查用户气泡 ⇒ goal/续轮无气泡时张冠李戴",
+      "result": "RESOLVED",
+      "evidence_cmd": "sed -n '9250,9275p' crates/pony-agent-core/src/bin/tui.rs; sed -n '1900,1930p' crates/pony-agent-core/src/bin/tui.rs"
+    },
+    {
+      "id": "B3",
+      "claim": "8 例全为纯函数/状态方法，接线点零断言（假绿）",
+      "result": "RESOLVED",
+      "evidence_cmd": "grep -n 'build_approval_resume_turn_input' crates/pony-agent-core/src/bin/tui.rs crates/pony-agent-core/tests/../src/bin/tui/tests/approval_resume_context_tests.rs"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+      "line": 125,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '120,132p' crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 1905,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "sed -n '9250,9275p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs",
+      "line": 32,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "grep -n 'capture_suspended_turn_context' crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 11378,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "sed -n '11372,11396p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY"
+    }
+  ]
+}

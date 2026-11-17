@@ -1599,3 +1599,22 @@ note: >-
       `agent::goal::wave1_tests::missing_session_id_is_rejected_instead_of_falling_back_to_default`、
       `tests/tui_batch2_regression.rs::n8b_cancel_token_is_partitioned_per_session`、
       `n8b_cancel_token_drives_the_round_abort_decision`、`tests/pa109_goal_acceptance.rs`（3 例）。
+
+  【归属登记（2026-11-17）｜审批续轮带回被挂起回合用户指令（ADR：.agents/notes/implemented/bug-fix/2026-11-17-approval-resume-suspended-context.md；backlog: B232）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改变**本地 TUI 审批续轮的模型面上下文拼装**，
+  无新增网络 IO、无新增后台常驻任务、无 `/metrics` 出口、无新增外部接口或 LLM 调用。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面进程无常驻监听地址、无 pull 模型）。
+  (2) 变更面：`crates/pony-agent-core/src/bin/tui.rs` 新增 `TuiState.suspended_turn_context`
+      （挂起即捕获本回合用户指令）、纯函数 `compose_approval_resume_message`（原指令 + 宿主续轮文案），
+      `UiEvent::ApprovalResumeTurn` 经唯一接缝 `build_approval_resume_turn_input` 用它作为 `turn_input.message`，
+      并把 `display_message` 置 `None`（运行时落库 user 行取 `display_message`；置 None 才把组合正文写进历史，
+      否则只修一轮）。新提交 / API-key 失败 / 会话作用域复位 / Ask 续轮清空捕获；链式挂起经
+      `resume_instruction` + `seed_pending_after_resume` 不丢原指令。
+  (3) 新增**本地取证面**（非遥测出口，只落 stderr → `~/.pony-agent/tui-logs/tui-runtime.log`）：
+      `approval_resume_context: injected=<bool> turn=<id|-> user_chars=<n>`；只含布尔/轮次 id/字符数，
+      不含用户正文与凭据。
+  (4) 收口点：不新增 enforcement_point（无新网络出口、无新异常边界）；行为门落在单测——
+      `crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs`（12 例，契约
+      `.dev-team/contract-matrix-approval-resume-context.md` C6/C7/C8）。
