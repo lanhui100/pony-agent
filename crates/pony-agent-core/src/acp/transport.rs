@@ -688,7 +688,12 @@ fn apply_acp_child_env_extras(command: &mut Command) {
     for key in ACP_CHILD_ENV_EXTRA_ALLOWLIST {
         if is_denied_env_key(key) {
             // 与显式声明同口径：只打键名，绝不打值。
-            eprintln!("[acp] ACP 扩展 env `{key}` 命中 deny 表，已跳过（fail-closed）。");
+            crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "acp 扩展 env 命中 deny 表，已跳过（fail-closed；只记键名）",
+                None,
+                &[("key", json!(key))],
+            );
             continue;
         }
         if let Some(value) = std::env::var_os(key) {

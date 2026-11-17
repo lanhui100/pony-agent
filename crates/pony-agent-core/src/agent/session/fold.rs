@@ -2472,6 +2472,7 @@ mod tests {
                     turn_id: "turn-1".to_string(),
                     branch_id: "main".to_string(),
                     events: Vec::new(),
+                    event_times_ms: Vec::new(),
                 },
             ),
             envelope(

@@ -276,9 +276,9 @@ where
     }
 }
 
-/// 权限 fail-closed 诊断（只写进程 stderr，绝不污染协议 stdout）。
+/// 权限 fail-closed 诊断（结构化 JSON 日志：json + trace_id；绝不写协议 stdout 的报文流）。
 fn cancelled_permission_response(reason: &str) {
-    eprintln!("[acp] {reason}");
+    crate::agent::otel::log::log_json("warn", reason, None);
 }
 
 fn invalid_params(method: &str, error: String) -> AcpInboundResponse {
@@ -604,8 +604,10 @@ impl AcpAgentClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !slots.declared.fs {
             // B3：握手已固化「不声明 fs」⇒ 装配被拒绝（不追认新能力；绝不执行反向请求）。
-            eprintln!(
-                "[acp][client] 拒绝装配 FsHandler：本会话 initialize 未声明 clientCapabilities.fs（fail-closed，不追认）。"
+            crate::agent::otel::log::log_json(
+                "warn",
+                "acp 拒绝装配 FsHandler：本会话 initialize 未声明 clientCapabilities.fs（fail-closed，不追认）",
+                None,
             );
             return;
         }
@@ -619,8 +621,10 @@ impl AcpAgentClient {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !slots.declared.terminal {
-            eprintln!(
-                "[acp][client] 拒绝装配 TerminalHandler：本会话 initialize 未声明 clientCapabilities.terminal（fail-closed，不追认）。"
+            crate::agent::otel::log::log_json(
+                "warn",
+                "acp 拒绝装配 TerminalHandler：本会话 initialize 未声明 clientCapabilities.terminal（fail-closed，不追认）",
+                None,
             );
             return;
         }
@@ -693,8 +697,11 @@ impl AcpAgentClient {
             Some(session_id) => self.session_id = Some(session_id.to_string()),
             None => {
                 // 两形态兼容：opencode 只回 configOptions/modes ⇒ 沿用请求 id（不伪造）。
-                eprintln!(
-                    "[acp][client] session/load 响应缺 sessionId，沿用请求中的会话标识 `{fallback_session_id}`。"
+                crate::agent::otel::log::log_json_with_fields(
+                    "info",
+                    "acp session/load 响应缺 sessionId，沿用请求中的会话标识（不伪造）",
+                    None,
+                    &[("session_id", json!(fallback_session_id))],
                 );
                 self.session_id = Some(fallback_session_id);
             }
@@ -715,7 +722,12 @@ impl AcpAgentClient {
             Ok(_) => Ok(()),
             Err(AcpTransportError::Unsupported(message)) => {
                 // 能力降级：agent 不支持 session/close 不构成失败（调用方跳过该能力即可）。
-                eprintln!("[acp][client] session/close 不受支持，降级跳过：{message}");
+                crate::agent::otel::log::log_json_with_fields(
+                    "info",
+                    "acp session/close 不受支持，降级跳过（不视为失败）",
+                    None,
+                    &[("message", json!(message))],
+                );
                 Ok(())
             }
             Err(error) => Err(error),

@@ -1457,9 +1457,10 @@ impl SqliteSessionBackend {
                 turn_id,
                 branch_id,
                 events,
+                event_times_ms,
                 ..
             } => {
-                self.flush_events_tx(tx, session_id, turn_id, branch_id, events)?;
+                self.flush_events_tx(tx, session_id, turn_id, branch_id, events, event_times_ms)?;
             }
             PersistCommand::PublishMetadata { key, value, .. } => {
                 tx.execute(
@@ -1471,9 +1472,12 @@ impl SqliteSessionBackend {
         }
         Ok(())
     }
-    /// turn 终态 flush：为事件批次分配连续 seq（0-based，从计数器起）并写入
+    /// 事件批次 flush：为事件批次分配连续 seq（0-based，从计数器起）并写入
     /// `turn_events`，计数器与事件行同事务更新。`#[cfg(test)]` 注入点位于
     /// 事件行写入与计数器更新之间，用于验证事务回滚（两表均无残留）。
+    ///
+    /// wave-acp-delegate C6.2：`created_at_ms` 逐事件取 `event_times_ms[i]`（事件真实产生
+    /// 时刻）；缺失/为 0 ⇒ 回落批首时间（legacy 兼容，绝不写 0 冒充真值）。
     fn flush_events_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -1481,6 +1485,7 @@ impl SqliteSessionBackend {
         turn_id: &str,
         branch_id: &str,
         events: &[crate::agent::turn_event::TurnEvent],
+        event_times_ms: &[u64],
     ) -> Result<(), String> {
         if events.is_empty() {
             return Ok(());
@@ -1510,6 +1515,12 @@ impl SqliteSessionBackend {
             .unwrap_or(0);
         for (offset, event) in events.iter().enumerate() {
             let seq = next_seq + offset as i64;
+            // wave-acp-delegate C6.2：逐事件真实产生时刻；缺失/0 ⇒ 回落批首时间（legacy）。
+            let created_at_ms = event_times_ms
+                .get(offset)
+                .copied()
+                .filter(|stamp| *stamp > 0)
+                .unwrap_or(now);
             // PA-094：大字段外置——ContextObservation 事件携带全量 payload 时，
             // 写入 build_context_observations 表并改为只含引用的落盘形态。
             let payload = self
@@ -1539,10 +1550,28 @@ impl SqliteSessionBackend {
                     seq,
                     event.type_name(),
                     payload,
-                    now
+                    created_at_ms as i64
                 ],
             )
             .map_err(|e| format!("flush event insert: {e}"))?;
+        }
+        // wave-acp-delegate C6.2：会话 `createdAt` = 会话创建时刻（**不是**首轮 flush 时刻）。
+        // 事件是会话最早的自身时间证据（`turn:started` 即会话首条活动）⇒ 取本批最早事件时刻，
+        // 且只允许**前移**（`MIN` 单调），已有更早值不被覆盖；列仍为 NULL 的旧库被补写。
+        // 无逐事件时间（legacy 调用面）⇒ 无从得知创建时刻，不写（禁止用 flush 时刻冒充）。
+        if let Some(earliest_event_ms) = event_times_ms
+            .iter()
+            .copied()
+            .filter(|stamp| *stamp > 0)
+            .min()
+        {
+            tx.execute(
+                "UPDATE normalized_sessions \
+                 SET created_at_ms = CASE WHEN created_at_ms IS NULL THEN ?2 ELSE MIN(created_at_ms, ?2) END \
+                 WHERE session_id = ?1",
+                params![session_id, earliest_event_ms as i64],
+            )
+            .map_err(|e| format!("flush session created_at: {e}"))?;
         }
         #[cfg(test)]
         if let Some(suffix) = TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX
@@ -1751,7 +1780,8 @@ impl SqliteSessionBackend {
                 .unchecked_transaction()
                 .map_err(|e| format!("begin tx: {e}"))?;
             if !events.is_empty() {
-                self.flush_events_tx(&tx, &session_id, "backfill", "main", &events)?;
+                // wave-acp-delegate C6.2：backfill 事件无逐事件时间戳（迁移路径）⇒ 空数组（回落批首时间）。
+                self.flush_events_tx(&tx, &session_id, "backfill", "main", &events, &[])?;
             }
             tx.execute(
                 "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, 'done')",
@@ -4931,6 +4961,7 @@ mod tests {
             turn_id: "turn-1".to_string(),
             branch_id: "main".to_string(),
             events: events.clone(),
+            event_times_ms: Vec::new(),
         });
         assert_eq!(outcome, PersistCommandOutcome::Succeeded);
 
@@ -4979,6 +5010,7 @@ mod tests {
             events: vec![TurnEvent::TurnStart {
                 turn_id: "turn-2".into(),
             }],
+            event_times_ms: Vec::new(),
         });
         assert_eq!(outcome, PersistCommandOutcome::Succeeded);
         let conn = backend.connection().expect("connection");
@@ -5029,6 +5061,7 @@ mod tests {
                     error: None,
                 },
             ],
+            event_times_ms: Vec::new(),
         });
         TEST_INJECT_FLUSH_FAILURE_DB_SUFFIX
             .lock()
@@ -5071,6 +5104,7 @@ mod tests {
             events: vec![TurnEvent::TurnStart {
                 turn_id: "turn-1".into(),
             }],
+            event_times_ms: Vec::new(),
         });
         assert_eq!(outcome, PersistCommandOutcome::Succeeded);
         let conn = backend.connection().expect("connection");
@@ -5102,6 +5136,7 @@ mod tests {
             turn_id: "turn-1".to_string(),
             branch_id: "main".to_string(),
             events: Vec::new(),
+            event_times_ms: Vec::new(),
         });
         assert_eq!(
             outcome,
@@ -5143,6 +5178,7 @@ mod tests {
                         events: vec![TurnEvent::TurnStart {
                             turn_id: format!("turn-{thread_id}-{i}"),
                         }],
+                        event_times_ms: Vec::new(),
                     });
                     assert_eq!(outcome, PersistCommandOutcome::Succeeded);
                 }
@@ -5673,6 +5709,7 @@ mod tests {
                     error: None,
                 },
             ],
+            event_times_ms: Vec::new(),
         });
         assert_eq!(outcome, PersistCommandOutcome::Succeeded);
 
@@ -6029,6 +6066,7 @@ mod tests {
             turn_id: "turn-1".to_string(),
             branch_id: "main".to_string(),
             events: flush_events,
+            event_times_ms: Vec::new(),
         });
         assert_eq!(outcome, PersistCommandOutcome::Succeeded);
 
@@ -6186,6 +6224,7 @@ mod tests {
             turn_id: "turn-1".to_string(),
             branch_id: "main".to_string(),
             events: flush_events,
+            event_times_ms: Vec::new(),
         });
         assert_eq!(outcome, PersistCommandOutcome::Succeeded);
 
