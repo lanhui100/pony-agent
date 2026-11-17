@@ -12,10 +12,10 @@ Status: implemented
 
 以 additive 契约修复四面（真源 `.dev-team/contract-matrix-acp-delegate-p0p2.md` C0.1–C6.3）：
 
-- **C0**：`acp_delegate` 成功结果增 `finalText`/`finalTextTruncated`/`usage`；`AgentMessageChunk` 按到达序拼接，32,000 字符（`ACP_DELEGATE_FINAL_TEXT_MAX_CHARS` 单一常量）前缀截断；空正文如实提示；非 `end_turn` 路径不变。
+- **C0**：`acp_delegate` 成功结果增 `finalText`/`finalTextTruncated`/`usage`；`AgentMessageChunk` 按到达序拼接，32,000 字符（`ACP_DELEGATE_FINAL_TEXT_MAX_CHARS` 单一常量）前缀截断；空正文如实提示；`truncated`（撞输出/轮次上限）仍回传 finalText 且 `finalTextTruncated=true`；refused/cancelled/error 不产 finalText。
 - **C1**：外部 `tool_call/tool_call_update` 以父 session/turn/call_id 经 `turn_flow::emit_external_turn_event` 落父 turn `turn:tool`（`parent_activity_id=call_id`、状态词表映射、turn_id 不取 ACP session id）；无通道/无上下文静默跳过；文本 chunk 不混入父 assistant 流。
 - **C2**：`usage_update` 的 used/size/cost 进结果 JSON 与结构化日志，不写 `usage_ledger`（外部计费口径不同源）。
-- **C3**：`src/acp/**` 32 处裸 `eprintln!` 迁移到 `agent::otel::log`（json + trace_id）；CLI `--resume` 补一条结构化诊断。
+- **C3**：`src/acp/**` 32 处裸 `eprintln!` 迁移到 `agent::otel::log`（json + trace_id）；CLI `--resume` 补一条结构化诊断；`ponycli acp` 在 jsonl/sse 下入口即改道 stderr（保 wave-59 C1）。
 - **C4**：`ToolCall/ToolResult.step` 取产生该调用的 turn step index（`payload.step`，None≡0），删除 `payload.sequence` 误用；`parent_activity_id` 从 activity 透传。
 - **C5**：`ProviderCallCacheRecord` 增 `attempts/failed_attempt_ms/prelude_ms`，由 `ProviderCallRetryMeta` 单一真源从 `ProviderAttemptWindow` 结算（无重试 attempts=Some(1)，失败/前奏时长仅重试时 Some(>0)）。
 - **C6**：step 边界 drain-on-success 增量 flush；`FlushEvents.eventTimes` 逐事件时间戳；会话 `createdAt` 取最早事件时刻；崩溃后已 flush 事件可回读且 turn 未完成。

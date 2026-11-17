@@ -12,7 +12,7 @@
 | C0.1 | `acp_delegate` 成功结果 JSON 必含 `finalText`（AgentMessageChunk 文本按到达顺序拼接）与 `finalTextTruncated: bool`；保留 `ok/sessionId/stopReason/updates/warnings/summary`。 | T-ACP-01 | P0 |
 | C0.2 | 无 AgentMessageChunk ⇒ `finalText=""`、`finalTextTruncated=false`，`summary.text` 明示"未返回文本正文"，不得伪装内容。 | T-ACP-02 | P0 |
 | C0.3 | 正文 > 32_000 字符 ⇒ 保留前缀 + `finalTextTruncated=true`；上限为单一常量真源。 | T-ACP-03 | P0 |
-| C0.4 | 非 `end_turn` 归约（truncated/refused/cancelled/error）行为不变，且不出现 `finalText`。 | T-ACP-04 | P0 |
+| C0.4 | `truncated`（max_tokens/max_turn_requests）归约保持 `truncated:true` 且**回传 finalText**（`finalTextTruncated=true`）；refused/cancelled/error 行为不变且不出现 `finalText`。 | T-ACP-04 | P0 |
 | C0.5 | 工具描述（模型可见）声明结果含 `finalText` 正文；与实际行为一致。 | T-ACP-05 | P0 |
 | C1.1 | 委派期间 ACP `tool_call`/`tool_call_update` 归集为父 turn `turn:tool` 事件：`parent_activity_id == acp_delegate call_id`（`TurnEvent::ToolCall/ToolResult` 增 additive 字段承载），事件 session_id/turn_id = 父会话/父 turn，并落入 `turn_events`。 | T-VIS-01 | P1 |
 | C1.2 | 外部 agent 文本 chunk 不得混入父 assistant 正文流（父 `assistant_message` 不含其内容）。 | T-VIS-02 | P1 |
@@ -20,7 +20,7 @@
 | C1.4 | ACP 状态词表映射：`pending|in_progress→running`、`completed→done`、`failed→failed`、`cancelled→aborted`，确保父 turn 事件被正确判为 ToolCall/ToolResult。 | T-VIS-04 | P1 |
 | C1.5 | 归集事件的 `turn_id` 不得为 ACP session id（必须改写为父 turn id）；`parent_activity_id` 不得为空。 | T-VIS-05 | P1 |
 | C2.1 | ACP `usage_update` 的 used/size（及可选 cost）进入结果 JSON `usage` 字段并写结构化日志；不写 `usage_ledger`（Non-Goal 3）。 | T-USE-01 | P1 |
-| C3.1 | `crates/pony-agent-core/src/acp/**` 非测试代码零裸 `eprintln!`，诊断走 `agent::otel::log`（json + trace_id）。 | T-LOG-01 | P1 |
+| C3.1 | `crates/pony-agent-core/src/acp/**` 非测试代码零裸 `eprintln!`，诊断走 `agent::otel::log`（json + trace_id）；CLI `acp` 在 jsonl/sse 下日志改道 stderr（遵守 wave-59 C1 stdout 纯净）。 | T-LOG-01 | P1 |
 | C4.1 | `TurnEvent::ToolCall/ToolResult.step` = 产生该调用的 turn step index（与 `StepStart/AssistantChunk.step` 同源），不得用事件 sequence；ACP 子活动 step=0（未知 hop，None≡0）。 | T-STEP-01 | P2 |
 | C5.1 | `ProviderCallCacheRecord` additive 字段：`attempts` 恒 Some(≥1)；`failed_attempt_ms`/`prelude_ms` 仅当发生失败重试时 Some(>0)，否则键缺席；可经 `session_turn_traces.providerCallRecords` 回读。 | T-RETRY-01 | P2 |
 | C6.1 | 每 step 结束增量落盘：截至该 step 的事件已在 `turn_events` 可读，终态仍写 `turn_end`；同事件不重复。 | T-PERSIST-01 | P2 |
