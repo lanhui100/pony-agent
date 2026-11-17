@@ -1,0 +1,33 @@
+{
+  "wave": "acp-delegate-p0p2",
+  "task": "task-1（W1 Protocol 冻结）",
+  "theme": "ACP 委派缺陷修复 P0–P2（acp_delegate 正文回传 / 子活动归集 / usage / 结构化日志 / step 语义 / retry 元数据 / 轮内增量落盘）",
+  "baseline_commit": "c5761b27",
+  "contract": ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+  "claim_policy": "本文件只声明本波次的**目标基准与冻结常量**，不声称任何实现已通过：machine_verified 一律为 false，直到对应门禁用例真实跑绿并由 Lead 在收据中登记。全局 .dev-team/nfr-baseline.json 保持不动（其 27 项存量失败非本波引入，不夹带修复）。",
+  "external_call_timeout_ms": 3000,
+  "external_call_timeout_scope": "单次外部（网络）往返的通用上限。ACP 场景的例外口径沿用全局基线的 acp 段：transport::ACP_REQUEST_TIMEOUT=5000（单请求）、ACP_DEFAULT_TURN_BUDGET=120s（整轮委派预算），二者不构成对本字段的重新解释。",
+  "retry": {
+    "max_attempts": 3,
+    "backoff_ms": 500,
+    "backoff_cap_ms": 1000,
+    "note": "本波不改变既有重试策略，只把**重试事实**观测化（契约 C5.1）：ProviderCallCacheRecord.attempts / failed_attempt_ms / prelude_ms。attempts 恒 Some(≥1)，failed_attempt_ms 与 prelude_ms 仅重试时 Some(>0)、否则键缺席。"
+  },
+  "concurrency_lock": {
+    "type": "acp_session_prompt_gate",
+    "timeout_ms": 600000,
+    "note": "同一 ACP 会话的 session/prompt 串行闸：锁等待上限 600000ms，覆盖排队的一整轮委派 + 收尾（整轮预算常量 ACP_DEFAULT_TURN_BUDGET=120s 见 crates/pony-agent-core/src/acp/mod.rs；600s 是闸门等待上限，不是单轮预算的替代口径）。"
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": "agent::otel::log 自动回落 current_trace_id",
+    "note": "契约 C3.1：crates/pony-agent-core/src/acp/** 非测试代码零裸 eprintln!，诊断统一走 agent::otel::log（json 行 + trace_id 自动回落 current_trace_id）。"
+  },
+  "resource_release": [
+    "acp_child_process_close",
+    "pending_permissions",
+    "terminal_handles"
+  ],
+  "resource_release_note": "ACP 委派结束（成功/失败/取消/超时）必须回收：外部 agent 子进程（close/kill，禁僵尸）、未决权限请求（pending permission 清空并向对方发取消）、宿主终端句柄（terminal/* 资源释放）。",
+  "machine_verified": false
+}

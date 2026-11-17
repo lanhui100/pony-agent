@@ -1,0 +1,19 @@
+{
+  "wave": "acp-delegate-p0p2",
+  "base_commit": "c5761b27",
+  "branch": "fix/acp-delegate-p0p2",
+  "cmd": "bash scripts/cargo-lane.sh test -p pony-agent-core --lib -- --test-threads=4",
+  "cwd": "/home/dm/pony-agent-worktrees/acp-delegate-p0p2",
+  "exit_code": 0,
+  "result": "test result: ok. 1607 passed; 0 failed; 0 ignored; finished in 216.97s",
+  "log": "/tmp/acp-baseline-lib.log",
+  "recorded_at": "2026-11-17T19:41:00+08:00",
+  "note": "基线在 Protocol 空桩落盘前编译完成（cargo 编译快照=基线源），后续 additive 字段的测试字面量同步属 derivative 编译适配。",
+  "derivative_scopes": [
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs (仅 tests 字面量补 3 字段)",
+    "crates/pony-agent-core/src/agent/session/tests.rs (仅字面量补 3 字段)",
+    "crates/pony-agent-core/src/agent/projection.rs (仅字面量补 3 字段)",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs (仅 tests 字面量补 3 字段)",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs (字面量补 3 字段 + 注释)"
+  ]
+}
