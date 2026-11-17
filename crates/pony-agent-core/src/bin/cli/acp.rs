@@ -45,6 +45,14 @@ fn run_acp_client_mode(args: &[String]) -> i32 {
         Err(code) => return code,
     };
 
+    // L3-P BLOCKING 修复（wave-59 契约 C1）：`ponycli acp` 由 `main` 在本文件**之前**拦截，
+    // 从未经过 `ObservabilityBootstrap` 的日志改道 ⇒ `jsonl/sse` 下 `agent::otel::log` 的结构化
+    // 日志会混入 stdout，破坏「stdout 只承载事件」。这里在解析出输出格式后补上同一开关
+    // （幂等；text 模式逐字不变，仍走既有 stdout 诊断面）。
+    if parsed.output_format != OutputFormat::Text {
+        pony_agent_core::agent::otel::log::set_stderr_output(true);
+    }
+
     // 0) B185：`--list`（agent 清单）与 `--list-sessions`（会话清单）语义不同，不得混用。
     if parsed.list && parsed.list_sessions {
         return acp_usage_error(

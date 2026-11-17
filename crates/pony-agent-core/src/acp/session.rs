@@ -1421,15 +1421,21 @@ impl AcpAgentSession {
             updates: updates.len(),
             warnings: warnings.to_vec(),
         };
+        // 正文 / 用量归约与是否「成功轮」解耦：**所有**成功面（`end_turn` 与 stopReason 上限收尾的
+        // `max_tokens`/`max_turn_requests`）都必须带回正文，否则模型调用方拿到「成功但没有内容」
+        // 的结果就只能凭 summary 猜（Gate-1 P0 语义修正）。失败面（refused/cancelled/error）
+        // 一律走 `build_failure_result`，**不**产 `finalText`。
+        let stop_reason_limit_hit = matches!(outcome, AcpTurnOutcome::Truncated);
+        let final_text = reduce_final_text(updates);
+        let usage = reduce_usage(updates);
         match outcome {
-            // wave-acp-delegate C0.1–C0.3 / C2.1：只有 `end_turn` 成功轮归约正文与用量；
-            // C0.4 的非 end_turn 归约（truncated/refused/cancelled/error）一律保持原样。
-            AcpTurnOutcome::Ok => {
-                let final_text = reduce_final_text(updates);
-                let usage = reduce_usage(updates);
-                build_ok_result_with_final_text(&labels, &final_text, usage.as_ref(), started)
-            }
-            AcpTurnOutcome::Truncated => build_ok_result(&labels, true, started),
+            AcpTurnOutcome::Ok | AcpTurnOutcome::Truncated => build_ok_result_with_final_text(
+                &labels,
+                &final_text,
+                usage.as_ref(),
+                stop_reason_limit_hit,
+                started,
+            ),
             AcpTurnOutcome::Refused => build_failure_result(
                 &labels,
                 "error",
@@ -1469,47 +1475,31 @@ struct Labels {
     warnings: Vec<String>,
 }
 
-fn build_ok_result(labels: &Labels, truncated: bool, started: Instant) -> ToolResult {
-    let summary = if truncated {
-        "外部 agent 达到输出/轮次上限，结果可能被截断（stopReason 非 end_turn）。"
-    } else {
-        "外部 agent 已完成本轮任务。"
-    };
-    ToolResult {
-        tool_name: TOOL_ACP_DELEGATE.to_string(),
-        status: "ok".to_string(),
-        output: serde_json::to_string(&json!({
-            "ok": true,
-            "tool": TOOL_ACP_DELEGATE,
-            "agent": labels.agent,
-            "sessionId": labels.session_id,
-            "stopReason": labels.stop_reason,
-            "truncated": truncated,
-            "updates": labels.updates,
-            "warnings": labels.warnings,
-            "summary": { "text": summary },
-        }))
-        .unwrap_or_else(|error| format!("{{\"ok\":true,\"tool\":\"acp_delegate\",\"warnings\":[\"序列化输出失败：{error}\"]}}")),
-        duration_ms: started.elapsed().as_millis() as u64,
-    }
-}
-
-/// `end_turn` 成功结果 + 归约正文 / 用量（C0.1 / C0.2 / C0.3 / C2.1，additive）。
+/// 成功面结果 + 归约正文 / 用量（C0.1 / C0.2 / C0.3 / C2.1，additive）。
+///
+/// 覆盖两种成功轮：`end_turn`（`stop_reason_limit_hit=false`）与 stopReason 上限收尾的
+/// `max_tokens`/`max_turn_requests`（`stop_reason_limit_hit=true`，既有 `truncated: true` 语义）。
 ///
 /// 键面 = 既有成功键（`ok/tool/agent/sessionId/stopReason/truncated/updates/warnings/summary`）
 /// + `finalText`（string）+ `finalTextTruncated`（bool）+ 有 `usage_update` 时的 `usage`。
+/// `finalTextTruncated` 语义 = **正文不完整**：本侧 32k 截断，或外部 agent 因输出/轮次上限提前收尾。
 /// 空正文时 `summary.text` 必须明示「未返回文本正文」，不得复用「已完成本轮任务」让调用方误判。
 fn build_ok_result_with_final_text(
     labels: &Labels,
     final_text: &DelegateFinalText,
     usage: Option<&DelegateUsage>,
+    stop_reason_limit_hit: bool,
     started: Instant,
 ) -> ToolResult {
+    // 摘要优先级：空正文（C0.2 诚实提示）> stopReason 上限（C0.4 既有文案逐字保留）
+    // > 本侧 32k 截断 > 正常完成。
     let summary = if final_text.text.is_empty() {
         format!(
             "外部 agent 未返回文本正文（updates={}），无可用内容可归约。",
             labels.updates
         )
+    } else if stop_reason_limit_hit {
+        "外部 agent 达到输出/轮次上限，结果可能被截断（stopReason 非 end_turn）。".to_string()
     } else if final_text.truncated {
         format!(
             "外部 agent 已完成本轮任务；正文超过 {ACP_DELEGATE_FINAL_TEXT_MAX_CHARS} 字符上限，已保留前缀。"
@@ -1523,7 +1513,8 @@ fn build_ok_result_with_final_text(
     payload.insert("agent".to_string(), json!(labels.agent));
     payload.insert("sessionId".to_string(), json!(labels.session_id));
     payload.insert("stopReason".to_string(), json!(labels.stop_reason));
-    payload.insert("truncated".to_string(), json!(false));
+    // 既有 `truncated` 键语义不变：stopReason 是否撞上限（max_tokens/max_turn_requests）。
+    payload.insert("truncated".to_string(), json!(stop_reason_limit_hit));
     payload.insert("updates".to_string(), json!(labels.updates));
     payload.insert("warnings".to_string(), json!(labels.warnings));
     payload.insert("summary".to_string(), json!({ "text": summary }));
@@ -1531,7 +1522,7 @@ fn build_ok_result_with_final_text(
     payload.insert("finalText".to_string(), json!(final_text.text));
     payload.insert(
         "finalTextTruncated".to_string(),
-        json!(final_text.truncated),
+        json!(final_text.truncated || stop_reason_limit_hit),
     );
     // C2.1：无 usage_update ⇒ 键缺席（不用 null/0 占位，避免伪造用量）。
     if let Some(usage) = usage {
