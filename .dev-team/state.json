@@ -245,5 +245,5 @@
       "desc": "architecture 文档 usage 键名与实际 JSON 不一致"
     }
   ],
-  "final_head_expected": "pending"
+  "final_head": "c738b26f"
 }
