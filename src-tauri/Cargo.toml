@@ -1,6 +1,6 @@
 [package]
 name = "pony-agent"
-version = "0.1.197"
+version = "0.1.198"
 description = "Tauri + Rust rewrite scaffold for Hermes Agent"
 authors = ["HUAWEI"]
 edition = "2021"
