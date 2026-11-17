@@ -276,6 +276,11 @@ pub const INTERRUPTED_CANCELLED_LINE: &str = "上一轮已停止，发送消息�
 /// C4：措辞必须显式表达"**已中断**"（与取消轮的"已停止"可区分，且是单行一句话）。
 pub const INTERRUPTED_FAILED_LINE: &str = "上一轮已中断，已保留已执行的步骤记录。";
 
+/// B217：本轮**真的失败**（上游报错 / 工具链失败）收口的一行状态。
+///
+/// 与 [`INTERRUPTED_FAILED_LINE`] 严格区分：把 Error 说成「已中断」会误导续跑判断。
+pub const INTERRUPTED_ERROR_LINE: &str = "上一轮因错误终止，已保留已执行的步骤记录。";
+
 const CHECKPOINT_MARKER: &str = "[中断轮次检查点]";
 
 /// L2（dsh 对齐）：合成中断记录的一行状态文案。
@@ -292,6 +297,8 @@ pub fn interrupted_record_status_line(
     match kind {
         Some(HistoryMessageKind::Cancelled) => Some(INTERRUPTED_CANCELLED_LINE),
         Some(HistoryMessageKind::Interrupted) => Some(INTERRUPTED_FAILED_LINE),
+        // B217：失败不是中断 —— 文案必须给出不同的续跑判断依据。
+        Some(HistoryMessageKind::Error) => Some(INTERRUPTED_ERROR_LINE),
         None => {
             let trimmed = content.trim();
             if trimmed == pony_agent_core::agent::session::CANCELLED_TURN_SENTINEL {
@@ -330,6 +337,19 @@ mod interrupted_record_status_tests {
     use pony_agent_core::agent::session::HistoryMessageKind;
 
     const CHECKPOINT: &str = "[中断轮次检查点]\n已执行的工具步骤：\n- Run 探测";
+
+    /// B217：失败不得被读成「已中断」——两种终态给出不同的续跑判断文案。
+    #[test]
+    fn error_kind_is_not_reported_as_interrupted() {
+        assert_eq!(
+            interrupted_record_status_line(CHECKPOINT, Some(HistoryMessageKind::Error)),
+            Some(INTERRUPTED_ERROR_LINE)
+        );
+        assert_ne!(
+            INTERRUPTED_ERROR_LINE, INTERRUPTED_FAILED_LINE,
+            "两种终态必须给出可区分的一句话"
+        );
+    }
 
     /// 结构化 `kind` 优先：同一段落库文本，两种终态给出不同的一句话。
     #[test]

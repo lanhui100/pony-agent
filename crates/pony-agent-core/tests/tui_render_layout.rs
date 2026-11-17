@@ -9,7 +9,6 @@ use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 use pony_agent_core::agent::headless::PermissionMode;
 use std::fmt::Write as _;
-use std::time::{Duration, Instant};
 
 fn screen(state: &mut tui::TuiState, width: u16, height: u16) -> ratatui::buffer::Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -170,29 +169,6 @@ fn path_form_rules_are_host_independent() {
     );
 }
 
-/// 把状态行右槽轮播**显式钉在指定相位**（ADR 0119：模型身份与「权限 · <级别>」按时分交替）。
-///
-/// 为什么必须钉：`status_carousel_phase` 在 `status_carousel_started_at = None` 时退化为
-/// **墙钟毫秒 % 周期**，最后一行落在哪个半周期不可控——断言「最后一行 == 模型身份」会随真实
-/// 时间随机红（Windows 全量首跑正是这样红的）。这里把起点回拨到目标窗口**正中**，偏移量全部
-/// 取自产品常量（不写死毫秒数），并当场断言相位已落入窗口，防止夹具失效后静默假绿。
-fn pin_carousel_phase(state: &mut tui::TuiState, model_phase: bool) {
-    let offset_ms = if model_phase {
-        tui::STATUS_CAROUSEL_MODEL_HOLD_MS / 2
-    } else {
-        tui::STATUS_CAROUSEL_MODEL_HOLD_MS + tui::STATUS_CAROUSEL_PERM_HOLD_MS / 2
-    };
-    state.status_carousel_started_at = Some(Instant::now() - Duration::from_millis(offset_ms));
-    let (is_model, _) = tui::status_carousel_phase(state);
-    assert_eq!(
-        is_model, model_phase,
-        "夹具失效：期望相位 {}，实际 {}（offset={offset_ms}ms，周期={}ms）",
-        if model_phase { "模型" } else { "权限" },
-        if is_model { "模型" } else { "权限" },
-        tui::STATUS_CAROUSEL_PERIOD_MS
-    );
-}
-
 /// 去掉**全部**空白后的「字形序列」：CJK 宽字符在 buffer 里占两格，右侧填充格的 symbol 是
 /// 空格，因此中文文案必须先抹掉填充空白才能比较（与 `squeezed` 同源口径）。
 ///
@@ -218,17 +194,13 @@ fn assert_last_row_is_status(
     ticket: &str,
 ) {
     let row = row_text(buf, buf.area.height - 1);
-    let (actual, wanted) = if expected.is_ascii() {
-        (row.trim().to_string(), expected.trim().to_string())
-    } else {
-        (glyphs(&row), glyphs(expected))
-    };
-    assert_eq!(
-        actual,
-        wanted,
-        "{ticket}：最后一行必须承载状态行右槽，期望 {expected:?}（比较口径 {:?}），\
-         实际 {row:?}（比较口径 {actual:?}）",
-        wanted
+    // 2026-11-17：状态条同帧承载「模型 · 档位」与「权限 · 级别」，故判据从「逐字相等」
+    // 降为「字形序列包含」（CJK 宽字符在 buffer 里带填充格，必须用 glyphs 口径比较）。
+    let haystack = glyphs(&row);
+    let needle = glyphs(expected);
+    assert!(
+        haystack.contains(&needle),
+        "{ticket}：最后一行必须含 {expected:?}（字形口径 {needle:?}），实际 {row:?}"
     );
     let trailing_blanks = row.len() - row.trim_end().len();
     assert!(
@@ -251,8 +223,6 @@ fn assert_last_row_is_status(
 fn layout_invariants_hold_on_standard_terminal() {
     let mut state = tui::TuiState::default();
     state.set_input("hello");
-    // 相位显式钉住（见 `pin_carousel_phase`）：本帧取模型相位，权限相位在用例末尾另渲一帧。
-    pin_carousel_phase(&mut state, true);
     let buf = screen(&mut state, 110, 30);
     dump_if_requested("01-input", &buf);
     let text = all_text(&buf);
@@ -311,7 +281,7 @@ fn layout_invariants_hold_on_standard_terminal() {
     );
     // ADR 0078 的 header/工作区分工保留；ADR 0119 取代其「最后一行只承载模型身份」条款：
     // 最后一行是**状态行右槽**，按时分轮播「模型身份（含思考强度）」与「权限 · <级别>」。
-    // 本帧已钉在模型相位（见 `pin_carousel_phase`），故此处仍要求右槽逐字等于模型身份。
+    // 2026-11-17：模型与权限同帧可见，故此处只要求模型身份**在场**。
     let header_row = row_text(&buf, 0);
     let workspace_name = state
         .workspace
@@ -365,24 +335,15 @@ fn layout_invariants_hold_on_standard_terminal() {
         "夹具失效：默认权限模式应为「工作区写入」，期望 WorkspaceWrite，实际 {:?}",
         state.permission_mode
     );
-    pin_carousel_phase(&mut state, false);
-    let perm_buf = screen(&mut state, 110, 30);
-    assert_last_row_is_status(&perm_buf, "权限 · 工作区", canvas_bg, "权限相位");
-    // 判别力自检：两个相位必须真的渲染出不同内容，否则「轮播」形同虚设、两条断言互为冗余。
-    let model_row = row_text(&buf, buf.area.height - 1);
-    let perm_row = row_text(&perm_buf, perm_buf.area.height - 1);
-    assert_ne!(
-        model_row.trim(),
-        perm_row.trim(),
-        "轮播相位未生效：模型相位与权限相位的最后一行完全相同（{perm_row:?}）"
-    );
-    // 轮播只换右槽内容，不改底部几何：composer 仍紧贴底部区块。
-    let perm_prompt_row = perm_buf.area.height - 3;
+    // 2026-11-17：取消时分轮播 —— 模型与权限必须在**同一帧**同时可见，
+    // 故不再另渲「权限相位」帧，改为在同一帧上断言两段都在。
+    assert_last_row_is_status(&buf, "权限 · 工作区", canvas_bg, "同帧权限");
+    // 轮播删除后底部几何不变：composer 仍紧贴底部区块。
+    let prompt_row = buf.area.height - 3;
     assert!(
-        row_text(&perm_buf, perm_prompt_row).contains('›'),
-        "权限相位不得改变 composer 几何，期望输入行仍在 y={perm_prompt_row} 且含提示符，\
-         实际整屏 {:?}",
-        all_text(&perm_buf)
+        row_text(&buf, prompt_row).contains('›'),
+        "状态条不得改变 composer 几何，期望输入行仍在 y={prompt_row} 且含提示符，实际整屏 {:?}",
+        all_text(&buf)
     );
 }
 
@@ -523,7 +484,6 @@ fn panel_renders_inside_screen_and_keeps_footer() {
     ]);
     // 相位显式钉住（ADR 0119）：不钉时 `status_carousel_phase` 用墙钟毫秒取模，
     // 本用例末尾「恢复后的底部行」断言会随相位随机失败。浮层帧本身与相位无关，一并钉住求确定。
-    pin_carousel_phase(&mut state, true);
     let mut buf = screen(&mut state, 90, 24);
     dump_if_requested("03-panel", &buf);
     let text = all_text(&buf);
@@ -571,7 +531,6 @@ fn panel_renders_inside_screen_and_keeps_footer() {
 
     // 反向断言（防「面板卡死 / 永久吞掉输入区」）：关闭浮层后 composer 与底部行必须恢复。
     state.cancel_session_selector();
-    pin_carousel_phase(&mut state, true);
     buf = screen(&mut state, 90, 24);
     let restored = all_text(&buf);
     assert!(restored.contains('›'), "关闭浮层后 composer 提示符必须恢复，实际屏幕: {restored:?}");
@@ -589,11 +548,8 @@ fn panel_renders_inside_screen_and_keeps_footer() {
         state.model
     );
 
-    // 权限半周期（ADR 0119 取代 ADR 0078 的「只承载模型身份」）：同一行改由状态行承担。
-    // 相位必须显式钉住，否则墙钟相位会让本断言随机失败。
-    pin_carousel_phase(&mut state, false);
-    buf = screen(&mut state, 90, 24);
-    assert_last_row_is_status(&buf, "权限 · 工作区", restored_canvas_bg, "关闭浮层后·权限相位");
+    // 2026-11-17：同一帧必须同时可见权限级别（取消时分轮播）。
+    assert_last_row_is_status(&buf, "权限 · 工作区", restored_canvas_bg, "关闭浮层后·同帧权限");
 }
 
 #[test]

@@ -331,6 +331,63 @@ pub fn stall_hint(phase: UpstreamPhase, silent_ms: u64) -> Option<String> {
     })
 }
 
+/// B198：followup 阶段 ⇒ 状态行文案（固定短语，不拼接 URL / elapsed / provider 细节）。
+///
+/// 与 [`stall_hint`] 正交：`stall_hint` 回答「静默多久」（时间维度），本函数回答
+/// 「现在卡在哪个阶段」（流程维度）。渲染层可叠加：阶段在前，静默提示在后。
+///
+/// 为什么文案在这里而不是 provider 层：provider 只上报**事实**（阶段枚举），
+/// 用户可见措辞归展示层（同一事实一个家，避免库层被 UI 文案污染）。
+pub fn followup_phase_text(phase: &pony_agent_core::agent::retry::ProviderPhase) -> String {
+    use pony_agent_core::agent::retry::ProviderPhase;
+    match phase {
+        ProviderPhase::StreamFallback => "流式中断，转同步重试…".to_string(),
+        ProviderPhase::SyncAttempt { attempt } => format!("同步兜底第 {attempt} 次…"),
+        ProviderPhase::LocalFallback => "上游不可用，已切本地兜底摘要".to_string(),
+    }
+}
+
+/// B216：轮末过程摘要的终态口径。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SettledTurnOutcome {
+    /// 正常完成（显示耗时）。
+    Completed,
+    /// 用户停止（只给终态，不显示耗时）。
+    Cancelled,
+    /// 失败（只给终态，不显示耗时）。
+    Failed,
+}
+
+/// B216：轮末「过程摘要」一行（**持久信息**，独立于进行中的状态行）。
+///
+/// 为什么需要它：状态行随轮次终态停止渲染，16.9 分钟的一轮结束后界面上不留任何
+/// 「用了多久 / 跑了多少工具」——历史只落在 `session_turn_traces` 里，用户无从回看。
+/// 对齐 deepseek harness `TurnProcessNodeView`：轮次 `closed` 后渲染 settled duration；
+/// `stopped` / `error` 只给终态摘要、**不显示耗时**（此时耗时无解释力，还容易被读成正常完成）。
+///
+/// 纯函数：不改状态、不读时钟，耗时由调用方注入。
+pub fn settled_turn_summary(
+    outcome: SettledTurnOutcome,
+    elapsed_ms: Option<u64>,
+    tool_calls: u64,
+) -> String {
+    let head = match outcome {
+        SettledTurnOutcome::Completed => match elapsed_ms {
+            // 走 `super::`（tui 模块内相对路径）而非 `crate::`：本文件会被测试以
+            // `#[path] mod tui;` 形式内联，`crate::` 会解析到测试 crate 根而找不到该函数。
+            Some(ms) => format!("本轮完成 · 用时 {}", super::format_elapsed_seconds(ms)),
+            None => "本轮完成".to_string(),
+        },
+        SettledTurnOutcome::Cancelled => "本轮已停止".to_string(),
+        SettledTurnOutcome::Failed => "本轮失败".to_string(),
+    };
+    if tool_calls == 0 {
+        head
+    } else {
+        format!("{head} · 工具 {tool_calls} 次")
+    }
+}
+
 /// 上游静默跟踪器：**只**由真实事件推进（请求已发出 / 增量到达 / 轮次收口）。
 ///
 /// 时间由调用方注入（`now_ms`），本类型不读时钟 ⇒ 单测可喂假时间。
@@ -649,5 +706,65 @@ mod tests {
         assert!(!idle.is_active());
         assert_eq!(idle.silent_ms(20_000), 0);
         assert_eq!(idle.hint(20_000), None, "复位后不得报告任何上游静默");
+    }
+
+    /// B198：followup 三阶段各有**可区分**的固定文案，且不泄漏内部细节
+    ///（URL / elapsed 一旦进状态行，用户读到的就是噪音）。
+    #[test]
+    fn followup_phase_text_is_stable_and_leak_free() {
+        use pony_agent_core::agent::retry::ProviderPhase;
+
+        let stream = followup_phase_text(&ProviderPhase::StreamFallback);
+        let sync = followup_phase_text(&ProviderPhase::SyncAttempt { attempt: 3 });
+        let local = followup_phase_text(&ProviderPhase::LocalFallback);
+
+        assert_eq!(stream, "流式中断，转同步重试…");
+        assert!(sync.contains('3'), "同步兜底的尝试序号必须真实透出：{sync}");
+        assert_ne!(stream, local, "降级收尾必须与过程中断可区分");
+        for text in [&stream, &sync, &local] {
+            assert!(!text.contains("http"), "状态行不得出现 URL：{text}");
+            assert!(
+                !text.contains("elapsed"),
+                "状态行不得出现内部耗时字段：{text}"
+            );
+        }
+    }
+}
+
+/// B216：轮末过程摘要的口径（完成显示耗时；停止/失败只给终态）。
+#[cfg(test)]
+mod settled_turn_summary_tests {
+    use super::*;
+
+    #[test]
+    fn completed_shows_duration_and_tool_count() {
+        let line = settled_turn_summary(SettledTurnOutcome::Completed, Some(1_013_009), 35);
+        assert!(line.contains("16分53秒"), "完成轮必须给出真实耗时，实际 = {line:?}");
+        assert!(line.contains("35"), "完成轮必须给出工具次数，实际 = {line:?}");
+    }
+
+    #[test]
+    fn cancelled_and_failed_hide_duration() {
+        for outcome in [SettledTurnOutcome::Cancelled, SettledTurnOutcome::Failed] {
+            let line = settled_turn_summary(outcome, Some(1_013_009), 3);
+            assert!(
+                !line.contains("用时") && !line.contains("16分"),
+                "非完成轮不得显示耗时（会被读成正常完成），实际 = {line:?}"
+            );
+            assert!(line.contains('3'), "非完成轮仍要保留已执行工具数，实际 = {line:?}");
+        }
+    }
+
+    #[test]
+    fn zero_tools_omits_tool_segment() {
+        let line = settled_turn_summary(SettledTurnOutcome::Completed, Some(2_000), 0);
+        assert!(!line.contains("工具"), "没有工具调用时不得出现空计数段，实际 = {line:?}");
+    }
+
+    #[test]
+    fn missing_elapsed_still_summarises_completion() {
+        let line = settled_turn_summary(SettledTurnOutcome::Completed, None, 1);
+        assert!(line.contains("本轮完成"), "缺锚点也要给出终态，实际 = {line:?}");
+        assert!(!line.contains("用时"), "无锚点不得伪造耗时，实际 = {line:?}");
     }
 }

@@ -264,7 +264,7 @@ fn dirty_state() -> tui::TuiState {
         "脏目标".to_string(),
         Some(8),
     ));
-    state.goal_banner_since = Some(std::time::Instant::now());
+    state.task_center = Some(tui::TaskCenterState::new());
     state.pending_request = Some(tui::PendingUiRequest {
         request_id: "req-1".to_string(),
         version: 1,
@@ -317,8 +317,8 @@ fn n12a_reset_session_scope_clears_every_contract_field() {
     assert!(state.task_board_state.is_none(), "N12a: task_board_state 必须清空");
     assert!(state.goal_state.is_none(), "N12a: goal_state 必须清空");
     assert!(
-        state.goal_banner_since.is_none(),
-        "N12a: goal_banner_since 必须清空（否则新会话横幅时间片错位）"
+        state.task_center.is_none(),
+        "N12a: task_center 必须清空（切会话后旧任务抽屉不得残留）"
     );
     assert!(state.pending_request.is_none(), "N12a: pending_request 必须清空");
     assert_eq!(state.scroll_offset, 0, "N12a: scroll_offset 必须归零");

@@ -406,6 +406,9 @@ impl Projection<HistoryProjectionState> for HistoryProjectionState {
                     // 避免把展示语义的 match 埋到嵌套深处（也是 file-size 门禁要的形状）。
                     let checkpoint_kind = match reason {
                         TurnEndReason::Cancelled => HistoryMessageKind::Cancelled,
+                        // B217：失败与进程中断不再共用一种历史行 —— 前者是本轮真失败，
+                        // 后者是「没跑完就被进程终止」，续跑判断与人读文案都不同。
+                        TurnEndReason::Error => HistoryMessageKind::Error,
                         _ => HistoryMessageKind::Interrupted,
                     };
                     if let Some(mut pending) = state.pending.take() {
@@ -1038,6 +1041,10 @@ fn terminal_envelope(reason: &TurnEndReason) -> (&'static str, &'static str) {
     match reason {
         TurnEndReason::Completed | TurnEndReason::Degraded => ("turn.completed", "completed"),
         TurnEndReason::Error => ("turn.failed", "failed"),
+        // B217：进程中断沿用 failed 信封 —— trace 的 phase 词表只登记
+        // completed/failed/cancelled（不新增未登记 phase）。「中断 ≠ 失败」的区分由
+        // 历史行 `HistoryMessageKind` 与收口文案承载，trace 信封不承担该语义。
+        TurnEndReason::Interrupted => ("turn.failed", "failed"),
         TurnEndReason::Aborted | TurnEndReason::Cancelled => ("turn.cancelled", "cancelled"),
     }
 }
@@ -1591,6 +1598,40 @@ mod tests {
             messages[1].status,
             Some(crate::agent::session::MessageStatus::Done)
         );
+    }
+
+    /// B217：终态三分不得互借 —— 失败写 `Error`、进程中断写 `Interrupted`、
+    /// 用户取消写 `Cancelled`。此前 `Error` 与进程中断共用 `Interrupted`，
+    /// 历史与状态条把「本轮失败」读成「被中断」，误导续跑判断。
+    #[test]
+    fn history_projection_terminal_kind_keeps_three_states_apart() {
+        use crate::agent::session::HistoryMessageKind;
+
+        let cases = [
+            (TurnEndReason::Error, HistoryMessageKind::Error),
+            (
+                TurnEndReason::Interrupted,
+                HistoryMessageKind::Interrupted,
+            ),
+            (TurnEndReason::Aborted, HistoryMessageKind::Interrupted),
+            (TurnEndReason::Cancelled, HistoryMessageKind::Cancelled),
+        ];
+        for (reason, expected) in cases {
+            let mut events = failed_turn_events(Some("boom"), None);
+            events[4].1 = TurnEvent::TurnEnd {
+                turn_id: "t9".into(),
+                reason: reason.clone(),
+                turn_duration_ms: Some(1200),
+                error: Some("boom".into()),
+            };
+            let state = fold_all::<_, HistoryProjectionState>(&events);
+            let kind = state.messages().last().and_then(|message| message.kind);
+            assert_eq!(
+                kind,
+                Some(expected),
+                "reason={reason:?} 必须映射到独立的历史行种类"
+            );
+        }
     }
 
     #[test]

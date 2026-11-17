@@ -264,6 +264,9 @@ pub enum HistoryMessageKind {
     Cancelled,
     /// 上游失败 / 崩溃收口：`content` 形态同上，错误细节由 trace 承载。
     Interrupted,
+    /// B217：本轮**真的失败**（上游报错等）收口——与 [`Self::Interrupted`]（进程中断）分离，
+    /// 历史与状态条据此给出不同的一句人话，不把失败读成「被中断」。
+    Error,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

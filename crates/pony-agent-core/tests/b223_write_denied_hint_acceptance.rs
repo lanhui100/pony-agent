@@ -1,10 +1,13 @@
-//! B223 workspace 外写拒绝的可执行提示（红相）。
+//! B223 workspace 外写拒绝的可执行提示（红相）；B204 起同时锁定「不承诺升级审批」。
 //!
-//! 现场：沙箱拒绝写到 workspace 之外时，用户只看到「拒绝写入」+ escalation 提示，但没有
-//! 任何可执行替代——不知道往哪写、下一步做什么。契约：新增
-//! `outside_workspace_write_denied_with_workspace(message, workspace_root)`，在既有
-//! escalation 提示之外**附受控可写目录**（`<workspace_root>/.tmp`，见 `tools/paths.rs`
-//! 的受控 tmp 约定）与一次可执行纠正建议；结构化错误码不换码。
+//! 现场：沙箱拒绝写到 workspace 之外时，用户只看到「拒绝写入」+ 无落点的 escalation 提示，
+//! 没有任何可执行替代——不知道往哪写、下一步做什么。
+//! 契约：`outside_workspace_write_denied_with_workspace(message, workspace_root)` 在拒绝文案中
+//! **附受控可写目录**（`<workspace_root>/.tmp`，见 `tools/paths.rs` 的受控 tmp 约定）与一次
+//! 可执行纠正建议；结构化错误码不换码。
+//!
+//! B204 补充契约：拒绝路径**不产生**任何可批准的升级请求，故文案不得再出现
+//! `[sandbox: escalation available …]` 之类无法兑现的承诺。
 //!
 //! 本文件全部为真实断言；不读真实时钟、不 sleep、不吞异常。
 
@@ -78,71 +81,53 @@ fn b223_message_hints_controlled_tmp() {
     );
 }
 
-/// 3. 幂等提示：入参已含 escalation 片段时不得重复追加。
+/// 3. 幂等提示：入参已含受控可写目录提示时不得重复追加。
 #[test]
 fn b223_hint_is_idempotent() {
-    // Arrange：调用方已把 escalation 提示写进 message（真实调用链会二次经过构造器）。
+    // Arrange：调用方已把可写目录提示写进 message（真实调用链会二次经过构造器）。
     let root = Path::new("/tmp/ws");
-    let message_already_hinted =
-        "拒绝写入。 [sandbox: escalation available — retry with explicit authorization]";
-
-    // Arrange：同一 root 的「未预先带提示」基线（用于按字数比对，不写死措辞次数）。
-    let baseline =
-        PermissionError::outside_workspace_write_denied_with_workspace("拒绝写入。", root).message;
-    let baseline_tmp = occurrences(&baseline, ".tmp");
+    let already_hinted = PermissionError::outside_workspace_write_denied_with_workspace(
+        "拒绝写入。",
+        root,
+    )
+    .message;
+    let baseline_tmp = occurrences(&already_hinted, ".tmp");
     assert!(
         baseline_tmp >= 1,
-        "前提：新构造器必须给出受控 tmp 提示，基线 = {baseline:?}"
+        "前提：新构造器必须给出受控 tmp 提示，基线 = {already_hinted:?}"
     );
 
-    // Act
-    let error = PermissionError::outside_workspace_write_denied_with_workspace(
-        message_already_hinted,
-        root,
-    );
+    // Act：把已带提示的文案再次送入构造器。
+    let error =
+        PermissionError::outside_workspace_write_denied_with_workspace(already_hinted, root);
     let message = &error.message;
 
-    // Assert 1：escalation 提示只能出现一次。
-    assert_eq!(
-        occurrences(message, ESCALATION_MARKER),
-        1,
-        "escalation 提示不得重复追加，实际 = {message:?}"
-    );
-
-    // Assert 2：受控 tmp 提示不得叠加（次数必须与基线一致，而不是只写一遍的死板口径）。
+    // Assert：受控 tmp 提示不得叠加（次数必须与基线一致）。
     assert_eq!(
         occurrences(message, ".tmp"),
         baseline_tmp,
-        "受控 tmp 提示不得重复追加（已带 escalation 片段时次数应与基线一致 = {baseline_tmp}），实际 = {message:?}"
+        "受控 tmp 提示不得重复追加（基线 = {baseline_tmp}），实际 = {message:?}"
     );
 }
 
-/// 4. 旧构造器行为不变：仍以 escalation 提示结尾（既有调用方零改动）。
+/// 4. 旧构造器（无 workspace root）：只给通用可执行指引，不承诺升级审批（B204）。
 #[test]
-fn b223_legacy_constructor_still_appends_escalation() {
+fn b204_legacy_constructor_never_promises_escalation() {
     // Act
-    let error = PermissionError::outside_workspace_write_denied("x");
+    let error = PermissionError::outside_workspace_write_denied("拒绝写入。");
     let message = error.message.trim_end().to_string();
 
-    // Assert 1：仍带 escalation 提示。
+    // Assert 1：不得再出现无法兑现的 escalation 承诺。
     assert_eq!(
         occurrences(&message, ESCALATION_MARKER),
-        1,
-        "旧构造器必须继续追加一次 escalation 提示，实际 = {message:?}"
+        0,
+        "拒绝路径不产生审批请求 ⇒ 文案不得承诺可升级，实际 = {message:?}"
     );
 
-    // Assert 2：它以该提示结尾（不得在后面再挂其他片段）。
+    // Assert 2：必须给出可执行替代（工作区内路径 / 受控 tmp 目录）。
     assert!(
-        message.ends_with(']'),
-        "escalation 提示必须仍是文案结尾，实际 = {message:?}"
-    );
-    let tail = message
-        .rsplit_once(ESCALATION_MARKER)
-        .map(|(_, tail)| tail)
-        .unwrap_or_default();
-    assert!(
-        tail.ends_with(']') && !tail.contains("可写"),
-        "escalation 之后的尾段只能是提示本体，实际尾段 = {tail:?}"
+        message.contains(".tmp") || message.contains("工作区内"),
+        "必须给出可执行的替代路径指引，实际 = {message:?}"
     );
 
     // Assert 3：错误码不变。

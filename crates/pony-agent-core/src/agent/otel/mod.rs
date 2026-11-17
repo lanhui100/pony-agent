@@ -17,6 +17,8 @@
 
 /// 最小 JSON 日志面（D8）：仅服务本次新增 trace 代码路径。
 pub mod log;
+/// B202：导出失败的**有界本地 spool** + 失败类别判别（出口网络 vs 配置/鉴权）。
+pub mod spool;
 
 // ---------------------------------------------------------------- span 名（冻结）
 
@@ -4258,9 +4260,28 @@ impl SpanExporter for RuntimeExporter {
                 match outcome {
                     Ok(()) => return Ok(()),
                     Err(err) if attempt >= EXPORT_MAX_ATTEMPTS => {
+                        // B202：先分类再措辞 —— 「出口网络不可达」与「配置/鉴权」对用户的下一步
+                        // 完全不同；同时把失败摘要落**有界本地 spool**，让诊断链不再只剩
+                        // 一行「永久丢失」（次日仍可回溯丢了哪些批次、为什么丢）。
+                        let err_text = err.to_string();
+                        let kind = spool::classify_export_error(&err_text);
+                        let spooled = spool::record_export_failure(
+                            kind,
+                            exportable.len(),
+                            &err_text,
+                            spool::now_ms(),
+                        );
+                        let spool_tail = match spooled {
+                            Some(path) => {
+                                format!("失败摘要已落本地 spool：{}", path.display())
+                            }
+                            None => "失败摘要落本地 spool 失败（可观测性自身降级，不影响主流程）"
+                                .to_string(),
+                        };
                         degraded_warn(
                             &format!(
-                                "OTLP 导出失败（{attempt}/{EXPORT_MAX_ATTEMPTS} 次尝试后放弃，本批 {} 个 span 永久丢失）：{err}",
+                                "OTLP 导出失败（{}，{attempt}/{EXPORT_MAX_ATTEMPTS} 次尝试后放弃，本批 {} 个 span 未上送）：{err}；{spool_tail}",
+                                kind.label(),
                                 exportable.len()
                             ),
                             None,

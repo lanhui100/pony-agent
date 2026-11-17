@@ -1413,6 +1413,74 @@ impl RetryNotifier {
     }
 }
 
+// ── followup 阶段机（B198）：流式失败 → 同步兜底 → 本地兜底的**实时**阶段出口 ──
+//
+// 问题：followup 单次交互在流断后可静默 ~190s（stream 断流 75s + sync 首次 31s + 4×21s）。
+// `RetryNotifier` 只覆盖「已失败且即将重试」的瞬间：它既不表达阶段切换，也覆盖不到
+// **首次**同步尝试（那时还没有重试计数）。故补一条与重试**正交**的阶段通道。
+//
+// 与 `RETRY_OBSERVER` 完全同构：thread_local、非阻塞、未安装即 no-op
+//（CLI / 测试 / 子代理线程零副作用）。阶段事实来自真实调用点，不伪造进度。
+
+/// followup 的一次阶段切换（只承载展示所需的最小事实，不含 URL / elapsed 等内部细节）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderPhase {
+    /// 流式读取失败 → 即将转同步兜底。
+    StreamFallback,
+    /// 同步兜底请求即将发出（`attempt` 1 起；其后的重试仍由 `RetryNotice` 报）。
+    SyncAttempt { attempt: u32 },
+    /// 同步兜底也失败 → 本轮以本地兜底摘要收尾（必须可见，不得伪装成模型正常输出）。
+    LocalFallback,
+}
+
+/// 阶段通知观察者（宿主安装；签名用 `&ProviderPhase` 以便零拷贝）。
+pub type PhaseObserver = Box<dyn Fn(&ProviderPhase)>;
+
+/// 观察者守卫：生命周期 = 宿主轮次线程生命周期，`drop` 即摘除。
+pub struct PhaseObserverGuard {
+    installed: bool,
+}
+
+impl PhaseObserverGuard {
+    /// 未安装任何观察者时的空守卫。
+    pub fn idle() -> Self {
+        Self { installed: false }
+    }
+}
+
+impl Drop for PhaseObserverGuard {
+    fn drop(&mut self) {
+        if self.installed {
+            PHASE_OBSERVER.with(|slot| {
+                *slot.borrow_mut() = None;
+            });
+        }
+    }
+}
+
+thread_local! {
+    static PHASE_OBSERVER: RefCell<Option<PhaseObserver>> = const { RefCell::new(None) };
+}
+
+/// 在当前线程安装阶段通知观察者（覆盖既有安装；同线程仅需一个）。
+pub fn install_phase_observer(observer: PhaseObserver) -> PhaseObserverGuard {
+    PHASE_OBSERVER.with(|slot| {
+        *slot.borrow_mut() = Some(observer);
+    });
+    PhaseObserverGuard { installed: true }
+}
+
+/// 派发一次阶段通知（未安装观察者 ⇒ 静默 no-op）。
+///
+/// 观察者必须**非阻塞**（生产实现只往 channel 里 `send`）。
+pub fn notify_provider_phase(phase: &ProviderPhase) {
+    PHASE_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow().as_ref() {
+            observer(phase);
+        }
+    });
+}
+
 /// 纯净 per-call 窗口的结算结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PureCallWindow {
@@ -1507,6 +1575,38 @@ fn log_pure_call_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B198：阶段通道必须真实投递三种 followup 阶段，且守卫 drop 后立即摘除
+    ///（否则上一轮阶段的观察者会把陈旧阶段写进下一轮状态行）。
+    #[test]
+    fn phase_observer_dispatches_followup_stages_and_uninstalls() {
+        use std::sync::{Arc, Mutex};
+
+        // 观察者签名是 `Box<dyn Fn(&ProviderPhase)>`（隐含 `'static`）⇒ 捕获的自持状态必须是 `Arc`。
+        let seen: Arc<Mutex<Vec<ProviderPhase>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let guard = install_phase_observer(Box::new(move |phase| {
+            sink.lock().expect("observer lock").push(phase.clone());
+        }));
+
+        notify_provider_phase(&ProviderPhase::StreamFallback);
+        notify_provider_phase(&ProviderPhase::SyncAttempt { attempt: 1 });
+        notify_provider_phase(&ProviderPhase::LocalFallback);
+        let observed = seen.lock().expect("observer lock").clone();
+        assert_eq!(
+            observed,
+            vec![
+                ProviderPhase::StreamFallback,
+                ProviderPhase::SyncAttempt { attempt: 1 },
+                ProviderPhase::LocalFallback,
+            ]
+        );
+
+        drop(guard);
+        notify_provider_phase(&ProviderPhase::LocalFallback);
+        let after_drop = seen.lock().expect("observer lock").len();
+        assert_eq!(after_drop, 3, "守卫 drop 后不得再投递");
+    }
 
     #[test]
     fn compute_delay_first_attempt_is_zero() {

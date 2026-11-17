@@ -2,6 +2,18 @@
 # 形状：~/.agents/skills/observability-onboarding/references/declaration.schema.json
 # 判定：声明说「该不该有」，巡检说「实际有没有」，两者交叉才是结论（规则家：declaration-rubric.md）。
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
+# B202（ADR 2026-11-17-otel-export-failure-spool）归属说明：OTLP 导出失败分类 + 有界本地 spool。
+# (1) 变更面全在**可观测性自身的降级路径**：`agent/otel/mod.rs` 最终失败分支加「先分类再措辞」，
+#     新增 `agent/otel/spool.rs`（失败摘要落 `PonyAgent/otel-spool/export-failures.jsonl`，
+#     行数上限 200 + TTL 24h + tmp/rename 原子写）。**不新增**对外接口、网络出口、
+#     后台任务线程或 LLM 调用；导出端点与超时预算均不变。
+# (2) 新增**本地取证面**（非遥测出口，只落本地 spool 文件与既有 degraded_warn 日志行）：
+#     `{ts_ms, kind, kind_label, spans, error(≤240 字)}`；只含类别与截断错误摘要，
+#     不含消息正文与凭据。spool 写失败只留一行 warn，不影响主流程。
+# (3) ⇒ 四维归属不变：tracing / issues 仍 applicable（落点不变 agent/otel/mod.rs、agent/ponysentry/client.rs），
+#     metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
+#     不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 # B193/B194（2026-11-15，ADR 2026-11-15-tui-goal-round-and-queue-visibility）归属说明：
 # (1) 变更面全在**本地 TUI 呈现层与输入层**：`bin/tui/goal_round_stop.rs`（首轮终态 → 停止原因纯函数）、
 #     `bin/tui/queue_panel.rs`（排队正文内联面板）、`bin/tui.rs` 的 Alt+S 键位分支与覆盖层几何；

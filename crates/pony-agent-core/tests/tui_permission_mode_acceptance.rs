@@ -13,7 +13,6 @@ mod tui;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use pony_agent_core::agent::headless::PermissionMode;
-use std::time::{Duration, Instant};
 
 #[test]
 fn test_default_permission_mode_is_workspace_write() {
@@ -98,38 +97,37 @@ fn test_permission_shortcut_predicate() {
 }
 
 #[test]
-fn test_status_carousel_alternation() {
+fn test_status_line_shows_model_and_permission_in_one_frame() {
+    // 2026-11-17：状态条取消模型/权限时分轮播（ADR
+    // `2026-11-17-tui-task-visibility-bottom-drawer`）——两段必须同帧可见。
     let mut state = tui::TuiState::default();
     state.model = "deepseek-v4".to_string();
     state.permission_mode = PermissionMode::WorkspaceWrite;
 
-    let base = Instant::now();
-    // 0s 时处于 Model 阶段
-    state.status_carousel_started_at = Some(base);
-    let (is_model, remaining) = tui::status_carousel_phase(&state);
-    assert!(is_model);
-    assert!(remaining <= 3_000);
-    let (text, _) = tui::right_slot_content(&state);
-    assert!(text.contains("deepseek-v4"));
+    let render = |state: &tui::TuiState| -> String {
+        tui::status_bar_line(state, 100)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    let text = render(&state);
+    assert!(text.contains("deepseek-v4"), "状态条必须含模型身份，实际：{text:?}");
+    assert!(
+        text.contains("权限 · 工作区"),
+        "状态条必须含权限级别，实际：{text:?}"
+    );
 
-    // 模拟经过 3.5s -> 处于 Permission 阶段
-    let advanced_base = base - Duration::from_millis(3_500);
-    state.status_carousel_started_at = Some(advanced_base);
-    let (is_model_after, remaining_after) = tui::status_carousel_phase(&state);
-    assert!(!is_model_after);
-    assert!(remaining_after <= 3_000);
-    let (text_after, _) = tui::right_slot_content(&state);
-    assert_eq!(text_after, "权限 · 工作区");
-
-    // 切换到 ReadOnly
     state.permission_mode = PermissionMode::ReadOnly;
-    let (text_ro, _) = tui::right_slot_content(&state);
-    assert_eq!(text_ro, "权限 · 只读");
-
-    // 切换到 FullAccess
+    assert!(
+        render(&state).contains("权限 · 只读"),
+        "权限级别切换必须立刻反映"
+    );
     state.permission_mode = PermissionMode::FullAccess;
-    let (text_fa, _) = tui::right_slot_content(&state);
-    assert_eq!(text_fa, "权限 · 完全访问");
+    assert!(
+        render(&state).contains("权限 · 完全访问"),
+        "权限级别切换必须立刻反映"
+    );
 }
 
 #[test]

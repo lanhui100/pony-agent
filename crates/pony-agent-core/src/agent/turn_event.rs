@@ -37,6 +37,20 @@ pub enum TurnEndReason {
     Cancelled,
     /// B219：provider 本地兜底收尾（非正常完成，但不是失败）。
     Degraded,
+    /// B217：进程中断（崩溃/退出后由恢复路径补写）——**仅恢复路径**会写。
+    ///
+    /// 与 [`TurnEndReason::Error`] 严格分离：Error = 本轮真的失败（上游报错/工具链失败），
+    /// Interrupted = 本轮没跑完就被进程终止。两者历史文案与续跑判断都不同，不可互借。
+    Interrupted,
+}
+
+impl TurnEndReason {
+    /// 该终态是否「模型已正常收尾」。
+    ///
+    /// 唯一真源：合成检查点只对非完成态生效，判定不得散落在各投影点。
+    pub fn is_completed(&self) -> bool {
+        matches!(self, Self::Completed)
+    }
 }
 
 impl<'de> Deserialize<'de> for TurnEndReason {
@@ -51,6 +65,7 @@ impl<'de> Deserialize<'de> for TurnEndReason {
             "aborted" => Self::Aborted,
             "cancelled" => Self::Cancelled,
             "degraded" => Self::Degraded,
+            "interrupted" => Self::Interrupted,
             // 未知 wire 值（旧版本读新日志）⇒ 兼容读为 Completed，不得让读取端炸开。
             _ => Self::Completed,
         })
@@ -340,6 +355,27 @@ impl TurnEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B217：`interrupted` 是新增 wire 值（仅恢复路径写）；
+    /// 旧读取端遇未知值仍 fail-soft 退化为 `Completed`，新读取端能认出它。
+    #[test]
+    fn interrupted_reason_round_trips_and_unknown_wire_stays_fail_soft() {
+        let parsed: TurnEndReason =
+            serde_json::from_str("\"interrupted\"").expect("interrupted 必须可解析");
+        assert_eq!(parsed, TurnEndReason::Interrupted);
+        assert_eq!(
+            serde_json::to_string(&TurnEndReason::Interrupted).unwrap(),
+            "\"interrupted\""
+        );
+
+        let unknown: TurnEndReason =
+            serde_json::from_str("\"forked\"").expect("未知 wire 值不得炸开");
+        assert_eq!(
+            unknown,
+            TurnEndReason::Completed,
+            "旧读取端兼容契约：未知终态退化为 Completed"
+        );
+    }
 
     fn sample_usage() -> TokenUsage {
         TokenUsage {

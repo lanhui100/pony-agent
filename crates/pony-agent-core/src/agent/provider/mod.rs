@@ -1816,7 +1816,15 @@ impl ProviderManager {
                             "followup:stream-fallback protocol={} provider={} model={} reason={}",
                             protocol_label, self.config.provider_name, request.model, stream_error
                         ));
+                        // B198：阶段切换即发通知（展示层据此显示「流式中断→转同步重试」）。
+                        crate::agent::retry::notify_provider_phase(
+                            &crate::agent::retry::ProviderPhase::StreamFallback,
+                        );
                         // stream→sync 回退与本地 fallback 语义对齐 completions 分支。
+                        // B198：**首次**同步尝试没有重试计数，必须单独报阶段，否则这 31s 静默。
+                        crate::agent::retry::notify_provider_phase(
+                            &crate::agent::retry::ProviderPhase::SyncAttempt { attempt: 1 },
+                        );
                         let response = match retry_provider_followup_timeout_with_policy_deadline(
                             "followup_sync_fallback",
                             &self.policy,
@@ -1847,6 +1855,10 @@ impl ProviderManager {
                                     "followup:stream-error protocol={} provider={} model={} reason={}",
                                     protocol_label, self.config.provider_name, request.model, sync_error
                                 ));
+                                // B198：同步兜底也失败 ⇒ 本轮以本地兜底摘要收尾，事实必须可见。
+                                crate::agent::retry::notify_provider_phase(
+                                    &crate::agent::retry::ProviderPhase::LocalFallback,
+                                );
                                 Ok(local_tool_followup_fallback_response(
                                     request,
                                     tool_call,

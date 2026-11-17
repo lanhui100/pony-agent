@@ -243,6 +243,13 @@ pub enum UiEvent {
     /// 尝试总数。历史实现曾在 `StreamFailed` 里伪造「重试中（1/5）」（假进度、且那已是终态），
     /// 本变体替代该伪造路径：只有**真实发生**的重试才有事件。
     ProviderRetry { attempt: u32, max_attempts: u32 },
+    /// B198：followup 阶段切换（流式失败 → 即将转同步兜底 / 同步请求已发出 / 落本地兜底）。
+    ///
+    /// 唯一真值来源：`agent::retry::notify_provider_phase`（经
+    /// `install_phase_observer` 装到轮次线程上）。与 `ProviderRetry` **正交**：后者只覆盖
+    /// 「已失败且即将重试」的瞬间，覆盖不到**首次**同步尝试（那时还没有重试计数），
+    /// 而一次 followup 交互的真实静默窗口约 190s（断流 75s + 首次同步 31s + 4×21s）。
+    ProviderPhase(pony_agent_core::agent::retry::ProviderPhase),
     /// wave-39 R1（契约冻结空桩）：本轮 token 用量回执，源自 `turn:output_end` /
     /// `turn:completed` 载荷。变体与穷尽匹配已冻结；发送侧（R8）由 Executor 接线。
     StreamUsage {
@@ -546,6 +553,27 @@ pub use self::queue_panel::{
 };
 #[path = "tui/shortcuts.rs"]
 mod shortcuts;
+// 2026-11-17：状态条（任务摘要 + 提示/队列 + 模型·权限）与后台作业投影。
+#[path = "tui/status_bar.rs"]
+mod status_bar;
+#[path = "tui/jobs_panel.rs"]
+mod jobs_panel;
+#[path = "tui/task_center.rs"]
+mod task_center;
+#[path = "tui/permission_panel.rs"]
+mod permission_panel;
+// 这些再导出服务于「测试以 `#[path] mod tui;` 内联本文件」的多个测试二进制：
+// 每个测试只用到其中一部分，故在各测试 crate 里必然出现 unused_imports ——
+// 用 allow 收口，避免 CI 的 deny-warnings 被测试选择集差异打穿。
+#[allow(unused_imports)]
+pub use self::jobs_panel::{JobStatus, JobsViewState};
+#[allow(unused_imports)]
+pub use self::status_bar::{status_line as status_bar_line, task_summary, TaskGlance};
+#[allow(unused_imports)]
+pub use self::task_center::{
+    content_lines as task_center_lines, height as task_center_height,
+    scroll_by as task_center_scroll, TaskCenterState, TaskCenterTab,
+};
 #[path = "tui/goal_panel.rs"]
 mod goal_panel;
 pub use self::queue::*;
@@ -665,7 +693,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
     ("/goal", "设置或查看当前会话目标"),
     ("/approve", "批准当前会话的草稿计划（解除写保护）"),
-    ("/tasks", "切换/查看 Team 任务看板（Ctrl+T）"),
+    ("/tasks", "切换/查看完整 Team 任务看板（Ctrl+T 打开任务抽屉）"),
     ("/agents", "查看 Team 角色与状态"),
     ("/teams", "查看 Team 角色与状态（同 /agents）"),
     ("/clear", "清空当前消息上下文"),
@@ -1486,8 +1514,6 @@ pub struct TuiState {
     pub thinking_collapsed: bool,
     /// 会话权限模式（只读 / 工作区写入 / 完全访问），对齐内核 PermissionMode 契约。
     pub permission_mode: PermissionMode,
-    /// 状态行右槽轮播基准时间（None 表示使用当前瞬时）。
-    pub status_carousel_started_at: Option<std::time::Instant>,
     /// `/settings` 面板当前选中项下标（0 起，越界由渲染钳制）。
     pub settings_selected_index: usize,
     /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的覆盖层状态（`None` = 未打开）。
@@ -1500,6 +1526,12 @@ pub struct TuiState {
     /// 终态事件（完成/失败/停止）与新轮起点（`TurnStarted`，覆盖 goal 续轮）—— 不做 TTL
     /// 猜测，避免已恢复却还显示「正在重试」。
     pub provider_retry: Option<(u32, u32)>,
+    /// B198：followup 的**当前阶段**（`None` = 当前不在 followup 兜底链路上）。
+    ///
+    /// 唯一写入点：`UiEvent::ProviderPhase`（真值来自 provider 调用点）；清空点与
+    /// `provider_retry` 完全一致（首个增量 / 全部终态 / 新轮起点）——两处生命周期同源，
+    /// 避免「重试位清了、阶段位还在」的陈旧状态残留。
+    pub provider_phase: Option<pony_agent_core::agent::retry::ProviderPhase>,
     /// wave-36b：鼠标捕获开关（默认开，F2 切换）。
     pub mouse_capture: bool,
     pub mouse_selection: MouseSelectionState,
@@ -1562,6 +1594,12 @@ pub struct TuiState {
     pub plan_state: Option<PlanState>,
     pub task_board_state: Option<TaskBoardState>,
     pub goal_state: Option<TuiGoal>,
+    /// 常驻任务摘要计数（状态条左槽的数据源；与面板生命周期无关）。
+    pub task_glance: TaskGlance,
+    /// 后台作业快照（状态条右槽计数与抽屉 Jobs 页签共用；`None` = 从未同步）。
+    pub jobs_state: Option<JobsViewState>,
+    /// 底部任务抽屉（`None` = 关闭）。非模态：不改 `mode`，正文与输入框照常工作。
+    pub task_center: Option<TaskCenterState>,
     /// PA-171 C1-T4：本会话最近一次「goal 续轮停止」的结构化原因（`None` = 未停止）。
     ///
     /// 与 `status_text`（瞬时文案）互补：状态行会被下一轮进度短语覆盖，本字段是
@@ -1570,8 +1608,6 @@ pub struct TuiState {
     /// 波次 43：当前处于待决状态的宿主控制请求（真实 `list_pending_asks` 快照）。
     /// `None` = 没有待决请求；`Some` 时对话框提交/拒绝会回写控制面。
     pub pending_request: Option<PendingUiRequest>,
-    /// 波次 44：Goal 横幅首次出现的时间点，用于与指标行做时间片交替（不挤在同一行右侧）。
-    pub goal_banner_since: Option<std::time::Instant>,
     /// 契约 P-3：覆盖层（审批 / 问答等模态弹窗）的 mode 栈；退出时按栈回退，空栈 ⇒ Normal。
     pub mode_stack: Vec<InteractionMode>,
     /// 契约 P-5：一次性状态提示（文案 + 产生时刻）。非流式期按 TTL 渲染，提交新消息时清空。
@@ -1650,11 +1686,11 @@ impl Default for TuiState {
             hide_process: false,
             thinking_collapsed: false,
             permission_mode: PermissionMode::WorkspaceWrite,
-            status_carousel_started_at: None,
             settings_selected_index: 0,
             rewind_state: None,
             status_text: "Ready".to_string(),
             provider_retry: None,
+            provider_phase: None,
             mouse_capture: true,
             mouse_selection: MouseSelectionState::default(),
             scroll_offset: 0,
@@ -1694,9 +1730,11 @@ impl Default for TuiState {
             plan_state: None,
             task_board_state: None,
             goal_state: None,
+            task_glance: TaskGlance::default(),
+            jobs_state: None,
+            task_center: None,
             goal_rounds_stopped: None,
             pending_request: None,
-            goal_banner_since: None,
             mode_stack: Vec::new(),
             status_notice: None,
             provider_registry_path: None,
@@ -1748,9 +1786,39 @@ impl TuiState {
         self.upstream_idle.reset();
     }
 
-    /// 2026-11-14：清空重试进度（重试恢复或任一终态到达）。
+    /// B198：记录一次**真实发生**的 followup 阶段切换（幂等覆盖，只保留当前阶段）。
+    pub fn note_provider_phase(&mut self, phase: pony_agent_core::agent::retry::ProviderPhase) {
+        self.provider_phase = Some(phase);
+        // 阶段切换意味着上一跳的静默计时窗口作废（下一次真实 `calling_model` 重新起算）。
+        self.upstream_idle.reset();
+    }
+
+    /// 2026-11-14：清空重试进度与 followup 阶段（重试恢复 / 任一终态 / 新轮起点）。
+    ///
+    /// B198：阶段位与重试位**生命周期同源**，故同一入口一并清空。方法名沿用历史
+    /// （6 处调用点语义完全一致），不做无收益的改名漂移。
     pub fn clear_provider_retry(&mut self) {
         self.provider_retry = None;
+        self.provider_phase = None;
+    }
+
+    /// B216：把轮末过程摘要写进消息区一行（**持久信息**，与进行中的状态行分离）。
+    ///
+    /// 只在本轮确有起点锚（真实开轮）时写入：会话装载 / 历史重放没有锚点，不得凭空冒出
+    /// 「本轮完成」。写入后 `take()` 锚点，同一轮的多条终态事件（`stop` → `completed`
+    /// 竞态、重复终态回执）只留一行，不重复记账。
+    pub fn push_settled_turn_summary(&mut self, outcome: SettledTurnOutcome) {
+        let Some(started) = self.turn_started_at.take() else {
+            return;
+        };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let line = settled_turn_summary(outcome, Some(elapsed_ms), self.tool_activity.call_count());
+        self.messages.push(ChatMessage {
+            role: MessageRole::System,
+            content: line,
+            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+        });
+        self.auto_scroll = true;
     }
 
     /// wave-60 §C9：`turn:stop_requested` 驱动的**纯状态迁移** —— 只进入「正在停止…」。
@@ -1846,7 +1914,8 @@ impl TuiState {
         self.plan_state = None;
         self.task_board_state = None;
         self.goal_state = None;
-        self.goal_banner_since = None;
+        // 抽屉是会话作用域的瞬时视图：切走后旧会话的任务视图不得挂在头上。
+        self.task_center = None;
         // PA-172 §8 B2（遗留 #10）：续轮停止原因同属会话作用域 —— 不清会让新会话的横幅
         // 继续显示「已停止（…）」，把一个已经切走的会话的结论挂到新会话头上。
         self.goal_rounds_stopped = None;
@@ -2598,6 +2667,22 @@ impl TuiState {
         }
     }
 
+    /// Ctrl+T：任务抽屉开关（非模态覆盖层，不改 `mode`）。
+    ///
+    /// 打开时顺带刷一次花名册：抽屉的 Agents 页签与状态条摘要都读这份进程内快照。
+    pub fn toggle_task_center(&mut self) {
+        if self.task_center.is_some() {
+            self.task_center = None;
+        } else {
+            self.refresh_agent_roster();
+            self.task_center = Some(task_center::TaskCenterState::new());
+        }
+    }
+
+    pub fn close_task_center(&mut self) {
+        self.task_center = None;
+    }
+
     pub fn toggle_task_board(&mut self) {
         // 面板是**覆盖层**，不是模式替换：走 `begin_overlay`/`end_overlay` 记录并恢复进入前的模式。
         // 旧实现直接写 `mode = TaskBoard|Normal` ⇒ 从 PlanMode 打开看板再关闭会静默丢失 PlanMode
@@ -2653,18 +2738,6 @@ impl TuiState {
     }
 
     pub fn set_goal(&mut self, goal: TuiGoal) {
-        // 新目标（或阶段/轮次变化）重置横幅时间片，保证一次切换从 Goal 相位开始。
-        let restarted = match &self.goal_state {
-            Some(previous) => {
-                previous.id != goal.id
-                    || previous.round_count != goal.round_count
-                    || previous.phase != goal.phase
-            }
-            None => true,
-        };
-        if restarted || self.goal_banner_since.is_none() {
-            self.goal_banner_since = Some(std::time::Instant::now());
-        }
         self.goal_state = Some(goal);
     }
 
@@ -2673,7 +2746,6 @@ impl TuiState {
     /// 与 `active_goal_for_session` 同源：core 已删记录，UI 不得残留「已清除的目标」。
     pub fn clear_goal_banner(&mut self) {
         self.goal_state = None;
-        self.goal_banner_since = None;
     }
 
     pub fn next_session(&mut self) {
@@ -3261,6 +3333,21 @@ fn install_tui_retry_observer(
                 attempt: notice.attempt,
                 max_attempts: notice.max_attempts,
             });
+        },
+    ))
+}
+
+/// B198：「followup 阶段 → 状态行」的**唯一装配点**（与重试观察者同构、同线程）。
+///
+/// 为什么必须成对安装：阶段通道覆盖「断流→首次同步→本地兜底」这些**没有重试计数**的
+/// 静默窗口；重试通道覆盖「已失败且即将重试」。缺任一条，followup 长静默就会出现盲区
+/// （B198 现场：约 190s 无任何阶段文案，用户读成「会话无故停止」）。
+fn install_tui_phase_observer(
+    tx: Sender<UiEvent>,
+) -> pony_agent_core::agent::retry::PhaseObserverGuard {
+    pony_agent_core::agent::retry::install_phase_observer(Box::new(
+        move |phase: &pony_agent_core::agent::retry::ProviderPhase| {
+            let _ = tx.send(UiEvent::ProviderPhase(phase.clone()));
         },
     ))
 }
@@ -4247,61 +4334,11 @@ pub(crate) fn workspace_header_label_with_home(
     name.to_string()
 }
 
-/// wave-39 v3 §6 R7/R10/R11 / wave-41 S1：色带下方指标行 —— 左侧 workspace 路径（整行 GHOST），
-/// 右侧按「有值才显示」拼装 `↑in ↓out · 缓存 x% · 上下文 y%`；全无值时右簇为空。
-/// 输入 token (↑) 与上下文百分比分子对齐 ADR 0035 S1：使用当前上下文输入 token（非会话累计）。
-/// 波次 44：Goal 横幅与指标行的**时间片交替**参数。
+/// wave-39 v3 §6 R7/R10/R11 / wave-41 S1：色带下方状态条 —— 任务摘要 + 提示/队列 + 模型·权限。
 ///
-/// 占用同一行会让右侧指标被 Goal 挤掉（真实目标动辄一整句），因此改为轮播：
-/// 前 6 秒展示 Goal，随后 8 秒让位给 token / 缓存 / 上下文指标，循环往复。
-pub const GOAL_BANNER_HOLD_MS: u64 = 6_000;
+/// 2026-11-17 起本行不再承载数值指标（指标唯一家是 header 右槽），也不再与 Goal 做时间片交替：
+/// Goal 可见性由状态条左槽的常驻摘要承担（ADR `2026-11-17-tui-task-visibility-bottom-drawer`）。
 pub const METRICS_HOLD_MS: u64 = 8_000;
-
-/// 当前 Goal 轮播相位（`None` = 没有活跃 Goal，整行永远是指标）。
-/// 返回 `(是否显示 Goal, 距离下次切换的毫秒数)`，供主循环安排精确重绘。
-pub fn goal_banner_phase(state: &TuiState) -> Option<(bool, u64)> {
-    let goal = state.goal_state.as_ref()?;
-    let _ = goal;
-    let since = state.goal_banner_since?;
-    let period = GOAL_BANNER_HOLD_MS + METRICS_HOLD_MS;
-    let elapsed = since.elapsed().as_millis() as u64 % period;
-    if elapsed < GOAL_BANNER_HOLD_MS {
-        Some((true, GOAL_BANNER_HOLD_MS - elapsed))
-    } else {
-        Some((false, period - elapsed))
-    }
-}
-
-/// Goal 横幅拆成「加重的 Goal 标签」+「正文」两段，避免整行同一灰度。
-///
-/// PA-172 §8 B2（遗留 #10）：本函数是 `TuiState::goal_rounds_stopped` 的**读取点**——
-/// armed goal 仍在、但自动续轮已停时，横幅必须说明「已停止（`visible_line`）」，否则用户
-/// 只看到轮数停在原处（`goal_rounds_stopped` 在此之前是只写不读的遗留字段）。
-fn goal_banner_parts(state: &TuiState, goal: &TuiGoal) -> (String, String) {
-    let rounds = match goal.max_rounds {
-        Some(max) => format!("{}/{}", goal.round_count, max),
-        None => format!("{}", goal.round_count),
-    };
-    let phase = match goal.phase {
-        GoalPhase::Active => "进行中",
-        GoalPhase::Completed => "已完成",
-        GoalPhase::Blocked => "已阻塞",
-        GoalPhase::Paused => "已暂停",
-    };
-    // PA-172 §8 B2：已停止的自动续轮必须与「进行中 [n/m]」共存可见（否则横幅在说谎）。
-    let stopped = state
-        .goal_rounds_stopped
-        .as_ref()
-        .map(|reason| format!(" · 已停止（{}）", reason.visible_line()))
-        .unwrap_or_default();
-    (
-        "Goal".to_string(),
-        format!(
-            " · {} [{rounds}] ({phase}){stopped}",
-            goal.objective.trim().replace('\n', " ")
-        ),
-    )
-}
 
 /// F1 I4（2026-11-15 修订，ADR 2026-11-15-tui-speed-segment-drop-inline-cadence）：
 /// 速度段只出「值 + 单位」，**不再行内自描述口径与样本量**——header 右槽宽度是稀缺资源，
@@ -4582,155 +4619,13 @@ fn header_metrics_text_within(state: &TuiState, budget: usize) -> String {
     }
 }
 
-pub const STATUS_CAROUSEL_MODEL_HOLD_MS: u64 = 3_000;
-pub const STATUS_CAROUSEL_PERM_HOLD_MS: u64 = 3_000;
-pub const STATUS_CAROUSEL_PERIOD_MS: u64 = STATUS_CAROUSEL_MODEL_HOLD_MS + STATUS_CAROUSEL_PERM_HOLD_MS;
-
-/// 当前状态行右槽轮播相位。
-/// 返回 `(是否为 Model 阶段, 距离下次切换的毫秒数)`。
-pub fn status_carousel_phase(state: &TuiState) -> (bool, u64) {
-    let now_ms = match state.status_carousel_started_at {
-        Some(t) => t.elapsed().as_millis() as u64,
-        None => std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-    };
-    let elapsed = now_ms % STATUS_CAROUSEL_PERIOD_MS;
-    if elapsed < STATUS_CAROUSEL_MODEL_HOLD_MS {
-        (true, STATUS_CAROUSEL_MODEL_HOLD_MS - elapsed)
-    } else {
-        (false, STATUS_CAROUSEL_PERIOD_MS - elapsed)
-    }
-}
-
-/// 右槽轮播渲染文本与样式（模型身份与执行权限模式时分轮播）。
-pub fn right_slot_content(state: &TuiState) -> (String, Style) {
-    let (is_model, _) = status_carousel_phase(state);
-    if is_model {
-        let text = match state.reasoning_effort {
-            Some(_) => format!("{} · {}", state.model, state.reasoning_effort_label()),
-            None => state.model.clone(),
-        };
-        (text, Style::default().fg(theme::GHOST))
-    } else {
-        let text = match state.permission_mode {
-            PermissionMode::ReadOnly => "权限 · 只读".to_string(),
-            PermissionMode::WorkspaceWrite => "权限 · 工作区".to_string(),
-            PermissionMode::FullAccess => "权限 · 完全访问".to_string(),
-        };
-        let color = match state.permission_mode {
-            PermissionMode::ReadOnly => theme::WARN,
-            PermissionMode::WorkspaceWrite => theme::MUTED,
-            PermissionMode::FullAccess => theme::ACCENT,
-        };
-        (text, Style::default().fg(color))
-    }
-}
-
-/// 输入框下方状态行：左槽 = 一次性提示 / 计划模式横幅 / 排队反馈，右槽 = 当前模型身份与权限模式时分轮播。
+/// 状态条：任务摘要 + 提示/队列 + 模型·权限（唯一渲染真源 `tui/status_bar.rs`）。
 ///
-/// 与 header 的分工（ADR 0078）：header 左 = 品牌 + 工作区（`~/<文件夹名称>`），header 右 = 数值指标；
-/// 本行不再重复工作区路径，改为右对齐时分轮播展示模型（含思考强度）与权限级别。排队/提示留在本行，
-/// 因为它们紧贴输入动作，且必须在**每一帧**都有渲染点（C7/C18③/C23）。
+/// 模型身份与权限**同时**可见，不再 3s/3s 时分轮播
+///（ADR `2026-11-17-tui-task-visibility-bottom-drawer`）。
 fn status_line(state: &TuiState, width: usize) -> Line<'static> {
-    let ghost = || Style::default().fg(theme::GHOST);
-    let (right_text, right_style) = right_slot_content(state);
-    // C7/C18③/C23：排队指示器**唯一渲染点**就是本行（每帧都渲染，与 `mode`/`runtime_mode`
-    // 无关），故 `status_word` 不再重复输出。`queue_indicator_line` 保证流式期 / 工具执行期
-    // 都有输出；宽度受限时按 34 列截断，避免挤掉右槽的模型身份。
-    let queue_left = queue_indicator_line(
-        state.queued_count(),
-        state
-            .queue_notice
-            .as_ref()
-            .filter(|(_, at)| at.elapsed().as_millis() as u64 <= QUEUE_NOTICE_TTL_MS)
-            .map(|(text, _)| text.as_str()),
-        state.is_streaming,
-        matches!(state.runtime_mode, RuntimeMode::ExecutingTool(_)),
-    )
-    .map(|indicator| (truncate_width(&indicator, 34), ghost()));
-    // 契约 P-5 / F-N：一次性提示（非流式 + TTL 内）与非流式的计划模式横幅优先占左槽，
-    // 其次排队反馈；两者都没有时左槽留空，右槽始终是模型/权限轮播槽。
-    let transient_left: Option<(String, Style)> = state
-        .status_notice
-        .as_ref()
-        .filter(|(_, at)| {
-            should_render_status_notice(
-                state.is_streaming,
-                at.elapsed().as_millis() as u64,
-                STATUS_NOTICE_TTL_MS,
-            )
-        })
-        .map(|(notice, _)| {
-            let style = severity_style(system_message_severity(notice), muted());
-            (truncate_width(notice, 34), style)
-        })
-        .or_else(|| {
-            plan_mode_banner(state.mode == InteractionMode::PlanMode)
-                .map(|banner| (banner.to_string(), muted()))
-        });
-    if let Some((left_text, left_style)) = transient_left.or(queue_left) {
-        let right_w = str_width(&right_text);
-        if right_text.is_empty() || RAIL + 2 + str_width(&left_text) + right_w > width {
-            return Line::from(vec![
-                Span::raw(" ".repeat(RAIL)),
-                Span::styled(
-                    ellipsize_width(&left_text, width.saturating_sub(RAIL)),
-                    left_style,
-                ),
-            ]);
-        }
-        let budget = width.saturating_sub(RAIL + 1 + right_w);
-        let left = ellipsize_width(&left_text, budget.max(6));
-        let used = RAIL + str_width(&left);
-        return Line::from(vec![
-            Span::raw(" ".repeat(RAIL)),
-            Span::styled(left, left_style),
-            Span::raw(" ".repeat(width.saturating_sub(used + right_w))),
-            Span::styled(right_text, right_style),
-        ]);
-    }
-
-    // 波次 44：Goal 横幅与状态行其余内容按时间片交替（见 goal_banner_phase），
-    // 且 Goal 相位**左对齐**成横幅，不与右对齐的模型身份混在同一排版里。
-    if matches!(goal_banner_phase(state), Some((true, _))) {
-        if let Some(goal) = state.goal_state.as_ref() {
-            let (tag, body) = goal_banner_parts(state, goal);
-            let used = RAIL;
-            let budget = width.saturating_sub(used).max(12);
-            // 「Goal」标记固定完整显示（最多 4 列），正文按剩余宽度省略。
-            let body_budget = budget.saturating_sub(str_width(&tag)).max(6);
-            let body = ellipsize_width(&body, body_budget);
-            let pad = width.saturating_sub(used + str_width(&tag) + str_width(&body));
-            return Line::from(vec![
-                Span::raw(" ".repeat(RAIL)),
-                // 「Goal」标记加重：BOLD + 比正文亮一档，作为横幅唯一的强调点。
-                Span::styled(
-                    tag,
-                    Style::default()
-                        .fg(theme::MUTED)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(body, ghost()),
-                Span::raw(" ".repeat(pad)),
-            ]);
-        }
-    }
-
-    // 默认态：左槽留空（工作区已在 header 展示一次），模型身份与权限右对齐到内容列最后一列。
-    let right_w = str_width(&right_text);
-    if right_w <= width {
-        Line::from(vec![
-            Span::raw(" ".repeat(width - right_w)),
-            Span::styled(right_text, right_style),
-        ])
-    } else {
-        Line::from(Span::styled(ellipsize_width(&right_text, width), right_style))
-    }
+    status_bar::status_line(state, width)
 }
-
-
 
 /// 列表行：左侧 emphasis 竖条 + 主文本 + 右侧次要信息；选中行用极淡底色铺满整行。
 /// 模型显示名：名称缺失或与 id 相同则回落到 id。
@@ -5132,7 +5027,10 @@ fn runtime_mode_lifecycle(mode: &RuntimeMode) -> TurnLifecycle {
 /// 不拿 `is_streaming` 当门：该标志由**派发点**置位，而 goal 自动续轮等入口在轮次线程内
 /// 直接开轮，以它作门会让这些轮次整段没有「进行中」反馈。
 pub(crate) fn turn_lifecycle(state: &TuiState) -> TurnLifecycle {
-    if state.stopping_turn_id.is_some() || state.provider_retry.is_some() {
+    if state.stopping_turn_id.is_some()
+        || state.provider_retry.is_some()
+        || state.provider_phase.is_some()
+    {
         return TurnLifecycle::Running;
     }
     runtime_mode_lifecycle(&state.runtime_mode)
@@ -5206,6 +5104,12 @@ fn status_word_base(state: &TuiState) -> (String, StatusTone) {
             format!("正在重试（{attempt}/{max_attempts}）…"),
             StatusTone::Warn,
         );
+    }
+    // B198：followup 阶段（断流转同步 / 首次同步尝试 / 本地兜底）此前整段无文案——
+    // 一次交互可静默 ~190s，用户据此判定「无故停止」。阶段事实优先于「生成中」含糊短语；
+    // 重试计数仍在时以计数为准（它是更精确的进度），故本分支排在 retry 之后。
+    if let Some(phase) = state.provider_phase.as_ref() {
+        return (followup_phase_text(phase), StatusTone::Warn);
     }
     let transient = compact_status(&state.status_text);
     match &state.runtime_mode {
@@ -6146,16 +6050,49 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             ),
     );
     let band_h = input_h + 1 + badge_h;
-    // 底部固定基座 = 色带 + 指标行；内联 Ask 面板插在基座之上（信息流底部）。
+    // 底色基座 = 色带 + 状态条。自下而上：状态条 → 输入框色带 → 打断层 → 任务抽屉 → 正文。
     let bottom_h = input_h + 2 + badge_h;
     let bottom_top = area.y.saturating_add(area.height).saturating_sub(bottom_h);
-    let ask_inline_h = inline_ask_height(state, content.width as usize);
-
     let chat_top = content.y + 3; // header + rule + 1 行呼吸
-    // 契约 C8（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：消息区下缘与 Composer 色带
-    // 之间恒定保留 `CHAT_BOTTOM_GAP` 行空白（CANVAS 底色，无任何字形）；自动贴底与手动滚到底
-    // 两种情形都成立。间距行不参与消息区几何，故在高度上扣除而不是塞进 Composer 侧。
-    let chat_h = bottom_top
+    let ask_inline_h = inline_ask_height(state, content.width as usize);
+    // B194：排队面板与 Ask 同构；二者同时在场时让位给 Ask（计数仍在状态条）。
+    let queue_inline_h = if ask_inline_h > 0 {
+        0
+    } else {
+        inline_queue_height(state, content.width as usize)
+    };
+    // 权限审批：与 Ask / 排队同构的底部内联打断层（不再是居中弹窗）。
+    let permission_inline_h = permission_panel::inline_permission_height(
+        state,
+        bottom_top.saturating_sub(chat_top),
+    );
+    // 打断层占位：贴基座上缘，永不越过 header。
+    let blocker_h = ask_inline_h
+        .max(queue_inline_h)
+        .max(permission_inline_h)
+        .min(bottom_top.saturating_sub(chat_top));
+    // 打断层下缘 = 基座上缘（它自己就是贴基座的那一段）；抽屉再叠在打断层之上。
+    let inline_bottom = bottom_top;
+    // 抽屉锚点：关闭时**不扣**打断层高度（否则 Ask/Queue 会经由 chat_rect 改变消息几何，
+    // 破坏契约 C8 与既有 O2 用例）；只有抽屉真的打开时才叠到打断层之上。
+    let drawer_bottom = if state.task_center.is_some() {
+        inline_bottom.saturating_sub(blocker_h)
+    } else {
+        inline_bottom
+    };
+    // 任务抽屉：高度按内容自适应、上限为可用正文区的 2/3。抽屉参与底部几何，
+    // 正文区随之缩短 ⇒ 最新消息始终在抽屉上方可见（无需滚动锚点补偿）。
+    let drawer_h = task_center::height(state, drawer_bottom.saturating_sub(chat_top));
+    let drawer_rect = Rect {
+        x: content.x,
+        y: drawer_bottom.saturating_sub(drawer_h),
+        width: content.width,
+        height: drawer_h,
+    };
+    let chat_bottom = drawer_rect.y;
+    // 契约 C8（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：消息区下缘与
+    // Composer 色带之间恒定保留 `CHAT_BOTTOM_GAP` 行空白（抽屉在场时即与抽屉之间）。
+    let chat_h = chat_bottom
         .saturating_sub(chat_top)
         .saturating_sub(CHAT_BOTTOM_GAP);
     let chat_rect = Rect {
@@ -6164,48 +6101,43 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         width: content.width,
         height: chat_h.max(1),
     };
-    // Ask 是正文下部的覆盖层，不参与消息区几何；极小终端也不能越过 header 或 Composer。
+    // 打断层是覆盖层而非布局项：下缘贴 `inline_bottom`（有抽屉时即抽屉顶），不得越过 header。
     let ask_rect = if ask_inline_h > 0 {
-        let ask_y = chat_rect.y.max(bottom_top.saturating_sub(ask_inline_h));
-        // Ask 是覆盖层而非布局项：下缘仍贴 Composer 色带上缘，允许占用消息区之下的
-        // `CHAT_BOTTOM_GAP` 呼吸行（契约 C8 只约束消息区几何；既有 O2 用例断言面板贴色带）。
-        let ask_bottom = chat_rect
-            .y
-            .saturating_add(chat_rect.height)
-            .saturating_add(CHAT_BOTTOM_GAP)
-            .min(bottom_top);
+        let ask_y = chat_rect.y.max(inline_bottom.saturating_sub(ask_inline_h));
         Rect {
             x: content.x,
             y: ask_y,
             width: content.width,
-            height: ask_bottom.saturating_sub(ask_y).min(ask_inline_h),
+            height: inline_bottom.saturating_sub(ask_y).min(ask_inline_h),
         }
     } else {
         Rect::default()
     };
-    // B194：排队面板与 Ask 同构 —— **覆盖层**，不参与消息区几何（契约 C8 不变）。
-    // Ask 是必须由人回答的阻塞面板，二者同时存在时让位给 Ask（计数仍在指标行）。
-    let queue_inline_h = if ask_inline_h > 0 {
-        0
-    } else {
-        inline_queue_height(state, content.width as usize)
-    };
     let queue_rect = if queue_inline_h > 0 {
-        let queue_y = chat_rect.y.max(bottom_top.saturating_sub(queue_inline_h));
-        let queue_bottom = chat_rect
-            .y
-            .saturating_add(chat_rect.height)
-            .saturating_add(CHAT_BOTTOM_GAP)
-            .min(bottom_top);
+        let queue_y = chat_rect.y.max(inline_bottom.saturating_sub(queue_inline_h));
         Rect {
             x: content.x,
             y: queue_y,
             width: content.width,
-            height: queue_bottom.saturating_sub(queue_y).min(queue_inline_h),
+            height: inline_bottom.saturating_sub(queue_y).min(queue_inline_h),
         }
     } else {
         Rect::default()
     };
+    // 权限审批内联面板：与 Ask / 排队同一位置口径（下缘贴 `inline_bottom`）。
+    let permission_rect = if permission_inline_h > 0 {
+        let perm_y = chat_rect.y.max(inline_bottom.saturating_sub(permission_inline_h));
+        Rect {
+            x: content.x,
+            y: perm_y,
+            width: content.width,
+            height: inline_bottom.saturating_sub(perm_y).min(permission_inline_h),
+        }
+    } else {
+        Rect::default()
+    };
+    state.last_chat_rect = Some(chat_rect);
+    state.last_chat_rect = Some(chat_rect);
     state.last_chat_rect = Some(chat_rect);
 
     // ── 会话正文：轨道标记 + 单色正文 + 分层工具行 ─────────────────────────
@@ -6453,12 +6385,23 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 
     // 其他浮层仍先清场；Ask 仅覆盖自身矩形，未遮挡的历史消息保持原样。
-    if state.mode != InteractionMode::Normal && state.mode != InteractionMode::AskUserQuestion {
+    if !matches!(
+        state.mode,
+        InteractionMode::Normal
+            | InteractionMode::AskUserQuestion
+            | InteractionMode::PermissionApproval
+    ) {
         f.render_widget(ratatui::widgets::Clear, chat_rect);
         f.render_widget(
             Block::default().style(Style::default().bg(theme::CANVAS)),
             chat_rect,
         );
+    }
+
+    // ── 权限审批覆盖层（底部内联）：下缘贴 `inline_bottom`，不遮正文 ──────────
+    if permission_rect.height > 0 {
+        f.render_widget(ratatui::widgets::Clear, permission_rect);
+        permission_panel::render_permission_inline(f, permission_rect, state);
     }
 
     // ── Ask 覆盖层：下缘贴 Composer 上缘，消息几何不随面板开关变化 ──────────
@@ -6486,7 +6429,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     };
     // 普通态渲染输入区；Ask 态保留色带与指标行，只把输入区换成「等待选择」提示，
     // 让问答面板成为信息流底部的一段，而不是遮罩式弹窗。
-    if state.mode == InteractionMode::Normal || state.mode == InteractionMode::AskUserQuestion {
+    if matches!(
+        state.mode,
+        InteractionMode::Normal
+            | InteractionMode::AskUserQuestion
+            | InteractionMode::PermissionApproval
+    ) {
         fill(f, band, theme::SURFACE);
         // wave-39 v4 R13：色带末行是呼吸行（整行空白）。v4 起它同时是「输入正文 → 指标行」之间
         // 唯一的 1 行视觉间距；底色按色带 content 宽铺设，左右沟槽列保持 CANVAS。
@@ -6540,6 +6488,11 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                 .style(Style::default().bg(theme::CANVAS).fg(theme::GHOST)),
             status_rect,
         );
+    }
+
+    // ── 任务抽屉（非模态）：正文区已为其让位，最新消息始终在抽屉上方可见 ────
+    if drawer_rect.height > 0 {
+        task_center::render(f, drawer_rect, state);
     }
 
     // ── 斜杠命令面板：浮于输入区之上，两条发丝线夹一段浅表面 ──────────────
@@ -6919,9 +6872,6 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     }
 
     // ── 进阶交互组件渲染空桩（由 Executor 在阶段 3 完善实际 UI） ──
-    if state.mode == InteractionMode::PermissionApproval {
-        render_permission_dialog_stub(f, state);
-    }
     if state.mode == InteractionMode::PlanMode {
         render_plan_panel_stub(f, state);
     }
@@ -9526,8 +9476,6 @@ fn tui_event_loop(
 
     let mut last_tick_instant = std::time::Instant::now();
     let mut last_poll_instant = std::time::Instant::now();
-    let mut last_goal_phase: Option<bool> = None;
-    let mut last_status_carousel_phase: Option<bool> = None;
     let mut cap_poll_ms: Option<u64> = None;
     // C24 单飞闩（时间窗）：队首派发后置 `now + QUEUE_DISPATCH_LATCH_MS`，窗口内不再派发。
     // 不再「收到任何 InputKey 就清闩」—— 那会在「派发后、合成 Enter 被消费前」开单飞缺口
@@ -9657,33 +9605,14 @@ fn tui_event_loop(
             }
         }
 
-        // 波次 44：Goal/指标轮播到切换点时立即重绘，并且把等待时长压到不超过剩余相位，
-        // 既不靠 16fps 空转，也不会让横幅在相位边界上“卡住不动”。
-        if let Some((visible, remaining)) = goal_banner_phase(&state) {
-            if last_goal_phase != Some(visible) {
-                last_goal_phase = Some(visible);
-                dirty = true;
-            }
-            // 留 1ms 余量，避免取整后再次落在同一相位。
-            cap_poll_ms = Some(remaining.saturating_add(1));
-        } else {
-            last_goal_phase = None;
-        }
-
         // 状态行驻留到点唤醒：与 goal 相位共用 `cap_poll_ms`（取最小，互不吞掉）。
         if let Some(wake) = state.status_dwell.next_wake_ms() {
             let remaining = wake.saturating_sub(now_ms()).saturating_add(1);
             cap_poll_ms = Some(cap_poll_ms.map_or(remaining, |cap| cap.min(remaining)));
         }
 
-        // 状态行右槽：模型身份与权限模式时分轮播（3 秒交替）。
-        let (carousel_phase, carousel_remaining) = status_carousel_phase(&state);
-        if last_status_carousel_phase != Some(carousel_phase) {
-            last_status_carousel_phase = Some(carousel_phase);
-            dirty = true;
-        }
-        let carousel_cap = carousel_remaining.saturating_add(1);
-        cap_poll_ms = Some(cap_poll_ms.map_or(carousel_cap, |cap| cap.min(carousel_cap)));
+        // 常驻任务摘要 + 后台作业快照：三条数据源都是进程内注册表（无网络），每轮刷新。
+        status_bar::sync_task_glance(&mut state);
 
         let mut poll_ms = if state.is_streaming || state.has_pending_animation() { 16 } else { 120 };
         if let Some(cap) = cap_poll_ms {
@@ -10620,6 +10549,53 @@ fn tui_event_loop(
                         continue;
                     }
 
+                    // 1b. 任务抽屉是**非模态**覆盖层：↑↓/PgUp/PgDn/Tab/Esc 优先归抽屉，
+                    //     其余按键照常落进 Composer（用户可在抽屉开着时继续输入）。
+                    if state.task_center.is_some() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                state.close_task_center();
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::Tab => {
+                                if let Some(center) = state.task_center.as_mut() {
+                                    center.next_tab();
+                                }
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::BackTab => {
+                                if let Some(center) = state.task_center.as_mut() {
+                                    center.prev_tab();
+                                }
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::Up => {
+                                task_center::scroll_by(&mut state, -1);
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::Down => {
+                                task_center::scroll_by(&mut state, 1);
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::PageUp => {
+                                task_center::scroll_by(&mut state, -10);
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::PageDown => {
+                                task_center::scroll_by(&mut state, 10);
+                                dirty = true;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // 2. 流式态 Esc = 停止本轮（双击）；静态下 Esc 仅用于清空输入缓冲区，不退出程序
                     if key.code == KeyCode::Esc {
                         if state.is_streaming {
@@ -10896,8 +10872,9 @@ fn tui_event_loop(
                             // 波次 44：Ctrl+T 呼出任务看板（与 /tasks 同路径：先同步真实 todo 存储）。
                             // 不占用裸 `t`，避免无法输入以 t 开头的消息。
                             KeyCode::Char('t') => {
+                                // 抽屉是五类任务信息的统一入口；`/tasks` 仍可直达完整看板。
                                 sync_tasks_from_store(&mut state);
-                                state.toggle_task_board();
+                                state.toggle_task_center();
                                 continue;
                             }
                             // wave-35b：Ctrl+R 打开模型面板并远程刷新（与 /models 同路径）。
@@ -11466,6 +11443,8 @@ fn tui_event_loop(
                                   // 故在此安装重试观察者 ⇒ 真实重试进度直达状态行。守卫随线程体
                                   // drop，摘除观察者，不给后续线程留悬挂回调。
                                   let _retry_observer = install_tui_retry_observer(tx_turn.clone());
+                                  // B198：阶段观察者与重试观察者成对安装（同一轮次线程）。
+                                  let _phase_observer = install_tui_phase_observer(tx_turn.clone());
                                   // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
                                   // 抢走 outer 的 `tx_turn`（panic 兜底还要用它）。
                                   let tx_session_fail = tx_turn.clone();
@@ -11716,6 +11695,11 @@ fn tui_event_loop(
                     state.note_provider_retry(attempt, max_attempts);
                     dirty = true;
                 }
+                // B198：阶段切换只更新状态位（不进消息流）——它是「当前卡在哪」而非历史事实。
+                UiEvent::ProviderPhase(phase) => {
+                    state.note_provider_phase(phase);
+                    dirty = true;
+                }
                 UiEvent::StreamDelta(delta) => {
                     // 上游已开始产出 ⇒ 重试真的恢复了，进度位立即摘除（不留假状态）。
                     state.clear_provider_retry();
@@ -11763,6 +11747,8 @@ fn tui_event_loop(
                     stop_sequence.reset();
                     state.transition_runtime_mode(RuntimeMode::Completed);
                     state.status_text = "Turn completed".to_string();
+                    // B216：状态行随终态消失 ⇒ 轮末摘要落到消息区（耗时/工具数是可回看的持久信息）。
+                    state.push_settled_turn_summary(SettledTurnOutcome::Completed);
                     sync_tasks_from_store(&mut state);
                     if let Some(goal_data) = pony_agent_core::agent::goal::active_goal_for_session(&state.session_id) {
                         state.set_goal(tui_goal_from_goal(&goal_data));
@@ -11799,6 +11785,8 @@ fn tui_event_loop(
                     state.apply_stop_terminal(&turn_id, stop_reason.as_deref());
                     // 2026-11-14：取消是终态之一 ⇒ 重试进度位一并摘除（不得随停止残留）。
                     state.clear_provider_retry();
+                    // B216：停止轮同样留一行终态摘要（不显示耗时）。
+                    state.push_settled_turn_summary(SettledTurnOutcome::Cancelled);
                     // wave-60 §C8：turn 结束 ⇒ 双击 Esc 的上膛失效。
                     stop_sequence.reset();
                 }
@@ -11871,6 +11859,8 @@ fn tui_event_loop(
                     // 不再向消息区推重复的 System 消息。
                     state.status_text = summary.clone();
                     state.transition_runtime_mode(RuntimeMode::Failed(summary));
+                    // B216：失败轮只给终态摘要（不显示耗时，避免被读成正常完成）。
+                    state.push_settled_turn_summary(SettledTurnOutcome::Failed);
                 }
                 UiEvent::ModelsDiscovered { provider_id, ids } => {
                     // 契约 F-J：视图变换收敛进 `apply_models_discovered`（幂等、可单测）；
@@ -12061,6 +12051,8 @@ fn tui_event_loop(
                         // 2026-11-14：本线程是 provider 调用所在线程 ⇒ 在此安装重试观察者
                         // （见 `install_tui_retry_observer`），让真实重试进度直达状态行。
                         let _retry_observer = install_tui_retry_observer(tx_turn.clone());
+                        // B198：阶段观察者与重试观察者成对安装（同一轮次线程）。
+                        let _phase_observer = install_tui_phase_observer(tx_turn.clone());
                         // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
                         // 抢走 outer 的 `tx_turn`（终态兜底还要用它）。
                         let tx_session_fail = tx_turn.clone();
@@ -12173,6 +12165,8 @@ fn tui_event_loop(
                         // 2026-11-14：本线程是 provider 调用所在线程 ⇒ 在此安装重试观察者
                         // （见 `install_tui_retry_observer`），让真实重试进度直达状态行。
                         let _retry_observer = install_tui_retry_observer(tx_turn.clone());
+                        // B198：阶段观察者与重试观察者成对安装（同一轮次线程）。
+                        let _phase_observer = install_tui_phase_observer(tx_turn.clone());
                         // 会话缺失的可见上报需要 sender；克隆一份，避免内层 move 闭包
                         // 抢走 outer 的 `tx_turn`（终态兜底还要用它）。
                         let tx_session_fail = tx_turn.clone();

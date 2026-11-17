@@ -529,3 +529,75 @@ fn b220_no_hint_before_threshold() {
         "请求发出后 5000ms 必须提示上游未响应"
     );
 }
+
+// ── B198：followup 阶段位（断流→首次同步→本地兜底）──────────────────────────
+
+/// 阶段位必须让生命周期保持 Running：即使 `runtime_mode` 已回终态（Ready/Completed），
+/// 只要兜底链路还在跑，底部就必须有进行中反馈——这是 B198 现场的直接回归。
+#[test]
+fn b198_phase_keeps_running_status_visible() {
+    use pony_agent_core::agent::retry::ProviderPhase;
+
+    let mut state = state_in(RuntimeMode::Ready);
+    assert!(
+        !should_render_running_status(&state),
+        "前提：无任何在途信号时终态不渲染进行中行"
+    );
+
+    state.note_provider_phase(ProviderPhase::SyncAttempt { attempt: 1 });
+
+    assert!(
+        should_render_running_status(&state),
+        "首次同步兜底尝试没有重试计数，阶段位是唯一在途信号"
+    );
+    let (text, _tone) = status_word_base(&state);
+    assert!(
+        text.contains("同步兜底") && text.contains('1'),
+        "状态词必须点名阶段与真实尝试序号，实际 = {text:?}"
+    );
+}
+
+/// 三阶段文案互不混淆，且「本地兜底」是可识别的降级收尾（不是正常生成）。
+#[test]
+fn b198_phase_texts_are_distinguishable() {
+    use pony_agent_core::agent::retry::ProviderPhase;
+
+    let mut state = state_in(RuntimeMode::Responding);
+    state.note_provider_phase(ProviderPhase::StreamFallback);
+    let (stream, _) = status_word_base(&state);
+
+    state.note_provider_phase(ProviderPhase::LocalFallback);
+    let (local, tone) = status_word_base(&state);
+
+    assert!(stream.contains("流式中断"), "实际 = {stream:?}");
+    assert!(local.contains("本地兜底"), "实际 = {local:?}");
+    assert_ne!(stream, local, "过程中断与降级收尾必须可区分");
+    assert!(
+        matches!(tone, StatusTone::Warn),
+        "降级收尾必须用警示色，不得读成正常输出"
+    );
+}
+
+/// 重试计数比阶段更精确 ⇒ 同时存在时以计数为准；二者生命周期同源，一起清空。
+#[test]
+fn b198_retry_outranks_phase_and_both_clear_together() {
+    use pony_agent_core::agent::retry::ProviderPhase;
+
+    let mut state = state_in(RuntimeMode::Responding);
+    state.note_provider_retry(2, 5);
+    state.note_provider_phase(ProviderPhase::SyncAttempt { attempt: 2 });
+
+    let (text, _tone) = status_word_base(&state);
+    assert!(
+        text.contains("正在重试"),
+        "重试计数在场时必须优先显示真实进度，实际 = {text:?}"
+    );
+
+    state.clear_provider_retry();
+    assert!(state.provider_phase.is_none(), "阶段位必须与重试位一并摘除");
+    let (after, _tone) = status_word_base(&state);
+    assert!(
+        !after.contains("正在重试") && !after.contains("同步兜底"),
+        "两处都清空后不得残留进度文案，实际 = {after:?}"
+    );
+}

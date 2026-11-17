@@ -27,7 +27,6 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
-use std::time::{Duration, Instant};
 
 // 与 tui.rs 保持一致的布局常量（只在断言里复算几何，不参与实现）。
 const GUTTER: u16 = 3;
@@ -104,30 +103,6 @@ fn all_text(buf: &Buffer) -> String {
         .map(|y| row_text(buf, y))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// 把状态行右槽轮播**显式钉在指定相位**（ADR 0119：模型身份与「权限 · <级别>」按时分交替）。
-///
-/// 为什么必须钉：`status_carousel_phase` 在 `status_carousel_started_at = None` 时退化为
-/// **墙钟毫秒 % 周期**，底面行（y=29）落在哪个半周期不可控 —— 断言「底面行 == 模型身份且字形
-/// 全为 GHOST」会随真实时间随机红（权限相位用 MUTED，颜色断言先挂）。这里把起点回拨到目标窗口
-/// **正中**，偏移量全部取自产品常量（不写死毫秒数），并当场断言相位已生效，防止夹具失效后
-/// 静默假绿。
-fn pin_carousel_phase(state: &mut tui::TuiState, model_phase: bool) {
-    let offset_ms = if model_phase {
-        tui::STATUS_CAROUSEL_MODEL_HOLD_MS / 2
-    } else {
-        tui::STATUS_CAROUSEL_MODEL_HOLD_MS + tui::STATUS_CAROUSEL_PERM_HOLD_MS / 2
-    };
-    state.status_carousel_started_at = Some(Instant::now() - Duration::from_millis(offset_ms));
-    let (is_model, _) = tui::status_carousel_phase(state);
-    assert_eq!(
-        is_model, model_phase,
-        "夹具失效：期望相位 {}，实际 {}（offset={offset_ms}ms，周期={}ms）",
-        if model_phase { "模型" } else { "权限" },
-        if is_model { "模型" } else { "权限" },
-        tui::STATUS_CAROUSEL_PERIOD_MS
-    );
 }
 
 /// 每个 cell 一个 String（宽字符右半格是空格），用于按「列」而不是「字符」定位。
@@ -625,10 +600,6 @@ fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
         .unwrap_or_default()
         .to_string();
 
-    // 相位显式钉住（ADR 0119）：底面行是「模型身份 / 权限 · 级别」的时分轮播槽，
-    // 不钉则下面 y=29 的前景与内容断言会随墙钟相位随机红。
-    pin_carousel_phase(&mut state, true);
-
     // Act
     let buf = screen(&mut state, 110, 30);
 
@@ -1023,11 +994,6 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
     state.context_window_tokens = 200_000;
     let (cx, cw) = content_geometry(110);
 
-    // 相位显式钉住（ADR 0119）：底面行是「模型身份 / 权限 · 级别」的时分轮播槽。不钉时
-    // `status_carousel_phase` 用墙钟毫秒取模，本用例会在「字形前景必须是 GHOST」处随机红
-    // （权限相位用 MUTED）。权限相位另渲一帧在 Assert 4 断言。
-    pin_carousel_phase(&mut state, true);
-
     // Act
     let buf = screen(&mut state, 110, 30);
 
@@ -1054,10 +1020,10 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
         let symbol = cell.symbol();
         if !symbol.trim().is_empty() {
             glyph_cells += 1;
-            assert_eq!(
-                cell.fg,
-                GHOST,
-                "底面行内容列第 {x} 列字形前景必须是 GHOST Rgb(104,98,90)，实际 {:?}（symbol={:?}）",
+            assert!(
+                cell.fg == GHOST || cell.fg == MUTED,
+                "底面行内容列第 {x} 列字形前景必须是 GHOST（模型段）或 MUTED（权限段），\
+                 实际 {:?}（symbol={:?}）",
                 cell.fg,
                 symbol
             );
@@ -1071,10 +1037,14 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
     }
     assert!(glyph_cells > 0, "底面行必须至少渲染一个字形（模型身份）");
     let bottom = row_text(&buf, 29);
-    assert_eq!(
-        bottom.trim(),
-        state.model.trim(),
-        "底面行只能承载模型身份（ADR 0119 模型半周期；已钉相位），实际 {bottom:?}"
+    // 2026-11-17：模型与权限同帧可见（取消时分轮播）——只要求模型在场，不再要求逐字相等。
+    assert!(
+        bottom.contains(state.model.trim()),
+        "底面行必须含模型身份，实际 {bottom:?}"
+    );
+    assert!(
+        bottom.contains("权限 · "),
+        "底面行必须含权限级别（同帧可见），实际 {bottom:?}"
     );
     for needle in ["↑", "↓", "缓存", "上下文", "—"] {
         assert!(
@@ -1174,64 +1144,23 @@ fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
         }
     }
 
-    // Assert 4（ADR 0119 权限半周期）：同一底面行改由状态行承担 —— 逐字为「权限 · 工作区」
-    // （默认 `PermissionMode::WorkspaceWrite`），字形色为 MUTED（= 产品 `theme::MUTED`，
-    // 本文件顶部已按现实现值冻结），背景仍为 CANVAS。相位必须显式钉住，否则墙钟相位会让
-    // 本段断言随机失败。
+    // Assert 4（2026-11-17）：模型与权限**同帧**可见（取消时分轮播）。
     assert_eq!(
         state.permission_mode,
         pony_agent_core::agent::headless::PermissionMode::WorkspaceWrite,
-        "夹具失效：默认权限模式应为「工作区写入」（决定权限相位文本），实际 {:?}",
+        "夹具失效：默认权限模式应为「工作区写入」，实际 {:?}",
         state.permission_mode
     );
-    pin_carousel_phase(&mut state, false);
-    let perm_buf = screen(&mut state, 110, 30);
-    let perm_bottom = row_text(&perm_buf, 29);
-    assert_eq!(
-        perm_bottom.trim(),
-        "权限 · 工作区",
-        "权限相位下底面行必须承载状态行右槽，期望 {:?}，实际 {:?}",
-        "权限 · 工作区",
-        perm_bottom.trim()
-    );
-    let mut perm_glyph_cells = 0usize;
-    let mut perm_skip_continuation = false;
-    for x in cx..cx + cw {
-        if perm_skip_continuation {
-            perm_skip_continuation = false;
-            continue;
-        }
-        let cell = &perm_buf[(x, 29)];
-        assert_eq!(
-            cell.bg, CANVAS,
-            "权限相位底面行内容列第 {x} 列背景必须是 CANVAS（不在色带内），实际 {:?}",
-            cell.bg
-        );
-        let symbol = cell.symbol();
-        if !symbol.trim().is_empty() {
-            perm_glyph_cells += 1;
-            assert_eq!(
-                cell.fg, MUTED,
-                "权限相位底面行字形前景必须是 MUTED Rgb(162,155,146)（theme::MUTED），\
-                 实际 {:?}（symbol={:?}）",
-                cell.fg, symbol
-            );
-        }
-        let mut chars = symbol.chars();
-        if let (Some(ch), None) = (chars.next(), chars.next()) {
-            if disp_width(ch) == 2 {
-                perm_skip_continuation = true;
-            }
-        }
-    }
+    let same_frame = row_text(&buf, 29);
     assert!(
-        perm_glyph_cells > 0,
-        "权限相位底面行必须至少渲染一个字形（权限状态行）"
+        same_frame.contains("权限 · 工作区"),
+        "同一帧必须同时可见权限级别，实际 {:?}",
+        same_frame.trim()
     );
     assert!(
-        !perm_bottom.contains(&state.model),
-        "权限相位底面行不得同时残留模型身份（轮播是分时二选一），实际 {:?}",
-        perm_bottom.trim()
+        same_frame.contains(&state.model),
+        "同一帧必须同时可见模型身份，实际 {:?}",
+        same_frame.trim()
     );
 }
 

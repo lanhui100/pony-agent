@@ -891,7 +891,9 @@ impl AgentRuntime {
             transcript,
             Vec::new(),
             None,
-            Some(HistoryMessageKind::Interrupted),
+            // B217：失败收口写 `Error`（不是 `Interrupted`）—— 进程中断由恢复路径补写
+            // `Interrupted`，两者在历史与状态条上必须可区分。
+            Some(HistoryMessageKind::Error),
         );
     }
 

@@ -91,34 +91,35 @@ impl PermissionError {
         }
     }
 
+    /// B204：workspace 外写拒绝（无 workspace root 上下文时的旧入口）。
+    ///
+    /// 旧行为会追加 `[sandbox: escalation available …]` 承诺，但运行时**从不**产生任何可批准的
+    /// 升级请求（`pending_asks` 恒为空），模型只能原样重试再被拒 —— 文案承诺了不存在的能力。
+    /// 现改为可执行指引：告知改写到工作区内的受控可写目录后重试。
     pub fn outside_workspace_write_denied(message: impl Into<String>) -> Self {
         Self {
             code: PermissionErrorCode::OutsideWorkspaceWriteDenied,
-            message: with_escalation_hint(message.into()),
+            message: with_writable_guidance(message.into()),
         }
     }
 
-    /// B223：workspace 外写拒绝 + **可执行替代**（受控可写目录 `<root>/.tmp`）。
+    /// B223 + B204：workspace 外写拒绝 + **可执行替代**（受控可写目录 `<root>/.tmp`）。
     ///
-    /// 现场：旧文案只说「已拒绝写入」+ escalation，用户不知道往哪写、下一步做什么。
-    /// 本构造器在既有 escalation 提示之外追加一句可执行纠正（改写到该可写目录后重试），
+    /// 现场：旧文案只说「已拒绝写入」+ escalation，用户不知道往哪写、下一步做什么；
+    /// 而 escalation 承诺在运行时**没有落点**（拒绝路径不产生任何审批请求）。
+    /// 本构造器只给可执行纠正（改写到该可写目录后重试），不再追加 escalation 提示；
     /// 结构化错误码**不换码**（前端审批 UI 依赖 `outside_workspace_write_denied`）。
     ///
-    /// 幂等：`message` 已含 escalation 片段 ⇒ 不重复追加；已含受控可写目录提示 ⇒ 不叠加。
-    /// 判定一律按 `trim_end` 后的文本，避免尾随空白把「已带提示」误判成「未带提示」。
+    /// 幂等：已含受控可写目录提示 ⇒ 不叠加。判定按 `trim_end` 后的文本，
+    /// 避免尾随空白把「已带提示」误判成「未带提示」。
     pub fn outside_workspace_write_denied_with_workspace(
         message: impl Into<String>,
         workspace_root: &Path,
     ) -> Self {
         let base = message.into();
         let base = base.trim_end();
-        let with_escalation = if base.is_empty() {
-            ESCALATION_HINT.to_string()
-        } else {
-            with_escalation_hint(base.to_string())
-        };
-        let message = if with_escalation.contains(WRITABLE_HINT_MARKER) {
-            with_escalation
+        let message = if base.contains(WRITABLE_HINT_MARKER) {
+            base.to_string()
         } else {
             // 受控可写目录真源：`<workspace_root>/.tmp`（见 `agent::tools::paths`
             // 的 `controlled_tmp_dir`，PA-080 约定）。此处只呈现路径文本，不做 IO。
@@ -127,7 +128,11 @@ impl PermissionError {
                 "{WRITABLE_HINT_MARKER}：{}（工作区内的可写替代目录）。请改写到该目录后重试。",
                 tmp_dir.display()
             );
-            format!("{with_escalation} {hint}")
+            if base.is_empty() {
+                hint
+            } else {
+                format!("{base} {hint}")
+            }
         };
         Self {
             code: PermissionErrorCode::OutsideWorkspaceWriteDenied,
@@ -144,10 +149,12 @@ impl PermissionError {
 }
 
 /// 既有 escalation 提示（逐字保持：旧构造器与 acp 侧同码文案共用这段措辞）。
-const ESCALATION_HINT: &str = "[sandbox: escalation available — retry with explicit authorization]";
-
-/// escalation 提示的判定前缀（幂等：已带提示的 message 不再重复追加）。
-const ESCALATION_MARKER: &str = "[sandbox: escalation available";
+/// B204：无 workspace root 上下文时的通用可执行指引。
+///
+/// 刻意**不再**包含 `escalation available` 承诺：运行时不产生任何可批准的升级请求
+/// （拒绝路径只有 tool_result，不落 `pending_asks`），承诺即误导。
+const WRITABLE_GUIDANCE: &str =
+    "请改用工作区内的路径（工作区根下的 .tmp 受控可写目录）后重试。";
 
 /// B223 可写替代提示的去重标记（同一 message 二次经过构造器不得叠加）。
 const WRITABLE_HINT_MARKER: &str = "受控可写目录";
@@ -155,12 +162,15 @@ const WRITABLE_HINT_MARKER: &str = "受控可写目录";
 /// 受控 tmp 目录名（真源 `agent::tools::paths::controlled_tmp_dir`：`<root>/.tmp`）。
 const CONTROLLED_TMP_DIR_NAME: &str = ".tmp";
 
-/// 追加 escalation 提示（幂等；已带则原样返回）。
-fn with_escalation_hint(message: String) -> String {
-    if message.contains(ESCALATION_MARKER) {
-        message
+/// 追加通用可写指引（幂等；已带受控可写目录提示则原样返回）。
+fn with_writable_guidance(message: String) -> String {
+    if message.contains(WRITABLE_HINT_MARKER) {
+        return message;
+    }
+    if message.trim().is_empty() {
+        WRITABLE_GUIDANCE.to_string()
     } else {
-        format!("{message} {ESCALATION_HINT}")
+        format!("{} {}", message.trim_end(), WRITABLE_GUIDANCE)
     }
 }
 
@@ -1246,7 +1256,17 @@ mod tests {
             .classify("/outside/a.txt", &root, &PathBuf::from("/ws/.tmp"), &store, PathPurpose::Write)
             .expect_err("revoked write must be denied");
         assert_eq!(write_err.code, PermissionErrorCode::OutsideWorkspaceWriteDenied);
-        assert!(write_err.message.contains("[sandbox: escalation available"));
+        // B204：拒绝文案只给可执行替代路径，不得再承诺运行时不存在的「升级审批」。
+        assert!(
+            write_err.message.contains("受控可写目录"),
+            "拒绝文案必须给出可写替代目录，实际 = {:?}",
+            write_err.message
+        );
+        assert!(
+            !write_err.message.contains("escalation available"),
+            "不得承诺运行时不产生的升级审批，实际 = {:?}",
+            write_err.message
+        );
 
         // 子授权保留：revoke 父不撤销子。
         store.grant(PathBuf::from("/outside/dir")).unwrap();
