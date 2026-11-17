@@ -1,0 +1,69 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "契约矩阵(.dev-team/contract-matrix-acp-delegate-p0p2.md：C0.1–C6.3 / Non-Goals / DAG / 设计裁决)",
+    "ADR(.agents/notes/implemented/bug-fix/2026-11-17-acp-delegate-result-and-trace-integrity.md：Decision / Alternatives considered / Consequences)",
+    "B237 描述(backlog/tasks.jsonl：现场缺陷与修复契约引用)",
+    "union diff 概览(c5761b27..HEAD：51 文件 / +5042 -287)",
+    "contract-matrix",
+    "adr",
+    "backlog",
+    "contract-matrix,adr,backlog"
+  ],
+  "findings": [
+    {
+      "file": ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+      "line": 15,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -n \"AcpTurnOutcome::Truncated => build_ok_result\" crates/pony-agent-core/src/acp/session.rs && echo \"finalText keys inside build_ok_result = $(sed -n '/^fn build_ok_result(/,/^}/p' crates/pony-agent-core/src/acp/session.rs | grep -c finalText) => truncated success returns no body\" && grep -n \"assert_no_final_text_contract\" crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs | head -3",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+      "line": 16,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && echo \"refs to T-ACP-05/T-VIS-02 in frozen tests = $(grep -rhoE 'T-ACP-05|T-VIS-02' crates/pony-agent-core/tests | wc -l)\" && echo \"finalText mentions in acp_delegate description tests = $(grep -c finalText crates/pony-agent-core/tests/acp_proxy_autowire.rs crates/pony-agent-core/tests/acp_client_contract.rs | tr '\\n' ' ')\"",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+      "line": 26,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -n \"并发 flush 仍有\" .agents/notes/implemented/bug-fix/2026-11-17-acp-delegate-result-and-trace-integrity.md && grep -n \"同事件不重复\" .dev-team/contract-matrix-acp-delegate-p0p2.md && echo \"Barrier-based concurrency cases in persistence suite = $(grep -cE 'std::sync::Barrier' crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs) => C6.1 no-duplicate only proven sequentially\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs",
+      "line": 1149,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -nF \"call_steps.iter().all\" crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs && echo \"step-greater-than-0 assertions in suite = $(grep -cE 'step > 0|step>0|step == 1' crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs) => hard-coded step:0 passes\"",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+      "line": 27,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -n \"INSERT OR IGNORE INTO normalized_sessions\" crates/pony-agent-core/src/agent/sqlite_session.rs && grep -n \"created_at_ms = CASE WHEN created_at_ms IS NULL\" crates/pony-agent-core/src/agent/sqlite_session.rs && grep -n \"None => println\" crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+      "line": 23,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent && python3 -c \"import json;r=[json.loads(l) for l in open('backlog/tasks.jsonl') if l.strip()];print([(d['id'],d['status'],d['title'][:38]) for d in r if d['id'] in ('B164','B209','B214')])\" && cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -n \"C3.1\" .dev-team/contract-matrix-acp-delegate-p0p2.md",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "gate1-plan-review-acp-delegate-subagent",
+    "fresh_context": true
+  },
+  "executed_by": "gate1-plan-review-acp-delegate-subagent",
+  "reviewed_commit": "8afa4376b740bdbe899a1a8c907d57bd0f251ada",
+  "attestation": {
+    "self_signed": false,
+    "note": "Gate-1 计划阶段补做审查（只读）；设计产物位于 worktree fix/acp-delegate-p0p2。"
+  }
+}

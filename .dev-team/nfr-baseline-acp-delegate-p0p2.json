@@ -15,8 +15,10 @@
   },
   "concurrency_lock": {
     "type": "acp_session_prompt_gate",
-    "timeout_ms": 600000,
-    "note": "同一 ACP 会话的 session/prompt 串行闸：锁等待上限 600000ms，覆盖排队的一整轮委派 + 收尾（整轮预算常量 ACP_DEFAULT_TURN_BUDGET=120s 见 crates/pony-agent-core/src/acp/mod.rs；600s 是闸门等待上限，不是单轮预算的替代口径）。"
+    "bounded_wait": false,
+    "wait_bound": "peer_turn_budget_ms",
+    "note": "裸 Mutex 串行闸（无独立 lock timeout）：同一 ACP 会话的 session/prompt 串行化靠 `prompt_gate.lock()` 阻塞等待，等待上界由**对方 turn budget** 承担（默认 ACP_DEFAULT_TURN_BUDGET=120s / 显式 timeoutMs）；本侧不实现、也不声明 600s 之类的独立锁超时。原稿 timeout_ms=600000 系无出处估值，已按 L3-P ADVISORY F3 撤回。",
+    "evidence": "crates/pony-agent-core/src/acp/session.rs:415（prompt_gate: Mutex<()>）与 :891（裸 prompt_gate.lock()，无 try_lock/timeout）；整轮预算常量见 crates/pony-agent-core/src/acp/mod.rs 的 ACP_DEFAULT_TURN_BUDGET"
   },
   "logging": {
     "format": "json",

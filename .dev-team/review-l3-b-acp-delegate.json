@@ -1,0 +1,123 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".agents/notes/implemented/bug-fix/2026-11-17-acp-delegate-result-and-trace-integrity.md",
+    ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+    ".dev-team/nfr-baseline-acp-delegate-p0p2.json",
+    ".dev-team/red-phase/acp_delegate_adversarial.receipt.json",
+    ".dev-team/red-phase/acp_delegate_p0p2_contract.receipt.json",
+    ".dev-team/red-phase/acp_delegate_persistence_contract.receipt.json",
+    ".dev-team/regression-baseline-acp-delegate.json",
+    ".dev-team/state-acp-client-p0-p2.json",
+    ".dev-team/state.json",
+    "crates/pony-agent-core/src/acp/client.rs",
+    "crates/pony-agent-core/src/acp/config.rs",
+    "crates/pony-agent-core/src/acp/delegate_events.rs",
+    "crates/pony-agent-core/src/acp/handlers.rs",
+    "crates/pony-agent-core/src/acp/mod.rs",
+    "crates/pony-agent-core/src/acp/protocol.rs",
+    "crates/pony-agent-core/src/acp/result.rs",
+    "crates/pony-agent-core/src/acp/session.rs",
+    "crates/pony-agent-core/src/acp/transport.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/projection.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_recovery.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/session/backend.rs",
+    "crates/pony-agent-core/src/agent/session/fold.rs",
+    "crates/pony-agent-core/src/agent/session/history.rs",
+    "crates/pony-agent-core/src/agent/session/log_command.rs",
+    "crates/pony-agent-core/src/agent/session/log_sink.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/session/tests.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/agent/telemetry.rs",
+    "crates/pony-agent-core/src/agent/tools/orchestration.rs",
+    "crates/pony-agent-core/src/agent/tools/schema.rs",
+    "crates/pony-agent-core/src/agent/turn_event.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/turn_flow/turn_flow_registry.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/tests/acp_cli_resume_and_epipe.rs",
+    "crates/pony-agent-core/tests/acp_delegate_adversarial.rs",
+    "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs",
+    "crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs",
+    "crates/pony-agent-core/tests/acp_session_lifecycle.rs",
+    "crates/pony-agent-core/tests/adr0123_supplement_r2_test.rs",
+    "crates/pony-agent-core/tests/f1_speed_observability.rs",
+    "crates/pony-agent-core/tests/metrics_snapshot_adversarial.rs",
+    "crates/pony-agent-core/tests/metrics_snapshot_contract.rs",
+    "crates/pony-agent-core/tests/pa174_history_wiring_and_followup_contract.rs",
+    "docs/architecture/acp-client-integration.md",
+    "docs/release/evidence/acp-delegate/all-acp-final.log",
+    "docs/release/evidence/acp-delegate/c6-green.log",
+    "docs/release/evidence/acp-delegate/full-lib-w2w3.log"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/acp/session.rs",
+      "line": 382,
+      "rule": "SECURITY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n '119,135p' crates/pony-agent-core/src/agent/otel/log.rs && sed -n '382,387p' crates/pony-agent-core/src/acp/session.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/projection.rs",
+      "line": 714,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -n 'parent_activity_id: None' crates/pony-agent-core/src/agent/projection.rs && grep -n 'parent_activity_id: activity.parent_activity_id.clone()' crates/pony-agent-core/src/agent/turn_flow.rs && sed -n '142,160p' crates/pony-agent-core/src/agent/session/startup_repair.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/session.rs",
+      "line": 1718,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -n 'id: tool_call_id.to_string()' crates/pony-agent-core/src/acp/session.rs && grep -n 'any(|a| a.id == \\*call_id)' crates/pony-agent-core/src/agent/projection.rs && sed -n '478,490p' crates/pony-agent-core/src/agent/telemetry.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/protocol.rs",
+      "line": 519,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n '492,530p' crates/pony-agent-core/src/acp/protocol.rs && grep -c 'serde(other)' crates/pony-agent-core/src/acp/protocol.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/result.rs",
+      "line": 25,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && python3 -c 'print(len((\"中\"*20000).encode()))' && grep -n 'TOOL_RESULT_TEXT_MAX_CHARS' crates/pony-agent-core/src/agent/telemetry.rs | head -3 && sed -n '19,26p' crates/pony-agent-core/src/acp/result.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/projection.rs",
+      "line": 1313,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n '1305,1316p' crates/pony-agent-core/src/agent/projection.rs && sed -n '142,160p' crates/pony-agent-core/src/agent/session/startup_repair.rs && grep -n 'attempts' crates/pony-agent-core/src/agent/projection.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/session.rs",
+      "line": 922,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n '918,924p' crates/pony-agent-core/src/acp/session.rs && grep -n 'updates.push(update)' crates/pony-agent-core/src/acp/session.rs && sed -n '36,66p' crates/pony-agent-core/src/acp/result.rs",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "9851632a-3a79-43fb-9184-bd414e489597",
+    "fresh_context": true
+  },
+  "executed_by": "9851632a-3a79-43fb-9184-bd414e489597",
+  "reviewed_commit": "8afa4376",
+  "attestation": {
+    "self_signed": false,
+    "note": "L3-B（协议一致性/安全防御/兼容性）只读审查：union diff c5761b27..HEAD(8afa4376) 共 55 文件；重点面 acp/{result,delegate_events,protocol,session,client,config,handlers,transport}.rs + tools/{orchestration,schema}.rs + telemetry.rs + turn_event.rs + bin/cli.rs。已实测：acp_session_lifecycle helper 子进程 stdout 出现结构化 JSON 诊断行（otel::log 缺省 sink=stdout）；ACP 子活动经父 turn 通道写入的身份三要素（session/turn/call_id）不可被线缆数据覆盖。cli.rs:2303 的 stdout 污染已由 L3-P 报为 BLOCKING，且工作区已有未提交修复（bin/cli/acp.rs set_stderr_output + 测试改 parse stderr），本文件不重复计入。"
+  }
+}

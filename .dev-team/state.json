@@ -163,5 +163,22 @@
   "observability_gate": {
     "audit_diff": "exit 0",
     "check_declaration": "PASS exit 0"
+  },
+  "l3p": {
+    "verdict": "FAIL",
+    "blocking": 1,
+    "advisory": 3,
+    "reviewed_commit": "8afa4376",
+    "file": ".dev-team/review-l3p.json",
+    "blocking_fix": {
+      "id": "F1",
+      "desc": "ponycli acp 未把结构化日志改道 stderr（jsonl/sse stdout 污染，wave-59 C1）",
+      "owner": "executor-a",
+      "test_migration": "test-agent-3"
+    },
+    "advisories": [
+      "F2 并发 drain 重复窗口（per-key in-flight 标记待补）",
+      "F3 NFR concurrency_lock.timeout_ms 与实际不符（协议 Agent 修正基线）"
+    ]
   }
 }

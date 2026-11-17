@@ -45,6 +45,8 @@ use pony_agent_core::agent::config::{
     ThinkingParamPattern,
 };
 use pony_agent_core::agent::context::DefaultTurnContextBuilder;
+use pony_agent_core::agent::dispatcher::DispatchContext;
+use pony_agent_core::agent::mcp_config::surface_tool_definitions;
 use pony_agent_core::agent::planner::LocalTurnPlanner;
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::runtime::{AgentRuntime, TurnInput, TurnStreamEvent};
@@ -110,11 +112,16 @@ fn usage_file(root: &Path) -> PathBuf {
     root.join("usage.jsonl")
 }
 
+/// T-VIS-02 专用帧文件（与 `chunks.jsonl` 分开，避免用例间并行写同一文件）。
+fn vis_file(root: &Path) -> PathBuf {
+    root.join("vis.jsonl")
+}
+
 fn init_capture(root: &Path, tag: &str) -> PathBuf {
     root.join(format!("init-{tag}.jsonl"))
 }
 
-/// 一次性装配 fake agent 清单（8 个模式各一个 id，全部指向本地 `sh` fixture）。
+/// 一次性装配 fake agent 清单（9 个模式各一个 id，全部指向本地 `sh` fixture）。
 fn agents_root() -> PathBuf {
     AGENTS_ROOT
         .get_or_init(|| {
@@ -179,6 +186,12 @@ fn agents_root() -> PathBuf {
                     "label": "C2.1 usage_update",
                     "command": "sh",
                     "args": [script, "emit_updates", init_capture(&root, "usage").to_string_lossy(), usage_file(&root).to_string_lossy()]
+                },
+                {
+                    "id": "fake-vis",
+                    "label": "T-VIS-02 父正文隔离",
+                    "command": "sh",
+                    "args": [script, "emit_updates", init_capture(&root, "vis").to_string_lossy(), vis_file(&root).to_string_lossy()]
                 }
             ]);
             std::fs::write(
@@ -409,12 +422,14 @@ fn assert_no_final_text_contract(result: &Value, case: &str) {
 }
 
 #[test]
-fn c0_4a_truncated_stop_reason_unchanged() {
-    // Arrange：stopReason = max_tokens（归约口径：ok + truncated: true）。
+fn c0_4a_truncated_stop_reason_carries_final_text() {
+    // Arrange：stopReason = max_tokens（成功面：ok + truncated: true）。
+    // Gate-1 P0 语义修正：**所有成功面**（end_turn 与 max_tokens/max_turn_requests 上限收尾）
+    // 都必须带回正文；本剧本 fake agent 不发 AgentMessageChunk ⇒ 正文为空串。
     // Act
     let (status, result) = run_acp_delegate("fake-truncated", "外部 agent 会撞上限");
 
-    // Assert：既有截断语义一字不变，且不出现 finalText。
+    // Assert ①：既有成功/截断键面一字不变（additive 变更不得挤掉旧键）。
     assert_eq!(status, "ok", "C0.4 违约：max_tokens 仍是成功轮，实际 = {result}");
     assert_eq!(
         result.pointer("/truncated").and_then(Value::as_bool),
@@ -426,7 +441,28 @@ fn c0_4a_truncated_stop_reason_unchanged() {
         "max_tokens",
         "C0.4 违约：stopReason 必须原样透传，实际 = {result}"
     );
-    assert_no_final_text_contract(&result, "truncated");
+
+    // Assert ②：成功面必须带回 `finalText`（键存在且为字符串；本剧本无 chunk ⇒ 空串，
+    // 不得缺键/不得 null —— 否则模型调用方拿到「成功但没有内容」只能凭 summary 猜）。
+    assert_eq!(
+        result.get("finalText").and_then(Value::as_str),
+        Some(""),
+        "C0.4 违约：max_tokens 成功面必须存在字符串 `finalText`（本剧本无 chunk ⇒ 空串，不得缺键），实际 = {result}"
+    );
+
+    // Assert ③：`finalTextTruncated=true` —— 正文不完整（外部 agent 因输出/轮次上限提前收尾）。
+    assert_eq!(
+        result.pointer("/finalTextTruncated"),
+        Some(&Value::Bool(true)),
+        "C0.4 违约：max_tokens ⇒ `finalTextTruncated` 必须为 true（正文不完整），实际 = {result}"
+    );
+
+    // Assert ④：summary 语义不变 —— 空正文时仍必须诚实明示「未返回文本正文」（C0.2 口径）。
+    let summary = json_str(&result, "/summary/text", "C0.4");
+    assert!(
+        summary.contains("未返回文本"),
+        "C0.4 违约：空正文时 summary.text 必须仍诚实明示未返回文本正文，实际 = {summary:?}（整包 {result}）"
+    );
 }
 
 #[test]
@@ -1363,4 +1399,180 @@ fn c5_1_no_retry_keeps_single_attempt_and_omits_retry_windows() {
             "C5.1 违约：无重试时 wire 面不得出现 `{absent}`（键必须缺席，不得 null/0 占位），实际 = {first}"
         );
     }
+}
+
+// ══════════════════════════ T-ACP-05 工具描述（模型可见）声明结果契约 ══════════════════════════
+
+/// C0.5：`acp_delegate` 的**模型可见** description 必须声明结果含 `finalText` /
+/// `finalTextTruncated` —— 否则模型无从消费正文契约（只能靠猜），实际行为与声明也会脱钩。
+///
+/// 观测面：`agent::mcp_config::surface_tool_definitions()`（内建 + 已接入外部工具的
+/// 模型可见面，会话内冻结；与模型真正看到的面同源）。
+#[test]
+fn t_acp_05_model_visible_description_declares_final_text_contract() {
+    // Arrange
+    let surface = surface_tool_definitions();
+    let definition = surface
+        .iter()
+        .find(|definition| definition.name == "acp_delegate")
+        .unwrap_or_else(|| {
+            panic!(
+                "C0.5 违约：模型可见工具面必须含 `acp_delegate`，实际 = {:?}",
+                surface.iter().map(|item| item.name).collect::<Vec<_>>()
+            )
+        });
+    let description = definition.description;
+
+    // Assert ①：两个结果键都必须被声明（模型据此知道成功结果里有正文）。
+    for token in ["finalText", "finalTextTruncated"] {
+        assert!(
+            description.contains(token),
+            "C0.5 违约：`acp_delegate` 的模型可见 description 必须声明结果含 `{token}`，实际 description = {description:?}"
+        );
+    }
+
+    // Assert ②：描述必须把正文说成「返回结果的一部分」（不得宣称成功结果无正文）。
+    assert!(
+        description.contains("正文"),
+        "C0.5 违约：description 必须声明返回的正文语义（含「正文」），实际 description = {description:?}"
+    );
+    assert!(
+        !description.contains("不返回 `finalText`") || description.contains("非 end_turn"),
+        "C0.5 违约：description 若限制 `finalText` 的出现面，必须显式限定为非 end_turn 归约，实际 description = {description:?}"
+    );
+}
+
+// ══════════════════════════ T-VIS-02 父正文隔离（C1.2） ══════════════════════════
+
+/// 外部 agent 正文的唯一标记（出现在父 assistant 流里即违约）。
+const EXTERNAL_BODY_MARKER: &str = "EXTERNAL-ACP-BODY-MARKER-7F4C";
+
+/// 一条 ACP `tool_call` 帧（保证本次委派除正文外还有工具活动，覆盖归集路径）。
+fn tool_chunk(tool_call_id: &str) -> Value {
+    json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": tool_call_id,
+        "title": "edit a.rs",
+        "kind": "edit",
+        "status": "pending"
+    })
+}
+
+/// 带**父上下文**（dispatch_context session/turn）走真实工具路径调 `acp_delegate`。
+///
+/// C1.1/C1.5 的归集入口需要父 turn 身份；本助手只负责把父身份注入工具执行上下文。
+fn run_acp_delegate_with_parent(
+    agent_id: &str,
+    prompt: &str,
+    session_id: &str,
+    turn_id: &str,
+    call_id: &str,
+) -> (String, Value) {
+    let root = agents_root();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("创建 workspace");
+
+    let router = ToolRouter::with_workspace_root(workspace.clone());
+    let call = ToolCall {
+        call_id: Some(call_id.to_string()),
+        name: "acp_delegate".to_string(),
+        arguments: json!({
+            "agent": agent_id,
+            "prompt": prompt,
+            "timeoutMs": 30_000,
+        }),
+        plan: None,
+    };
+    let context = ToolExecutionContext {
+        workspace_root: Some(workspace),
+        session_id: Some(session_id.to_string()),
+        dispatch_context: Some(DispatchContext {
+            session_id: Some(session_id.to_string()),
+            turn_id: Some(turn_id.to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let result = router.execute_with_context(&call, &context);
+    let parsed: Value = serde_json::from_str(&result.output).unwrap_or_else(|error| {
+        panic!(
+            "acp_delegate 结果必须是 JSON（C0.1）；agent={agent_id} status={} output={} 解析失败：{error}",
+            result.status, result.output
+        )
+    });
+    (result.status, parsed)
+}
+
+/// C1.2：外部 agent 的文本 chunk **不得**混入父 assistant 正文流。
+///
+/// 观测面：`turn_flow::register_event_persist`（父 turn 持久化通道，生产唯一事件落盘口）
+/// 捕获的父事件流 —— 断言其中**非 tool 文本事件**（`AssistantChunk`/`AssistantMessage`）
+/// 不含外部正文；同时用工具结果里的 `finalText` 作正控（证明确实收到过该正文）。
+#[test]
+fn t_vis_02_external_chunk_text_never_enters_parent_assistant_stream() {
+    // 持久化通道是进程级全局单槽 ⇒ 与 C4/C5 的捕获用例互斥。
+    let _guard = EVENT_PERSIST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // Arrange：外部 agent 先发正文 chunk（带唯一标记）再发一条工具活动。
+    let root = agents_root();
+    write_updates(
+        &vis_file(&root),
+        &[text_chunk(EXTERNAL_BODY_MARKER), tool_chunk("tc-vis-1")],
+    );
+    let captured: Arc<Mutex<Vec<TurnEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_persist = Arc::clone(&captured);
+    register_event_persist(Arc::new(
+        move |_session_id: &str, _turn_id: &str, event: TurnEvent, _is_terminal: bool| {
+            captured_for_persist
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event);
+        },
+    ));
+
+    // Act
+    let (status, result) = run_acp_delegate_with_parent(
+        "fake-vis",
+        "把正文交给我",
+        "sess-parent-vis",
+        "turn-parent-vis",
+        "call-vis-02",
+    );
+    clear_event_persist();
+    let events = captured
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+
+    // Assert ①：正控 —— 外部正文确实送达并被归约进工具结果（否则下一条断言在证明空气）。
+    assert_eq!(
+        status, "ok",
+        "C1.2 夹具前提：带父上下文的委派必须成功，实际 status={status} 结果 = {result}"
+    );
+    let final_text = json_str(&result, "/finalText", "C1.2");
+    assert!(
+        final_text.contains(EXTERNAL_BODY_MARKER),
+        "C1.2 夹具前提：外部正文必须真的送达（工具结果 `finalText` 含标记 {EXTERNAL_BODY_MARKER}），实际 = {final_text:?}（整包 {result}）"
+    );
+
+    // Assert ②：父 assistant 正文流不得含外部正文（C1.2 的核心断言）。
+    let leaks: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            TurnEvent::AssistantChunk { text, .. } | TurnEvent::AssistantMessage { text, .. }
+                if text.contains(EXTERNAL_BODY_MARKER) =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "C1.2 违约：外部 agent 文本 chunk 混入父 assistant 正文流（父 AssistantChunk/AssistantMessage 含外部正文），泄漏 {leaks:?}；父事件流共 {} 条",
+        events.len()
+    );
 }

@@ -419,10 +419,10 @@ fn r3_resume_without_response_session_id_still_runs_turn() {
         }
     }
     assert!(saw_delta, "R3 违约：stdout 必须含 turn:delta，实际:\n{stdout}");
-    // 诊断面（C3.1 迁移）：介质由 stderr 文本 `[acp]` 改为 `agent::otel::log` 结构化 JSON 行
-    // （缺省 sink = stdout；本 `acp` 子命令路径未触发 `set_stderr_output` 改道 ⇒ 实测诊断在 stdout，
-    // 与 turn 事件 JSONL 同流，按行 parse 后以 `message`+`trace_id` 识别）。
-    let diagnostic = stdout
+    // 诊断面（C3.1 迁移）：介质由 stderr 文本 `[acp]` 改为 `agent::otel::log` 结构化 JSON 行。
+    // wave-59 C1：`--output-format jsonl|sse` 下 stdout 只承载结构化事件，JSON 诊断改道 **stderr**
+    // （`set_stderr_output(true)`，src/bin/cli.rs `ObservabilityBootstrap::install`），故按行 parse stderr。
+    let diagnostic = stderr
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find(|record| {
