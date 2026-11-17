@@ -87,6 +87,12 @@ fn compose_with_context_places_instruction_before_prompt() {
         1,
         "原指令不得重复注入（重复会让模型误以为用户说了两遍），实际 = {composed:?}"
     );
+    // C7 版式逐字：段标、一个空行、宿主文案，不得多/少换行（防止实现漂移成"近似格式"）。
+    assert_eq!(
+        composed,
+        format!("【挂起前用户指令（宿主补录）】\n{SITE_INSTRUCTION}\n\n【宿主续轮】\n{APPROVED_PROMPT}"),
+        "组合正文必须与契约 C7 的版式逐字一致"
+    );
 }
 
 // T3（INV-4 边界）：指令全空白 ⇒ 回落为宿主文案，不得产出只有段标的空壳。
@@ -123,6 +129,10 @@ fn capture_requires_matching_pending_submit() {
     assert!(
         state.suspended_turn_context.is_none(),
         "pending_user_turn 与 streaming_turn_id 不一致时不得捕获（迟到事件防串轮）"
+    );
+    assert!(
+        state.pending_user_turn.is_none(),
+        "不匹配的登记必须被丢弃（否则迟到事件后可能被后续无关挂起误认领）"
     );
 
     // ③ 两者一致：捕获 turn_id 与提交正文，且 pending 被消费。
@@ -299,5 +309,58 @@ fn approval_resume_turn_input_fail_open_without_context() {
     assert_eq!(
         input.display_message, None,
         "无捕获时 display_message 仍为 None（落库与模型面一致）"
+    );
+}
+
+
+// T11（C9）：链式挂起 —— 续轮自身再次挂起时，第二次续轮仍能带回原指令（连续两次工作区外审批）。
+#[test]
+fn chained_suspension_reseeds_pending_and_keeps_instruction() {
+    let mut state = state_after_user_submit("turn-chained-1", SITE_INSTRUCTION);
+    state.capture_suspended_turn_context();
+    let first = state.take_approval_resume_message(APPROVED_PROMPT);
+    assert!(
+        first.contains(SITE_INSTRUCTION),
+        "第一次续轮必须带回原指令，实际 = {first:?}"
+    );
+    assert_eq!(
+        state.resume_instruction.as_deref(),
+        Some(SITE_INSTRUCTION),
+        "take 必须把原指令留在 resume_instruction 里，供链式挂起复用"
+    );
+
+    // 续轮开跑：登记自身 turn_id，并假设它再次挂起（例如又要读第二个工作区外文件）。
+    let resume_turn = "turn-approval-resume-chained-1";
+    state.seed_pending_after_resume(resume_turn);
+    state.streaming_turn_id = Some(resume_turn.to_string());
+    state.capture_suspended_turn_context();
+
+    let captured = state
+        .suspended_turn_context
+        .clone()
+        .expect("链式挂起（第二次挂起）必须再次捕获到原指令");
+    assert_eq!(captured.turn_id, resume_turn);
+    assert_eq!(
+        captured.user_message, SITE_INSTRUCTION,
+        "第二次续轮的指令必须仍是原始用户指令（不得退化成宿主文案）"
+    );
+}
+
+// T12（C9/INV-5）：会话作用域复位必须同时清掉链式指令，避免跨会话把旧指令带进新续轮。
+#[test]
+fn session_reset_clears_resume_instruction() {
+    let mut state = state_after_user_submit("turn-chained-1", SITE_INSTRUCTION);
+    state.capture_suspended_turn_context();
+    let _ = state.take_approval_resume_message(APPROVED_PROMPT);
+    assert!(
+        state.resume_instruction.is_some(),
+        "前置条件：take 后链式指令已登记"
+    );
+
+    state.reset_session_scope();
+
+    assert!(
+        state.resume_instruction.is_none(),
+        "会话作用域复位后不得保留链式指令（否则新会话的续轮会注入旧指令）"
     );
 }

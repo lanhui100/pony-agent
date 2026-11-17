@@ -55,6 +55,15 @@
   （审查 B3 裁决）：事件循环与单测**共用**这一组装口径（take → build_turn_input → display_message=None），
   杜绝「纯函数自证、接线零断言」的假绿。
 
+**C9 — 链式挂起不丢（v3，实施审查裁决）**
+- 续轮（Ask / 审批）本身可能再次挂起（应答后又要读第二个工作区外文件；连续两次审批）。续轮轮次
+  不经过 composer，`pending_user_turn` 为空 ⇒ 第二次挂起无从捕获，原指令再次丢失。
+- 契约：`TuiState.resume_instruction: Option<String>` 记录**最近一次被续轮携带的原始用户指令**
+  （`take_approval_resume_message` 注入时写入；Ask 续轮启动时从 `suspended_turn_context` 转存）。
+  每个续轮在生成自身 `turn_id` 后调用 `seed_pending_after_resume(turn_id)`，把该指令登记成本轮的
+  `pending_user_turn` ⇒ 再次挂起时可被 `capture_suspended_turn_context` 认领。
+- 清除时机与 `suspended_turn_context` 同源：composer 主提交、API-key 失败分支、`reset_session_scope`。
+
 **C8 — 观测与收口**
 - 续轮取用时落一条 `[pony-tui] approval_resume_context: injected=<bool> turn=<id|-> user_chars=<n>` 诊断（现场可判"是否真的注入"）。
 - 新提交路径（composer 主提交，`state.add_user_message(&input)` 之后）清空捕获（INV-5）。
@@ -80,6 +89,9 @@
 - **T8**：`reset_session_scope` 清空捕获与 pending（INV-5）。
 - **T9**：生产接缝 `build_approval_resume_turn_input` —— `message` 含原指令与宿主文案、`display_message == None`（INV-7）、不新增用户气泡（INV-2）、provider/model 原样透传、捕获被消费（审查 B1/B3）。
 - **T10**：无捕获时接缝 fail-open —— `message` 逐字等于 `prompt`、`display_message == None`（INV-4）。
+- **T11**（C9）：链式 —— `take` 后 `resume_instruction` 保留原指令；`seed_pending_after_resume(new_turn)` 登记后，
+  把 `streaming_turn_id` 切到 `new_turn` 再 `capture` 能再次拿到同一指令（第二次挂起不丢）。
+- **T12**（C9/INV-5）：composer 新提交语义（`reset_session_scope` 覆盖）必须清空 `resume_instruction`。
 
 红相判据：实现前 `cargo test --bin pony approval_resume_context` 必须因 `cannot find function/struct`（NotImplemented 等价）失败，原始 stderr 入档。
 
@@ -94,6 +106,8 @@
 ## 5. 变更流水
 
 - 2026-11-17 Lead：初版冻结（A 级，B232）。范围仅 C6/C7/C8；B233/B234/B235 明确出界。
+- 2026-11-17 Lead（实施审查后裁决，v3）：采纳链式挂起丢失（Ask→审批、审批→审批）为 C9 —— 新增
+  `resume_instruction` + `seed_pending_after_resume`，冻结用例 10→12（T11/T12），T2 改为逐字版式断言、T4② 冻结「mismatch 丢弃 pending」。
 - 2026-11-17 Lead（独立审查后裁决，v2）：采纳 3 条 BLOCKING —— B1 落库取 `display_message` ⇒ C7 改为 `display_message=None` 并新增 INV-7；
   B2 捕获不得反查 UI 气泡 ⇒ C6 改为 `pending_user_turn`（提交处登记 + 轮次身份校验）；B3 接线零断言 ⇒ 新增生产接缝
   `build_approval_resume_turn_input` 与 T9/T10。同步采纳 A5（API-key 失败分支清空）；冻结测试由 8 例扩到 10 例并重锚红相。
