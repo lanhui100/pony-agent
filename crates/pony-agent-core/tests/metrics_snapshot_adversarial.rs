@@ -38,6 +38,9 @@ fn base_record() -> ProviderCallCacheRecord {
         context_input_tokens: None,
         latency_kind: ProviderLatencyKind::Unknown,
         prefix_mutation_reasons: Vec::new(),
+        attempts: None,
+        failed_attempt_ms: None,
+        prelude_ms: None,
     }
 }
 

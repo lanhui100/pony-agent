@@ -505,6 +505,7 @@ fn p1_history_is_rebuilt_from_turn_events() {
             duration_ms: Some(3),
             artifacts: None,
             capability_invocation: None,
+            parent_activity_id: None,
         },
         TurnEvent::AssistantMessage {
             turn_id: "turn-1".to_string(),

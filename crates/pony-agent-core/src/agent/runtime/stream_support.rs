@@ -349,6 +349,11 @@ pub(super) fn build_provider_call_cache_record(
         prefix_mutation_reasons: build_context_observation
             .map(|observation| observation.prefix_mutation_reasons.clone())
             .unwrap_or_default(),
+        // wave-acp-delegate C5.1：重试元数据 additive 缺省（`None` ⇒ 未知）；
+        // 值由 W2b 在成功结算处按 take_pure_call_window 的 window 元数据填入。
+        attempts: None,
+        failed_attempt_ms: None,
+        prelude_ms: None,
     }
 }
 

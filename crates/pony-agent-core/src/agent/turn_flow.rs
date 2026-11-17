@@ -1445,6 +1445,9 @@ fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_even
             arguments: activity.arguments_text.clone().unwrap_or_default(),
             started_at_ms: None,
             description,
+            // wave-acp-delegate C1.1：顶层工具活动无父活动（Null）；ACP 子活动归集时
+            // 由 Executor-B 在此透传 activity.parent_activity_id。
+            parent_activity_id: None,
         })
     } else {
         Some(TurnEvent::ToolResult {
@@ -1459,8 +1462,33 @@ fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_even
                 .map(|seconds| (seconds * 1000.0) as u64),
             artifacts: activity.artifacts.clone(),
             capability_invocation: activity.capability_invocation.clone(),
+            // wave-acp-delegate C1.1：同 ToolCall（顶层 ⇒ None；子活动由 Executor-B 透传）。
+            parent_activity_id: None,
         })
     }
+}
+
+/// wave-acp-delegate C1.1/C1.3：以**父 turn 身份**发射一条 turn 流事件。
+///
+/// 这是 ACP 子活动归集的**父 turn 持久化通道**（契约矩阵「设计裁决」）：外部 agent 的
+/// `tool_call` / `tool_call_update` 经 `acp::delegate_events` 转成 [`TurnToolActivity`] 后，
+/// 由本函数以父 `session_id`/`turn_id` 发 `turn:tool` 并落盘（live UI 渲染不在本期范围）。
+///
+/// W1 冻结的形状（实现归 W2b）：
+/// - `session_id` / `turn_id` 必须来自父 turn 上下文，**不得**使用 ACP session id；
+/// - 事件分配 sequence/event_id 后经 `dispatch_event_persist` 写入父会话的 `turn_events`；
+/// - 无父上下文 / 持久化通道未注册 ⇒ 返回 `false` 并静默跳过（不 panic、不新增必填构造参数）。
+///
+/// 空桩期（W1）显式放行 `dead_code` 与未读参数：消费者在 W2a 才接入，而发版构建带
+/// `-D warnings`；实现落地后两处放行随「函数被调用」自然失效（不是永久豁免）。
+#[allow(dead_code, unused_variables)]
+pub(crate) fn emit_external_turn_event(
+    session_id: &str,
+    turn_id: &str,
+    name: &str,
+    payload: TurnStreamEvent,
+) -> bool {
+    unimplemented!()
 }
 
 pub fn normalize_user_message(message: &str) -> String {
@@ -2112,6 +2140,9 @@ mod tests {
                 prefix_mutation_reasons: Vec::new(),
                 usage_origin: None,
                 context_input_tokens: None,
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             },
             crate::agent::telemetry::ProviderCallCacheRecord {
                 request_kind: crate::agent::telemetry::ProviderRequestKind::ToolFollowup,
@@ -2133,6 +2164,9 @@ mod tests {
                 ],
                 usage_origin: None,
                 context_input_tokens: None,
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             },
         ]);
         let per_call_events = build_provider_usage_event("turn:completed", &payload);

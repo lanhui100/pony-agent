@@ -4784,6 +4784,9 @@ mod tests {
                         ],
                         usage_origin: None,
                         context_input_tokens: None,
+                        attempts: None,
+                        failed_attempt_ms: None,
+                        prelude_ms: None,
                     }],
                     hook_trace_records: vec![crate::agent::hooks::HookTraceRecord {
                         hook_name: "observe.failed-finalize".to_string(),
@@ -4888,6 +4891,9 @@ mod tests {
                         ],
                         usage_origin: None,
                         context_input_tokens: None,
+                        attempts: None,
+                        failed_attempt_ms: None,
+                        prelude_ms: None,
                     }],
                     hook_trace_records: vec![crate::agent::hooks::HookTraceRecord {
                         hook_name: "observe.cancelled-finalize".to_string(),
@@ -8509,6 +8515,9 @@ mod tests {
                     prefix_mutation_reasons: Vec::new(),
                     usage_origin: None,
                     context_input_tokens: None,
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 }],
                 ..crate::agent::session::TurnTraceRecord::default()
             },
@@ -8554,6 +8563,9 @@ mod tests {
                     prefix_mutation_reasons: Vec::new(),
                     usage_origin: None,
                     context_input_tokens: None,
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 }],
                 ..crate::agent::session::TurnTraceRecord::default()
             },

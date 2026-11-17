@@ -135,6 +135,21 @@ pub struct ProviderCallCacheRecord {
     pub latency_kind: ProviderLatencyKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix_mutation_reasons: Vec<PrefixMutationReason>,
+    /// wave-acp-delegate C5.1：本 call 的**尝试次数**（恒 `Some(≥1)`：1 = 无重试；
+    /// `None` 仅表示旧记录/未知，不表示「0 次」）。
+    ///
+    /// additive：旧记录反序列化缺省 `None`，旧消费者不读即行为不变；值由 W2b 在成功结算处
+    /// 填入（本波 W1 只冻结字段，不赋业务值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+    /// wave-acp-delegate C5.1：失败尝试的累计耗时（毫秒）。**仅重试时** `Some(>0)`，
+    /// 无重试 ⇒ `None` ⇒ 键缺席（禁止 0 占位冒充真值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_attempt_ms: Option<u64>,
+    /// wave-acp-delegate C5.1：首个**成功** attempt 之前的等待/预热时长（毫秒）。
+    /// **仅重试时** `Some(>0)`，无重试 ⇒ `None` ⇒ 键缺席（禁止 0 占位冒充真值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prelude_ms: Option<u64>,
 }
 
 pub trait TurnTelemetryBuilder: Send + Sync {

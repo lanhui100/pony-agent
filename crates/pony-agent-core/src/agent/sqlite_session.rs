@@ -139,6 +139,8 @@ fn derive_events_from_session(
                     arguments: activity.arguments_text.clone().unwrap_or_default(),
                     started_at_ms: None,
                     description: None,
+                    // wave-acp-delegate C1.1：回填为顶层活动（父活动透传由 W2b 决定）。
+                    parent_activity_id: None,
                 });
             } else {
                 events.push(TurnEvent::ToolResult {
@@ -151,6 +153,8 @@ fn derive_events_from_session(
                     duration_ms: activity.duration_seconds.map(|s| (s * 1000.0) as u64),
                     artifacts: activity.artifacts.clone(),
                     capability_invocation: activity.capability_invocation.clone(),
+                    // wave-acp-delegate C1.1：回填为顶层活动（父活动透传由 W2b 决定）。
+                    parent_activity_id: None,
                 });
             }
         }
@@ -5348,6 +5352,9 @@ mod tests {
             prefix_mutation_reasons: Vec::new(),
             usage_origin: None,
             context_input_tokens: None,
+            attempts: None,
+            failed_attempt_ms: None,
+            prelude_ms: None,
         }];
         session.turn_trace_history = vec![trace];
         assert!(backend.upsert_session("s1", &session));
@@ -5985,6 +5992,8 @@ mod tests {
                     arguments: "{}".into(),
                     started_at_ms: None,
                     description: None,
+                    // wave-acp-delegate C1.1：回填为顶层活动（父活动透传由 W2b 决定）。
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -5999,6 +6008,8 @@ mod tests {
                     duration_ms: Some(500),
                     artifacts: None,
                     capability_invocation: None,
+                    // wave-acp-delegate C1.1：回填为顶层活动（父活动透传由 W2b 决定）。
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -6138,6 +6149,8 @@ mod tests {
                     arguments: "{}".into(),
                     started_at_ms: None,
                     description: None,
+                    // wave-acp-delegate C1.1：回填为顶层活动（父活动透传由 W2b 决定）。
+                    parent_activity_id: None,
                 },
             ),
             (
@@ -6152,6 +6165,8 @@ mod tests {
                     duration_ms: Some(500),
                     artifacts: None,
                     capability_invocation: None,
+                    // wave-acp-delegate C1.1：回填为顶层活动（父活动透传由 W2b 决定）。
+                    parent_activity_id: None,
                 },
             ),
             (
