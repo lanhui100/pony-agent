@@ -47,30 +47,34 @@
         "task-3",
         "task-4"
       ],
-      "status": "in_progress",
+      "status": "completed",
       "blocked_by": [
         "wave-w1"
       ],
       "write_scope_overlaps": [],
-      "note": "test-agent-2 第二批 C1/C6 红相（task-8）进行中；executor-a/executor-b 已开工"
+      "note": "test-agent-2 第二批 C1/C6 红相（task-8）进行中；executor-a/executor-b 已开工",
+      "green_status": "contract 12/12 + ACP 13 suites green；R3 迁移待产品侧诊断（executor-a 修补 bin/cli.rs）",
+      "green_commit": "fbde9fe7",
+      "test_commit": "7e853dc8"
     },
     "wave-w3": {
       "members": [
         "task-5"
       ],
-      "status": "blocked",
+      "status": "completed",
       "blocked_by": [
         "wave-w2"
       ],
       "write_scope_overlaps": [
         "turn_flow.rs/turn_flow/ 与 wave-w2 串行（非并发波次），已显式记录"
-      ]
+      ],
+      "green_commit": "fbde9fe7 (与 W2 同一绿色检查点，turn_flow/runtime 文件重叠无法无损拆分，显式记录)"
     },
     "wave-w4": {
       "members": [
         "task-6"
       ],
-      "status": "blocked",
+      "status": "in_progress",
       "blocked_by": [
         "wave-w3"
       ]
@@ -137,5 +141,27 @@
     "status": "in_progress",
     "owner": "lead",
     "note": "scripts/backlog.mjs 以 git common-dir 定位仓根，B237/租约落在主工作区 /home/dm/pony-agent/backlog（该处另有他人未提交账本改动）；本分支不携带 backlog 变更以避免合并冲突，闭环时在主账本 resolve。"
+  },
+  "frozen_test_drift": [
+    {
+      "file": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs",
+      "at": "2026-11-17T20:01+08:00",
+      "writer": "l2-at",
+      "kind": "test-defect rewrite（删死代码字段 + at_03b 违例聚合，仅增断言）",
+      "lead_action": "accept as test-defect rewrite; re-anchor with final receipt",
+      "red_receipt": "4bfda7ec / .dev-team/red-phase/acp_delegate_adversarial.receipt.json"
+    }
+  ],
+  "acceptance": {
+    "contract": "12 passed/0 failed",
+    "adversarial": "6 passed/0 failed",
+    "persistence": "3 passed/0 failed",
+    "lib": "1614 passed/0 failed",
+    "acp_suites": "19 suites all green",
+    "evidence_dir": "docs/release/evidence/acp-delegate/"
+  },
+  "observability_gate": {
+    "audit_diff": "exit 0",
+    "check_declaration": "PASS exit 0"
   }
 }

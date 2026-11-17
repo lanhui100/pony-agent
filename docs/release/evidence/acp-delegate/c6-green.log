@@ -1,0 +1,28 @@
+warning: unused variable: `provider`
+   --> crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs:583:10
+    |
+583 |     let (provider, plane, sink) = two_step_stack("c62", session_id, INITIAL_REPLY_DELAY_MS, &fixture);
+    |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_provider`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pony-agent-core` (test "acp_delegate_persistence_contract") generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 0.35s
+     Running tests/acp_delegate_persistence_contract.rs (target/debug/deps/acp_delegate_persistence_contract-7a182564f278cbf4)
+
+running 3 tests
+{"events":7,"level":"info","message":"turn events flushed at step boundary","session_id":"pa_c6_3_crash_recovery","step":1,"trace_id":"e73c0604a8cf417f9ff97868581ff898","ts":"2026-11-17T12:47:58.805Z","turn_id":"turn-c63"}
+{"level":"info","message":"turn speed settled","trace_id":"e73c0604a8cf417f9ff97868581ff898","ts":"2026-11-17T12:47:59.137Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":2,"turnCallsTtftMissing":2,"turnExcludedTotal":2,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":29.56989247311828,"turn_id":"turn-c63"}
+{"decision":"WaitUser","level":"debug","message":"ask-aware turn finished inside a real graph run","run_id":"run-1794919678675","run_phase":"WaitingUser","trace_id":null,"ts":"2026-11-17T12:47:59.150Z","turn_id":"turn-c63"}
+test c6_3_crashed_turn_keeps_flushed_events_and_reads_back_unfinished ... ok
+{"events":7,"level":"info","message":"turn events flushed at step boundary","session_id":"pa_c6_2_event_time","step":1,"trace_id":"a1f2e10b2aeb495681d18142c5c2f6c8","ts":"2026-11-17T12:47:59.568Z","turn_id":"turn-c62"}
+{"level":"info","message":"turn speed settled","trace_id":"a1f2e10b2aeb495681d18142c5c2f6c8","ts":"2026-11-17T12:47:59.883Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":2,"turnCallsTtftMissing":2,"turnExcludedTotal":2,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":17.713365539452496,"turn_id":"turn-c62"}
+{"decision":"WaitUser","level":"debug","message":"ask-aware turn finished inside a real graph run","run_id":"run-1794919679189","run_phase":"WaitingUser","trace_id":null,"ts":"2026-11-17T12:47:59.893Z","turn_id":"turn-c62"}
+test c6_2_event_created_at_is_production_time_not_flush_time ... ok
+{"events":7,"level":"info","message":"turn events flushed at step boundary","session_id":"pa_c6_1_step_boundary","step":1,"trace_id":"d458d0a31f354a63bfa06bac006ad59d","ts":"2026-11-17T12:48:00.072Z","turn_id":"turn-c61"}
+{"level":"info","message":"turn speed settled","trace_id":"d458d0a31f354a63bfa06bac006ad59d","ts":"2026-11-17T12:48:00.401Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":2,"turnCallsTtftMissing":2,"turnExcludedTotal":2,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":28.205128205128204,"turn_id":"turn-c61"}
+{"decision":"WaitUser","level":"debug","message":"ask-aware turn finished inside a real graph run","run_id":"run-1794919679936","run_phase":"WaitingUser","trace_id":null,"ts":"2026-11-17T12:48:00.413Z","turn_id":"turn-c61"}
+test c6_1_first_step_events_are_readable_at_step_boundary_without_duplicates ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s
+

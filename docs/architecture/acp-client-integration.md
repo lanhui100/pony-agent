@@ -164,6 +164,11 @@ Pony 模型通过工具 `acp_delegate` 把一段任务交给外部 ACP agent，c
    | `cancelled` | `status: aborted`，错误码 `tool_cancelled`（沿用既有） |
 9. **错误码分源**（与 `tool_surface_singularity` 的"错误码保留来源"一致）：
    `acp_spawn_failed` / `acp_initialize_failed` / `acp_protocol_error` / `acp_agent_error` / `acp_agent_refused` / `acp_auth_required` / `acp_timeout` / `acp_unavailable`
+10. **结果与持久化契约（wave-acp-delegate，B237）**：
+   - **`acp_delegate` 成功结果**（additive，旧键不变）：`finalText`（`agent_message_chunk` 按到达序拼接，上限 `ACP_DELEGATE_FINAL_TEXT_MAX_CHARS=32_000` 字符）、`finalTextTruncated`、`usage{used,size,costAmount?,costCurrency?}`（来自 `usage_update`；不入 `usage_ledger`，外部计费口径不同源）。无正文 ⇒ `finalText=""` 且 `summary.text` 明示未返回正文；非 `end_turn` 路径不产 `finalText`。
+   - **子活动归集**：`tool_call`/`tool_call_update` 经 `acp::delegate_events` 以**父 session/turn/call_id** 经 `turn_flow::emit_external_turn_event` 落父 turn `turn:tool`（`parent_activity_id=call_id`，状态词表 pending|in_progress→running、completed→done、failed→failed、cancelled→aborted）；文本 chunk 不混入父 assistant 流。live UI 实时渲染仍属 P2 宿主形态（B163）。
+   - **trace 字段**：`ToolCall/ToolResult.step` = 产生该调用的 turn step index（不再是事件 sequence）；`TurnEvent` 增 `parent_activity_id`；`ProviderCallCacheRecord` 增 `attempts/failed_attempt_ms/prelude_ms`（无重试 attempts=1，其余键缺席）。
+   - **持久化**：step 边界增量 flush（drain-on-success，终态仍 `turn_end`）；`FlushEvents.eventTimes` 逐事件时间戳；会话 `createdAt` 取最早事件时刻（不回退、不许 flush 时刻冒充）。旧日志缺 `eventTimes` 时回落批首时间。
 
 ---
 
