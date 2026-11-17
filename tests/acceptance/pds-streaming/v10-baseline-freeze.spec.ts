@@ -9,6 +9,12 @@
  *   等价性：只重算**被 §5 授权改动的这一个文件**的哈希，其余 7 个锚逐字未动；
  *           V10-2/V10-3 的「子进程真实执行」判据不变。
  *
+ * ── 2026-11-17 B231 追加授权（Lead 裁决）──────────────────────────────
+ * `FROZEN_FILES` 中 `tests/acceptance/wave59/wave59-f1-waiting-animation.spec.ts` 的 SHA-256 **重锚**：
+ *   B231 将等待首字节状态词改为「等待响应中…」（该测试同步改 3 行），冻结锚必须随授权同步，
+ *   否则 V10-1 永红（同 wave-61 §5.1 的授权重锚口径）。
+ *   等价性：只重算**被 B231 授权改动的这一个文件**，其余锚逐字未动；V10-2/V10-3 判据不变。
+ *
  * 契约源（只读）：`.dev-team/contracts/wave-pds-3-streaming-visual.md` §6 V10
  *   「既有 `tests/useStreamingPresentationState.spec.ts`(14) + `tests/acceptance/wave59/`(23) + 全量单测全绿」。
  *
@@ -74,8 +80,8 @@ const FROZEN_FILES: Array<{ path: string; sha256: string; note: string }> = [
   },
   {
     path: "tests/acceptance/wave59/wave59-f1-waiting-animation.spec.ts",
-    sha256: "0dd9238ddcb4741cd439a9e279de037caef37fb6a727d2c93e22d5108df59078",
-    note: "wave-59 F1（5 例）"
+    sha256: "be5ecb12a46a1d23527f863d385ef89908fcef9ac840289aa5d25883f40e756a",
+    note: "wave-59 F1（5 例）· 2026-11-17 B231 等待文案契约修订（Lead 重锚）"
   },
   {
     path: "tests/acceptance/wave59/wave59-f2-status-metrics-layout.spec.ts",
