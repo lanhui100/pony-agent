@@ -36,20 +36,23 @@
         "task-1",
         "task-2"
       ],
-      "status": "in_progress",
-      "red_commit": null,
-      "green_commit": null
+      "status": "completed",
+      "red_commit": "4bfda7ec",
+      "green_commit": null,
+      "protocol_commit": "8df162dc",
+      "receipts_commit": "1d77f9b1"
     },
     "wave-w2": {
       "members": [
         "task-3",
         "task-4"
       ],
-      "status": "blocked",
+      "status": "in_progress",
       "blocked_by": [
         "wave-w1"
       ],
-      "write_scope_overlaps": []
+      "write_scope_overlaps": [],
+      "note": "test-agent-2 第二批 C1/C6 红相（task-8）进行中；executor-a/executor-b 已开工"
     },
     "wave-w3": {
       "members": [
@@ -128,5 +131,10 @@
     "scope": "仅限本 worktree 的 lane 构建；仍 max_jobs_per_lane=4 + nice 5；overload 判据不变",
     "load_at_override": "5.8 / 16 cores（< 1.5× 上限）",
     "recorded_at": "2026-11-17T19:52+08:00"
+  },
+  "backlog": {
+    "id": "B237",
+    "status": "in_progress",
+    "owner": "lead"
   }
 }
