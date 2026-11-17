@@ -5,7 +5,7 @@
 //!
 //! 覆盖：
 //! - L1 `session/list` 分页（cursor/limit 透传、nextCursor；agy 空列表合法）；
-//! - L2 `session/load` 两形态（无 sessionId ⇒ `None` + 会话标识沿用请求 id + stderr 诊断；有 sessionId ⇒ `Some`）；
+//! - L2 `session/load` 两形态（无 sessionId ⇒ `None` + 会话标识沿用请求 id + 结构化 JSON 诊断；有 sessionId ⇒ `Some`）；
 //! - L3 `session/close` 幂等（存在/不存在/重复均 Ok）；
 //! - L4 `-32601` ⇒ `Unsupported`/`acp_method_not_supported`（不得 agent/auth）；
 //! - L5 `additionalDirectories` 本地 fail-closed（相对/glob/不存在，且**不发** session/new）+ 合法目录 canonical 去重保序；
@@ -181,7 +181,7 @@ fn l1b_list_sessions_agy_empty_list_is_valid() {
 // ───────────────────────── L2 session/load 两形态 ─────────────────────────
 
 /// L2（opencode 形态）：响应无 `sessionId` ⇒ `session_id == None`；
-/// session 侧会话标识必须沿用**请求 id**，并留下一条 stderr 诊断（不要求文案）。
+/// session 侧会话标识必须沿用**请求 id**，并留下一条结构化 JSON 诊断（C3.1：stdout，不要求文案）。
 #[test]
 fn l2_load_without_session_id_keeps_request_id() {
     let cwd = temp_dir("load-opencode");
@@ -222,7 +222,9 @@ fn l2_load_without_session_id_keeps_request_id() {
         "L2 违约：响应缺 sessionId 时会话标识必须沿用请求 id"
     );
 
-    // 诊断面：真实 stderr 只能经子进程捕获 —— 用同二进制 helper 跑同一场景并读其 stderr。
+    // 诊断面（C3.1 迁移）：诊断介质由 stderr 文本 `[acp]` 改为 `agent::otel::log` 结构化 JSON 行
+    // （缺省 sink = stdout；核心键 level/message/ts/trace_id）。helper 子进程是**测试二进制**
+    // （非 CLI，不调用 `set_stderr_output`）⇒ 诊断落在 stdout，按行 parse JSON 取证。
     let exe = std::env::current_exe().expect("current_exe");
     let output = std::process::Command::new(exe)
         .arg("--exact")
@@ -230,18 +232,25 @@ fn l2_load_without_session_id_keeps_request_id() {
         .arg("--nocapture")
         .output()
         .expect("必须能启动 helper 子进程");
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "L2 helper 子进程必须通过，stderr:\n{stderr}"
+        "L2 helper 子进程必须通过，stdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    let diagnostic = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| {
+            record
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.to_lowercase().contains("session"))
+                && record.get("trace_id").is_some()
+        });
     assert!(
-        stderr.contains("[acp]"),
-        "L2 违约：响应缺 sessionId 时 session 侧必须留下 stderr 诊断（约定前缀 [acp]），实际 stderr:\n{stderr}"
-    );
-    assert!(
-        stderr.to_lowercase().contains("session"),
-        "L2 违约：诊断必须与会话标识相关（含 session），实际 stderr:\n{stderr}"
+        diagnostic.is_some(),
+        "L2 违约：响应缺 sessionId 时 session 侧必须留下结构化 JSON 诊断（`message` 含 session + `trace_id` 键），实际 stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
     session.close();

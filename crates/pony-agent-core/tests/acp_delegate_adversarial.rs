@@ -734,7 +734,6 @@ struct CapturedToolEvent {
     parent_activity_id: Option<String>,
     /// 事件的活动 id（子活动 = ACP `toolCallId`）。
     activity_id: String,
-    variant: &'static str,
 }
 
 fn capture_tool_event(
@@ -742,19 +741,19 @@ fn capture_tool_event(
     turn_id: &str,
     event: &TurnEvent,
 ) -> Option<CapturedToolEvent> {
-    let (event_turn_id, parent_activity_id, activity_id, variant) = match event {
+    let (event_turn_id, parent_activity_id, activity_id) = match event {
         TurnEvent::ToolCall {
             turn_id,
             call_id,
             parent_activity_id,
             ..
-        } => (turn_id.clone(), parent_activity_id.clone(), call_id.clone(), "ToolCall"),
+        } => (turn_id.clone(), parent_activity_id.clone(), call_id.clone()),
         TurnEvent::ToolResult {
             turn_id,
             call_id,
             parent_activity_id,
             ..
-        } => (turn_id.clone(), parent_activity_id.clone(), call_id.clone(), "ToolResult"),
+        } => (turn_id.clone(), parent_activity_id.clone(), call_id.clone()),
         _ => return None,
     };
     Some(CapturedToolEvent {
@@ -763,7 +762,6 @@ fn capture_tool_event(
         event_turn_id,
         parent_activity_id,
         activity_id,
-        variant,
     })
 }
 
@@ -885,26 +883,37 @@ fn at_03b_concurrent_delegations_do_not_cross_session_events() {
         );
     }
 
+    // 逐条收集违约（不早退）：一条用例要同时暴露 C0.1（正文归约）与 C1.1/C1.5（父 turn 事件归属）
+    // 两个威胁面，否则红相只看到第一个断言，证据面被吃掉。
+    let mut violations: Vec<String> = Vec::new();
+
     // C0.1：正文本体不得串（各自 agent 发出的 chunk 各归各家）。
     let alpha_output = result_json(&alpha);
     let beta_output = result_json(&beta);
-    assert_eq!(
-        final_text(&alpha_output),
-        "alpha-text",
-        "C0.1/at_03b 违约：alpha 委派正文被串会话污染，实际 {alpha_output}"
-    );
-    assert_eq!(
-        final_text(&beta_output),
-        "beta-text",
-        "C0.1/at_03b 违约：beta 委派正文被串会话污染，实际 {beta_output}"
-    );
+    for (label, output, expected) in [
+        ("alpha", &alpha_output, "alpha-text"),
+        ("beta", &beta_output, "beta-text"),
+    ] {
+        match output.get("finalText").and_then(Value::as_str) {
+            Some(text) if text == expected => {}
+            other => violations.push(format!(
+                "C0.1 违约：{label} 委派 finalText 应为 `{expected}`（各归各家，不得串会话），\
+                 实际 {other:?} / 顶层键={:?}",
+                output
+                    .as_object()
+                    .map(|map| map.keys().cloned().collect::<Vec<_>>())
+            )),
+        }
+    }
 
-    // C1.1：每路委派都必须留下属于**自身父活动**的事件（W1 骨架期无事件 ⇒ 此处必红）。
-    assert!(
-        !events.is_empty(),
-        "C1.1 违约：委派期间的 ACP tool_call 必须归集为父 turn 事件并经持久化通道落盘，\
-         实际捕获 0 条（delegate_events 未接入，见 src/acp/delegate_events.rs:46）"
-    );
+    // C1.1：每路委派都必须留下属于**自身父活动**的事件（W1 骨架期 0 条 ⇒ 此处必红）。
+    if events.is_empty() {
+        violations.push(
+            "C1.1 违约：委派期间的 ACP tool_call 必须归集为父 turn 事件并经持久化通道落盘，\
+             实际捕获 0 条（delegate_events 未接入，见 src/acp/delegate_events.rs:46）"
+                .to_string(),
+        );
+    }
 
     for (parent, session_id, turn_id) in [
         ("call-alpha", "sess-alpha", "turn-alpha"),
@@ -914,50 +923,73 @@ fn at_03b_concurrent_delegations_do_not_cross_session_events() {
             .iter()
             .filter(|event| event.parent_activity_id.as_deref() == Some(parent))
             .collect();
-        assert!(
-            !own.is_empty(),
-            "C1.1 违约：`parent_activity_id={parent}` 的父 turn 事件缺失（必须 == acp_delegate call_id），\
-             实际捕获事件 = {events:?}"
-        );
+        if own.is_empty() && !events.is_empty() {
+            violations.push(format!(
+                "C1.1 违约：`parent_activity_id={parent}` 的父 turn 事件缺失\
+                 （必须 == acp_delegate call_id），实际捕获事件 = {events:?}"
+            ));
+        }
+        let foreign = if parent == "call-alpha" {
+            "tc-beta"
+        } else {
+            "tc-alpha"
+        };
         for event in own {
-            assert_eq!(
-                event.persist_session_id, session_id,
-                "C1.1 违约：事件 session 必须是父会话（不得串会话），实际 {event:?}"
-            );
-            assert_eq!(
-                event.persist_turn_id, turn_id,
-                "C1.1 违约：事件落库 turn 必须是父 turn，实际 {event:?}"
-            );
-            assert!(
-                event.event_turn_id == turn_id,
-                "C1.5 违约：事件 `turn_id` 必须是父 turn id（不得为 ACP session id），实际 {event:?}"
-            );
-            let foreign = if parent == "call-alpha" {
-                "tc-beta"
-            } else {
-                "tc-alpha"
-            };
-            assert!(
-                !event.activity_id.contains(foreign),
-                "C1.1 违约：事件不得携带另一路委派的活动 id（串会话），实际 {event:?}"
-            );
+            if event.persist_session_id != session_id {
+                violations.push(format!(
+                    "C1.1 违约：事件 session 必须是父会话 `{session_id}`（不得串会话），实际 {event:?}"
+                ));
+            }
+            if event.persist_turn_id != turn_id {
+                violations.push(format!(
+                    "C1.1 违约：事件落库 turn 必须是父 turn `{turn_id}`，实际 {event:?}"
+                ));
+            }
+            if event.event_turn_id != turn_id {
+                violations.push(format!(
+                    "C1.5 违约：事件 `turn_id` 必须是父 turn id（不得为 ACP session id），\
+                     实际 {event:?}"
+                ));
+            }
+            if event.activity_id.contains(foreign) {
+                violations.push(
+                    "C1.1 违约：事件不得携带另一路委派的活动 id（串会话）".to_string()
+                        + &format!("，实际 {event:?}"),
+                );
+            }
         }
     }
 
     // 反向：任何事件都不得同时属于两路（parent 与 session/turn 必须自洽）。
     for event in &events {
         if let Some(parent) = event.parent_activity_id.as_deref() {
-            let expected = match parent {
-                "call-alpha" => "sess-alpha",
-                "call-beta" => "sess-beta",
-                other => panic!("C1.1 违约：出现未知 parent_activity_id `{other}`：{event:?}"),
-            };
-            assert_eq!(
-                event.persist_session_id, expected,
-                "C1.1 违约：父活动与会话归属不自洽（串会话），实际 {event:?}"
-            );
+            match parent {
+                "call-alpha" | "call-beta" => {
+                    let expected = if parent == "call-alpha" {
+                        "sess-alpha"
+                    } else {
+                        "sess-beta"
+                    };
+                    if event.persist_session_id != expected {
+                        violations.push(format!(
+                            "C1.1 违约：父活动与会话归属不自洽（串会话），实际 {event:?}"
+                        ));
+                    }
+                }
+                other => violations.push(format!(
+                    "C1.1 违约：出现未知 parent_activity_id `{other}`（必须恰为某次 acp_delegate 的 \
+                     call_id）：{event:?}"
+                )),
+            }
         }
     }
+
+    assert!(
+        violations.is_empty(),
+        "at_03b 违约（{} 条，按契约分组）：\n- {}",
+        violations.len(),
+        violations.join("\n- ")
+    );
 
     cleanup(&cwd);
 }

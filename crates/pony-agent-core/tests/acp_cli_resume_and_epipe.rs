@@ -378,7 +378,7 @@ fn r2_resume_unsupported_degrades_without_new_session() {
 // ───────────────────────── R3 缺 sessionId 形态 ─────────────────────────
 
 /// R3：opencode 形态（session/load 响应不含 sessionId）⇒ CLI 仍 Exit 0 并跑完一轮 prompt；
-/// 会话标识沿用请求 id，stderr 有 `[acp]` 诊断。
+/// 会话标识沿用请求 id，并留下一条结构化 JSON 诊断（C3.1）。
 #[test]
 fn r3_resume_without_response_session_id_still_runs_turn() {
     let root = unique_root("resume-no-id");
@@ -419,9 +419,22 @@ fn r3_resume_without_response_session_id_still_runs_turn() {
         }
     }
     assert!(saw_delta, "R3 违约：stdout 必须含 turn:delta，实际:\n{stdout}");
+    // 诊断面（C3.1 迁移）：介质由 stderr 文本 `[acp]` 改为 `agent::otel::log` 结构化 JSON 行
+    // （缺省 sink = stdout；本 `acp` 子命令路径未触发 `set_stderr_output` 改道 ⇒ 实测诊断在 stdout，
+    // 与 turn 事件 JSONL 同流，按行 parse 后以 `message`+`trace_id` 识别）。
+    let diagnostic = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| {
+            record
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.to_lowercase().contains("session"))
+                && record.get("trace_id").is_some()
+        });
     assert!(
-        stderr.contains("[acp]"),
-        "R3 违约：响应缺 sessionId 时必须有 `[acp]` 诊断（沿用请求 id），实际 stderr:\n{stderr}"
+        diagnostic.is_some(),
+        "R3 违约：响应缺 sessionId 时必须留下结构化 JSON 诊断（`message` 含 session + `trace_id` 键），实际 stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
     let _ = std::fs::remove_dir_all(&root);
