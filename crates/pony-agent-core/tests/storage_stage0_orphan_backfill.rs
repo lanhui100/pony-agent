@@ -108,6 +108,8 @@ fn flush_events(backend: &SqliteSessionBackend, session_id: &str, turn_id: &str)
         session_id: session_id.to_string(),
         turn_id: turn_id.to_string(),
         branch_id: "main".to_string(),
+        // wave-acp-delegate C6.2 衍生同步：`event_times_ms` 与 `events` 平行（空 = 落库回落批首时间）。
+        event_times_ms: Vec::new(),
         events: vec![
             TurnEvent::UserMessage {
                 turn_id: turn_id.to_string(),
