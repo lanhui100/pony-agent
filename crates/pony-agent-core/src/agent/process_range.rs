@@ -613,6 +613,9 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     /// B207 §1：unit 名合法性（systemd 会拒绝非法字符，静默失败比崩溃更糟 ⇒ 构造期就拒）。
+    // Windows 无 systemd：该用例依赖 `#[cfg(not(windows))]` 的 SystemdScopeOwner/owner_for，
+    // 跨平台测试编译不能在 Windows 失效（CI deny-warnings/测试编译门）。
+    #[cfg(not(windows))]
     #[test]
     fn b207_unit_name_validation() {
         assert!(is_valid_unit_name(&unit_name_for(1234, 7)));
@@ -651,6 +654,9 @@ mod tests {
     }
 
     /// B207 §2：`systemctl show` 输出解析 —— 四种判定，且 `[not set]` **不得判空**。
+    // Windows 无 systemd：该用例依赖 `#[cfg(not(windows))]` 的 SystemdScopeOwner/owner_for，
+    // 跨平台测试编译不能在 Windows 失效（CI deny-warnings/测试编译门）。
+    #[cfg(not(windows))]
     #[test]
     fn b207_systemctl_show_parsing() {
         let active = classify_scope_state("LoadState=loaded\nActiveState=active\nTasksCurrent=3\n");
@@ -846,6 +852,9 @@ mod tests {
 
     /// B207b 裁决 #6：**陷阱已消除** —— scope 明确不可用 ⇒ `Unavailable` ⇒ 上游终止路径 `Err`，
     /// **不是**静默 `Ok`。这是「有 user manager 的宿主机上每次 kill 都返回 Ok 却啥也没杀」的反面。
+    // Windows 无 systemd：该用例依赖 `#[cfg(not(windows))]` 的 SystemdScopeOwner/owner_for，
+    // 跨平台测试编译不能在 Windows 失效（CI deny-warnings/测试编译门）。
+    #[cfg(not(windows))]
     #[test]
     fn b207_scope_unavailable_is_fail_loud() {
         // 注入一个必定失败的 systemctl（路径不存在 ⇒ Command::output() 直接 Err），
