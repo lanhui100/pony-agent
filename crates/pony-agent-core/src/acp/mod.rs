@@ -13,8 +13,12 @@
 
 pub mod client;
 pub mod config;
+/// wave-acp-delegate C1：ACP 子活动 → 父 turn 事件归集（W1 签名骨架，实现归 W2a）。
+pub(crate) mod delegate_events;
 pub mod handlers;
 pub mod protocol;
+/// wave-acp-delegate C0：`acp_delegate` 最终正文归约（W1 签名骨架，实现归 W2a）。
+pub(crate) mod result;
 pub mod session;
 pub mod transport;
 

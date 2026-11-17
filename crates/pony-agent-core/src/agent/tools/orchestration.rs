@@ -220,14 +220,26 @@ impl ToolRouter {
         if let Some(token) = context.cancellation.as_ref() {
             session.set_cancellation_token(std::sync::Arc::clone(token));
         }
-        eprintln!(
-            "[acp] acp_delegate: agent={} session={} budget_ms={} host_cancellation={} fs_handler={} terminal_handler={}",
-            spec.id,
-            session.session_id(),
-            turn_budget.as_millis(),
-            context.cancellation.is_some(),
-            fs_declared,
-            terminal_declared
+        // wave-acp-delegate C1（发射端）：把父 session/turn 与本次 call id 注入会话，委派期间的
+        // ACP `tool_call` / `tool_call_update` 因此以**父 turn 身份**落 `turn:tool`（C1.1）。
+        // 三要素缺一（无父 turn 上下文）⇒ 不注入，归集静默跳过（C1.3）；文本 chunk 不入父正文（C1.2）。
+        let parent_turn = parent_turn_ref(context, call);
+        if let Some(parent_turn) = parent_turn.as_ref() {
+            session.set_parent_turn(parent_turn.clone());
+        }
+        crate::agent::otel::log::log_json_with_fields(
+            "info",
+            "acp_delegate 起轮（budget/能力/父 turn 归属）",
+            None,
+            &[
+                ("agent", json!(spec.id)),
+                ("acp_session_id", json!(session.session_id())),
+                ("budget_ms", json!(turn_budget.as_millis() as u64)),
+                ("host_cancellation", json!(context.cancellation.is_some())),
+                ("fs_handler", json!(fs_declared)),
+                ("terminal_handler", json!(terminal_declared)),
+                ("parent_turn_collected", json!(parent_turn.is_some())),
+            ],
         );
 
         let blocks = vec![crate::acp::protocol::ContentBlock::Text {
@@ -1196,6 +1208,43 @@ impl ToolRouter {
 
 
 // ───────────────────────────── B150/P1：acp_delegate 实现细节 ─────────────────────────────
+
+/// wave-acp-delegate C1.1/C1.3/C1.5：父 turn 身份三要素的解析（发射端唯一入口）。
+///
+/// 真源：`ToolExecutionContext.session_id`（父会话）+ `dispatch_context.turn_id`（父 turn）
+/// + `ToolCall.call_id`（本次委派调用 id）。任一缺失/空白 ⇒ `None` ⇒ 归集静默跳过，
+/// **绝不**用 ACP session id 冒充父 turn id（C1.5）。
+fn parent_turn_ref(
+    context: &ToolExecutionContext,
+    call: &ToolCall,
+) -> Option<crate::acp::delegate_events::ParentTurnRef> {
+    let dispatch_session = context
+        .dispatch_context
+        .as_ref()
+        .and_then(|dispatch| dispatch.session_id.as_deref());
+    let session_id = context
+        .session_id
+        .as_deref()
+        .or(dispatch_session)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let turn_id = context
+        .dispatch_context
+        .as_ref()
+        .and_then(|dispatch| dispatch.turn_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let call_id = call
+        .call_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(crate::acp::delegate_events::ParentTurnRef {
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        call_id: call_id.to_string(),
+    })
+}
 
 /// `acp_delegate` 参数（schema 见 `agent/tools/schema.rs`；`description` 由全局
 /// `with_description()` 注入，故不在此声明——未知字段 serde 默认忽略）。

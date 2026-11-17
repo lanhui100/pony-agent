@@ -190,6 +190,9 @@ impl SessionLogSink {
         release: bool,
     ) -> Result<LogAppendReceipt, String> {
         let mut grouped: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+        // wave-acp-delegate C6.2：本批命令里可得的**会话创建时刻**下界（逐会话取最早）。
+        // header 的 `createdAt` 必须是会话创建时刻，而不是「首轮落盘（原为 turn 终态）时刻」。
+        let mut creation_hints: BTreeMap<&str, u64> = BTreeMap::new();
         for command in commands {
             if matches!(command, PersistCommand::RemoveSession { .. }) {
                 continue;
@@ -197,6 +200,10 @@ impl SessionLogSink {
             let Some(session_id) = command_session_id(command) else {
                 continue;
             };
+            if let Some(hint) = command_creation_hint(command) {
+                let entry = creation_hints.entry(session_id).or_insert(hint);
+                *entry = (*entry).min(hint);
+            }
             let value = command_to_value(command)
                 .map_err(|error| format!("encode session log command for `{session_id}`: {error}"))?;
             grouped.entry(session_id).or_default().push(value);
@@ -211,11 +218,15 @@ impl SessionLogSink {
         let ts = now_ms();
         let mut receipt = LogAppendReceipt::default();
         for (session_id, values) in grouped {
+            let meta = || match creation_hints.get(session_id).copied() {
+                Some(created_at) => SessionLogMeta::new(session_id, self.cwd.clone())
+                    .with_created_at(created_at as i64),
+                None => SessionLogMeta::new(session_id, self.cwd.clone()),
+            };
             if release {
                 // 先丢弃可能存在的缓存句柄（释放锁），再按批开/放。
                 writers.remove(session_id);
-                let meta = SessionLogMeta::new(session_id, self.cwd.clone());
-                let mut writer = self.open_writer(session_id, &meta)?;
+                let mut writer = self.open_writer(session_id, &meta())?;
                 // 追加前长度：回滚时按它 set_len（含 header / 已提交命令）。
                 let pre_append_len = writer.committed_len();
                 writer
@@ -229,8 +240,7 @@ impl SessionLogSink {
                 continue;
             }
             if !writers.contains_key(session_id) {
-                let meta = SessionLogMeta::new(session_id, self.cwd.clone());
-                let writer = self.open_writer(session_id, &meta)?;
+                let writer = self.open_writer(session_id, &meta())?;
                 writers.insert(session_id.to_string(), writer);
             }
             let writer = writers
@@ -353,6 +363,27 @@ impl SessionLogSink {
     }
 }
 
+/// wave-acp-delegate C6.2：从单条持久化命令里提取**会话创建时刻**的下界提示。
+///
+/// 只取「命令自身携带的真实时间证据」，不猜、不用 now() 兜底：
+/// - `FlushEvents` ⇒ 本批事件的最早产生时刻（批次首批 = turn 起点 ⇒ 会话首条活动）；
+/// - `UpsertTurn` ⇒ 该 turn 的 `started_at_ms`。
+///
+/// `None` ⇒ 该命令不含时间证据（调用方回落 `now()`，与改造前行为一致）。
+fn command_creation_hint(command: &PersistCommand) -> Option<u64> {
+    match command {
+        PersistCommand::FlushEvents { event_times_ms, .. } => event_times_ms
+            .iter()
+            .copied()
+            .filter(|stamp| *stamp > 0)
+            .min(),
+        PersistCommand::UpsertTurn { turn, .. } => {
+            turn.started_at_ms.filter(|stamp| *stamp > 0)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +409,7 @@ mod tests {
             turn_id: "t".to_string(),
             branch_id: "main".to_string(),
             events: Vec::new(),
+            event_times_ms: Vec::new(),
         }
     }
 

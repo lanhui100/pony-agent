@@ -290,6 +290,8 @@ mod tests {
                 arguments: "{}".to_string(),
                 started_at_ms: None,
                 description: None,
+                // wave-acp-delegate C1.1：回填路径无父活动信息 ⇒ None（顶层语义，行为逐字不变）。
+                parent_activity_id: None,
             },
             TurnEvent::TurnEnd {
                 turn_id: "t1".to_string(),

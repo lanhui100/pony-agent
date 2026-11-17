@@ -1,0 +1,109 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    ".agents/notes/implemented/bug-fix/2026-11-17-acp-delegate-result-and-trace-integrity.md",
+    ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+    ".dev-team/nfr-baseline-acp-delegate-p0p2.json",
+    ".dev-team/red-phase/acp_delegate_adversarial.receipt.json",
+    ".dev-team/red-phase/acp_delegate_p0p2_contract.receipt.json",
+    ".dev-team/red-phase/acp_delegate_persistence_contract.receipt.json",
+    ".dev-team/regression-baseline-acp-delegate.json",
+    ".dev-team/state-acp-client-p0-p2.json",
+    ".dev-team/state.json",
+    "crates/pony-agent-core/src/acp/client.rs",
+    "crates/pony-agent-core/src/acp/config.rs",
+    "crates/pony-agent-core/src/acp/delegate_events.rs",
+    "crates/pony-agent-core/src/acp/handlers.rs",
+    "crates/pony-agent-core/src/acp/mod.rs",
+    "crates/pony-agent-core/src/acp/protocol.rs",
+    "crates/pony-agent-core/src/acp/result.rs",
+    "crates/pony-agent-core/src/acp/session.rs",
+    "crates/pony-agent-core/src/acp/transport.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/projection.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_recovery.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/session/backend.rs",
+    "crates/pony-agent-core/src/agent/session/fold.rs",
+    "crates/pony-agent-core/src/agent/session/history.rs",
+    "crates/pony-agent-core/src/agent/session/log_command.rs",
+    "crates/pony-agent-core/src/agent/session/log_sink.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/session/tests.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/agent/telemetry.rs",
+    "crates/pony-agent-core/src/agent/tools/orchestration.rs",
+    "crates/pony-agent-core/src/agent/tools/schema.rs",
+    "crates/pony-agent-core/src/agent/turn_event.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/turn_flow/turn_flow_registry.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/tests/acp_cli_resume_and_epipe.rs",
+    "crates/pony-agent-core/tests/acp_delegate_adversarial.rs",
+    "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs",
+    "crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs",
+    "crates/pony-agent-core/tests/acp_session_lifecycle.rs",
+    "crates/pony-agent-core/tests/adr0123_supplement_r2_test.rs",
+    "crates/pony-agent-core/tests/f1_speed_observability.rs",
+    "crates/pony-agent-core/tests/metrics_snapshot_adversarial.rs",
+    "crates/pony-agent-core/tests/metrics_snapshot_contract.rs",
+    "crates/pony-agent-core/tests/pa174_history_wiring_and_followup_contract.rs",
+    "docs/architecture/acp-client-integration.md",
+    "docs/release/evidence/acp-delegate/all-acp-final.log",
+    "docs/release/evidence/acp-delegate/c6-green.log",
+    "docs/release/evidence/acp-delegate/full-lib-w2w3.log"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 1225,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n '1216,1235p' crates/pony-agent-core/src/agent/control_plane/mod.rs && sed -n '1247,1280p' crates/pony-agent-core/src/agent/control_plane/mod.rs && grep -n 'INSERT INTO turn_events' -A 6 crates/pony-agent-core/src/agent/sqlite_session.rs | head -12",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/acp/session.rs",
+      "line": 891,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n '889,898p' crates/pony-agent-core/src/acp/session.rs && grep -n 'prompt_gate' crates/pony-agent-core/src/acp/session.rs && grep -n 'concurrency_lock' -A 4 .dev-team/nfr-baseline-acp-delegate-p0p2.json && grep -n 'spawn_with_full_options' crates/pony-agent-core/src/agent/tools/orchestration.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 2633,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n '2601,2643p' crates/pony-agent-core/src/agent/session/store.rs && sed -n '1420,1430p' crates/pony-agent-core/src/agent/control_plane/mod.rs && sed -n '3698,3722p' crates/pony-agent-core/src/agent/session/store.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "line": 1248,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n '1247,1281p' crates/pony-agent-core/src/agent/control_plane/mod.rs && sed -n '840,862p' crates/pony-agent-core/src/agent/runtime/turn_stream.rs && sed -n '1560,1582p' crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/log_command.rs",
+      "line": 240,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -rn 'eventTimes' crates/pony-agent-core/src && sed -n '236,247p' crates/pony-agent-core/src/agent/session/log_command.rs && sed -n '572,578p' crates/pony-agent-core/src/agent/session/fold.rs",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3a-acp-delegate-p0p2",
+    "fresh_context": true
+  },
+  "executed_by": "l3a-acp-delegate-p0p2",
+  "reviewed_commit": "8afa4376b740bdbe899a1a8c907d57bd0f251ada",
+  "attestation": {
+    "self_signed": false,
+    "note": "L3-A（并发/调度/状态流转/持久化一致性）只读审查 c5761b27..HEAD；机读门禁：cargo-lane 跑 acp_delegate_persistence_contract 3 passed / Exit 0；无 BLOCKING，5 条 ADVISORY 均为结构性风险（无可注入故障点的确定性复现）。"
+  }
+}

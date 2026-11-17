@@ -1,0 +1,30 @@
+{
+  "suite": "acp_delegate_persistence_contract",
+  "cmd": "PONY_BUILD_LOCK=/tmp/pony-agent-build-acp-delegate.lock bash scripts/cargo-lane.sh test -p pony-agent-core --test acp_delegate_persistence_contract",
+  "exit_code": 101,
+  "log": ".dev-team/red-phase/acp_delegate_persistence_contract.log",
+  "result": {
+    "passed": 0,
+    "failed": 3
+  },
+  "failures": [
+    {
+      "test": "c6_1_first_step_events_are_readable_at_step_boundary_without_duplicates",
+      "site": "crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs:601",
+      "assert": "C6.1：第一个 step 结束后（followup 请求到达时）turn_events 仍为 0 行 —— 事件只在 turn 终态 整批 flush，未做每 step 增量落盘（契约 C6.1）。session=pa_c6_1_step_boundary rows=0"
+    },
+    {
+      "test": "c6_3_crashed_turn_keeps_flushed_events_and_reads_back_unfinished",
+      "site": "crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs:745",
+      "assert": "C6.3：模拟崩溃后（重新打开同 DB）整轮事件 0 行 —— 已 flush 事件未持久化，重启即丢（契约 C6.3）。turn_events 行数 = 0，fresh-store 回读 = 0 条"
+    },
+    {
+      "test": "c6_2_event_created_at_is_production_time_not_flush_time",
+      "site": "crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs:692",
+      "assert": "C6.2：首条事件时间戳滞后 turn 开始 421ms（上界 125ms）—— 事件时间戳取的是 flush 时刻而非产生时刻。时间轴 = [start=1794918967942, end=1794918968392]，stamps=[1794918968363, 1794918968363, 1794918968"
+    }
+  ],
+  "author": "test-agent-4",
+  "runner": "lead",
+  "recorded_at": "2026-11-17T20:38+08:00"
+}

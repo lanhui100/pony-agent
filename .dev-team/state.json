@@ -1,160 +1,249 @@
 {
-  "wave": "acp-client-p0-p2",
+  "wave": "acp-delegate-p0p2",
   "status": "completed",
   "task_tier": "C",
-  "tier_basis": "跨系统协议面（ACP v1 线协议 + stdio 双向 JSON-RPC）+ 安全敏感（request_permission/fs/terminal 治理边界）+ 命中 blast 关键字（spawn/thread/lock/fs/Command::new）+ 跨包（pony-agent-core / src-tauri / 前端类型 / CLI）；无裁量降级权",
-  "baseline_commit": "f4146970",
-  "branch": "main",
+  "tier_basis": "跨模块（acp/tools/runtime/session/sqlite/control_plane）+ 外部进程 IO（ACP spawn/stdio）+ 事件持久化契约变更 + 命中 blast 关键字（thread/lock/io/fs/spawn/unsafe/saturating_add）；无裁量降级权",
+  "baseline_commit": "c5761b27",
+  "branch": "fix/acp-delegate-p0p2",
+  "worktree": "/home/dm/pony-agent-worktrees/acp-delegate-p0p2",
+  "previous_wave_state": ".dev-team/state-acp-client-p0-p2.json",
   "regression_baseline": {
-    "cmd": "npm run cargo:check:shared && cargo test -p pony-agent-core --lib",
-    "result": "cargo check exit 0; lib 1550 passed / 0 failed, 212.47s",
+    "cmd": "bash scripts/cargo-lane.sh test -p pony-agent-core --lib -- --test-threads=4",
+    "result": "ok. 1607 passed; 0 failed; finished in 216.97s",
     "exit_code": 0,
-    "log": ".dev-team/regression/baseline-acp-p0.log"
+    "log": "/tmp/acp-baseline-lib.log",
+    "receipt": ".dev-team/regression-baseline-acp-delegate.json"
   },
-  "observability_dynamic": "触及外部进程 IO（spawn agent + stdio）⇒ audit-diff.sh + check-declaration.sh 必须跑；docs/observability.yaml 已补归属段，提交带 [decl-change-approved]",
+  "derivative_compilation_exemption": {
+    "declared_by": "protocol-agent",
+    "reason": "ProviderCallCacheRecord additive 字段导致既有结构体字面量必须补字段（纯机械同步，无逻辑改动）",
+    "scopes": [
+      "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+      "crates/pony-agent-core/src/agent/session/tests.rs",
+      "crates/pony-agent-core/src/agent/projection.rs",
+      "crates/pony-agent-core/src/agent/sqlite_session.rs",
+      "crates/pony-agent-core/src/agent/runtime/stream_support.rs"
+    ],
+    "purity_check": "git diff 仅 +attempts:None/+failed_attempt_ms:None/+prelude_ms:None（含 1 行注释）"
+  },
+  "observability": {
+    "applicable": true,
+    "reason": "触及 LLM 调用/后台任务/工具结果契约/事件持久化；需 audit-diff + check-declaration"
+  },
+  "waves": {
+    "wave-w1": {
+      "members": [
+        "task-1",
+        "task-2"
+      ],
+      "status": "completed",
+      "red_commit": "4bfda7ec",
+      "green_commit": null,
+      "protocol_commit": "8df162dc",
+      "receipts_commit": "1d77f9b1"
+    },
+    "wave-w2": {
+      "members": [
+        "task-3",
+        "task-4"
+      ],
+      "status": "completed",
+      "blocked_by": [
+        "wave-w1"
+      ],
+      "write_scope_overlaps": [],
+      "note": "test-agent-2 第二批 C1/C6 红相（task-8）进行中；executor-a/executor-b 已开工",
+      "green_status": "contract 12/12 + ACP 13 suites green；R3 迁移待产品侧诊断（executor-a 修补 bin/cli.rs）",
+      "green_commit": "fbde9fe7",
+      "test_commit": "7e853dc8"
+    },
+    "wave-w3": {
+      "members": [
+        "task-5"
+      ],
+      "status": "completed",
+      "blocked_by": [
+        "wave-w2"
+      ],
+      "write_scope_overlaps": [
+        "turn_flow.rs/turn_flow/ 与 wave-w2 串行（非并发波次），已显式记录"
+      ],
+      "green_commit": "fbde9fe7 (与 W2 同一绿色检查点，turn_flow/runtime 文件重叠无法无损拆分，显式记录)"
+    },
+    "wave-w4": {
+      "members": [
+        "task-6"
+      ],
+      "status": "completed",
+      "blocked_by": [
+        "wave-w3"
+      ]
+    }
+  },
   "tasks": [
     {
       "id": "task-1",
-      "backlog": "B149",
       "role": "protocol",
       "owner": "protocol-agent",
-      "deliverable": "acp 空桩/类型/接口 + NFR ACP 段 + 契约矩阵",
-      "write_scopes": [
-        "crates/pony-agent-core/src/acp",
-        "crates/pony-agent-core/src/lib.rs",
-        "crates/pony-agent-sdk",
-        ".dev-team"
-      ]
+      "deliverable": "NFR 基线 + acp/result.rs + acp/delegate_events.rs + telemetry 字段 + turn_flow 助手签名"
     },
     {
       "id": "task-2",
-      "backlog": "B149",
       "role": "test",
       "owner": "test-agent",
-      "blocked_by": [
-        "task-1"
-      ],
-      "deliverable": "P0 蓝军 7 项 + L2-AT 3 类红相",
-      "write_scopes": [
-        "crates/pony-agent-core/tests",
-        ".dev-team"
-      ]
+      "deliverable": "C0–C6 验收测试 + 红相证据"
     },
     {
       "id": "task-3",
-      "backlog": "B149",
       "role": "executor",
-      "owner": "executor",
-      "blocked_by": [
-        "task-2"
-      ],
-      "deliverable": "transport.rs + config.rs 实现至全绿 + green receipt",
-      "write_scopes": [
-        "crates/pony-agent-core/src/acp"
-      ]
+      "owner": "executor-a",
+      "deliverable": "ACP 正文回传/子活动归集/usage/结构化日志"
     },
     {
       "id": "task-4",
-      "backlog": "B150",
-      "role": "test",
-      "owner": "test-agent",
-      "blocked_by": [
-        "task-3"
-      ],
-      "deliverable": "acp_client_contract 8 项红相",
-      "write_scopes": [
-        "crates/pony-agent-core/tests",
-        ".dev-team"
-      ]
+      "role": "executor",
+      "owner": "executor-b",
+      "deliverable": "父 turn 事件助手 + trace step + retry 元数据"
     },
     {
       "id": "task-5",
-      "backlog": "B150",
       "role": "executor",
-      "owner": "executor",
-      "blocked_by": [
-        "task-4"
-      ],
-      "deliverable": "client.rs/session.rs + acp_delegate 工具",
-      "write_scopes": [
-        "crates/pony-agent-core/src/acp",
-        "crates/pony-agent-core/src/agent/tools"
-      ]
+      "owner": "executor-c",
+      "deliverable": "增量落盘 + 时间语义（B209）"
     },
     {
       "id": "task-6",
-      "backlog": "B151",
-      "role": "test",
-      "owner": "test-agent",
-      "blocked_by": [
-        "task-5"
-      ],
-      "deliverable": "宿主形态红相（CLI/Tauri）",
-      "write_scopes": [
-        "crates/pony-agent-core/tests",
-        ".dev-team"
-      ]
+      "role": "lead",
+      "owner": "lead",
+      "deliverable": "Join Barrier + L3/L3-P + 收口"
+    }
+  ],
+  "counter": {
+    "functional_failures": {},
+    "adversarial_failures": {},
+    "reset_rule": "同一用例连续失败轮次合并计数；修复验证通过或红相重锚即清零"
+  },
+  "nfr_degraded": [],
+  "artifacts": {
+    "baseline": ".dev-team/regression-baseline-acp-delegate.json",
+    "contract_matrix": ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+    "red_phase_logs": ".dev-team/red-phase/"
+  },
+  "build_lock_override": {
+    "env": "PONY_BUILD_LOCK=/tmp/pony-agent-build-acp-delegate.lock",
+    "reason": "全局 flock 被另一会话 tui_task_visibility 长测试占用（>12min），本波排队 lane 无法推进",
+    "scope": "仅限本 worktree 的 lane 构建；仍 max_jobs_per_lane=4 + nice 5；overload 判据不变",
+    "load_at_override": "5.8 / 16 cores（< 1.5× 上限）",
+    "recorded_at": "2026-11-17T19:52+08:00"
+  },
+  "backlog": {
+    "id": "B237",
+    "status": "in_progress",
+    "owner": "lead",
+    "note": "scripts/backlog.mjs 以 git common-dir 定位仓根，B237/租约落在主工作区 /home/dm/pony-agent/backlog（该处另有他人未提交账本改动）；本分支不携带 backlog 变更以避免合并冲突，闭环时在主账本 resolve。"
+  },
+  "frozen_test_drift": [
+    {
+      "file": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs",
+      "at": "2026-11-17T20:01+08:00",
+      "writer": "l2-at",
+      "kind": "test-defect rewrite（删死代码字段 + at_03b 违例聚合，仅增断言）",
+      "lead_action": "accept as test-defect rewrite; re-anchor with final receipt",
+      "red_receipt": "4bfda7ec / .dev-team/red-phase/acp_delegate_adversarial.receipt.json"
+    }
+  ],
+  "acceptance": {
+    "contract": "12 passed/0 failed",
+    "adversarial": "6 passed/0 failed",
+    "persistence": "3 passed/0 failed",
+    "lib": "1614 passed/0 failed",
+    "acp_suites": "19 suites all green",
+    "evidence_dir": "docs/release/evidence/acp-delegate/"
+  },
+  "observability_gate": {
+    "audit_diff": "exit 0",
+    "check_declaration": "PASS exit 0"
+  },
+  "l3p": {
+    "verdict": "FAIL",
+    "blocking": 1,
+    "advisory": 3,
+    "reviewed_commit": "8afa4376",
+    "file": ".dev-team/review-l3p.json",
+    "blocking_fix": {
+      "id": "F1",
+      "desc": "ponycli acp 未把结构化日志改道 stderr（jsonl/sse stdout 污染，wave-59 C1）",
+      "owner": "executor-a",
+      "test_migration": "test-agent-3"
+    },
+    "advisories": [
+      "F2 并发 drain 重复窗口（per-key in-flight 标记待补）",
+      "F3 NFR concurrency_lock.timeout_ms 与实际不符（协议 Agent 修正基线）"
+    ]
+  },
+  "join": {
+    "verdict": "PASS",
+    "blocking": 0,
+    "advisory": 7,
+    "file": ".dev-team/review-join-acp-delegate-r2.json",
+    "reviewed_commit": "5a914c4c"
+  },
+  "residual_advisories": [
+    {
+      "id": "B239",
+      "owner": "followup",
+      "desc": "flush 并发去重/eventTimes 解码/finalize 区间/缓冲锁粒度"
     },
     {
-      "id": "task-7",
-      "backlog": "B151",
-      "role": "executor",
-      "owner": "executor",
-      "blocked_by": [
-        "task-6"
-      ],
-      "deliverable": "ponycli acp 子命令 + Tauri 命令",
-      "write_scopes": [
-        "crates/pony-agent-core/src/bin/cli.rs",
-        "crates/pony-agent-core/src/acp",
-        "src-tauri/src/lib.rs",
-        "src/types"
-      ]
-    }
-  ],
-  "artifacts": {
-    "plan_truth": "docs/architecture/acp-client-integration.md",
-    "contract_matrix": ".dev-team/contract-matrix-acp-p0.md",
-    "adr": ".agents/notes/proposed/architecture/2026-11-14-acp-client-external-agent-integration.md",
-    "backlog": "B149 / B150 / B151",
-    "test_design": ".dev-team/acp-p0-test-design.md"
-  },
-  "decisions": [
-    "方案 B（委派工具 + 子代理引擎）先行，协议层按 P2 宿主需求设计；不改 ProviderProtocol/ProviderClient",
-    "自研同步 stdio transport（与 plugin_host/transport.rs 同构），不引入 agent-client-protocol crate",
-    "删除 acp/server.rs（协议方向错误）与 crates/pony-agent-sdk（无 Cargo.toml/零消费者）",
-    "request_permission 无 handler 一律 cancelled（fail-closed），绝不默认 allow",
-    "文档生成物走生成器：gen-extension-points.mjs 增 ACP 行（禁手改文档）",
-    "Gate-1/Gate-2 均在交付前以 fresh-context subagent 执行，收据 .dev-team/review-plan.json / review-join.json（schema_version=2）",
-    "文件规模门：schema.rs builtin_tools 1102→1074（抽出 acp_delegate_tool_definition）、provider/tests.rs 3003→2999，零行为变更",
-    "P2 范围收敛：只做 CLI 宿主形态；Tauri 三命令+前端类型转 B163（方案原标 optional）",
-    "审查轮次 r2/r3 FAIL 收据保真保留；5 条 BLOCKING 全在交付前修复并各带机器反例"
-  ],
-  "history": [
+      "id": "B240",
+      "owner": "followup",
+      "desc": "projection 丢 parent_activity_id/attempts、otel extras 未脱敏、ToolCallStatus serde(other)"
+    },
     {
-      "wave": "interrupted-turn-resume",
-      "status": "done",
-      "task_tier": "B",
-      "baseline_commit": "a7393954",
-      "branch": "fix/interrupted-turn-resume",
-      "regression_baseline": {
-        "cmd": "cargo test -p pony-agent-core --lib",
-        "result": "1518 passed; 0 failed; 795.84s",
-        "exit_code": 0,
-        "log": ".dev-team/regression/baseline-lib.log"
-      },
-      "artifacts": {
-        "contract_matrix": ".dev-team/contract-matrix-interrupted-turn-resume.md",
-        "adr": ".agents/notes/implemented/bug-fix/2026-11-12-interrupted-turn-content-preservation.md",
-        "backlog": "B113"
-      }
+      "id": "A2",
+      "owner": "executor-a",
+      "desc": "--help 在改道前打印 stdout"
+    },
+    {
+      "id": "A3",
+      "owner": "test-agent-3",
+      "desc": "R3 注释与 stdout 负向断言"
+    },
+    {
+      "id": "A4",
+      "owner": "test-agent-3",
+      "desc": "c0_4a 增加非空正文截断用例"
+    },
+    {
+      "id": "F2",
+      "owner": "B239",
+      "desc": "终态 flush 快照→提交→移除重复窗口"
+    },
+    {
+      "id": "A2-help",
+      "owner": "B240",
+      "desc": "acp --help 文本在 jsonl 下仍走 stdout（契约未登记豁免）"
+    },
+    {
+      "id": "A3-test",
+      "owner": "B240",
+      "desc": "T-ACP-05 只查首个截断子句，追加矛盾子句可逃逸"
+    },
+    {
+      "id": "A4-null",
+      "owner": "B240",
+      "desc": "C6.2 持久化测试 NULL 分支 println 空过未登记"
+    },
+    {
+      "id": "schema-hardcode",
+      "owner": "B240",
+      "desc": "工具描述硬编码 32000，未与常量耦合；截断轮 finalTextTruncated 未显式表述"
+    },
+    {
+      "id": "usage-key",
+      "owner": "B240",
+      "desc": "architecture 文档 usage 键名与实际 JSON 不一致"
     }
   ],
-  "gate_history": [
-    "Gate-1 方案对抗（subagent, reviewed_commit b61682e1）：FAIL，2 BLOCKING（prompt 5s 硬顶 / 取消令牌未联动）+ 8 ADVISORY",
-    "Gate-2 L3-P 六问（subagent, reviewed_commit b61682e1）：FAIL，Q1 超时 + Q6 工具面 38→39/45→46 漏同步 4 份冻结契约测试",
-    "BLOCKING 修复：client.set_prompt_budget/session.set_turn_budget 落地（P1-9 绿）；四份契约测试同步（16/23/9/4 全绿）；P1-10 取消联动待修",
-    "ADVISORY 转 backlog：B164(eprintln 非 json)/B165(Windows Job Object)/B166(SessionUpdate 14 变体)/B167(capabilities 诚实性)/B168(串行闸零断言)",
-    "Gate-1 r4 / Gate-2 r4（reviewed_commit be302170）：双方 PASS（0 BLOCKING / 9 ADVISORY）"
-  ]
+  "final_head": "c738b26f"
 }

@@ -37,7 +37,9 @@ pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::Provid
         build_local_tool_followup_recovery_response(&synthetic_tool_result, hop_records, &error)
     });
     // 同步恢复调用无首包观测（`BufferedResponse`）⇒ 只结算 dur，不伪造 ttft。
-    let duration_ms = crate::agent::retry::take_pure_call_window(started_at, None).duration_ms;
+    // wave-acp-delegate C5.1：账本（window）整体保留，重试元数据随记录落盘。
+    let pure_call_window = crate::agent::retry::take_pure_call_window(started_at, None);
+    let duration_ms = pure_call_window.duration_ms;
     let provider_source_snapshot = response.provider_source.clone();
     let provider_mode_snapshot = response.provider_mode.clone();
     let token_usage_snapshot = response.token_usage.clone();
@@ -83,6 +85,7 @@ pub(super) fn recover_tool_followup_completion<P: crate::agent::provider::Provid
             Some(duration_ms),
             latency_kind,
             Some(context_observation),
+            ProviderCallRetryMeta::from_window(pure_call_window.window.as_ref()),
         ),
     }
 }
@@ -335,6 +338,7 @@ pub(super) fn recover_tool_followup_completion_stream<P: crate::agent::provider:
             Some(duration_ms),
             latency_kind,
             Some(context_observation),
+            ProviderCallRetryMeta::from_window(pure_call_window.window.as_ref()),
         ),
     }
 }

@@ -1,0 +1,34 @@
+{
+  "suite": "acp_delegate_adversarial",
+  "cmd": "PONY_BUILD_LOCK=/tmp/pony-agent-build-acp-delegate.lock bash scripts/cargo-lane.sh test -p pony-agent-core --test acp_delegate_adversarial",
+  "exit_code": 101,
+  "log": ".dev-team/red-phase/acp_delegate_adversarial.log",
+  "result": {
+    "passed": 2,
+    "failed": 4
+  },
+  "failures": [
+    {
+      "test": "at_02c_non_text_content_block_is_not_text",
+      "site": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs:226",
+      "assert": "C0.1 违约：结果 JSON 必含字符串 `finalText`（AgentMessageChunk 按到达顺序拼接），实际 `finalText` = None；顶层键 = Some([\"agent\", \"ok\", \"sessionId\", \"stopReason\", \"summary\", \"tool\", \"tru"
+    },
+    {
+      "test": "at_02a_malformed_updates_do_not_drop_the_stream",
+      "site": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs:226",
+      "assert": "C0.1 违约：结果 JSON 必含字符串 `finalText`（AgentMessageChunk 按到达顺序拼接），实际 `finalText` = None；顶层键 = Some([\"agent\", \"ok\", \"sessionId\", \"stopReason\", \"summary\", \"tool\", \"tru"
+    },
+    {
+      "test": "at_02b_oversized_chunk_is_bounded_and_flagged",
+      "site": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs:226",
+      "assert": "C0.1 违约：结果 JSON 必含字符串 `finalText`（AgentMessageChunk 按到达顺序拼接），实际 `finalText` = None；顶层键 = Some([\"agent\", \"ok\", \"sessionId\", \"stopReason\", \"summary\", \"tool\", \"tru"
+    },
+    {
+      "test": "at_03b_concurrent_delegations_do_not_cross_session_events",
+      "site": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs:226",
+      "assert": "C0.1 违约：结果 JSON 必含字符串 `finalText`（AgentMessageChunk 按到达顺序拼接），实际 `finalText` = None；顶层键 = Some([\"agent\", \"ok\", \"sessionId\", \"stopReason\", \"summary\", \"tool\", \"tru"
+    }
+  ],
+  "recorded_by": "lead",
+  "recorded_at": "2026-11-17T19:58+08:00"
+}

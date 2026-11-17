@@ -214,7 +214,12 @@ pub enum PersistCommand {
         epoch: u64,
         session_id: String,
     },
-    /// PA-091：turn 终态事件批次落盘（与快照写入同事务）。
+    /// PA-091：turn 事件批次落盘（与快照写入同事务）。
+    ///
+    /// wave-acp-delegate C6.1：批次不再只来自 turn 终态——每 step 边界也会落一批（增量）。
+    /// wave-acp-delegate C6.2：`event_times_ms` 是 `events` 的**平行数组**，逐事件携带
+    /// 「真实产生时刻」（Unix ms），供落库写 `created_at_ms`；空数组 ⇒ 旧路径/未知，
+    /// 落库回落批首时间（legacy 兼容）。
     FlushEvents {
         epoch: u64,
         session_id: String,
@@ -222,6 +227,7 @@ pub enum PersistCommand {
         /// PA-093：事件归属分支（阶段 3 起分支可见性推导的基石；legacy 数据 'main'）。
         branch_id: String,
         events: Vec<crate::agent::turn_event::TurnEvent>,
+        event_times_ms: Vec<u64>,
     },
     PublishMetadata {
         epoch: u64,

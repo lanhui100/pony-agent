@@ -5,7 +5,9 @@ use crate::agent::provider::{
     ProviderStreamChunk, TokenUsage,
 };
 use crate::agent::session::TraceTimelineEntry;
-use crate::agent::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
+use crate::agent::telemetry::{
+    ProviderCallCacheRecord, ProviderCallRetryMeta, TurnToolActivity, TurnTraceStep,
+};
 use crate::agent::tools::{ToolCall, ToolDefinition, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,7 +53,7 @@ pub use self::turn_flow_registry::{
     EventPersistTestSinkGuard, SessionEventFlushBindingGuard, SessionEventPersistBindingGuard,
 };
 // 内部派发入口：父模块的 emit 链路仍在用，收紧为 `pub(super)` 不扩大可见性。
-use self::turn_flow_registry::dispatch_event_persist;
+use self::turn_flow_registry::{dispatch_event_persist, has_event_persist_channel};
 
 
 pub struct PreparedTurn {
@@ -69,6 +71,9 @@ pub struct PlannedTurn {
     pub first_decision: ProviderDecision,
     pub resolved_tool_call: Option<ToolCall>,
     pub initial_decision_duration_ms: Option<u64>,
+    /// wave-acp-delegate C5.1：首跳决策那次 provider 调用的重试观测（账本结算后带回），
+    /// 随 per-call 记录落 `providerCallRecords`（`attempts`/`failed_attempt_ms`/`prelude_ms`）。
+    pub initial_decision_retry: ProviderCallRetryMeta,
     pub planner_hook_trace_records: Vec<HookTraceRecord>,
 }
 
@@ -1429,7 +1434,10 @@ fn payload_usage(payload: &TurnStreamEvent) -> Option<crate::agent::provider::To
 fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_event::TurnEvent> {
     use crate::agent::turn_event::TurnEvent;
     let activity = payload.tool_activities.as_deref()?.last()?;
-    let step = payload.sequence.unwrap_or(0) as u32;
+    // C4.1：`step` 是**产生该调用的 turn step index**（与 `StepStart`/`AssistantChunk.step`
+    // 同源），缺省 0（未知 hop）。此前误取 `payload.sequence`（事件序号），使同一 hop 的
+    // 工具事件带上一串与 step 空间无关的数字（红相 C4.1 的根因）。
+    let step = payload.step.unwrap_or(0);
     if activity.status == "running" {
         // B1：工具描述随 ToolCall 落盘（重投影拼检查点工具行用 `name + " " + description`，
         // 与 turn_persist 写路径同形）；空描述 ⇒ None ⇒ 工具行只含 name（兼容旧形态）。
@@ -1445,6 +1453,10 @@ fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_even
             arguments: activity.arguments_text.clone().unwrap_or_default(),
             started_at_ms: None,
             description,
+            // wave-acp-delegate C1.1：父活动归因**从 activity 透传**——ACP 子活动由
+            // `acp::delegate_events` 填 `parent_activity_id = acp_delegate call_id`，
+            // 顶层工具活动为 `None`（恒 None 会把子活动归集抹平）。
+            parent_activity_id: activity.parent_activity_id.clone(),
         })
     } else {
         Some(TurnEvent::ToolResult {
@@ -1459,8 +1471,63 @@ fn build_tool_event(payload: &TurnStreamEvent) -> Option<crate::agent::turn_even
                 .map(|seconds| (seconds * 1000.0) as u64),
             artifacts: activity.artifacts.clone(),
             capability_invocation: activity.capability_invocation.clone(),
+            // wave-acp-delegate C1.1：同 ToolCall（子活动必须带父活动 id）。
+            parent_activity_id: activity.parent_activity_id.clone(),
         })
     }
+}
+
+/// wave-acp-delegate C1.1/C1.3：以**父 turn 身份**发射一条 turn 流事件。
+///
+/// 这是 ACP 子活动归集的**父 turn 持久化通道**（契约矩阵「设计裁决」）：外部 agent 的
+/// `tool_call` / `tool_call_update` 经 `acp::delegate_events` 转成 [`TurnToolActivity`] 后，
+/// 由本函数以父 `session_id`/`turn_id` 发 `turn:tool` 并落盘（live UI 渲染不在本期范围）。
+///
+/// 契约（C1.1/C1.3/C1.5）：
+/// - `session_id` / `turn_id` 必须来自父 turn 上下文，**不得**使用 ACP session id
+///   （传进来的 payload 里的 session/turn 一律被父身份覆写）；
+/// - 事件序号与 `event_id` 取**与 `emit_event` 同源**的 turn 级计数器，随后经
+///   `dispatch_event_persist` 写入父会话的 `turn_events`（`is_terminal = false`：
+///   ACP 子活动不驱动 flush，flush 仍由父 turn 终态负责）；
+/// - 无父上下文 / 持久化通道未注册 / 该事件类型不落盘 ⇒ 返回 `false` 并静默跳过
+///   （不 panic、不新增必填构造参数）。
+pub(crate) fn emit_external_turn_event(
+    session_id: &str,
+    turn_id: &str,
+    name: &str,
+    payload: TurnStreamEvent,
+) -> bool {
+    // C1.3：缺父 session/turn 上下文 ⇒ 无处归属，静默跳过（绝不猜 ACP session id）。
+    if session_id.is_empty() || turn_id.is_empty() {
+        return false;
+    }
+    // C1.3：持久化通道未注册 ⇒ 明说「未落盘」，而不是发一条只存在于内存的事件、
+    // 白白吃掉一个 turn 事件序号。
+    if !has_event_persist_channel(session_id) {
+        return false;
+    }
+    let mut payload = payload;
+    // C1.5：turn_id 必须是父 turn（不得是 ACP session id）；session 同理。
+    payload.turn_id = turn_id.to_string();
+    payload.session_id = Some(session_id.to_string());
+    // 与 `emit_event` 同源：同一 turn 级计数器分配 sequence / event_id / 事件元数据。
+    let next_sequence = next_turn_event_sequence(turn_id);
+    payload.event_id = Some(format!("{turn_id}:{next_sequence}"));
+    payload.event_type = Some(resolve_canonical_event_type(
+        name,
+        payload.phase.as_deref(),
+        payload.build_context_observation.as_ref(),
+        payload.tool_activities.as_deref(),
+    ));
+    payload.event_version = Some(turn_event_version().to_string());
+    payload.sequence = Some(next_sequence);
+    payload.emitted_at_ms = Some(now_timestamp_ms());
+    // 该事件类型不落盘（`build_turn_event` 返回 None）⇒ 视为未发射。
+    let Some(event) = build_turn_event(name, &payload) else {
+        return false;
+    };
+    dispatch_event_persist(session_id, turn_id, event, false);
+    true
 }
 
 pub fn normalize_user_message(message: &str) -> String {
@@ -1506,6 +1573,39 @@ pub fn provider_failure_message(
     }
 
     None
+}
+
+/// wave-acp-delegate C6.1：**step 边界增量落盘**。
+///
+/// 语义与终态 flush 完全同源（都走注册的 `EventFlushFn`）：把该会话当前已缓冲的事件
+/// 提交到 `turn_events`，**commit 成功才移除缓冲**（失败保留可重试，绝不丢事件）；
+/// 事件序号仍由 store 的 `store_metadata` 计数器在事务内分配，因此增量 flush 与终态
+/// flush 的 seq 连续且不重复。
+///
+/// 返回本次提交的事件数（0 = 无缓冲/未注册通道/后端不支持事件）。失败只记结构化日志，
+/// **不阻断** turn（持久化是 accounted 旁路，流式主路径不得因落盘失败而中断）。
+pub fn flush_step_boundary_events(session_id: Option<&str>) -> usize {
+    // 与 `dispatch_event_persist` 同一条归一规则：匿名 turn（session_id 缺失）归默认会话，
+    // 否则缓冲键与会话不匹配，flush 永远找不到该批事件。
+    let resolved = match session_id.map(str::trim) {
+        Some(id) if !id.is_empty() => id,
+        _ => crate::agent::session::DEFAULT_SESSION_ID,
+    };
+    match flush_session_buffered_events(resolved) {
+        Ok(committed) => committed,
+        Err(error) => {
+            crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "turn event step-boundary flush failed (buffer retained)",
+                None,
+                &[
+                    ("session_id", serde_json::json!(resolved)),
+                    ("error", serde_json::json!(error)),
+                ],
+            );
+            0
+        }
+    }
 }
 
 /// T8：`turn:delta` 必须携带真实 `session_id`。
@@ -2112,6 +2212,9 @@ mod tests {
                 prefix_mutation_reasons: Vec::new(),
                 usage_origin: None,
                 context_input_tokens: None,
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             },
             crate::agent::telemetry::ProviderCallCacheRecord {
                 request_kind: crate::agent::telemetry::ProviderRequestKind::ToolFollowup,
@@ -2133,6 +2236,9 @@ mod tests {
                 ],
                 usage_origin: None,
                 context_input_tokens: None,
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             },
         ]);
         let per_call_events = build_provider_usage_event("turn:completed", &payload);

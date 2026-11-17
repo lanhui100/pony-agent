@@ -521,6 +521,10 @@ pub enum ToolCallStatus {
     InProgress,
     Completed,
     Failed,
+    /// wave-acp-delegate C1.4（additive）：外部 agent 可能回报 `cancelled`（此前该值会让整条
+    /// `tool_call(_update)` 反序列化失败、整帧丢弃）。父 turn 归集按 `aborted` 映射，见
+    /// `acp::delegate_events::map_acp_tool_status`。
+    Cancelled,
 }
 
 /// 工具调用产出的内容（判别键 `type`）。

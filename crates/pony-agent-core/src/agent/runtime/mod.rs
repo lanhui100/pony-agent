@@ -44,8 +44,8 @@ use crate::agent::session::{
     TurnHistoryMessage, TurnTraceRecord,
 };
 use crate::agent::telemetry::{
-    DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderLatencyKind, ProviderRequestKind,
-    TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
+    DefaultTurnTelemetryBuilder, ProviderCallCacheRecord, ProviderCallRetryMeta,
+    ProviderLatencyKind, ProviderRequestKind, TurnTelemetryBuilder, TurnToolActivity, TurnTraceStep,
 };
 use std::path::PathBuf;
 use crate::agent::tools::{
@@ -61,7 +61,8 @@ use crate::agent::trace_persistence::{
 use crate::agent::turn_flow::{
     build_failed_turn_result, build_failed_turn_result_with_hooks,
     emit_stream_cancelled, emit_stream_event, emit_stream_event_with_step,
-    emit_stream_failed, emit_turn_failed, normalize_user_message, preview_text,
+    emit_stream_failed, emit_turn_failed, flush_step_boundary_events, normalize_user_message,
+    preview_text,
     provider_decision_stream_guarded_with_mode, provider_decision_with_mode,
     provider_event_meta, provider_failure_message, provider_followup_stream_with_calls,
     provider_followup_stream_with_mode,

@@ -94,6 +94,9 @@ fn record(
         context_input_tokens: Some(1_000),
         latency_kind: ProviderLatencyKind::ProviderStream,
         prefix_mutation_reasons: Vec::new(),
+        attempts: None,
+        failed_attempt_ms: None,
+        prelude_ms: None,
     }
 }
 

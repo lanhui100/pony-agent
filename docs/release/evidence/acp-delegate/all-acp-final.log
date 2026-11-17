@@ -1,0 +1,324 @@
+   Compiling pony-agent-core v0.1.169 (/home/dm/pony-agent-worktrees/acp-delegate-p0p2/crates/pony-agent-core)
+warning: unused variable: `provider`
+   --> crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs:583:10
+    |
+583 |     let (provider, plane, sink) = two_step_stack("c62", session_id, INITIAL_REPLY_DELAY_MS, &fixture);
+    |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_provider`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pony-agent-core` (test "acp_delegate_persistence_contract") generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 29.71s
+     Running tests/acp_capabilities_contract.rs (target/debug/deps/acp_capabilities_contract-8cca8903036a33aa)
+
+running 11 tests
+test g1_capabilities_for_is_hint_and_handler ... ok
+test g3_hint_without_handler_declares_nothing ... ok
+test g4_declared_capabilities_match_installed_handlers ... ok
+test g2_connect_with_capabilities_declares_exactly_caps ... ok
+test g2b_legacy_session_entries_never_declare_capabilities ... ok
+{"code":"permission_denied","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.130Z"}
+{"code":"permission_denied","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"/tmp/pony-acp-caps-2955364-70-fs-denied-9/../pony-acp-escape-target.txt","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.132Z"}
+{"code":"outside_workspace_write_denied","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"/tmp/pony-acp-caps-2955364-50-fs-external-11/outside.txt","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.125Z"}
+{"code":"permission_denied","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.145Z"}
+{"code":"permission_denied","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"/tmp/pony-acp-caps-2955364-70-fs-denied-9/../pony-acp-escape-target.txt","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.145Z"}
+{"code":"requires_authorization","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"/tmp/pony-acp-caps-2955364-71-fs-outside-10/secret.txt","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.146Z"}
+{"code":"outside_workspace_write_denied","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"/tmp/pony-acp-caps-2955364-71-fs-outside-10/secret.txt","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.146Z"}
+{"code":"permission_denied","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.147Z"}
+{"code":"permission_denied","level":"warn","message":"acp fs 反向请求被拒（fail-closed）","path":"","purpose":"read","trace_id":null,"ts":"2026-11-17T13:29:45.147Z"}
+test g5_fs_handler_reads_and_writes_inside_workspace ... ok
+test g8_undeclared_capability_requests_are_rejected ... ok
+test g5b_fs_handler_reads_authorized_external_path ... ok
+test g9_malformed_path_parameters_yield_errors ... ok
+test g6_fs_handler_fails_closed_outside_workspace ... ok
+test g7_terminal_handler_full_chain_and_no_residue ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/acp_cli_capabilities.rs (target/debug/deps/acp_cli_capabilities-1e138d53331563a5)
+
+running 2 tests
+test j2b_cli_does_not_declare_fs_when_hint_off ... ok
+test j2_cli_declares_fs_capability_from_hint ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/acp_cli_resume_and_epipe.rs (target/debug/deps/acp_cli_resume_and_epipe-9ba5517438fc1d30)
+
+running 5 tests
+test r4_resume_dirs_surface_absent_in_frozen_cli ... ok
+test e1_early_pipe_close_exits_zero_not_panic ... ok
+test r2_resume_unsupported_degrades_without_new_session ... ok
+test r1_resume_loads_session_without_creating_new_one ... ok
+test r3_resume_without_response_session_id_still_runs_turn ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/acp_client_contract.rs (target/debug/deps/acp_client_contract-9d97887203abc90c)
+
+running 11 tests
+test p1_06_reduce_stop_reason_pure_mapping ... ok
+test p1_07_crashed_agent_is_error_not_panic ... ok
+test p1_01_initialize_version_mismatch_fails_closed ... ok
+test p1_08_acp_delegate_tool_surface ... ok
+test p1_02_relative_cwd_rejected ... ok
+test p1_04_permission_ask_roundtrip_returns_selected ... ok
+test p1_05_cancel_settles_pending_permission ... ok
+{"level":"info","message":"acp 无宿主审批 dispatcher 绑定，session/request_permission fail-closed：cancelled","tool_call_id":"tc-1","trace_id":null,"ts":"2026-11-17T13:29:45.742Z"}
+test p1_05_cancel_aborts_running_prompt ... ok
+test p1_04_permission_without_host_is_fail_closed ... ok
+test p1_03_session_update_maps_to_turn_events ... ok
+test p1_06_prompt_reduces_five_stop_reasons ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running tests/acp_config_regressions.rs (target/debug/deps/acp_config_regressions-f5f73d3a7f71e4f9)
+
+running 8 tests
+{"agent":"fake","code":"workspace_mcp_config_untrusted","level":"info","message":"acp inherit MCP 诊断","server":null,"trace_id":null,"ts":"2026-11-17T13:29:46.386Z"}
+{"level":"warn","message":"acp 拒绝装配 FsHandler：本会话 initialize 未声明 clientCapabilities.fs（fail-closed，不追认）","trace_id":null,"ts":"2026-11-17T13:29:46.426Z"}
+{"agent":"fake","code":"workspace_mcp_config_untrusted","level":"info","message":"acp inherit MCP 诊断","server":null,"trace_id":null,"ts":"2026-11-17T13:29:46.431Z"}
+test i3_initialize_error_attribution_is_faithful ... ok
+test h2_untrusted_workspace_mcp_config_is_ignored_not_fatal ... ok
+test i2_acp_child_env_extends_allowlist_without_path_injection ... ok
+test h3_installed_handler_cannot_enable_undeclared_capability ... ok
+test h1_output_after_wait_for_exit_keeps_stdout ... ok
+test h5_terminal_output_buffer_is_bounded ... ok
+test i1_handshake_budget_exceeds_legacy_five_seconds ... ok
+test h4_long_running_terminal_wait_respects_budget_and_stays_responsive ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.16s
+
+     Running tests/acp_delegate_adversarial.rs (target/debug/deps/acp_delegate_adversarial-710dc001d1f2e0c4)
+
+running 6 tests
+{"acp_session_id":"acp-sess-1","agent":"fake-malformed","budget_ms":120000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:52.582Z"}
+{"level":"warn","message":"acp 未知 sessionUpdate 变体（已降级诊断，不中断本轮流）","trace_id":null,"ts":"2026-11-17T13:29:52.607Z"}
+{"content":{"data":"iVBORw0KGgo=","mimeType":"image/png","type":"image"},"level":"info","message":"acp 非文本内容块不映射为 turn:delta（当前无富内容渲染通道）","trace_id":null,"ts":"2026-11-17T13:29:52.607Z"}
+test at_02a_malformed_updates_do_not_drop_the_stream ... ok
+{"acp_session_id":"acp-sess-1","agent":"fake-non-text","budget_ms":120000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:52.736Z"}
+{"content":{"data":"iVBORw0KGgo=","mimeType":"image/png","type":"image"},"level":"info","message":"acp 非文本内容块不映射为 turn:delta（当前无富内容渲染通道）","trace_id":null,"ts":"2026-11-17T13:29:52.744Z"}
+test at_02c_non_text_content_block_is_not_text ... ok
+{"acp_session_id":"acp-sess-1","agent":"fake-slow","budget_ms":3000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:52.873Z"}
+test at_03a_same_session_prompts_are_serialized_on_the_wire ... ok
+test at_01_timeout_injection_reduces_to_timeout_without_hang ... ok
+{"acp_session_id":"acp-sess-1","agent":"fake-alpha","budget_ms":120000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.413Z"}
+{"acp_session_id":"acp-sess-1","agent":"fake-beta","budget_ms":120000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.413Z"}
+test at_03b_concurrent_delegations_do_not_cross_session_events ... ok
+{"acp_session_id":"acp-sess-1","agent":"fake-oversized","budget_ms":120000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.552Z"}
+test at_02b_oversized_chunk_is_bounded_and_flagged ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.15s
+
+     Running tests/acp_delegate_p0p2_contract.rs (target/debug/deps/acp_delegate_p0p2_contract-1f31f6a165f2e780)
+
+running 15 tests
+test t_acp_05_model_visible_description_declares_final_text_contract ... ok
+test c3_1_acp_sources_have_no_bare_eprintln ... ok
+test c0_4d_error_path_unchanged ... ok
+{"acp_session_id":"acp-sess-1","agent":"fake-long","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.825Z"}
+{"acp_session_id":"acp-sess-1","agent":"fake-usage","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.823Z"}
+{"acp_session_id":"acp-sess-trunc","agent":"fake-truncated","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.824Z"}
+{"acp_session_id":"acp-sess-refused","agent":"fake-refused","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.807Z"}
+{"acp_session_id":"acp-sess-1","agent":"fake-order","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.818Z"}
+{"acp_session_id":"acp-sess-empty","agent":"fake-empty","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.807Z"}
+{"acp_session_id":"acp-sess-cancelled","agent":"fake-cancelled","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.809Z"}
+{"acp_session_id":"acp-sess-1","agent":"fake-vis","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.809Z"}
+{"acp_session_id":"acp-sess-trunc-chunk","agent":"fake-trunc-chunk","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:29:56.819Z"}
+{"cost_amount":0.0123,"cost_currency":"USD","level":"info","message":"acp usage_update","size":200000,"trace_id":null,"ts":"2026-11-17T13:29:56.876Z","used":12345}
+test c0_4b_refused_stop_reason_unchanged ... ok
+test c0_4c_cancelled_stop_reason_unchanged ... ok
+test c0_2_absent_chunks_yield_empty_final_text_and_honest_summary ... ok
+test c0_4a_truncated_stop_reason_carries_final_text ... ok
+test t_vis_02_external_chunk_text_never_enters_parent_assistant_stream ... ok
+test c0_4a2_non_empty_body_survives_max_tokens_round ... ok
+test c0_1_final_text_concatenates_chunks_in_arrival_order ... ok
+test c2_1_usage_update_lands_in_result_json_usage ... ok
+test c0_3_oversize_final_text_keeps_prefix_and_marks_truncated ... ok
+{"level":"info","message":"turn speed settled","trace_id":"b85a8307c2974758ad260ba10344c028","ts":"2026-11-17T13:29:57.114Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":1,"turnCallsTtftMissing":1,"turnExcludedTotal":1,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":204.0816326530612,"turn_id":"turn-norety"}
+test c5_1_no_retry_keeps_single_attempt_and_omits_retry_windows ... ok
+{"level":"info","message":"turn speed settled","trace_id":"e6f5a9c6c0d44c289be44b04585f5281","ts":"2026-11-17T13:29:57.283Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":2,"turnCallsTtftMissing":2,"turnExcludedTotal":2,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":56.70103092783505,"turn_id":"turn-step"}
+test c4_1_tool_event_step_is_the_turn_step_index ... ok
+{"attempts":2,"failed_attempt_ms":472,"level":"info","message":"provider_call_retry_window","outer_duration_ms":1072,"outer_first_token_latency_ms":null,"prelude_ms":972,"pure_duration_ms":99,"pure_first_token_latency_ms":null,"slept_ms":500,"succeeded_attempt_offset_ms":972,"trace_id":"5bd03d88240e4a079490810c8f7d0127","ts":"2026-11-17T13:29:57.966Z"}
+{"level":"info","message":"turn speed settled","trace_id":"5bd03d88240e4a079490810c8f7d0127","ts":"2026-11-17T13:29:57.979Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":1,"turnCallsTtftMissing":1,"turnExcludedTotal":1,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":404.04040404040404,"turn_id":"turn-retry"}
+test c5_1_retry_populates_attempts_and_retry_windows ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.26s
+
+     Running tests/acp_delegate_persistence_contract.rs (target/debug/deps/acp_delegate_persistence_contract-7a182564f278cbf4)
+
+running 3 tests
+{"events":7,"level":"info","message":"turn events flushed at step boundary","session_id":"pa_c6_2_event_time","step":1,"trace_id":"20fb51c9d1ec487395d5d49656ed94ec","ts":"2026-11-17T13:29:58.486Z","turn_id":"turn-c62"}
+{"level":"info","message":"turn speed settled","trace_id":"20fb51c9d1ec487395d5d49656ed94ec","ts":"2026-11-17T13:29:58.860Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":2,"turnCallsTtftMissing":2,"turnExcludedTotal":2,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":15.850144092219022,"turn_id":"turn-c62"}
+{"decision":"WaitUser","level":"debug","message":"ask-aware turn finished inside a real graph run","run_id":"run-1794922198053","run_phase":"WaitingUser","trace_id":null,"ts":"2026-11-17T13:29:58.870Z","turn_id":"turn-c62"}
+test c6_2_event_created_at_is_production_time_not_flush_time ... ok
+{"events":7,"level":"info","message":"turn events flushed at step boundary","session_id":"pa_c6_1_step_boundary","step":1,"trace_id":"2b15d7e86935468392e71da3ae6145e9","ts":"2026-11-17T13:29:59.060Z","turn_id":"turn-c61"}
+{"level":"info","message":"turn speed settled","trace_id":"2b15d7e86935468392e71da3ae6145e9","ts":"2026-11-17T13:29:59.386Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":2,"turnCallsTtftMissing":2,"turnExcludedTotal":2,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":27.295285359801486,"turn_id":"turn-c61"}
+{"decision":"WaitUser","level":"debug","message":"ask-aware turn finished inside a real graph run","run_id":"run-1794922198898","run_phase":"WaitingUser","trace_id":null,"ts":"2026-11-17T13:29:59.397Z","turn_id":"turn-c61"}
+test c6_1_first_step_events_are_readable_at_step_boundary_without_duplicates ... ok
+{"events":7,"level":"info","message":"turn events flushed at step boundary","session_id":"pa_c6_3_crash_recovery","step":1,"trace_id":"6f7ac94dbbf54e4198b12a2c1b30fea6","ts":"2026-11-17T13:29:59.572Z","turn_id":"turn-c63"}
+{"level":"info","message":"turn speed settled","trace_id":"6f7ac94dbbf54e4198b12a2c1b30fea6","ts":"2026-11-17T13:29:59.891Z","turnBurstExcluded":0,"turnCallsEligible":0,"turnCallsTotal":2,"turnCallsTtftMissing":2,"turnExcludedTotal":2,"turnSpeedBasis":"end_to_end","turnSpeedTokensPerSecond":28.42377260981912,"turn_id":"turn-c63"}
+{"decision":"WaitUser","level":"debug","message":"ask-aware turn finished inside a real graph run","run_id":"run-1794922199430","run_phase":"WaitingUser","trace_id":null,"ts":"2026-11-17T13:29:59.903Z","turn_id":"turn-c63"}
+test c6_3_crashed_turn_keeps_flushed_events_and_reads_back_unfinished ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
+
+     Running tests/acp_host_surface.rs (target/debug/deps/acp_host_surface-78d32666256b4022)
+
+running 5 tests
+test p2_04_acp_help_documents_acp_surface ... ok
+test p2_01_acp_list_prints_builtin_specs_as_json_lines ... ok
+test p2_02_unknown_or_missing_agent_fails_with_error_code ... ok
+test p2_05_resume_without_load_session_fails_closed ... ok
+test p2_03_single_turn_emits_jsonl_turn_delta ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/acp_list_sessions.rs (target/debug/deps/acp_list_sessions-8c21a435cf815713)
+
+running 7 tests
+test l4_list_sessions_never_creates_a_session ... ok
+test l1_list_sessions_prints_one_json_line_per_session ... ok
+test l5_empty_session_list_prints_nothing ... ok
+test l3_method_not_supported_is_explicit_error_not_empty_list ... ok
+test l2_next_cursor_is_an_extra_last_line ... ok
+test l6_list_and_list_sessions_semantics_do_not_mix ... ok
+test l7_session_paging_parameters ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/acp_mcp_wiring.rs (target/debug/deps/acp_mcp_wiring-c4a7dfb8d1279c02)
+
+running 6 tests
+test a2_resolve_three_states ... ok
+test c1_denied_env_key_fails_closed_without_leaking_value ... ok
+test a1_three_states_are_distinguishable_in_serde ... ok
+test b1_explicit_entries_reach_real_session_new_wire ... ok
+test e1_inherit_without_pony_config_yields_empty_list ... ok
+{"agent":"fake","code":"invalid_json","level":"info","message":"acp inherit MCP 诊断","server":null,"trace_id":null,"ts":"2026-11-17T13:30:00.282Z"}
+{"agent":"fake","code":"unsupported_schema_version","level":"info","message":"acp inherit MCP 诊断","server":null,"trace_id":null,"ts":"2026-11-17T13:30:00.312Z"}
+test d1_invalid_config_fails_closed_not_silent_empty ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/acp_p0_acceptance.rs (target/debug/deps/acp_p0_acceptance-4047dbf850a3ded7)
+
+running 19 tests
+test contract_a1_protocol_version_is_integer_one ... ok
+test contract_a3_a6_session_update_and_stop_reason_variants ... ok
+test contract_nfr_constants_match_baseline ... ok
+test contract_config_error_code_mapping ... ok
+test contract_config_relative_default_cwd_rejected ... ok
+test contract_transport_error_code_mapping ... ok
+test contract_config_missing_file_falls_back_to_builtin ... ok
+test contract_config_builtin_agents_data ... ok
+test contract_transport_relative_cwd_rejected ... ok
+test contract_config_roundtrip_and_unknown_fields_tolerated ... ok
+test contract_a5_camel_case_fields_roundtrip ... ok
+test contract_config_agents_file_path ... ok
+test contract_a10_notification_handler_received_exactly_once ... ok
+test contract_a10_notification_without_handler_keeps_id_pairing ... ok
+test contract_transport_initialize_roundtrip ... ok
+test contract_transport_permission_without_handler_is_fail_closed ... ok
+test contract_transport_inbound_request_dispatched_to_handler ... ok
+test contract_transport_notification_not_dispatched_as_request ... ok
+test contract_transport_stderr_tail_is_bounded_ring ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/acp_p0_adversarial.rs (target/debug/deps/acp_p0_adversarial-f2681996169563b0)
+
+running 7 tests
+test adversarial_stderr_tail_cap_is_frozen ... ok
+test adversarial_crashed_agent_yields_error_not_panic ... ok
+test adversarial_malformed_streak_fail_closed ... ok
+test adversarial_malformed_below_threshold_is_skipped ... ok
+test adversarial_cancel_notification_has_no_id ... ok
+test adversarial_concurrent_requests_do_not_cross_ids ... ok
+test adversarial_request_timeout_within_deadline ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.54s
+
+     Running tests/acp_p1_blockers.rs (target/debug/deps/acp_p1_blockers-4c8a8690eb93b539)
+
+running 6 tests
+{"acp_session_id":"acp-sess-1","agent":"fake","budget_ms":120000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:30:05.992Z"}
+test p1_13_session_cancel_does_not_mutate_host_token ... ok
+test p1_10_cancellation_token_aborts_prompt_and_notifies_agent ... ok
+test p1_14_tool_entry_default_budget_not_capped_at_five_seconds ... ok
+{"acp_session_id":"acp-sess-1","agent":"fake","budget_ms":8000,"fs_handler":false,"host_cancellation":true,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":false,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:30:12.574Z"}
+test p1_11_tool_path_cancellation_aborts_acp_delegate ... ok
+test p1_09_turn_budget_is_not_capped_by_request_timeout ... ok
+test p1_12_cli_timeout_secs_feeds_turn_budget ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.15s
+
+     Running tests/acp_proxy_autowire.rs (target/debug/deps/acp_proxy_autowire-a760394c410c3f47)
+
+running 6 tests
+test g6_acp_delegate_exposes_builtin_agent_ids ... ok
+{"key":"not_a_valid_line","level":"info","message":"acp 代理文件行缺少 `=`，已跳过","trace_id":null,"ts":"2026-11-17T13:30:14.121Z"}
+test g1_proxy_env_parsing_boundaries ... ok
+test g4_proxy_env_merge_order ... ok
+test g5_inherit_proxy_env_false_disables_injection ... ok
+test g2_only_proxy_keys_are_kept ... ok
+test g3_denied_env_keys_are_rejected ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/acp_realtime_permission.rs (target/debug/deps/acp_realtime_permission-b0839f6b18554d85)
+
+running 8 tests
+{"level":"info","message":"acp 无宿主审批 dispatcher 绑定，session/request_permission fail-closed：cancelled","tool_call_id":"tc-1","trace_id":null,"ts":"2026-11-17T13:30:14.321Z"}
+{"level":"info","message":"acp 无宿主审批 dispatcher 绑定，session/request_permission fail-closed：cancelled","tool_call_id":"tc-1","trace_id":null,"ts":"2026-11-17T13:30:14.310Z"}
+test p3_missing_permission_handler_is_always_cancelled ... ok
+test p1_host_approval_returns_selected_option ... ok
+test r2_r3_updates_are_ordered_and_emitted_once ... ok
+test p2_host_cancel_returns_cancelled ... ok
+{"level":"info","message":"acp 无宿主审批 dispatcher 绑定，session/request_permission fail-closed：cancelled","tool_call_id":"tc-1","trace_id":null,"ts":"2026-11-17T13:30:14.435Z"}
+test s1_cancellation_still_aborts_within_budget ... ok
+test n1_legacy_entries_keep_fail_closed_permission ... ok
+test r1_first_delta_is_emitted_before_prompt_returns ... ok
+test p4_unanswered_permission_becomes_cancelled_within_budget ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.17s
+
+     Running tests/acp_session_lifecycle.rs (target/debug/deps/acp_session_lifecycle-18f00ff2fdbdefe8)
+
+running 9 tests
+test l5_additional_directories_fail_closed_and_canonicalized ... ok
+test l4_method_not_found_maps_to_unsupported ... ok
+test l2b_load_with_session_id_and_unknown_fields ... ok
+test l1_list_sessions_passes_paging_and_returns_sessions ... ok
+test l1b_list_sessions_agy_empty_list_is_valid ... ok
+test l3_close_session_is_idempotent ... ok
+{"level":"info","message":"acp session/load 响应缺 sessionId，沿用请求中的会话标识（不伪造）","session_id":"sess-from-request-xyz","trace_id":null,"ts":"2026-11-17T13:30:19.507Z"}
+{"level":"info","message":"acp session/load 响应缺 sessionId，沿用请求中的会话标识（不伪造）","session_id":"sess-from-request-xyz","trace_id":null,"ts":"2026-11-17T13:30:19.505Z"}
+test l2_helper_load_without_session_id_subprocess ... ok
+test l6_legacy_entries_omit_additional_directories_key ... ok
+test l2_load_without_session_id_keeps_request_id ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/acp_tool_permission_e2e.rs (target/debug/deps/acp_tool_permission_e2e-67ade7d087bf8308)
+
+running 1 test
+{"acp_session_id":"acp-sess-1","agent":"fake-approve","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:30:19.649Z"}
+{"acp_session_id":"acp-sess-1","agent":"fake-cancel","budget_ms":30000,"fs_handler":false,"host_cancellation":false,"level":"info","message":"acp_delegate 起轮（budget/能力/父 turn 归属）","parent_turn_collected":true,"terminal_handler":false,"trace_id":null,"ts":"2026-11-17T13:30:19.808Z"}
+test j1_tool_path_permission_roundtrip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/acp_updates_meta.rs (target/debug/deps/acp_updates_meta-1c43eee414ceb4ea)
+
+running 5 tests
+test u1_fourteen_variants_roundtrip ... ok
+test u3_client_capabilities_meta_passthrough ... ok
+{"level":"warn","message":"acp 未知 sessionUpdate 变体（已降级诊断，不中断本轮流）","trace_id":null,"ts":"2026-11-17T13:30:19.978Z"}
+{"cost_amount":0.42,"cost_currency":"USD","level":"info","message":"acp usage_update","size":200000,"trace_id":null,"ts":"2026-11-17T13:30:19.983Z","used":1234}
+test u5_legacy_update_mapping_unchanged ... ok
+test u2_unknown_variant_falls_back_and_prompt_continues ... ok
+test u4_usage_update_is_parsed_and_not_mapped_to_turn_events ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+

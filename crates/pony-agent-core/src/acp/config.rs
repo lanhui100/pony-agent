@@ -429,9 +429,16 @@ fn inherit_pony_mcp_servers(
     // `acp_config_invalid` 全废。
     let mut fatal: Option<&crate::agent::mcp_config::McpConfigDiagnostic> = None;
     for diagnostic in &load.diagnostics {
-        eprintln!(
-            "[acp][config] ACP agent `{}` inherit MCP 诊断：code={} server={:?} message={}",
-            spec.id, diagnostic.code, diagnostic.server, diagnostic.message
+        crate::agent::otel::log::log_json_with_fields(
+            "info",
+            "acp inherit MCP 诊断",
+            None,
+            &[
+                ("agent", serde_json::json!(spec.id)),
+                ("code", serde_json::json!(diagnostic.code)),
+                ("server", serde_json::json!(diagnostic.server)),
+                ("message", serde_json::json!(diagnostic.message)),
+            ],
         );
         // 文件级诊断中，仅「不可解析 / 不受支持 schema」是致命的；`workspace_mcp_config_untrusted`
         // 是既有 trust 语义的「忽略并记账」，不得升级为错误。
@@ -463,9 +470,15 @@ fn inherit_pony_mcp_servers(
             .iter()
             .find(|(key, _)| is_denied_spec_env_key(key))
         {
-            eprintln!(
-                "[acp][config] ACP agent `{}` inherit MCP server `{}` 的 env 键 `{key}` 命中 deny 表，已丢弃该条（fail-closed）",
-                spec.id, entry.id
+            crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "acp inherit MCP server 的 env 键命中 deny 表，已丢弃该条（fail-closed；只记键名）",
+                None,
+                &[
+                    ("agent", serde_json::json!(spec.id)),
+                    ("server", serde_json::json!(entry.id)),
+                    ("key", serde_json::json!(key)),
+                ],
             );
             continue;
         }
@@ -579,9 +592,14 @@ pub fn resolve_proxy_env() -> Vec<(String, String)> {
         Err(error) => {
             // 缺文件 = 无代理（常态）；其余读失败只记诊断，绝不阻断 ACP 启动。
             if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!(
-                    "[acp][config] 读取代理文件 {} 失败（{error}），按无代理处理。",
-                    path.display()
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "acp 读取代理文件失败，按无代理处理",
+                    None,
+                    &[
+                        ("path", serde_json::json!(path.display().to_string())),
+                        ("error", serde_json::json!(error.to_string())),
+                    ],
                 );
             }
             return Vec::new();
@@ -603,7 +621,12 @@ fn parse_proxy_env(raw: &str) -> Vec<(String, String)> {
         }
         let body = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
         let Some((key, value)) = body.split_once('=') else {
-            eprintln!("[acp][config] 代理文件行缺少 `=`，已跳过（键名=`{body}`）。");
+            crate::agent::otel::log::log_json_with_fields(
+                "info",
+                "acp 代理文件行缺少 `=`，已跳过",
+                None,
+                &[("key", serde_json::json!(body))],
+            );
             continue;
         };
         let key = key.trim();
@@ -616,7 +639,12 @@ fn parse_proxy_env(raw: &str) -> Vec<(String, String)> {
         }
         if crate::agent::plugin_host::capability::is_denied_env_key(key) {
             // G3：即使形如 `*_proxy`，命中 deny 表也不注入；只记键名，绝不记值。
-            eprintln!("[acp][config] 代理变量 `{key}` 命中 deny 表，已丢弃（不注入）。");
+            crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "acp 代理变量命中 deny 表，已丢弃（不注入；只记键名）",
+                None,
+                &[("key", serde_json::json!(key))],
+            );
             continue;
         }
         let value = unquote_env_value(value.trim());
