@@ -35,23 +35,44 @@ pub(crate) fn run_acp_subcommand_if_requested() -> Option<i32> {
     Some(run_acp_client_mode(&argv[2..]))
 }
 
+/// 早期日志改道（L3-P 复审）：在 `parse_acp_cli_args` **之前**探测输出格式，非 text 即把
+/// `agent::otel::log` 的缺省输出目标改到 stderr（幂等；text 模式逐字不变）。
+///
+/// 为什么预解析而非复用正式解析结果：`parse_acp_cli_args` 自身会向 stdout 打印 `--help` /
+/// 用法错误，等它返回时污染已经发生。本函数**只**探测 `--output-format <fmt>` 的相邻值
+/// （正式解析器只支持该形态），非法/缺省一律按 `text` 处理——判定真源仍在 `parse_acp_cli_args`，
+/// 非法值照旧由它以既有口径报错，本函数绝不提前判错、绝不改变退出码。
+fn acp_early_log_redirection(args: &[String]) {
+    let mut detected = OutputFormat::Text;
+    for (index, arg) in args.iter().enumerate() {
+        if arg == "--output-format" {
+            if let Some(value) = args.get(index + 1) {
+                if let Ok(format) = OutputFormat::from_str(value) {
+                    detected = format;
+                }
+            }
+            break;
+        }
+    }
+    if detected != OutputFormat::Text {
+        pony_agent_core::agent::otel::log::set_stderr_output(true);
+    }
+}
+
 /// `ponycli acp [--agent <id>] [--list] [-p|--prompt <text>] [--output-format jsonl|sse]
 ///              [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]`
 ///
 /// 失败一律「非 0 + stderr 带真源错误码」，绝不 panic、绝不在 stdin 上等输入（无 REPL）。
 fn run_acp_client_mode(args: &[String]) -> i32 {
+    // L3-P（wave-59 契约 C1）：`ponycli acp` 由 `main` 在本文件**之前**拦截，从未经过
+    // `ObservabilityBootstrap` 的日志改道 ⇒ `jsonl/sse` 下 JSON 诊断会混入 stdout。
+    // 必须在**任何** stdout 输出之前改道：包括 `--help` / 用法错误这类 parse 期输出。
+    acp_early_log_redirection(args);
+
     let parsed = match parse_acp_cli_args(args) {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
-
-    // L3-P BLOCKING 修复（wave-59 契约 C1）：`ponycli acp` 由 `main` 在本文件**之前**拦截，
-    // 从未经过 `ObservabilityBootstrap` 的日志改道 ⇒ `jsonl/sse` 下 `agent::otel::log` 的结构化
-    // 日志会混入 stdout，破坏「stdout 只承载事件」。这里在解析出输出格式后补上同一开关
-    // （幂等；text 模式逐字不变，仍走既有 stdout 诊断面）。
-    if parsed.output_format != OutputFormat::Text {
-        pony_agent_core::agent::otel::log::set_stderr_output(true);
-    }
 
     // 0) B185：`--list`（agent 清单）与 `--list-sessions`（会话清单）语义不同，不得混用。
     if parsed.list && parsed.list_sessions {

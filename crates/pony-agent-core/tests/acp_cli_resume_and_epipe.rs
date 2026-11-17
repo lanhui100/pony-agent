@@ -410,18 +410,19 @@ fn r3_resume_without_response_session_id_still_runs_turn() {
         !seen.iter().any(|method| method == "session/new"),
         "R3：缺 sessionId 形态也不得新建会话，实际 {seen:?}"
     );
-    let mut saw_delta = false;
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        if let Ok(value) = serde_json::from_str::<Value>(line) {
-            if value["type"] == json!("turn:delta") {
-                saw_delta = true;
-            }
-        }
-    }
+    let structured: Vec<Value> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let saw_delta = structured
+        .iter()
+        .any(|value| value["type"] == json!("turn:delta"));
     assert!(saw_delta, "R3 违约：stdout 必须含 turn:delta，实际:\n{stdout}");
     // 诊断面（C3.1 迁移）：介质由 stderr 文本 `[acp]` 改为 `agent::otel::log` 结构化 JSON 行。
     // wave-59 C1：`--output-format jsonl|sse` 下 stdout 只承载结构化事件，JSON 诊断改道 **stderr**
-    // （`set_stderr_output(true)`，src/bin/cli.rs `ObservabilityBootstrap::install`），故按行 parse stderr。
+    // ——改道点在 acp 子命令入口 `run_acp_client_mode`（`crates/pony-agent-core/src/bin/cli/acp.rs:53`
+    // 调 `otel::log::set_stderr_output(true)`，在连 agent 之前生效），故诊断按行 parse stderr。
     let diagnostic = stderr
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -435,6 +436,19 @@ fn r3_resume_without_response_session_id_still_runs_turn() {
     assert!(
         diagnostic.is_some(),
         "R3 违约：响应缺 sessionId 时必须留下结构化 JSON 诊断（`message` 含 session + `trace_id` 键），实际 stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // 负向断言（C1 改道不得泄漏到 stdout）：stdout 是事件专用通道，**不得**出现诊断形态的
+    // JSON 行（同时带 `message` 与 `trace_id` 的对象）；否则 `--output-format jsonl` 的消费者
+    // 会把诊断当成事件解析。只能放行事件行（`type`/`kind` 主导，无 `message` 键）。
+    let leaked: Vec<&Value> = structured
+        .iter()
+        .filter(|value| value.get("message").is_some() && value.get("trace_id").is_some())
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "R3 违约：结构化诊断必须只落 stderr（wave-59 C1：stdout 仅承载事件），实际 stdout 泄漏 {} 条诊断行：{leaked:?}\nstdout:\n{stdout}",
+        leaked.len()
     );
 
     let _ = std::fs::remove_dir_all(&root);

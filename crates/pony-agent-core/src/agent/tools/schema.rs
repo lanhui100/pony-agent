@@ -1139,10 +1139,10 @@ fn acp_delegate_tool_definition() -> ToolDefinition {
     ToolDefinition {
             name: TOOL_ACP_DELEGATE,
             // B183：显式列出可用 builtin agent id（模型据此直接选 `agent` 参数，不必猜）。
-            // C0.5：结果契约必须对模型可见 —— 成功结果含 `finalText`（外部 agent 的最终正文，
-            // 超 32000 字符截断并置 `finalTextTruncated`），空正文时 summary 明示未返回文本；
-            // 非 end_turn（截断/拒绝/取消/错误）不产 `finalText`，须按 `error.code` 处置。
-            description: "把一段任务委派给外部 ACP agent 执行，返回该 agent 的最终结果：成功结果 JSON 含 `finalText`（外部 agent 最终正文；超过 32000 字符只保留前缀并置 `finalTextTruncated=true`）与可选 `usage`（used/size/cost）；无正文时 `finalText` 为空串且 summary 明示未返回文本；非 end_turn 归约（截断/拒绝/取消/错误）不返回 `finalText`，按 `error.code` 处置。可用 agent id：`opencode`、`antigravity`（内置）；自定义 agent 见 `ponycli acp --list`。",
+            // C0.5：结果契约必须对模型可见 —— 成功轮与截断轮都回传 `finalText`（外部 agent 最终
+            // 正文，超 32000 字符只保留前缀），空正文时 summary 明示未返回文本；仅拒绝/取消/错误
+            // 不产 `finalText`，须按 `error.code` 处置。
+            description: "把一段任务委派给外部 ACP agent 执行，返回该 agent 的最终结果：成功轮与截断轮（stopReason=`max_tokens`/`max_turn_requests`）都回传 `finalText`（外部 agent 最终正文，超过 32000 字符只保留前缀并置 `finalTextTruncated=true`；截断轮另带 `truncated=true`），并含可选 `usage`（used/size/cost）；无正文时 `finalText` 为空串且 summary 明示未返回文本。仅拒绝/取消/错误不返回 `finalText`，须按 `error.code` 处置。可用 agent id：`opencode`、`antigravity`（内置）；自定义 agent 见 `ponycli acp --list`。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {

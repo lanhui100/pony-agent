@@ -1,0 +1,145 @@
+{
+  "verdict": "FAIL",
+  "audited_scopes": [
+    ".agents/notes/implemented/bug-fix/2026-11-17-acp-delegate-result-and-trace-integrity.md",
+    ".dev-team/contract-matrix-acp-delegate-p0p2.md",
+    ".dev-team/nfr-baseline-acp-delegate-p0p2.json",
+    ".dev-team/red-phase/acp_delegate_adversarial.receipt.json",
+    ".dev-team/red-phase/acp_delegate_p0p2_contract.receipt.json",
+    ".dev-team/red-phase/acp_delegate_persistence_contract.receipt.json",
+    ".dev-team/regression-baseline-acp-delegate.json",
+    ".dev-team/review-l3-a-acp-delegate.json",
+    ".dev-team/review-l3-a.notes.md",
+    ".dev-team/review-l3-b-acp-delegate.json",
+    ".dev-team/review-l3p-acp-delegate.json",
+    ".dev-team/review-l3p.md",
+    ".dev-team/review-plan-acp-delegate.json",
+    ".dev-team/state-acp-client-p0-p2.json",
+    ".dev-team/state.json",
+    "crates/pony-agent-core/src/acp/client.rs",
+    "crates/pony-agent-core/src/acp/config.rs",
+    "crates/pony-agent-core/src/acp/delegate_events.rs",
+    "crates/pony-agent-core/src/acp/handlers.rs",
+    "crates/pony-agent-core/src/acp/mod.rs",
+    "crates/pony-agent-core/src/acp/protocol.rs",
+    "crates/pony-agent-core/src/acp/result.rs",
+    "crates/pony-agent-core/src/acp/session.rs",
+    "crates/pony-agent-core/src/acp/transport.rs",
+    "crates/pony-agent-core/src/agent/control_plane/mod.rs",
+    "crates/pony-agent-core/src/agent/projection.rs",
+    "crates/pony-agent-core/src/agent/runtime/mod.rs",
+    "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
+    "crates/pony-agent-core/src/agent/runtime/tool_recovery.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_prep.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+    "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
+    "crates/pony-agent-core/src/agent/session/backend.rs",
+    "crates/pony-agent-core/src/agent/session/fold.rs",
+    "crates/pony-agent-core/src/agent/session/history.rs",
+    "crates/pony-agent-core/src/agent/session/log_command.rs",
+    "crates/pony-agent-core/src/agent/session/log_sink.rs",
+    "crates/pony-agent-core/src/agent/session/store.rs",
+    "crates/pony-agent-core/src/agent/session/tests.rs",
+    "crates/pony-agent-core/src/agent/sqlite_session.rs",
+    "crates/pony-agent-core/src/agent/telemetry.rs",
+    "crates/pony-agent-core/src/agent/tools/orchestration.rs",
+    "crates/pony-agent-core/src/agent/tools/schema.rs",
+    "crates/pony-agent-core/src/agent/turn_event.rs",
+    "crates/pony-agent-core/src/agent/turn_flow.rs",
+    "crates/pony-agent-core/src/agent/turn_flow/turn_flow_registry.rs",
+    "crates/pony-agent-core/src/bin/cli.rs",
+    "crates/pony-agent-core/src/bin/cli/acp.rs",
+    "crates/pony-agent-core/tests/acp_cli_resume_and_epipe.rs",
+    "crates/pony-agent-core/tests/acp_delegate_adversarial.rs",
+    "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs",
+    "crates/pony-agent-core/tests/acp_delegate_persistence_contract.rs",
+    "crates/pony-agent-core/tests/acp_session_lifecycle.rs",
+    "crates/pony-agent-core/tests/adr0123_supplement_r2_test.rs",
+    "crates/pony-agent-core/tests/f1_speed_observability.rs",
+    "crates/pony-agent-core/tests/metrics_snapshot_adversarial.rs",
+    "crates/pony-agent-core/tests/metrics_snapshot_contract.rs",
+    "crates/pony-agent-core/tests/pa174_history_wiring_and_followup_contract.rs",
+    "docs/architecture/acp-client-integration.md",
+    "docs/release/evidence/acp-delegate/all-acp-final.log",
+    "docs/release/evidence/acp-delegate/c6-green.log",
+    "docs/release/evidence/acp-delegate/full-lib-w2w3.log"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/agent/tools/schema.rs",
+      "line": 1145,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "timeout -k 5 60 bash -c 'cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -n \"非 end_turn 归约（截断\" crates/pony-agent-core/src/agent/tools/schema.rs && sed -n \"1428,1438p\" crates/pony-agent-core/src/acp/session.rs && sed -n \"168p\" docs/architecture/acp-client-integration.md && sed -n \"1439,1442p\" crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs",
+      "line": 1439,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "timeout -k 5 60 bash -c 'cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n \"1426,1443p\" crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/cli/acp.rs",
+      "line": 166,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "timeout -k 5 60 bash -c 'cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n \"52,54p;164,168p\" crates/pony-agent-core/src/bin/cli/acp.rs && env -i PATH=/usr/bin:/bin HOME=/tmp/f1help ./target/debug/ponycli acp --output-format jsonl --help | head -2'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_cli_resume_and_epipe.rs",
+      "line": 422,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "timeout -k 5 60 bash -c 'cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n \"418,432p\" crates/pony-agent-core/tests/acp_cli_resume_and_epipe.rs'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs",
+      "line": 425,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "timeout -k 5 60 bash -c 'cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n \"424,451p\" crates/pony-agent-core/tests/acp_delegate_p0p2_contract.rs'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/state.json",
+      "line": 179,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "timeout -k 5 60 bash -c 'cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && sed -n \"172,185p\" .dev-team/state.json && grep -n \"created_at_ms\\|createdAt\" .dev-team/state.json .dev-team/meta-retrospective.md || echo NO-REGISTRY-ENTRY'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "docs/release/evidence/acp-delegate/all-acp-final.log",
+      "line": 126,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "timeout -k 5 60 bash -c 'cd /home/dm/pony-agent-worktrees/acp-delegate-p0p2 && grep -n \"c0_4a_truncated\\|t_acp_05_model_visible\" docs/release/evidence/acp-delegate/all-acp-final.log /tmp/final-acp.log'",
+      "severity": "ADVISORY"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "14952504-90a0-4ee4-a6d5-d485c3f0a327",
+    "fresh_context": true
+  },
+  "executed_by": "14952504-90a0-4ee4-a6d5-d485c3f0a327",
+  "reviewed_commit": "aaec5ae3",
+  "attestation": {
+    "self_signed": false,
+    "note": "L3-P 复审 + Join Barrier 六问裁决；只读审查（未改 src/测试/契约、未做 git 写、未跑全量构建；仅用 cargo-lane 跑 3 个单套件）。证据来源：F1 现场探针（jsonl vs text 双模式 stdout/stderr 分流）、HEAD 三套件真跑收据、/tmp/final-lib.log 与 /tmp/final-acp.log、git diff c5761b27..HEAD。"
+  },
+  "summary": {
+    "q1_timeout": "PASS",
+    "q2_logging": "PASS",
+    "q3_resource_release": "PASS",
+    "q4_concurrency": "PASS",
+    "q5_config_defaults": "PASS",
+    "q6_contract_additive": "FAIL"
+  },
+  "gate_anterior": {
+    "F1_cli_stderr_routing": "PASS",
+    "F2_drain_duplicate_window": "ADVISORY-OPEN（代码未改，已登记；无 owner/backlog/到期日）",
+    "F3_nfr_concurrency_lock": "PASS",
+    "B1_truncated_final_text": "PASS（代码面）/ 描述面见 BLOCKING",
+    "B2_frozen_assertions": "PARTIAL（T-ACP-05 存在但逃逸子句使其对本次矛盾失效；T-VIS-02 真实有效）"
+  }
+}

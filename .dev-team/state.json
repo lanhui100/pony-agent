@@ -180,5 +180,50 @@
       "F2 并发 drain 重复窗口（per-key in-flight 标记待补）",
       "F3 NFR concurrency_lock.timeout_ms 与实际不符（协议 Agent 修正基线）"
     ]
-  }
+  },
+  "join": {
+    "verdict": "FAIL",
+    "blocking": 1,
+    "advisory": 6,
+    "file": ".dev-team/review-join-acp-delegate.json",
+    "reviewed_commit": "aaec5ae3",
+    "blocking_fix": {
+      "id": "schema-desc",
+      "desc": "模型可见工具描述仍称截断轮不返回 finalText",
+      "owner": "executor-a",
+      "test_fix": "test-agent-3"
+    }
+  },
+  "residual_advisories": [
+    {
+      "id": "B239",
+      "owner": "followup",
+      "desc": "flush 并发去重/eventTimes 解码/finalize 区间/缓冲锁粒度"
+    },
+    {
+      "id": "B240",
+      "owner": "followup",
+      "desc": "projection 丢 parent_activity_id/attempts、otel extras 未脱敏、ToolCallStatus serde(other)"
+    },
+    {
+      "id": "A2",
+      "owner": "executor-a",
+      "desc": "--help 在改道前打印 stdout"
+    },
+    {
+      "id": "A3",
+      "owner": "test-agent-3",
+      "desc": "R3 注释与 stdout 负向断言"
+    },
+    {
+      "id": "A4",
+      "owner": "test-agent-3",
+      "desc": "c0_4a 增加非空正文截断用例"
+    },
+    {
+      "id": "F2",
+      "owner": "B239",
+      "desc": "终态 flush 快照→提交→移除重复窗口"
+    }
+  ]
 }

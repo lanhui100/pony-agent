@@ -121,6 +121,34 @@ fn init_capture(root: &Path, tag: &str) -> PathBuf {
     root.join(format!("init-{tag}.jsonl"))
 }
 
+/// C0.4a 补充用例的 fake agent（stdio JSON-RPC，POSIX sh）：`session/prompt` 期间先发
+/// 一条 `agent_message_chunk` 正文，再以 `stopReason: max_tokens` 收尾。
+///
+/// 为什么需要独立脚本：共享 fixture 的 `flow max_tokens` 不产任何 chunk，无法覆盖
+/// 「截断轮必须带回已有正文」这条语义（本用例的断言对象正是非空 `finalText`）。
+const TRUNC_CHUNK_AGENT_SCRIPT: &str = r#"set -u
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+    m=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+    case "$m" in
+        initialize)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false},"authMethods":[]}}\n' "$id"
+            ;;
+        session/new)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"acp-sess-trunc-chunk"}}\n' "$id"
+            ;;
+        session/prompt)
+            printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-sess-trunc-chunk","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"PARTIAL-BODY-BEFORE-MAX-TOKENS|"}}}}\n'
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"max_tokens"}}\n' "$id"
+            ;;
+        *)
+            [ -n "$id" ] && printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            ;;
+    esac
+done
+"#;
+
 /// 一次性装配 fake agent 清单（9 个模式各一个 id，全部指向本地 `sh` fixture）。
 fn agents_root() -> PathBuf {
     AGENTS_ROOT
@@ -138,6 +166,11 @@ fn agents_root() -> PathBuf {
             std::fs::create_dir_all(config_dir.join("pony-agent")).expect("创建隔离 XDG 配置目录");
 
             let script = fixture_script();
+            // C0.4a 补充：需要「先发正文 chunk、再以 max_tokens 收尾」的 fake agent
+            // （共享 fixture 的 `flow max_tokens` 不产正文，覆盖不到「截断轮带回正文」语义）。
+            let trunc_chunk_script = root.join("acp_trunc_chunk_agent.sh");
+            std::fs::write(&trunc_chunk_script, TRUNC_CHUNK_AGENT_SCRIPT)
+                .expect("写入 max_tokens 带正文的 fake agent 脚本");
             let agents = json!([
                 {
                     "id": "fake-order",
@@ -192,6 +225,12 @@ fn agents_root() -> PathBuf {
                     "label": "T-VIS-02 父正文隔离",
                     "command": "sh",
                     "args": [script, "emit_updates", init_capture(&root, "vis").to_string_lossy(), vis_file(&root).to_string_lossy()]
+                },
+                {
+                    "id": "fake-trunc-chunk",
+                    "label": "C0.4a 非空正文 + max_tokens",
+                    "command": "sh",
+                    "args": [trunc_chunk_script.to_string_lossy()]
                 }
             ]);
             std::fs::write(
@@ -462,6 +501,51 @@ fn c0_4a_truncated_stop_reason_carries_final_text() {
     assert!(
         summary.contains("未返回文本"),
         "C0.4 违约：空正文时 summary.text 必须仍诚实明示未返回文本正文，实际 = {summary:?}（整包 {result}）"
+    );
+}
+
+#[test]
+fn c0_4a2_non_empty_body_survives_max_tokens_round() {
+    // Arrange：fake agent 先发正文 chunk（唯一标记），再以 `stopReason: max_tokens` 收尾
+    // ⇒ 截断轮**必须带回**已经收到的正文，且标记正文不完整。
+    let (status, result) = run_acp_delegate("fake-trunc-chunk", "外部 agent 会撞上限");
+
+    // Assert ①：仍是成功面（截断不是失败）。
+    assert_eq!(status, "ok", "C0.4 违约：max_tokens 仍是成功轮，实际 = {result}");
+    assert_eq!(
+        json_str(&result, "/stopReason", "C0.4a2"),
+        "max_tokens",
+        "C0.4 违约：stopReason 必须原样透传，实际 = {result}"
+    );
+
+    // Assert ②：`finalText` 必须非空，且逐字等于已收到的 chunk 正文（不得丢正文/不得只给 summary）。
+    let final_text = json_str(&result, "/finalText", "C0.4a2");
+    assert_eq!(
+        final_text,
+        "PARTIAL-BODY-BEFORE-MAX-TOKENS|",
+        "C0.4 违约：max_tokens 截断轮必须回传已收到的正文（逐字等于 chunk），实际 = {final_text:?}（整包 {result}）"
+    );
+    assert!(
+        !final_text.is_empty(),
+        "C0.4 违约：max_tokens 截断轮的 `finalText` 不得为空串（外部 agent 已产正文），实际 = {result}"
+    );
+
+    // Assert ③：两个截断事实标志必须同时为 true。
+    assert_eq!(
+        result.pointer("/finalTextTruncated"),
+        Some(&Value::Bool(true)),
+        "C0.4 违约：max_tokens ⇒ `finalTextTruncated` 必须为 true（正文不完整），实际 = {result}"
+    );
+    assert_eq!(
+        result.pointer("/truncated").and_then(Value::as_bool),
+        Some(true),
+        "C0.4 违约：max_tokens ⇒ 既有 `truncated: true` 必须保留，实际 = {result}"
+    );
+
+    // Assert ④：截断轮是成功面 ⇒ 不得出现 `error` 对象（不得降级成失败归约）。
+    assert!(
+        result.get("error").is_none(),
+        "C0.4 违约：max_tokens 截断轮不得携带 `error`（成功面），实际 = {result}"
     );
 }
 
@@ -1431,14 +1515,28 @@ fn t_acp_05_model_visible_description_declares_final_text_contract() {
         );
     }
 
-    // Assert ②：描述必须把正文说成「返回结果的一部分」（不得宣称成功结果无正文）。
+    // Assert ②：必须**显式**声明「截断轮也回传正文」——截断轮的独立子句里既要出现 `finalText`，
+    // 又不得把截断列进「不返回 `finalText`」的归约集合（严格断言，无逃逸/OR 分支）：
+    // 描述若一边说截断轮回传正文、一边说截断轮不返回，模型只会得到互相矛盾的契约。
+    let truncation_clause = description
+        .split(|symbol| symbol == '；' || symbol == '。')
+        .find(|clause| clause.contains("截断"))
+        .unwrap_or_else(|| {
+            panic!(
+                "C0.5 违约：description 必须显式说明截断轮的结果语义（须有含「截断」的独立子句），实际 description = {description:?}"
+            )
+        });
     assert!(
-        description.contains("正文"),
-        "C0.5 违约：description 必须声明返回的正文语义（含「正文」），实际 description = {description:?}"
+        truncation_clause.contains("finalText"),
+        "C0.5 违约：截断轮子句必须声明其回传 `finalText`（不得只说「截断」不说回传正文），实际子句 = {truncation_clause:?}（整段 {description:?}）"
     );
     assert!(
-        !description.contains("不返回 `finalText`") || description.contains("非 end_turn"),
-        "C0.5 违约：description 若限制 `finalText` 的出现面，必须显式限定为非 end_turn 归约，实际 description = {description:?}"
+        !truncation_clause.contains("不返回"),
+        "C0.5 违约：截断轮不得被列入「不返回 `finalText`」的归约集合（与截断轮回传正文的实现矛盾），实际子句 = {truncation_clause:?}（整段 {description:?}）"
+    );
+    assert!(
+        truncation_clause.contains("finalTextTruncated"),
+        "C0.5 违约：截断轮子句必须声明伴随标志 `finalTextTruncated`（正文不完整），实际子句 = {truncation_clause:?}"
     );
 }
 
