@@ -13,6 +13,20 @@ pub(super) type BufferKey = (String, String);
 /// 一次待提交快照：`(键, 事件批, 是否终态批)`。
 pub(super) type Snapshot = (BufferKey, Vec<BufferedTurnEvent>, bool);
 
+/// 入队事件的类别（用枚举替代 bool 形参：`fn_params_excessive_bools` 是 0 容忍）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum EventKind {
+    Delta,
+    Terminal,
+}
+
+/// 提交结果（成功可携带「是否终态批」；失败只释放幂等键）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommitOutcome {
+    Committed { finalize: bool },
+    Failed,
+}
+
 /// 进程级事件缓冲的键状态。
 ///
 /// - `batches`：尚未提交的事件批次；
@@ -41,9 +55,10 @@ pub(super) fn enqueue(
     key: &BufferKey,
     event: TurnEvent,
     produced_at_ms: u64,
-    is_terminal: bool,
+    kind: EventKind,
 ) -> Option<Vec<BufferedTurnEvent>> {
     let mut state = lock(buffer);
+    let is_terminal = kind == EventKind::Terminal;
     if is_terminal {
         state.terminal_pending.insert(key.clone());
     }
@@ -117,10 +132,13 @@ pub(super) fn finish_commit(
     buffer: &Mutex<EventBufferState>,
     key: &BufferKey,
     committed: usize,
-    finalize: bool,
-    success: bool,
+    outcome: CommitOutcome,
 ) {
     let mut state = lock(buffer);
+    let (success, finalize) = match outcome {
+        CommitOutcome::Committed { finalize } => (true, finalize),
+        CommitOutcome::Failed => (false, false),
+    };
     if success {
         let mut empty = false;
         if let Some(batch) = state.batches.get_mut(key) {

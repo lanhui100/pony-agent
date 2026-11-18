@@ -685,6 +685,7 @@ impl ProviderRetryPolicy {
     }
 
     /// P1-4：注入重试档位（构建后链式调用；`Normal` 与 [`Self::new`] 等价）。
+    #[must_use]
     pub fn with_mode(mut self, mode: RetryMode) -> Self {
         self.mode = mode;
         self
@@ -758,7 +759,9 @@ impl ProviderRetryPolicy {
         if self.mode == RetryMode::Always {
             let base_delay = compute_delay(attempt, &self.config, 0.5);
             return RetryDecision::Retry {
-                delay_ms: (base_delay.as_millis() as u64).min(self.config.max_delay_ms),
+                delay_ms: u64::try_from(base_delay.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .min(self.config.max_delay_ms),
             };
         }
         if budget.is_exhausted() {
