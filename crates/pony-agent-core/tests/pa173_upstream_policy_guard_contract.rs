@@ -132,14 +132,17 @@ fn zero_policy_fields(on_disk: &mut Value) {
         Some(policy) => policy,
         None => panic!("PA-173 D1：策略段 `{key}` 必须是 JSON 对象"),
     };
-    assert_eq!(
-        policy.len(),
-        3,
-        "PA-173 D1：策略段必须恰有 3 个字段（requestTimeoutMs/decisionMaxAttempts/\
-         retryBudgetMs），实际 {:?}",
+    // B247 起策略段追加 additive `retryMode`（字符串枚举），数值三元组仍是既有三键。
+    assert!(
+        (3..=4).contains(&policy.len()),
+        "PA-173 D1：策略段必须有 3 个数值字段（requestTimeoutMs/decisionMaxAttempts/\
+         retryBudgetMs）[+ B247 retryMode]，实际 {:?}",
         policy.keys().collect::<Vec<_>>()
     );
-    for value in policy.values_mut() {
+    for (field, value) in policy.iter_mut() {
+        if field.to_ascii_lowercase().replace('_', "").contains("retrymode") {
+            continue;
+        }
         *value = json!(0);
     }
 }
@@ -158,6 +161,10 @@ fn policy_triple_on_disk(on_disk: &Value) -> (u64, u64, u64) {
     let mut budget = None;
     for (field, value) in policy {
         let normalized = field.to_ascii_lowercase().replace('_', "");
+        // B247 additive：`retryMode` 是字符串枚举，不属于数值三元组。
+        if normalized.contains("retrymode") {
+            continue;
+        }
         let number = value.as_u64().unwrap_or_else(|| {
             panic!("PA-173 D1：策略字段 `{field}` 必须是 u64 整数（禁止字符串/浮点），实际 {value}")
         });

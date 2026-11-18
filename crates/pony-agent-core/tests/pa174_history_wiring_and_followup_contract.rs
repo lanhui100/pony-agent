@@ -1226,6 +1226,10 @@ fn policy_triple(report: &Value, key: &str) -> (u64, u64, u64) {
     let mut budget = None;
     for (field, value) in policy {
         let normalized = field.to_ascii_lowercase().replace('_', "");
+        // B247 additive：`retryMode` 是字符串枚举，不属于数值三元组。
+        if normalized.contains("retrymode") {
+            continue;
+        }
         let number = value.as_u64().unwrap_or_else(|| {
             panic!("PA-174 F3：`{key}.{field}` 必须是 u64 整数，实际 {value}")
         });

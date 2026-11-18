@@ -404,7 +404,8 @@ fn upstream_policy_and_failover_ids_survive_registry_round_trip() {
         Some(&json!({
             "requestTimeoutMs": 60_000,
             "decisionMaxAttempts": 7,
-            "retryBudgetMs": 12_345
+            "retryBudgetMs": 12_345,
+            "retryMode": "normal"
         })),
         "C2-d：保存→读回后 `upstreamPolicy` 必须逐字段相等（不得被清空），实际 {:?}",
         policy_of(&reloaded)
@@ -508,11 +509,14 @@ fn extreme_values_are_clamped_on_effective_path_not_persisted() {
     //   elapsed 有界断言会破（该用例直接构造 1000ms 的 per-attempt 超时）。
     let on_disk = sandbox.read_json();
     let policy_key = locate_policy_key(&on_disk);
-    let mut on_disk_values: Vec<u64> = on_disk[policy_key]
+    let policy_object = on_disk[policy_key]
         .as_object()
-        .unwrap_or_else(|| panic!("PA-173 D1：策略段 `{policy_key}` 必须是 JSON 对象"))
-        .values()
-        .map(|value| {
+        .unwrap_or_else(|| panic!("PA-173 D1：策略段 `{policy_key}` 必须是 JSON 对象"));
+    // B247 additive：`retryMode` 是字符串枚举，不属于数值三元组的钳制面。
+    let mut on_disk_values: Vec<u64> = policy_object
+        .iter()
+        .filter(|(field, _)| !field.to_ascii_lowercase().replace('_', "").contains("retrymode"))
+        .map(|(_, value)| {
             value.as_u64().unwrap_or_else(|| {
                 panic!("PA-173 D1：策略字段必须是 u64 整数（禁止字符串/浮点），实际 {value}")
             })
@@ -533,7 +537,8 @@ fn extreme_values_are_clamped_on_effective_path_not_persisted() {
         Some(&json!({
             "requestTimeoutMs": u64::MAX,
             "decisionMaxAttempts": u32::MAX,
-            "retryBudgetMs": u64::MAX
+            "retryBudgetMs": u64::MAX,
+            "retryMode": "normal"
         })),
         "PA-173 D1：`load_view` 必须按原值往返（不得钳制），实际 {:?}",
         policy_of(&reloaded)
@@ -708,7 +713,8 @@ fn upstream_policy_tolerates_wrong_types() {
         Some(&json!({
             "requestTimeoutMs": UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT,
             "decisionMaxAttempts": UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT,
-            "retryBudgetMs": UPSTREAM_RETRY_BUDGET_MS_DEFAULT
+            "retryBudgetMs": UPSTREAM_RETRY_BUDGET_MS_DEFAULT,
+            "retryMode": "normal"
         })),
         "v2-3：类型错乱字段必须回落默认 45000/10/60000，实际 {:?}",
         policy_of(&reloaded)
