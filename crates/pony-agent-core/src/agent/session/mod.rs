@@ -39,6 +39,10 @@ mod host_continuation_goal_round_tests;
 // 历史治理门禁：追加语义 / 压缩双写 / 压缩可重放 / 事件物化（同上，避免撑大 `tests.rs`）。
 #[cfg(test)]
 mod history_compaction_tests;
+// B235/B238：宿主续轮历史角色（host，不占 user 槽）+ 组合正文识别（独立文件，避免撑大 store.rs）。
+pub mod host_resume;
+#[cfg(test)]
+mod host_resume_tests;
 mod types;
 // 中断/失败轮次的闭合真值（补齐优先于截断；事故 pa_01a1ce16）：纯函数出口。
 pub mod interrupted_turn;

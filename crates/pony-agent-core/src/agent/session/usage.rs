@@ -550,7 +550,7 @@ mod tests {
         ledger.note_history_shrink(100_000, 0);
         assert_eq!(ledger.projected_tokens(), Some(5_000), "表面归零后投影 = 采样值");
         ledger.note_surface_delta(-1);
-        assert!(ledger.projected_tokens().is_some_and(|tokens| tokens >= 0));
+        assert!(ledger.projected_tokens().is_some(), "投影必须仍可计算（≥0 由 u64 类型保证）");
 
         // 未缩减（after >= before）不得被当成追加。
         let mut stable = ContextSurfaceLedger::default();

@@ -8454,7 +8454,8 @@ pub fn compose_approval_resume_message(context: Option<&SuspendedTurnContext>, p
     if instruction.is_empty() {
         return prompt.to_string();
     }
-    format!("【挂起前用户指令（宿主补录）】\n{instruction}\n\n【宿主续轮】\n{prompt}")
+    // 版式与段标真值源在会话库（`session::host_resume`），此处只消费不复制文案。
+    pony_agent_core::agent::session::host_resume::compose_host_continuation(instruction, prompt)
 }
 
 /// wave-65 R2（F3）：从**待决快照项**推导审批计划（唯一决策口径，纯函数、可单测）。

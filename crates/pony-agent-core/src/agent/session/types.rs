@@ -272,6 +272,8 @@ pub enum HistoryMessageKind {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnHistoryMessage {
+    /// 行角色白名单：`user` / `assistant` / [`super::host_resume::HOST_HISTORY_ROLE`]（B235：
+    /// 宿主续轮，不占 user 槽）。旧日志只有前两种，缺省回放逐字不变（additive）。
     pub role: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

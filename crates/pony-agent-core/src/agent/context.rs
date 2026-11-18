@@ -1592,6 +1592,12 @@ fn to_provider_history_message(message: &TurnHistoryMessage) -> Option<ProviderM
             role: ProviderRole::Developer,
             content: format!("Previous assistant reply: {}", content),
         }),
+        // B235：宿主续轮（Ask/审批/goal）不再占 user 槽；模型面仍须看到指令 ⇒ 投影成
+        // developer 消息（协议无关，与上面 assistant 回放同层），不伪造用户发言。
+        crate::agent::session::host_resume::HOST_HISTORY_ROLE => Some(ProviderMessage {
+            role: ProviderRole::Developer,
+            content: format!("Host continuation context: {content}"),
+        }),
         _ => None,
     }
 }
@@ -2967,3 +2973,7 @@ mod tests {
         );
     }
 }
+
+/// B235：宿主续轮历史行（`host` 角色）的 provider 投影回归（独立文件，避免撑大本文件）。
+#[cfg(test)]
+mod host_history_tests;

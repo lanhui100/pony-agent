@@ -746,10 +746,9 @@ impl SessionStore {
             }
             history_len_before = staged_session.history.len();
             staged_session.history.push(TurnHistoryMessage {
-                role: "user".to_string(),
+                role: super::host_resume::user_history_role(&user_content).to_string(),
                 content: user_content,
                 attachments,
-                // A1：轮次身份落进消息本体（其余字段保持默认）。
                 turn_id: turn_id.map(str::to_string),
                 ..Default::default()
             });
@@ -929,7 +928,7 @@ impl SessionStore {
             ensure_history_graph(&mut staged_session);
             prepare_session_for_new_turn(&mut staged_session);
             staged_session.history.push(TurnHistoryMessage {
-                role: "user".to_string(),
+                role: super::host_resume::user_history_role(user_message).to_string(),
                 content: user_message.to_string(),
                 attachments: Vec::new(),
                 turn_id: turn_id.clone(),
@@ -4353,8 +4352,8 @@ fn new_history_branch_id(session: &SessionState, ordinal: usize) -> String {
 /// 直接驱动两个派生分支；生产调用方均在 store 内部。
 pub(in crate::agent::session) fn refresh_session_metadata(session: &mut SessionState, touch_updated_at: bool) {
     normalize_trace_timeline_entries(&mut session.turn_trace_history);
-    // 宿主续轮提示（Ask 恢复/审批恢复/goal 轮次）虽以 user 角色落库，但不代表
-    // 真实用户轮，不得进入标题与轮次统计，否则会话标题会被续轮文案覆盖。
+    // 宿主续轮提示（Ask 恢复/审批恢复/goal 轮次）以 host 角色（旧日志为 user）落库，但
+    // 不代表真实用户轮，不得进入标题与轮次统计，否则会话标题会被续轮文案覆盖。
     session.turn_count = session
         .history
         .iter()
@@ -5177,9 +5176,9 @@ fn session_is_persistable(session: &SessionState) -> bool {
     super::backend::state_has_content(session)
 }
 
-/// 宿主续轮提示的唯一真值源。TUI 在 Ask 恢复、工具审批恢复、goal 轮次推进时
-/// 把这几段固定文案作为 `display_message` 派发，随即以 `user` 角色落库。
-/// 它们不是用户真实输入：既不能当会话标题，也不能计入轮次。
+/// 宿主续轮提示的唯一真值源。TUI 在 Ask 恢复 / 审批恢复 / goal 轮次推进时把这些固定
+/// 文案（或其「原指令 + 宿主文案」组合正文）派发；B235 起历史行以 `host` 角色落库
+/// （不再占 `user` 槽），旧日志的 `user` 行仍由本判据识别，且不是用户真实输入。
 pub const ASK_RESUME_CONTINUATION_PROMPT: &str = "（已作答，继续上一轮未完成的步骤）";
 pub const APPROVAL_APPROVED_CONTINUATION_PROMPT: &str =
     "（已批准该工具调用，请重试刚才的操作并继续任务）";
@@ -5195,8 +5194,9 @@ pub fn is_host_continuation_prompt(text: &str) -> bool {
     if trimmed == ASK_RESUME_CONTINUATION_PROMPT
         || trimmed == APPROVAL_APPROVED_CONTINUATION_PROMPT
         || trimmed == APPROVAL_DENIED_CONTINUATION_PROMPT
-        // ADR 0092：goal 续轮真正下发的是 `<goal_round round="N" max="M">…`。
+        // ADR 0092 goal 续轮结构匹配；B238：B232 的「原指令 + 宿主续轮」组合正文同属宿主注入。
         || crate::agent::goal::is_goal_round_prompt(trimmed)
+        || super::host_resume::is_composed_host_continuation(trimmed)
     {
         return true;
     }
@@ -5224,13 +5224,12 @@ fn build_title(history: &[TurnHistoryMessage]) -> String {
 pub fn session_is_continuation_fragment(session: &SessionState) -> bool {
     let (mut saw_continuation, mut saw_real) = (false, false);
     for message in &session.history {
-        if message.role != "user" {
-            continue;
-        }
-        if is_host_continuation_prompt(&message.content) {
-            saw_continuation = true;
-        } else {
-            saw_real = true;
+        match message.role.as_str() {
+            // B235：host 角色是宿主上下文（续轮），永远不是「真实用户轮」。
+            super::host_resume::HOST_HISTORY_ROLE => saw_continuation = true,
+            "user" if is_host_continuation_prompt(&message.content) => saw_continuation = true,
+            "user" => saw_real = true,
+            _ => {}
         }
     }
     if !saw_real {

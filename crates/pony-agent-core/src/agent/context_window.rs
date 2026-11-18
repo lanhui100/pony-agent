@@ -175,8 +175,15 @@ pub(super) fn history_to_native_messages(history: &[TurnHistoryMessage]) -> Vec<
         .map(|msg| {
             // wave-3 L3-B：native transcript 同样不得携带已落盘的 DSML 协议原文。
             let content = sanitize_dsml_protocol_text(msg.content.trim());
+            // B235：native 回放只认 provider 原生角色；宿主续轮行按 user 回放（指令可见，
+            // 且绝不把未知的 "host" 角色发给上游 ⇒ 避免 400）。
+            let role = if msg.role == crate::agent::session::host_resume::HOST_HISTORY_ROLE {
+                "user"
+            } else {
+                msg.role.as_str()
+            };
             json!({
-                "role": msg.role,
+                "role": role,
                 "content": content,
             })
         })
