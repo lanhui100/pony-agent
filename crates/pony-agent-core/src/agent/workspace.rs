@@ -37,7 +37,7 @@ fn slugify(name: &str) -> String {
 }
 
 /// Windows canonicalize 输出去 `\\?\` / `\\?\UNC\` 前缀，统一为可读绝对路径。
-fn normalize_win_prefix(path: &str) -> String {
+pub(crate) fn normalize_win_prefix(path: &str) -> String {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }

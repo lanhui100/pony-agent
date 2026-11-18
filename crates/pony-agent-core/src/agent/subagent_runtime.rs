@@ -557,11 +557,22 @@ fn seed_completed_history(
 }
 
 /// workspace root 比较（忽略尾部路径分隔符；不引入 canonicalize 的 IO 与 symlink 语义）。
+///
+/// B230：Windows 上 `std::fs::canonicalize` 会带 `\\?\` verbatim 前缀，而 workspace 注册
+/// 走 `normalize_workspace_root` 已剥前缀 ⇒ 两侧形态不一致会让 root 反查恒 miss（子代理
+/// 落默认 workspace）。比较前统一去 verbatim 前缀；平台大小写语义复用 `roots_match`。
 fn workspace_root_matches(registered: &str, root: &Path) -> bool {
-    let registered = registered.trim_end_matches(['/', '\\']);
+    let registered = crate::agent::workspace::normalize_win_prefix(
+        registered.trim_end_matches(['/', '\\']),
+    );
+    if registered.is_empty() {
+        return false;
+    }
     let target = root.display().to_string();
-    let target = target.trim_end_matches(['/', '\\']);
-    !registered.is_empty() && registered == target
+    let target = crate::agent::workspace::normalize_win_prefix(
+        target.trim_end_matches(['/', '\\']),
+    );
+    crate::agent::workspace::roots_match(&registered, &target)
 }
 
 impl SubagentTurnEngine for HostTurnEngine {
@@ -764,6 +775,30 @@ mod tests {
         // ③ 从未产出 assistant（例如父轮首个调用就失败）⇒ 不带任何上下文（禁止伪造）。
         let empty = seed_completed_history(vec![message("user", "only-user")]);
         assert!(empty.is_empty(), "无已完成回合时 seed 必须为空");
+    }
+
+    /// B230：Windows canonicalize 的 `\\?\` verbatim 前缀必须在 root 反查比较前归一，
+    /// 否则注册表里的可读路径与调用方传入的 canonical 形态不一致 ⇒ 恒 miss。
+    #[test]
+    fn workspace_root_match_normalizes_windows_verbatim_prefix() {
+        assert!(workspace_root_matches(
+            r"\\?\C:\ws\project",
+            Path::new(r"C:\ws\project")
+        ));
+        assert!(workspace_root_matches(
+            r"C:\ws\project",
+            Path::new(r"\\?\C:\ws\project")
+        ));
+        // UNC：`\\?\UNC\server\share` 归一为 `\\server\share`。
+        assert!(workspace_root_matches(
+            r"\\?\UNC\server\share",
+            Path::new(r"\\server\share")
+        ));
+        // 归一后仍必须完全相等（不做前缀/子目录匹配）。
+        assert!(!workspace_root_matches(
+            r"\\?\C:\ws",
+            Path::new(r"C:\ws\sub")
+        ));
     }
 
     /// P1：workspace root 比较忽略尾部路径分隔符，但不做前缀/子目录匹配。

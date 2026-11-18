@@ -317,9 +317,11 @@ fn c1_unknown_skill_name_resolves_to_none() {
 //
 // wave-61 迁移（2026-11-03，Lead 一票授权）：Wave-61 C1 让 9 项团队/子代理工具进入
 // 常驻模型可见面（`workflow` 因 handler 为桩退回 Internal，见契约 C1.7），模型可见面
-// 由 29 → **38** 项。本用例的**意图**（`skill_load` 必须注册且可被模型看到）不变，故只把
-// 总数锚点同步为 38，并保留「必须含 skill_load」的逐名断言；其余断言一字未改。
-// 未放宽：从"精确 29"改为"精确 38"是同强度收紧后的等价迁移（数字仍是精确值，不是 `>=`）。
+// 由 29 → **38** 项；B150/P1 的 `acp_delegate` 再 +1 ⇒ **39**（与 nfr-baseline
+// `team_tool_surface_exact_count=39` 及 `contract_view_tests` 同源真值一致）。本用例的**意图**
+// （`skill_load` 必须注册且可被模型看到）不变，只把总数锚点同步为 39，并保留「必须含
+// skill_load」的逐名断言；其余断言一字未改。
+// 未放宽：数字仍是精确值（不是 `>=`），38→39 是随模型面真实扩容的同强度迁移。
 // ============================================================
 
 #[test]
@@ -329,8 +331,8 @@ fn c1_skill_load_is_registered_on_the_model_visible_surface() {
     let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
     assert_eq!(
         names.len(),
-        38,
-        "C1-5：wave-61 后模型可见面必须是 38 项（29 基线 + 9 项团队工具；workflow 因桩退回 Internal），实际：{names:?}"
+        39,
+        "C1-5：模型可见面必须是 39 项（29 基线 + 9 项团队工具 + B150/P1 的 acp_delegate；workflow 因桩退回 Internal），实际：{names:?}"
     );
     let view = views
         .iter()
@@ -351,8 +353,8 @@ fn c1_skill_load_is_registered_on_the_model_visible_surface() {
     let internal = builtin_tools();
     assert_eq!(
         internal.len(),
-        45,
-        "C1-5：内部注册表必须为 45 项（基线 44 + skill_load）"
+        46,
+        "C1-5：内部注册表必须为 46 项（基线 44 + skill_load + B150/P1 的 acp_delegate）"
     );
     assert!(
         internal.iter().any(|tool| tool.name == "skill_load"),

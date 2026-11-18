@@ -49,9 +49,24 @@ fn fixture_script() -> PathBuf {
     script
 }
 
+/// B230：Windows 的 `std::fs::canonicalize` 产出 `\\?\` verbatim 前缀，POSIX shell（Git Bash）
+/// 无法按该形态打开文件（capture 落盘静默失败）。传给 fake agent 的路径统一去前缀 + 正斜杠；
+/// Unix 下为恒等变换。
+fn shell_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().into_owned();
+    let normalized = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        raw
+    };
+    normalized.replace('\\', "/")
+}
+
 /// 基础 spec（hint 由调用方指定；`mcp_servers: Some(vec![])` 关闭 inherit 干扰）。
 fn spec_with_hint(hint: AcpCapabilitiesHint, mode: &str, extra: &[&str]) -> AcpAgentSpec {
-    let mut args = vec![fixture_script().to_string_lossy().into_owned(), mode.to_string()];
+    let mut args = vec![shell_path(&fixture_script()), mode.to_string()];
     args.extend(extra.iter().map(|value| (*value).to_string()));
     AcpAgentSpec {
         id: "fake".to_string(),
@@ -74,9 +89,9 @@ fn spec_capturing_initialize(hint: AcpCapabilitiesHint, cwd: &Path) -> AcpAgentS
         hint,
         "init_capture",
         &[
-            init_file.to_string_lossy().as_ref(),
+            shell_path(&init_file).as_str(),
             "1",
-            session_file.to_string_lossy().as_ref(),
+            shell_path(&session_file).as_str(),
         ],
     )
 }
@@ -130,9 +145,9 @@ fn spec_probing_fs(hint: AcpCapabilitiesHint, cwd: &Path, paths: &[&str]) -> Acp
         hint,
         "probe_fs",
         &[
-            init_file.to_string_lossy().as_ref(),
-            resp_file.to_string_lossy().as_ref(),
-            paths_file.to_string_lossy().as_ref(),
+            shell_path(&init_file).as_str(),
+            shell_path(&resp_file).as_str(),
+            shell_path(&paths_file).as_str(),
         ],
     )
 }
@@ -146,9 +161,9 @@ fn spec_probing_terminal(hint: AcpCapabilitiesHint, cwd: &Path, marker_file: &Pa
         hint,
         "probe_terminal",
         &[
-            init_file.to_string_lossy().as_ref(),
-            resp_file.to_string_lossy().as_ref(),
-            marker_file.to_string_lossy().as_ref(),
+            shell_path(&init_file).as_str(),
+            shell_path(&resp_file).as_str(),
+            shell_path(&marker_file).as_str(),
         ],
     )
 }
