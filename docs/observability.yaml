@@ -117,6 +117,18 @@
 # (4) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
 #     tracing 收口点仍是 `agent/otel/mod.rs`，issues 边界不变。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
+# TUI 模型能力编辑（ADR 2026-11-18-tui-model-capabilities）归属说明：
+# (1) 变更面仍是**本地配置文件**的定点写入：`agent/model_window.rs::set_model_capabilities`
+#     （上下文窗口 + supportsImage/Video/AudioInput；改模态时切 `capabilityPreset=custom` 并落
+#     完整能力族），以及 `DEFAULT_CONTEXT_WINDOW_TOKENS` 对齐十进制 256_000；
+#     无网络出口、无后台任务、无 LLM 调用、无 exporter 变更。
+# (2) TUI `w` 编辑器扩展为「上下文窗口 + 输入模态」：纯呈现 + 本地写；常用规格快选与
+#     `200000` / `200K` / `1M` 手输共用 `parse_context_window_input`；失败仍只落面板文案，
+#     不新增 stderr 结构化行。
+# (3) 模型面板徽标去掉 `ctx` 前缀，仅文案变化，不新增遥测出口。
+# (4) 四维归属不变：tracing / issues 仍 applicable（落点不变 agent/otel/mod.rs、agent/ponysentry/client.rs），
+#     metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
 service: pony-agent
 kind: desktop
 reviewed_at: "2026-11-09"

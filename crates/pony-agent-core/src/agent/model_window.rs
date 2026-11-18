@@ -4,7 +4,7 @@
 //!
 //! `ProviderRegistryStore::load_storage` 归一化时会把**缺失**的窗口按能力预设补成显式值
 //! （见 ADR 2026-11-14-model-declared-context-window-precedence）。于是 view↔storage 往返会
-//! 把「未声明」固化成「声明了 262144」：一次 TUI/CLI 保存之后，预设再也补不了缺，
+//! 把「未声明」固化成「声明了 256000」：一次 TUI/CLI 保存之后，预设再也补不了缺，
 //! 用户也分不清「我填过」与「系统补的」。
 //!
 //! 窗口是**逐模型的个体事实**（同一预设可挂 128K/200K/1M 的不同部署），「未声明」本身
@@ -32,6 +32,53 @@ use std::path::Path;
 /// 不参与任何业务判断：真值始终是上游模型自己的容量。
 pub const MAX_CONTEXT_WINDOW_TOKENS: u32 = 10_000_000;
 
+/// 常用上下文窗口规格（token，十进制），与桌面端 `CONTEXT_TOKEN_PRESETS` 同口径。
+///
+/// 面板用 ←/→ 在这些规格间快选，手输仍接受任意 `200000` / `200K` / `1.5M`。
+pub const CONTEXT_WINDOW_PRESETS: &[u32] = &[32_000, 64_000, 128_000, 256_000, 512_000, 1_000_000];
+
+/// 模型接受的**输入模态**（图片 / 视频 / 音频）。
+///
+/// 与桌面端 `inputCapabilityOptions` 对齐，只覆盖输入侧三项；工具 / 流式 / 推理 /
+/// 输出模态属于高级参数，不在 TUI 面板暴露（避免把 `w` 编辑器做成完整配置页）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ModelInputCapabilities {
+    pub image: bool,
+    pub video: bool,
+    pub audio: bool,
+}
+
+impl ModelInputCapabilities {
+    /// 人读标签（全空时写「无」，避免面板出现空白字段）。
+    pub fn label(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.image {
+            parts.push("图片");
+        }
+        if self.video {
+            parts.push("视频");
+        }
+        if self.audio {
+            parts.push("音频");
+        }
+        if parts.is_empty() {
+            "无".to_string()
+        } else {
+            parts.join("/")
+        }
+    }
+}
+
+impl From<&crate::agent::config::ProviderModelCapabilities> for ModelInputCapabilities {
+    fn from(capabilities: &crate::agent::config::ProviderModelCapabilities) -> Self {
+        Self {
+            image: capabilities.supports_image_input,
+            video: capabilities.supports_video_input,
+            audio: capabilities.supports_audio_input,
+        }
+    }
+}
+
 /// 一个模型的窗口视图：声明值（磁盘真值）与生效值（声明 > 预设补缺）并列。
 ///
 /// 两者必须同时暴露：用户需要看到「这个数是我填的，还是预设补的」，
@@ -50,6 +97,8 @@ pub struct ModelContextWindow {
     pub declared: Option<u32>,
     /// 生效窗口（`declared` 优先，否则预设补缺）。
     pub effective: Option<u32>,
+    /// 生效的输入模态（图片 / 视频 / 音频），供能力编辑器回显。
+    pub inputs: ModelInputCapabilities,
 }
 
 impl ModelContextWindow {
@@ -73,7 +122,7 @@ pub fn find_context_window(
 /// 盘点全部模型的窗口（顺序 = 注册表顺序，provider 主序、model 次序）。
 pub fn list_context_windows(store: &ProviderRegistryStore) -> Vec<ModelContextWindow> {
     // 声明值只能从**原始 JSON**读：`load_view()` 的窗口已被预设补齐，无法区分「用户填的
-    // 262144」与「预设补的 262144」。
+    // 256000」与「预设补的 256000」。
     let declared = read_registry_value(store)
         .map(|raw| declared_windows(&raw))
         .unwrap_or_default();
@@ -95,6 +144,7 @@ pub fn list_context_windows(store: &ProviderRegistryStore) -> Vec<ModelContextWi
                     .capabilities
                     .context_window_tokens
                     .filter(|tokens| *tokens > 0),
+                inputs: ModelInputCapabilities::from(&model.capabilities),
             });
         }
     }
@@ -114,9 +164,43 @@ pub fn set_context_window(
     model_id: &str,
     window: Option<u32>,
 ) -> Result<ModelContextWindow, String> {
-    if let Some(tokens) = window {
+    set_model_capabilities(store, provider_id, model_id, Some(window), None)
+}
+
+/// 定点写入上下文窗口 + 输入模态（图片 / 视频 / 音频）。
+///
+/// - `window`：`None` = 不动；`Some(None)` = 删键（恢复跟随预设）；`Some(Some(tokens))` = 声明。
+/// - `inputs`：`None` = 不动；目标值与「已声明值 / 预设生效值」相同则**不落键**
+///   ——否则打开编辑器点一下保存，就会把预设补缺固化成显式声明。
+///
+/// 除目标键外整棵 JSON 树保持原样（不整份归一化、不碰兄弟模型）。
+pub fn set_model_capabilities(
+    store: &ProviderRegistryStore,
+    provider_id: &str,
+    model_id: &str,
+    window: Option<Option<u32>>,
+    inputs: Option<ModelInputCapabilities>,
+) -> Result<ModelContextWindow, String> {
+    if let Some(Some(tokens)) = window {
         validate_window(tokens)?;
     }
+    // 只有要改模态时才回读生效能力：布尔能力由 preset 决定（通用预设分支忽略声明值），
+    // 因此「改模态」必须拿生效值当基准，并把整个能力族显式落盘。
+    let effective_capabilities = inputs.map(|_| {
+        store
+            .load_view()
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .and_then(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.id == model_id || model.model == model_id)
+            })
+            .map(|model| model.capabilities.clone())
+            .unwrap_or_default()
+    });
 
     let path = store.path();
     let mut raw = read_registry_value(store)?;
@@ -136,28 +220,67 @@ pub fn set_context_window(
         .find(|entry| model_matches_value(entry, model_id))
         .ok_or_else(|| format!("提供商 `{provider_id}` 下未找到模型 `{model_id}`"))?;
 
-    match window {
-        Some(tokens) => {
+    if let Some(window) = window {
+        match window {
+            Some(tokens) => {
+                let object = model
+                    .as_object_mut()
+                    .ok_or_else(|| "模型条目不是 JSON 对象".to_string())?;
+                let capabilities = object
+                    .entry("capabilities".to_string())
+                    .or_insert_with(|| Value::Object(Default::default()));
+                if !capabilities.is_object() {
+                    *capabilities = Value::Object(Default::default());
+                }
+                capabilities
+                    .as_object_mut()
+                    .expect("capabilities 已保证是对象")
+                    .insert("contextWindowTokens".to_string(), json!(tokens));
+            }
+            None => {
+                if let Some(capabilities) = model
+                    .get_mut("capabilities")
+                    .and_then(Value::as_object_mut)
+                {
+                    capabilities.remove("contextWindowTokens");
+                }
+            }
+        }
+    }
+
+    if let Some(desired) = inputs {
+        let effective = effective_capabilities.unwrap_or_default();
+        let inherited = ModelInputCapabilities::from(&effective);
+        // 目标与生效值一致 ⇒ 什么都不写：打开面板点一下保存，不得把预设固化成显式声明。
+        if desired != inherited {
             let object = model
                 .as_object_mut()
                 .ok_or_else(|| "模型条目不是 JSON 对象".to_string())?;
+            // 预设分支会忽略声明布尔值（`normalize_model_capabilities`），故必须落下
+            // 「custom + 完整能力族」才能让勾选真的生效；其余能力保持当前生效值，
+            // 不能因为切 custom 把推理/工具/流式静默关掉。
+            object.insert("capabilityPreset".to_string(), json!("custom"));
             let capabilities = object
                 .entry("capabilities".to_string())
-                .or_insert_with(|| Value::Object(Default::default()));
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
             if !capabilities.is_object() {
-                *capabilities = Value::Object(Default::default());
+                *capabilities = Value::Object(serde_json::Map::new());
             }
-            capabilities
+            let capabilities = capabilities
                 .as_object_mut()
-                .expect("capabilities 已保证是对象")
-                .insert("contextWindowTokens".to_string(), json!(tokens));
-        }
-        None => {
-            if let Some(capabilities) = model
-                .get_mut("capabilities")
-                .and_then(Value::as_object_mut)
-            {
-                capabilities.remove("contextWindowTokens");
+                .expect("capabilities 已保证是对象");
+            for (key, value) in [
+                ("supportsTools", effective.supports_tools),
+                ("supportsStreaming", effective.supports_streaming),
+                ("supportsReasoning", effective.supports_reasoning),
+                ("supportsImageInput", desired.image),
+                ("supportsVideoInput", desired.video),
+                ("supportsAudioInput", desired.audio),
+                ("supportsImageOutput", effective.supports_image_output),
+                ("supportsVideoOutput", effective.supports_video_output),
+                ("supportsAudioOutput", effective.supports_audio_output),
+            ] {
+                capabilities.insert(key.to_string(), json!(value));
             }
         }
     }
@@ -569,5 +692,92 @@ mod tests {
         assert_eq!(format_context_window(1_500_000), "1.5M");
         assert_eq!(format_context_window(262_144), "262.1K");
         assert_eq!(format_context_window(999), "999");
+    }
+
+    #[test]
+    fn presets_are_decimal_and_parse_back_exactly() {
+        assert_eq!(
+            CONTEXT_WINDOW_PRESETS,
+            &[32_000, 64_000, 128_000, 256_000, 512_000, 1_000_000]
+        );
+        for preset in CONTEXT_WINDOW_PRESETS {
+            let label = format_context_window(*preset);
+            assert_eq!(
+                parse_context_window_input(&label).expect("preset parses"),
+                Some(*preset),
+                "{label} 必须能原样解析回 {preset}"
+            );
+        }
+    }
+
+    #[test]
+    fn changing_modalities_switches_to_custom_and_keeps_other_capabilities() {
+        let root = temp_root("inputs");
+        let path = write_fixture(&root);
+        let store = ProviderRegistryStore::with_path(&path);
+
+        let updated = set_model_capabilities(
+            &store,
+            "provider-demo",
+            "model-declared",
+            None,
+            Some(ModelInputCapabilities {
+                image: false,
+                video: true,
+                audio: false,
+            }),
+        )
+        .expect("set inputs");
+
+        assert_eq!(
+            updated.inputs,
+            ModelInputCapabilities {
+                image: false,
+                video: true,
+                audio: false,
+            }
+        );
+        assert_eq!(updated.declared, Some(200_000), "窗口不得被顺带改写");
+
+        let raw = read_registry_value(&store).expect("read");
+        let model = &raw["providers"][0]["models"][0];
+        assert_eq!(model["capabilityPreset"], json!("custom"));
+        let capabilities = &model["capabilities"];
+        assert_eq!(capabilities["supportsImageInput"], json!(false));
+        assert_eq!(capabilities["supportsVideoInput"], json!(true));
+        assert_eq!(capabilities["supportsAudioInput"], json!(false));
+        // 未改动的能力沿用生效值，不能因切 custom 静默关掉。
+        assert_eq!(capabilities["supportsTools"], json!(true));
+        assert_eq!(capabilities["supportsStreaming"], json!(true));
+        assert_eq!(capabilities["supportsReasoning"], json!(false));
+        assert_eq!(capabilities["contextWindowTokens"], json!(200_000));
+    }
+
+    #[test]
+    fn unchanged_modalities_write_nothing() {
+        let root = temp_root("inputs-noop");
+        let path = write_fixture(&root);
+        let store = ProviderRegistryStore::with_path(&path);
+        let before = fs::read_to_string(&path).expect("read before");
+
+        // open-ai-chat 预设的生效值是 image=true / video=false / audio=false。
+        set_model_capabilities(
+            &store,
+            "provider-demo",
+            "model-declared",
+            None,
+            Some(ModelInputCapabilities {
+                image: true,
+                video: false,
+                audio: false,
+            }),
+        )
+        .expect("no-op inputs");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read after"),
+            before,
+            "目标值与生效值一致时不得写盘（否则会把预设固化成声明）"
+        );
     }
 }

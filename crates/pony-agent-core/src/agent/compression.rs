@@ -789,7 +789,7 @@ Some trailing text"#;
     #[test]
     fn test_default_context_window_is_256k_and_triggers_before_overflow() {
         let window = crate::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS as usize;
-        assert_eq!(window, 262_144, "默认窗口真值必须是 256K");
+        assert_eq!(window, 256_000, "默认窗口真值必须是 256K（十进制口径）");
         let threshold = calculate_threshold_tokens(window, 64_000, &CompressionConfig::default());
         assert!(
             threshold > 160_000 && threshold < 210_000,

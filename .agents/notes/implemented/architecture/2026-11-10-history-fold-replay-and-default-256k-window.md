@@ -49,7 +49,8 @@ P0/P1 修好了「失败轮写不进上下文」「压缩只写 blob」，但读
    （空历史项污染下一轮 carry，下游按空文本判无效；此口径用 P0/PA-174 既有约定）。
 6. **默认上下文窗口 = 256K**：`config::DEFAULT_CONTEXT_WINDOW_TOKENS = 262_144`（`pub`），
    TUI / CLI 统一引用该常量，删除各自的 `1_000_000` 副本。水位由此约 180K~205K，
-   压缩先于溢出发生。
+   压缩先于溢出发生。**2026-11-18 后续**：数值改为十进制 `256_000`（面板显示 `256K`），
+   见 [2026-11-18-tui-model-capabilities](./2026-11-18-tui-model-capabilities.md)。
 
 ## Alternatives considered
 

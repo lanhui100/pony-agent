@@ -684,8 +684,8 @@ pub enum InteractionMode {
     /// ADR 0113「撤回」：双击 Esc / `/rewind` 打开的两段式覆盖层
     /// （① 选轮次 ② 选范围：恢复代码与会话 / 仅恢复会话）。
     Rewind,
-    /// `/models` 面板内 `w`：编辑当前高亮模型的上下文窗口
-    /// （↵ 保存 · esc 取消 · 留空 / `-` 恢复跟随预设）。真值落点 `agent::model_window`。
+    /// `/models` 面板内 `w`：编辑当前高亮模型的上下文窗口与输入模态
+    /// （↵ 保存 · esc 取消 · tab 切字段 · 留空 / `-` 恢复跟随预设）。真值落点 `agent::model_window`。
     EditingModelWindow,
 }
 
@@ -4803,12 +4803,13 @@ fn model_badges(state: &TuiState, item: &ModelItem) -> String {
     }
     // 上下文窗口必须显示**来源**：声明值裸写，预设补缺加后缀。
     // 这是「按 256K 算的百分比对不对」在界面上唯一可自查的地方（`w` 可直接改）。
+    // 不再写 `ctx` 前缀：列里只有窗口一个数值型徽标，前缀纯占宽（ADR 2026-11-18）。
     if let Some(window) = item.context_window_tokens {
         let label = format_context_window(window);
         parts.push(if item.declared_context_window.is_some() {
-            format!("ctx {label}")
+            label
         } else {
-            format!("ctx {label}·预设")
+            format!("{label}·预设")
         });
     }
     parts.join(" · ")
@@ -6878,7 +6879,7 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             f,
             rect,
             &title,
-            "↑↓ 选择 · ↵ 确认 · ⌃D 设默认 · ⌃F 优选 · w 改窗口 · r 刷新 · esc 取消",
+            "↑↓ 选择 · ↵ 确认 · ⌃D 设默认 · ⌃F 优选 · w 能力 · r 刷新 · esc 取消",
         );
         let inner_w = body.width as usize;
         let mut lines_out: Vec<Line<'static>> = Vec::new();

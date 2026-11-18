@@ -47,6 +47,9 @@ Status: implemented
 8. **十进制口径与桌面端一致**（K = 1000、M = 1_000_000，`200K` → 200000），
    与 `ProviderConfigPage.vue::formatTokenUnit` / `CONTEXT_TOKEN_PRESETS` 对齐；
    上限 10M token 只防手滑（多打一位数），不参与业务判断。
+9. **2026-11-18 后续（本轮部分取代）**：徽标去掉 `ctx` 前缀、`w` 编辑器扩为「上下文窗口 +
+   输入模态」、默认窗口对齐十进制 `256_000`；见
+   [2026-11-18-tui-model-capabilities](./2026-11-18-tui-model-capabilities.md)。
 
 ## Alternatives considered
 

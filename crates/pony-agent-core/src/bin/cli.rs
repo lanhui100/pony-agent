@@ -1852,7 +1852,7 @@ pub fn execute_models_command(
 ///
 /// 与 TUI `/models` 面板的 `w` 共用同一真源 `agent::model_window`：**定点**改
 /// `providers[].models[].capabilities.contextWindowTokens` 一个键，未声明的模型保持未声明
-/// （不会被归一化补成 262144）。CLI 此前完全没有 provider/model 配置面，窗口只能手改文件
+/// （不会被归一化补成 256000）。CLI 此前完全没有 provider/model 配置面，窗口只能手改文件
 /// 或用桌面端（ADR 2026-11-14-model-declared-window-tui-entry）。
 ///
 /// 输出：每行一个 JSON（`list` = 每个模型一行；`set-window` = 写入后的单条）。
