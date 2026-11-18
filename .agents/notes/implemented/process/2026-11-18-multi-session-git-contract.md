@@ -57,4 +57,6 @@ Date: 2026-11-18
 
 - **语义冲突仍靠 review**：两个会话改同一函数的不同行为，机械门禁只能发现「同时改了同一行」，发现不了「合起来语义不自洽」。
 - **`backlog/tasks.jsonl` 的追加竞争**：`scripts/backlog.mjs` 的任务级租约只保护同一 ID，不保护账本文件本身；并发 `record` 仍可能丢行，靠「record 后立即提交 + 冲突人工合并」兜底（`backlog/README.md` 已声明）。
+- **`--dry-run` 不能当作远端拦截的验收证据**：`git push --dry-run` 只做客户端引用检查，不触发 GitHub 服务端 ruleset 评估（实测 `git push --dry-run --no-verify origin HEAD:main` 返回 0，看起来「推上去了」）。远端是否真生效只认 `gh api repos/<owner>/<repo>/rules/branches/main`——它返回 `pull_request` / `required_status_checks` / `non_fast_forward` / `deletion` 四条 active 规则。
+- **`core-platform-check` 暂未纳入 required checks**：matrix job 的 check 上下文带 runner 后缀（`core-platform-check (ubuntu-latest)` 等），且两侧是长跑平台矩阵。起步只 require `verify` + `governance`，避免 PR 因平台矩阵排队而长时间无法合并；待实测 CI 时长可接受再逐个追加。
 - **版本 auto-bump 在并发下仍是冲突源**：`pre-commit` 的 `-AutoDetect -Stage` 会让每个会话都 bump 版本，四处同步文件在合并时冲突。本 ADR 不改其行为（属既有约定），但契约文档要求「并发会话下把版本 bump 收敛到发版 PR 一次完成」。
