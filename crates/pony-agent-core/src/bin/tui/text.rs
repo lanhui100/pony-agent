@@ -3,18 +3,31 @@
 
 use super::*;
 
+/// 耗时的人类可读文本（中文单位，状态行与轮末摘要共用的唯一口径）。
+///
+/// 分段：`<1分钟` 只给秒；`<1小时` 给分+秒；`>=1小时` 补小时段——分钟数不再无界
+/// 增长成「93分钟」这种要用户自己换算的写法（B253）。
 pub fn format_elapsed_seconds(ms: u64) -> String {
     let secs = ms / 1000;
     if secs < 60 {
-        format!("{}秒", secs)
-    } else {
-        let mins = secs / 60;
-        let rem_secs = secs % 60;
-        if rem_secs > 0 {
-            format!("{}分{}秒", mins, rem_secs)
+        return format!("{secs}秒");
+    }
+    let mins = secs / 60;
+    let rem_secs = secs % 60;
+    if mins < 60 {
+        return if rem_secs > 0 {
+            format!("{mins}分{rem_secs}秒")
         } else {
-            format!("{}分钟", mins)
-        }
+            format!("{mins}分钟")
+        };
+    }
+    let hours = mins / 60;
+    let rem_mins = mins % 60;
+    match (rem_mins > 0, rem_secs > 0) {
+        (true, true) => format!("{hours}小时{rem_mins}分{rem_secs}秒"),
+        (true, false) => format!("{hours}小时{rem_mins}分钟"),
+        (false, true) => format!("{hours}小时{rem_secs}秒"),
+        (false, false) => format!("{hours}小时"),
     }
 }
 

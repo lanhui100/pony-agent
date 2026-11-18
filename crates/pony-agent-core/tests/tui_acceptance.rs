@@ -588,13 +588,21 @@ fn test_tui_runtime_mode_state_transitions() {
 
 #[test]
 fn test_elapsed_seconds_formatting() {
-    // Wave-13：断言与实现语义对齐（src/bin/tui.rs `format_elapsed_seconds` 使用中文单位，
-    // 与桌面端/前端 formatElapsedSeconds 口径一致）；修复前此处断言英文 "0s" 导致 pre-existing 红灯。
+    // Wave-13：断言与实现语义对齐（src/bin/tui/text.rs `format_elapsed_seconds` 使用中文单位）；
+    // 修复前此处断言英文 "0s" 导致 pre-existing 红灯。
+    // B253：TUI 独有小时段（桌面端 `src/lib/runtime/status.ts` 仍为分钟级，见该处注释）。
     assert_eq!(tui::format_elapsed_seconds(0), "0秒");
     assert_eq!(tui::format_elapsed_seconds(500), "0秒");
     assert_eq!(tui::format_elapsed_seconds(1250), "1秒");
     assert_eq!(tui::format_elapsed_seconds(65400), "1分5秒");
     assert_eq!(tui::format_elapsed_seconds(60000), "1分钟");
+    // B253：分钟数超过 60 必须换算成小时段，不再输出「93分钟」这类需用户自算的写法。
+    assert_eq!(tui::format_elapsed_seconds(3_600_000), "1小时");
+    assert_eq!(tui::format_elapsed_seconds(3_661_000), "1小时1分1秒");
+    assert_eq!(tui::format_elapsed_seconds(3_600_000 + 120_000), "1小时2分钟");
+    assert_eq!(tui::format_elapsed_seconds(3_600_000 + 5_000), "1小时5秒");
+    assert_eq!(tui::format_elapsed_seconds(5_580_000), "1小时33分钟");
+    assert_eq!(tui::format_elapsed_seconds(59 * 60_000), "59分钟");
 }
 
 
