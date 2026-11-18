@@ -52,6 +52,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 mod ask_plan_commands;
+mod event_buffer;
 mod ask_resume_commands;
 mod capability_commands;
 mod compaction_commands;
@@ -1148,14 +1149,8 @@ impl HostControlPlaneBuilder {
         let event_flush_channel: Arc<crate::agent::turn_flow::EventFlushFn>;
         {
             let sessions = Arc::clone(&sessions_rwlock);
-            let buffer: Arc<
-                std::sync::Mutex<
-                    std::collections::HashMap<
-                        (String, String),
-                        Vec<BufferedTurnEvent>,
-                    >,
-                >,
-            > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let buffer: Arc<std::sync::Mutex<event_buffer::EventBufferState>> =
+                Arc::new(std::sync::Mutex::new(event_buffer::EventBufferState::default()));
             // PA-095 #2：persist 与 flush-requester 两个闭包共享同一缓冲与 store。
             let buffer_for_flush = Arc::clone(&buffer);
             let sessions_for_flush = Arc::clone(&sessions);
@@ -1164,73 +1159,22 @@ impl HostControlPlaneBuilder {
                                 event: crate::agent::turn_event::TurnEvent,
                                 is_terminal: bool| {
                 // wave-acp-delegate C6.2：**产生时刻在入缓冲的这一刻取**——persist 由发射方
-                // 同步调用，此刻即事件真实产生时间；落库时逐事件写入 `created_at_ms`，
-                // 不得整批塌缩到 flush 时刻。
+                // 同步调用，此刻即事件真实产生时间；落库时逐事件写入 `created_at_ms`。
+                // B239：`in_flight` 幂等键保证两路并发 flush 不会重复提交同一批；
+                // 缓冲锁只覆盖入队/快照，提交（sessions.write）在锁外。
                 let produced_at_ms = now_event_ms();
-                // PA-095 #3（实施后审核 P0）：缓冲锁不得跨越 flush——persist 闭包
-                // 持 buf mutex 调 flush_events（阻塞 sessions.write），而 history
-                // 命令线程持 sessions.write 发射全局事件时要抢同一把 buf mutex，
-                // 构成跨线程 ABBA 死锁。改为：锁内只做聚合/入队 + 终态批快照，
-                // 释放锁后再 flush，成功后重新加锁移除（commit 先于 clear）。
-                // 同 turn 单写者假设：快照与移除间隙内同 (session,turn) 的并发
-                // 入队在 turn 流程中不存在（发射方即当前写者）。
-                let mut flush_batch: Option<(
-                    String,
-                    String,
-                    Vec<BufferedTurnEvent>,
-                )> = None;
-                {
-                    let mut buf = buffer.lock().unwrap_or_else(|e| {
-                        eprintln!(
-                            "[pony-agent][runtime] event buffer lock poisoned: {e}, recovering"
-                        );
-                        e.into_inner()
-                    });
-                    let key = (session_id.to_string(), turn_id.to_string());
-                    // 写时聚合：同一 turn 的连续 AssistantChunk 合并为一条（
-                    // append-only 不可变 + seq 连续与聚合的一致性由"emit 时合并"保证）。
-                    // 聚合后保留**首条**chunk 的产生时刻（合并段的时间下界）。
-                    let mut merged_chunk = false;
-                    if let crate::agent::turn_event::TurnEvent::AssistantChunk { text, .. } =
-                        &event
-                    {
-                        if let Some(last) = buf.get_mut(&key).and_then(|v| v.last_mut()) {
-                            if let crate::agent::turn_event::TurnEvent::AssistantChunk {
-                                text: last_text,
-                                ..
-                            } = &mut last.event
-                            {
-                                last_text.push_str(text);
-                                merged_chunk = true;
-                            }
-                        }
-                    }
-                    if !merged_chunk {
-                        buf.entry(key.clone())
-                            .or_default()
-                            .push(BufferedTurnEvent {
-                                event,
-                                produced_at_ms,
-                            });
-                    }
-                    if is_terminal {
-                        // PA-095 #2：commit 先于 clear——flush 成功才移除缓冲
-                        // （失败保留可重试，防止 remove→flush 之间崩溃丢事件）。
-                        let events = buf.get(&key).cloned().unwrap_or_default();
-                        flush_batch =
-                            Some((session_id.to_string(), turn_id.to_string(), events));
-                    }
-                }
-                if let Some((sid, tid, events)) = flush_batch {
-                    if flush_events(&sessions, &sid, &tid, events) {
-                        let mut buf = buffer.lock().unwrap_or_else(|e| {
-                            eprintln!(
-                                "[pony-agent][runtime] event buffer lock poisoned: {e}, recovering"
-                            );
-                            e.into_inner()
-                        });
-                        buf.remove(&(sid, tid));
-                    }
+                let key = (session_id.to_string(), turn_id.to_string());
+                let flush_batch = event_buffer::enqueue(
+                    &buffer,
+                    &key,
+                    event,
+                    produced_at_ms,
+                    is_terminal,
+                );
+                if let Some(events) = flush_batch {
+                    let committed = events.len();
+                    let success = flush_events(&sessions, &key.0, &key.1, events, true);
+                    event_buffer::finish_commit(&buffer, &key, committed, true, success);
                 }
             };
             // PA-095 #3：通道句柄保留在本控制面上（会话绑定路由用）。
@@ -1244,32 +1188,51 @@ impl HostControlPlaneBuilder {
             //
             // wave-acp-delegate C6.1：本通道同时是**step 边界增量落盘**的执行体
             //（`turn_flow::flush_step_boundary_events` → 同一 drain-on-success 语义）。
+            //
+            // B239：**快照在缓冲锁内、提交在锁外**——锁内只克隆各键批次并标记
+            // `in_flight`，提交期间不持有进程级缓冲锁；提交成功后再短临界区摘掉
+            // 已提交前缀。快照/提交间隙新入队的事件保留在尾部，不会被吞。
             let flush_requester = move |session_id: &str| -> Result<usize, String> {
-                let mut buf = buffer_for_flush.lock().unwrap_or_else(|e| {
-                    tracing::warn!(target: "control_plane", error = %e, "[pony-agent][runtime] event buffer lock poisoned");
-                    e.into_inner()
-                });
-                let keys: Vec<(String, String)> = buf
-                    .keys()
-                    .filter(|(sid, _)| sid == session_id)
-                    .cloned()
-                    .collect();
-                if keys.is_empty() {
+                let mut snapshots = event_buffer::drain(&buffer_for_flush, session_id);
+                if snapshots.is_empty() {
                     return Ok(0);
                 }
-                let mut sessions = sessions_for_flush.try_write().map_err(|_| {
-                    "sessions write lock busy while flushing buffered events (called under lock?)"
-                        .to_string()
-                })?;
-                let mut committed = 0usize;
-                for key in keys {
-                    let events = buf.get(&key).cloned().unwrap_or_default();
-                    if events.is_empty() {
-                        continue;
+                let mut sessions = match sessions_for_flush.try_write() {
+                    Ok(sessions) => sessions,
+                    Err(_) => {
+                        event_buffer::release_in_flight(
+                            &buffer_for_flush,
+                            snapshots.iter().map(|(key, _, _)| key),
+                        );
+                        return Err(
+                            "sessions write lock busy while flushing buffered events (called under lock?)"
+                                .to_string(),
+                        );
                     }
-                    if commit_event_batch(&mut sessions, &key.0, &key.1, events) {
-                        committed += buf.remove(&key).map(|events| events.len()).unwrap_or(0);
+                };
+                let mut committed = 0usize;
+                let total = snapshots.len();
+                for index in 0..total {
+                    let key = snapshots[index].0.clone();
+                    let events = std::mem::take(&mut snapshots[index].1);
+                    let finalize = snapshots[index].2;
+                    let len = events.len();
+                    let success =
+                        commit_event_batch(&mut sessions, &key.0, &key.1, events, finalize);
+                    event_buffer::finish_commit(
+                        &buffer_for_flush,
+                        &key,
+                        len,
+                        finalize,
+                        success,
+                    );
+                    if success {
+                        committed += len;
                     } else {
+                        event_buffer::release_in_flight(
+                            &buffer_for_flush,
+                            snapshots.iter().skip(index + 1).map(|(key, _, _)| key),
+                        );
                         return Err(format!(
                             "event flush failed for session={session_id} turn={} (buffer retained)",
                             key.1
@@ -1361,6 +1324,7 @@ pub(crate) struct BufferedTurnEvent {
     pub produced_at_ms: u64,
 }
 
+
 /// 当前时刻（Unix ms），用作事件产生时刻与旧批回落时间。
 pub(crate) fn now_event_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1376,6 +1340,7 @@ fn commit_event_batch(
     session_id: &str,
     turn_id: &str,
     batch: Vec<BufferedTurnEvent>,
+    finalize: bool,
 ) -> bool {
     if batch.is_empty() {
         return true;
@@ -1422,7 +1387,13 @@ fn commit_event_batch(
         return false;
     }
     // PA-093：水位同步 + 节点引用化升级（幂等；失败只记日志）。
-    sessions.finalize_event_watermark(session_id, turn_id);
+    //
+    // B239：只在**终态批**提交成功后 finalize 一次——调用点是本轮 `append_turn`
+    // 之前的终态 flush（或终态事件尚未提交时的 drain）。step 边界增量 flush 若也
+    // finalize，会把上一轮节点的事件区间在第一个 hop 处提前冻结。
+    if finalize {
+        sessions.finalize_event_watermark(session_id, turn_id);
+    }
     // PA-095 #7（实施后审核 P2）：把本 turn 的 observation 引用附加到内存
     // trace 缓存行——异步 trace worker 整行 REPLACE 时带上引用，防止覆盖掉
     // flush 同事务回填的 ref。
@@ -1442,6 +1413,7 @@ fn flush_events(
     session_id: &str,
     turn_id: &str,
     batch: Vec<BufferedTurnEvent>,
+    finalize: bool,
 ) -> bool {
     if batch.is_empty() {
         return true;
@@ -1466,7 +1438,7 @@ fn flush_events(
         tracing::warn!(target: "control_plane", error = %e, "[pony-agent][runtime] sessions lock poisoned");
         e.into_inner()
     });
-    commit_event_batch(&mut sessions, session_id, turn_id, batch)
+    commit_event_batch(&mut sessions, session_id, turn_id, batch, finalize)
 }
 
 /// RC3/C5（落库边界）：把事件里的 assistant 正文换成**持久化口径**（整块丢弃协议文本、
@@ -8180,6 +8152,9 @@ mod tests {
 
     #[path = "tests_materialization.rs"]
     mod tests_materialization;
+
+    #[path = "tests_flush_dedup.rs"]
+    mod tests_flush_dedup;
 
     #[test]
     fn load_model_monitor_summary_aggregates_capability_usage_dimensions() {

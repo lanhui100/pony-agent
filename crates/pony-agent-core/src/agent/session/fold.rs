@@ -278,6 +278,18 @@ fn read_log_events_from_path(path: &Path) -> Result<Vec<LogEvent>, FoldError> {
 // fold 结果
 // ---------------------------------------------------------------------------
 
+/// B239：日志 fold 出的一条事件记录（`turn_events` 的重建形态）。
+///
+/// `created_at_ms` 取该事件在日志 `FlushEvents.eventTimes` 里的真实产生时刻；
+/// 旧日志缺键/缺位时回落该批的批首时间（见 [`decode_event_times`]）。
+#[derive(Clone, Debug)]
+pub struct FoldedTurnEvent {
+    /// 事件所属轮次（`TurnEvent::turn_id`；无归属事件为空串）。
+    pub turn_id: String,
+    pub event: TurnEvent,
+    pub created_at_ms: u64,
+}
+
 /// fold 的产物：可折叠出的会话状态 + 墓碑标记。
 #[derive(Clone, Debug)]
 pub struct FoldedSession {
@@ -288,6 +300,12 @@ pub struct FoldedSession {
     /// `FlushEvents` 折叠出的事件行数（`turn_events` 不属于 `SessionState`，
     /// 这里只保留计数供重建报告/校验，不假装它是状态的一部分）。
     pub event_rows: usize,
+    /// B239：`FlushEvents` 折叠出的逐事件记录（含重建后的 `created_at_ms`）。
+    ///
+    /// 事件日志是持久化真源：重建侧必须能从日志复原 C6.2 的「事件真实产生时刻」，
+    /// 而不是整批塌缩到 flush 时刻。旧日志缺 `eventTimes` 时按批首时间回落（见
+    /// [`decode_event_times`]），保持读写双向兼容。
+    pub event_records: Vec<FoldedTurnEvent>,
     /// `UpsertTurn` 折叠出的 turn 行（`normalized_turns` 的投影源，按 turn_id upsert）。
     pub turns: Vec<TurnStateRecord>,
 }
@@ -368,6 +386,8 @@ enum FoldCommand {
     FlushEvents {
         session_id: String,
         events: Vec<TurnEvent>,
+        /// B239：与 `events` 平行的逐事件产生时刻（已按批首时间补齐）。
+        event_times_ms: Vec<u64>,
     },
     /// 全局元数据（无会话归属）：**不属于**会话状态，fold 中按 N/A 跳过。
     PublishMetadata,
@@ -397,6 +417,35 @@ fn optional_str(value: &Value, field: &str) -> Option<String> {
 
 fn optional_u64(value: &Value, field: &str) -> Option<u64> {
     value.get(field).and_then(Value::as_u64)
+}
+
+/// B239：把 `flush_events.eventTimes`（与 `events` 平行的 Unix ms 数组）解码成
+/// 逐事件 `created_at_ms`，并保证与事件数等长。
+///
+/// 回落规则（旧日志兼容，绝不伪造时间）：
+/// - 位置 `i` 有正数时间 ⇒ 用该事件真实产生时刻；
+/// - 缺位 / 0 ⇒ 用**批首时间**（本批第一个正数 `eventTimes`）；整键缺失的旧日志
+///   没有逐事件时间，批首时间退化为该日志行的 `ts`（该批的落盘时刻）。
+fn decode_event_times(value: &Value, events: &[TurnEvent], log_ts: i64) -> Vec<u64> {
+    let encoded: Vec<u64> = value
+        .get("eventTimes")
+        .and_then(Value::as_array)
+        .map(|array| array.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default();
+    let batch_head_ms = encoded
+        .iter()
+        .copied()
+        .find(|stamp| *stamp > 0)
+        .unwrap_or_else(|| u64::try_from(log_ts).unwrap_or(0));
+    (0..events.len())
+        .map(|index| {
+            encoded
+                .get(index)
+                .copied()
+                .filter(|stamp| *stamp > 0)
+                .unwrap_or(batch_head_ms)
+        })
+        .collect()
 }
 
 fn required_u64(value: &Value, seq: u64, kind: &str, field: &str) -> Result<u64, FoldError> {
@@ -571,10 +620,14 @@ impl FoldCommand {
             "remove_session" => Self::RemoveSession {
                 session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
             },
-            "flush_events" => Self::FlushEvents {
-                session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
-                events: payload(value, seq, kind, "events")?,
-            },
+            "flush_events" => {
+                let events: Vec<TurnEvent> = payload(value, seq, kind, "events")?;
+                Self::FlushEvents {
+                    session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
+                    event_times_ms: decode_event_times(value, &events, event.ts),
+                    events,
+                }
+            }
             "publish_metadata" => Self::PublishMetadata,
             other => {
                 return Err(FoldError::UnknownCommand {
@@ -640,6 +693,7 @@ struct Folder {
     branches: Vec<HistoryBranch>,
     cursor: Option<HistoryCursor>,
     event_rows: usize,
+    event_records: Vec<FoldedTurnEvent>,
     sequence: usize,
 }
 
@@ -854,10 +908,24 @@ impl Folder {
                 // D3 墓碑：fold 结果为「已删除」。删除是幂等的终态。
                 self.deleted = true;
             }
-            FoldCommand::FlushEvents { events, .. } => {
+            FoldCommand::FlushEvents {
+                events,
+                event_times_ms,
+                ..
+            } => {
                 // `turn_events` 是独立表的派生视图，不属于 `SessionState`；
-                // 这里只折叠计数（重建报告/校验用），不假装它是会话状态的一部分。
+                // 这里折叠计数 + 逐事件重建记录（`created_at_ms` 供日志重建复原
+                // C6.2 时间语义），不假装它是会话状态的一部分。
                 self.event_rows += events.len();
+                for (index, event) in events.into_iter().enumerate() {
+                    let created_at_ms = event_times_ms.get(index).copied().unwrap_or(0);
+                    let turn_id = event.turn_id().map(str::to_string).unwrap_or_default();
+                    self.event_records.push(FoldedTurnEvent {
+                        turn_id,
+                        event,
+                        created_at_ms,
+                    });
+                }
             }
             FoldCommand::PublishMetadata => {
                 // 全局元数据（key/value，无会话归属）不属于会话状态，也不该出现在
@@ -929,6 +997,7 @@ impl Folder {
             state: self.state.take().expect("state initialized above"),
             deleted: self.deleted,
             event_rows: self.event_rows,
+            event_records: self.event_records,
             turns: self.turns,
         })
     }
@@ -2897,4 +2966,5 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
 }
