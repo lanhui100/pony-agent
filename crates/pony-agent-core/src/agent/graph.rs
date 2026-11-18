@@ -1025,6 +1025,53 @@ impl GraphRunner {
         store.ask_waits.get(run_id).cloned().unwrap_or_default()
     }
 
+    /// 释放**非 Ask**（审批）挂起轮占用的 `active_turn_id`，让宿主能在**同一 run** 上续跑。
+    ///
+    /// 为什么需要：Ask 挂起由 [`Self::bind_ask_wait`] 收口（`WaitingUser` + ask wait + 清 active turn）；
+    /// 审批挂起没有 ask wait，若不释放，run 会停在 `Running` + `active_turn_id=Some(turn)`，
+    /// `prepare_continue_graph_run_stream` 会以「already has an active turn」拒绝 run-bound 续轮
+    /// ⇒ 宿主只能新起一轮（正是本次迁移要消除的语义）。
+    ///
+    /// 幂等且保守：仅当该 run 无未决 Ask wait **且** `active_turn_id` 恰为刚挂起的 turn 时才改写；
+    /// 其他形态原样返回（不夺别人的 run）。
+    pub fn suspend_for_host_decision(
+        &self,
+        store: &mut GraphRunStore,
+        run_id: &str,
+        turn_id: &str,
+        request_id: &str,
+    ) -> Result<GraphRun, String> {
+        let mut run = store
+            .load_run(run_id)
+            .ok_or_else(|| format!("Graph run `{run_id}` not found."))?;
+        if matches!(
+            run.phase,
+            GraphRunPhase::Completed | GraphRunPhase::Failed | GraphRunPhase::Cancelled
+        ) {
+            return Err(format!(
+                "Graph run `{run_id}` is terminal and cannot suspend for a host decision."
+            ));
+        }
+        if has_unresolved_ask_waits(store, run_id)
+            || run.active_turn_id.as_deref() != Some(turn_id)
+        {
+            return Ok(run);
+        }
+        run.phase = GraphRunPhase::WaitingUser;
+        run.active_turn_id = None;
+        run.stop_reason = None;
+        run.last_decision = Some(GraphDecision {
+            kind: GraphDecisionKind::WaitUser,
+            reason: GraphDecisionReason::TurnCompletedAwaitingUser,
+            summary: format!(
+                "Approval `{request_id}` awaits a host decision before run `{run_id}` resumes."
+            ),
+            target_phase: GraphRunPhase::WaitingUser,
+        });
+        run.updated_at_ms = now_timestamp_ms();
+        Ok(store.save_run(run))
+    }
+
     /// Resolve a bound Ask wait and return exactly one terminal tool result for the original
     /// `call_id`. The `expected_version` must match the version the binding was created with —
     /// a stale version (e.g. the version after the request was consumed) is rejected. On success

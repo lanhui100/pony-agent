@@ -22,6 +22,21 @@ use super::*;
 /// 新建 run 时的兜底 goal：`prepare_start_graph_run_stream` 对空 goal 直接 `Err`，绝不留空串。
 const ASK_AWARE_FALLBACK_GOAL: &str = "宿主流式轮次（Ask 可恢复）";
 
+/// run-bound 续跑的两种结局（[`HostControlPlane::continue_bound_graph_run_stream`] 的返回）。
+///
+/// `Executed` 携带整份单步结果，variant 尺寸差触 `large_enum_variant`；该 enum 只作为
+/// 调用栈上的瞬时返回（不长期持有、不批量存放），Box 会多一层间接而无可测收益，故显式豁免。
+#[expect(
+    clippy::large_enum_variant,
+    reason = "瞬时返回值：两个变体不批量存放，Box 只增加间接与分配"
+)]
+enum BoundContinuation {
+    /// prepare 成功并已执行单步；内层 `Err` = turn 已执行但收口失败（绝不重跑）。
+    Executed(Result<GraphRunTurnResponse, String>),
+    /// 指定 run 已不可续（不存在 / 终态 / 被占用 / 跨会话）：**没有**执行任何 turn。
+    NotContinuable(String),
+}
+
 impl HostControlPlane {
     /// C1：Ask 可感知的宿主流式轮入口（`start_turn_stream` 的实现体，签名与语义向后兼容）。
     ///
@@ -133,58 +148,42 @@ impl HostControlPlane {
         run_id: &str,
         command: StartTurnStreamCommand,
     ) -> Result<(), String> {
-        let session_id_for_flush = command
-            .input
-            .session_id
-            .clone()
-            .unwrap_or_else(|| crate::agent::session::DEFAULT_SESSION_ID.to_string());
         let turn_id = command.turn_id.clone();
-        let continue_command = ContinueGraphRunStreamCommand {
-            run_id: run_id.to_string(),
-            turn_id: turn_id.clone(),
-            input: command.input.clone(),
-        };
-        match self.prepare_continue_graph_run_stream(continue_command) {
-            Ok((_, prepared)) => {
-                let step = self.execute_graph_run_stream_step(sink, prepared);
-                let _ = crate::agent::turn_flow::flush_session_buffered_events(&session_id_for_flush);
-                match step {
-                    Ok(response) => {
-                        crate::agent::otel::log::log_json_with_fields(
-                            "debug",
-                            "ask-resume continuation finished on the bound run",
-                            None,
-                            &[
-                                ("run_id", serde_json::json!(run_id)),
-                                ("turn_id", serde_json::json!(turn_id)),
-                                (
-                                    "decision",
-                                    serde_json::json!(format!("{:?}", response.decision.kind)),
-                                ),
-                                (
-                                    "run_phase",
-                                    serde_json::json!(format!("{:?}", response.run.phase)),
-                                ),
-                            ],
-                        );
-                        Ok(())
-                    }
-                    Err(error) => {
-                        crate::agent::otel::log::log_json_with_fields(
-                            "error",
-                            "ask-resume continuation step failed after turn execution; not retried",
-                            None,
-                            &[
-                                ("run_id", serde_json::json!(run_id)),
-                                ("turn_id", serde_json::json!(turn_id)),
-                                ("error", serde_json::json!(error)),
-                            ],
-                        );
-                        Err(error)
-                    }
-                }
+        match self.continue_bound_graph_run_stream(sink, run_id, &command) {
+            BoundContinuation::Executed(Ok(response)) => {
+                crate::agent::otel::log::log_json_with_fields(
+                    "debug",
+                    "ask-resume continuation finished on the bound run",
+                    None,
+                    &[
+                        ("run_id", serde_json::json!(run_id)),
+                        ("turn_id", serde_json::json!(turn_id)),
+                        (
+                            "decision",
+                            serde_json::json!(format!("{:?}", response.decision.kind)),
+                        ),
+                        (
+                            "run_phase",
+                            serde_json::json!(format!("{:?}", response.run.phase)),
+                        ),
+                    ],
+                );
+                Ok(())
             }
-            Err(error) => {
+            BoundContinuation::Executed(Err(error)) => {
+                crate::agent::otel::log::log_json_with_fields(
+                    "error",
+                    "ask-resume continuation step failed after turn execution; not retried",
+                    None,
+                    &[
+                        ("run_id", serde_json::json!(run_id)),
+                        ("turn_id", serde_json::json!(turn_id)),
+                        ("error", serde_json::json!(error)),
+                    ],
+                );
+                Err(error)
+            }
+            BoundContinuation::NotContinuable(error) => {
                 crate::agent::otel::log::log_json_with_fields(
                     "warn",
                     "ask-resume bound run is no longer continuable; falling back to the generic ask-aware entry",
@@ -197,6 +196,108 @@ impl HostControlPlane {
                 );
                 self.start_ask_aware_turn_stream(sink, command)
             }
+        }
+    }
+
+    /// wave-65 C4（run-bound 迁移）：**审批**决策成功后的续轮，钉死在挂起时的同一 graph run 上。
+    ///
+    /// 与 [`Self::continue_ask_resume_turn_stream`] 同构（共用 [`Self::continue_bound_graph_run_stream`]
+    /// 的 prepare+step，不复制第二套图执行逻辑），但失败语义不同：Ask 在 run 不可续时回落到通用
+    /// 入口（答案另有注入通道），审批**没有**可回落的一次性注入 —— 新起 turn 会让「已批准」与
+    /// 挂起上下文脱钩（最多退化成再审批循环），因此这里 **fail-closed**：只留痕 + 回传错误，
+    /// **绝不** `start_ask_aware_turn_stream`。
+    ///
+    /// 出货路径（唯一调用者）：`crates/pony-agent-core/src/bin/tui.rs` 的
+    /// `UiEvent::ApprovalResumeTurn` 分支 —— 审批挂起快照的 `runId`（C3 投影）随事件携带到宿主。
+    pub fn continue_approval_resume_turn_stream<S: TurnEventSink>(
+        &self,
+        sink: &S,
+        run_id: &str,
+        command: &StartTurnStreamCommand,
+    ) -> Result<(), String> {
+        let turn_id = command.turn_id.clone();
+        match self.continue_bound_graph_run_stream(sink, run_id, command) {
+            BoundContinuation::Executed(Ok(response)) => {
+                crate::agent::otel::log::log_json_with_fields(
+                    "debug",
+                    "approval-resume continuation finished on the bound run",
+                    None,
+                    &[
+                        ("run_id", serde_json::json!(run_id)),
+                        ("turn_id", serde_json::json!(turn_id)),
+                        (
+                            "decision",
+                            serde_json::json!(format!("{:?}", response.decision.kind)),
+                        ),
+                        (
+                            "run_phase",
+                            serde_json::json!(format!("{:?}", response.run.phase)),
+                        ),
+                    ],
+                );
+                Ok(())
+            }
+            BoundContinuation::Executed(Err(error)) => {
+                crate::agent::otel::log::log_json_with_fields(
+                    "error",
+                    "approval-resume continuation step failed after turn execution; not retried",
+                    None,
+                    &[
+                        ("run_id", serde_json::json!(run_id)),
+                        ("turn_id", serde_json::json!(turn_id)),
+                        ("error", serde_json::json!(error)),
+                    ],
+                );
+                Err(error)
+            }
+            BoundContinuation::NotContinuable(error) => {
+                crate::agent::otel::log::log_json_with_fields(
+                    "error",
+                    "approval-resume bound run is no longer continuable; fail-closed without starting a new turn",
+                    None,
+                    &[
+                        ("run_id", serde_json::json!(run_id)),
+                        ("turn_id", serde_json::json!(turn_id)),
+                        ("error", serde_json::json!(error)),
+                        ("fallback", serde_json::json!(null)),
+                    ],
+                );
+                Err(format!(
+                    "审批续轮无法继续：绑定的执行上下文 run `{run_id}` 已不可续（{error}）；\
+                     为安全起见未新起轮次（fail-closed），请重新发起该操作。"
+                ))
+            }
+        }
+    }
+
+    /// run-bound 续跑的唯一图执行实现：在**指定 run** 上单步执行一轮，不挑 run、不新建 run。
+    ///
+    /// Ask 与审批两条续轮入口共用本函数（契约要求「复用 prepare+step，不复制第二套图执行逻辑」；
+    /// 两者差别只在调用方对 [`BoundContinuation`] 的处置）。`command.input` 按值传入准备命令，
+    /// 调用方仍持有 `command` 以便 Ask 回落分支复用。
+    fn continue_bound_graph_run_stream<S: TurnEventSink>(
+        &self,
+        sink: &S,
+        run_id: &str,
+        command: &StartTurnStreamCommand,
+    ) -> BoundContinuation {
+        let session_id_for_flush = command
+            .input
+            .session_id
+            .clone()
+            .unwrap_or_else(|| crate::agent::session::DEFAULT_SESSION_ID.to_string());
+        let continue_command = ContinueGraphRunStreamCommand {
+            run_id: run_id.to_string(),
+            turn_id: command.turn_id.clone(),
+            input: command.input.clone(),
+        };
+        match self.prepare_continue_graph_run_stream(continue_command) {
+            Ok((_, prepared)) => {
+                let step = self.execute_graph_run_stream_step(sink, prepared);
+                let _ = crate::agent::turn_flow::flush_session_buffered_events(&session_id_for_flush);
+                BoundContinuation::Executed(step)
+            }
+            Err(error) => BoundContinuation::NotContinuable(error),
         }
     }
 

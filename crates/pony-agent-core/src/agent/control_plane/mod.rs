@@ -1169,12 +1169,25 @@ impl HostControlPlaneBuilder {
                     &key,
                     event,
                     produced_at_ms,
-                    is_terminal,
+                    if is_terminal {
+                        event_buffer::EventKind::Terminal
+                    } else {
+                        event_buffer::EventKind::Delta
+                    },
                 );
                 if let Some(events) = flush_batch {
                     let committed = events.len();
-                    let success = flush_events(&sessions, &key.0, &key.1, events, true);
-                    event_buffer::finish_commit(&buffer, &key, committed, true, success);
+                    let success = flush_events(&sessions, &key.0, &key.1, events, BatchFinalize::Terminal);
+                    event_buffer::finish_commit(
+                        &buffer,
+                        &key,
+                        committed,
+                        if success {
+                            event_buffer::CommitOutcome::Committed { finalize: true }
+                        } else {
+                            event_buffer::CommitOutcome::Failed
+                        },
+                    );
                 }
             };
             // PA-095 #3：通道句柄保留在本控制面上（会话绑定路由用）。
@@ -1197,18 +1210,15 @@ impl HostControlPlaneBuilder {
                 if snapshots.is_empty() {
                     return Ok(0);
                 }
-                let mut sessions = match sessions_for_flush.try_write() {
-                    Ok(sessions) => sessions,
-                    Err(_) => {
-                        event_buffer::release_in_flight(
-                            &buffer_for_flush,
-                            snapshots.iter().map(|(key, _, _)| key),
-                        );
-                        return Err(
-                            "sessions write lock busy while flushing buffered events (called under lock?)"
-                                .to_string(),
-                        );
-                    }
+                let Ok(mut sessions) = sessions_for_flush.try_write() else {
+                    event_buffer::release_in_flight(
+                        &buffer_for_flush,
+                        snapshots.iter().map(|(key, _, _)| key),
+                    );
+                    return Err(
+                        "sessions write lock busy while flushing buffered events (called under lock?)"
+                            .to_string(),
+                    );
                 };
                 let mut committed = 0usize;
                 let total = snapshots.len();
@@ -1218,13 +1228,26 @@ impl HostControlPlaneBuilder {
                     let finalize = snapshots[index].2;
                     let len = events.len();
                     let success =
-                        commit_event_batch(&mut sessions, &key.0, &key.1, events, finalize);
+                        commit_event_batch(
+                            &mut sessions,
+                            &key.0,
+                            &key.1,
+                            events,
+                            if finalize {
+                                BatchFinalize::Terminal
+                            } else {
+                                BatchFinalize::Incremental
+                            },
+                        );
                     event_buffer::finish_commit(
                         &buffer_for_flush,
                         &key,
                         len,
-                        finalize,
-                        success,
+                        if success {
+                            event_buffer::CommitOutcome::Committed { finalize }
+                        } else {
+                            event_buffer::CommitOutcome::Failed
+                        },
                     );
                     if success {
                         committed += len;
@@ -1333,6 +1356,13 @@ pub(crate) fn now_event_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 批次收口类别（枚举替代 bool：`fn_params_excessive_bools` 是 0 容忍口径）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BatchFinalize {
+    Incremental,
+    Terminal,
+}
+
 /// PA-095 #2：单批事件提交核心（调用方已持 sessions 写锁）——persist 成功后
 /// 同步水位；返回是否提交成功。
 fn commit_event_batch(
@@ -1340,7 +1370,7 @@ fn commit_event_batch(
     session_id: &str,
     turn_id: &str,
     batch: Vec<BufferedTurnEvent>,
-    finalize: bool,
+    finalize: BatchFinalize,
 ) -> bool {
     if batch.is_empty() {
         return true;
@@ -1391,7 +1421,7 @@ fn commit_event_batch(
     // B239：只在**终态批**提交成功后 finalize 一次——调用点是本轮 `append_turn`
     // 之前的终态 flush（或终态事件尚未提交时的 drain）。step 边界增量 flush 若也
     // finalize，会把上一轮节点的事件区间在第一个 hop 处提前冻结。
-    if finalize {
+    if finalize == BatchFinalize::Terminal {
         sessions.finalize_event_watermark(session_id, turn_id);
     }
     // PA-095 #7（实施后审核 P2）：把本 turn 的 observation 引用附加到内存
@@ -1413,7 +1443,7 @@ fn flush_events(
     session_id: &str,
     turn_id: &str,
     batch: Vec<BufferedTurnEvent>,
-    finalize: bool,
+    finalize: BatchFinalize,
 ) -> bool {
     if batch.is_empty() {
         return true;
@@ -2056,12 +2086,55 @@ impl HostControlPlane {
                 input: next_input,
             };
 
-            let (_, next_prepared) = match self.prepare_continue_graph_run_stream(next_cmd) {
-                Ok(prep) => prep,
-                Err(_) => return Ok(response),
+            let Ok((_, next_prepared)) = self.prepare_continue_graph_run_stream(next_cmd) else {
+                return Ok(response);
             };
 
             prepared = next_prepared;
+        }
+    }
+
+
+    /// wave-65 C4（run-bound）：审批挂起没有 Ask wait，`bind_ask_wait` 不会清 active turn ⇒
+    /// 先把本轮从 run 上释放（同 run 可续），否则宿主续轮只能另起一轮。Ask 挂起有 wait，
+    /// 该调用在那种形态下是幂等 no-op（见 `GraphRunner::suspend_for_host_decision`）。
+    ///
+    /// 抽成独立方法：`execute_graph_run_stream_step` 已是规模门禁的存量超限函数，禁止再增长。
+    fn release_approval_suspension_turn(&self, prepared: &PreparedGraphRunStream) {
+        let Some(request_id) = self
+            .ask_dispatcher
+            .pending_requests()
+            .into_iter()
+            .find(|request| {
+                request.request_kind == PendingControlRequestKind::Approval
+                    && request.state == PendingControlRequestState::Pending
+                    && request.turn_id == prepared.turn_id
+            })
+            .map(|request| request.request_id)
+        else {
+            return;
+        };
+        let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
+            tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
+            e.into_inner()
+        });
+        if let Err(error) = self.graph_runner.suspend_for_host_decision(
+            &mut graph_runs,
+            &prepared.run_id,
+            &prepared.turn_id,
+            &request_id,
+        ) {
+            crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "approval suspension could not release the run's active turn; run-bound resume may be unavailable",
+                None,
+                &[
+                    ("run_id", serde_json::json!(prepared.run_id.as_str())),
+                    ("turn_id", serde_json::json!(prepared.turn_id.as_str())),
+                    ("request_id", serde_json::json!(request_id)),
+                    ("error", serde_json::json!(error)),
+                ],
+            );
         }
     }
 
@@ -2209,8 +2282,8 @@ impl HostControlPlane {
                 .as_deref()
                 .unwrap_or(crate::agent::session::DEFAULT_SESSION_ID),
         );
-
         if turn_result.phase == SUSPENDED_TURN_PHASE {
+            self.release_approval_suspension_turn(&prepared);
             // The run is already `WaitingUser` with a bound Ask wait (design.md Decision 5): the
             // runtime set it via `bind_ask_wait` before the turn returned. No turn-result
             // application may run while the wait is unresolved (`apply_turn_result` rejects it

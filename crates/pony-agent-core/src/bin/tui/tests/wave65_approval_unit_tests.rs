@@ -78,3 +78,52 @@ fn apply_approval_decision_without_pending_handle_returns_none() {
         "无句柄路径不得凭空造出一个待决句柄"
     );
 }
+
+/// C4（run-bound 迁移）：`run_id` 缺失时必须 fail-closed —— 不投递续轮事件（绝不静默回落
+/// 「新起一轮」），只上屏中文提示 + 结构化日志。
+#[test]
+fn dispatch_approval_resume_fails_closed_when_run_identity_is_missing() {
+    let mut state = TuiState::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    dispatch_approval_resume(&mut state, &tx, Some("（已批准，继续）".to_string()), None);
+
+    assert!(
+        rx.try_recv().is_err(),
+        "C4（run-bound）：run 身份缺失时**不得**投递 ApprovalResumeTurn（否则会静默新起一轮）"
+    );
+    assert!(
+        state
+            .status_notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("执行上下文")),
+        "C4（run-bound）：run 身份缺失必须上屏中文提示，实际 = {:?}",
+        state.status_notice
+    );
+    assert!(
+        state.messages.iter().any(|message| {
+            message.role == MessageRole::System && message.content.contains("执行上下文")
+        }),
+        "C4（run-bound）：run 身份缺失必须留下 System 消息（非静默），实际 = {:?}",
+        state.messages
+    );
+
+    // 有 run 身份 ⇒ 恰好一条续轮事件，且 run_id 原样携带。
+    dispatch_approval_resume(
+        &mut state,
+        &tx,
+        Some("（已批准，继续）".to_string()),
+        Some("run-approval-unit".to_string()),
+    );
+    match rx.try_recv().expect("有 run 身份时必须投递续轮事件") {
+        UiEvent::ApprovalResumeTurn { prompt, run_id } => {
+            assert_eq!(prompt, "（已批准，继续）");
+            assert_eq!(run_id, "run-approval-unit");
+        }
+        other => panic!("C4（run-bound）：必须投递 ApprovalResumeTurn，实际 = {other:?}"),
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "C4（run-bound）：一次决策只允许一条续轮事件"
+    );
+}

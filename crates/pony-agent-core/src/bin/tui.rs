@@ -301,10 +301,11 @@ pub enum UiEvent {
     /// wave-65 C4：审批（`Approval`）决策成功 ⇒ **需要续轮**。
     ///
     /// `prompt` = 宿主固定续轮文案（批准/拒绝两种常量，见 [`approval_continuation_prompt`]）。
-    /// 与 [`UiEvent::AskResumeTurn`] 不同：审批续轮没有 run 绑定，走普通宿主流式入口
-    /// （`start_ask_aware_turn_stream`），因此事件只带文案、不带 `run_id`。
+    /// `run_id` = 审批挂起时绑定的 graph run（C3 宿主投影的 `runId`）。续轮**钉死在这个 run 上**
+    /// （`continue_approval_resume_turn_stream`），不再重新挑选 run、也不再新起一轮；
+    /// `run_id` 缺失时**不投递本事件**（决策侧 fail-closed，绝不静默回落新轮）。
     /// 同样**不得** `add_user_message`：这不是用户发言，不能产生用户气泡。
-    ApprovalResumeTurn { prompt: String },
+    ApprovalResumeTurn { prompt: String, run_id: String },
     /// Plan 计划更新通知
     PlanUpdated(PlanState),
     /// 任务看板更新通知
@@ -8383,6 +8384,13 @@ const ASK_RESUME_CONTINUATION_PROMPT: &str =
 const ASK_RESUME_UNAVAILABLE_NOTICE: &str =
     "该提问缺少可恢复的执行上下文，本轮无法自动继续；请重新发起该操作（详情见 tui-runtime.log）。";
 
+/// wave-65 C4（run-bound）：审批决策已收口但**缺少 run 身份**时的可读提示。
+///
+/// fail-closed：没有 run 就没有可续跑的上下文；绝不静默回落「新起一轮」（那会让批准与挂起回合
+/// 脱钩，退化成再审批循环），也不静默停住。审批请求已由决策面收口 ⇒ 工具不会被放行（INV-1）。
+const APPROVAL_RESUME_UNAVAILABLE_NOTICE: &str =
+    "该审批缺少可恢复的执行上下文（run 身份缺失），本轮无法自动继续；工具未被放行，请重新发起该操作（详情见 tui-runtime.log）。";
+
 /// wave-65 C4：审批**批准**后的固定宿主续轮文案（常量，非用户输入）。
 ///
 /// 为什么必须非空：`runtime.prepare_turn` 的 `reject_empty` 会拒绝空 message。
@@ -8490,7 +8498,8 @@ fn approval_snapshot_hint(state: &TuiState) -> serde_json::Value {
 /// 契约 `.dev-team/contract-matrix-approval-resume.md` §2 C4（含 R2 修正）：决策逻辑抽成可测纯函数
 /// （真实 control plane 驱动），返回**续轮文案**。
 /// - `Some(prompt)` = 需要续轮（批准：`authorize_path(path,"read")` → `approve_control_request`；
-///   拒绝：`cancel_approval_request`），由调用方投递 `UiEvent::ApprovalResumeTurn { prompt }`；
+///   拒绝：`cancel_approval_request`），由调用方经 [`dispatch_approval_resume`] 投递
+///   `UiEvent::ApprovalResumeTurn { prompt, run_id }`（`run_id` 缺失 ⇒ fail-closed，不投递）；
 /// - `None` = 不需要/不能续轮（无审批句柄，或失败已上屏中文提示，绝不静默）。
 ///
 /// INV-1：批准**只**写 `read` 作用域路径授权（`store_metadata.path_authorizations.v1`），
@@ -8549,6 +8558,36 @@ pub fn apply_approval_decision(
         }
     }
     Some(plan.prompt.to_string())
+}
+
+/// wave-65 C4（run-bound）：把**已成功**的审批决策派发成续轮事件（按键分支的唯一出口）。
+///
+/// - `Some(run_id)` ⇒ 投递 [`UiEvent::ApprovalResumeTurn`]，续轮由事件循环钉死在该 run 上
+///   （[`HostControlPlane::continue_approval_resume_turn_stream`]）；
+/// - `None`（C3 投影缺 `runId`）⇒ **fail-closed**：不投递续轮事件（绝不静默回落新起一轮），
+///   上屏中文提示 + 结构化日志。决策面已收口 ⇒ 工具不会被放行执行（INV-1）。
+fn dispatch_approval_resume(
+    state: &mut TuiState,
+    tx: &Sender<UiEvent>,
+    prompt: Option<String>,
+    run_id: Option<String>,
+) {
+    let Some(prompt) = prompt else {
+        return;
+    };
+    if let Some(run_id) = run_id {
+        let _ = tx.send(UiEvent::ApprovalResumeTurn { prompt, run_id });
+    } else {
+        eprintln!(
+            "[pony-tui] approval_resume_unavailable: reason=no_run_identity (fail-closed, no new turn)"
+        );
+        state.set_status_notice(APPROVAL_RESUME_UNAVAILABLE_NOTICE.to_string());
+        state.messages.push(ChatMessage {
+            role: MessageRole::System,
+            content: APPROVAL_RESUME_UNAVAILABLE_NOTICE.to_string(),
+            timestamp_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+        });
+    }
 }
 
 /// F-12（C8/B3）：审批续轮的 `TurnInput` 组装（唯一生产口径，事件循环与单测共用同一符号）。
@@ -10325,11 +10364,19 @@ fn tui_event_loop(
                                         choice: PermissionChoice::Deny,
                                     });
                                 }
+                                let approval_run_id = state
+                                    .pending_request
+                                    .as_ref()
+                                    .filter(|handle| handle.is_approval)
+                                    .and_then(|handle| handle.run_id.clone());
                                 state.pending_request = None;
                                 state.cancel_permission_approval();
-                                if let Some(prompt) = approval_prompt {
-                                    let _ = tx.send(UiEvent::ApprovalResumeTurn { prompt });
-                                }
+                                dispatch_approval_resume(
+                                    &mut state,
+                                    &tx,
+                                    approval_prompt,
+                                    approval_run_id,
+                                );
                             }
                             KeyCode::Tab | KeyCode::Down => {
                                 if let Some(ref mut perm) = state.permission_state {
@@ -10356,11 +10403,19 @@ fn tui_event_loop(
                                         choice: PermissionChoice::AllowOnce,
                                     });
                                 }
+                                let approval_run_id = state
+                                    .pending_request
+                                    .as_ref()
+                                    .filter(|handle| handle.is_approval)
+                                    .and_then(|handle| handle.run_id.clone());
                                 state.pending_request = None;
                                 state.cancel_permission_approval();
-                                if let Some(prompt) = approval_prompt {
-                                    let _ = tx.send(UiEvent::ApprovalResumeTurn { prompt });
-                                }
+                                dispatch_approval_resume(
+                                    &mut state,
+                                    &tx,
+                                    approval_prompt,
+                                    approval_run_id,
+                                );
                             }
                             KeyCode::Enter => {
                                 let choice = state.permission_state.as_ref().map(|p| p.selected_choice()).unwrap_or(PermissionChoice::Deny);
@@ -10375,11 +10430,19 @@ fn tui_event_loop(
                                         choice,
                                     });
                                 }
+                                let approval_run_id = state
+                                    .pending_request
+                                    .as_ref()
+                                    .filter(|handle| handle.is_approval)
+                                    .and_then(|handle| handle.run_id.clone());
                                 state.pending_request = None;
                                 state.cancel_permission_approval();
-                                if let Some(prompt) = approval_prompt {
-                                    let _ = tx.send(UiEvent::ApprovalResumeTurn { prompt });
-                                }
+                                dispatch_approval_resume(
+                                    &mut state,
+                                    &tx,
+                                    approval_prompt,
+                                    approval_run_id,
+                                );
                             }
                             _ => {}
                         }
@@ -12351,14 +12414,14 @@ fn tui_event_loop(
                     );
                     dirty = true;
                 }
-                UiEvent::ApprovalResumeTurn { prompt } => {
+                UiEvent::ApprovalResumeTurn { prompt, run_id } => {
                     // wave-65 C4：审批决策成功后的续轮同样由**事件循环**发起（按键分支只投递
                     // 事件）。整套轮次线程基建与 `UiEvent::AskResumeTurn` 逐项对齐：
                     // begin_turn_usage / TuiTurnSink / TuiTurnSinkGuard / current_turn_id /
                     // turn_loop_in_flight / inflight_turns。
-                    // 与 Ask 续轮的两点**刻意的**差异（契约 §2 C4）：
-                    // ① `message` 与 `display_message` 用事件携带的固定宿主文案（批准/拒绝各一条）；
-                    // ② 审批续轮没有 run 绑定 ⇒ 走普通宿主流式入口 `start_ask_aware_turn_stream`。
+                    // run-bound（契约 §2 C4 迁移后）：续轮**钉死在审批挂起时的同一个 graph run**
+                    // 上（`continue_approval_resume_turn_stream`），不重新挑选 run、不新起一轮；
+                    // run 不可续时 fail-closed（RunErr ⇒ StreamFailed），绝不回落 `start_ask_aware_turn_stream`。
                     // **不** add_user_message：续轮提示不是用户发言，不得新增用户气泡。
                     state.begin_turn_usage();
                     state.status_notice = None;
@@ -12382,6 +12445,9 @@ fn tui_event_loop(
                     );
 
                     let turn_id_str = format!("turn-approval-resume-{}", uuid::Uuid::new_v4());
+                    // run-bound：续轮钉死在审批挂起时的 run 上（事件携带的 C3 投影 `runId`）。
+                    let resume_run_id = run_id.clone();
+                    let resume_run_for_turn = resume_run_id.clone();
                     // F-12（C9）：续轮自身再次挂起（链式：连续两个工作区外路径）时，必须有
                     // 本轮 pending 才能认领原指令 ⇒ 以本轮 turn_id 登记。
                     state.seed_pending_after_resume(&turn_id_str);
@@ -12429,15 +12495,22 @@ fn tui_event_loop(
                                 turn_id: turn_id_str,
                                 input: turn_input,
                             };
-                            turn_control_plane.start_ask_aware_turn_stream(sink.as_ref(), cmd)
+                            // run-bound：同 run 续跑；run 不可续 ⇒ Err（fail-closed，不新起轮次）。
+                            turn_control_plane.continue_approval_resume_turn_stream(
+                                sink.as_ref(),
+                                &resume_run_for_turn,
+                                &cmd,
+                            )
                         }));
                         // 与 Ask 续轮同纪律：panic 或「无终态」的 Err 都必须补发终态，否则
                         // `is_streaming` 永久为真，输入与排队派发彻底卡死。
                         let failure = match outcome {
                             Ok(Ok(())) => None,
-                            Ok(Err(error)) => Some(format!("审批续轮未产出终态: {error}")),
+                            Ok(Err(error)) => {
+                                Some(format!("审批续轮未产出终态（run={resume_run_id}）: {error}"))
+                            }
                             Err(payload) => Some(format!(
-                                "审批续轮线程 panic: {}",
+                                "审批续轮线程 panic（run={resume_run_id}）: {}",
                                 panic_payload_message(payload.as_ref())
                             )),
                         };
@@ -12454,8 +12527,8 @@ fn tui_event_loop(
                     drop(turns);
 
                     eprintln!(
-                        "[pony-tui] approval_resume_turn_started: turn={} session={}",
-                        turn_id_for_log, state.session_id
+                        "[pony-tui] approval_resume_turn_started: run={} turn={} session={}",
+                        run_id, turn_id_for_log, state.session_id
                     );
                     dirty = true;
                 }

@@ -70,21 +70,44 @@ store（`control_plane/ask_plan_commands.rs:27-62`），Approval 永远进不了
   `options.path`（新增 `PermissionRequest.approval_path: Option<String>` 字段承载；**禁止**用
   `command_or_path`——它在 options.path 缺失时回退 `callId`，会把 callId 当路径做 canonicalize 必败）。
 - 批准（`y` / Enter 的 `AllowOnce|AllowSession`）：`approval_path` 为 `Some` 时 `authorize_path(path,"read")` →
-  `approve_control_request` → 投递 `UiEvent::ApprovalResumeTurn { prompt }`；`approval_path` 为 `None`
+  `approve_control_request` → 投递 `UiEvent::ApprovalResumeTurn { prompt, run_id }`；`approval_path` 为 `None`
   时**跳过**授权直接 approve（R2：防无 path 审批被永久拒批）；失败上中文提示、不静默。
   顺序保持「先授权后 CAS」，R2 记录其已知代价（CAS 失败会残留一条 read 授权）为 ADVISORY/backlog F-3。
-- 拒绝（`n` / Esc）：`cancel_approval_request` → 投递 `UiEvent::ApprovalResumeTurn { prompt }`（拒绝文案）。
+- 拒绝（`n` / Esc）：`cancel_approval_request` → 投递 `UiEvent::ApprovalResumeTurn { prompt, run_id }`（拒绝文案）。
+- **B233 run-bound 迁移（Lead 已批准）**：续轮改为**同 run 续跑**，与 Ask 续轮同构：
+  - `run_id` = C3 审批投影的 `runId`（挂起时绑定的 graph run），随事件携带到 TUI；宿主经
+    `HostControlPlane::continue_approval_resume_turn_stream(sink, run_id, command)` 续轮，
+    该入口与 Ask 续轮**共用** `continue_bound_graph_run_stream`（prepare+step 唯一实现，无第二套图执行逻辑）。
+  - 续轮**不新起 graph run、不走通用入口**：run 身份不变；每次续跑仍是一次 run 内 turn（运行时按 turn
+    发 `turn:started`），但不再有「新起一轮（新 run）」的语义，也不再回落 `start_ask_aware_turn_stream`。
+  - `run_id` 缺失 ⇒ **fail-closed**：不投递续轮事件、上屏中文提示 + 结构化日志
+    `[pony-tui] approval_resume_unavailable: reason=no_run_identity`，绝不静默回落新轮；
+    run 不可续（不存在/终态/被占用/跨会话）⇒ 控制面记结构化日志并 `Err`，同样不新起轮次。
+  - 为让审批挂起轮可续，`execute_graph_run_stream_step` 在挂起分支调用
+    `GraphRunner::suspend_for_host_decision`（仅无 Ask wait 且 active turn 为本轮时释放）——
+    此前审批挂起会让 run 停在 `Running + active_turn_id=Some(...)`，续轮只能另起 run。
+  - 批准路径顺序不变（先 `authorize_path` 后 `approve_control_request`）；拒绝经 `cancel_control_request`
+    收口后同一 run 继续（工具仍绝不执行，INV-1）。
 - 续轮：`UiEvent::ApprovalResumeTurn` 复用 AskResumeTurn 的基建（`TuiTurnSink` + `turn_loop_in_flight`），
   固定宿主文案、不产生用户气泡；批准/拒绝文案分别为常量。
 - 决策逻辑抽成可测纯接缝 `apply_approval_decision(state, control_plane, choice) -> Option<String>`
-  （返回续轮文案），由 `tui.rs` 单测覆盖（真实 control plane + 内存 store）。
+  （返回续轮文案），由 `tui.rs` 单测覆盖（真实 control plane + 内存 store）；派发出口为
+  `dispatch_approval_resume(state, tx, prompt, run_id)`（run_id 缺失 fail-closed）。
 
 **C5 — 红相验收（Test Agent 唯一写）**
 `crates/pony-agent-core/tests/approval_resume_e2e.rs`（黑盒，mock provider TCP，照 `ask_resume_e2e.rs` 骨架）：
 - **T1**：能力开 + 工作区外 `Read` ⇒ `turn:suspended` 恰 1、`turn:failed` 恰 0；`list_pending_approvals(session)`
   恰 1 且带 `path`；provider 只被请求挂起前那次（不回灌 `control_outcome_pending`）。
-- **T2**：`authorize_path` + `approve_control_request` 后跑续轮 ⇒ 同一 `Read` 被放行（`Allow`），
-  续轮 `turn:completed` 恰 1，且续轮请求体不含 `control_outcome_pending`。
+- **T2（B233 run-bound 改锚；原断言「续轮 = 新一轮」与新语义冲突，故只改 T2）**：`authorize_path` +
+  `approve_control_request` 后经 `continue_approval_resume_turn_stream(sink, run_id, ..)` 在原 run 续跑 ⇒
+  ①审批快照 `runId` 即挂起 run；②续轮后 graph run 数量不变、run id 不变、`last_completed_turn_id` == 续轮
+  turn_id（同 run 续跑，不新起 run/轮次）；③同一 `Read` 被放行（探针正文作为 tool 结果回灌模型）、
+  续轮 `turn:completed` 恰 1、不新增 suspended/failed、请求体不含 `control_outcome_pending`。
+- **T5（B233 新增）**：`cancel_approval_request` 后经同一 run-bound 入口续跑 ⇒ 同一 run 收口
+  （run 数不变、run id 不变、`last_completed_turn_id` == 续轮 turn_id），轮次 completed 恰 1、
+  不新增 suspended/failed、越界工具结果绝不回灌（工具未执行）。
+- **T6（B233 新增，fail-closed）**：run 不可续（不存在）⇒ `continue_approval_resume_turn_stream` 必 `Err`
+  且错误含中文后果 + run id；**不得**新建 graph run、不得派发任何轮次事件（无静默回落新轮）。
 - **T3**：`cancel_approval_request` 后 `approve_control_request` 必 Err（CAS 未破）；拒绝后请求不在待决列表。
 - **T4**（INV-2）：能力关（默认）⇒ 终态 `turn:failed` 且 error 以 `approval_resume_unavailable` 开头，
   `turn:suspended` 恰 0。
@@ -113,3 +136,16 @@ store（`control_plane/ask_plan_commands.rs:27-62`），Approval 永远进不了
   C4 改用结构化 `options.path`（新增 `PermissionRequest.approval_path`）并恢复「审批优先展示」；C5 增补单元级判据与
   验收盲区登记；ADVISORY 全部转 `.dev-team/backlog-approval-resume-followups.md`。
 - 2026-11-06 Lead R3（第二轮审查后裁决）：审批成因派生改为 `decision_source`（禁止按实参 path 派生）；审批列表只列路径授权类；审批专属失效文案。同轮以 tmux 真机复验（工作区外 Read → 面板 → Enter 批准 → 授权落盘 → 续轮读成功；Esc 拒绝 → 续轮改道）。
+- 2026-11-18 B233（Lead 已批准契约迁移）：审批续轮由「新起一轮（`start_ask_aware_turn_stream`）」改为
+  **run-bound 同 run 续跑**（`HostControlPlane::continue_approval_resume_turn_stream`，与 Ask 续轮共用
+  `continue_bound_graph_run_stream` 的 prepare+step）；C3 的 `runId` 经 `UiEvent::ApprovalResumeTurn { prompt, run_id }`
+  携带到 TUI；`run_id` 缺失 fail-closed（中文提示 + `approval_resume_unavailable: reason=no_run_identity`
+  结构化日志，绝不静默新起轮）。C4 注明「续轮改 run-bound：同 run/turn，不再有新的 turn:start
+  （不新起 graph run、不走通用新轮入口；run 内续跑仍由运行时按 turn 发 turn:started）」。
+  C5 的 T2 改锚为 run-bound 断言（同一 run_id、run 数不变、`last_completed_turn_id` 对齐；T1/T3/T4 原样不动），
+  并新增 T5（拒绝→同一 run 继续）与 T6（run 不可续 fail-closed，禁止静默回落新轮）。T2 改锚理由：
+  旧 T2 的续轮经通用入口，断言隐含「另起一轮」；run-bound 后同一断言骨架保留，锚点换成 graph run 身份。
+  另修根因：审批挂起原先不释放 `active_turn_id`（run 停在 Running），`GraphRunner::suspend_for_host_decision`
+  在无 Ask wait 时释放，使同 run 续跑可成立（Ask 路径行为不变）。
+  B235/B238 不因本迁移改变：续轮仍以 `message`（`display_message=None`）落一条 user 行，
+  host 文案仍以 user 角色入历史（B235）、组合正文仍可能成为首条 user 行（B238）。

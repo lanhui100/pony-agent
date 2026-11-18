@@ -568,6 +568,44 @@ fn run_turn_until_approval_suspension(
     approvals[0].clone()
 }
 
+/// 挂起审批**必须**持有的 run 身份（C3 投影 `runId`）。缺失即 `{case}` 判据失败。
+fn require_run_id(request: &Value, case: &str) -> String {
+    request
+        .get("runId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            panic!(
+                "{case}：审批挂起快照必须携带真实 run 身份（`runId` 为字符串），否则无法 run-bound \
+                 续跑；实际 = {request}"
+            )
+        })
+}
+
+/// 夹具：经 **run-bound** 入口（`continue_approval_resume_turn_stream`，TUI 同款）在
+/// 指定 run 上跑续轮；`turn_id` 为本次续跑的 turn 标识。
+fn run_bound_approval_continuation_turn(
+    control_plane: &HostControlPlane,
+    sink: &RecordingSink,
+    session_id: &str,
+    run_id: &str,
+    turn_id: &str,
+    prompt: &str,
+    case: &str,
+) {
+    expect_ok(
+        control_plane.continue_approval_resume_turn_stream(
+            sink,
+            run_id,
+            &StartTurnStreamCommand {
+                turn_id: turn_id.to_string(),
+                input: test_turn_input(session_id, prompt),
+            },
+        ),
+        case,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // T1：能力开 + 工作区外 Read ⇒ 可恢复挂起 + 宿主可列出待决审批（C1 + C3）
 // ---------------------------------------------------------------------------
@@ -703,6 +741,19 @@ fn t2_approval_then_authorized_continuation_turn_completes_the_read() {
     );
     let request_id = json_str(&approval, "requestId", "T2");
     let version = json_u64(&approval, "version", "T2");
+    // C3 投影的 run 身份 ⇒ run-bound 续跑的锚点。
+    let run_id = require_run_id(&approval, "T2");
+    let runs_before = control_plane.list_graph_runs();
+    assert_eq!(
+        runs_before.len(),
+        1,
+        "T2 夹具自检：挂起后应只有一个 graph run，实际 = {:?}",
+        runs_before.iter().map(|run| run.id.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        runs_before[0].id, run_id,
+        "T2（C3/C4）：审批快照的 runId 必须就是挂起轮所在的 graph run"
+    );
     assert!(
         server.wait_request_count(1),
         "T2 夹具自检：挂起轮必须真实打到本地回环 provider"
@@ -731,17 +782,45 @@ fn t2_approval_then_authorized_continuation_turn_completes_the_read() {
         pending_approvals(&control_plane, session_id)
     );
 
-    // Act ②：固定宿主续轮文案跑续轮。
-    run_turn(
+    // Act ②：**run-bound** 续轮 —— 固定宿主续轮文案钉死在挂起时的同一 graph run 上。
+    run_bound_approval_continuation_turn(
         &control_plane,
         &sink,
         session_id,
+        &run_id,
         "turn-approval-e2e-t2-2",
         CONTINUATION_PROMPT,
-        "T2：续轮入口必须成功返回（不得把可续轮当成错误上抛）",
+        "T2（C4-runbound）：run-bound 续轮入口必须成功返回（不得把可续轮当成错误上抛）",
     );
 
-    // Assert ②：续轮产出**恰好一条** turn:completed，正文 == mock 最后一段文本。
+    // Assert ②：续轮仍落在**同一个 run** 上 —— 不新建 run、run 身份不变，且 run 的最后完成
+    // turn 就是本次续轮的 turn_id（证明这一轮真的跑在该 run 里，而不是「碰巧复用了最近 run」）。
+    let runs_after = control_plane.list_graph_runs();
+    assert_eq!(
+        runs_after.len(),
+        runs_before.len(),
+        "T2（C4-runbound）：run-bound 续轮**不得**新建 graph run（同 run 续跑），实际 = {:?}",
+        runs_after
+            .iter()
+            .map(|run| (run.id.clone(), run.phase.clone()))
+            .collect::<Vec<_>>()
+    );
+    let resumed_run = control_plane
+        .load_graph_run(pony_agent_core::agent::control_plane::GraphRunQuery {
+            run_id: Some(run_id.clone()),
+        })
+        .unwrap_or_else(|| panic!("T2（C4-runbound）：续轮后 run `{run_id}` 必须仍可读"));
+    assert_eq!(
+        resumed_run.id, run_id,
+        "T2（C4-runbound）：续轮后 run id 必须与挂起时一致"
+    );
+    assert_eq!(
+        resumed_run.last_completed_turn_id.as_deref(),
+        Some("turn-approval-e2e-t2-2"),
+        "T2（C4-runbound）：续轮的 turn 必须作为该 run 的最后完成 turn 落账（同 run 续跑），实际 run = {resumed_run:?}"
+    );
+
+    // Assert ③：续轮产出**恰好一条** turn:completed，正文 == mock 最后一段文本。
     let completed = sink.events_named("turn:completed");
     assert_eq!(
         completed.len(),
@@ -755,7 +834,7 @@ fn t2_approval_then_authorized_continuation_turn_completes_the_read() {
         "T2（C5）：turn:completed 的正文必须等于 mock 最后一段 assistant 文本（同一 Read 被放行后模型真的继续了）"
     );
 
-    // Assert ③：不新增 suspended / failed（挂起轮那 1 条 suspended 保留，failed 始终 0）。
+    // Assert ④：不新增 suspended / failed（挂起轮那 1 条 suspended 保留，failed 始终 0）。
     assert_eq!(
         sink.events_named("turn:suspended").len(),
         1,
@@ -769,7 +848,7 @@ fn t2_approval_then_authorized_continuation_turn_completes_the_read() {
         sink.names()
     );
 
-    // Assert ④：续轮真的打到 provider，且续轮的所有请求体都不含挂起标记字面串、
+    // Assert ⑤：续轮真的打到 provider，且续轮的所有请求体都不含挂起标记字面串、
     // 且至少有一次重新发起了同一越界 Read（放行后工具链路真的继续）。
     assert!(
         server.wait_request_count(2),
@@ -802,6 +881,15 @@ fn t2_approval_then_authorized_continuation_turn_completes_the_read() {
             .iter()
             .any(|body| body.contains(&outside_dir_marker)),
         "T2（C5）：续轮必须重新发起同一越界 Read（请求体必须包含 `{outside_dir_marker}`，路径 `{outside_path}`），实际 = {continuation_bodies:?}"
+    );
+    // INV-1 + C4-runbound：批准后的同一 run 续跑里，工具被放行执行，真实文件正文作为 tool 结果
+    // 回灌给模型（否则续轮只可能再次挂起，不会走到 completed）。
+    assert!(
+        continuation_bodies
+            .iter()
+            .any(|body| body.contains(PROBE_CONTENT.trim())),
+        "T2（INV-1/C4-runbound）：续轮必须把真实 Read 结果（探针正文 `{}`）回灌模型，证明工具在同一 run 内被授权放行",
+        PROBE_CONTENT.trim()
     );
 }
 
@@ -940,5 +1028,156 @@ fn t4_default_runtime_fails_closed_with_approval_resume_unavailable() {
         std::fs::read_to_string(&outside).expect("T4：探针文件必须仍可读"),
         PROBE_CONTENT,
         "T4（INV-1）：fail-closed 路径不得执行工具改动探针文件"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T5（run-bound 迁移新增）：拒绝 ⇒ 同一 run 继续（不新起 turn / run）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t5_denied_approval_continues_on_the_same_run_instead_of_starting_a_new_turn() {
+    let _serial = serial_guard();
+
+    // Arrange：mock 队列 = [Read(挂起), 文本(拒绝续轮换路)]。
+    let outside = outside_workspace_probe_file("t5");
+    let outside_path = outside.display().to_string();
+    let server = MockProviderServer::start(vec![
+        MockReply::ReadToolCall(outside_path),
+        MockReply::Text(CONTINUATION_TEXT.to_string()),
+    ]);
+    let workspace = isolated_workspace("t5");
+    let control_plane = control_plane_with_approval_resume(server.base_url.clone(), &workspace);
+    let sink = RecordingSink::new();
+    let session_id = "session-approval-e2e-t5";
+
+    let approval = run_turn_until_approval_suspension(
+        &control_plane,
+        &sink,
+        session_id,
+        "turn-approval-e2e-t5-1",
+        "T5",
+    );
+    let request_id = json_str(&approval, "requestId", "T5");
+    let version = json_u64(&approval, "version", "T5");
+    let run_id = require_run_id(&approval, "T5");
+    assert_eq!(
+        control_plane.list_graph_runs().len(),
+        1,
+        "T5 夹具自检：挂起后应只有一个 graph run"
+    );
+
+    // Act ①：拒绝（C3 宿主拒绝面）—— 工具绝不执行（INV-1）。
+    expect_ok(
+        control_plane.cancel_approval_request(&request_id, version),
+        "T5（C3）：cancel_approval_request 必须以当前版本成功拒绝",
+    );
+    assert!(
+        pending_approvals(&control_plane, session_id).is_empty(),
+        "T5（C3）：拒绝后该审批不得停留在待决列表"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("T5：探针文件必须仍可读"),
+        PROBE_CONTENT,
+        "T5（INV-1）：拒绝路径不得执行越界工具"
+    );
+
+    // Act ②：拒绝后经 **run-bound** 入口在同一 run 上继续（模型换路）。
+    run_bound_approval_continuation_turn(
+        &control_plane,
+        &sink,
+        session_id,
+        &run_id,
+        "turn-approval-e2e-t5-2",
+        CONTINUATION_PROMPT,
+        "T5（C4-runbound）：拒绝后的 run-bound 续轮入口必须成功返回",
+    );
+
+    // Assert ①：同一 run 续跑 —— 不新建 run，续轮的 turn 作为该 run 的最后完成 turn。
+    let runs = control_plane.list_graph_runs();
+    assert_eq!(
+        runs.len(),
+        1,
+        "T5（C4-runbound）：拒绝后续轮**不得**新建 graph run，实际 = {:?}",
+        runs.iter().map(|run| run.id.clone()).collect::<Vec<_>>()
+    );
+    assert_eq!(runs[0].id, run_id, "T5（C4-runbound）：续轮后 run id 必须不变");
+    assert_eq!(
+        runs[0].last_completed_turn_id.as_deref(),
+        Some("turn-approval-e2e-t5-2"),
+        "T5（C4-runbound）：续轮的 turn 必须落在挂起时的同一 run 上，实际 run = {:?}",
+        runs[0]
+    );
+
+    // Assert ②：续轮以恰好一条 completed 收口，不新增 suspended/failed。
+    assert_eq!(
+        sink.events_named("turn:completed").len(),
+        1,
+        "T5：拒绝后续轮必须产出恰好一条 turn:completed，实际事件序列 = {:?}",
+        sink.names()
+    );
+    assert_eq!(
+        sink.events_named("turn:suspended").len(),
+        1,
+        "T5：拒绝后续轮不得新增 turn:suspended（总数仍是挂起轮那 1 条），实际事件序列 = {:?}",
+        sink.names()
+    );
+    assert_eq!(
+        sink.events_named("turn:failed").len(),
+        0,
+        "T5：拒绝后续轮不得派生 turn:failed，实际事件序列 = {:?}",
+        sink.names()
+    );
+    // 拒绝后工具仍绝不执行（探针内容从未被读取到模型面）。
+    assert!(
+        server
+            .bodies_from(1)
+            .iter()
+            .all(|body| !body.contains(PROBE_CONTENT.trim())),
+        "T5（INV-1）：拒绝后续轮不得把越界工具结果回灌模型，实际 = {:?}",
+        server.bodies_from(1)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T6（run-bound 迁移新增）：run 不可续 ⇒ fail-closed，绝不静默回落「新起一轮」
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t6_approval_continuation_fails_closed_when_the_bound_run_is_not_continuable() {
+    let _serial = serial_guard();
+
+    // Arrange：没有任何 graph run 的控制面（run_id 指向不存在的 run）。
+    let workspace = isolated_workspace("t6");
+    let control_plane = control_plane_with_approval_resume("http://127.0.0.1:1/v1".to_string(), &workspace);
+    let sink = RecordingSink::new();
+
+    // Act：run-bound 续轮钉在不存在的 run 上。
+    let result = control_plane.continue_approval_resume_turn_stream(
+        &sink,
+        "run-approval-e2e-t6-missing",
+        &StartTurnStreamCommand {
+            turn_id: "turn-approval-e2e-t6-1".to_string(),
+            input: test_turn_input("session-approval-e2e-t6", CONTINUATION_PROMPT),
+        },
+    );
+
+    // Assert ①：必须 Err（可读中文原因），不得静默当作成功。
+    let error = expect_err(result, "T6（fail-closed）：run 不可续时审批续轮必须 Err");
+    assert!(
+        error.contains("审批续轮无法继续") && error.contains("run-approval-e2e-t6-missing"),
+        "T6（fail-closed）：错误必须指明不可续的 run 与中文后果，实际 = {error:?}"
+    );
+
+    // Assert ②：绝不回落通用入口 —— 不得新建 run、不得派发任何轮次事件。
+    assert!(
+        control_plane.list_graph_runs().is_empty(),
+        "T6（fail-closed）：run 不可续时不得新起 graph run（无静默回落），实际 = {:?}",
+        control_plane.list_graph_runs()
+    );
+    assert!(
+        sink.names().is_empty(),
+        "T6（fail-closed）：run 不可续时不得派发任何轮次事件，实际 = {:?}",
+        sink.names()
     );
 }
