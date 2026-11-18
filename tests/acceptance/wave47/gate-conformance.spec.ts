@@ -204,14 +204,20 @@ describe("wave47 D1 声明批准语义（仓库内引擎）", () => {
     }
   });
 
-  it("D1-c: 先批准再追加未批准改动 → 拦截（不可搭便车）", () => {
-    const dir = fixtureWithBase();
-    try {
-      commitDecl(dir, "docs: approved [decl-change-approved]");
-      commitDecl(dir, "docs: sneaky unapproved");
-      expect(runGate(dir).code).toBe(2);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  // B248：该用例含多次真实 git 子进程；Windows runner 首次 git 调用可能 >5s（CI 实测超时）。
+  // 显式给 30s 预算（不改变断言口径，只放宽执行时限）。
+  it(
+    "D1-c: 先批准再追加未批准改动 → 拦截（不可搭便车）",
+    () => {
+      const dir = fixtureWithBase();
+      try {
+        commitDecl(dir, "docs: approved [decl-change-approved]");
+        commitDecl(dir, "docs: sneaky unapproved");
+        expect(runGate(dir).code).toBe(2);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 });
