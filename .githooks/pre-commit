@@ -6,10 +6,9 @@ fi
 # <<< ponygo-gate: adr-verify v1 <<<
 # L1 pre-commit：秒级预算——暂存卫生 + 决策记录校验。不跑类型/测试/构建。
 # 决策记录门由上文 ponygo-gate (adr-verify.sh) 统一真源保障（校验 .agents/notes/）。
-# 暂存卫生与版本 bump 仍只在 Windows（pwsh）侧生效。
-if command -v pwsh >/dev/null 2>&1; then
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/../scripts/git-guard.ps1" pre-commit || exit $?
-fi
+# 暂存卫生改由 scripts/git-guard.mjs 无条件执行：旧实现在 pwsh 缺席时整段静默跳过，
+# Linux 工作区等于没有这条门（ADR 2026-11-18-multi-session-git-contract 已收口）。
+node "$(git rev-parse --show-toplevel)/scripts/git-guard.mjs" pre-commit || exit $?
 
 # L1 追加：backlog 账本门（lint + doctor 对账，统一实现见 .meta/gates/backlog-gate.sh）。
 # 放在 ponygo-gate 哨兵块之外——判据 2.4 要求 BEGIN..END 段逐字节等于规范块，块内新增会被 init 抹掉。

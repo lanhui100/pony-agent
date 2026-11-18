@@ -1,5 +1,16 @@
 #!/bin/sh
-# L2 pre-push：十秒级预算——只跑增量类型检查。
+# L2 pre-push：十秒级预算——推送纪律 + 增量类型检查。
+# 纪律检查（保护分支 / 历史改写 / 分支命名）必须排在 typecheck 之前：
+# git 把待推送 refs 从 stdin 交给钩子，git-guard 要先把它读完。
+node "$(git rev-parse --show-toplevel)/scripts/git-guard.mjs" pre-push || exit $?
+
 # 卫生检查已在 pre-commit 执行；穷举矩阵与平台矩阵归 CI，此处不重复。
+# worktree 首次使用时可能还没有 node_modules：显式跳过并给出建链命令，
+# 不静默、也不阻断推送（类型检查由 CI 的 verify job 兜底）。
+if [ ! -d "$(git rev-parse --show-toplevel)/node_modules" ]; then
+  echo "[pre-push] 本工作区无 node_modules，跳过增量类型检查（CI verify 仍会执行）。"
+  echo "[pre-push] 需要本地反馈时建软链：ln -s ~/pony-agent/node_modules \"$(git rev-parse --show-toplevel)/node_modules\""
+  exit 0
+fi
 npm run typecheck
 exit $?

@@ -1,0 +1,4 @@
+#!/bin/sh
+# L2 commit-msg：提交信息规范（Conventional Commits）。
+# 只锁 type 前缀，不要求 scope / backlog 编号——后者会逼迫为琐碎改动伪造卡片。
+node "$(git rev-parse --show-toplevel)/scripts/git-guard.mjs" commit-msg "$1" || exit $?

@@ -121,10 +121,40 @@ execSync(`git commit -m "chore(release): bump version to ${tauriVer}"`, { stdio:
 execSync(`git tag ${tagName}`, { stdio: "inherit", cwd: repoRoot });
 console.log(`[bump-version] Created git commit and tag ${tagName}`);
 
+// ADR 2026-11-18-multi-session-git-contract：main 已受保护，发版不再直推 main。
+// 版本 bump 提交必须经 PR 合并（人工点 Merge），本脚本只负责把 tag 推到远端触发 release workflow。
 if (pushAfter) {
-  console.log(`[bump-version] Pushing main and tags to origin...`);
-  execSync("git push origin main --tags", { stdio: "inherit", cwd: repoRoot });
-  console.log(`[bump-version] Release push completed.`);
+  try {
+    execSync("git fetch origin main --quiet", { stdio: "inherit", cwd: repoRoot });
+  } catch {
+    console.warn("[bump-version] WARN: git fetch origin main 失败，跳过「是否已合并」校验。");
+  }
+
+  let mergedIntoMain = true;
+  try {
+    execSync("git merge-base --is-ancestor HEAD origin/main", { stdio: "ignore", cwd: repoRoot });
+  } catch {
+    mergedIntoMain = false;
+  }
+
+  if (!mergedIntoMain) {
+    console.error("");
+    console.error("[bump-version] 拒绝推送 tag：当前 HEAD 尚未进入 origin/main。");
+    console.error("  main 受保护（禁止直推），版本 bump 必须走 PR：");
+    console.error("    1. git switch -c chore/release-v<version> main   # 若已在特性分支可跳过");
+    console.error("    2. npm run release                              # 本地 bump + commit + tag");
+    console.error("    3. git push -u origin <branch> && gh pr create");
+    console.error("    4. 人工用 merge commit（不要 squash）合并，保证 tag 指向 main 历史");
+    console.error("    5. npm run release:push                         # 只推 tag，触发发布");
+    console.error("");
+    process.exit(1);
+  }
+
+  console.log(`[bump-version] Pushing tag ${tagName} only (main is protected)...`);
+  execSync(`git push origin ${tagName}`, { stdio: "inherit", cwd: repoRoot });
+  console.log(`[bump-version] Tag ${tagName} pushed. Release workflow builds from the tag.`);
 } else {
-  console.log(`[bump-version] NOTE: Run 'git push origin main --tags' to trigger GitHub release build, or pass --push.`);
+  console.log(
+    `[bump-version] NOTE: tag ${tagName} 已本地创建。main 受保护，请先把 bump 提交经 PR 合并，再 'npm run release:push' 只推 tag。`
+  );
 }
