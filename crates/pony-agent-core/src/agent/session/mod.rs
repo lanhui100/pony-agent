@@ -21,6 +21,8 @@ mod history_materialize;
 // ADR 0099 阶段 3-B：存量会话日志回填（grandfather 转正，方案 A）。
 pub mod log_migrate;
 mod store;
+// B201：标题 provider 事实读取（独立文件，避免撑大 store.rs 棘轮）。
+mod provider_facts;
 mod transcript_sanitize;
 // 启动装载期的有界修复（空壳会话派生字段保护 + trace 投影缓存预算）。
 pub(crate) mod startup_repair;

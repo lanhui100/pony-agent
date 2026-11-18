@@ -949,7 +949,9 @@ impl ProviderRegistryStore {
         let provider = storage
             .providers
             .iter()
-            .find(|item| Some(item.id.as_str()) == provider_id)
+            .find(|item| {
+                Some(item.id.as_str()) == provider_id || Some(item.name.as_str()) == provider_id
+            })
             .or_else(|| {
                 storage
                     .selected_provider_id
@@ -962,7 +964,11 @@ impl ProviderRegistryStore {
         let model = provider
             .models
             .iter()
-            .find(|item| Some(item.id.as_str()) == model_id)
+            .find(|item| {
+                Some(item.id.as_str()) == model_id
+                    || Some(item.model.as_str()) == model_id
+                    || Some(item.name.as_str()) == model_id
+            })
             .or_else(|| {
                 provider
                     .selected_model_id

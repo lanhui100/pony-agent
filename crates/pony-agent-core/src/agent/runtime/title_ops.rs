@@ -8,6 +8,7 @@
 //
 // 标题来源（`TitleSource`）三线并存：用户改名（title_override）> AI（ai_title）> 派生（title）。
 // 本模块只写 `ai_title`（并经 `SessionStore::set_ai_title` 镜像到冻结基准 `title`）。
+use super::AgentRuntime;
 use crate::agent::provider::{
     ProviderManager, ProviderMessage, ProviderRequest, ProviderRequestObservation,
     ProviderStreamGuard,
@@ -36,6 +37,23 @@ const TITLE_CONTEXT_MAX_MESSAGES: usize = 8;
 const TITLE_CONTEXT_MESSAGE_CHARS: usize = 600;
 /// AI 标题字符上限（比派生标题的 28 更宽松，留给「动作+对象」表达；仍受 store 的 64 校验约束）。
 pub const AI_TITLE_MAX_CHARS: usize = 40;
+
+impl AgentRuntime {
+    /// 标题生成用的 provider（优先遵循给定 provider/model，缺省回落默认 selection）。
+    pub(crate) fn title_provider(
+        &self,
+        provider_id: Option<&str>,
+        model_id: Option<&str>,
+    ) -> ProviderManager {
+        let selection = self
+            .provider_resolver
+            .resolve_provider_selection(provider_id, model_id);
+        let chain = self.provider_resolver.resolve_failover_chain(&selection);
+        ProviderManager::new(selection)
+            .with_policy(self.provider_resolver.upstream_policy())
+            .with_failover(crate::agent::provider::ProviderFailoverChain::new(chain))
+    }
+}
 
 /// AI 标题生成结果（前端 / Tauri 序列化契约，camelCase）。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
