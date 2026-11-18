@@ -1368,12 +1368,90 @@ pub fn install_retry_observer(observer: RetryObserver) -> RetryObserverGuard {
 /// 派发一次「即将重试」通知（未安装观察者 ⇒ 静默 no-op）。
 ///
 /// 观察者必须**非阻塞**（生产实现只往 channel 里 `send`），否则会拖慢退避调度。
+///
+/// B214：除实时观察者外，同一事实还会写进会话事件流（`llm/retry`）——观察者缺失
+/// （CLI / 桌面宿主未装）不应让重试事实消失，故两条通路各自独立、互不依赖。
 pub fn notify_provider_retry(notice: &RetryNotice) {
     RETRY_OBSERVER.with(|slot| {
         if let Some(observer) = slot.borrow().as_ref() {
             observer(notice);
         }
     });
+    persist_provider_retry_event(notice);
+}
+
+// ── B214：重试事实的**持久化**出口（会话事件流 `llm/retry`） ─────────────────
+//
+// 缺陷：实时进度只经上面的 thread_local 观察者投给宿主（TUI 的 `UiEvent::ProviderRetry`），
+// 进程内一次性、不跨界面、重启即丢；`turn_events` 里没有重试事实。
+//
+// 为什么仍是 thread_local：与 `RETRY_OBSERVER` 完全同一前提——一次 turn（含其 provider
+// 重试）在同一线程同步执行，而重试循环位于库层深处、拿不到 turn 层的 sink。故由
+// runtime 在 turn 入口安装 **(session_id, turn_id)** 上下文，重试循环只读它，把事件交给
+// **既有** turn 事件缓冲（`turn_flow::emit_turn_scoped_event` → `EventPersistFn`），
+// 不新增第二套持久化通道；产生时刻由该通道的 `event_times_ms` 语义逐事件落盘。
+//
+// 未安装上下文（单元测试、第三方直接调用 provider、线程外调用）⇒ 静默 no-op。
+
+/// 当前轮次线程的 turn 归属（持久化重试事件所需的最小事实）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RetryEventContext {
+    session_id: String,
+    turn_id: String,
+}
+
+thread_local! {
+    static RETRY_EVENT_CONTEXT: RefCell<Option<RetryEventContext>> =
+        const { RefCell::new(None) };
+}
+
+/// 上下文守卫：生命周期 = 本轮 turn；`drop` 恢复安装前的上下文（支持嵌套 turn）。
+#[derive(Debug)]
+pub struct RetryEventContextGuard {
+    previous: Option<RetryEventContext>,
+}
+
+/// 在当前轮次线程安装 turn 归属（`session_id` 缺失时留空，由事件通道归一到默认会话）。
+pub fn install_retry_event_context(
+    session_id: Option<&str>,
+    turn_id: &str,
+) -> RetryEventContextGuard {
+    let previous = RETRY_EVENT_CONTEXT.with(|slot| {
+        slot.borrow_mut().replace(RetryEventContext {
+            session_id: session_id.unwrap_or("").to_string(),
+            turn_id: turn_id.to_string(),
+        })
+    });
+    RetryEventContextGuard { previous }
+}
+
+impl Drop for RetryEventContextGuard {
+    fn drop(&mut self) {
+        RETRY_EVENT_CONTEXT.with(|slot| {
+            *slot.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+/// 把「即将重试」写成 `llm/retry` 事件（未安装 turn 上下文 ⇒ no-op）。
+fn persist_provider_retry_event(notice: &RetryNotice) {
+    let context = RETRY_EVENT_CONTEXT.with(|slot| slot.borrow().clone());
+    let Some(context) = context else {
+        return;
+    };
+    crate::agent::turn_flow::emit_turn_scoped_event(
+        &context.session_id,
+        &context.turn_id,
+        crate::agent::turn_event::TurnEvent::LlmRetry {
+            turn_id: context.turn_id.clone(),
+            request: notice.label.clone(),
+            scope: notice.scope.to_string(),
+            failure_code: notice.error_class.clone(),
+            retry: notice.attempt,
+            max_attempts: notice.max_attempts,
+            delay_ms: notice.delay_ms,
+        },
+    );
 }
 
 /// 「即将重试」通知的装配器：绑定 provider 调用名与作用域，供重试循环逐次派发。
@@ -2571,5 +2649,83 @@ mod tests {
         // 判据未被削弱：真正的原因文本码仍必须命中。
         assert!(policy.classify("HTTP 502 Bad Gateway").is_retryable());
         assert!(policy.classify("HTTP 429 Too Many Requests").is_retryable());
+    }
+
+    /// B214：一次真实重试必须同时写进会话事件流（`llm/retry`），字段与实时通道同源；
+    /// 未安装 turn 上下文（线程外/第三方直调）⇒ 静默 no-op，不伪造归属。
+    #[test]
+    fn retry_notice_persists_llm_retry_event_with_turn_context() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::agent::turn_event::TurnEvent;
+
+        let session_id = "b214-retry-persist";
+        let turn_id = "b214-turn";
+        let captured: Arc<Mutex<Vec<TurnEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_captured = Arc::clone(&captured);
+        let _binding = crate::agent::turn_flow::bind_event_persist_session(
+            session_id,
+            Arc::new(
+                move |sid: &str, _tid: &str, event: TurnEvent, _terminal: bool| {
+                    if sid == session_id {
+                        sink_captured
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .push(event);
+                    }
+                },
+            ),
+        );
+        let notice = RetryNotice {
+            label: "decision_stream".to_string(),
+            scope: "decision",
+            attempt: 2,
+            max_attempts: 5,
+            delay_ms: 3_000,
+            error_class: "rate_limited".to_string(),
+        };
+
+        // 未安装上下文：事件流不得出现无归属的重试事件。
+        notify_provider_retry(&notice);
+        assert!(
+            captured
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "无 turn 上下文时不得写事件"
+        );
+
+        {
+            let _ctx = install_retry_event_context(Some(session_id), turn_id);
+            notify_provider_retry(&notice);
+        }
+        // 守卫 Drop 后恢复：后续通知不再落盘。
+        notify_provider_retry(&notice);
+
+        let events = captured
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(events.len(), 1, "只记录真实重试，实际 = {events:?}");
+        match &events[0] {
+            TurnEvent::LlmRetry {
+                turn_id: event_turn,
+                request,
+                scope,
+                failure_code,
+                retry,
+                max_attempts,
+                delay_ms,
+            } => {
+                assert_eq!(event_turn, turn_id);
+                assert_eq!(request, "decision_stream");
+                assert_eq!(scope, "decision");
+                assert_eq!(failure_code, "rate_limited");
+                assert_eq!(*retry, 2, "分子 = 已失败次数");
+                assert_eq!(*max_attempts, 5, "分母 = 尝试总数（含首次）");
+                assert_eq!(*delay_ms, 3_000);
+            }
+            other => panic!("必须投影为 llm/retry，实际 = {other:?}"),
+        }
     }
 }

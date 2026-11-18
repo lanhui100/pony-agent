@@ -10,7 +10,6 @@ use super::turn_control::claim_failed_terminal;
 /// 仅在本模块内用作标记（绝不下发到宿主表面，也不进入任何落库字段）。
 const STREAM_CANCELLED_HANDLED_SENTINEL: &str = "__wave64_stream_cancelled_handled__";
 
-
 /// L1（dsh 对齐）：取消轮的 native transcript 片段——**只在已闭合的工具往返存在时**生成。
 ///
 /// 取消轮没有 `assistant/message`，此前只能靠「文本检查点」把过程清单当成 assistant
@@ -1704,13 +1703,13 @@ impl AgentRuntime {
         // Wave43 task-8 挂载切片：turn root span（agent.turn）在流式轮唯一顶层入口创建，
         // 函数返回时 Drop 自动结束 span，覆盖整轮生命周期（含同步执行的工具子轮）。
         // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
-        let turn_sequence = self.session_turn_sequence(input.session_id.as_deref());
+        let (turn_seq, _retry_ctx) = self.enter_turn(input.session_id.as_deref(), &turn_id);
         let turn_started_at = Instant::now(); // P5：与 `agent.turn` span 同点起算（旧实现实测差 35.4s）
         // W3 trace：队友/子代理 runtime 继承宿主 traceparent（宿主 runtime 为 `None` ⇒ root）。
         let mut otel_turn_scope = crate::agent::otel::begin_turn_trace_with_parent(
             input.session_id.as_deref().unwrap_or(""),
             &turn_id,
-            turn_sequence,
+            turn_seq,
             self.parent_traceparent.as_deref(),
         );
         // T2-1：流式 turn 的 session/run/turn 事实在本 turn 内部解析，并随每次工具调用

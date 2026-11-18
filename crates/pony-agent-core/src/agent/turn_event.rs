@@ -249,6 +249,40 @@ pub enum TurnEvent {
         error_message: String,
         raw_snippet: String,
     },
+    /// B214：provider 请求重试（`llm/retry`）——「即将重试」的真实事实落进会话事件流。
+    ///
+    /// 为什么需要它：实时进度此前只经 `agent::retry` 的 thread_local 观察者投给宿主
+    /// （`UiEvent::ProviderRetry`），进程内一次性、不跨界面、重启即丢；排障只能翻运行日志。
+    /// 本事件与 DSH 的 `llm/retry` 对齐，把客户端投影「正在重试模型请求（`retry`/`max_attempts`）·
+    /// `delay_ms`」所需的字段一次写全。
+    ///
+    /// 契约（additive）：
+    /// - 只在**真实发生**的重试时写（`RetryDecision::Retry` 分支、sleep 之前），不伪造进度；
+    /// - `retry` = 已失败尝试次数（1 起，即「第几次重试」）；
+    /// - `max_attempts` = 本跳允许的**尝试总数（含首次）**——分母与实时通道同源，
+    ///   客户端直接显示 `retry/max_attempts`，无需自行 +1；
+    /// - `failure_code` 取自 `retry::classify_error_class` 的冻结取值；不落上游错误正文
+    ///   （正文含端点/响应片段，无投影价值且属受控内容）。
+    ///
+    /// 事件名与 payload `type` 同为 `llm/retry`（与既有 snake_case tag 的差异是本事件
+    /// 的显式契约：DSH 同名事件，便于跨端对齐）。
+    #[serde(rename = "llm/retry")]
+    LlmRetry {
+        turn_id: String,
+        /// provider 调用名（`decision` / `decision_stream` / `followup` …），与 provider_log 同源。
+        request: String,
+        /// 重试作用域（`decision` / `followup`）。
+        scope: String,
+        /// 失败分类（`retry::classify_error_class`：timeout / rate_limited / quota /
+        /// network / auth / bad_request / other）。
+        failure_code: String,
+        /// 已失败尝试次数（1 起）——即「第 retry 次重试」。
+        retry: u32,
+        /// 本跳允许的尝试总数（含首次）——客户端直接作分母。
+        max_attempts: u32,
+        /// 本次退避将 sleep 的毫秒数（尚未执行）。
+        delay_ms: u64,
+    },
     /// F1：**轮级速度口径结算**（每轮终态一条，可离线取证）。
     ///
     /// 为什么需要它：`turnSpeedBasis` / speed 此前只走线缆与（401 全丢的）OTel，
@@ -333,6 +367,7 @@ impl TurnEvent {
             TurnEvent::ForkCreated { .. } => "fork/created",
             TurnEvent::ContextObservation { .. } => "context/observation",
             TurnEvent::CorruptedEventTombstone { .. } => "corrupted/tombstone",
+            TurnEvent::LlmRetry { .. } => "llm/retry",
             TurnEvent::TurnSpeed { .. } => "turn/speed",
         }
     }
@@ -350,6 +385,7 @@ impl TurnEvent {
             | TurnEvent::ToolCall { turn_id, .. }
             | TurnEvent::ToolResult { turn_id, .. }
             | TurnEvent::ProviderUsage { turn_id, .. }
+            | TurnEvent::LlmRetry { turn_id, .. }
             | TurnEvent::TurnSpeed { turn_id, .. }
             | TurnEvent::ContextObservation { turn_id, .. } => Some(turn_id),
             TurnEvent::CorruptedEventTombstone { turn_id, .. } => turn_id.as_deref(),
@@ -501,6 +537,15 @@ mod tests {
                 observation: None,
                 observation_ref: Some("bco:t1:3".into()),
             },
+            TurnEvent::LlmRetry {
+                turn_id: "t1".into(),
+                request: "decision".into(),
+                scope: "decision".into(),
+                failure_code: "rate_limited".into(),
+                retry: 2,
+                max_attempts: 5,
+                delay_ms: 3_000,
+            },
         ];
         for event in &events {
             let json = serde_json::to_string(event).expect("serialize");
@@ -547,6 +592,34 @@ mod tests {
     #[test]
     fn schema_version_is_stable() {
         assert_eq!(EVENT_SCHEMA_VERSION, 1);
+    }
+
+    /// B214：`llm/retry` 的事件名与字段是客户端投影契约（DSH 同名事件）：
+    /// `retry`/`max_attempts` 直接给出「2/5」，`delay_ms` 给出退避秒数。
+    #[test]
+    fn llm_retry_event_exposes_projection_contract() {
+        let event = TurnEvent::LlmRetry {
+            turn_id: "t-retry".into(),
+            request: "followup_stream".into(),
+            scope: "followup".into(),
+            failure_code: "rate_limited".into(),
+            retry: 2,
+            max_attempts: 5,
+            delay_ms: 3_000,
+        };
+        assert_eq!(event.type_name(), "llm/retry");
+        assert_eq!(event.turn_id(), Some("t-retry"));
+        let json = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(json["type"], "llm/retry", "payload tag 与事件名一致");
+        assert_eq!(json["retry"], 2);
+        assert_eq!(json["max_attempts"], 5);
+        assert_eq!(json["delay_ms"], 3_000);
+        assert_eq!(json["failure_code"], "rate_limited");
+        let decoded: TurnEvent = serde_json::from_value(json).expect("deserialize");
+        assert!(matches!(
+            decoded,
+            TurnEvent::LlmRetry { retry: 2, max_attempts: 5, delay_ms: 3_000, .. }
+        ));
     }
 
     #[test]

@@ -581,6 +581,22 @@ impl AgentRuntime {
         self.graph.contract_version()
     }
 
+    /// turn 入口的共用登记：本轮会话轮次序号（ADR 0055 P0-3 的 `agent.turn` span 序号），
+    /// 以及 B214 的 `(session_id, turn_id)` 上下文——后者供库层深处的 provider 重试循环把
+    /// `llm/retry` 写回**既有** turn 事件缓冲（不新增第二套持久化通道）。
+    ///
+    /// 前提与 `agent::retry::install_retry_observer` 完全相同：一次 turn（含其 provider 重试）
+    /// 在同一线程同步执行。返回的守卫必须活到本轮结束（绑定到本轮作用域），
+    /// 嵌套 turn（子代理/兜底）由守卫 Drop 恢复上一层上下文。
+    pub(crate) fn enter_turn(
+        &self,
+        session_id: Option<&str>,
+        turn_id: &str,
+    ) -> (u64, crate::agent::retry::RetryEventContextGuard) {
+        let sequence = self.session_turn_sequence(session_id);
+        let context = crate::agent::retry::install_retry_event_context(session_id, turn_id);
+        (sequence, context)
+    }
 }
 
 #[cfg(test)]

@@ -56,6 +56,20 @@ pub fn emit_global_event(
     }
 }
 
+/// B214：turn 作用域的过程事实（非终态）——与 turn 事件共用同一条 buffered 通道、
+/// 同一条归一规则（匿名会话归默认会话）与测试多播面。
+///
+/// 与 [`emit_global_event`] 的唯一区别是走 `dispatch_event_persist`：空 `session_id`
+/// 归一为默认会话（与 turn 事件一致），测试可用 `bind_event_persist_session` 定向观察。
+/// 生产路径仍是同一个 `EventPersistFn`——不新增第二套持久化通道。
+pub fn emit_turn_scoped_event(
+    session_id: &str,
+    turn_id: &str,
+    event: crate::agent::turn_event::TurnEvent,
+) {
+    dispatch_event_persist(session_id, turn_id, event, false);
+}
+
 /// 当前注册的持久化通道（None = 未注册，事件不落盘）。
 fn current_event_persist() -> Option<Arc<EventPersistFn>> {
     event_persist_registry()

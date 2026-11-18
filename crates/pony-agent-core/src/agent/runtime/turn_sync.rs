@@ -695,14 +695,14 @@ impl AgentRuntime {
         // PA-095：同步入口事件 turn_id 一次性计算——started/failed/completed 全路径
         // 复用同一 id，保证"每个 turn:started 必有配对 turn:end"的配对不变式。
         let sync_turn_id = Self::sync_turn_event_id(&input);
+        let (turn_seq, _retry_ctx) = self.enter_turn(input.session_id.as_deref(), &sync_turn_id);
         // Wave43 task-8：turn root span（agent.turn）在入口创建、函数返回时 Drop 结束，覆盖同步轮全部终态出口。
         // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
-        let sync_turn_sequence = self.session_turn_sequence(input.session_id.as_deref());
         // W3 trace：队友/子代理 runtime 继承宿主 traceparent（宿主 runtime 为 `None` ⇒ root）。
         let mut otel_turn_scope = crate::agent::otel::begin_turn_trace_with_parent(
             input.session_id.as_deref().unwrap_or(""),
             &sync_turn_id,
-            sync_turn_sequence,
+            turn_seq,
             self.parent_traceparent.as_deref(),
         );
         // Wave-7 B003（同步入口同构）：**turn 启动前**的用量治理判定（一次性、fail-open）。

@@ -44,7 +44,7 @@ mod turn_flow_registry;
 // 公开 API 逐项 re-export：既有 `turn_flow::<fn>` 寻址契约一字不变。
 pub use self::turn_flow_registry::{
     clear_event_flush, clear_event_persist, emit_global_event, flush_session_buffered_events,
-    register_event_flush, register_event_persist, EventFlushFn,
+    emit_turn_scoped_event, register_event_flush, register_event_persist, EventFlushFn,
 };
 // 测试专用绑定/多播 sink 与守卫：沿用原 `#[cfg(test)]` 门，不对外暴露。
 #[cfg(test)]

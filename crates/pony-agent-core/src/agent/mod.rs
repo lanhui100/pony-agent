@@ -57,6 +57,7 @@ pub mod projection;
 pub mod provider;
 pub mod recovery;
 pub mod retry;
+pub mod retry_projection;
 pub mod runtime;
 pub mod runtime_helper;
 pub mod sandbox;
