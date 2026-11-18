@@ -1266,6 +1266,8 @@ fn build_turn_end_event(
         reason: completed_turn_end_reason(payload.fallback_reason.as_deref()),
         turn_duration_ms: payload.turn_duration_ms,
         error: None,
+        stop_reason: None,
+        failure_code: None,
     })
 }
 
@@ -1394,6 +1396,10 @@ fn build_turn_event(
             // B1：失败原因随事件落盘——事件重投影据此产与写路径同源的检查点文本
             // （此前 error 在事件层被丢弃，重启重建的文本永久缺「失败原因」行）。
             error: payload.error.clone(),
+            // 失败轮没有「停止原因」（停止原因属取消轮）。
+            stop_reason: None,
+            // P2-6：失败语义码（稳定枚举值，读取端不再靠子串猜）。
+            failure_code: failure_code_of(payload.error.as_deref()),
         }),
         "turn:cancelled" => Some(TurnEvent::TurnEnd {
             turn_id: payload.turn_id.clone(),
@@ -1401,6 +1407,10 @@ fn build_turn_event(
             turn_duration_ms: payload.turn_duration_ms,
             // 取消轮无失败原因（cancel 的 error 是停止原因，不是失败归因）。
             error: None,
+            // P2-6：`turn:cancelled` 的载荷已带该轮 checkpoint 的 `stopReason`
+            // （wave-60 C3）⇒ 原样落盘，读取端据此区分人工停止 / 看门狗 / 钩子 / 级联。
+            stop_reason: payload.stop_reason.clone(),
+            failure_code: None,
         }),
         "turn:tool" => build_tool_event(payload),
         _ => None,
@@ -1560,6 +1570,17 @@ pub fn token_usage_parts(
     }
 }
 
+/// provider 结果是否构成**本轮失败**（唯一判据）。
+///
+/// P0-3（实测 pa_01a1e908 / pa_01a1e928）：缺陷不是「兜底轮被当成失败」，而是
+/// **兜底轮被当成 `completed`**——用户看到的就是「毫无征兆地停在中途」。修法落在终态派生
+/// （`turn_event::completed_turn_end_reason`：非空 `fallback_reason` ⇒ `Interrupted`，
+/// 可重试/可续跑）与 UI 可重试提示上，**不**在此处把兜底判成失败轮：
+/// 改成 `turn:failed` 会让本轮已完成的 hook / capability / 工具事实在失败收口处提前 return
+/// （实测打破 `*_hook_trace*`、`governed_*`、`start_turn_stream_preserves_*` 等 7 个运行时用例），
+/// 代价大于收益。
+///
+/// 因此 `fallback` 仍返回 `None`（不判失败）；`mock` 保持原语义（测试替身失败即失败）。
 pub fn provider_failure_message(
     provider_mode: &str,
     fallback_reason: Option<&str>,
@@ -1571,8 +1592,22 @@ pub fn provider_failure_message(
                 .to_string(),
         );
     }
-
     None
+}
+
+/// P2-6：失败语义码（唯一取值出口 [`crate::agent::retry::classify_error_class`]）。
+///
+/// `None` = 无失败原因 / 空串；分类码为 `other`（码表未命中）时**也返回 `None`**——
+/// 「未知」不该伪装成一个稳定码，读取端按「不可重试 + 展示原文」处理。
+pub fn failure_code_of(error: Option<&str>) -> Option<String> {
+    let error = error?.trim();
+    if error.is_empty() {
+        return None;
+    }
+    match crate::agent::retry::classify_error_class(error) {
+        "other" => None,
+        code => Some(code.to_string()),
+    }
 }
 
 /// wave-acp-delegate C6.1：**step 边界增量落盘**。

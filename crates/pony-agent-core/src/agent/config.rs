@@ -76,6 +76,13 @@ pub const UPSTREAM_RETRY_BUDGET_MS_MAX: u64 = 300_000;
 /// sleep 合计仅 47.5s，180s 内可跑满 10 次尝试。即：次数上调对快失败完全生效，
 /// 对慢超时仍由墙钟护栏收口（这正是 PA-174 F2 的立法本意）。
 pub const UPSTREAM_AGGREGATE_DEADLINE_MS_MAX: u64 = 180_000;
+/// P0-2：单次 attempt 的**最小可用**超时（毫秒）。
+///
+/// 低于此值的 attempt 物理上不可能成功（实测模型 p50 4.67s、网关 p50 2.2s，且正常请求
+/// 1.76s 起步），发出去只是在聚合预算里再啃掉一段。实测现场：45s×5 次把 180s 预算吃光后，
+/// 末次 attempt 拿到 6.4s（必超时）甚至 0ms（`no request sent`，连 HTTP 都没发）。
+/// 故：剩余预算 < 本常量 ⇒ **不排这次 attempt**，立即用最后一次真实错误收口。
+pub const UPSTREAM_MIN_USABLE_ATTEMPT_TIMEOUT_MS: u64 = 5_000;
 /// PA-172 §2.3 C2-c：显式候选链的长度上限（超出截断并 `warn failover_candidate_ignored`）。
 pub const FAILOVER_CHAIN_MAX_LEN: usize = 8;
 
@@ -135,6 +142,36 @@ where
         "retryBudgetMs",
         default_retry_budget_ms(),
     ))
+}
+
+/// P1-4：`retry_mode` 的容错反序列化（`normal` / `always`，大小写与空白容忍）。
+///
+/// 与其余策略字段同一条纪律：畸形值只回落默认并落 warn，绝不让一个新键拖垮整个
+/// `providers.json`（整文件解析失败会顶替用户全部 provider 配置）。
+fn de_retry_mode_lenient<'de, D>(
+    deserializer: D,
+) -> Result<crate::agent::retry::RetryMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use crate::agent::retry::RetryMode;
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    Ok(match &value {
+        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "normal" => RetryMode::Normal,
+            "always" => RetryMode::Always,
+            _ => {
+                warn_upstream_policy_invalid_value("retryMode", &value);
+                RetryMode::Normal
+            }
+        },
+        // `null` 视为缺省（与 `#[serde(default)]` 同义，不告警）。
+        serde_json::Value::Null => RetryMode::Normal,
+        _ => {
+            warn_upstream_policy_invalid_value("retryMode", &value);
+            RetryMode::Normal
+        }
+    })
 }
 
 fn de_u32_lenient<'de, D>(deserializer: D) -> Result<u32, D::Error>
@@ -440,6 +477,12 @@ pub struct UpstreamPolicy {
         deserialize_with = "de_retry_budget_ms_lenient"
     )]
     pub retry_budget_ms: u64,
+    /// P1-4：重试档位（`normal` 缺省 = 有界重试；`always` = 无界重试直到成功/取消）。
+    ///
+    /// 容错反序列化：未知/畸形值回落 `normal` 并落 warn（不得因一个新键拖垮整个
+    /// `providers.json`）。
+    #[serde(default, deserialize_with = "de_retry_mode_lenient")]
+    pub retry_mode: crate::agent::retry::RetryMode,
 }
 
 impl Default for UpstreamPolicy {
@@ -448,6 +491,7 @@ impl Default for UpstreamPolicy {
             request_timeout_ms: default_request_timeout_ms(),
             decision_max_attempts: default_decision_max_attempts(),
             retry_budget_ms: default_retry_budget_ms(),
+            retry_mode: crate::agent::retry::RetryMode::Normal,
         }
     }
 }
@@ -465,6 +509,11 @@ impl UpstreamPolicy {
     /// `retry_budget_ms` 是 sleep-only 预算。
     pub fn short_backoff_config(&self) -> BackoffConfig {
         BackoffConfig {
+            // 次数**不**按预算钳制（刻意保留）：`decision_max_attempts` 是「快失败」（429/5xx/
+            // 连接重置，单次数百毫秒）的耐心预算，510s 的「次数 × 超时」病态慢路径由跨 attempt
+            // 聚合 deadline（180s）+ `effective_attempt_timeout_ms` 的最小可用闸门收口。
+            // 若在此按 `budget / timeout` 钳制，默认 10 次会被压成 4 次，快失败重试能力被误伤
+            // （实测：`retry_loop_reports_real_progress_to_observer` 等契约断言 10 次）。
             max_retries: self.decision_max_attempts.saturating_sub(1),
             initial_delay_ms: SHORT_BACKOFF_INITIAL_DELAY_MS,
             multiplier: SHORT_BACKOFF_MULTIPLIER,
@@ -473,6 +522,26 @@ impl UpstreamPolicy {
             jitter_kind: JitterKind::None,
         }
     }
+
+    /// P0-2：聚合预算**跑满整次数**的上限（观测出口，**不参与调度**）。
+    ///
+    /// 缺陷现场（pa_01a1e908 / pa_01a1e928）：`45s × 5 + 30s` 超过
+    /// [`UPSTREAM_AGGREGATE_DEADLINE_MS_MAX`] 后，聚合 deadline 会在第 4/5 次 attempt 前
+    /// 被吃光——`effective_attempt_timeout_ms` 于是给出 6.4s（必超时）甚至 0ms（连 HTTP
+    /// 都不发）。真正的收口点是那里的「最小可用」闸门；本函数只让 `config effective`
+    /// 能把「按当前预算，整预算能跑几次」说清楚，避免把 10 次报成「一定跑得完」。
+    pub fn sync_affordable_attempts(&self) -> u32 {
+        let budget = aggregate_sync_call_budget_ms(self);
+        let per_attempt = self
+            .request_timeout_ms
+            .max(UPSTREAM_MIN_USABLE_ATTEMPT_TIMEOUT_MS);
+        let affordable = budget / per_attempt.max(1);
+        affordable
+            .clamp(1, u64::from(self.decision_max_attempts))
+            .try_into()
+            .unwrap_or(1)
+    }
+
 }
 
 impl UpstreamPolicy {
@@ -515,6 +584,7 @@ impl UpstreamPolicy {
                 request_timeout_ms,
                 decision_max_attempts,
                 retry_budget_ms,
+                retry_mode: self.retry_mode,
             },
             fields,
         )
@@ -637,6 +707,7 @@ pub fn upstream_policy_report(
             "request_timeout_ms": policy.request_timeout_ms,
             "decision_max_attempts": policy.decision_max_attempts,
             "retry_budget_ms": policy.retry_budget_ms,
+            "retry_mode": policy.retry_mode,
         })
     };
     serde_json::json!({
@@ -645,6 +716,9 @@ pub fn upstream_policy_report(
         "clamped_fields": clamped_fields,
         "aggregate_budget_ms": aggregate_budget_ms,
         "per_attempt_effective_timeout_ms": per_attempt_effective_timeout_ms,
+        // P0-2：聚合预算内**真正可用**的尝试次数（次数随预算联动钳制）。缺这一项时，
+        // `decision_max_attempts: 5` 会被报成「生效 5 次」，而实际第 5 次连 HTTP 都发不出。
+        "affordable_attempts": effective.sync_affordable_attempts(),
     })
 }
 
@@ -669,6 +743,9 @@ struct UpstreamPolicyStorage {
         deserialize_with = "de_retry_budget_ms_lenient"
     )]
     retry_budget_ms: u64,
+    /// P1-4：存储层 `retry_mode`（snake_case；视图层 `retryMode`）。
+    #[serde(default, deserialize_with = "de_retry_mode_lenient")]
+    retry_mode: crate::agent::retry::RetryMode,
 }
 
 /// ⚠ 手写而非 `derive(Default)`（L3-A/L3-P B1）：`#[serde(default)]` 对**缺键**走的是
@@ -682,6 +759,7 @@ impl Default for UpstreamPolicyStorage {
             request_timeout_ms: UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT,
             decision_max_attempts: UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT,
             retry_budget_ms: UPSTREAM_RETRY_BUDGET_MS_DEFAULT,
+            retry_mode: crate::agent::retry::RetryMode::Normal,
         }
     }
 }
@@ -692,6 +770,7 @@ impl From<UpstreamPolicy> for UpstreamPolicyStorage {
             request_timeout_ms: policy.request_timeout_ms,
             decision_max_attempts: policy.decision_max_attempts,
             retry_budget_ms: policy.retry_budget_ms,
+            retry_mode: policy.retry_mode,
         }
     }
 }
@@ -702,6 +781,7 @@ impl From<UpstreamPolicyStorage> for UpstreamPolicy {
             request_timeout_ms: storage.request_timeout_ms,
             decision_max_attempts: storage.decision_max_attempts,
             retry_budget_ms: storage.retry_budget_ms,
+            retry_mode: storage.retry_mode,
         }
     }
 }

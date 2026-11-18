@@ -432,6 +432,7 @@ fn extreme_values_are_clamped_on_effective_path_not_persisted() {
         request_timeout_ms: u64::MAX,
         decision_max_attempts: u32::MAX,
         retry_budget_ms: u64::MAX,
+        retry_mode: Default::default(),
     }
     .clamped();
     assert_eq!(
@@ -459,6 +460,7 @@ fn extreme_values_are_clamped_on_effective_path_not_persisted() {
         request_timeout_ms: 0,
         decision_max_attempts: 0,
         retry_budget_ms: 0,
+        retry_mode: Default::default(),
     }
     .clamped();
     assert_eq!(floor.0.request_timeout_ms, UPSTREAM_REQUEST_TIMEOUT_MS_MIN);

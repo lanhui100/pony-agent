@@ -947,6 +947,19 @@ impl ProviderManager {
         let remaining_ms = deadline
             .saturating_duration_since(Instant::now())
             .as_millis() as u64;
+        // P0-2：剩余预算不足**最小可用超时** ⇒ 返回 0（调用方立即收口、0 次 HTTP），
+        // 而不是发一个注定超时的秒级请求（实测 6.4s / 0ms 两种自伤终态）。
+        //
+        // 闸门按配置自适应：`min(全局最小可用值, request_timeout_ms)`。原因：全局 5s 是
+        // 「真实上游 p50 4.67s」的物理下界，而测试替身/本地假服务会把单次超时配到 1s——
+        // 用全局值兜底会把这类**合法的小超时配置**整体判死（0 次 HTTP），既弄坏换手契约，
+        // 也不是本项要修的缺陷。取 `min` 后：45s 配置下末次 6.4s 仍会被拒（低于 5s 才拒），
+        // 1s 配置下 1s 预算仍可正常发一次 attempt。
+        let min_usable_ms = crate::agent::config::UPSTREAM_MIN_USABLE_ATTEMPT_TIMEOUT_MS
+            .min(self.policy.request_timeout_ms);
+        if remaining_ms < min_usable_ms {
+            return 0;
+        }
         crate::agent::retry::failover_attempt_timeout_ms(
             self.policy.request_timeout_ms,
             remaining_ms,
@@ -3738,9 +3751,27 @@ pub fn should_bypass_proxy(base_url: &str) -> bool {
     }
 }
 
-fn build_http_client(timeout: Duration, endpoint: &str) -> Result<Client, String> {
+/// P0-1：同步请求的建连预算上限（毫秒），与流式路径同口径。
+const SYNC_CONNECT_TIMEOUT_MS: u64 = 15_000;
+
+/// 同步请求的 HTTP 客户端（**与 [`build_streaming_http_client`] 同口径**）。
+///
+/// 缺陷（实测 pa_01a1e908 / pa_01a1e928）：旧实现用 `.timeout(idle_timeout)`——那是
+/// 「整个请求含读完响应体」的**总时限**，与流式路径（15s 建连 + 180s 读空闲）两套口径。
+/// 上游一慢，同步 followup 必被总时限砍掉；每次 attempt 都吃满时限 ⇒ 把跨 attempt
+/// 聚合预算吃光，末次 attempt 只剩 6.4s/0ms（`no request sent` 的自伤终态）。
+///
+/// 现在只用两类预算：
+/// - `connect_timeout`：建连预算（`min(idle_timeout, 15s)`），连不上立刻失败；
+/// - `read_timeout`：**单次读空闲**预算——只要还有字节持续到达就不会被累计时长杀掉。
+///
+/// 墙钟护栏仍在：跨 attempt 聚合 deadline（`aggregate_sync_call_budget_ms`）由
+/// `effective_attempt_timeout_ms` 逐 attempt 收紧，本函数不承担总时限语义。
+fn build_http_client(idle_timeout: Duration, endpoint: &str) -> Result<Client, String> {
+    let connect_timeout = idle_timeout.min(Duration::from_millis(SYNC_CONNECT_TIMEOUT_MS));
     let builder = Client::builder()
-        .timeout(timeout)
+        .connect_timeout(connect_timeout)
+        .read_timeout(idle_timeout)
         .http1_only()
         .pool_max_idle_per_host(0);
     client_for_endpoint(builder, endpoint)
@@ -5622,6 +5653,7 @@ where
         label,
         ProviderRetryScope::Decision,
         policy.short_backoff_config(),
+        policy.retry_mode,
         operation,
         &StdThreadSleeper,
         None,
@@ -5668,6 +5700,7 @@ where
         label,
         ProviderRetryScope::Decision,
         policy.short_backoff_config(),
+        policy.retry_mode,
         operation,
         &DeadlineSleeper { deadline },
         None,
@@ -5691,6 +5724,7 @@ where
         label,
         ProviderRetryScope::Followup,
         policy.short_backoff_config(),
+        policy.retry_mode,
         operation,
         &DeadlineSleeper { deadline },
         None,
@@ -5715,6 +5749,7 @@ where
         label,
         ProviderRetryScope::Followup,
         policy.short_backoff_config(),
+        policy.retry_mode,
         operation,
         &StdThreadSleeper,
         Some(no_more_retries_hint),
@@ -5736,6 +5771,7 @@ where
         label,
         scope,
         provider_timeout_backoff_config(),
+        crate::agent::retry::RetryMode::Normal,
         operation,
         sleeper,
         no_retry_hint,
@@ -5747,6 +5783,7 @@ fn retry_provider_scoped_with_sleeper_and_config<T, F>(
     label: &str,
     scope: ProviderRetryScope,
     config: BackoffConfig,
+    mode: crate::agent::retry::RetryMode,
     operation: F,
     sleeper: &dyn Sleeper,
     no_retry_hint: Option<&dyn Fn() -> bool>,
@@ -5759,6 +5796,7 @@ where
         label,
         scope,
         config,
+        mode,
         operation,
         sleeper,
         no_retry_hint,
@@ -5787,6 +5825,7 @@ where
         label,
         scope,
         provider_timeout_backoff_config(),
+        crate::agent::retry::RetryMode::Normal,
         operation,
         sleeper,
         no_retry_hint,
@@ -5798,6 +5837,7 @@ fn retry_provider_scoped_with_report_config<T, F>(
     label: &str,
     scope: ProviderRetryScope,
     base_config: BackoffConfig,
+    mode: crate::agent::retry::RetryMode,
     mut operation: F,
     sleeper: &dyn Sleeper,
     no_retry_hint: Option<&dyn Fn() -> bool>,
@@ -5822,7 +5862,7 @@ where
             exhausted_reason: budget.exhausted_reason(),
         }
     };
-    let policy = ProviderRetryPolicy::new(base_config);
+    let policy = ProviderRetryPolicy::new(base_config).with_mode(mode);
     let mut budget = RetryBudget::new(base_config.max_retries, base_config.total_budget_ms);
     let mut active_config = base_config;
     let mut rl_active = false;
@@ -5861,6 +5901,12 @@ where
             slept_ms += slept;
             // F2：退避 sleep 属「成功 attempt 之前」耗时，逐次记账（未开账本 ⇒ no-op）。
             crate::agent::retry::note_provider_attempt_backoff_slept(slept);
+            // P1-4（durable-before-wait 的第二半）：`llm/retry` 已在决策时先落盘，退避到此
+            // 结束、下一次 attempt 即将发出 ⇒ 落 `llm/retry_started`。缺这一条时，
+            // 「进程在退避里被打断」与「重试已发出后失败」在事件层同形。
+            if let Some(last) = last_failure.as_deref() {
+                retry_notify.notify_started(attempts_total, &active_config, last);
+            }
         }
         // F2：逐 attempt 计时——失败耗时与成功 attempt 的窗口在这里各自落账
         // （见 `agent::retry::ProviderAttemptWindow`）。**不改变**任何调度/重试语义。
@@ -5913,7 +5959,7 @@ where
                     carried.elapsed_ms = budget.elapsed_ms;
                     budget = carried;
                     attempt = 1;
-                    let rl_policy = ProviderRetryPolicy::new(active_config);
+                    let rl_policy = ProviderRetryPolicy::new(active_config).with_mode(mode);
                     let decision =
                         rl_policy.decide(&failure, &budget, attempt, None, StreamState::NoDelta);
                     provider_log(format!(
@@ -5932,7 +5978,7 @@ where
                     }
                 }
 
-                let active_policy = ProviderRetryPolicy::new(active_config);
+                let active_policy = ProviderRetryPolicy::new(active_config).with_mode(mode);
                 let decision =
                     active_policy.decide(&failure, &budget, attempt, None, StreamState::NoDelta);
                 provider_log(format!(

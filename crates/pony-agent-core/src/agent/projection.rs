@@ -1590,6 +1590,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(500),
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ]
@@ -1635,6 +1637,8 @@ mod tests {
                 reason: reason.clone(),
                 turn_duration_ms: Some(1200),
                 error: Some("boom".into()),
+                stop_reason: None,
+                failure_code: None,
             };
             let state = fold_all::<_, HistoryProjectionState>(&events);
             let kind = state.messages().last().and_then(|message| message.kind);
@@ -1654,6 +1658,8 @@ mod tests {
             reason: TurnEndReason::Error,
             turn_duration_ms: None,
             error: None,
+            stop_reason: None,
+            failure_code: None,
         };
         let state = fold_all::<_, HistoryProjectionState>(&events);
         let messages = state.messages();
@@ -1708,6 +1714,8 @@ mod tests {
                     reason: TurnEndReason::Error,
                     turn_duration_ms: Some(1200),
                     error: error.map(str::to_string),
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ]
@@ -2171,6 +2179,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(1200),
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ];
@@ -2255,6 +2265,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(300),
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ];
@@ -2410,6 +2422,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(800),
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ];
@@ -2470,6 +2484,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: None,
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ];
@@ -2566,6 +2582,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(800),
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ];
@@ -2637,6 +2655,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(1200),
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ];

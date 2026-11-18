@@ -56,6 +56,8 @@ fn duplicate_user_turn_events() -> Vec<(u64, TurnEvent)> {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1_200),
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ]
@@ -141,6 +143,8 @@ fn b222_distinct_turns_each_keep_one_user() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
         (
@@ -164,6 +168,8 @@ fn b222_distinct_turns_each_keep_one_user() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ];
@@ -238,6 +244,8 @@ fn b222_single_user_unchanged() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ];
@@ -390,6 +398,8 @@ fn b222_distinct_turns_assistants_not_merged() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
         (
@@ -424,6 +434,8 @@ fn b222_distinct_turns_assistants_not_merged() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ];

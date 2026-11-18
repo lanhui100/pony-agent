@@ -277,7 +277,15 @@ impl AgentRuntime {
         if !persist_allowed {
             return;
         }
-        let error = "stopped_by_user".to_string();
+        // P2-6：停止原因取该轮 checkpoint 记录的**真实值**（wire：`user` / `parent` /
+        // `hook` / `watchdog` / `legacy`）；未记录 ⇒ `user`（与既有哨兵句 `stopped_by_user`
+        // 逐字一致，不改变既有契约）。此前一律写死 `stopped_by_user`，实测 `pa_01a1e908`
+        // 那个 108s、0 次 provider 调用的 `cancelled` 轮**无法区分**人工停止与看门狗收口。
+        let stop_reason = control
+            .load_checkpoint(Some(turn_id), None)
+            .and_then(|checkpoint| checkpoint.stop_reason)
+            .unwrap_or_else(|| "user".to_string());
+        let error = format!("stopped_by_{stop_reason}");
         let attachments = self
             .save_input_attachments_for_session(session_id, input_images)
             .unwrap_or_default();

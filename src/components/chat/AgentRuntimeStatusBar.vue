@@ -2,12 +2,21 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { AlertCircle, CheckCircle2, Pause } from "lucide-vue-next";
 import { formatElapsedSeconds, type AgentRuntimeStatus } from "@/lib/runtime/status";
+import type { TurnRetryHint } from "@/lib/runtime/turn-retry";
 
 interface Props {
   status: AgentRuntimeStatus;
+  /**
+   * P2-7：失败轮的可重试提示（`null` / 不可重试 ⇒ 不渲染续跑按钮）。
+   *
+   * 判定来源是 store 的 `failedTurnRetry`（唯一出口，见 `lib/runtime/turn-retry.ts`），
+   * 本组件只负责呈现与派发 `resume`，不自行判断可重试性。
+   */
+  retryHint?: TurnRetryHint | null;
 }
 
 const props = defineProps<Props>();
+const emit = defineEmits<{ (event: "resume"): void }>();
 
 const now = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -98,6 +107,14 @@ const isInfoMode = computed(() => displayedStatus.value.mode === "info");
 // wave-64 §2 F1：stopped 为「停止终态」（非进行中）：lucide Pause + 中性 stone 语义色，
 // 禁止 emerald/绿系（非本项目色彩体系）、禁止 shimmer 扫光、禁止耗时计时。
 const isStoppedMode = computed(() => displayedStatus.value.mode === "stopped");
+
+/**
+ * P2-7：是否渲染「重试」动作（仅上游瞬时失败、可重试时为真）。
+ *
+ * 状态行外层被 HomeWorkspace 设成 `pointer-events: none`（避免遮挡消息区），
+ * 故按钮自身显式恢复 `pointer-events: auto`；其余区域仍不吃事件。
+ */
+const showRetryAction = computed(() => Boolean(props.retryHint?.retryable));
 
 const labelToneClass = computed(() => {
   if (displayedStatus.value.mode === "error") {
@@ -237,6 +254,18 @@ watch(displayLabel, (nextLabel, previousLabel) => {
           data-testid="agent-runtime-status-elapsed"
         >{{ elapsedText }}</span>
       </div>
+      <!-- P2-7：上游瞬时失败 ⇒ 显式「重试」入口（一键续跑，等价输入「继续」）。 -->
+      <button
+        v-if="showRetryAction"
+        type="button"
+        class="ml-2 shrink-0 rounded-full border border-stone-300/70 px-2 py-0.5 text-[11px] font-normal text-stone-600 transition hover:border-stone-400 hover:text-stone-800 dark:border-stone-600/70 dark:text-stone-300 dark:hover:text-stone-100"
+        style="pointer-events: auto"
+        data-testid="agent-runtime-status-retry"
+        :title="props.retryHint?.title ?? '重试本轮'"
+        @click.stop="emit('resume')"
+      >
+        重试
+      </button>
     </div>
   </div>
 </template>

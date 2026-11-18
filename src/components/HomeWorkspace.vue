@@ -67,12 +67,23 @@ const {
   pendingQueuedMessages,
   activeTurnId,
   agentRuntimeStatus,
+  failedTurnRetry,
   phase,
   sessionId,
   sessionOperation,
   traceTimeline,
   turnTraceHistory
 } = storeToRefs(runtimeStore);
+
+/**
+ * P2-7：失败轮一键续跑（等价于用户输入「继续」）。
+ *
+ * 不可重试的失败（配额 / 鉴权 / 未知）由 store 内的判定直接返回 `false`，
+ * 状态行此时不渲染按钮 ⇒ 这里无需重复判断。
+ */
+async function handleResumeFailedTurn() {
+  await runtimeStore.retryLastTurn();
+}
 
 function isTransientSessionOverview(session: {
   title?: string | null;
@@ -2134,7 +2145,11 @@ watch(
               class="runtime-status-slot-inner"
               :class="{ 'runtime-status-slot-inner-hidden': !isRuntimeStatusVisible }"
             >
-              <AgentRuntimeStatusBar :status="agentRuntimeStatus" />
+              <AgentRuntimeStatusBar
+                :status="agentRuntimeStatus"
+                :retry-hint="failedTurnRetry"
+                @resume="handleResumeFailedTurn"
+              />
             </div>
           </div>
         </div>

@@ -48,21 +48,30 @@ pub fn fallback_body_text(tool_name: &str, error: &str, summary: &str) -> String
     text
 }
 
-/// B221：`error` 字符串 → 原因**类别**（只输出分类词，绝不回显 `error` 原文）。
+/// B221/P1-5：`error` 字符串 → 原因**类别**（只输出分类词，绝不回显 `error` 原文）。
 ///
-/// 判据顺序即优先级：先超时（`timeout` 常见于连接串里），再连接（connect/dns/network），
-/// 再响应解析（decode/body），其余归「上游返回异常」。
+/// P1-5 变更：判定来源收归 [`crate::agent::retry::classify_error_class`] 的**稳定语义码**，
+/// 本文件不再维护第二套子串表。旧实现的 `timeout`/`connect`/`dns`/`decode`/`body` 子串桥
+/// 有两个实测缺陷：
+/// - `type=request`（CDN 断连、`SendRequest` 阶段即失败，无 HTTP 状态码）不含任何旧关键词
+///   ⇒ 被笼统归成「上游返回异常」，正是 pa_01a1e908 / pa_01a1e928 的真实死因；
+/// - `body` 这种无意义片段足以决定用户看到的归因。
+///
+/// 例外只有一条：**我们自己产的**解析失败标记（`decoding response body` /
+/// `解析 provider 返回失败`）是结构化前缀而非上游正文猜测，仍单独归类。
 fn fallback_error_category(error: &str) -> &'static str {
     let lowered = error.to_ascii_lowercase();
-    let has = |needle: &str| lowered.contains(needle);
-    if has("timeout") || has("timed out") {
-        "上游响应超时"
-    } else if has("connect") || has("dns") || has("network") {
-        "连接上游失败"
-    } else if has("decode") || has("body") {
-        "上游响应解析失败"
-    } else {
-        "上游返回异常"
+    if lowered.contains("decoding response body") || lowered.contains("解析 provider 返回失败") {
+        return "上游响应解析失败";
+    }
+    match crate::agent::retry::classify_error_class(error) {
+        "timeout" => "上游响应超时",
+        "network" => "连接上游失败",
+        "rate_limited" => "上游限流",
+        "quota" => "上游额度耗尽",
+        "auth" => "上游鉴权失败",
+        "bad_request" => "请求被上游拒绝",
+        _ => "上游返回异常",
     }
 }
 
@@ -204,11 +213,19 @@ mod tests {
         assert_eq!(fallback_error_category("type=timeout+request"), "上游响应超时");
         assert_eq!(fallback_error_category("request TIMED OUT"), "上游响应超时");
         assert_eq!(fallback_error_category("connect error: dns lookup failed"), "连接上游失败");
-        assert_eq!(fallback_error_category("network unreachable"), "连接上游失败");
+        // P1-5：实测死因——CDN 断连属传输层（`type=request`，无 HTTP 状态码），
+        // 旧子串桥把它归成「上游返回异常」，语义码（network）归「连接上游失败」。
+        assert_eq!(
+            fallback_error_category("调用 provider 失败：error sending request；type=request；elapsed=26951ms"),
+            "连接上游失败"
+        );
+        assert_eq!(fallback_error_category("connection reset by peer"), "连接上游失败");
         assert_eq!(
             fallback_error_category("error decoding response body: unexpected eof"),
             "上游响应解析失败"
         );
+        // 限流不再是「上游返回异常」。
+        assert_eq!(fallback_error_category("HTTP 429 rate limit exceeded"), "上游限流");
         assert_eq!(fallback_error_category("boom"), "上游返回异常");
     }
 

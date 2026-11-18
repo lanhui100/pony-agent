@@ -4492,6 +4492,8 @@ fn pa093_turn_events(turn_id: &str, user_text: &str, assistant_text: &str) -> Ve
             reason: TurnEndReason::Completed,
             turn_duration_ms: None,
             error: None,
+            stop_reason: None,
+            failure_code: None,
         },
     ]
 }
@@ -4800,6 +4802,8 @@ fn pa093_fold_10k_events_stays_under_budget() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ));
     }
@@ -4934,6 +4938,8 @@ fn pa094_trace_and_message_views_same_source() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1200),
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ];

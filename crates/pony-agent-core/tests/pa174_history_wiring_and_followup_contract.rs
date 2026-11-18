@@ -1062,6 +1062,7 @@ fn b2_aggregate_exhaustion_keeps_real_error_and_allows_failover() {
         request_timeout_ms: 1_000,
         decision_max_attempts: 5,
         retry_budget_ms: 3_600,
+        retry_mode: Default::default(),
     };
     // 每次 attempt 都「慢 503」（900ms < 1000ms 单次超时 ⇒ 真实收到 503，而非客户端超时）。
     let slow_503 = MockReply {
@@ -1148,6 +1149,7 @@ fn f2_aggregate_sync_call_budget_is_capped_and_computed() {
         request_timeout_ms: 15_000,
         decision_max_attempts: 2,
         retry_budget_ms: 5_000,
+        retry_mode: Default::default(),
     };
     let small_budget = aggregate_sync_call_budget_ms(&small_policy);
     assert_eq!(
@@ -1182,6 +1184,7 @@ fn f2_sync_call_wall_clock_is_bounded_across_attempts() {
         request_timeout_ms: 1_000,
         decision_max_attempts: 5,
         retry_budget_ms: 3_600,
+        retry_mode: Default::default(),
     });
     let request = request_probe();
 
@@ -1252,6 +1255,7 @@ fn f3_upstream_policy_report_exposes_disk_and_effective() {
         request_timeout_ms: 0,
         decision_max_attempts: 0,
         retry_budget_ms: 0,
+        retry_mode: Default::default(),
     };
     let effective_invalid = raw_invalid.clone().clamped().0;
     let report = upstream_policy_report(&raw_invalid, &effective_invalid);

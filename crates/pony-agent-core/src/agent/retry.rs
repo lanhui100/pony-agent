@@ -642,10 +642,29 @@ pub(crate) fn upstream_code_for_hints(lower: &str) -> Option<ErrorCode> {
     None
 }
 
+/// P1-4：重试档位（对齐 dsh `retry-policy` 的 `normal` / `always` 两档）。
+///
+/// 分档只放宽「次数 + 时间预算」两个闸门，**不放宽**流安全（已向用户发出增量即不可重试）
+/// 与不可重试错误（4xx / 鉴权 / 配额）——那两类是语义结论，不是耐心问题。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryMode {
+    /// 有界重试：次数上限 + sleep 预算双闸（缺省；与既有行为逐字一致）。
+    #[default]
+    Normal,
+    /// 无界重试：直到成功 / 调用方取消 / 命中不可重试错误为止（dsh 的 `always`）。
+    ///
+    /// 适用场景：长轮次工具链（实测单轮 55~96 步、28~75 分钟）里，一次几十秒的上游抖动
+    /// 不该让整轮以兜底收口——用户要的是「等到上游回来」。
+    Always,
+}
+
 /// Provider-specific retry policy combining config, classification, and budget.
 pub struct ProviderRetryPolicy {
     pub config: BackoffConfig,
     pub sleeper: Box<dyn Sleeper>,
+    /// P1-4：重试档位（`Normal` 缺省 ⇒ 既有行为零变更）。
+    pub mode: RetryMode,
 }
 
 impl ProviderRetryPolicy {
@@ -653,11 +672,22 @@ impl ProviderRetryPolicy {
         Self {
             config,
             sleeper: Box::new(StdThreadSleeper),
+            mode: RetryMode::Normal,
         }
     }
 
     pub fn with_sleeper(config: BackoffConfig, sleeper: Box<dyn Sleeper>) -> Self {
-        Self { config, sleeper }
+        Self {
+            config,
+            sleeper,
+            mode: RetryMode::Normal,
+        }
+    }
+
+    /// P1-4：注入重试档位（构建后链式调用；`Normal` 与 [`Self::new`] 等价）。
+    pub fn with_mode(mut self, mode: RetryMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// Classify a provider error based on its message content.
@@ -720,6 +750,15 @@ impl ProviderRetryPolicy {
         if !failure.is_retryable() {
             return RetryDecision::Abort {
                 reason: format!("{:?}: {}", failure, failure.details()),
+            };
+        }
+        // P1-4：`Always` 档位无视「次数上限 + 预算耗尽」两个闸门（dsh `always` 语义），
+        // 流安全与不可重试错误已在上面两道判据拦下。退避仍按既有曲线封顶（max_delay_ms），
+        // 退避 sleep 本身仍受调用方 deadline（`DeadlineSleeper`）截断 ⇒ 不新增无界等待面。
+        if self.mode == RetryMode::Always {
+            let base_delay = compute_delay(attempt, &self.config, 0.5);
+            return RetryDecision::Retry {
+                delay_ms: (base_delay.as_millis() as u64).min(self.config.max_delay_ms),
             };
         }
         if budget.is_exhausted() {
@@ -1488,6 +1527,32 @@ impl RetryNotifier {
             delay_ms: compute_delay(next_attempt, config, 0.5).as_millis() as u64,
             error_class: classify_error_class(last_error).to_string(),
         });
+    }
+
+    /// P1-4：派发一次「重试**真正开始**」（退避已结束、下一次 attempt 即将发出）。
+    ///
+    /// 与 [`Self::notify`] 成对，构成 durable-before-wait：先落 `llm/retry`（含退避时长）→
+    /// 退避 → 落 `llm/retry_started` → 发 attempt。缺这条时，「进程在退避里被打断」与
+    /// 「重试已发出」在事件层同形（实测 pa_01a1e908 末次 attempt 是否发出无从判定）。
+    ///
+    /// 未安装 turn 上下文（单测 / 线程外调用）⇒ 静默 no-op。
+    pub fn notify_started(&self, attempt: u32, config: &BackoffConfig, last_error: &str) {
+        let context = RETRY_EVENT_CONTEXT.with(|slot| slot.borrow().clone());
+        let Some(context) = context else {
+            return;
+        };
+        crate::agent::turn_flow::emit_turn_scoped_event(
+            &context.session_id,
+            &context.turn_id,
+            crate::agent::turn_event::TurnEvent::LlmRetryStarted {
+                turn_id: context.turn_id.clone(),
+                request: self.label.clone(),
+                scope: self.scope.to_string(),
+                failure_code: classify_error_class(last_error).to_string(),
+                attempt,
+                max_attempts: config.max_retries.saturating_add(1),
+            },
+        );
     }
 }
 

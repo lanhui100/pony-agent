@@ -716,6 +716,7 @@ fn failover_budget_stops_handoffs() {
         // 关掉单跳重试，使「每候选 1 次 attempt」成为确定事实（预算锚点只测 deadline）。
         decision_max_attempts: 1,
         retry_budget_ms: 1_000,
+        retry_mode: Default::default(),
     };
     let slow_delay = Duration::from_millis(2_500);
     let primary = MockProvider::slow(slow_delay);

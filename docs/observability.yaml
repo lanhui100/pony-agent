@@ -1658,3 +1658,26 @@ note: >-
   (4) 收口点：不新增 enforcement_point（无新网络出口、无新异常边界）；行为门落在单测——
       `crates/pony-agent-core/src/bin/tui/tests/approval_resume_context_tests.rs`（12 例，契约
       `.dev-team/contract-matrix-approval-resume-context.md` C6/C7/C8）。
+
+  【归属登记（2026-11-18）｜degraded 轮静默中止的七项修复（ADR：.agents/notes/implemented/bug-fix/2026-11-18-degraded-turn-abort-diagnosis-and-fix.md；backlog: B247）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地重试调度、HTTP 客户端超时口径与终态事实的落盘形状**，
+  无新增对外接口、无新增网络出口、无新增后台常驻任务、无 `/metrics` 出口、无新增环境变量或依赖。
+  (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-agent-core/src/agent/otel/mod.rs`
+      与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`），metrics / logs 维持结构性 N-A
+      （桌面/TUI 无常驻监听地址、无 `/metrics`、Prometheus pull 与节点日志采集前提均不成立）。
+  (2) 变更面（全部本地）：`agent/provider/mod.rs` 的同步 HTTP 客户端由「45s 总时限」改为
+      `connect_timeout(≤15s) + read_timeout(idle)`（与流式路径同口径，**不新增网络出口**）；
+      `agent/config.rs` 新增 `UPSTREAM_MIN_USABLE_ATTEMPT_TIMEOUT_MS`（剩余预算低于该值的 attempt
+      不发、立即用最后一次真实错误收口）与 `sync_affordable_attempts`（**仅观测出口**，不参与调度钳制）、
+      `UpstreamPolicy.retry_mode`（`normal|always`，容错反序列化）；
+      `agent/retry.rs` 新增 `RetryMode` 与 `RetryNotifier::notify_started`；
+      `agent/turn_event.rs` 的 `turn/end` 增 additive 字段 `stop_reason` / `failure_code`。
+  (3) 新增本地事实面（仅登记，非遥测出口）：事件 `llm/retry_started`（`TurnEvent::LlmRetryStarted`，
+      退避结束、attempt 发出前与既有 `llm/retry` 成对写入 `sessions.db` 的 `turn_events`），
+      用于区分「退避中被打断」与「重试已发出」；`turn/end.stop_reason` 取该轮 checkpoint 的真实停止原因
+      （`user|parent|hook|watchdog|legacy`）。两者只进本地 sessions.db，**不上送** Loki / Sentry / Tempo。
+  (4) 收口点：不新增 enforcement_point（无新网络出口、无新异常边界）；行为门落在测试层——
+      `crates/pony-agent-core/tests/b219_degraded_turn_acceptance.rs`（派生口径改为 Interrupted）、
+      `crates/pony-agent-core/src/agent/provider/fallback_body.rs` 内的归因真值表用例
+      （`type=request` ⇒ 连接上游失败、429 ⇒ 上游限流），以及前端
+      `tests/turn-retry.test.ts`（6 例：实测两类死因文本 + 不可重试类 + 畸形输入红线）。

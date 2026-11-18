@@ -78,6 +78,11 @@ import {
   withTimeout
 } from "@/lib/runtime/utils";
 import {
+  failedTurnRetryHint as resolveFailedTurnRetryHint,
+  RETRY_RESUME_PROMPT,
+  type TurnRetryHint
+} from "@/lib/runtime/turn-retry";
+import {
   BROWSER_PREVIEW_CHUNKS,
   BROWSER_PREVIEW_FALLBACK_REASON,
   BROWSER_PREVIEW_MODEL_NAME,
@@ -387,6 +392,47 @@ function resolveTerminalFailureLabel(state: RuntimeStateW59): string {
   return DEFAULT_FAILED_TURN_ERROR;
 }
 
+/**
+ * P2-7：失败轮可重试提示的**唯一取值出口**（终态状态行标签与续跑动作共用）。
+ *
+ * 取值优先级与 [`resolveTerminalFailureLabel`] 同序：`error` → 最近一条 assistant
+ * `errorDetail` → 最近一条 trace `error`。只在**未提交**时调用（进行中无终态提示）。
+ */
+function resolveRetryHintForState(state: RuntimeStateW59): TurnRetryHint | null {
+  const direct = resolveFailedTurnRetryHint(state.error);
+  if (direct) {
+    return direct;
+  }
+  const messages = state.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const hint = resolveFailedTurnRetryHint(messages[index]?.errorDetail);
+    if (hint) {
+      return hint;
+    }
+  }
+  const traces = state.turnTraceHistory ?? [];
+  for (let index = traces.length - 1; index >= 0; index -= 1) {
+    const hint = resolveFailedTurnRetryHint(traces[index]?.error);
+    if (hint) {
+      return hint;
+    }
+  }
+  return null;
+}
+
+/**
+ * P2-7：给终态状态行标签追加「上游失败，可重试」后缀。
+ *
+ * 幂等：标签里已有该短语时不再拼接；不可重试（配额/鉴权/未知）不追加，避免把
+ * 「重试无用」的失败伪装成可重试。
+ */
+function appendRetryHintLabel(label: string, hint: TurnRetryHint | null): string {
+  if (!hint || !hint.retryable || label.includes(hint.label)) {
+    return label;
+  }
+  return `${label} · ${hint.label}`;
+}
+
 /** core 失败轮「零正文兼容锁」文案（`turn_flow.rs` 的 `LEGACY_FAILED_TURN_TEXT`，逐字）。 */
 const FAILED_TURN_EMPTY_WIRE_TEXT = "This turn failed.";
 /** core 失败轮在已产出正文后追加的说明后缀（`turn_flow.rs` 的 `FAILED_PARTIAL_TEXT_SUFFIX`，含前导空行）。 */
@@ -609,6 +655,18 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     isSessionRunning(state): (sessionId: string) => boolean {
       return (sessionId: string) => sessionId in state.runningSessionMap;
     },
+    /**
+     * P2-7：失败轮的「可重试」提示（`null` ⇒ 无失败原因或无可提示项）。
+     *
+     * 消费面：续跑入口（[`retryLastTurn`]）与状态行（后缀已由 `agentRuntimeStatus`
+     * 经同一判定拼接）。判定只在**未提交**时为真——进行中不该出现终态提示。
+     */
+    failedTurnRetry(state): TurnRetryHint | null {
+      if (state.isSubmitting) {
+        return null;
+      }
+      return resolveRetryHintForState(state);
+    },
     agentRuntimeStatus(state): AgentRuntimeStatus | null {
       if (!state.isSubmitting) {
         if (state.sessionOperation === "initializing") {
@@ -642,7 +700,7 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (state.error?.trim() && state.messages.length > 0) {
           return {
             mode: "error",
-            label: state.error.trim(),
+            label: appendRetryHintLabel(state.error.trim(), resolveRetryHintForState(state)),
             startTime: null
           };
         }
@@ -671,7 +729,10 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
         if (state.phase === "failed" && state.messages.length > 0) {
           return {
             mode: "error",
-            label: resolveTerminalFailureLabel(state),
+            label: appendRetryHintLabel(
+              resolveTerminalFailureLabel(state),
+              resolveRetryHintForState(state)
+            ),
             startTime: null
           };
         }
@@ -5661,6 +5722,25 @@ export const useRuntimeStore = defineStore("runtime", {  state: (): RuntimeState
     setSessionNotice(text: string | null) {
       const trimmed = typeof text === "string" ? text.trim() : "";
       this.sessionNotice = trimmed ? trimmed : null;
+    },
+    /**
+     * P2-7：一键续跑——上游失败（可重试）的轮次直接继续。
+     *
+     * 语义：把「继续」写进草稿并提交，与用户手打「继续」**逐字一致**（不另造隐藏协议，
+     * 也不重放整轮工具链）。不可重试的失败（配额/鉴权/未知）返回 `false`，由调用方
+     * 展示不可重试原因，避免无效重试掩盖真实问题。
+     */
+    async retryLastTurn(): Promise<boolean> {
+      if (this.isSubmitting) {
+        return false;
+      }
+      const hint = this.failedTurnRetry;
+      if (!hint || !hint.retryable) {
+        return false;
+      }
+      this.draftMessage = RETRY_RESUME_PROMPT;
+      await this.submitTurn();
+      return true;
     },
     async submitTurn(options?: { images?: TurnInputImage[] }) {
       if (this.isSubmitting) {

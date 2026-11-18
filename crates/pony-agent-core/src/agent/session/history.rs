@@ -212,6 +212,8 @@ mod tests {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ]);
 
@@ -298,6 +300,8 @@ mod tests {
                 reason: TurnEndReason::Error,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ]);
 
@@ -350,6 +354,8 @@ mod tests {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: None,
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ]);
 

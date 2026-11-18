@@ -4147,7 +4147,15 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
     fn skeleton(records: &[(String, String, String)], session: &str) -> Vec<String> {
         records
             .iter()
-            .filter(|(sid, _, event_type)| sid == session && event_type != "assistant/chunk" && event_type != "llm/retry")
+            // B214/P1-4：`llm/retry` 与 `llm/retry_started` 的条数依赖传输路径的实时预算
+            // （sync aggregate deadline vs stream 读循环），不属于 turn 生命周期骨架；
+            // 重试事实由专门的持久化用例覆盖。
+            .filter(|(sid, _, event_type)| {
+                sid == session
+                    && event_type != "assistant/chunk"
+                    && event_type != "llm/retry"
+                    && event_type != "llm/retry_started"
+            })
             .map(|(_, _, event_type)| event_type.clone())
             .collect()
     }

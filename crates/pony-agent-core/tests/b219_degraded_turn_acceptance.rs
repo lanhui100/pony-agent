@@ -52,7 +52,7 @@ fn b219_degraded_reason_wire() {
     );
 }
 
-/// 2. 派生口径：`fallback_reason` 非空 ⇒ Degraded；None / 空串 ⇒ Completed。
+/// 2. 派生口径：`fallback_reason` 非空 ⇒ Interrupted（P0-3）；None / 空串 ⇒ Completed。
 #[test]
 fn b219_completed_reason_derivation() {
     // Arrange
@@ -61,11 +61,11 @@ fn b219_completed_reason_derivation() {
     // Act
     let degraded = completed_turn_end_reason(failed_followup);
 
-    // Assert 1
+    // Assert 1（P0-3 修订：兜底不再伪装成 completed+degraded，改用可续跑的 Interrupted）
     assert_eq!(
         degraded,
-        TurnEndReason::Degraded,
-        "存在失败兜底原因 ⇒ 本轮必须以 Degraded 收尾"
+        TurnEndReason::Interrupted,
+        "存在失败兜底原因 ⇒ 本轮必须以 Interrupted 收尾（可重试/可续跑）"
     );
 
     // Act / Assert 2：空串视为无原因（空白不得伪造降级）。
@@ -114,6 +114,8 @@ fn b219_degraded_turn_has_checkpoint() {
                 reason: TurnEndReason::Degraded,
                 turn_duration_ms: Some(8_400),
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ];

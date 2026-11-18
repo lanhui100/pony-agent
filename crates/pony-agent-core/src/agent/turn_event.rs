@@ -72,14 +72,19 @@ impl<'de> Deserialize<'de> for TurnEndReason {
     }
 }
 
-/// B219：`turn:completed` 的终态派生口径（唯一真源；写路径与验收测试共用）。
+/// B219/P0-3：`turn:completed` 的终态派生口径（唯一真源；写路径与验收测试共用）。
 ///
 /// `fallback_reason` 是本轮 provider 兜底收尾的失败原因：非空 ⇒ 本轮**不是**正常完成，
-/// 必须以 [`TurnEndReason::Degraded`] 收尾；`None` / 空白串 ⇒ [`TurnEndReason::Completed`]
-/// （空白不得伪造降级）。
+/// 以 [`TurnEndReason::Interrupted`] 收尾（**可重试/可续跑**的中断态）；`None` / 空白串 ⇒
+/// [`TurnEndReason::Completed`]（空白不得伪造降级）。
+///
+/// P0-3 变更（实测 pa_01a1e908 / pa_01a1e928）：此前非空 ⇒ `Degraded`，而 `Degraded` 在
+/// 投影层被当成 `turn.completed` 呈现，于是「上游连续失败、runtime 合成兜底文案」的轮次
+/// 在 UI 上与正常完成无法区分——用户看到的就是「毫无征兆地停在中途」。
+/// `Degraded` 变体保留（旧日志读取兼容），新写入一律用 `Interrupted`。
 pub fn completed_turn_end_reason(fallback_reason: Option<&str>) -> TurnEndReason {
     match fallback_reason.map(str::trim) {
-        Some(reason) if !reason.is_empty() => TurnEndReason::Degraded,
+        Some(reason) if !reason.is_empty() => TurnEndReason::Interrupted,
         _ => TurnEndReason::Completed,
     }
 }
@@ -103,6 +108,21 @@ pub enum TurnEvent {
         /// additive：旧日志无该键 ⇒ None ⇒ 检查点文本退化为既有中断形态。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// P2-6：结构化停止原因（wire 值见 [`crate::agent::stop_escalation::StopReason`]：
+        /// `user` / `parent` / `hook` / `watchdog` / `legacy`）。
+        ///
+        /// 缺陷：取消轮此前一律写死 `error = "stopped_by_user"`（`runtime/turn_control.rs`），
+        /// 实测 pa_01a1e908 那个 108s、0 次 provider 调用的 `cancelled` 轮**无法区分**
+        /// 是人工停止还是看门狗收口。additive：旧日志无该键 ⇒ `None`（读取端按 `legacy` 呈现）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+        /// P2-6：失败语义码（`retry::classify_error_class` 口径：`timeout` / `network` /
+        /// `rate_limited` / `server_error` …）。`None` ⇒ 非失败轮。
+        ///
+        /// 缺陷：失败归因此前只藏在自由文本里，读取端只能靠子串猜；有了稳定码，
+        /// 「可重试」判定与 UI 文案都不再依赖字符串匹配。additive：旧日志无该键 ⇒ `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_code: Option<String>,
     },
     StepStart {
         turn_id: String,
@@ -283,6 +303,25 @@ pub enum TurnEvent {
         /// 本次退避将 sleep 的毫秒数（尚未执行）。
         delay_ms: u64,
     },
+    /// P1-4：重试**真正开始**（退避已结束、下一次 attempt 即将发出）的持久化事实。
+    ///
+    /// 与 [`TurnEvent::LlmRetry`] 成对，构成 dsh 口径的 **durable-before-wait**：
+    /// 先落 `llm/retry`（含本次退避时长）→ 退避 → 退避结束后落本事件 → 发 attempt。
+    /// 只有 `llm/retry` 时，「进程在退避中被打断」与「重试已发出」在事件层无法区分
+    /// （实测 pa_01a1e908 的长轮次复盘即卡在这里：末次 attempt 到底有没有发出去，无从判定）。
+    LlmRetryStarted {
+        turn_id: String,
+        /// provider 调用名（同 [`TurnEvent::LlmRetry`]）。
+        request: String,
+        /// 重试作用域（`decision` / `followup`）。
+        scope: String,
+        /// 失败分类（`retry::classify_error_class` 口径）。
+        failure_code: String,
+        /// 即将发出的 attempt 序号（1 起 = 已失败次数 + 1）。
+        attempt: u32,
+        /// 本跳允许的尝试总数（含首次）。
+        max_attempts: u32,
+    },
     /// F1：**轮级速度口径结算**（每轮终态一条，可离线取证）。
     ///
     /// 为什么需要它：`turnSpeedBasis` / speed 此前只走线缆与（401 全丢的）OTel，
@@ -368,6 +407,7 @@ impl TurnEvent {
             TurnEvent::ContextObservation { .. } => "context/observation",
             TurnEvent::CorruptedEventTombstone { .. } => "corrupted/tombstone",
             TurnEvent::LlmRetry { .. } => "llm/retry",
+            TurnEvent::LlmRetryStarted { .. } => "llm/retry_started",
             TurnEvent::TurnSpeed { .. } => "turn/speed",
         }
     }
@@ -386,6 +426,7 @@ impl TurnEvent {
             | TurnEvent::ToolResult { turn_id, .. }
             | TurnEvent::ProviderUsage { turn_id, .. }
             | TurnEvent::LlmRetry { turn_id, .. }
+            | TurnEvent::LlmRetryStarted { turn_id, .. }
             | TurnEvent::TurnSpeed { turn_id, .. }
             | TurnEvent::ContextObservation { turn_id, .. } => Some(turn_id),
             TurnEvent::CorruptedEventTombstone { turn_id, .. } => turn_id.as_deref(),
@@ -447,6 +488,8 @@ mod tests {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1234),
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
             TurnEvent::StepStart {
                 turn_id: "t1".into(),

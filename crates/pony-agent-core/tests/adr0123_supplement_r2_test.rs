@@ -518,6 +518,8 @@ fn failed_turn_events(turn_id: &str, failure_reason: Option<&str>) -> Vec<(u64, 
                 reason: TurnEndReason::Error,
                 turn_duration_ms: Some(1200),
                 error: failure_reason.map(str::to_string),
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ]

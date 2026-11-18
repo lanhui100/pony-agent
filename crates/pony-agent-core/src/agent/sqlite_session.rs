@@ -75,6 +75,8 @@ fn derive_events_from_session(
                         reason: TurnEndReason::Completed,
                         turn_duration_ms: None,
                         error: None,
+                        stop_reason: None,
+                        failure_code: None,
                     });
                 }
                 let turn_id = message
@@ -113,6 +115,8 @@ fn derive_events_from_session(
             reason: TurnEndReason::Completed,
             turn_duration_ms: None,
             error: None,
+            stop_reason: None,
+            failure_code: None,
         });
     }
     // trace 反推 tool / provider 事件
@@ -4982,6 +4986,8 @@ mod tests {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(100),
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ];
         let outcome = backend.persist_command(PersistCommand::FlushEvents {
@@ -5088,6 +5094,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: None,
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ],
             event_times_ms: Vec::new(),
@@ -5736,6 +5744,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: None,
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ],
             event_times_ms: Vec::new(),
@@ -6085,6 +6095,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(800),
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ];
@@ -6243,6 +6255,8 @@ mod tests {
                     reason: TurnEndReason::Completed,
                     turn_duration_ms: Some(800),
                     error: None,
+                    stop_reason: None,
+                    failure_code: None,
                 },
             ),
         ];

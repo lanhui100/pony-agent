@@ -371,6 +371,7 @@ fn d2_policy_floors_are_physically_reachable() {
         request_timeout_ms: 0,
         decision_max_attempts: 0,
         retry_budget_ms: 0,
+        retry_mode: Default::default(),
     }
     .clamped();
     assert_eq!(
@@ -396,6 +397,7 @@ fn d2_policy_floors_are_physically_reachable() {
         request_timeout_ms: 15_000,
         decision_max_attempts: 2,
         retry_budget_ms: 5_000,
+        retry_mode: Default::default(),
     }
     .clamped();
     assert_eq!(
@@ -404,6 +406,7 @@ fn d2_policy_floors_are_physically_reachable() {
             request_timeout_ms: 15_000,
             decision_max_attempts: 2,
             retry_budget_ms: 5_000,
+            retry_mode: Default::default(),
         },
         "PA-173 D2：恰好等于下界的配置必须原样保留"
     );

@@ -1102,6 +1102,8 @@ fn t3_trace_projection_keeps_per_call_duration() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1_200),
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ];
@@ -1213,6 +1215,8 @@ fn t3_settle_timeline_does_not_overwrite_existing_per_call_duration() {
                 reason: TurnEndReason::Completed,
                 turn_duration_ms: Some(1_200),
                 error: None,
+                stop_reason: None,
+                failure_code: None,
             },
         ),
     ];
