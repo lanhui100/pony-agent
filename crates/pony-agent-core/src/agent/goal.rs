@@ -89,6 +89,63 @@ pub struct UpdateGoalResult {
 static SESSION_GOALS: Mutex<Option<HashMap<String, GoalData>>> = Mutex::new(None);
 static GOAL_STORE_DEGRADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// B130：goal 领域事实的进程级广播（宿主事件 `goal://*` 的唯一真源）。
+///
+/// 为什么在 core 而不在 Tauri 命令层发射：goal 变更不止走 `goal_create` / `goal_update` /
+/// `goal_command` 三个 IPC 命令，模型工具（`execute_update_goal`）、graph 续轮
+/// （`advance_goal_round`）与会话删除清理（`clear_goal`）都直接调本模块。把发射点放在
+/// 领域写入成功之后，才能覆盖全部变更路径；桌面层只负责把事件映射成 Tauri 线缆载荷
+/// （`src-tauri/src/goal_events.rs`），core 不依赖 Tauri。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalEvent {
+    /// `create_goal` / `update_goal` / `advance_goal_round` 成功后的目标快照。
+    Changed { goal: GoalData },
+    /// 每成功发起一轮 goal-round（`rounds_started` 递增后）。
+    RoundStarted { goal: GoalData },
+    /// `clear_goal` 真的删除了记录（`clear` 无墓碑，故附带被删目标的 id 供审计/诊断）。
+    Cleared {
+        session_id: String,
+        goal_id: Option<String>,
+    },
+}
+
+/// 宿主注入的观察者（桌面层安装一次；测试可替换）。
+pub type GoalEventObserver = dyn Fn(&GoalEvent) + Send + Sync;
+
+static GOAL_EVENT_OBSERVER: Mutex<Option<std::sync::Arc<GoalEventObserver>>> = Mutex::new(None);
+
+/// B130：安装进程级 goal 事件观察者（桌面层唯一调用点；重复安装覆盖旧值）。
+///
+/// 观察者在 goal 写锁**释放之后**被调用，故可以安全地回调本模块的读面（`get_goal` 等）。
+pub fn install_goal_event_observer(observer: std::sync::Arc<GoalEventObserver>) {
+    let mut slot = GOAL_EVENT_OBSERVER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = Some(observer);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_goal_event_observer_for_test() {
+    let mut slot = GOAL_EVENT_OBSERVER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = None;
+}
+
+/// 广播一条 goal 事实；无观察者时静默（core 单测 / TUI / CLI 都不需要宿主事件）。
+///
+/// 失败语义：观察者自身的发射失败只由观察者记录诊断，**绝不回滚已落盘的目标变更**
+/// （与 `docs/architecture/plan-goal-contract.md` §7「发射失败只记诊断」一致）。
+fn notify_goal_event(event: &GoalEvent) {
+    let observer = GOAL_EVENT_OBSERVER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(observer) = observer {
+        observer(event);
+    }
+}
+
 #[cfg(test)]
 static TEST_DEFAULT_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
@@ -463,6 +520,14 @@ pub fn advance_goal_round(goal_id: &str) -> Result<GoalData, String> {
         return Err(error);
     }
 
+    // B130：先释放写锁再广播（观察者可能回调本模块读面）。
+    drop(guard);
+    notify_goal_event(&GoalEvent::Changed {
+        goal: updated.clone(),
+    });
+    notify_goal_event(&GoalEvent::RoundStarted {
+        goal: updated.clone(),
+    });
     Ok(updated)
 }
 
@@ -693,6 +758,9 @@ pub fn create_goal(args: CreateGoalArgs) -> Result<CreateGoalResult, String> {
         return Err(error);
     }
 
+    // B130：create 也是「目标变了」——GoalBar 需在不刷新整轮的情况下即时更新。
+    drop(guard);
+    notify_goal_event(&GoalEvent::Changed { goal: goal.clone() });
     Ok(CreateGoalResult { goal })
 }
 
@@ -799,6 +867,11 @@ pub fn update_goal(args: UpdateGoalArgs) -> Result<UpdateGoalResult, String> {
         return Err(error);
     }
 
+    // B130：人类命令（/goal、GoalBar 按钮）与模型工具共用本入口，事件在此统一发射。
+    drop(guard);
+    notify_goal_event(&GoalEvent::Changed {
+        goal: updated.clone(),
+    });
     Ok(UpdateGoalResult { goal: updated })
 }
 
@@ -823,11 +896,19 @@ pub fn clear_goal(session_id: &str) -> Result<bool, String> {
     };
 
     // 显式把被删 session 传给持久化层：磁盘上若仍有该条目（另一进程写过盘），必须一并移除。
+    let removed_goal_id = previous.id.clone();
     if let Err(error) = persist_goal_store(goals, &[session.to_string()]) {
         goals.insert(session.to_string(), previous);
         return Err(error);
     }
 
+    // B130：clear 是「目标消失」而非「目标变成某相位」，故用独立的 Cleared 事实
+    // （桌面线缆事件名见 `src-tauri/src/goal_events.rs`），不复用 Changed 的 GoalData 载荷。
+    drop(guard);
+    notify_goal_event(&GoalEvent::Cleared {
+        session_id: session.to_string(),
+        goal_id: Some(removed_goal_id),
+    });
     Ok(true)
 }
 
@@ -842,6 +923,59 @@ pub(crate) mod test_support {
         GOAL_STORE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 独占 goal sidecar 的测试夹具：把 `PONY_AGENT_GOAL_STORE_PATH` 指向本次用例的临时
+    /// 目录，Drop 时复原 env、删目录并复位进程内缓存。
+    ///
+    /// 为什么必须独占：`SESSION_GOALS` 是进程级静态，多个用例并行写同一 sidecar 会互相
+    /// 擦除；因此**安装者必须先持有 [`lock`]**（夹具本身不加锁，避免医生式双重加锁）。
+    pub(crate) struct TempGoalStore {
+        previous: Option<std::ffi::OsString>,
+        dir: std::path::PathBuf,
+        store_path: std::path::PathBuf,
+    }
+
+    impl TempGoalStore {
+        pub(crate) fn install(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "pony-goal-store-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("create temp goal store dir");
+            let store_path = dir.join("goal_store.json");
+            let previous = std::env::var_os(super::GOAL_STORE_PATH_ENV);
+            std::env::set_var(super::GOAL_STORE_PATH_ENV, &store_path);
+            super::reset_goal_store_for_test();
+            Self {
+                previous,
+                dir,
+                store_path,
+            }
+        }
+
+        pub(crate) fn path(&self) -> &std::path::Path {
+            &self.store_path
+        }
+
+        pub(crate) fn dir(&self) -> &std::path::Path {
+            &self.dir
+        }
+    }
+
+    impl Drop for TempGoalStore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(super::GOAL_STORE_PATH_ENV, value),
+                None => std::env::remove_var(super::GOAL_STORE_PATH_ENV),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+            super::reset_goal_store_for_test();
+        }
     }
 }
 
@@ -1375,3 +1509,145 @@ mod wave1_tests {
     }
 }
 
+/// B130：领域事件广播（`GoalEvent` / `install_goal_event_observer`）的真值测试。
+///
+/// 宿主事件 `goal://*` 的**发射时机**在这里被锁死：create / update / advance / clear 四条
+/// 写入路径各广播什么、clear 幂等时不广播。桌面层只需把同一批事实映射成线缆载荷
+/// （`src-tauri/src/goal_events.rs` 的形状测试覆盖那一半）。
+#[cfg(test)]
+mod b130_event_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    /// 收集进程级广播；只断言本用例 session 的事件（并行用例可能同时写别的 session）。
+    struct EventLog {
+        events: Arc<StdMutex<Vec<GoalEvent>>>,
+    }
+
+    impl EventLog {
+        fn install() -> Self {
+            let events: Arc<StdMutex<Vec<GoalEvent>>> = Arc::new(StdMutex::new(Vec::new()));
+            let sink = Arc::clone(&events);
+            install_goal_event_observer(Arc::new(move |event: &GoalEvent| {
+                sink.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event.clone());
+            }));
+            Self { events }
+        }
+
+        fn of_session(&self, session: &str) -> Vec<GoalEvent> {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter(|event| match event {
+                    GoalEvent::Changed { goal } | GoalEvent::RoundStarted { goal } => {
+                        goal.session_id == session
+                    }
+                    GoalEvent::Cleared { session_id, .. } => session_id == session,
+                })
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl Drop for EventLog {
+        fn drop(&mut self) {
+            reset_goal_event_observer_for_test();
+        }
+    }
+
+    #[test]
+    fn goal_writes_broadcast_events_after_persist_b130() {
+        let _lock = test_support::lock();
+        let _store = test_support::TempGoalStore::install("b130-events");
+        let log = EventLog::install();
+        let session = "b130-events-session";
+
+        let created = create_goal(CreateGoalArgs {
+            session_id: Some(session.to_string()),
+            objective: "把事件发射补上".to_string(),
+            max_goal_rounds: Some(5),
+        })
+        .expect("create_goal");
+
+        let events = log.of_session(session);
+        assert_eq!(events.len(), 1, "create 只广播一条 Changed: {events:?}");
+        match &events[0] {
+            GoalEvent::Changed { goal } => {
+                assert_eq!(goal.id, created.goal.id);
+                assert_eq!(goal.phase, "active");
+            }
+            other => panic!("create 必须广播 Changed，实际: {other:?}"),
+        }
+
+        advance_goal_round(&created.goal.id).expect("advance_goal_round");
+        let events = log.of_session(session);
+        assert_eq!(
+            events.len(),
+            3,
+            "advance 需同时广播 Changed 与 RoundStarted: {events:?}"
+        );
+        assert!(matches!(&events[1], GoalEvent::Changed { .. }));
+        match &events[2] {
+            GoalEvent::RoundStarted { goal } => assert_eq!(goal.rounds_started, 1),
+            other => panic!("advance 必须广播 RoundStarted，实际: {other:?}"),
+        }
+
+        update_goal(UpdateGoalArgs {
+            session_id: Some(session.to_string()),
+            goal_id: created.goal.id.clone(),
+            revision: created.goal.revision,
+            action: UpdateGoalAction::Complete,
+            objective: None,
+            blocked_reason: None,
+            max_goal_rounds: None,
+        })
+        .expect("update_goal complete");
+        let events = log.of_session(session);
+        match events.last() {
+            Some(GoalEvent::Changed { goal }) => assert_eq!(goal.phase, "completed"),
+            other => panic!("update 必须广播 Changed(completed)，实际: {other:?}"),
+        }
+
+        assert!(clear_goal(session).expect("clear_goal"));
+        let events = log.of_session(session);
+        match events.last() {
+            Some(GoalEvent::Cleared {
+                session_id,
+                goal_id,
+            }) => {
+                assert_eq!(session_id, session);
+                assert_eq!(goal_id.as_ref(), Some(&created.goal.id));
+            }
+            other => panic!("clear 必须广播 Cleared，实际: {other:?}"),
+        }
+
+        // 幂等 no-op 不得广播（否则前端会为「本来就没有目标」刷新一次）。
+        let before = events.len();
+        assert!(!clear_goal(session).expect("idempotent clear"));
+        assert_eq!(
+            log.of_session(session).len(),
+            before,
+            "无删除的 clear 不得广播"
+        );
+    }
+
+    /// 观察者缺席时写入路径照常成功（core 单测 / TUI / CLI 都不装观察者）。
+    #[test]
+    fn writes_succeed_without_observer_b130() {
+        let _lock = test_support::lock();
+        let _store = test_support::TempGoalStore::install("b130-no-observer");
+        reset_goal_event_observer_for_test();
+        let session = "b130-no-observer-session";
+
+        create_goal(CreateGoalArgs {
+            session_id: Some(session.to_string()),
+            objective: "没有观察者也要能写".to_string(),
+            max_goal_rounds: Some(2),
+        })
+        .expect("create_goal without observer");
+        assert!(clear_goal(session).expect("clear_goal without observer"));
+    }
+}

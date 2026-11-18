@@ -826,16 +826,26 @@ impl ToolRouter {
         }
 
         match update_goal(args) {
-            Ok(res) => ToolResult {
-                tool_name: TOOL_UPDATE_GOAL.to_string(),
-                status: "ok".to_string(),
-                output: json_string(json!({
+            Ok(res) => {
+                // B129：终态（completed / blocked）后，宿主循环下一条必定是「本轮最后一次
+                // 模型调用」——把收尾指令随 tool result 一起回灌，模型才能把结论写给用户。
+                // 非终态相位不注入（避免每轮 update（edit/pause/resume）都刷一段无关文案）。
+                let wrapup = crate::agent::goal_wrapup::wrapup_for_goal(&res.goal);
+                let mut payload = json!({
                     "ok": true,
                     "tool": TOOL_UPDATE_GOAL,
                     "result": res,
-                })),
-                duration_ms: 0,
-            },
+                });
+                if let (Some(wrapup), Some(object)) = (wrapup, payload.as_object_mut()) {
+                    object.insert("wrapup".to_string(), json!(wrapup));
+                }
+                ToolResult {
+                    tool_name: TOOL_UPDATE_GOAL.to_string(),
+                    status: "ok".to_string(),
+                    output: json_string(payload),
+                    duration_ms: 0,
+                }
+            }
             Err(err) => error_result(TOOL_UPDATE_GOAL, "update_goal_failed", err, None),
         }
     }

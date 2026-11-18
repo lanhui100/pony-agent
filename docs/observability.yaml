@@ -2,6 +2,20 @@
 # 形状：~/.agents/skills/observability-onboarding/references/declaration.schema.json
 # 判定：声明说「该不该有」，巡检说「实际有没有」，两者交叉才是结论（规则家：declaration-rubric.md）。
 # 结构性依据：`.dev-team/evidence/wave43/observability-applicability.md`（wave-43 适配性裁决）。
+# B129/B130（2026-11-18，ADR 2026-11-18-goal-event-emission-and-terminal-wrapup）归属说明：
+# (1) 变更面全在**本地目标生命周期**：core 领域层在 goal 持久化成功后广播进程内事实
+#     （`agent/goal.rs::GoalEvent` + `install_goal_event_observer`），桌面层把它映射为
+#     **本地 Tauri 窗口事件**：`goal://changed` / `goal://round`（既有冻结契约 §7 原样）与
+#     additive 的 `goal://cleared`（`src-tauri/src/goal_events.rs`）。无网络出口、无后台任务线程、
+#     无新增 LLM 调用。B129 的收尾文案只追加进 `update_goal` 的 tool result（`wrapup` 键），
+#     不新增上下文注入通道。会话删除时 fail-soft 清理 goal sidecar（`control_plane/history_commands.rs`）。
+# (2) 新增**本地取证面**（非遥测出口，只落既有结构化日志行）：`goal_clear_on_session_delete_failed`
+#     （warn，字段 stage/session_id/error）与 `goal_event_emit_failed`（warn，字段 event/error）；
+#     字段只有会话标识与本地错误串，不含目标正文、消息正文与凭据。
+# (3) ⇒ 四维归属不变：tracing / issues 仍 applicable（落点不变 agent/otel/mod.rs、
+#     agent/ponysentry/client.rs）；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、
+#     无 /metrics、pull 模型不成立）。不新增 applicable 判定、不新增 enforcement_point。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 # B202（ADR 2026-11-17-otel-export-failure-spool）归属说明：OTLP 导出失败分类 + 有界本地 spool。
 # (1) 变更面全在**可观测性自身的降级路径**：`agent/otel/mod.rs` 最终失败分支加「先分类再措辞」，
 #     新增 `agent/otel/spool.rs`（失败摘要落 `PonyAgent/otel-spool/export-failures.jsonl`，

@@ -131,8 +131,8 @@ export const useGoalStore = defineStore("goal", {
 // ===========================================================================
 
 /**
- * C6：turn 结束（`turn:completed` / graph 流结束）或 `goal://changed` / `goal://round`
- * 事件到达后，以真实 sessionId 刷新目标条（`fetchGoal(sessionId)`）。
+ * C6：turn 结束（`turn:completed` / graph 流结束）或 `goal://changed` / `goal://round` /
+ * `goal://cleared` 事件到达后，以真实 sessionId 刷新目标条（`fetchGoal(sessionId)`）。
  *
  * 契约约束：空 sessionId 直接返回（不发起 IPC）；IPC 异常必须吞掉，不得冒泡到事件路径。
  */

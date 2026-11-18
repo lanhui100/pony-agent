@@ -1,5 +1,6 @@
 pub use pony_agent_core::agent;
 mod blocking_helper;
+mod goal_events;
 mod platform;
 mod tauri_adapter;
 /// wave-60 C6（A1 裁决）：注册表需被 `src-tauri/tests/` 直接引用 ⇒ 改 `pub mod`。
@@ -1446,6 +1447,9 @@ pub fn run() {
         })
         .manage(TurnTaskRegistry::with_max_concurrent(3))
         .setup(|app| {
+            // B130：goal 领域事件 → `goal://*` 宿主事件的唯一装配点。必须在任何 goal
+            // 变更发生前完成安装（否则首批 create/update 无事件；UI 只能等 turn 结束再拉）。
+            goal_events::install(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {
                 platform::apply_icons(app);
                 platform::apply_window_style(&window);

@@ -475,6 +475,11 @@ fn tool_router_executes_todo_write_and_todo_list_lifecycle() {
 
 #[test]
 fn goal_tools_authority_gate_b128() {
+    // B130 附带：旧版本不隔离 goal store，并行 goal 用例（临时 sidecar / 损坏 sidecar）
+    // 会把它推进「degraded 拒绝写盘」分支而随机假红；本用例只验证权限门，故与其它
+    // goal 用例共用同一把测试锁 + 独占 sidecar。
+    let _lock = crate::agent::goal::test_support::lock();
+    let _store = crate::agent::goal::test_support::TempGoalStore::install("b128-auth");
     let workspace = temp_workspace();
     let router = ToolRouter::with_workspace_root(workspace.clone());
     let session = "b128-auth-session";
@@ -591,6 +596,162 @@ fn goal_tools_authority_gate_b128() {
     };
     let auth_complete = router.execute_with_context(&complete_call, &goal_round_ctx);
     assert_eq!(auth_complete.status, "ok", "goal round 必须允许 complete: {}", auth_complete.output);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+/// B129：终态 goal 的收尾上下文必须由**真实工具路径**回灌，而不是只存在于一个孤立函数里。
+///
+/// 断言三点：active 不注入（避免每轮刷无关文案）、completed/blocked 注入对应引导、
+/// 且终态后真实续轮读面（`continuation_goal_for_run`）返回 `None`（不再发起新轮）。
+#[test]
+fn terminal_goal_wrapup_is_injected_into_tool_result_b129() {
+    let _lock = crate::agent::goal::test_support::lock();
+    let _store = crate::agent::goal::test_support::TempGoalStore::install("b129-wrapup");
+    let workspace = temp_workspace();
+    let router = ToolRouter::with_workspace_root(workspace.clone());
+    let session = "b129-wrapup-session";
+
+    let call = |name: &str, arguments: serde_json::Value| ToolCall {
+        name: name.to_string(),
+        arguments,
+        call_id: Some("b129-wrapup".to_string()),
+        plan: None,
+    };
+
+    // create_goal 的门禁要求直接人类授权；complete/blocked 允许在 goal 轮内由模型发起。
+    let human_ctx = ToolExecutionContext {
+        workspace_root: Some(workspace.clone()),
+        session_id: Some(session.to_string()),
+        dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
+            session_id: Some(session.to_string()),
+            is_direct_human: true,
+            is_goal_round: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let goal_round_ctx = ToolExecutionContext {
+        workspace_root: Some(workspace.clone()),
+        session_id: Some(session.to_string()),
+        dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
+            session_id: Some(session.to_string()),
+            is_direct_human: false,
+            is_goal_round: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let created = router.execute_with_context(
+        &call(
+            "create_goal",
+            json!({ "session_id": session, "objective": "把报告写完并给出结论" }),
+        ),
+        &human_ctx,
+    );
+    assert_eq!(created.status, "ok", "create_goal 必须成功: {}", created.output);
+    let created_payload: Value =
+        serde_json::from_str(&created.output).expect("create_goal 输出必须是 JSON");
+    let goal_id = created_payload["result"]["goal"]["id"]
+        .as_str()
+        .expect("create_goal 必须返回 goal.id")
+        .to_string();
+    assert!(
+        created_payload.get("wrapup").is_none(),
+        "非终态相位不得注入 wrapup: {}",
+        created.output
+    );
+
+    // 1. complete：goal 轮内模型自行完成 → tool result 带 <goal_complete>。
+    let completed = router.execute_with_context(
+        &call(
+            "update_goal",
+            json!({
+                "session_id": session,
+                "goal_id": goal_id,
+                "revision": 1,
+                "action": "complete"
+            }),
+        ),
+        &goal_round_ctx,
+    );
+    assert_eq!(
+        completed.status, "ok",
+        "goal round 必须允许 complete: {}",
+        completed.output
+    );
+    let completed_payload: Value =
+        serde_json::from_str(&completed.output).expect("update_goal 输出必须是 JSON");
+    let complete_text = completed_payload["wrapup"]
+        .as_str()
+        .unwrap_or_else(|| panic!("completed 必须注入 wrapup: {}", completed.output));
+    assert!(complete_text.starts_with("<goal_complete>"), "{complete_text}");
+    assert!(
+        complete_text.contains("把报告写完并给出结论"),
+        "收尾文案必须点名目标：{complete_text}"
+    );
+    assert!(
+        complete_text.contains("不要再调用工具"),
+        "必须禁止本轮继续调工具：{complete_text}"
+    );
+    assert!(
+        crate::agent::goal::continuation_goal_for_run(Some(session)).is_none(),
+        "completed 后宿主不得再发起 goal 轮"
+    );
+
+    // 2. blocked：人类重建目标后，goal 轮内模型标记阻塞 → tool result 带 <goal_blocked>。
+    let recreated = router.execute_with_context(
+        &call(
+            "create_goal",
+            json!({ "session_id": session, "objective": "把报告写完并给出结论" }),
+        ),
+        &human_ctx,
+    );
+    assert_eq!(
+        recreated.status, "ok",
+        "completed 目标应允许人类重建: {}",
+        recreated.output
+    );
+    let recreated_payload: Value =
+        serde_json::from_str(&recreated.output).expect("create_goal 输出必须是 JSON");
+    let second_goal_id = recreated_payload["result"]["goal"]["id"]
+        .as_str()
+        .expect("create_goal 必须返回 goal.id")
+        .to_string();
+
+    let blocked = router.execute_with_context(
+        &call(
+            "update_goal",
+            json!({
+                "session_id": session,
+                "goal_id": second_goal_id,
+                "revision": 1,
+                "action": "blocked",
+                "blocked_reason": "上游模型连续失败"
+            }),
+        ),
+        &goal_round_ctx,
+    );
+    assert_eq!(
+        blocked.status, "ok",
+        "goal round 必须允许 blocked: {}",
+        blocked.output
+    );
+    let blocked_payload: Value =
+        serde_json::from_str(&blocked.output).expect("update_goal 输出必须是 JSON");
+    let blocked_text = blocked_payload["wrapup"]
+        .as_str()
+        .unwrap_or_else(|| panic!("blocked 必须注入 wrapup: {}", blocked.output));
+    assert!(blocked_text.starts_with("<goal_blocked>"), "{blocked_text}");
+    assert!(
+        blocked_text.contains("上游模型连续失败"),
+        "必须带上阻塞原因：{blocked_text}"
+    );
+    assert!(
+        crate::agent::goal::continuation_goal_for_run(Some(session)).is_none(),
+        "blocked 后宿主不得再发起 goal 轮"
+    );
 
     let _ = std::fs::remove_dir_all(&workspace);
 }

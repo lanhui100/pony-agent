@@ -609,6 +609,22 @@ impl HostControlPlane {
                 command.session_id
             );
         }
+        // B130：goal sidecar 按 session 存（`agent/goal.rs::SESSION_GOALS`），会话删除后
+        // 条目会永久残留并随删除次数单调增长；会话 id 若被复用还会读到上一会话的目标。
+        // fail-soft：清理失败**不得**阻塞/回滚会话删除（删除已是用户可见的事实），
+        // 但必须留结构化诊断，否则 sidecar 泄漏又变成静默债务。
+        if let Err(error) = crate::agent::goal::clear_goal(&command.session_id) {
+            crate::agent::otel::log::log_json_with_fields(
+                "warn",
+                "goal_clear_on_session_delete_failed",
+                None,
+                &[
+                    ("stage", serde_json::json!("delete_session")),
+                    ("session_id", serde_json::json!(command.session_id)),
+                    ("error", serde_json::json!(error)),
+                ],
+            );
+        }
         remaining
     }
 
@@ -654,5 +670,113 @@ impl HostControlPlane {
             run: query.include_run.then_some(run).flatten(),
             runs: query.include_runs.then(|| self.list_graph_runs()),
         }
+    }
+}
+
+#[cfg(test)]
+mod b130_tests {
+    use super::*;
+    use crate::agent::goal::test_support::TempGoalStore;
+    use crate::agent::goal::{
+        clear_goal, create_goal, get_goal, reset_goal_store_for_test, CreateGoalArgs, GetGoalArgs,
+        GOAL_STORE_PATH_ENV,
+    };
+    use std::fs;
+
+    fn create_session_goal(session: &str) -> String {
+        create_goal(CreateGoalArgs {
+            session_id: Some(session.to_string()),
+            objective: "会话删除后不得留下目标".to_string(),
+            max_goal_rounds: Some(5),
+        })
+        .expect("create_goal")
+        .goal
+        .id
+    }
+
+    fn goal_of(session: &str) -> Option<crate::agent::goal::GoalData> {
+        get_goal(GetGoalArgs {
+            session_id: Some(session.to_string()),
+        })
+        .expect("get_goal")
+        .goal
+    }
+
+    /// B130：删除会话必须同时清掉该会话的 goal 条目（内存 + 磁盘），且重复删除幂等。
+    #[test]
+    fn deleting_session_clears_goal_sidecar_entry() {
+        let _lock = crate::agent::goal::test_support::lock();
+        let store = TempGoalStore::install("delete-success");
+        let control_plane = HostControlPlane::new();
+        let session = "b130-delete-success";
+        let goal_id = create_session_goal(session);
+        assert!(goal_of(session).is_some(), "前置：目标已创建");
+
+        let _remaining = control_plane.delete_session(DeleteSessionCommand {
+            session_id: session.to_string(),
+        });
+
+        assert!(goal_of(session).is_none(), "删除会话后内存中的目标必须消失");
+        // 磁盘面：重新加载后仍不得残留（否则跨进程合并会把条目带回）。
+        reset_goal_store_for_test();
+        assert!(
+            goal_of(session).is_none(),
+            "删除会话后 sidecar 不得残留该会话目标"
+        );
+        let store_path = store.path();
+        if store_path.exists() {
+            let disk = fs::read_to_string(store_path).expect("read goal sidecar");
+            assert!(
+                !disk.contains(&goal_id),
+                "sidecar 不得再出现被删目标的 id：{disk}"
+            );
+        }
+
+        // 幂等：再次删除同一会话不报错、不复活目标。
+        control_plane.delete_session(DeleteSessionCommand {
+            session_id: session.to_string(),
+        });
+        assert!(goal_of(session).is_none());
+    }
+
+    /// B130 fail-soft：goal 清理落盘失败必须**不阻塞**会话删除，且内存记录回滚保留。
+    ///
+    /// 注入方式（不碰真实磁盘）：把 sidecar 的父目录替换为普通文件——`persist_goal_store`
+    /// 的 `create_dir_all` 必然失败，但内存里的目标仍在（中间不 reset），于是 `clear_goal`
+    /// 走到「落盘失败 ⇒ 回滚内存 ⇒ 返回 Err」的真实分支。
+    #[test]
+    fn goal_clear_failure_does_not_block_session_delete() {
+        let _lock = crate::agent::goal::test_support::lock();
+        let store = TempGoalStore::install("fail-soft");
+        let control_plane = HostControlPlane::new();
+        let session = "b130-delete-fail-soft";
+        create_session_goal(session);
+
+        let blocked_parent = store.dir().join("blocked-parent");
+        fs::write(&blocked_parent, b"not-a-directory").expect("write blocker file");
+        std::env::set_var(GOAL_STORE_PATH_ENV, blocked_parent.join("goal_store.json"));
+
+        // 不 panic 即证明会话删除未被 goal 清理失败阻断。
+        let remaining = control_plane.delete_session(DeleteSessionCommand {
+            session_id: session.to_string(),
+        });
+        assert!(
+            !remaining
+                .iter()
+                .any(|overview| overview.conversation_id == session),
+            "会话必须已从列表移除（删除语义不受 goal 清理失败影响）"
+        );
+        assert!(
+            goal_of(session).is_some(),
+            "clear 落盘失败必须回滚内存记录（不得谎报已删除）"
+        );
+
+        // 恢复可写路径后重试清理成功——证明失败只是「这次没清掉」，不是永久卡死。
+        std::env::set_var(GOAL_STORE_PATH_ENV, store.path());
+        assert!(
+            clear_goal(session).expect("clear after restore"),
+            "重试必须真删"
+        );
+        assert!(goal_of(session).is_none());
     }
 }

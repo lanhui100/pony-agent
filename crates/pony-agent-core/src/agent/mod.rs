@@ -24,6 +24,7 @@ pub mod git_search;
 pub mod goal;
 pub mod goal_command;
 pub mod goal_lease;
+pub mod goal_wrapup;
 pub mod graph;
 pub mod governed_executor;
 pub mod headless;

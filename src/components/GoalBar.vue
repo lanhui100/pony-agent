@@ -49,12 +49,16 @@ const isOpen = computed(() => (props.open === undefined ? true : props.open));
 const shouldRender = computed(() => currentGoal.value !== null || props.open === true);
 
 // Wave-1 C6：GoalBar 在 sessionId 变化、turn 结束（runtime 侧统一刷新）、
-// `goal://changed` / `goal://round` 事件后以真实 sessionId 刷新。
+// `goal://changed` / `goal://round` / `goal://cleared` 事件后以真实 sessionId 刷新。
+// 三个事件都由后端在**写盘成功后**发射（B130：`src-tauri/src/goal_events.rs`），
+// 长跑目标期间 `goal://round` 能让轮次计数即时前进；`clear` 后 `goal://cleared` 立即收起面板。
 type GoalChangedEventPayload = { sessionId?: string };
 type GoalRoundEventPayload = { round?: number; status?: string };
+type GoalClearedEventPayload = { sessionId?: string; goalId?: string | null };
 
 const GOAL_CHANGED_EVENT = "goal://changed";
 const GOAL_ROUND_EVENT = "goal://round";
+const GOAL_CLEARED_EVENT = "goal://cleared";
 
 function refreshGoal(): void {
   void refreshForTurn(props.sessionId);
@@ -77,6 +81,15 @@ onMounted(() => {
       );
       unlistenHandlers.push(
         await safeListen<GoalRoundEventPayload>(GOAL_ROUND_EVENT, () => {
+          refreshGoal();
+        })
+      );
+      unlistenHandlers.push(
+        await safeListen<GoalClearedEventPayload>(GOAL_CLEARED_EVENT, ({ payload }) => {
+          const eventSessionId = payload?.sessionId?.trim();
+          if (eventSessionId && eventSessionId !== props.sessionId) {
+            return;
+          }
           refreshGoal();
         })
       );
