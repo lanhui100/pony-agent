@@ -32,6 +32,17 @@ repo 模板文件与 `ponygo` 内 heredoc 双写，EOL 归一后逐字节一致�
 `.github/workflows/ci.yml:47` 的 `governance` job 跑 `bash .meta/gates/scratch-hygiene.sh && bash .meta/gates/scratch-hygiene.spec.sh`；
 本地 pre-commit 不跑它，秒级预算留给 A1。
 
+### 实例门禁 git-guard.mjs（本地守卫 + 自检）
+
+多会话并发 git 契约的本地执行点：暂存卫生（产物目录 / 二进制 / 20MB / 尾随换行 / 敏感信息）、pre-push 纪律（禁直推 `main`、禁改写远端既有历史、分支名 `^<类型>/`）、commit-msg 规范（Conventional Commits）。
+
+- 实现：`scripts/git-guard.mjs` —— Node 单实现，三平台一致生效。
+- 退役：`scripts/git-guard.ps1` 已删。它被 `if command -v pwsh` 包住，Linux/macOS 上整段静默跳过（缺陷记录见 `docs/audit/engineering-quality-audit-2026-11-01.md:122`）。
+- 挂载：`.githooks/{pre-commit,pre-push,commit-msg}`（`core.hooksPath=.githooks`）。
+- 自检：`bash scripts/git-guard.spec.sh`（= `npm run git:guard:selftest`，11 条正负样本断言；隔离在 mktemp 临时仓库内，不触碰真实 `.git`）。
+- 接线：`npm run verify` 首段 + `.github/workflows/ponygo-governance.yml` 的 `governance` job。
+- 决策真源：`.agents/notes/implemented/process/2026-11-18-multi-session-git-contract.md`。
+
 ### 承诺 → 非零退出命令
 
 | 承诺（maturity-ladder §5） | 命令 | 命中判据 |
