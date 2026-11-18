@@ -90,6 +90,24 @@ jobs:
           RUSTFLAGS: -D warnings
         shell: pwsh
         run: ./scripts/invoke-rust-target.ps1 check check --package=pony-agent-core
+
+      # Clippy 棘轮门与上面两步职责不同、不可互相替代：
+      #   cargo check 那步（RUSTFLAGS=-D warnings）判"rustc 默认告警是否清零"；
+      #   本步判"clippy 表（.meta/lints/）的新增债是否为零"——存量在 scripts/clippy-baseline.json 冻结。
+      # 为什么只挂 Linux：基线按平台分册（platforms.<os>），cfg(windows)/cfg(unix) 让两边违例集合不同
+      # （实测 24% 存量落在平台门控文件里），拿 Linux 基线在 windows 上跑必然假红。Windows/macOS 分册
+      # 待各自平台跑一次 `npm run rust:lint:update` 后，再在该平台补同一步（见 backlog B244）。
+      # 门自持 lint 级别（脚本内清空 RUSTFLAGS 并注入 -W/-A），否则 -D warnings 会把可数的 warning
+      # 变成 error，棘轮失去记账面。表/阈值被改动但未重基线时 exit 2（口径漂移 fail-closed）。
+      - name: Rust 组件（clippy，幂等）
+        if: runner.os == 'Linux'
+        run: rustup component add clippy
+
+      - name: Clippy 棘轮门 + 门自检（Linux 分册；存量冻结，新增/恶化即红）
+        if: runner.os == 'Linux'
+        run: |
+          npm run rust:lint:selftest
+          npm run rust:lint
       - name: Core 非 Windows lib 单元测试（Linux-only）
         if: runner.os == 'Linux'
         env:

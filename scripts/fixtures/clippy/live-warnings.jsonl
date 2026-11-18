@@ -1,0 +1,13 @@
+{"reason":"compiler-artifact","package_id":"path+file:///repo/crates/pony-agent-core#0.1.168"}
+{"reason":"compiler-message","message":{"code":{"code":"clippy::unwrap_used"},"level":"warning","message":"used `unwrap()` on a `Result` value","spans":[{"file_name":"crates/x/a.rs","is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"clippy::unwrap_used"},"level":"error","message":"used `unwrap()` on a `Result` value","spans":[{"file_name":"crates/x/a.rs","is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"unreachable_pub"},"level":"warning","message":"`Foo` is only used internally","spans":[{"file_name":"crates/x/b.rs","is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"clippy::needless_return"},"level":"warning","message":"unneeded `return` statement","spans":[{"file_name":"crates/x/a.rs","is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"clippy::unwrap_used"},"level":"warning","message":"dep code","spans":[{"file_name":"/home/u/.cargo/registry/src/index.crates.io/serde-1.0.0/src/lib.rs","is_primary":true}]}}
+{"reason": "compiler-message", "message": {"code": {"code": "clippy::unwrap_used"}, "level": "warning", "message": "dep code (windows)", "spans": [{"file_name": "C:\\Users\\x\\.cargo\\registry\\src\\serde-1.0.0\\src\\lib.rs", "is_primary": true}]}}
+{"reason": "compiler-message", "message": {"code": {"code": "clippy::redundant_clone"}, "level": "warning", "message": "windows 分隔符必须归一化到同一键", "spans": [{"file_name": "crates\\x\\c.rs", "is_primary": true}]}}
+{"reason":"compiler-message","message":{"code":null,"level":"warning","message":"unused variable: `x`","spans":[{"file_name":"crates/x/a.rs","is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"clippy::doc_markdown"},"level":"warning","message":"表内 allow 的 lint，必须不入账","spans":[{"file_name":"crates/x/a.rs","is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"clippy::unwrap_used"},"level":"note","message":"note, not a violation","spans":[{"file_name":"crates/x/a.rs","is_primary":true}]}}
+{"reason":"build-finished","success":true}
+this line is not JSON at all

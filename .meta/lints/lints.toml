@@ -1,0 +1,74 @@
+# pony-agent Rust lint 表（唯一真值源）
+#
+# 适配自 morganlinton/BeautifulRust v1.6.0 的 lints/lints.toml（MIT，commit b971843），
+# 按本仓形态裁剪——裁剪不是"挑软柿子"，是形态不同的必然结果：
+#   本仓主体是 bin（`pony` / `ponycli`）与 TUI，不是对外发布的库 ⇒ `[lib]` 类 lint 关闭，
+#   理由逐条写在下方行内注释里（判据：`.meta/lints/README.md` §2）。
+#
+# ── 语义契约 ─────────────────────────────────────────────────────────────
+# 本表**不写进 Cargo.toml**。`scripts/check-clippy-baseline.mjs` 读本表、翻译成 `-W` / `-A`
+# 旗标注入 clippy（决策与备选见 ADR `.agents/notes/implemented/process/
+# 2026-11-18-rust-quality-gate-and-skills.md`）。因此：
+#   · 改本表 = 改门口径 ⇒ 必须重基线（`npm run rust:lint:update`）并人工 review diff；
+#     否则门以 exit 2 拒绝（表内容 sha256 与基线不符 = 口径漂移）。
+#   · 本表的 level 语义：`warn` = 计入棘轮（新增/恶化即红）；`allow` = 不扫描、不计入。
+#   · 存量违例在 `scripts/clippy-baseline.json` 记账（grandfathered），只许下调不许上涨。
+#
+# ── 波次（收口顺序；仅注释，机器不读）─────────────────────────────────────
+#   波1 零争议卫生：抑制要理由、unsafe 要 SAFETY、禁通配导入、禁 dbg!/todo!、
+#       冗余 clone —— 改动锚定在单行，`clippy --fix` 可覆盖大半。
+#   波2 类型与转换：`as` 截断族、bool 参数/字段、Rc 容器形态 —— 需要读调用点判断。
+#   波3 需要设计判断：`unwrap_used` 在 lib 热点路径上要换成 `?` 或带理由的 `expect`。
+# 波次只指导人力排序，不改变门的判定（全表一次性纳入棘轮）。
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"          # unsafe fn 内每个 unsafe 操作各自成块
+missing_debug_implementations = "warn"   # 公开类型实现 Debug：排障与日志可见性
+unreachable_pub = "warn"                 # 实际不可达的 pub 收敛为 pub(crate)
+rust_2018_idioms = { level = "warn", priority = -1 }  # 2018 期次惯用法（如 Formatter<'_>）
+missing_docs = "allow"                   # [lib] 类：本仓是 bin 主体，公开项四散在内部模块，4,651 条噪声
+
+[lints.clippy]
+# 组先给，优先级 -1，让下方单条设置覆盖组口径。
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# ── 波1：零争议卫生 ──────────────────────────────────────────────────────
+allow_attributes = "warn"                     # 用 #[expect] 而非 #[allow]（过期即提示）
+allow_attributes_without_reason = "warn"      # 每个抑制必须写 reason
+undocumented_unsafe_blocks = "warn"           # 每个 unsafe 块要有 // SAFETY: 论证
+multiple_unsafe_ops_per_block = "warn"        # 一个块一个 unsafe 操作，失败面可定位
+wildcard_imports = "warn"                     # 禁通配导入（测试内 super::* 由 clippy 豁免）
+redundant_clone = "warn"                      # 原值不再使用的 clone
+dbg_macro = "warn"                            # 调试残留
+todo = "warn"                                 # 未实现占位
+string_add = "warn"                           # 字符串拼接用 format!/push_str
+
+# ── 波2：类型与转换 ──────────────────────────────────────────────────────
+as_conversions = "warn"                       # 优先 From / TryFrom
+cast_possible_truncation = "warn"             # 静默截断
+cast_sign_loss = "warn"                       # 符号丢失
+cast_possible_wrap = "warn"                   # 溢出回绕（与上两条同族，一并纳入）
+fn_params_excessive_bools = "warn"            # bool 参数在调用点不可读（阈值 0，见 clippy.toml）
+struct_excessive_bools = "warn"               # 多个 bool 字段 → 枚举或 bitflags
+rc_buffer = "warn"                            # Rc<String>/Rc<Vec<T>> → Rc<str>/Rc<[T]>
+clone_on_ref_ptr = "warn"                     # Rc::clone(&x) 让廉价克隆可见
+
+# ── 波3：需要设计判断 ────────────────────────────────────────────────────
+unwrap_used = "warn"                          # 用 ? 或带理由的 expect
+expect_used = "allow"                         # 带理由的 expect 是被认可的形式（与上游一致）
+panic_in_result_fn = "warn"                   # 返回 Result 的函数不应再 panic
+missing_assert_message = "warn"               # assert! 要说清断的是什么（测试内豁免）
+
+# ── 应用模式裁剪：形状不同，不是降标准 ──────────────────────────────────
+print_stdout = "allow"                        # TUI/CLI 的终端输出是产品行为，不是调试残留
+print_stderr = "allow"                        # 同上（错误面向用户）
+missing_errors_doc = "allow"                  # [lib] 类：对外 API 的 # Errors 契约
+missing_panics_doc = "allow"                  # [lib] 类：对外 API 的 # Panics 契约
+exhaustive_enums = "allow"                    # [lib] 类：导出枚举 #[non_exhaustive] 的演进保护
+must_use_candidate = "allow"                  # 纯风格建议，本仓不接受它驱动 API 改动
+module_name_repetitions = "allow"             # 模块名与类型名同词在本仓层级下是清晰的
+module_inception = "allow"                    # 同名叶子模块（如 tui/tui）合法
+enum_glob_use = "allow"                       # 函数内 match 该枚举时 Enum::* 更易读
+doc_markdown = "allow"                        # 中英混排文档误报为主，4 位数量级噪声
+too_many_lines = "allow"                      # 与 npm run size:check（函数 200 行）重复覆盖

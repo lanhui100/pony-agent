@@ -1,0 +1,9 @@
+# 对应 scripts/check-clippy-baseline.spec.mjs 的夹具 lint 表（形状与 .meta/lints/lints.toml 相同，内容无关）
+[lints.rust]
+unreachable_pub = "warn"
+missing_docs = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+doc_markdown = "allow"   # 这里故意放行内注释，验证注释剥离与 allow 语义

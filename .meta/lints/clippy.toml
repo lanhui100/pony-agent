@@ -1,0 +1,18 @@
+# pony-agent clippy 阈值配置
+#
+# 由 scripts/check-clippy-baseline.mjs 以 CLIPPY_CONF_DIR=.meta/lints 注入（确定性：
+# 不依赖 clippy 从 CARGO_MANIFEST_DIR 向上搜索的结果）。手动跑 clippy 时请同样带上：
+#
+#   CLIPPY_CONF_DIR=.meta/lints cargo clippy -p pony-agent-core --lib --bins
+#
+# 只放"阈值与豁免形态"这类 clippy.toml 专属配置；lint 级别一律在 lints.toml。
+
+# bool 参数超过 0 个即触发 fn_params_excessive_bools（上游默认 3）。
+# 一个 bool 参数在调用点就是不可读的 report(true)，且在函数里长不出第三种模式。
+max-fn-params-bools = 0
+
+# 测试里的 panic 就是断言手法：unwrap / expect / 输出整体豁免。
+# 这与"lib 代码要返回错误"不冲突——测试失败必须炸得响。
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
