@@ -323,7 +323,7 @@ mod tests {
                     "params",
                     serde_json::json!({
                         "path": "/home/alice/pony-agent/secret.txt",
-                        "apiKey": "sk-live-0123456789abcdefghijklmnop",
+                        "apiKey": "sk-test-0123456789abcdefghijklmnop",
                         "reason": "Bearer abcdefghijklmnopqrstuvwxyz",
                         "nested": [{"token": "Bearer zzzzyyyyxxxx"}],
                     }),
