@@ -36,6 +36,9 @@
 //! 单次单行写 ⇒ 原语总数 1、`save_store` 0）；用例 2 为**病灶红相**（今天
 //! `create_workspace` 直连 `save_store` ⇒ `commit_boundary` 0 次，断言失败）。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use pony_agent_core::agent::capability_bridge::{McpSourceSnapshot, SkillSourceSnapshot};
 use pony_agent_core::agent::path_permission::AuthorizedPathEntry;
 use pony_agent_core::agent::session::{
@@ -497,10 +500,13 @@ fn authorize_path_does_not_trigger_full_store_commit() {
         "authorize_path 绝不得触发 save_store 全库落盘（实际 {spent:?}）"
     );
     let persisted = store_metadata_authorized_paths(&db, "path_authorizations.v1");
+    // B230：AuthorizeStore 现在对授权条目统一去 Windows verbatim 前缀（与 classify_path 同形），
+    // 故落盘期望值同口径。
+    let expected_authorized = support::deverbatim(&canonical);
     assert!(
-        persisted.iter().any(|entry| entry.path == canonical),
+        persisted.iter().any(|entry| entry.path == expected_authorized),
         "元数据必须已落盘到 store_metadata 的 path_authorizations.v1（期望含 {}，实际 {persisted:?}）",
-        canonical.display()
+        expected_authorized.display()
     );
 
     // Act 2: 撤销授权
