@@ -52,8 +52,9 @@ use pony_agent_core::agent::runtime::{
     TurnInput, TurnStreamEvent,
 };
 use pony_agent_core::agent::session::{
-    is_main_session_id, last_context_input_tokens, new_session_id, session_usage_totals,
-    turn_usage_totals_from_snapshot, SessionStore, SessionUsageLedger,
+    estimate_tool_roundtrip_surface_tokens, is_main_session_id, last_context_input_tokens,
+    new_session_id, session_usage_totals, turn_usage_totals_from_snapshot, ContextSurfaceLedger,
+    SessionStore, SessionUsageLedger,
 };
 use pony_agent_core::agent::stop_escalation::StopReason;
 // wave-60 §C8：双击 Esc 的纯判定状态机（与桌面端 `src/lib/runtime/stop-sequence.ts` 同判据）。
@@ -234,6 +235,11 @@ pub enum UiEvent {
     StreamReasoning(String),
     StreamToolCall(String),
     StreamToolResult(String),
+    /// B116：工具往返把新内容追加进**下一跳请求表面**（估算 token 数）。
+    ///
+    /// 唯一生产点：`TuiTurnSink` 在工具结果事件上按 `agent::session` 的估算纯函数算出；
+    /// 消费点只把它记入 `TuiState::context_surface`，驱动「下一跳上下文%」前进。
+    StreamSurfaceAppend(u64),
     StreamCompleted,
     StreamFailed(String),
     /// 2026-11-14：上游重试进度（provider 重试循环**即将重试**时投递）。
@@ -1496,6 +1502,12 @@ pub struct TuiState {
     pub session_usage: SessionUsageLedger,
     /// wave-39 R2 / wave-41 S1：最近一次调用的上下文占用 token，用于上下文百分比分子（对齐 ADR 0035 S1）。
     pub last_context_tokens: u64,
+    /// B116：上下文占用**下一跳预估**账本（`projectedTokens` 口径）。
+    ///
+    /// 分子优先级：投影（有采样时）→ 快照采样 → `last_context_tokens` → `total_input_tokens`。
+    /// 账本只由已结算采样 + 请求表面增量（工具结果追加 / compaction 负增量）驱动，
+    /// 不写回持久化 usage 真值。
+    pub context_surface: ContextSurfaceLedger,
     /// wave-39 R2：当前模型上下文窗口；`0` = 未知（指标行渲染 `—`）。
     pub context_window_tokens: u32,
     /// wave-39 R2：本轮去重回执 `(input, output, cache_hit, total)`；`None` = 本轮尚无回执。
@@ -1696,6 +1708,7 @@ impl Default for TuiState {
             live_metrics_stale: false,
             session_usage: SessionUsageLedger::default(),
             last_context_tokens: 0,
+            context_surface: ContextSurfaceLedger::default(),
             context_window_tokens: 0,
             turn_usage: None,
             reasoning_turn_closed: false,
@@ -1989,6 +2002,8 @@ impl TuiState {
         self.live_metrics_stale = false;
         self.session_usage.reset();
         self.last_context_tokens = 0;
+        // B116：投影账本同属会话瞬时态（跨会话残留会把旧会话的表面增量叠到新会话上）。
+        self.context_surface.reset();
         self.context_window_tokens = 0;
         self.plan_state = None;
         self.task_board_state = None;
@@ -2228,6 +2243,11 @@ impl TuiState {
         // P0：会话台账吸收本轮的**轮级 Σ**（幂等覆盖，多跳不重复累加）。
         self.session_usage
             .set_turn(turn_usage_totals_from_snapshot(&metrics));
+        // B116：上下文投影的采样锚点 = 本次结算的 prompt 侧压力（协议归一优先）。
+        // 采样必须与快照同一帧：采样值来自这次请求，锚点取此刻的请求表面累计。
+        if let Some(pressure) = metrics.context_input_tokens.or(metrics.input_tokens) {
+            self.context_surface.note_sample(pressure);
+        }
         self.live_metrics = Some(metrics);
         self.live_metrics_stale = false;
     }
@@ -2246,6 +2266,12 @@ impl TuiState {
         self.total_cache_hit_tokens = self.total_cache_hit_tokens.saturating_add(cache_hit);
         self.turn_cache_hit_tokens = cache_hit;
         self.last_context_tokens = input;
+        // B116：legacy 事件路径（无 metrics 快照，I7）时由 usage 回执承担采样；
+        // 有快照时采样已在 `apply_live_metrics` 完成（协议归一值优先），此处不得覆盖
+        // ——否则会把归一前的裸 `input_tokens` 盖回去，读数在两种量纲间抖动。
+        if self.live_metrics.is_none() {
+            self.context_surface.note_sample(input);
+        }
         self.turn_usage = Some((input, output, cache_hit, total));
     }
     pub fn start_add_provider(&mut self) {
@@ -3398,6 +3424,43 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
 
 struct TuiTurnSink {
     tx: Sender<UiEvent>,
+    /// B116：已计入「请求表面」估算的工具活动 id。
+    ///
+    /// 同一工具的完成态可能经多条事件名（`turn:tool` 完成相位 / 旧 `turn:tool_result`）
+    /// 抵达；按活动 id 去重，保证**每次真实工具往返只计一次**追加。
+    surface_counted: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl TuiTurnSink {
+    fn new(tx: Sender<UiEvent>) -> Self {
+        Self {
+            tx,
+            surface_counted: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// B116：把「本次工具往返新追加的请求表面」投递给 UI 投影账本。
+    ///
+    /// 只认**完成态**（`running` / `planned` 尚无结果，下一跳还没成型）；估算口径统一由
+    /// `agent::session::estimate_tool_roundtrip_surface_tokens` 出具，本函数不另算公式。
+    fn note_tool_surface(&self, id: &str, status: &str, arguments: Option<&str>, result: Option<&str>) {
+        if status == "running" || status == "planned" {
+            return;
+        }
+        let tokens = estimate_tool_roundtrip_surface_tokens(arguments, result);
+        if tokens == 0 {
+            return;
+        }
+        let mut counted = self
+            .surface_counted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !counted.insert(id.to_string()) {
+            return;
+        }
+        drop(counted);
+        let _ = self.tx.send(UiEvent::StreamSurfaceAppend(tokens));
+    }
 }
 
 /// 2026-11-14：「上游重试进度 → 状态行」的**唯一装配点**。
@@ -3567,6 +3630,13 @@ impl TurnEventSink for TuiTurnSink {
                 if let Some(activities) = &payload.tool_activities {
                     if let Some(act) = activities.last() {
                         let is_running = act.status == "running" || act.status == "planned";
+                        // B116：完成态工具往返把参数/结果追加进下一跳请求表面（按 id 去重）。
+                        self.note_tool_surface(
+                            &act.id,
+                            &act.status,
+                            act.arguments_text.as_deref(),
+                            act.result_text.as_deref(),
+                        );
                         let desc_text = if !act.description.trim().is_empty() {
                             Some(act.description.trim().to_string())
                         } else {
@@ -3621,6 +3691,19 @@ impl TurnEventSink for TuiTurnSink {
                 }
             }
             "turn:tool_result" => {
+                if let Some(act) = payload
+                    .tool_activities
+                    .as_ref()
+                    .and_then(|activities| activities.last())
+                {
+                    // B116：旧结果事件路径同样计入请求表面（helper 按 id 去重，双通道不重复计）。
+                    self.note_tool_surface(
+                        &act.id,
+                        &act.status,
+                        act.arguments_text.as_deref(),
+                        act.result_text.as_deref(),
+                    );
+                }
                 let (name, display_zh, status, detail) = payload
                     .tool_activities
                     .as_ref()
@@ -4499,9 +4582,10 @@ fn metrics_segments(state: &TuiState) -> Vec<MetricsSegment> {
     let snapshot = state.live_metrics.as_ref();
     let session = state.session_usage.totals();
 
-    // ---- ↑in：当前上下文输入（快照优先；无快照回退 legacy 当前输入）----
-    let current_context = snapshot
-        .and_then(|metrics| metrics.context_input_tokens)
+    // ---- ↑in：当前上下文输入（B116 下一跳投影优先 → 快照采样 → legacy 当前输入）----
+    let projected_context = state.context_surface.projected_tokens();
+    let current_context = projected_context
+        .or_else(|| snapshot.and_then(|metrics| metrics.context_input_tokens))
         .unwrap_or(state.total_input_tokens);
 
     // ---- ↓out：会话累计输出（台账优先 → legacy 会话累计 → 本轮 Σ）----
@@ -4550,16 +4634,22 @@ fn metrics_segments(state: &TuiState) -> Vec<MetricsSegment> {
         .and_then(|metrics| metrics.context_window_tokens)
         .filter(|window| *window > 0)
         .or_else(|| (state.context_window_tokens > 0).then_some(u64::from(state.context_window_tokens)));
-    let context_ratio = snapshot.and_then(|metrics| metrics.context_ratio).or_else(|| {
-        // P2：快照缺窗口（provider_meta 未注册能力）或走 legacy 事件 ⇒ 用调用方解析出的
-        // 注册表真实窗口回退；比例仍由 core `context_ratio_for_window` 算出（同源 fail-closed，
-        // 越界 ⇒ 无值，不得 clamp 成 100%）。分子取**当前上下文**：快照优先 → 最近一次调用 → 当前输入。
-        let context_tokens = snapshot
-            .and_then(|metrics| metrics.context_input_tokens)
-            .or_else(|| (state.last_context_tokens > 0).then_some(state.last_context_tokens))
-            .or_else(|| (state.total_input_tokens > 0).then_some(state.total_input_tokens))?;
-        context_ratio_for_window(context_tokens, window_tokens?)
-    });
+    let context_ratio = match projected_context {
+        // B116：有投影时按投影重算比例（采样比已被工具结果/压缩推进）；缺窗口则回退快照比。
+        Some(projected) => window_tokens
+            .and_then(|window| context_ratio_for_window(projected, window))
+            .or_else(|| snapshot.and_then(|metrics| metrics.context_ratio)),
+        None => snapshot.and_then(|metrics| metrics.context_ratio).or_else(|| {
+            // P2：快照缺窗口（provider_meta 未注册能力）或走 legacy 事件 ⇒ 用调用方解析出的
+            // 注册表真实窗口回退；比例仍由 core `context_ratio_for_window` 算出（同源 fail-closed，
+            // 越界 ⇒ 无值，不得 clamp 成 100%）。分子取**当前上下文**：快照优先 → 最近一次调用 → 当前输入。
+            let context_tokens = snapshot
+                .and_then(|metrics| metrics.context_input_tokens)
+                .or_else(|| (state.last_context_tokens > 0).then_some(state.last_context_tokens))
+                .or_else(|| (state.total_input_tokens > 0).then_some(state.total_input_tokens))?;
+            context_ratio_for_window(context_tokens, window_tokens?)
+        }),
+    };
     if let Some(text) = context_ratio.and_then(format_unit_fraction_percent) {
         segments.push(MetricsSegment::new(MetricsKind::Context, format!("上下文 {text}%")));
     }
@@ -9059,6 +9149,9 @@ fn hydrate_state_from_session(
     let restored_context = last_context_input_tokens(&session_snapshot).unwrap_or(0);
     state.total_input_tokens = restored_context;
     state.last_context_tokens = restored_context;
+    // B116：恢复会话时用末次已结算采样做锚点（后续工具结果/压缩增量仍会推动投影）。
+    state.context_surface.reset();
+    state.context_surface.note_sample(restored_context);
     state.context_window_tokens = resolve_context_window_tokens(state);
     // 历史会话没有「本轮快照」；指标行改由台账 + 恢复的上下文值渲染。
     state.live_metrics = None;
@@ -11520,7 +11613,7 @@ fn tui_event_loop(
                                     turn_id: turn_id_str.clone(),
                                     user_message: input.clone(),
                                 });
-                                let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
+                                let sink = Arc::new(TuiTurnSink::new(tx.clone()));
                                 let _turn_sink_guard =
                                     TuiTurnSinkGuard::new(&control_plane, &turn_id_str, Arc::clone(&sink));
                                 let turn_control_plane = Arc::clone(&control_plane);
@@ -11853,6 +11946,10 @@ fn tui_event_loop(
                     state.tool_activity.complete(&res);
                     state.transition_runtime_mode(RuntimeMode::Responding);
                 }
+                UiEvent::StreamSurfaceAppend(tokens) => {
+                    // B116：请求表面追加 ⇒ 下一跳上下文预估前进（采样值不动）。
+                    state.context_surface.note_surface_append(tokens);
+                }
                 UiEvent::StreamCompleted => {
                     state.is_streaming = false;
                     state.stopping_turn_id = None;
@@ -12172,7 +12269,7 @@ fn tui_event_loop(
                     // F-12（C9）：Ask 续轮自身也可能再次挂起 ⇒ 以本轮 turn_id 登记 pending。
                     state.seed_pending_after_resume(&turn_id_str);
                     let turn_id_for_log = turn_id_str.clone();
-                    let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
+                    let sink = Arc::new(TuiTurnSink::new(tx.clone()));
                     let resume_sink_guard =
                         TuiTurnSinkGuard::new(&control_plane, &turn_id_str, Arc::clone(&sink));
                     let turn_control_plane = Arc::clone(&control_plane);
@@ -12290,7 +12387,7 @@ fn tui_event_loop(
                     state.seed_pending_after_resume(&turn_id_str);
                     let turn_id_for_log = turn_id_str.clone();
                     let turn_id_for_failure = turn_id_str.clone();
-                    let sink = Arc::new(TuiTurnSink { tx: tx.clone() });
+                    let sink = Arc::new(TuiTurnSink::new(tx.clone()));
                     let resume_sink_guard =
                         TuiTurnSinkGuard::new(&control_plane, &turn_id_str, Arc::clone(&sink));
                     let turn_control_plane = Arc::clone(&control_plane);
