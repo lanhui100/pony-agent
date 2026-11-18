@@ -1058,6 +1058,10 @@ fn provider_usage(
         latency_kind: ProviderLatencyKind::ProviderStream,
         provider: "PonyLlm".to_string(),
         model: model.to_string(),
+        // B240：additive 重试三键——本用例不涉重试，按旧日志语义缺席。
+        attempts: None,
+        failed_attempt_ms: None,
+        prelude_ms: None,
     }
 }
 

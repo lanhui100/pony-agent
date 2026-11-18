@@ -225,6 +225,23 @@ pub enum TurnEvent {
         latency_kind: ProviderLatencyKind,
         provider: String,
         model: String,
+        /// wave-acp-delegate C5.1（B240）：本 call 的**尝试次数**——`ProviderCallCacheRecord.attempts`
+        /// 的事件化载体。
+        ///
+        /// 缺陷：`provider/usage` 此前只带 usage/耗时，`attempts` / `failed_attempt_ms` /
+        /// `prelude_ms` 三键从未进事件流 ⇒ 事件重建（`startup_repair` refold 回写缓存）后
+        /// 重试事实静默归零，C5.1 的「仅重试时出现」语义在重启后失效。
+        /// additive：旧日志无该键 ⇒ `None`（未知，而非「0 次 / 1 次」）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempts: Option<u32>,
+        /// 同 `ProviderCallCacheRecord.failed_attempt_ms`：失败 attempt 的累计耗时（毫秒），
+        /// **仅真发生重试时** `Some(>0)`，否则键缺席。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_attempt_ms: Option<u64>,
+        /// 同 `ProviderCallCacheRecord.prelude_ms`：首个成功 attempt 前的等待/预热（毫秒），
+        /// **仅真发生重试时** `Some(>0)`，否则键缺席。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prelude_ms: Option<u64>,
     },
     /// 上下文压缩：投影丢弃 base_seq 之前的消息事件并注入摘要
     /// （折叠不复活被压缩历史）。
@@ -556,6 +573,9 @@ mod tests {
                 latency_kind: ProviderLatencyKind::ProviderStream,
                 provider: "deepseek".into(),
                 model: "deepseek-chat".into(),
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             },
             TurnEvent::HistorySquash {
                 base_seq: 10,

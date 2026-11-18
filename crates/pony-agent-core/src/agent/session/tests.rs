@@ -4913,9 +4913,8 @@ fn pa094_trace_and_message_views_same_source() {
                 prefix_mutation_reasons: Vec::new(),
                 first_token_latency_ms: Some(88),
                 turn_duration_ms: Some(500),
-                latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
-                provider: "deepseek".into(),
-                model: "deepseek-chat".into(),
+                latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream, provider: "deepseek".into(),
+                model: "deepseek-chat".into(), attempts: None, failed_attempt_ms: None, prelude_ms: None,
             },
         ),
         (

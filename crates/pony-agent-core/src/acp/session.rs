@@ -30,7 +30,7 @@ use crate::acp::protocol::{
 };
 use crate::acp::result::{
     reduce_final_text, reduce_usage, DelegateFinalText, DelegateUsage,
-    ACP_DELEGATE_FINAL_TEXT_MAX_CHARS,
+    ACP_DELEGATE_FINAL_TEXT_MAX_BYTES,
 };
 use crate::acp::transport::{AcpNotificationHandler, AcpTransportError, ACP_REQUEST_TIMEOUT};
 use crate::agent::ask_persistence::{AskLifecycleState, PersistedAsk};
@@ -1502,7 +1502,7 @@ fn build_ok_result_with_final_text(
         "外部 agent 达到输出/轮次上限，结果可能被截断（stopReason 非 end_turn）。".to_string()
     } else if final_text.truncated {
         format!(
-            "外部 agent 已完成本轮任务；正文超过 {ACP_DELEGATE_FINAL_TEXT_MAX_CHARS} 字符上限，已保留前缀。"
+            "外部 agent 已完成本轮任务；正文超过 {ACP_DELEGATE_FINAL_TEXT_MAX_BYTES} 字节上限，已保留前缀。"
         )
     } else {
         "外部 agent 已完成本轮任务。".to_string()
@@ -1731,6 +1731,9 @@ fn tool_status_str(status: &ToolCallStatus) -> &'static str {
         ToolCallStatus::Failed => "failed",
         // C1.4 additive：ACP `cancelled` 不再是「反序列化失败整帧丢弃」。
         ToolCallStatus::Cancelled => "cancelled",
+        // B240：未知状态兜底（`#[serde(other)]`）——原样透出 `unknown`，
+        // 不臆造成 completed/failed 任何一方的终态。
+        ToolCallStatus::Unknown => "unknown",
     }
 }
 

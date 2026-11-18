@@ -525,6 +525,15 @@ pub enum ToolCallStatus {
     /// `tool_call(_update)` 反序列化失败、整帧丢弃）。父 turn 归集按 `aborted` 映射，见
     /// `acp::delegate_events::map_acp_tool_status`。
     Cancelled,
+    /// B240：**未知状态兜底**。ACP 是开放词汇表（各实现会扩展 `status` 取值，如 `deferred` /
+    /// `skipped`），此前封闭枚举缺 `#[serde(other)]` ⇒ 一个未识别状态让整条
+    /// `session/update` 帧反序列化失败并整帧丢弃（连 `toolCallId`/`content` 都看不到）。
+    /// 现在未知值收敛到本变体：帧保住、活动可见，状态按「未知 ⇒ 保守当作进行中」处理。
+    ///
+    /// 注意：本变体**只用于反序列化兜底**；序列化时会写出 `"unknown"`，正常映射路径
+    /// （`session.rs::tool_status_str`）不会产出该值。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 工具调用产出的内容（判别键 `type`）。
@@ -1182,3 +1191,49 @@ pub struct LogoutRequest {}
 /// `logout` 响应（空对象）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LogoutResponse {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B240：`ToolCallStatus` 必须带 `#[serde(other)]` 兜底——ACP 是开放词汇表，
+    /// 此前未知状态值会让整条 `tool_call(_update)` 反序列化失败并**整帧丢弃**
+    /// （连 toolCallId / content / locations 都看不到）。
+    #[test]
+    fn unknown_tool_call_status_deserializes_instead_of_dropping_frame() {
+        let raw = serde_json::json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-ext-1",
+                "title": "外部 agent 的未来状态",
+                "kind": "execute",
+                // 现今 ACP 实现尚未标准化的取值
+                "status": "deferred_by_policy",
+                "content": []
+            }
+        });
+        let frame: crate::acp::protocol::SessionNotification =
+            serde_json::from_value(raw).expect("未知 status 不得让整帧反序列化失败");
+        let SessionUpdate::ToolCall {
+            tool_call_id,
+            status,
+            title,
+            ..
+        } = &frame.update
+        else {
+            panic!("必须仍是 ToolCall 帧，实际 = {:?}", frame.update);
+        };
+        assert_eq!(tool_call_id, "call-ext-1", "帧内容必须完整保住");
+        assert_eq!(title.as_str(), "外部 agent 的未来状态");
+        assert_eq!(
+            *status,
+            Some(ToolCallStatus::Unknown),
+            "未识别状态必须收敛到 Unknown 兜底变体"
+        );
+        // 已知取值不受影响（兜底不得吞掉正常词表）。
+        let known: ToolCallStatus = serde_json::from_value(serde_json::json!("cancelled"))
+            .expect("cancelled 仍解析");
+        assert_eq!(known, ToolCallStatus::Cancelled);
+    }
+}

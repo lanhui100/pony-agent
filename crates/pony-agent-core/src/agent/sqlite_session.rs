@@ -186,11 +186,11 @@ fn derive_events_from_session(
                 cache_hit_input_tokens: record.cache_hit_input_tokens,
                 cache_miss_input_tokens: record.cache_miss_input_tokens,
                 prefix_mutation_reasons: Vec::new(),
-                first_token_latency_ms: record.first_token_latency_ms,
-                turn_duration_ms: record.turn_duration_ms,
+                first_token_latency_ms: record.first_token_latency_ms, turn_duration_ms: record.turn_duration_ms,
                 latency_kind: record.latency_kind.clone(),
-                provider: trace.provider_name.clone().unwrap_or_default(),
-                model: trace.provider_model.clone().unwrap_or_default(),
+                provider: trace.provider_name.clone().unwrap_or_default(), model: trace.provider_model.clone().unwrap_or_default(),
+                // B240：旧数据回填同样带重试三键（否则 refold 会把 attempts 抹成 None）。
+                attempts: record.attempts, failed_attempt_ms: record.failed_attempt_ms, prelude_ms: record.prelude_ms,
             });
         }
     }

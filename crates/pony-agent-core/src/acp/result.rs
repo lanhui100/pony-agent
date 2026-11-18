@@ -4,7 +4,7 @@
 //!
 //! 契约（实现已落地）：
 //! - [`reduce_final_text`] 按**到达顺序**拼接 `SessionUpdate::AgentMessageChunk` 的文本块；
-//! - 归约结果超过 [`ACP_DELEGATE_FINAL_TEXT_MAX_CHARS`] ⇒ 保留前缀并置 `truncated = true`
+//! - 归约结果超过 [`ACP_DELEGATE_FINAL_TEXT_MAX_BYTES`] ⇒ 保留前缀并置 `truncated = true`
 //!   （上限是单一常量真源，禁止在别处再写字面量）；
 //! - 无 `AgentMessageChunk` ⇒ `text` 为空串、`truncated = false`（不得伪造内容，C0.2）；
 //! - [`reduce_usage`] 把 `usage_update` 的 used/size 与可选 cost 归约成结果 JSON 的 `usage`
@@ -16,20 +16,26 @@ use serde_json::{json, Value};
 
 use crate::acp::protocol::{ContentBlock, Cost, SessionUpdate};
 
-/// `acp_delegate` 最终正文的长度上限（字符数，单一真源）。
+/// `acp_delegate` 最终正文的长度上限（**UTF-8 字节数**，单一真源）。
 ///
-/// 语义：结果 JSON 的 `finalText` 最多保留该长度的前缀；超出部分丢弃并把
-/// `finalTextTruncated` 置 `true`（C0.3）。取值与工具结果落库上限
-/// （`agent/telemetry.rs::TOOL_RESULT_TEXT_MAX_CHARS = 32 * 1024`）同量级，
-/// 避免一条委派把 session blob 撑爆。
-pub(crate) const ACP_DELEGATE_FINAL_TEXT_MAX_CHARS: usize = 32_000;
+/// 语义：结果 JSON 的 `finalText` 最多保留该字节数的前缀（切口回退到最近的
+/// 字符边界，绝不切出半个 UTF-8 码点）；超出部分丢弃并把 `finalTextTruncated`
+/// 置 `true`（C0.3）。
+///
+/// B240 口径统一：此前这里是 **32_000 字符**，而下游落库截断
+/// （`agent/telemetry.rs::TOOL_RESULT_TEXT_MAX_CHARS = 32 * 1024`，按**字节**且字界安全）
+/// 是 32 KiB。两者不同量纲 ⇒ 32 000 个 CJK 字符 ≈ 96 KB，会在下游被静默再切一刀，
+/// 而 `finalTextTruncated` 仍为 `false`（谎报「正文完整」）。
+/// 现在两者同一量纲且 `32_000 < 32_768`：`finalText` 正文**必然整体活过**下游截断，
+/// 标志位与实际保留内容永远一致（ASCII 下字节数 == 字符数 ⇒ 既有 32 000 断言不变）。
+pub(crate) const ACP_DELEGATE_FINAL_TEXT_MAX_BYTES: usize = 32_000;
 
 /// `acp_delegate` 最终正文的归约产物（C0.1 / C0.3）。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DelegateFinalText {
     /// 按到达顺序拼接的正文（超长时为前缀，可能为空串）。
     pub text: String,
-    /// 是否因超过 [`ACP_DELEGATE_FINAL_TEXT_MAX_CHARS`] 被截断。
+    /// 是否因超过 [`ACP_DELEGATE_FINAL_TEXT_MAX_BYTES`] 被截断。
     pub truncated: bool,
 }
 
@@ -40,7 +46,7 @@ pub(crate) struct DelegateFinalText {
 /// - 越过上限即截断并**停止累积**（尾标记不得出现在结果里，C0.3）。
 pub(crate) fn reduce_final_text(updates: &[SessionUpdate]) -> DelegateFinalText {
     let mut reduced = DelegateFinalText::default();
-    let mut length = 0usize;
+    let mut length = 0usize; // 已累积的**字节**数
     for update in updates {
         if reduced.truncated {
             break;
@@ -51,15 +57,22 @@ pub(crate) fn reduce_final_text(updates: &[SessionUpdate]) -> DelegateFinalText 
         let ContentBlock::Text { text } = content else {
             continue;
         };
-        let chunk_chars = text.chars().count();
-        let remaining = ACP_DELEGATE_FINAL_TEXT_MAX_CHARS.saturating_sub(length);
-        if chunk_chars > remaining {
-            reduced.text.extend(text.chars().take(remaining));
+        let chunk_bytes = text.len();
+        let remaining = ACP_DELEGATE_FINAL_TEXT_MAX_BYTES.saturating_sub(length);
+        if chunk_bytes > remaining {
+            // B240：按字节上限截断，但切口必须落在 UTF-8 字界上
+            // （CJK / emoji 是多字节码点，直切会切出半个字符 ⇒ 后续 `serde_json`
+            // 序列化或前端解码得到替换符，正文被静默污染）。
+            let mut cut = remaining;
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            reduced.text.push_str(&text[..cut]);
             reduced.truncated = true;
-            length = ACP_DELEGATE_FINAL_TEXT_MAX_CHARS;
+            length = ACP_DELEGATE_FINAL_TEXT_MAX_BYTES;
         } else {
             reduced.text.push_str(text);
-            length += chunk_chars;
+            length += chunk_bytes;
         }
     }
     reduced
@@ -149,17 +162,47 @@ mod tests {
         assert!(!reduced.truncated);
     }
 
-    /// C0.3：越上限 ⇒ 恰好保留上限字符的前缀并标记截断。
+    /// C0.3：越上限 ⇒ 恰好保留上限字节的前缀并标记截断。
     #[test]
     fn reduce_final_text_truncates_to_limit_prefix() {
-        let oversize = format!("BEGIN-{}", "y".repeat(ACP_DELEGATE_FINAL_TEXT_MAX_CHARS));
+        let oversize = format!("BEGIN-{}", "y".repeat(ACP_DELEGATE_FINAL_TEXT_MAX_BYTES));
         let reduced = reduce_final_text(&[text_chunk(&oversize)]);
         assert!(reduced.truncated);
-        assert_eq!(
-            reduced.text.chars().count(),
-            ACP_DELEGATE_FINAL_TEXT_MAX_CHARS
-        );
+        assert_eq!(reduced.text.len(), ACP_DELEGATE_FINAL_TEXT_MAX_BYTES);
         assert!(reduced.text.starts_with("BEGIN-"));
+    }
+
+    /// B240 回归：上限是**字节**口径 ⇒ 多字节正文不得被下游 32 KiB 字节截断再切一刀，
+    /// 且切口必须落在 UTF-8 字界（不产生半个码点 / 替换符）。
+    #[test]
+    fn reduce_final_text_is_byte_bounded_and_utf8_safe() {
+        // 三字节 CJK 码点：字符数远小于上限，字节数必须恰好受控。
+        let body = "界".repeat(ACP_DELEGATE_FINAL_TEXT_MAX_BYTES);
+        let reduced = reduce_final_text(&[text_chunk(&body)]);
+        assert!(reduced.truncated, "超字节上限必须标记截断");
+        assert!(
+            reduced.text.len() <= ACP_DELEGATE_FINAL_TEXT_MAX_BYTES,
+            "字节数不得超过上限"
+        );
+        assert_eq!(
+            reduced.text.len() % 3,
+            0,
+            "切口必须在 3 字节 CJK 码点边界上"
+        );
+        assert!(
+            std::str::from_utf8(reduced.text.as_bytes()).is_ok(),
+            "截断结果必须是合法 UTF-8"
+        );
+        assert!(
+            reduced.text.chars().all(|c| c == '界'),
+            "不得混入替换符或半个码点"
+        );
+        // 下游（工具结果落库）按 32 KiB 字节截断：本上限必须严格小于它，
+        // 否则 `finalTextTruncated=false` 却仍被下游改写的旧缺陷会回来。
+        assert!(
+            reduced.text.len() < 32 * 1024,
+            "finalText 字节上限必须小于下游 32 KiB 字节预算"
+        );
     }
 
     /// C2.1：快照语义（后到者覆盖 used/size）+ cost 缺失时沿用上一已知值。

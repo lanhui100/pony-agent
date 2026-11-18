@@ -133,7 +133,14 @@ fn build_json_line(
         if RESERVED_LOG_KEYS.contains(key) {
             continue; // 核心键不可被 extras 覆盖
         }
-        record.insert((*key).to_string(), value.clone());
+        // B240：extras 与 `message` **同一条脱敏流水线**。此前只脱敏 message，
+        // `params` / `error` 等结构化字段明文进 stdout/日志文件（含 home 路径、Bearer、
+        // 裸 token、`apiKey` 形态）——与 C4.3 的「输出/落盘前统一脱敏」契约直接冲突。
+        // 只脱敏字符串、数字/布尔保持原类型（词表外值不得被改成字符串而破坏指标化）。
+        record.insert(
+            (*key).to_string(),
+            crate::agent::ponysentry::sanitize_json(value),
+        );
     }
     serde_json::Value::Object(record).to_string()
 }
@@ -297,6 +304,70 @@ mod tests {
         assert_eq!(parsed["message"], "log sink ready");
 
         let _ = std::fs::remove_dir_all(deeply_nested.parent().unwrap().parent().unwrap());
+    }
+
+    /// B240：extras 与 `message` 走**同一条脱敏流水线**。
+    ///
+    /// 缺陷回归：此前只有 `message` 过 `sanitize`，`params` / `error` 等结构化字段
+    /// 明文进 stdout 与日志文件（home 路径、Bearer、裸 token、`apiKey` 形态全部泄露）。
+    #[test]
+    fn extras_are_sanitized_like_message() {
+        let _guard = lock();
+        let line = build_json_line(
+            "warn",
+            "provider failed with Bearer abcdefghijklmnop",
+            None,
+            &[
+                // 典型 `params`：带 home 路径 + 裸 API key
+                (
+                    "params",
+                    serde_json::json!({
+                        "path": "/home/alice/pony-agent/secret.txt",
+                        "apiKey": "sk-live-0123456789abcdefghijklmnop",
+                        "reason": "Bearer abcdefghijklmnopqrstuvwxyz",
+                        "nested": [{"token": "Bearer zzzzyyyyxxxx"}],
+                    }),
+                ),
+                // 典型 `error`：字符串载荷同样必须脱敏
+                (
+                    "error",
+                    serde_json::json!("request failed: Bearer aaaabbbbccccdddd"),
+                ),
+                // 数值型 extra 必须**保持 JSON number**（不得因脱敏退化成字符串）
+                ("retry_count", serde_json::json!(3)),
+            ],
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("valid json");
+        let params = &parsed["params"];
+        assert_eq!(
+            params["path"], "[USER_HOME]/pony-agent/secret.txt",
+            "extras.params 的 home 路径必须脱敏，实际 = {params}"
+        );
+        assert!(
+            !params["apiKey"].as_str().unwrap_or_default().contains("sk-live"),
+            "extras.params 的 apiKey 值必须被替换，实际 = {params}"
+        );
+        assert_eq!(params["apiKey"], "[REDACTED_SECRET]");
+        let reason = params["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("[REDACTED_SECRET]") && !reason.contains("abcdefghijklmnopqrstuvwxyz"),
+            "extras 内嵌 Bearer 必须脱敏，实际 = {reason:?}"
+        );
+        let nested = params["nested"][0]["token"].as_str().unwrap_or_default();
+        assert!(
+            nested.contains("[REDACTED_SECRET]") && !nested.contains("zzzzyyyyxxxx"),
+            "extras 嵌套数组里的 token 必须脱敏，实际 = {nested:?}"
+        );
+        let error = parsed["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("[REDACTED_SECRET]") && !error.contains("aaaabbbbccccdddd"),
+            "extras.error 必须脱敏，实际 = {error:?}"
+        );
+        assert_eq!(parsed["retry_count"], 3, "数值型 extra 必须保持 number 类型");
+        assert!(
+            parsed["retry_count"].is_number(),
+            "数值型 extra 不得被脱敏改写为字符串"
+        );
     }
 
     /// L3-A #3：多线程并发写日志时，文件里每一行都必须是可解析的完整 JSON（不得交错）。

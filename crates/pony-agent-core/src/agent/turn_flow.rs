@@ -1220,6 +1220,7 @@ fn build_provider_usage_event(
                                 record.provider_source.clone().unwrap_or_default()
                             }),
                         model: payload.provider_model.clone().unwrap_or_default(),
+                        attempts: record.attempts, failed_attempt_ms: record.failed_attempt_ms, prelude_ms: record.prelude_ms,
                     }
                 })
                 .collect();
@@ -1240,12 +1241,11 @@ fn build_provider_usage_event(
                 .cache_hit_input_tokens
                 .map(|hit| input.saturating_sub(hit))
         }),
-        prefix_mutation_reasons: Vec::new(),
-        first_token_latency_ms: payload.first_token_latency_ms,
-        turn_duration_ms: payload.turn_duration_ms,
+        prefix_mutation_reasons: Vec::new(), first_token_latency_ms: payload.first_token_latency_ms, turn_duration_ms: payload.turn_duration_ms,
         latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
         provider: payload.provider_name.clone().unwrap_or_default(),
         model: payload.provider_model.clone().unwrap_or_default(),
+        attempts: None, failed_attempt_ms: None, prelude_ms: None,
     }]
 }
 

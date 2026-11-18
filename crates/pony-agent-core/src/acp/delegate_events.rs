@@ -117,7 +117,13 @@ fn parent_tool_event(parent: &ParentTurnRef, activity: TurnToolActivity) -> Turn
 /// `None`（ACP 未给状态）按进行中处理 ⇒ `running`（草稿态工具调用必须先落 ToolCall）。
 pub(crate) fn map_acp_tool_status(status: Option<&ToolCallStatus>) -> &'static str {
     match status {
-        None | Some(ToolCallStatus::Pending) | Some(ToolCallStatus::InProgress) => "running",
+        // B240：未知状态（`#[serde(other)]` 兜底）与「未给状态」同按进行中处理——把未知值
+        // 猜成 done/failed 会伪造未发生的结果；running 只是「仍然开着」，父 turn 事件因此
+        // 落成 ToolCall（可被同 call_id 的后续 update 覆盖）。
+        None
+        | Some(ToolCallStatus::Pending)
+        | Some(ToolCallStatus::InProgress)
+        | Some(ToolCallStatus::Unknown) => "running",
         Some(ToolCallStatus::Completed) => "done",
         Some(ToolCallStatus::Failed) => "failed",
         Some(ToolCallStatus::Cancelled) => "aborted",

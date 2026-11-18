@@ -685,10 +685,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                 // 组装消息文本由 HistoryProjection 承担；trace 侧只关心过程。
             }
             TurnEvent::ToolCall {
-                call_id,
-                name,
-                arguments,
-                ..
+                call_id, name, arguments, parent_activity_id, ..
             } => {
                 let trace = state.by_turn.entry(turn_id.clone()).or_insert_with(|| {
                     let mut trace = TurnTraceRecord {
@@ -711,7 +708,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         arguments_text: Some(arguments.clone()),
                         result_text: None,
                         duration_seconds: None,
-                        parent_activity_id: None,
+                        parent_activity_id: parent_activity_id.clone(),
                         artifacts: None,
                         error: None,
                         capability_invocation: None,
@@ -750,7 +747,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         arguments_text: Some(arguments.clone()),
                         result_text: None,
                         duration_seconds: None,
-                        parent_activity_id: None,
+                        parent_activity_id: parent_activity_id.clone(),
                         artifacts: None,
                         error: None,
                         capability_invocation: None,
@@ -770,9 +767,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                 error,
                 status,
                 duration_ms,
-                artifacts,
-                capability_invocation,
-                ..
+                artifacts, capability_invocation, parent_activity_id, ..
             } => {
                 let trace = state.by_turn.entry(turn_id.clone()).or_insert_with(|| {
                     let mut trace = TurnTraceRecord {
@@ -798,6 +793,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                     activity.artifacts = artifacts.clone();
                     activity.capability_invocation = capability_invocation.clone();
                     activity.error = error.clone().map(serde_json::Value::String);
+                    if parent_activity_id.is_some() { activity.parent_activity_id.clone_from(parent_activity_id); }
                 } else {
                     // unmatched ToolResult（backfill 场景）：合成 activity（name 未知）。
                     trace.tool_activities.push(TurnToolActivity {
@@ -810,7 +806,7 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
                         arguments_text: None,
                         result_text: result.clone(),
                         duration_seconds: duration_ms.map(|ms| ms as f64 / 1000.0),
-                        parent_activity_id: None,
+                        parent_activity_id: parent_activity_id.clone(),
                         artifacts: artifacts.clone(),
                         error: error.clone().map(serde_json::Value::String),
                         capability_invocation: capability_invocation.clone(),
@@ -1173,7 +1169,7 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                 latency_kind,
                 provider,
                 model,
-                ..
+                attempts, failed_attempt_ms, prelude_ms, ..
             } => {
                 // 四桶统一使用事件级权威字段（P1-9）：
                 // cache_read = cache_hit_input_tokens；uncached = cache_miss_input_tokens
@@ -1310,9 +1306,9 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     // context_input_tokens 留空（UI 回退上下文解析，禁止臆造口径）。
                     usage_origin: usage.origin.map(str::to_string),
                     context_input_tokens: None,
-                    attempts: None,
-                    failed_attempt_ms: None,
-                    prelude_ms: None,
+                    attempts: *attempts,
+                    failed_attempt_ms: *failed_attempt_ms,
+                    prelude_ms: *prelude_ms,
                 });
                 // PA-094：per-turn ProviderCallCacheRecord 重建（design.md §5）。
                 // 重建字段集：request_kind、usage 四桶、cache_hit/cache_miss、
@@ -1343,9 +1339,9 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     // context_input_tokens 留空（UI 回退上下文解析，禁止臆造口径）。
                     usage_origin: usage.origin.map(str::to_string),
                     context_input_tokens: None,
-                    attempts: None,
-                    failed_attempt_ms: None,
-                    prelude_ms: None,
+                    attempts: *attempts,
+                    failed_attempt_ms: *failed_attempt_ms,
+                    prelude_ms: *prelude_ms,
                 };
                 // addReplacing：同一 (turn_id, step) 原位覆盖（与 totals 替换语义一致）。
                 if let Some(index) = state.record_index.get(&(turn_id.clone(), *step)).copied() {
@@ -1947,6 +1943,9 @@ mod tests {
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                     provider: "deepseek".into(),
                     model: "deepseek-chat".into(),
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 },
             )
         };
@@ -1995,6 +1994,9 @@ mod tests {
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                     provider: "deepseek".into(),
                     model: "deepseek-chat".into(),
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 },
             )
         };
@@ -2039,6 +2041,9 @@ mod tests {
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                     provider: "deepseek".into(),
                     model: "deepseek-chat".into(),
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 },
             )
         };
@@ -2170,6 +2175,9 @@ mod tests {
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                     provider: "deepseek".into(),
                     model: "deepseek-chat".into(),
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 },
             ),
             (
@@ -2347,6 +2355,9 @@ mod tests {
             latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
             provider: "deepseek".into(),
             model: "deepseek-chat".into(),
+            attempts: None,
+            failed_attempt_ms: None,
+            prelude_ms: None,
         };
         let mut metrics = MetricsProjectionState::init();
         MetricsProjectionState::apply(&mut metrics, 0, &usage_event);
@@ -2638,6 +2649,9 @@ mod tests {
                 latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                 provider: "deepseek".into(),
                 model: "deepseek-chat".into(),
+                attempts: None,
+                failed_attempt_ms: None,
+                prelude_ms: None,
             };
         let events: Vec<(u64, TurnEvent)> = vec![
             (
@@ -2700,6 +2714,9 @@ mod tests {
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                     provider: "deepseek".into(),
                     model: "deepseek-chat".into(),
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 },
             ),
             (
@@ -2717,6 +2734,9 @@ mod tests {
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::BufferedResponse,
                     provider: "deepseek".into(),
                     model: "deepseek-chat".into(),
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 },
             ),
         ];
@@ -2788,6 +2808,9 @@ mod tests {
                     latency_kind: crate::agent::telemetry::ProviderLatencyKind::ProviderStream,
                     provider: "deepseek".into(),
                     model: "deepseek-chat".into(),
+                    attempts: None,
+                    failed_attempt_ms: None,
+                    prelude_ms: None,
                 },
             )
         };
