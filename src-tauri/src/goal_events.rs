@@ -21,16 +21,16 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 /// §7 冻结字面量：前端 `GOAL_CHANGED_EVENT` 与本常量必须同源。
-pub const GOAL_CHANGED_EVENT: &str = "goal://changed";
+pub(crate) const GOAL_CHANGED_EVENT: &str = "goal://changed";
 /// §7 冻结字面量：每成功发起一轮 goal-round。
-pub const GOAL_ROUND_EVENT: &str = "goal://round";
+pub(crate) const GOAL_ROUND_EVENT: &str = "goal://round";
 /// B130 additive：`clear_goal` 真删了记录（无墓碑，附带被删 id）。
-pub const GOAL_CLEARED_EVENT: &str = "goal://cleared";
+pub(crate) const GOAL_CLEARED_EVENT: &str = "goal://cleared";
 
 /// `goal://changed` 载荷（camelCase，字段集合按 §7 冻结）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GoalChangedPayload {
+pub(crate) struct GoalChangedPayload {
     pub goal_id: String,
     pub session_id: String,
     pub phase: String,
@@ -57,7 +57,7 @@ impl From<&GoalData> for GoalChangedPayload {
 /// `goal://round` 载荷。`status` 在 wave-1 只有 `"started"`（§7：其他取值需重锚契约）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GoalRoundPayload {
+pub(crate) struct GoalRoundPayload {
     pub goal_id: String,
     pub round: u32,
     pub max_rounds: u32,
@@ -67,13 +67,13 @@ pub struct GoalRoundPayload {
 /// `goal://cleared` 载荷（additive）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GoalClearedPayload {
+pub(crate) struct GoalClearedPayload {
     pub session_id: String,
     pub goal_id: Option<String>,
 }
 
 /// 安装进程级观察者（`run()` 的 setup 内调用一次）。
-pub fn install(app: AppHandle) {
+pub(crate) fn install(app: AppHandle) {
     install_goal_event_observer(Arc::new(move |event: &GoalEvent| match event {
         GoalEvent::Changed { goal } => {
             emit(&app, GOAL_CHANGED_EVENT, GoalChangedPayload::from(goal));
