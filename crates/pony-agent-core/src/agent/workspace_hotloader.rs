@@ -94,6 +94,10 @@ impl FileFingerprint {
     ///
     /// 指纹里的 `file_size` 仍是文件真实大小，`content_hash` 只覆盖有界前缀；
     /// 因此超出前缀的变更由 `mtime + file_size` 兜底检测（与既有缓存语义一致）。
+    ///
+    /// B234：`take(limit)` 会把长度 > `limit` 的文件**恰好读满 `limit` 字节**，末尾多字节
+    /// 字符可能被切裂 —— 因此「是否超限」是按真实 `file_size` 判定的，截断必须按
+    /// [`utf8_safe_prefix_len`] 的边界回退结果执行（不得因 `bytes.len() == limit` 跳过回退）。
     pub fn compute_bounded<P: AsRef<Path>>(path: P, limit: usize) -> Option<(Self, String)> {
         let path = path.as_ref();
         let metadata = fs::metadata(path).ok()?;
@@ -103,7 +107,8 @@ impl FileFingerprint {
         let mut bytes: Vec<u8> = Vec::new();
         file.take(limit as u64).read_to_end(&mut bytes).ok()?;
         if (file_size as usize) > limit {
-            let keep = utf8_safe_prefix_len(&bytes, limit.min(bytes.len()));
+            // 内部非法字节序列 → fail-closed（保持既有语义：该文件不可作为候选）。
+            let keep = utf8_safe_prefix_len(&bytes, limit.min(bytes.len())).ok()?;
             bytes.truncate(keep);
         }
         let content = String::from_utf8(bytes).ok()?;
@@ -316,8 +321,11 @@ impl ConstitutionSourceSnapshot {
             if file.take(limit).read_to_end(&mut bytes).is_ok() {
                 oversized = bytes.len() > max_source_bytes;
                 if oversized {
-                    let keep = utf8_safe_prefix_len(&bytes, max_source_bytes);
-                    bytes.truncate(keep);
+                    // B234：只有尾部被截断的残缺序列才回退到字符边界；内部非法 UTF-8
+                    // 保持 `read_ok = false`（下方 `from_utf8` 失败即 fail-closed）。
+                    if let Ok(keep) = utf8_safe_prefix_len(&bytes, max_source_bytes) {
+                        bytes.truncate(keep);
+                    }
                 }
                 if let Ok(decoded) = String::from_utf8(bytes) {
                     read_ok = true;
@@ -364,15 +372,29 @@ impl ConstitutionSourceSnapshot {
 }
 
 /// 取字节序列中不超过 `max_bytes` 的 UTF-8 安全前缀长度（不切裂多字节字符）。
-fn utf8_safe_prefix_len(bytes: &[u8], max_bytes: usize) -> usize {
-    if bytes.len() <= max_bytes {
-        return bytes.len();
+///
+/// B234：原实现只在 `bytes.len() > max_bytes` 时才有机会回退，且只探测 `bytes[max_bytes]`。
+/// 但**有界读取本身可能恰好读满上限并把多字节字符切裂**（`take(limit)` 后的切片末尾就是
+/// 残缺字符的前缀字节），此时 `bytes.len() == max_bytes`，末尾仍是非法序列 —— 旧实现直接
+/// 返回 `max_bytes`，调用方的 `String::from_utf8` 随即失败，整个技能被静默丢弃
+/// （表现为 `skill_load` 报 `unknown_skill`，见 B234 现场）。
+///
+/// 判定口径：
+/// - 返回 `Ok(n)`：`bytes[..n]` 是不超过 `max_bytes` 的最长合法 UTF-8 前缀（`n ≤ max_bytes`）；
+///   `bytes[n..]` 要么为空，要么只是被截断的**尾部**多字节序列（`error_len() == None`）。
+/// - 返回 `Err(_)`：切片内部存在**非法字节序列**（`error_len() == Some(_)`），
+///   不得当成「截断产物」静默接受，调用方须 fail-closed。
+fn utf8_safe_prefix_len(bytes: &[u8], max_bytes: usize) -> Result<usize, usize> {
+    let end = max_bytes.min(bytes.len());
+    match std::str::from_utf8(&bytes[..end]) {
+        Ok(_) => Ok(end),
+        Err(error) => match error.error_len() {
+            // 尾部多字节序列被截断：回退到最近的字符边界。
+            None => Ok(error.valid_up_to()),
+            // 内部非法序列：fail-closed（返回首个非法字节位置供诊断）。
+            Some(_) => Err(error.valid_up_to()),
+        },
     }
-    let mut end = max_bytes;
-    while end > 0 && (bytes[end] & 0xC0) == 0x80 {
-        end -= 1;
-    }
-    end
 }
 
 /// 会话级已固化的静态基线（用于保障历史 KV Cache 不被截断冲刷）
@@ -3406,6 +3428,71 @@ allowed-tools: Bash, Read
         assert_eq!(tools, vec!["Bash", "Read"]);
         assert!(!disable_model_invocation);
         assert!(model_invocable);
+    }
+
+    /// B234：有界读取恰好读满上限、末尾切裂多字节字符时，候选仍须可用。
+    ///
+    /// 旧实现只在 `bytes.len() > max_bytes` 时回退字符边界；`take(limit)` 读满即
+    /// `bytes.len() == limit`，末尾残缺序列被原样交给 `String::from_utf8` → 失败 →
+    /// 技能被静默丢弃（`omitted skill:<name> (NotAFile)`）→ `skill_load` 报 `unknown_skill`。
+    #[test]
+    fn test_compute_bounded_keeps_multibyte_prefix_split_by_limit() {
+        let dir = unique_dir("pony_fp_split");
+        let path = dir.join("SKILL.md");
+        let mut content = String::from("---\nname: split-multibyte\ndescription: b234\n---\n\n");
+        // 调整前缀长度，使 `SKILL_FRONTMATTER_READ_LIMIT` 落在 3 字节字符 `中` 的中间。
+        while content.len() < SKILL_FRONTMATTER_READ_LIMIT
+            && (SKILL_FRONTMATTER_READ_LIMIT - content.len()) % 3 == 0
+        {
+            content.push(' ');
+        }
+        content.push_str(&"中".repeat(SKILL_FRONTMATTER_READ_LIMIT / 3 + 64));
+        assert!(content.len() > SKILL_FRONTMATTER_READ_LIMIT);
+        assert!(
+            std::str::from_utf8(&content.as_bytes()[..SKILL_FRONTMATTER_READ_LIMIT]).is_err(),
+            "前置条件：上限边界必须切裂多字节字符（否则测不到 B234）"
+        );
+        fs::write(&path, &content).unwrap();
+
+        let (fingerprint, prefix) =
+            FileFingerprint::compute_bounded(&path, SKILL_FRONTMATTER_READ_LIMIT)
+                .expect("B234：切裂多字节字符的有界前缀不得导致整份候选被丢弃");
+        // 指纹仍记录真实大小；正文只保留不越过上限的合法前缀。
+        assert_eq!(fingerprint.file_size, content.len() as u64);
+        assert!(!prefix.is_empty());
+        assert!(prefix.len() <= SKILL_FRONTMATTER_READ_LIMIT);
+        assert!(
+            prefix.len() + 3 > SKILL_FRONTMATTER_READ_LIMIT,
+            "最多只允许回退一个残缺字符，实际前缀 {} 字节",
+            prefix.len()
+        );
+        assert!(
+            content.as_bytes().starts_with(prefix.as_bytes()),
+            "返回的正文必须是原文件前缀"
+        );
+        let (name, ..) = parse_skill_metadata(&prefix, "fallback");
+        assert_eq!(name, "split-multibyte", "回退后 frontmatter 仍须可解析");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// B234 反向门：前缀**内部**出现非法字节序列仍须 fail-closed，
+    /// 不得因为「尾部可能被截断」而把二进制/损坏文件当技能候选接受。
+    #[test]
+    fn test_compute_bounded_rejects_invalid_utf8_inside_prefix() {
+        let dir = unique_dir("pony_fp_invalid");
+        let path = dir.join("SKILL.md");
+        let mut bytes = vec![b'a'; 128];
+        bytes.push(0xFF);
+        bytes.extend(vec![b'b'; SKILL_FRONTMATTER_READ_LIMIT + 64]);
+        fs::write(&path, &bytes).unwrap();
+
+        assert!(
+            FileFingerprint::compute_bounded(&path, SKILL_FRONTMATTER_READ_LIMIT).is_none(),
+            "内部非法 UTF-8 不得被当作「截断产物」接受（保持既有 fail-closed 语义）"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

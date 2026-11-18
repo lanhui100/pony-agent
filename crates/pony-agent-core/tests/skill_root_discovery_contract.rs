@@ -7,16 +7,21 @@
 //!    项目同名技能仍覆盖它（项目带恒优于全局带）；
 //! 3. **上探有界**：命中不到 `.git` 时退回会话根单层，绝不把父目录 / `~` / `/` 当项目根；
 //! 4. **可见性 = 可加载性**：清单里出现过的仓库根技能必须能被加载路径真读到
-//!    （加载侧信任根与扫描侧共用同一枚举，消除「列得出、载不进」）。
+//!    （加载侧信任根与扫描侧共用同一枚举，消除「列得出、载不进」）；
+//! 5. **全局技能可解析（B234）**：`$PONY_AGENT_HOME/skills/<name>` 下的大体积（> 64 KiB 有界
+//!    读取上限）且含多字节字符的 `SKILL.md` 必须能被 `resolve_skill_by_name` 解析并可加载 ——
+//!    有界前缀读取把多字节字符切裂时不得整份丢弃（否则 `skill_load` 误报 `unknown_skill`）。
 //!
 //! 隔离要点：全部用例只在临时目录内造 `.git` / 技能文件；不联网、不依赖宿主 `~` 现状
 //! （只按技能名断言，不断言技能总数）。
 
 use pony_agent_core::agent::skill_body::{
-    is_trusted_skill_file, load_skill_body_for_workspace, MAX_SKILL_BODY_BYTES,
+    is_trusted_skill_file, load_skill_body_for_workspace, resolve_skill_by_name,
+    MAX_SKILL_BODY_BYTES,
 };
 use pony_agent_core::agent::workspace_hotloader::{
-    find_git_root, AgentScope, HotloadedSkill, WorkspaceHotloader, PONY_AGENT_SKILL_DIRS_ENV,
+    find_git_root, AgentScope, HotloadedSkill, WorkspaceHotloader, PONY_AGENT_HOME_ENV,
+    PONY_AGENT_SKILL_DIRS_ENV,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -373,5 +378,78 @@ fn repo_root_skill_symlink_escape_is_rejected() {
     assert!(
         by_name(&skills, "outside-skill").is_empty(),
         "项目根符号链接逃出所属项目域时必须整根不采纳（workspace 内容是不可信输入）"
+    );
+}
+
+// ============================================================
+// 6. 全局技能（$PONY_AGENT_HOME）：大体积多字节正文可解析、可加载（B234）
+// ============================================================
+
+/// 技能扫描的有界前缀上限（src 内私有 `SKILL_FRONTMATTER_READ_LIMIT = 65_536`）。
+///
+/// 技能候选只读取该长度的前缀做 frontmatter 解析，因此「读满上限并切裂多字节字符」
+/// 是该上限的必然边界场景（B234 现场：`~/.agents/skills/dev-team/SKILL.md` 83 KB 中文正文）。
+const SKILL_FRONTMATTER_READ_LIMIT: usize = 65_536;
+
+/// 造一份 > 64 KiB 且 **65536 字节边界正好落在 3 字节字符中间** 的技能文档。
+fn oversized_multibyte_skill_document(name: &str) -> String {
+    let mut content =
+        format!("---\nname: {name}\ndescription: b234 oversized multibyte skill\n---\n\n");
+    // 调整前缀长度，使 `SKILL_FRONTMATTER_READ_LIMIT` 不是字符边界。
+    while content.len() < SKILL_FRONTMATTER_READ_LIMIT
+        && (SKILL_FRONTMATTER_READ_LIMIT - content.len()) % 3 == 0
+    {
+        content.push(' ');
+    }
+    let padding_chars = (SKILL_FRONTMATTER_READ_LIMIT - content.len()) / 3 + 64;
+    content.push_str(&"中".repeat(padding_chars));
+    content.push_str("\n\n# body-marker-b234\n");
+    content
+}
+
+#[test]
+fn oversized_global_skill_with_split_multibyte_prefix_is_resolvable() {
+    let _lock = env_lock();
+    let global = TempDir::new("b234-global-home");
+    let cwd = TempDir::new("b234-global-cwd");
+    let name = "b234-global-multibyte-skill";
+    let document = oversized_multibyte_skill_document(name);
+    // 前置条件（回归锚点）：正文超过有界前缀上限，且 64 KiB 边界切裂多字节字符。
+    assert!(
+        document.len() > SKILL_FRONTMATTER_READ_LIMIT,
+        "前置条件：正文必须超过有界前缀上限，实际 {} 字节",
+        document.len()
+    );
+    assert!(
+        std::str::from_utf8(&document.as_bytes()[..SKILL_FRONTMATTER_READ_LIMIT]).is_err(),
+        "前置条件：{SKILL_FRONTMATTER_READ_LIMIT} 字节边界必须切裂多字节字符（否则测不到 B234）"
+    );
+    let skill_file = global.write(&format!("skills/{name}/SKILL.md"), &document);
+    let _env = EnvGuard::set(PONY_AGENT_HOME_ENV, global.path());
+
+    // `resolve_skill_by_name` 是 `skill_load` 的唯一解析入口；它扫描真实全局根（含 env home）。
+    let resolved = resolve_skill_by_name(cwd.path(), name)
+        .unwrap_or_else(|| panic!("B234：`$PONY_AGENT_HOME` 下的全局技能 `{name}` 必须可解析"));
+    assert_eq!(
+        resolved.scope,
+        AgentScope::Global,
+        "env home 属用户级全局域"
+    );
+    assert_eq!(
+        resolved.path.canonicalize().ok(),
+        skill_file.canonicalize().ok(),
+        "解析到的路径必须就是该全局技能的 SKILL.md"
+    );
+
+    // 解析只是第一步：`skill_load` 随后加载正文，必须成功（不得迫使模型退回工作区外裸 Read）。
+    let body = load_skill_body_for_workspace(&resolved, MAX_SKILL_BODY_BYTES, Some(cwd.path()))
+        .expect("B234：可解析的全局技能必须可加载");
+    assert!(
+        body.content.starts_with("---\nname: "),
+        "正文必须含 frontmatter"
+    );
+    assert!(
+        body.content.contains("# body-marker-b234"),
+        "加载到的正文必须覆盖文件尾部标记（不得以有界前缀截断后的残片冒充正文）"
     );
 }
