@@ -63,6 +63,21 @@ jobs:
           RUSTFLAGS: -D warnings
         run: npm run cargo:check:shared
 
+      # Clippy 棘轮门（B244）：与 cargo check 的 `-D warnings` 职责不同——本步只判
+      # 「.meta/lints 表的新增债是否为零」，存量在 scripts/clippy-baseline.json 的
+      # platforms.win32 分册冻结（该分册由 lint-baseline-bootstrap 工作流在 Windows runner
+      # 生成，禁止套用 Linux 口径：cfg(windows) 让违例集合不同）。
+      - name: Rust 组件（clippy，幂等）
+        run: rustup component add clippy
+
+      - name: Clippy 棘轮门 + 门自检（Windows 分册；存量冻结，新增/恶化即红）
+        run: |
+          npm run rust:lint:selftest
+          npm run rust:lint
+
+      - name: Clippy 棘轮门（src-tauri 分册；第二份基线，B244 扩面）
+        run: npm run rust:lint:tauri
+
       # tools/tui-audit/*.py 需要 Pillow（render_ansi.py: from PIL import Image）。
       # Windows runner 预装 Python 但不带 Pillow ⇒ tui_audit_*_regression 4 例因
       # ModuleNotFoundError: No module named 'PIL' 恒红（既有 Windows 可移植性缺口）。
@@ -102,20 +117,23 @@ jobs:
       # Clippy 棘轮门与上面两步职责不同、不可互相替代：
       #   cargo check 那步（RUSTFLAGS=-D warnings）判"rustc 默认告警是否清零"；
       #   本步判"clippy 表（.meta/lints/）的新增债是否为零"——存量在 scripts/clippy-baseline.json 冻结。
-      # 为什么只挂 Linux：基线按平台分册（platforms.<os>），cfg(windows)/cfg(unix) 让两边违例集合不同
-      # （实测 24% 存量落在平台门控文件里），拿 Linux 基线在 windows 上跑必然假红。Windows/macOS 分册
-      # 待各自平台跑一次 `npm run rust:lint:update` 后，再在该平台补同一步（见 backlog B244）。
+      # 基线按平台分册（platforms.<os>）：cfg(windows)/cfg(unix) 让违例集合不同（实测 24% 存量
+      # 落在平台门控文件里），因此 Linux/macOS/Windows 各用各的分册（B244 起三分册齐备）。
       # 门自持 lint 级别（脚本内清空 RUSTFLAGS 并注入 -W/-A），否则 -D warnings 会把可数的 warning
       # 变成 error，棘轮失去记账面。表/阈值被改动但未重基线时 exit 2（口径漂移 fail-closed）。
       - name: Rust 组件（clippy，幂等）
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         run: rustup component add clippy
 
-      - name: Clippy 棘轮门 + 门自检（Linux 分册；存量冻结，新增/恶化即红）
-        if: runner.os == 'Linux'
+      - name: Clippy 棘轮门 + 门自检（各平台分册；存量冻结，新增/恶化即红）
+        if: runner.os != 'Windows'
         run: |
           npm run rust:lint:selftest
           npm run rust:lint
+
+      - name: Clippy 棘轮门（src-tauri 分册；第二份基线，B244 扩面）
+        if: runner.os != 'Windows'
+        run: npm run rust:lint:tauri
       - name: Core 非 Windows lib 单元测试（Linux-only）
         if: runner.os == 'Linux'
         env:

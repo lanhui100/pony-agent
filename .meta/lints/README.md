@@ -96,7 +96,10 @@ CLIPPY_CONF_DIR=.meta/lints cargo clippy -p pony-agent-core --lib --bins
 - 当前平台分册缺失 → **exit 2**，提示在该平台跑一次 `--update-baseline --allow-growth`（首次建册；
   只写本平台分册，不动其他分册）；
 - 禁止套用别平台口径（否则 Windows 一跑必假红，或 Linux 基线被 Windows 存量污染）；
-- 当前只建了 `linux` 分册；Windows/macOS 由 B244 跟进（各自平台跑一次后，在该平台 CI 补同一步）。
+- B244 起 `linux` / `win32` / `darwin` 三分册齐备（各由 `lint-baseline-bootstrap` 工作流在
+  对应平台生成、维护者 review 后合入），CI 三分支各自执行本平台分册；
+- 新增平台/新增扫描面（如 `src-tauri` 第二份基线 `scripts/clippy-baseline-src-tauri.json`）
+  也必须走 bootstrap 生成，禁止手抄或套用别平台口径。
 
 **路径归一化**：`(lint, 文件)` 的路径先统一分隔符再按**大小写不敏感**前缀剥离仓根（Windows 盘符
 `c:` vs `C:` 不会让存量整体变成"新增/消失"），剥不掉的前缀才保留为绝对路径。
@@ -146,10 +149,11 @@ CLIPPY_CONF_DIR=.meta/lints cargo clippy -p pony-agent-core --lib --bins
 
 ## 8. 诚实条款（本门不覆盖什么）
 
-- **平台面**：当前只有 `linux` 分册（CI 挂在 ubuntu-latest 的 core-platform-check）。Windows/macOS 的
-  `#[cfg]` 分支本门扫不到，由 `-D warnings` + 平台矩阵门承担；各平台补分册后可在该平台 CI 加同一步。
-- **扫描包**：只扫 `-p pony-agent-core`（541 个 .rs 的主体）。`src-tauri/src`（10 个文件、5 处 `unsafe`，
-  含 `platform.rs` 的 `ShellExecuteW` 安全边界）**不在本门扫描面**——扩面需另立第二份基线（B244 跟踪）。
+- **平台面**：`linux` / `win32` / `darwin` 三分册齐备（B244），CI 三分支各跑本平台分册；
+  平台分册缺失仍 exit 2（fail-closed）。
+- **扫描包**：第一份基线扫 `-p pony-agent-core`；第二份基线
+  `scripts/clippy-baseline-src-tauri.json` 扫 `-p pony-agent`（src-tauri，含 `platform.rs`
+  的 `ShellExecuteW` 安全边界），同样按平台分册、经 bootstrap 生成。
 - **测试目标**默认不在扫描面（`--all-targets` 可开）；测试里 `unwrap`/`expect`/打印由 `clippy.toml` 豁免，
   测试在 `-D warnings` 下的可编译性由 `scripts/check-rust-test-lints.mjs` 负责。
 - **格式面**：本仓**未纳管 rustfmt**（无 `rustfmt.toml`、CI 无 fmt 门，存量差异 1.7 万处）。`cargo fmt --check`

@@ -52,7 +52,7 @@
     "test:tauri:smoke": "node scripts/tauri-smoke.js",
     "secrets:check": "node scripts/check-secrets.mjs --staged",
     "secrets:check:all": "node scripts/check-secrets.mjs --all",
-    "verify": "npm run version:check && npm run adr:check && npm run secrets:check && npm run backlog:gate && npm run test:unit && npm run build && npm run contract:check && npm run contract:cli && npm run size:check && npm run rust:lint:selftest && npm run rust:lint && npm run cargo:check:shared && npm run ext:check",
+    "verify": "npm run version:check && npm run adr:check && npm run secrets:check && npm run backlog:gate && npm run test:unit && npm run build && npm run contract:check && npm run contract:cli && npm run size:check && npm run rust:lint:selftest && npm run rust:lint && npm run rust:lint:tauri && npm run cargo:check:shared && npm run ext:check",
     "preview": "vite preview",
     "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri",
@@ -74,7 +74,10 @@
     "hooks:install": "git config core.hooksPath .githooks",
     "artifacts:status": "bash scripts/artifacts-status.sh",
     "artifacts:spec": "bash scripts/artifacts-tools.spec.sh",
-    "clean:targets": "bash scripts/clean-targets.sh"
+    "clean:targets": "bash scripts/clean-targets.sh",
+    "rust:lint:tauri": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json",
+    "rust:lint:tauri:json": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json --json",
+    "rust:lint:tauri:update": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json --update-baseline"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",
