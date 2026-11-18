@@ -12,6 +12,9 @@
 //! 红相语义：transport/config 的函数体若仍为 `unimplemented!()`，对应用例必须真实 panic；
 //! 协议类型 serde 契约（已冻结的 derive）属绿基线，不得被改写。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -50,7 +53,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         Instant::now().elapsed().as_nanos()
     ));
     std::fs::create_dir_all(&path).expect("创建临时工作目录");
-    path.canonicalize().expect("canonicalize 临时工作目录")
+    support::deverbatim(&path.canonicalize().expect("canonicalize 临时工作目录"))
 }
 
 fn cleanup(path: &Path) {

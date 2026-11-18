@@ -17,6 +17,9 @@
 //! `approve_control_request` / `cancel_control_request` 消费；本文件不臆造 answer JSON
 //! schema（只需 `selected.optionId ∈ request.options`）。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -56,7 +59,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         Instant::now().elapsed().as_nanos()
     ));
     std::fs::create_dir_all(&path).expect("创建临时工作目录");
-    path.canonicalize().expect("canonicalize 临时工作目录")
+    support::deverbatim(&path.canonicalize().expect("canonicalize 临时工作目录"))
 }
 
 fn cleanup(path: &Path) {

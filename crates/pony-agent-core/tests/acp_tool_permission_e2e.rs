@@ -10,6 +10,9 @@
 //!
 //! [POST-HOC-GREEN: 生产接线（task-17）先于用例，仅作回归守护]
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
@@ -40,7 +43,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         Instant::now().elapsed().as_nanos()
     ));
     std::fs::create_dir_all(&path).expect("创建临时工作目录");
-    path.canonicalize().expect("canonicalize 临时工作目录")
+    support::deverbatim(&path.canonicalize().expect("canonicalize 临时工作目录"))
 }
 
 fn fixture_script() -> String {

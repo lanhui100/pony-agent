@@ -10,6 +10,9 @@
 //! - 阈值取 `.dev-team/nfr-baseline.json` 的 `acp` 段，等待用有界轮询 / `recv_timeout`；
 //! - 无 `#[ignore]`、无空断言；只碰 ACP 测试与夹具。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -41,7 +44,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         Instant::now().elapsed().as_nanos()
     ));
     std::fs::create_dir_all(&path).expect("创建临时工作目录");
-    path.canonicalize().expect("canonicalize 临时工作目录")
+    support::deverbatim(&path.canonicalize().expect("canonicalize 临时工作目录"))
 }
 
 fn fixture_script() -> PathBuf {

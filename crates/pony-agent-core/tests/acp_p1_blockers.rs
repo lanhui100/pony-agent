@@ -11,6 +11,9 @@
 //! 纪律：阈值全部取自 `.dev-team/nfr-baseline.json` 的 `acp` 段；注入延迟 = baseline + margin
 //! （margin 为 Lead 冻结的 2000ms / 3000ms）；等待用有界条件轮询 / `recv_timeout`，无 `#[ignore]`。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -38,7 +41,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         Instant::now().elapsed().as_nanos()
     ));
     std::fs::create_dir_all(&path).expect("创建临时工作目录");
-    path.canonicalize().expect("canonicalize 临时工作目录")
+    support::deverbatim(&path.canonicalize().expect("canonicalize 临时工作目录"))
 }
 
 fn cleanup(path: &Path) {

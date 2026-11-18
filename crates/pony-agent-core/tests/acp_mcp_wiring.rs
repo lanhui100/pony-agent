@@ -11,6 +11,9 @@
 //!
 //! 阈值：本文件无超时类断言（纯配置/报文等价），等待只用于子进程退出后的文件落地。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -40,7 +43,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         Instant::now().elapsed().as_nanos()
     ));
     std::fs::create_dir_all(&path).expect("创建临时工作目录");
-    path.canonicalize().expect("canonicalize 临时工作目录")
+    support::deverbatim(&path.canonicalize().expect("canonicalize 临时工作目录"))
 }
 
 fn fixture_script() -> PathBuf {

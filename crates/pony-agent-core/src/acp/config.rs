@@ -174,7 +174,15 @@ impl std::error::Error for AcpConfigError {}
 pub fn agents_file_path() -> PathBuf {
     // `dirs::config_dir()` 在 Linux = `$XDG_CONFIG_HOME`（缺省 `$HOME/.config`），
     // 与 `providers.json` / `model-preferences.json` 同一解析口径（单一真值，不另立名单）。
-    let mut path = dirs::config_dir()
+    // B230：Windows 的 `dirs::config_dir()` = KnownFolder(RoamingAppData)，忽略 XDG；而本仓
+    // ACP 清单的冻结契约就是「经 `$XDG_CONFIG_HOME/pony-agent/acp-agents.json` 发现」。
+    // 故显式优先读已有的 `XDG_CONFIG_HOME`（不新增 env 变量），让契约在 Windows 上同样成立，
+    // 测试的隔离根也因此跨平台一致。
+    let xdg_override = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let mut path = xdg_override
+        .or_else(dirs::config_dir)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     path.push(ACP_CONFIG_DIR_NAME);

@@ -9,6 +9,9 @@
 //! 确定性纪律：全部阈值来自 `.dev-team/nfr-baseline.json` 的 `acp` 段；
 //! 等待使用有界条件轮询 / `Barrier`，不使用「纯 sleep + 概率」作为同步手段。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Barrier};
@@ -37,7 +40,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         Instant::now().elapsed().as_nanos()
     ));
     std::fs::create_dir_all(&path).expect("创建临时工作目录");
-    path.canonicalize().expect("canonicalize 临时工作目录")
+    support::deverbatim(&path.canonicalize().expect("canonicalize 临时工作目录"))
 }
 
 fn cleanup(path: &Path) {

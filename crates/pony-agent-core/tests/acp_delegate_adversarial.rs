@@ -22,6 +22,9 @@
 //!   故 `finalText` 与「父 turn 事件」断言必红；已实现行为（会话串行闸
 //!   `src/acp/session.rs:849`、整轮预算超时归约）作为回归守护，不在红相之列。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -59,7 +62,7 @@ fn temp_dir(tag: &str) -> PathBuf {
         Instant::now().elapsed().as_nanos()
     ));
     std::fs::create_dir_all(&path).expect("创建临时工作目录");
-    path.canonicalize().expect("canonicalize 临时工作目录")
+    support::deverbatim(&path.canonicalize().expect("canonicalize 临时工作目录"))
 }
 
 fn cleanup(path: &Path) {
