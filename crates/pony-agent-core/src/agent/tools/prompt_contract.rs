@@ -69,6 +69,8 @@ pub fn prompt_non_tool_tokens() -> &'static [&'static str] {
         "team_task_",
         // BASE 段里作为示例出现的类名（`搜索 TokenManager 类`），不是工具。
         "TokenManager",
+        // 团队策略段里 list_agents 的可选入参名（`wait_ms`），是字段不是工具。
+        "wait_ms",
     ]
 }
 

@@ -1086,6 +1086,13 @@ fn tui_input_src() -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("必须能读取 {}: {e}", path.display()))
 }
 
+/// `tui/status_bar.rs` 源码原文：底部状态行渲染已从 `tui.rs` 拆出到该模块；
+/// 结构契约断言的扫描范围必须显式覆盖，否则函数搬家后断言会静默失配。
+fn tui_status_bar_src() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/tui/status_bar.rs");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("必须能读取 {}: {e}", path.display()))
+}
+
 /// 取 `signature_prefix` 起、到该函数体结束（列 0 的 `}`）为止的源码切片。
 fn fn_body<'a>(src: &'a str, signature_prefix: &str) -> &'a str {
     let start = src
@@ -1174,19 +1181,26 @@ fn a24_metrics_line_wires_queue_indicator_rendering() {
     // ADR 0078 把底面行契约从「工作区 + 指标」改为「一次性提示/排队反馈 + 模型身份」，
     // 渲染函数同步由 `metrics_line` 更名为 `status_line`（tui.rs `fn status_line`）。
     // 断言目标仍是同一个**每帧渲染**的输入框下方行，接线护栏不变。
-    let status_body = fn_body(TUI_SRC, "fn status_line");
+    let status_bar_src = tui_status_bar_src();
+    let status_body = fn_body(&status_bar_src, "fn status_line");
+    let middle_body = fn_body(&status_bar_src, "fn middle_segment");
+    // 渲染链：status_line → middle_segment → queue_indicator_line（拆模块后断言跟随真实接线）。
     assert!(
-        status_body.contains("queue_indicator_line("),
-        "C23/C16：status_line 渲染函数体必须调用 queue_indicator_line（删掉渲染块会让流式期排队不可见）"
+        status_body.contains("middle_segment("),
+        "C23/C16：status_line 渲染函数体必须经 middle_segment 接线（删掉会让流式期排队不可见）"
+    );
+    assert!(
+        middle_body.contains("queue_indicator_line("),
+        "C23/C16：middle_segment 渲染函数体必须调用 queue_indicator_line（删掉渲染块会让流式期排队不可见）"
     );
     // 指示器必须由 state 的实时队列/notice 驱动，而不是常量或其他字段。
     assert!(
-        status_body.contains("queued_count()"),
-        "C23：status_line 必须以 state.queued_count() 作为排队计数来源"
+        middle_body.contains("queued_count()"),
+        "C23：middle_segment 必须以 state.queued_count() 作为排队计数来源"
     );
     assert!(
-        status_body.contains("queue_notice"),
-        "C23：status_line 必须读取 state.queue_notice（C4/C6 反馈的流式渲染点）"
+        middle_body.contains("queue_notice"),
+        "C23：middle_segment 必须读取 state.queue_notice（C4/C6 反馈的流式渲染点）"
     );
     // status_word 不得重复渲染排队指示器（C18 ③ 去重要求）。
     let status_word_body = fn_body(TUI_SRC, "fn status_word");

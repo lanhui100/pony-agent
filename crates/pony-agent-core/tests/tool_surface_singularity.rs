@@ -344,7 +344,8 @@ const BUILTIN_GOLDEN: &[(&str, &str, &str, &str, u64)] = &[
     ("builtin:view_image", "ViewImage", "read", "model_visible", 0x2e5e324a17a5cab2),
     ("builtin:subagent", "subagent", "composite", "model_visible", 0xc9f3f6ae8f81c76a),
     ("builtin:spawn_teammate", "spawn_teammate", "interactive", "model_visible", 0xf884da9528ced99b),
-    ("builtin:list_agents", "list_agents", "interactive", "model_visible", 0x439ad3b9da88d665),
+    // B246：list_agents 增可选 `wait_ms`（团队边沿等待，schema additive）⇒ 同提交更新 golden hash。
+    ("builtin:list_agents", "list_agents", "interactive", "model_visible", 0x8b8fbfab3f094b67),
     ("builtin:send_message", "send_message", "interactive", "model_visible", 0xd06e563247ae205e),
     ("builtin:interrupt_agent", "interrupt_agent", "interactive", "model_visible", 0x0495e2c07dcf55e4),
     ("builtin:drain_inbox", "drain_inbox", "interactive", "model_visible", 0xff4f114de2906fae),
@@ -367,7 +368,8 @@ const BUILTIN_GOLDEN: &[(&str, &str, &str, &str, u64)] = &[
     ("builtin:skill_load", "skill_load", "read", "model_visible", 0xe6650761f1de664f),
     // B150/P1：acp_delegate 尾插在内建面（复合工具，模型面 38 → 39）；schema 由
     // tools/schema.rs:1130 的 definition 决定，逐字节冻结。
-    ("builtin:acp_delegate", "acp_delegate", "composite", "model_visible", 0x197dcf7c328a2f35),
+    // B237 委派结果/trace 波次给 acp_delegate schema 追加字段（additive）⇒ 同提交更新 golden hash。
+    ("builtin:acp_delegate", "acp_delegate", "composite", "model_visible", 0x84bcf7770aa9aa96),
     ("builtin:time_now", "Run", "read", "internal", 0x439ad3b9da88d665),
     ("builtin:echo_input", "Ask", "interactive", "internal", 0x71e16d17e1847e86),
     ("builtin:workspace_read_file", "Read", "read", "internal", 0xbdd5da7930910554),

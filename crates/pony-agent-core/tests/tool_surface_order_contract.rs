@@ -61,6 +61,8 @@ const FROZEN_BUILTIN_SURFACE_ORDER: &[&str] = &[
     "job_kill",
     "job_list",
     "skill_load",
+    // B150/P1：acp_delegate 按 builtin_tools() 定义序追加在末位（46 项）。
+    "acp_delegate",
 ];
 
 /// 取当前工具面的 primitive 名序列。

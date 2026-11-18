@@ -37,10 +37,10 @@ const TEAM_SECTION_ORDER: &[&str] = &[
     "- Shared workspace:",
     "- Prefer read/edit/write for file changes.",
     "- Use the target returned by",
-    "- send_message: a running target receives",
-    "- Member states:",
+    "- send_message: the message is queued",
+    "- Member status from",
+    "- Waiting:",
     "- Shared-task workflow:",
-    "- Member status has exactly one source:",
     "- Role lifecycle:",
     "- The Lead must not give the final answer",
 ];

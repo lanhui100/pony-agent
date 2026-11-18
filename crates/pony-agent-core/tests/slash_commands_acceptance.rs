@@ -59,10 +59,10 @@ use pony_agent_core::agent::tools::{ToolCall, ToolExecutor, ToolResult};
 // 2026-11-08 ADR 0092：/approve 为宿主盖章入口（Draft→Executing）；契约矩阵 C-4 已同提交原地改写并登记流水，此处按真值表同步。
 // 2026-11-10 ADR 0113：/rewind 与「非流式双击 Esc」共用撤回面板；契约矩阵 C-4 同提交原地改写为 16 条，其余条目顺序/文案未改。
 // 2026-11-10 wave-tui-permission：新增 /permission 命令支持查看与切换工具执行权限（ReadOnly / WorkspaceWrite / FullAccess）。
-const CONTRACT_COMMANDS: [&str; 18] = [
+const CONTRACT_COMMANDS: [&str; 19] = [
     "/resume", "/rewind", "/provider", "/models", "/thinking", "/permission", "/settings", "/plan",
-    "/goal", "/approve", "/tasks", "/agents", "/teams", "/clear", "/compact", "/help", "/update",
-    "/quit",
+    "/goal", "/approve", "/tasks", "/agents", "/teams", "/clear", "/compact", "/title", "/help",
+    "/update", "/quit",
 ];
 
 // ── 沙箱与测试脚手架 ───────────────────────────────────────────────────────────────────
@@ -285,7 +285,7 @@ fn t1_tui_command_table_drops_cost_and_adds_compact() {
         );
     }
 
-    // 契约 C-4：顺序固定、共 18 条（任何增删/重排都是契约漂移）。
+    // 契约 C-4：顺序固定、共 19 条（/title 随 B231 标题能力入表；任何增删/重排都是契约漂移）。
     assert_eq!(
         commands,
         CONTRACT_COMMANDS.to_vec(),

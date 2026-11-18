@@ -95,12 +95,13 @@ const TEAM_TOOLS: [&str; 9] = [
 /// 契约 C3.4：策略段标题行（机器判定锚串，与 DSH `:36` 同一锚串）。
 const TEAM_POLICY_ANCHOR: &str = "Agent Teams is available in this session";
 
-/// 契约 v1.2 C1.2：38 项模型可见面精确清单（含顺序；`workflow` 退回 Internal 后不在其中）。
+/// 契约 v1.2 C1.2 + B150/P1：39 项模型可见面精确清单（含顺序；`workflow` 退回 Internal 后不在其中，
+/// `acp_delegate` 为 B150/P1 追加项、按定义序排在末位）。
 ///
 /// 顺序真值源：registry 排序键 `(!visible, product_first_index)`（`tools.rs:555-566`）
 /// ＋ `builtin_tools()` 定义序（10 项团队工具注册于 `tools.rs:5925-6138`，夹在 `view_image`
 /// `:5894` 与 `todo_write` `:6147` 之间），故 10 项插入 `ViewImage` 之后、`TodoWrite` 之前。
-const EXPECTED_38: [&str; 38] = [
+const EXPECTED_39: [&str; 39] = [
     "Run",
     "Ask",
     "Read",
@@ -139,6 +140,7 @@ const EXPECTED_38: [&str; 38] = [
     "JobKill",
     "JobList",
     "skill_load",
+    "acp_delegate",
 ];
 
 // ============================================================
@@ -152,11 +154,11 @@ fn c1_team_tools_are_model_visible() {
     let views = builtin_turn_tool_contract_views();
     let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
 
-    // Assert 1：总数必须为 38（C1-A1，契约 v1.2：29 既有 + 9 团队，`workflow` 退回 Internal）。
+    // Assert 1：总数必须为 39（C1-A1，契约 v1.2：29 既有 + 9 团队 + B150/P1 的 acp_delegate，`workflow` 退回 Internal）。
     assert_eq!(
         names.len(),
-        38,
-        "C1-A1 失败：模型可见工具面必须为 38 项（29 既有 + 9 团队；`workflow` v1.2 退回 Internal）。\
+        39,
+        "C1-A1 失败：模型可见工具面必须为 39 项（29 既有 + 9 团队 + B150/P1 的 acp_delegate；`workflow` v1.2 退回 Internal）。\
          实际 {} 项：{names:?}",
         names.len()
     );
@@ -180,14 +182,14 @@ fn c1_team_tools_are_model_visible() {
         names.len()
     );
 
-    // Assert 3：逐字、逐序等于 C1.2 的 38 行清单（含顺序）。
-    let expected: Vec<&str> = EXPECTED_38.to_vec();
+    // Assert 3：逐字、逐序等于 39 行清单（含顺序）。
+    let expected: Vec<&str> = EXPECTED_39.to_vec();
     assert_eq!(
         names, expected,
-        "C1-A1 失败：模型可见面与契约 v1.2 C1.2 的 38 项精确清单（含顺序）不一致"
+        "C1-A1 失败：模型可见面与 39 项精确清单（含顺序）不一致"
     );
 
-    // Assert 4：产品名不得塌缩——`Run` 在 38 项中必须唯一（`time_now`/`run_command` 共用槽位，
+    // Assert 4：产品名不得塌缩——`Run` 在 39 项中必须唯一（`time_now`/`run_command` 共用槽位，
     // 若团队工具误落 `unwrap_or("Run")` 兜底会产生重复 Run）。
     let run_slots = names.iter().filter(|name| **name == "Run").count();
     assert_eq!(

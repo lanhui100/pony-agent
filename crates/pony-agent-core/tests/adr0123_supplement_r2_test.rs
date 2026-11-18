@@ -550,11 +550,13 @@ fn t_b1a_reprojected_failed_turn_checkpoint_is_same_source_as_write_path() {
     assert_eq!(messages[0].content, "帮我探测端口");
     assert_eq!(messages[1].role, "assistant");
 
-    // Assert 2：结构化身份（kind/status）与写路径同形
+    // Assert 2：结构化身份（kind/status）与写路径同形。
+    // B217：终态三分（失败 `Error` / 进程中断 `Interrupted` / 用户取消 `Cancelled`）——
+    // `turn/end.error` 缺失的旧日志退化为 Interrupted（见 Assert 5），本用例是失败轮 ⇒ Error。
     assert_eq!(
         messages[1].kind,
-        Some(HistoryMessageKind::Interrupted),
-        "上游失败轮的投影 kind 必须是 Interrupted，实际: {:?}",
+        Some(HistoryMessageKind::Error),
+        "上游失败轮的投影 kind 必须是 Error（B217 终态三分），实际: {:?}",
         messages[1].kind
     );
     assert_eq!(

@@ -10,6 +10,10 @@ fn test_b070_tui_e2e_data_dir_isolation_contract() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows 无 XDG_DATA_HOME/XDG 兜底等价物，且本用例主动清空 PONY_AGENT_DATA_DIR；\n隔离兜底语义仅在 Unix 成立（B230/B246）"
+)]
 fn test_b070_adversarial_data_dir_unconfigured_fallback_safety() {
     // 允许在无显式配置时检测 fallback 语义，但在测试中需要显式清理
     std::env::remove_var("PONY_AGENT_DATA_DIR");
