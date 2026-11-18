@@ -8,6 +8,9 @@
 //! 断言全部走真实 `ponycli` 子进程 + fake agent 落盘的原始请求帧；
 //! R1/R2 额外断言 agent 侧**没有** `session/new` 帧（防「先建后载」假绿）。
 
+#[path = "support/paths.rs"]
+mod support;
+
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -270,10 +273,16 @@ fn r1_resume_loads_session_without_creating_new_one() {
         json!("acp-sess-1"),
         "R1 违约：session/load 必须携带请求的 sessionId，实际 {load}"
     );
+    // B230：生产下行前会 canonicalize 并去 Windows verbatim 前缀；期望值同口径。
+    let expected_cwd = std::fs::canonicalize(&workspace)
+        .map(|path| support::deverbatim(&path))
+        .unwrap_or_else(|_| workspace.clone())
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         load["params"]["cwd"],
-        json!(workspace_text),
-        "R1 违约：session/load 的 cwd 必须是 canonical 绝对路径，实际 {load}"
+        json!(expected_cwd),
+        "R1 违约：session/load 的 cwd 必须是 canonical 绝对路径（去 verbatim），实际 {load}"
     );
     assert!(
         load["params"]["mcpServers"].is_array(),

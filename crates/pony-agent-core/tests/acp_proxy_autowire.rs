@@ -71,7 +71,7 @@ impl TempHome {
             std::fs::write(home.join(".pony").join("proxy.env"), body).expect("写 proxy.env");
         }
         let mut restore = Vec::new();
-        for key in ["HOME", "USERPROFILE"] {
+        for key in ["HOME", "USERPROFILE", "PONY_AGENT_HOME"] {
             restore.push((key, std::env::var_os(key)));
             std::env::set_var(key, &home);
         }

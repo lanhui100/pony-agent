@@ -422,6 +422,10 @@ fn h4_long_running_terminal_wait_respects_budget_and_stays_responsive() {
 const H5_OUTPUT_BYTE_LIMIT: usize = 1_048_576;
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "输出洪泛探针依赖 pgrep/POSIX 子进程语义（Windows 无等价命令，B230/B246）"
+)]
 fn h5_terminal_output_buffer_is_bounded() {
     let cwd = temp_dir("flood-output");
     let marker = format!("pony-h5-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos());
@@ -548,6 +552,10 @@ fn i1_handshake_budget_exceeds_legacy_five_seconds() {
 // `ACP_CHILD_ENV_EXTRA_ALLOWLIST`（XDG_*/TERM/LANG）必须原样透传；`spec.env` 注入 PATH 必须被
 // deny 表拦下（子进程 PATH 仍是宿主 PATH，绝不是注入值）。
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "POSIX 子进程 PATH/allowlist 语义（Git Bash 会重写 PATH，B230/B246）"
+)]
 fn i2_acp_child_env_extends_allowlist_without_path_injection() {
     let _guard: MutexGuard<'static, ()> = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let cwd = temp_dir("env-extra");

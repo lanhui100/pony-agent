@@ -498,6 +498,9 @@ impl AcpAgentClient {
                 cwd.display()
             ))
         })?;
+        // B230：外部 agent 不认 Windows verbatim 形态；下行前统一去 `\\?\` 前缀，
+        // 与 workspace 注册/路径授权的 canonical 形式同源。
+        let canonical = crate::agent::path_permission::normalize_canonical(&canonical);
         let request = SessionNewRequest {
             cwd: canonical.to_string_lossy().into_owned(),
             mcp_servers,
@@ -667,6 +670,13 @@ impl AcpAgentClient {
                 request.cwd
             )));
         }
+        // B230：`cwd` 下行前同样去 verbatim（外部 agent 不认 Windows `\\?\` 形态）。
+        let mut request = request;
+        if let Ok(canonical_cwd) = std::fs::canonicalize(Path::new(&request.cwd)) {
+            request.cwd = crate::agent::path_permission::normalize_canonical(&canonical_cwd)
+                .to_string_lossy()
+                .into_owned();
+        }
         let requested: Vec<std::path::PathBuf> = request
             .additional_directories
             .clone()
@@ -675,7 +685,6 @@ impl AcpAgentClient {
             .map(std::path::PathBuf::from)
             .collect();
         let canonical_dirs = canonicalize_additional_directories(&requested)?;
-        let mut request = request;
         request.additional_directories = if canonical_dirs.is_empty() {
             None
         } else {

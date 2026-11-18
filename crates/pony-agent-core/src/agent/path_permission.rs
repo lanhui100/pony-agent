@@ -300,9 +300,13 @@ impl AuthorizeStore {
     /// 显式授权一个路径并指定作用域（ADR 0029：`read` / `read-write`）。
     pub fn grant_with_scope(
         &self,
-        canonical: PathBuf,
+        mut canonical: PathBuf,
         scope: PathAuthorizationScope,
     ) -> Result<AuthorizedPathEntry, String> {
+        // B230：调用方可能传 `std::fs::canonicalize` 的 verbatim 形态（Windows `\\?\C:\...`），
+        // 而 `classify_path` 的 canonical 已去前缀 ⇒ 不归一会让「已授权」与「命中」永远错位。
+        // 授权条目与查找必须同一形式。
+        canonical = normalize_canonical(&canonical);
         let entry = AuthorizedPathEntry {
             path: canonical,
             granted_at_ms: now_ms(),
@@ -326,12 +330,14 @@ impl AuthorizeStore {
 
     /// 撤销授权：**精确路径**——只移除该路径条目，子路径授权条目保留。
     pub fn revoke(&self, canonical: &Path) -> bool {
+        // 与 grant/find 同口径：verbatim 与可读绝对路径视为同一条目（B230）。
+        let canonical = normalize_canonical(canonical);
         let removed = {
             let mut guard = self
                 .entries
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            guard.remove(canonical).is_some()
+            guard.remove(&canonical).is_some()
         };
         if removed {
             if let Some(persist) = &self.persist {
@@ -1561,6 +1567,27 @@ mod tests {
         assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// B230：授权条目与命中路径必须同形——调用方传 Windows verbatim 形态时，
+    /// grant/find/revoke 都按 `normalize_canonical` 归一（与 `classify_path` 同源）。
+    #[test]
+    fn grant_and_find_normalize_windows_verbatim_prefix() {
+        let store = AuthorizeStore::new();
+        let verbatim = PathBuf::from(r"\\?\C:\ws\outside.txt");
+        let readable = PathBuf::from(r"C:\ws\outside.txt");
+        store
+            .grant_with_scope(verbatim, PathAuthorizationScope::Read)
+            .expect("授权 verbatim 形态");
+        assert!(
+            store.find_authorization(&readable).is_some(),
+            "可读绝对路径必须命中同一授权条目"
+        );
+        assert!(
+            store.revoke(&readable),
+            "revoke 同口径：可读路径必须能撤销 verbatim 授权"
+        );
+        assert!(store.find_authorization(&readable).is_none());
     }
 
     /// 读放行策略必须与加载侧分域策略逐字一致：全局根允许词法归属（符号链接解析到根外），

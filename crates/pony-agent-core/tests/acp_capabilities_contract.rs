@@ -542,6 +542,10 @@ fn g6_fs_handler_fails_closed_outside_workspace() {
 /// G7/C5：create→output(含 hi)→wait_for_exit(0)→kill(幂等)→release；
 /// release 后 `pgrep -f <唯一 marker>` 必须无匹配（无残留子进程）。
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "进程残留检查依赖 POSIX pgrep（Windows 无等价命令，B230/B246）"
+)]
 fn g7_terminal_handler_full_chain_and_no_residue() {
     let cwd = temp_dir("terminal-chain");
     let marker = format!("pony-acp-term-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos());

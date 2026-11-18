@@ -590,7 +590,13 @@ fn convert_explicit_mcp_server(spec: &AcpMcpServerSpec) -> Result<McpServer, Acp
 /// 5. 返回值按文件出现顺序（后者覆盖前者的语义由下游合并顺序决定，见 `transport::spawn` 文档）。
 pub fn resolve_proxy_env() -> Vec<(String, String)> {
     // `<HOME>` 走 `dirs` 既有口径（Unix = `$HOME`；Windows 缺 HOME 时回退用户目录）。
-    let Some(home) = dirs::home_dir() else {
+    // B230：`PONY_AGENT_HOME` 是产品已有的“用户级全局根”显式覆盖（技能/MCP 同源），
+    // 这里同口径优先——既让隔离测试在 Windows 上可用（dirs::home_dir 忽略 HOME/USERPROFILE），
+    // 也不新增任何 env 变量。
+    let home_override = std::env::var_os("PONY_AGENT_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    let Some(home) = home_override.or_else(dirs::home_dir) else {
         // 无 HOME 是合法环境（如最小容器）：无代理可继承，不报错。
         return Vec::new();
     };
