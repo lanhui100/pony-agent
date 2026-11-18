@@ -580,7 +580,9 @@ fn c6_2_event_created_at_is_production_time_not_flush_time() {
     // Arrange：首跳应答人为延迟 ⇒「turn 开始」与「turn 终态」在时间轴上分开。
     let session_id = "pa_c6_2_event_time";
     let fixture = Fixture::new("c62");
-    let (provider, plane, sink) = two_step_stack("c62", session_id, INITIAL_REPLY_DELAY_MS, &fixture);
+    // Windows CI 以 `-D warnings` 构建测试：本用例只用 plane/sink，provider 绑定仅是为了保持
+    // two_step_stack 的返回形状可读 ⇒ 前缀下划线，避免 unused variable 变硬错误。
+    let (_provider, plane, sink) = two_step_stack("c62", session_id, INITIAL_REPLY_DELAY_MS, &fixture);
 
     // Act
     let turn_start_ms = now_ms();
