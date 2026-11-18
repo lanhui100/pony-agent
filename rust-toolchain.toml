@@ -1,0 +1,7 @@
+# 工具链 pin（B245）：clippy 棘轮基线（scripts/clippy-baseline.json）按 clippy 0.1.91 /
+# rustc 1.91.1 生成。CI 若浮在 latest stable，工具链升级会引入新 lint（实测 clippy 0.1.100
+# 多出 106 条），把「新增债」判成 106 而红。升级须走「重基线 + ADR」流程，不允许静默漂移。
+[toolchain]
+channel = "1.91.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
