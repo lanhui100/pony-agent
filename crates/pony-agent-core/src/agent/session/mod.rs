@@ -84,8 +84,10 @@ pub use bundle::{
 };
 
 pub use usage::{
-    last_context_input_tokens, session_usage_totals, turn_usage_totals,
-    turn_usage_totals_from_snapshot, SessionUsageLedger, SessionUsageTotals,
+    estimate_surface_message_tokens, estimate_surface_text_tokens,
+    estimate_tool_roundtrip_surface_tokens, last_context_input_tokens, session_usage_totals,
+    turn_usage_totals, turn_usage_totals_from_snapshot, ContextSurfaceLedger, SessionUsageLedger,
+    SessionUsageTotals,
 };
 pub use workspace_snapshot::WorkspaceSnapshotManager;
 // 「撤回」文件快照：写工具（抓取）与撤回命令（恢复）共用同一入口。
