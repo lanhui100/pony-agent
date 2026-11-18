@@ -223,28 +223,7 @@ pub fn command_to_value(command: &PersistCommand) -> Result<Value, String> {
             branch_id,
             events,
             event_times_ms,
-        } => {
-            let mut encoded = json!({
-                "type": "flush_events",
-                "encodingVersion": SESSION_LOG_COMMAND_ENCODING_VERSION,
-                "epoch": epoch,
-                "sessionId": session_id,
-                "turnId": turn_id,
-                "branchId": branch_id,
-                "events": serialize(events)?,
-            });
-            // wave-acp-delegate C6.2：逐事件产生时刻（additive）——空数组表示「未知/旧调用面」，
-            // 键缺席（旧读方按缺省回落批首时间，读写双向兼容）。
-            if !event_times_ms.is_empty() {
-                if let Some(object) = encoded.as_object_mut() {
-                    object.insert(
-                        "eventTimes".to_string(),
-                        serde_json::json!(event_times_ms),
-                    );
-                }
-            }
-            encoded
-        }
+        } => encode_flush_events(*epoch, session_id, turn_id, branch_id, events, event_times_ms)?,
         PersistCommand::PublishMetadata { epoch, key, value } => json!({
             "type": "publish_metadata",
             "encodingVersion": SESSION_LOG_COMMAND_ENCODING_VERSION,
@@ -253,6 +232,36 @@ pub fn command_to_value(command: &PersistCommand) -> Result<Value, String> {
             "value": value,
         }),
     };
+    Ok(encoded)
+}
+
+fn encode_flush_events(
+    epoch: u64,
+    session_id: &str,
+    turn_id: &str,
+    branch_id: &str,
+    events: &[TurnEvent],
+    event_times_ms: &[u64],
+) -> Result<Value, String> {
+    let mut encoded = json!({
+        "type": "flush_events",
+        "encodingVersion": SESSION_LOG_COMMAND_ENCODING_VERSION,
+        "epoch": epoch,
+        "sessionId": session_id,
+        "turnId": turn_id,
+        "branchId": branch_id,
+        "events": serialize(events)?,
+    });
+    // wave-acp-delegate C6.2：逐事件产生时刻（additive）——空数组表示「未知/旧调用面」，
+    // 键缺席（旧读方按缺省回落批首时间，读写双向兼容）。
+    if !event_times_ms.is_empty() {
+        if let Some(object) = encoded.as_object_mut() {
+            object.insert(
+                "eventTimes".to_string(),
+                serde_json::json!(event_times_ms),
+            );
+        }
+    }
     Ok(encoded)
 }
 

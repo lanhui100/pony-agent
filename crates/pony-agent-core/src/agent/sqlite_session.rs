@@ -1086,6 +1086,96 @@ impl SqliteSessionBackend {
         )
         .unwrap_or_default()
     }
+
+    fn apply_append_message_tx(
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        message: &TurnHistoryMessage,
+        ordinal: usize,
+    ) -> Result<(), commit::ApplyFailure> {
+        let message_id = match &message.turn_id {
+            Some(turn_id) if !turn_id.is_empty() => format!("{turn_id}-{}", message.role),
+            _ => format!("msg-{ordinal}-{}", message.role),
+        };
+        tx.execute(
+            "INSERT OR REPLACE INTO normalized_messages
+             (session_id, message_id, turn_id, ordinal, role, content, reasoning_content,
+              status, model_name, token_count, attachments_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+            params![
+                session_id,
+                message_id,
+                message.turn_id,
+                ordinal,
+                message.role,
+                message.content,
+                message.reasoning_content,
+                message
+                    .status
+                    .as_ref()
+                    .map(|s| serde_json::to_string(s).unwrap_or_default()),
+                message.model_name,
+                message.token_count,
+                serde_json::to_string(&message.attachments)
+                    .unwrap_or_else(|_| "[]".to_string()),
+            ],
+        )
+        .map_err(|e| format!("append message: {e}"))?;
+        Ok(())
+    }
+
+    fn apply_update_cursor_tx(
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        cursor: &HistoryCursor,
+    ) -> Result<(), commit::ApplyFailure> {
+        tx.execute(
+            "INSERT OR REPLACE INTO normalized_history_cursor
+             (session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id,
+              cursor_version, mode, checkout_mode, checkout_status, event_watermark)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                session_id,
+                cursor.visible_node_id,
+                cursor.active_branch_id,
+                cursor.branch_head_node_id,
+                cursor.workspace_node_id,
+                cursor.cursor_version,
+                serde_json::to_string(&cursor.mode).unwrap_or_else(|_| "\"live\"".to_string()),
+                serde_json::to_string(&cursor.checkout_mode).unwrap_or_else(|_| "null".to_string()),
+                serde_json::to_string(&cursor.checkout_status).unwrap_or_else(|_| "null".to_string()),
+                cursor.event_watermark,
+            ],
+        )
+        .map_err(|e| format!("update cursor: {e}"))?;
+        Ok(())
+    }
+
+    fn apply_update_branch_tx(
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+        branch: &HistoryBranch,
+    ) -> Result<(), commit::ApplyFailure> {
+        tx.execute(
+            "INSERT OR REPLACE INTO normalized_history_branches
+             (session_id, branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                session_id,
+                branch.branch_id,
+                branch.base_node_id,
+                branch.head_node_id,
+                branch.forked_from_branch_id,
+                branch.forked_from_node_id,
+                branch.label,
+                branch.created_at_ms as i64,
+                branch.updated_at_ms as i64,
+            ],
+        )
+        .map_err(|e| format!("update branch: {e}"))?;
+        Ok(())
+    }
+
     fn apply_persist_command_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -1138,34 +1228,7 @@ impl SqliteSessionBackend {
                 ordinal,
                 ..
             } => {
-                let message_id = match &message.turn_id {
-                    Some(turn_id) if !turn_id.is_empty() => format!("{turn_id}-{}", message.role),
-                    _ => format!("msg-{ordinal}-{}", message.role),
-                };
-                tx.execute(
-                    "INSERT OR REPLACE INTO normalized_messages
-                     (session_id, message_id, turn_id, ordinal, role, content, reasoning_content,
-                      status, model_name, token_count, attachments_json, created_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
-                    params![
-                        session_id,
-                        message_id,
-                        message.turn_id,
-                        ordinal,
-                        message.role,
-                        message.content,
-                        message.reasoning_content,
-                        message
-                            .status
-                            .as_ref()
-                            .map(|s| serde_json::to_string(s).unwrap_or_default()),
-                        message.model_name,
-                        message.token_count,
-                        serde_json::to_string(&message.attachments)
-                            .unwrap_or_else(|_| "[]".to_string()),
-                    ],
-                )
-                .map_err(|e| format!("append message: {e}"))?;
+                Self::apply_append_message_tx(tx, session_id, message, *ordinal)?;
             }
             PersistCommand::UpsertTurn {
                 session_id, turn, ..
@@ -1369,46 +1432,12 @@ impl SqliteSessionBackend {
             PersistCommand::UpdateCursor {
                 session_id, cursor, ..
             } => {
-                tx.execute(
-                    "INSERT OR REPLACE INTO normalized_history_cursor
-                     (session_id, visible_node_id, active_branch_id, branch_head_node_id, workspace_node_id,
-                      cursor_version, mode, checkout_mode, checkout_status, event_watermark)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        session_id,
-                        cursor.visible_node_id,
-                        cursor.active_branch_id,
-                        cursor.branch_head_node_id,
-                        cursor.workspace_node_id,
-                        cursor.cursor_version,
-                        serde_json::to_string(&cursor.mode).unwrap_or_else(|_| "\"live\"".to_string()),
-                        serde_json::to_string(&cursor.checkout_mode).unwrap_or_else(|_| "null".to_string()),
-                        serde_json::to_string(&cursor.checkout_status).unwrap_or_else(|_| "null".to_string()),
-                        cursor.event_watermark,
-                    ],
-                )
-                .map_err(|e| format!("update cursor: {e}"))?;
+                Self::apply_update_cursor_tx(tx, session_id, cursor)?;
             }
             PersistCommand::UpdateBranch {
                 session_id, branch, ..
             } => {
-                tx.execute(
-                    "INSERT OR REPLACE INTO normalized_history_branches
-                     (session_id, branch_id, base_node_id, head_node_id, forked_from_branch_id, forked_from_node_id, label, created_at_ms, updated_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        session_id,
-                        branch.branch_id,
-                        branch.base_node_id,
-                        branch.head_node_id,
-                        branch.forked_from_branch_id,
-                        branch.forked_from_node_id,
-                        branch.label,
-                        branch.created_at_ms as i64,
-                        branch.updated_at_ms as i64,
-                    ],
-                )
-                .map_err(|e| format!("update branch: {e}"))?;
+                Self::apply_update_branch_tx(tx, session_id, branch)?;
             }
             PersistCommand::UpdateSessionMeta {
                 session_id,

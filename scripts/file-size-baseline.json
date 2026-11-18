@@ -19,14 +19,14 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 10675
+      "value": 10737
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
       "kind": "fn-lines",
       "name": "build",
       "occurrence": 0,
-      "value": 202
+      "value": 215
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
@@ -54,7 +54,7 @@
       "kind": "fn-lines",
       "name": "model_monitor_session_drilldown_preserves_failed_and_cancelled_terminal_evidence",
       "occurrence": 0,
-      "value": 265
+      "value": 271
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/query_commands.rs",
@@ -75,7 +75,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 4242
+      "value": 4253
     },
     {
       "path": "crates/pony-agent-core/src/agent/governed_executor.rs",
@@ -96,21 +96,21 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 4412
+      "value": 4406
     },
     {
       "path": "crates/pony-agent-core/src/agent/process.rs",
       "kind": "fn-lines",
       "name": "start_inner",
       "occurrence": 0,
-      "value": 308
+      "value": 278
     },
     {
       "path": "crates/pony-agent-core/src/agent/projection.rs",
       "kind": "fn-lines",
       "name": "apply",
       "occurrence": 0,
-      "value": 206
+      "value": 203
     },
     {
       "path": "crates/pony-agent-core/src/agent/projection.rs",
@@ -124,14 +124,14 @@
       "kind": "fn-lines",
       "name": "apply",
       "occurrence": 2,
-      "value": 223
+      "value": 229
     },
     {
       "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6963
+      "value": 6948
     },
     {
       "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
@@ -187,7 +187,7 @@
       "kind": "fn-lines",
       "name": "recover_tool_followup_completion_stream",
       "occurrence": 0,
-      "value": 249
+      "value": 250
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/trace_timeline.rs",
@@ -208,42 +208,42 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 3421
+      "value": 3466
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
       "kind": "fn-lines",
       "name": "handle_stream_tool_turn",
       "occurrence": 0,
-      "value": 1572
+      "value": 1603
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
       "kind": "fn-lines",
       "name": "start_turn_stream_with_control_and_facts",
       "occurrence": 0,
-      "value": 1733
+      "value": 1747
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
       "kind": "fn-lines",
       "name": "handle_sync_tool_turn",
       "occurrence": 0,
-      "value": 573
+      "value": 577
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
       "kind": "fn-lines",
       "name": "run_turn_inner",
       "occurrence": 0,
-      "value": 599
+      "value": 603
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 5761
+      "value": 5778
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
@@ -264,28 +264,21 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6528
-    },
-    {
-      "path": "crates/pony-agent-core/src/agent/session/tests.rs",
-      "kind": "fn-lines",
-      "name": "file_backend_roundtrip_restores_turn_trace_history",
-      "occurrence": 0,
-      "value": 215
+      "value": 6463
     },
     {
       "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6237
+      "value": 6320
     },
     {
       "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
       "kind": "fn-lines",
       "name": "apply_persist_command_tx",
       "occurrence": 0,
-      "value": 385
+      "value": 325
     },
     {
       "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
@@ -369,7 +362,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 3570
+      "value": 3676
     },
     {
       "path": "crates/pony-agent-core/src/bin/conformance.rs",
@@ -377,6 +370,13 @@
       "name": "validate",
       "occurrence": 0,
       "value": 286
+    },
+    {
+      "path": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs",
+      "kind": "fn-lines",
+      "name": "at_03b_concurrent_delegations_do_not_cross_session_events",
+      "occurrence": 0,
+      "value": 216
     },
     {
       "path": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
@@ -398,13 +398,6 @@
       "name": "spawn_otlp_sink",
       "occurrence": 0,
       "value": 10
-    },
-    {
-      "path": "crates/pony-agent-core/tests/tui_dialog_wave39.rs",
-      "kind": "fn-lines",
-      "name": "a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface",
-      "occurrence": 0,
-      "value": 221
     },
     {
       "path": "crates/pony-agent-core/tests/wave48_otel_export_diagnostics.rs",
