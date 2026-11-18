@@ -4145,11 +4145,20 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
 
     // 骨架提取：本 session 的事件类型序列，剔除 streaming 独有的 assistant/chunk。
     fn skeleton(records: &[(String, String, String)], session: &str) -> Vec<String> {
-        records
+        // B214：`llm/retry` 的条数取决于传输路径的实时预算（sync 走 aggregate deadline、
+        // stream 按读循环收敛），连续重试条数不属于 turn 生命周期骨架；折叠连续重复，
+        // 仅保留「该轮发生过重试」这一事实（下方另有存在性断言，两份日志形状不被弱化）。
+        let mut out: Vec<String> = Vec::new();
+        for (_, _, event_type) in records
             .iter()
             .filter(|(sid, _, event_type)| sid == session && event_type != "assistant/chunk")
-            .map(|(_, _, event_type)| event_type.clone())
-            .collect()
+        {
+            if event_type == "llm/retry" && out.last().is_some_and(|last| last == "llm/retry") {
+                continue;
+            }
+            out.push(event_type.clone());
+        }
+        out
     }
 
     // ---- completed 主干：同步入口（JSON completion 带 usage）----
@@ -4270,6 +4279,15 @@ fn run_turn_and_start_turn_stream_produce_equivalent_event_sequences() {
     assert_eq!(
         sync_failed_skeleton, stream_failed_skeleton,
         "failed skeleton must match"
+    );
+    // B214：两条路径都必须把「重试发生」持久化进事件流（计数差异被折叠，但事实不能被吞）。
+    assert!(
+        sync_failed_skeleton.iter().any(|event_type| event_type == "llm/retry"),
+        "sync 失败轮必须持久化 llm/retry，实际 {sync_failed_skeleton:?}"
+    );
+    assert!(
+        stream_failed_skeleton.iter().any(|event_type| event_type == "llm/retry"),
+        "stream 失败轮必须持久化 llm/retry，实际 {stream_failed_skeleton:?}"
     );
     assert_eq!(
         sync_failed_skeleton.last().map(String::as_str),
