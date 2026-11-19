@@ -1,0 +1,262 @@
+diff --git a/crates/pony-agent-core/src/bin/tui.rs b/crates/pony-agent-core/src/bin/tui.rs
+index 141aabb2..20c382d4 100644
+--- a/crates/pony-agent-core/src/bin/tui.rs
++++ b/crates/pony-agent-core/src/bin/tui.rs
+@@ -67,16 +67,25 @@ use std::sync::Arc;
+ // 主循环每个 tick（≤16ms）检测后正常 break，走统一的终端恢复保证器。
+ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+ 
++/// 最近一次终端还原是否**没把输入侧还原串送达终端**（供退出提示决定是否附手工恢复命令）。
++///
++/// 典型场景：pane 被关 / SIGHUP 后 `/dev/tty` 与 stdout 双双 EIO —— 此时屏幕上已经什么都写不进去，
++/// 但日志里必须留下痕迹，且下一次能写出来的时候要告诉用户「该敲哪条命令」而不是让他自己猜。
++static TERMINAL_RESTORE_INCOMPLETE: AtomicBool = AtomicBool::new(false);
++
+ /// 终端**输入侧**协议还原串（收到后终端不再把按键编码成转义序列）。
+ ///
+ /// 残留这些模式时的现象：退出 TUI 后敲任何键都变成 `ESC[117u` / `ESC[9;5u` 这类
+ /// kitty 键盘协议编码，被 shell 当正文回显，终端看起来"输入全是乱码"。
+-/// - `<1u` / `<u`：弹掉 kitty 键盘增强协议栈（crossterm 的弹栈写作 `<1u`，部分终端只认 `<u`）
++/// - `<1u`×3 / `<u`：按**栈语义**弹掉 kitty 键盘增强协议（crossterm 的弹栈写作 `<1u`，部分终端只认 `<u`）。
++///   重复三次是兜底：push/pop 经 pty 代理层（herdr/tmux）转发时可能不对称，栈深对不上就弹不干净。
++/// - `=0u`：把 kitty 键盘协议标志**直接置零**（`CSI = 0 u`，与栈无关）。这是唯一的绝对还原手段——
++///   栈深错位时弹栈永远是相对操作，只有显式置零能保证「退出后按键不再被编码成 CSI 序列」。
++///   必须排在弹栈之后：弹栈会恢复栈里保存的旧值，置零收尾才能钉死终态。
+ /// - `>4;0m`：关 xterm modifyOtherKeys
+ /// - `?1000l` `?1002l` `?1003l` `?1006l` `?1015l`：关各级鼠标追踪（含 any-motion 与 SGR）
+ /// - `?2004l`：关 bracketed paste
+-pub const TERMINAL_INPUT_MODES_RESET: &[u8] =
+-    b"\x1b[<1u\x1b[<u\x1b[>4;0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l";
++pub const TERMINAL_INPUT_MODES_RESET: &[u8] = b"\x1b[<1u\x1b[<1u\x1b[<1u\x1b[<u\x1b[=0u\x1b[>4;0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l";
+ 
+ /// 终端**输出侧**还原串：退出备用屏 + 显示光标。
+ pub const TERMINAL_SCREEN_RESET: &[u8] = b"\x1b[?1049l\x1b[?25h";
+@@ -210,24 +219,45 @@ fn install_shutdown_signal_handlers() {}
+ /// 失败再退回 stdout。
+ #[cfg(unix)]
+ fn write_restore_bytes(bytes: &[u8]) -> io::Result<()> {
++    // 1) 预打开句柄：信号上下文里唯一 async-signal-safe 的通道（不改这里的语义）。
+     let tty_fd = RESTORE_TTY_FD.load(Ordering::SeqCst);
+-    if tty_fd >= 0 {
+-        let written = unsafe {
+-            libc::write(
+-                tty_fd,
+-                bytes.as_ptr() as *const libc::c_void,
+-                bytes.len(),
+-            )
+-        };
+-        if written == bytes.len() as isize {
++    if tty_fd >= 0 && write_all_to_fd(tty_fd, bytes) {
++        return Ok(());
++    }
++    // 2) 预打开句柄失效（pane 重建后 fd 悬空 / 曾被 dup2 复用）时重开一次。
++    //    只在正常退出与 panic hook 路径到达这里（信号路径不经本函数），允许 open。
++    if let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
++        use std::os::unix::io::AsRawFd;
++        if write_all_to_fd(tty.as_raw_fd(), bytes) {
+             return Ok(());
+         }
+     }
++    // 3) stdout 兜底：stdout 未被重定向时与 /dev/tty 等价。
+     let mut out = io::stdout();
+     out.write_all(bytes)?;
+     out.flush()
+ }
+ 
++/// 尽力把整串写进指定 fd；写短 / EIO 一律判失败，交给下一个通道（不静默吞掉半截还原串）。
++#[cfg(unix)]
++fn write_all_to_fd(fd: libc::c_int, bytes: &[u8]) -> bool {
++    let mut written = 0usize;
++    while written < bytes.len() {
++        let result = unsafe {
++            libc::write(
++                fd,
++                bytes[written..].as_ptr() as *const libc::c_void,
++                bytes.len() - written,
++            )
++        };
++        if result <= 0 {
++            return false;
++        }
++        written += result as usize;
++    }
++    true
++}
++
+ /// 非 unix：无 `/dev/tty` 语义，普通文本（如退出提示）直接写 stdout。
+ #[cfg(not(unix))]
+ fn write_restore_bytes(bytes: &[u8]) -> io::Result<()> {
+@@ -244,13 +274,43 @@ pub fn resume_hint_line(session_id: &str) -> String {
+     format!("继续该会话请运行：pony resume {session_id}")
+ }
+ 
++/// 终端输入残留时的手工恢复命令（单行、可整行复制执行）。
++///
++/// 口径：
++/// - `reset` 是首选（同时复位 raw mode 与终端私有模式）；
++/// - 应急串用 POSIX `printf` 的八进制转义，而不是 `$'...'`（后者是 bash/zsh 扩展，dash 不认）；
++/// - 顺序与 [`TERMINAL_INPUT_MODES_RESET`] 一致：先弹栈、再置零 —— 反了会被弹栈回写的旧值覆盖。
++pub fn terminal_recovery_hint_line() -> String {
++    "若终端按键仍是乱码或无回显，请重开终端或执行：reset（应急：printf '\\033[<1u\\033[=0u\\033[>4;0m'）"
++        .to_string()
++}
++
++/// 退出提示整块（纯函数，便于断言文案与行序）。
++///
++/// 续接行**恒在**；仅当终端还原不完整（输入侧还原串没送达）时追加一行手工恢复命令——
++/// 正常退出时多印这行只会让用户怀疑自己的终端坏了。
++pub fn resume_hint_block(session_id: &str, restore_incomplete: bool) -> String {
++    let mut block = format!("\n{}\n", resume_hint_line(session_id));
++    if restore_incomplete {
++        block.push_str(&format!("{}\n", terminal_recovery_hint_line()));
++    }
++    block
++}
++
++/// [`TERMINAL_RESTORE_INCOMPLETE`] 的只读视图：终端还原是否留下未撤销的输入侧协议。
++pub fn terminal_restore_incomplete() -> bool {
++    TERMINAL_RESTORE_INCOMPLETE.load(Ordering::SeqCst)
++}
++
+ /// 把续接提示写到真实终端（stdout 被重定向时仍能送达）。
+ ///
+ /// 调用时机：**终端还原之后**。提前写会落进备用屏，用户退出后根本看不到。
+ fn print_resume_hint(session_id: &str) {
+-    let line = format!("\n{}\n", resume_hint_line(session_id));
++    // 还原串没送达时（`/dev/tty` 与 stdout 双双 EIO，例如 pane 已被关闭）把恢复命令一并打印：
++    // 用户下一个能看到的界面就是 shell，不给命令行提示的话只能靠猜或重开会话。
++    let block = resume_hint_block(session_id, terminal_restore_incomplete());
+     let _ = io::stdout().flush();
+-    if let Err(error) = write_restore_bytes(line.as_bytes()) {
++    if let Err(error) = write_restore_bytes(block.as_bytes()) {
+         eprintln!("[pony-tui] 退出提示写入失败：{error}");
+     }
+ }
+@@ -434,8 +494,11 @@ pub fn exit_cleanup_plan(inflight_turn: bool, timeout_ms: u64) -> Vec<&'static s
+ pub fn restore_terminal_modes() {
+     // stdout 可能仍有未刷出的帧：先刷干净，避免还原串被后续帧覆盖。
+     let _ = io::stdout().flush();
++    // 幂等：每次还原都重新评估，成功即清除上一次的失败标记（重复调用不应污染退出提示）。
++    TERMINAL_RESTORE_INCOMPLETE.store(false, Ordering::SeqCst);
+     if let Err(error) = write_restore_bytes(TERMINAL_INPUT_MODES_RESET) {
+-        eprintln!("[pony-tui] 终端还原（输入模式）失败：{error}");
++        TERMINAL_RESTORE_INCOMPLETE.store(true, Ordering::SeqCst);
++        eprintln!("[pony-tui] 终端还原（输入模式）失败（退出提示将附带手工恢复命令）：{error}");
+     }
+     if let Err(error) = disable_raw_mode() {
+         eprintln!("[pony-tui] disable_raw_mode 失败：{error}");
+@@ -448,6 +511,9 @@ pub fn restore_terminal_modes() {
+ /// Windows 走 crossterm 命令（老 conhost 下 ANSI 直写不可靠，需走其 WinAPI 分支）。
+ #[cfg(not(unix))]
+ pub fn restore_terminal_modes() {
++    // Windows 分支逐条 `let _ =`，无可靠的失败回传；统一标记为「已完整还原」，
++    // 退出提示不会附手工恢复命令（crossterm 命令本身幂等，残留概率远低于 pty 代理层场景）。
++    TERMINAL_RESTORE_INCOMPLETE.store(false, Ordering::SeqCst);
+     let mut out = io::stdout();
+     let _ = execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
+     let _ = execute!(out, crossterm::event::DisableBracketedPaste);
+@@ -1097,6 +1163,66 @@ pub fn keyboard_enhancement_should_push_for(term: Option<&str>) -> bool {
+     )
+ }
+ 
++/// 会转发按键的 pty 复用器 / 代理层环境变量（命中任一非空值即视为「按键透传不保证对称」）。
++///
++/// `HERDR` 是本机 pane 复用器；其余是常见终端复用器。共同点：它们自己不解析
++/// kitty 键盘协议，只把字节转发给外层终端，因此 push 能透传、pop 未必被对称转发。
++const TERMINAL_MULTIPLEXER_ENV_KEYS: [&str; 5] = ["HERDR", "TMUX", "ZELLIJ", "STY", "ABDUCO"];
++
++/// [`terminal_multiplexer`] 的纯函数内核：从注入的环境视图判定复用器名字。
++///
++/// 纯函数（注入 lookup）便于单测断言，避免测试里改全局环境变量。
++pub fn terminal_multiplexer_for_env(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
++    TERMINAL_MULTIPLEXER_ENV_KEYS.iter().find_map(|key| {
++        lookup(key)
++            .filter(|value| !value.trim().is_empty())
++            .map(|_| (*key).to_string())
++    })
++}
++
++/// 当前进程是否跑在 pty 复用器 / 代理层里（是则返回其环境变量名）。
++pub fn terminal_multiplexer() -> Option<String> {
++    terminal_multiplexer_for_env(|key| std::env::var(key).ok())
++}
++
++/// 启动时**实际**要 push 的键盘增强标志（纯函数内核，便于断言）。
++///
++/// - `TERM` 缺失 / `dumb` ⇒ `None`（不 push）
++/// - 复用器 / pty 代理层 ⇒ 只 `DISAMBIGUATE_ESCAPE_CODES`(1)
++///
++/// 为什么复用器里不能带 `REPORT_ALL_KEYS_AS_ESCAPE_CODES`(8)：该位会把**每一个**按键都编码成
++/// `CSI <code>;<mods> u`。复用器对 push/pop 的转发不保证对称，一旦 pop 丢失（pane 被关、
++/// SIGHUP、代理层重建），用户在 shell 里敲任何键都会吐出 `u` / `3u` / `7u` 这类正文——
++/// 即「退出 TUI 后输入全是乱码」的真实形态。DISAMBIGUATE 已足够把 Shift+Enter 与裸 Enter
++/// 区分开（Shift+Enter 依赖的就是它），而普通键仍按传统编码发送：残留时最多是修饰键异常，
++/// 不会整个键盘变乱码。
++/// - 直连终端 ⇒ `DISAMBIGUATE | REPORT_ALL_KEYS`（保留既有全键位上报能力）
++pub fn keyboard_enhancement_push_flags_for(
++    term: Option<&str>,
++    multiplexer: Option<&str>,
++) -> Option<KeyboardEnhancementFlags> {
++    if !keyboard_enhancement_should_push_for(term) {
++        return None;
++    }
++    let mut flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
++    if multiplexer.is_none() {
++        flags |= KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
++    }
++    Some(flags)
++}
++
++/// 运行时入口：读 `TERM` 与复用器环境后调用 [`keyboard_enhancement_push_flags_for`]。
++pub fn keyboard_enhancement_push_flags() -> Option<KeyboardEnhancementFlags> {
++    // 既有闸门先跑（`TERM` 缺失 / `dumb` 不 push），再按复用器环境决定带不带全键位上报。
++    if !keyboard_enhancement_should_push() {
++        return None;
++    }
++    keyboard_enhancement_push_flags_for(
++        std::env::var("TERM").ok().as_deref(),
++        terminal_multiplexer().as_deref(),
++    )
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum RuntimeMode {
+     Ready,
+@@ -8086,14 +8212,10 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
+     install_panic_restore_hook();
+     let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
+     let mut stdout = io::stdout();
+-    if keyboard_enhancement_should_push() {
+-        if let Err(error) = execute!(
+-            stdout,
+-            PushKeyboardEnhancementFlags(
+-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+-            )
+-        ) {
++    // 复用器/代理层下只 push DISAMBIGUATE：REPORT_ALL_KEYS 会把每个键都编码成 CSI 序列，
++    // 一旦 pop 未被代理层对称转发，退出后 shell 里敲任何键都会吐出 `u`/`3u`（见函数文档）。
++    if let Some(flags) = keyboard_enhancement_push_flags() {
++        if let Err(error) = execute!(stdout, PushKeyboardEnhancementFlags(flags)) {
+             eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
+         }
+     }
+@@ -8239,14 +8361,10 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
+     install_panic_restore_hook();
+     let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
+     let mut stdout = io::stdout();
+-    if keyboard_enhancement_should_push() {
+-        if let Err(error) = execute!(
+-            stdout,
+-            PushKeyboardEnhancementFlags(
+-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+-            )
+-        ) {
++    // 复用器/代理层下只 push DISAMBIGUATE：REPORT_ALL_KEYS 会把每个键都编码成 CSI 序列，
++    // 一旦 pop 未被代理层对称转发，退出后 shell 里敲任何键都会吐出 `u`/`3u`（见函数文档）。
++    if let Some(flags) = keyboard_enhancement_push_flags() {
++        if let Err(error) = execute!(stdout, PushKeyboardEnhancementFlags(flags)) {
+             eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
+         }
+     }
