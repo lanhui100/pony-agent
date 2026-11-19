@@ -1,0 +1,237 @@
+diff --git a/crates/pony-agent-core/src/agent/context.rs b/crates/pony-agent-core/src/agent/context.rs
+index 5a0d746e..40361c6f 100644
+--- a/crates/pony-agent-core/src/agent/context.rs
++++ b/crates/pony-agent-core/src/agent/context.rs
+@@ -823,14 +823,15 @@ fn provider_semistable_context_note(
+         graph_name, retrieved.session_context.conversation_id
+     );
+ 
+-    // PA wave-21: 激活 WorkspaceHotloader，动态注入项目宪法规则 (AGENTS.md / CLAUDE.md)
+-    let hotloader = crate::agent::workspace_hotloader::WorkspaceHotloader::new();
++    // PA wave-21/cache-opt: 使用全局单例 WorkspaceHotloader 维护会话基线，确保护头部前缀稳定
++    let hotloader = crate::agent::workspace_hotloader::get_global_workspace_hotloader();
+     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+-    if let Some((constitution, _)) = hotloader.resolve_constitution(&current_dir) {
+-        if !constitution.trim().is_empty() {
+-            note.push_str("\n\n=== Project Instructions (AGENTS.md) ===\n");
+-            note.push_str(&constitution);
+-        }
++    let session_id = &retrieved.session_context.conversation_id;
++    let turn_count = retrieved.session_context.turn_count;
++    let (stable_prefix, _notice) = hotloader.resolve_session_prompt_context(session_id, turn_count, &current_dir);
++    if !stable_prefix.trim().is_empty() {
++        note.push_str("\n\n");
++        note.push_str(stable_prefix.trim());
+     }
+ 
+     SemistableContextSection { note }
+@@ -1044,14 +1045,32 @@ fn collect_prefix_mutation_reasons(
+     history_truncation_note: Option<&str>,
+     provider_native_tool_flow: bool,
+ ) -> Vec<PrefixMutationReason> {
+-    let _ = (
+-        retrieved,
+-        planner_skills,
+-        image_note,
+-        history_truncation_note,
+-        provider_native_tool_flow,
+-    );
+-    Vec::new()
++    let mut reasons = Vec::new();
++
++    if retrieved.session_context.summary.is_some() {
++        reasons.push(PrefixMutationReason::SessionSummaryChanged);
++    }
++    if retrieved.run_state.goal.is_some() {
++        reasons.push(PrefixMutationReason::RunGoalChanged);
++    }
++    if !retrieved.long_term_memory.entries.is_empty() {
++        reasons.push(PrefixMutationReason::LongTermMemoryChanged);
++    }
++    if !planner_skills.is_empty() {
++        reasons.push(PrefixMutationReason::PlannerSkillsChanged);
++    }
++    if image_note.is_some() {
++        reasons.push(PrefixMutationReason::ImageNoteChanged);
++    }
++    if history_truncation_note.is_some() {
++        if provider_native_tool_flow {
++            reasons.push(PrefixMutationReason::NativeTranscriptBoundaryShifted);
++        } else {
++            reasons.push(PrefixMutationReason::HistoryBoundaryShifted);
++        }
++    }
++
++    reasons
+ }
+ 
+ fn render_planner_skills_note(planner_skills: &[SkillDescriptor]) -> String {
+diff --git a/crates/pony-agent-core/src/agent/provider/mod.rs b/crates/pony-agent-core/src/agent/provider/mod.rs
+index cc414c79..b0f067a2 100644
+--- a/crates/pony-agent-core/src/agent/provider/mod.rs
++++ b/crates/pony-agent-core/src/agent/provider/mod.rs
+@@ -1724,7 +1724,7 @@ impl ProviderManager {
+         let body = with_anthropic_request_options(
+             json!({
+                 "model": request.model,
+-                "system": anthropic_system_text(&request.input),
++                "system": anthropic_system_payload(&request.input),
+                 "messages": anthropic_conversation_messages(request),
+                 "temperature": request.temperature,
+                 "max_tokens": request.max_output_tokens,
+@@ -2861,15 +2861,47 @@ fn text_if_present(text: &str) -> Option<&str> {
+     }
+ }
+ 
+-fn anthropic_system_text(input: &[ProviderMessage]) -> String {
+-    input
+-        .iter()
+-        .filter(|message| matches!(message.role, ProviderRole::System | ProviderRole::Developer))
+-        // 过滤掉 Previous assistant reply，它们应该出现在 messages 数组中作为 assistant 轮次
+-        .filter(|message| !message.content.starts_with("Previous assistant reply:"))
+-        .map(|message| message.content.clone())
+-        .collect::<Vec<_>>()
+-        .join("\n\n")
++fn anthropic_system_payload(input: &[ProviderMessage]) -> Value {
++    let text = anthropic_system_text(input);
++    if text.trim().is_empty() {
++        Value::String(String::new())
++    } else {
++        // 声明 cache_control 断点，触发 Anthropic Prompt Caching
++        json!([
++            {
++                "type": "text",
++                "text": text,
++                "cache_control": {
++                    "type": "ephemeral"
++                }
++            }
++        ])
++    }
++}
++
++pub fn build_anthropic_test_request_payload(system: &str, user_text: &str) -> Value {
++    json!({
++        "system": anthropic_system_payload(&[ProviderMessage::system(system)]),
++        "messages": [
++            {
++                "role": "user",
++                "content": user_text
++            }
++        ]
++    })
++}
++
++pub fn extract_anthropic_usage_from_sse_payload(payload_str: &str) -> TokenUsage {
++    for line in payload_str.lines() {
++        if let Some(data) = line.strip_prefix("data: ") {
++            if let Ok(v) = serde_json::from_str::<Value>(data) {
++                if let Some(usage) = extract_anthropic_usage(&v) {
++                    return usage;
++                }
++            }
++        }
++    }
++    TokenUsage::default()
+ }
+ 
+ /// 构建 Anthropic API 的 messages 数组，按原始顺序包含：
+@@ -4078,10 +4110,15 @@ fn extract_anthropic_usage(payload: &Value) -> Option<TokenUsage> {
+         })
+         .or_else(|| payload.get("delta").and_then(|delta| delta.get("usage")))?;
+ 
++    let cache_hit = usage
++        .get("cache_read_input_tokens")
++        .and_then(Value::as_u64)
++        .map(|v| (v, "usage.cache_read_input_tokens"));
++
+     Some(normalize_token_usage(TokenUsage {
+         input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+-        cache_hit_input_tokens: None,
+-        cache_hit_source: None,
++        cache_hit_input_tokens: cache_hit.map(|(v, _)| v),
++        cache_hit_source: cache_hit.map(|(_, s)| s.to_string()),
+         reasoning_tokens: None,
+         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+diff --git a/crates/pony-agent-core/src/agent/workspace_hotloader.rs b/crates/pony-agent-core/src/agent/workspace_hotloader.rs
+index 487c84e3..be359300 100644
+--- a/crates/pony-agent-core/src/agent/workspace_hotloader.rs
++++ b/crates/pony-agent-core/src/agent/workspace_hotloader.rs
+@@ -89,6 +89,13 @@ pub struct WorkspaceHotloader {
+     session_baselines: RwLock<HashMap<String, SessionBaselineSnapshot>>,
+ }
+ 
++static GLOBAL_HOTLOADER: std::sync::OnceLock<WorkspaceHotloader> = std::sync::OnceLock::new();
++
++/// 获取进程级全局持久化热加载管理器，确保跨轮次持有基线
++pub fn get_global_workspace_hotloader() -> &'static WorkspaceHotloader {
++    GLOBAL_HOTLOADER.get_or_init(WorkspaceHotloader::new)
++}
++
+ impl WorkspaceHotloader {
+     pub fn new() -> Self {
+         Self::default()
+diff --git a/crates/pony-agent-core/src/bin/tui.rs b/crates/pony-agent-core/src/bin/tui.rs
+index 705a0ae8..4c43b35e 100644
+--- a/crates/pony-agent-core/src/bin/tui.rs
++++ b/crates/pony-agent-core/src/bin/tui.rs
+@@ -4273,7 +4273,7 @@ fn tui_event_loop(
+                 UiEvent::PlanUpdated(plan) => {
+                     state.update_plan(plan);
+                 }
+-                UiEvent::TasksUpdated(tasks) => {
++                UiEvent::TaskBoardUpdated(tasks) => {
+                     state.update_task_board(tasks);
+                 }
+                 UiEvent::GoalUpdated(goal) => {
+diff --git a/crates/pony-agent-core/tests/tui_token_context_wave41.rs b/crates/pony-agent-core/tests/tui_token_context_wave41.rs
+index 57bf62e1..8b1d58a2 100644
+--- a/crates/pony-agent-core/tests/tui_token_context_wave41.rs
++++ b/crates/pony-agent-core/tests/tui_token_context_wave41.rs
+@@ -188,3 +188,45 @@ fn a4_context_percentage_is_based_on_current_context_input() {
+         "输入指标必须显示当前上下文占用 25k，实际：{last}"
+     );
+ }
++
++// ---------------------------------------------------------------------------
++// A5: 跨轮对话中缓存命中率必须按单轮次计算，绝不能超过 100%（针对累计缓存命中除以单轮输入造成的计算错误）
++// ---------------------------------------------------------------------------
++#[test]
++fn a5_cache_hit_percentage_is_calculated_per_turn_and_clamped() {
++    let mut state = tui::TuiState::default();
++
++    // 第 1 轮：输入 1000，输出 100，缓存命中 800 (80%)
++    state.apply_turn_usage(1000, 100, 800, 1100);
++    assert_eq!(state.turn_cache_hit_tokens, 800, "第 1 轮单轮缓存命中为 800");
++
++    let buf1 = screen(&mut state, 110, 30);
++    let last1 = row_text(&buf1, 29);
++    assert!(
++        last1.contains("缓存 80%"),
++        "第 1 轮缓存命中率必须是 800/1000 = 80%，实际：{last1}"
++    );
++
++    // 第 2 轮：新一轮开始清空本轮 usage
++    state.begin_turn_usage();
++    // 第 2 轮：单次输入 1000，输出 200，本轮缓存命中 600 (60%)
++    // 若错误地累加缓存 (800 + 600 = 1400)，且分母是本轮单次输入 1000，则 1400/1000 会达到 140%！
++    state.apply_turn_usage(1000, 200, 600, 1200);
++
++    // 跨轮累计缓存命中为 800 + 600 = 1400
++    assert_eq!(state.total_cache_hit_tokens, 1400, "跨轮累计缓存命中保持累加为 1400");
++    // 本轮单轮缓存命中为 600
++    assert_eq!(state.turn_cache_hit_tokens, 600, "第 2 轮单轮缓存命中必须为 600");
++
++    let buf2 = screen(&mut state, 110, 30);
++    let last2 = row_text(&buf2, 29);
++    assert!(
++        last2.contains("缓存 60%"),
++        "第 2 轮缓存命中率必须是单轮次计算 600/1000 = 60%，绝不能是 1400/1000 = 140%！实际：{last2}"
++    );
++    assert!(
++        !last2.contains("140%"),
++        "缓存命中率绝不得超过 100%，实际：{last2}"
++    );
++}
++
