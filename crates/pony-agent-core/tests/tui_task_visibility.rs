@@ -194,6 +194,31 @@ fn drawer_tabs_cycle_forward_and_backward() {
 }
 
 #[test]
+fn drawer_puts_a_breathing_row_between_tabs_and_content() {
+    let mut state = TuiState::default();
+    let mut center = TaskCenterState::new();
+    // 空态首行文案稳定，便于断言「呼吸行之后就是内容第一行」。
+    center.tab = TaskCenterTab::Plan;
+    state.task_center = Some(center);
+    let buf = render(&mut state, 110, 30);
+    let rows: Vec<String> = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
+    let tab_row = rows
+        .iter()
+        .position(|row| row.contains("Goal") && row.contains("Plan") && row.contains("Jobs"))
+        .expect("页签栏必须渲染");
+    assert!(
+        rows[tab_row + 1].trim().is_empty(),
+        "页签与内容之间必须留一行呼吸区，实际：{:?}",
+        rows[tab_row + 1]
+    );
+    assert!(
+        rows[tab_row + 2].replace(' ', "").contains("当前会话还没有计划"),
+        "呼吸行之后应是内容首行，实际：{:?}",
+        rows[tab_row + 2]
+    );
+}
+
+#[test]
 fn drawer_render_keeps_latest_message_visible() {
     let mut state = TuiState::default();
     state.add_user_message(LATEST_SENTINEL);

@@ -59,10 +59,12 @@ use pony_agent_core::agent::tools::{ToolCall, ToolExecutor, ToolResult};
 // 2026-11-08 ADR 0092：/approve 为宿主盖章入口（Draft→Executing）；契约矩阵 C-4 已同提交原地改写并登记流水，此处按真值表同步。
 // 2026-11-10 ADR 0113：/rewind 与「非流式双击 Esc」共用撤回面板；契约矩阵 C-4 同提交原地改写为 16 条，其余条目顺序/文案未改。
 // 2026-11-10 wave-tui-permission：新增 /permission 命令支持查看与切换工具执行权限（ReadOnly / WorkspaceWrite / FullAccess）。
-const CONTRACT_COMMANDS: [&str; 19] = [
+// 2026-11-19 修订16：新增 /panel（任务抽屉斜杠入口，与 Ctrl+T 同路径；紧随 /approve，保持 /tasks→/agents 相邻），
+// 并把历史欠账（/permission、/goal、/title 早已入表但冻结表未同步）一次补齐为真值 20 条；断言未放宽。
+const CONTRACT_COMMANDS: [&str; 20] = [
     "/resume", "/rewind", "/provider", "/models", "/thinking", "/permission", "/settings", "/plan",
-    "/goal", "/approve", "/tasks", "/agents", "/teams", "/clear", "/compact", "/title", "/help",
-    "/update", "/quit",
+    "/goal", "/approve", "/panel", "/tasks", "/agents", "/teams", "/clear", "/compact", "/title",
+    "/help", "/update", "/quit",
 ];
 
 // ── 沙箱与测试脚手架 ───────────────────────────────────────────────────────────────────
@@ -285,7 +287,7 @@ fn t1_tui_command_table_drops_cost_and_adds_compact() {
         );
     }
 
-    // 契约 C-4：顺序固定、共 19 条（/title 随 B231 标题能力入表；任何增删/重排都是契约漂移）。
+    // 契约 C-4：顺序固定、共 20 条（/title 随 B231 标题能力入表、/panel 随任务抽屉入口入表；任何增删/重排都是契约漂移）。
     assert_eq!(
         commands,
         CONTRACT_COMMANDS.to_vec(),
@@ -308,6 +310,45 @@ fn t1_tui_command_table_drops_cost_and_adds_compact() {
         describe("/quit"),
         Some("安全退出 TUI 界面"),
         "T1: `/quit` 描述文案必须保持不变"
+    );
+}
+
+// ── T1b：`/panel` 与 `Ctrl+T` 同路径（任务抽屉可发现性） ─────────────────────────────
+
+#[test]
+fn t1b_panel_command_opens_the_task_drawer_like_ctrl_t() {
+    // 面板类命令：流式期允许打开、不排队（与 Ctrl+T 同一可用域）。
+    assert!(
+        tui::is_panel_command("/panel"),
+        "T1b: `/panel` 必须归入面板类命令（流式期可打开、不排队）"
+    );
+    assert!(
+        tui::is_panel_command("  /PANEL  "),
+        "T1b: 面板判定必须容忍首尾空白与大小写（与既有面板命令同一口径）"
+    );
+    for raw in ["/panelx", "panel", "/panel worker-1"] {
+        assert!(
+            !tui::is_panel_command(raw),
+            "T1b: {raw:?} 不得被判为面板命令"
+        );
+    }
+
+    // 分发点必须与 Ctrl+T 同一路径：先同步真实 todo 存储，再切抽屉。
+    // 顺序颠倒会让抽屉展示上一轮快照（用户看到的仍是「空的」）。
+    let source = include_str!("../src/bin/tui.rs");
+    let branch = source
+        .find("if known_command == Some(\"/panel\")")
+        .expect("T1b: 分发点必须存在 `/panel` 分支");
+    let block = &source[branch..(branch + 400).min(source.len())];
+    let sync = block
+        .find("sync_tasks_from_store")
+        .expect("T1b: `/panel` 必须先 sync_tasks_from_store");
+    let toggle = block
+        .find("toggle_task_center")
+        .expect("T1b: `/panel` 必须 toggle_task_center");
+    assert!(
+        sync < toggle,
+        "T1b: `/panel` 必须先同步再开抽屉（实际 sync={sync} toggle={toggle}）"
     );
 }
 
