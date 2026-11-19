@@ -400,13 +400,19 @@
           "type": "integer",
           "const": 30000,
           "description": "B178（真机）：握手阶段（initialize / session/new）的单请求预算。与 request_timeout_ms 分开——外部 agent 冷启动 + 会话初始化可 >5s，用 5s 会误杀。真值源 crates/pony-agent-core/src/acp/transport.rs 的 ACP_HANDSHAKE_TIMEOUT。"
+        },
+        "turn_budget_ms": {
+          "type": "integer",
+          "const": 120000,
+          "description": "B170（additive）：ACP 整轮 prompt 预算。真值源 crates/pony-agent-core/src/acp/mod.rs 的 ACP_DEFAULT_TURN_BUDGET（Duration::from_secs(120)）；这是整轮 turn 预算，不是 external_call_timeout_ms(<=3000) 的请求级往返预算，也不是 acp.request_timeout_ms(5000)。"
         }
       },
       "required": [
         "request_timeout_ms",
         "malformed_line_streak_limit",
         "spawn_reap_grace_ms",
-        "handshake_timeout_ms"
+        "handshake_timeout_ms",
+        "turn_budget_ms"
       ],
       "additionalProperties": false
     }
