@@ -1,6 +1,6 @@
 [package]
 name = "pony-agent"
-version = "0.1.199"
+version = "0.1.200"
 description = "Tauri + Rust rewrite scaffold for Hermes Agent"
 authors = ["HUAWEI"]
 edition = "2021"
@@ -27,6 +27,3 @@ url = "2"
 window-vibrancy = "0.6.0"
 
 raw-window-handle = "0.6"
-
-
-
