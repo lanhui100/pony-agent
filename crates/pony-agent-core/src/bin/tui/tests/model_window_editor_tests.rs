@@ -148,7 +148,7 @@ fn open_leaves_buffer_blank_when_window_inherited_from_preset() {
     let edit = state.model_window_edit.as_ref().expect("edit state");
     assert!(
         edit.buffer.is_empty(),
-        "未声明窗口不能预填默认值，否则回车就把「跟随预设」变成了「声明 262144」"
+        "未声明窗口不能预填默认值，否则回车就把「跟随预设」变成了「声明 256000」"
     );
     assert_eq!(edit.declared, None);
     assert_eq!(
@@ -306,12 +306,12 @@ fn model_panel_shows_window_and_its_source() {
     let text = all_text(&screen(&mut state, 100, 30));
     assert!(text.contains("Declared 200K"), "{text}");
     // 声明值裸写；预设补缺加后缀——两者绝不能在界面上长得一样。
-    assert!(text.contains("ctx 200K"), "已声明窗口应显示声明值：{text}");
+    assert!(text.contains("200K"), "已声明窗口应显示声明值：{text}");
     assert!(
-        text.contains("ctx 262.1K·预设"),
+        text.contains("256K·预设"),
         "预设补缺窗口必须标注来源：{text}"
     );
-    assert!(text.contains("w 改窗口"), "面板底栏必须给出入口提示：{text}");
+    assert!(text.contains("w 能力"), "面板底栏必须给出入口提示：{text}");
 }
 
 #[test]
@@ -323,9 +323,77 @@ fn editor_panel_render_makes_the_choice_explicit() {
     state.open_model_window_editor().expect("open editor");
 
     let text = all_text(&screen(&mut state, 100, 30));
+    assert!(text.contains("模型能力"), "{text}");
     assert!(text.contains("上下文窗口"), "{text}");
     assert!(text.contains("Undeclared"), "{text}");
     // 空缓冲时必须直接写出「后果」：跟随预设以及它当前解析成什么。
-    assert!(text.contains("跟随预设（262.1K）"), "{text}");
+    assert!(text.contains("跟随预设（256K）"), "{text}");
+    // 常用规格与多模态开关必须同屏可见（可快选，也可手输）。
+    for preset in ["32K", "128K", "256K", "512K", "1M"] {
+        assert!(text.contains(preset), "缺少规格 {preset}：{text}");
+    }
+    assert!(text.contains("多模态输入"), "{text}");
+    assert!(text.contains("图片"), "{text}");
     assert!(text.contains("↵ 保存"), "{text}");
+}
+
+#[test]
+fn right_arrow_fills_common_preset_and_commit_writes_it() {
+    let (path, provider_id) = fixture("preset");
+    let mut state = TuiState::default();
+    state.provider_registry_path = Some(path);
+    open_panel(&mut state, &provider_id, "model-undeclared");
+    state.open_model_window_editor().expect("open editor");
+
+    // 未声明 ⇒ 跟随预设 256K；→ 快选到下一档 512K。
+    state.handle_model_window_editor_key(&key(KeyCode::Right));
+    assert_eq!(
+        state.model_window_edit.as_ref().expect("edit").buffer,
+        "512K",
+        "常用规格必须能一键填入"
+    );
+    assert!(state.handle_model_window_editor_key(&key(KeyCode::Enter)));
+
+    let raw = registry_json(&state);
+    assert_eq!(
+        raw["providers"][0]["models"][1]["capabilities"]["contextWindowTokens"],
+        serde_json::json!(512_000),
+        "512K 必须按十进制口径落成 512000"
+    );
+}
+
+#[test]
+fn modality_toggles_switch_to_custom_and_persist() {
+    let (path, provider_id) = fixture("inputs");
+    let mut state = TuiState::default();
+    state.provider_registry_path = Some(path);
+    open_panel(&mut state, &provider_id, "model-undeclared");
+    state.open_model_window_editor().expect("open editor");
+
+    // tab → 模态焦点；默认高亮「图片」，空格关掉；→ 到「视频」，空格打开。
+    state.handle_model_window_editor_key(&key(KeyCode::Tab));
+    state.handle_model_window_editor_key(&key(KeyCode::Char(' ')));
+    state.handle_model_window_editor_key(&key(KeyCode::Right));
+    state.handle_model_window_editor_key(&key(KeyCode::Char(' ')));
+
+    let edit = state.model_window_edit.as_ref().expect("edit");
+    assert!(!edit.inputs.image, "图片应被关掉");
+    assert!(edit.inputs.video, "视频应被打开");
+    assert!(!edit.inputs.audio);
+
+    assert!(state.handle_model_window_editor_key(&key(KeyCode::Enter)));
+
+    let raw = registry_json(&state);
+    let model = &raw["providers"][0]["models"][1];
+    // 预设分支会忽略声明布尔值 ⇒ 必须切 custom 才能让勾选生效。
+    assert_eq!(model["capabilityPreset"], serde_json::json!("custom"));
+    let capabilities = &model["capabilities"];
+    assert_eq!(capabilities["supportsImageInput"], serde_json::json!(false));
+    assert_eq!(capabilities["supportsVideoInput"], serde_json::json!(true));
+    assert_eq!(capabilities["supportsAudioInput"], serde_json::json!(false));
+    // 未动窗口 ⇒ 不写窗口键（继续跟随 preset/custom 的默认 256K）。
+    assert!(
+        capabilities.get("contextWindowTokens").is_none(),
+        "只改模态不得顺带声明窗口：{capabilities:?}"
+    );
 }

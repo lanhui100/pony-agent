@@ -1,28 +1,41 @@
-//! `/models` 面板的上下文窗口编辑器（面板内 `w`）。
+//! `/models` 面板的模型能力编辑器（面板内 `w`）。
 //!
 //! ## 为什么需要它
 //!
-//! 窗口是**逐模型声明**（`providers[].models[].capabilities.contextWindowTokens`），
+//! 上下文窗口是**逐模型声明**（`providers[].models[].capabilities.contextWindowTokens`），
 //! 但桌面端之外曾没有任何入口：TUI 的 `/provider` 只有名称 / Base URL / API Key，
 //! `/settings` 只有三项显示偏好，`/models` 只负责切换。于是「200K 模型被按 256K 算」
 //! 这类问题只能靠手改 `providers.json` 才能修（ADR 2026-11-14-model-declared-window-tui-entry）。
 //!
+//! 本轮把同一个入口扩展为**模型能力**编辑（ADR 2026-11-18-tui-model-capabilities）：
+//! 上下文窗口（常用规格快选 + `200000` / `200K` / `1M` 手输）与输入模态
+//! （图片 / 视频 / 音频）。不暴露工具 / 流式 / 推理 / 输出模态等高级参数。
+//!
 //! ## 纪律
 //!
-//! - **写入走 `agent::model_window`**：定点改一个键，未声明的模型保持未声明（不会被
-//!   「保存一次就全部固化成 262144」）；本模块不碰 `save_view`。
+//! - **写入走 `agent::model_window`**：定点改键，未声明的模型保持未声明（不会被
+//!   「保存一次就全部固化成 256000」）；本模块不碰 `save_view`。
 //! - **留空 / `-` = 恢复跟随预设**（删键），不是写 0、也不是写预设默认值。
+//! - **改模态才落能力族**：预设分支会忽略声明布尔值，故目标与生效值不同时切
+//!   `capabilityPreset=custom` 并显式落全部布尔能力；未改动则完全不写盘。
 //! - **失败不静默**：解析错误 / 未命中模型 / 落盘失败一律留在面板里显示，不关面板、不谎报成功。
-//! - 面板渲染只读 `state`（窗口徽标在列表构建时一次读盘），不在每帧访问文件系统。
+//! - 面板渲染只读 `state`（窗口与模态在列表构建时一次读盘），不在每帧访问文件系统。
 
 use super::*;
 use pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS;
 use pony_agent_core::agent::model_window::{
     find_context_window, format_context_window, list_context_windows, parse_context_window_input,
-    set_context_window,
+    set_model_capabilities, ModelInputCapabilities, CONTEXT_WINDOW_PRESETS,
 };
 
-/// 正在编辑的窗口。`None`（`TuiState::model_window_edit`）= 编辑器未打开。
+/// 编辑器内的字段焦点：上下文窗口 / 多模态输入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapabilityFocus {
+    Window,
+    Inputs,
+}
+
+/// 正在编辑的模型能力。`None`（`TuiState::model_window_edit`）= 编辑器未打开。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelWindowEditState {
     pub provider_id: String,
@@ -37,12 +50,19 @@ pub struct ModelWindowEditState {
     pub effective: Option<u32>,
     /// 输入缓冲（预填声明值；未声明时留空 = 保持跟随预设）。
     pub buffer: String,
+    /// 打开编辑器时的生效输入模态（回车保存时用来判断「真的改了吗」）。
+    pub original_inputs: ModelInputCapabilities,
+    /// 当前勾选的输入模态。
+    pub inputs: ModelInputCapabilities,
+    pub(crate) focus: CapabilityFocus,
+    /// 模态焦点下高亮的项：0 图片 / 1 视频 / 2 音频。
+    pub input_index: usize,
     /// 上次提交的错误（解析失败 / 未命中 / 落盘失败），成功提交时清空。
     pub error: Option<String>,
 }
 
 impl ModelWindowEditState {
-    /// 「当前生效窗口」的人读文案（含来源）：`200K（声明）` / `262.1K（预设）`。
+    /// 「当前生效窗口」的人读文案（含来源）：`200K（声明）` / `256K（预设）`。
     pub fn effective_label(&self) -> String {
         let value = self
             .effective
@@ -58,6 +78,54 @@ impl ModelWindowEditState {
     /// 提交后要展示的新值提示（用于状态通知，不参与判定）。
     pub fn is_following_preset(&self) -> bool {
         self.declared.is_none()
+    }
+
+    fn current_window_tokens(&self) -> Option<u32> {
+        parse_context_window_input(&self.buffer)
+            .ok()
+            .flatten()
+            .or(self.effective)
+    }
+
+    fn cycle_preset(&mut self, step: isize) {
+        let current = self.current_window_tokens();
+        let index = current.and_then(|tokens| {
+            CONTEXT_WINDOW_PRESETS
+                .iter()
+                .position(|preset| *preset == tokens)
+        });
+        let len = CONTEXT_WINDOW_PRESETS.len();
+        let next = if step < 0 {
+            index.map_or(len - 1, |index| if index == 0 { len - 1 } else { index - 1 })
+        } else {
+            index.map_or(0, |index| (index + 1) % len)
+        };
+        self.buffer = format_context_window(CONTEXT_WINDOW_PRESETS[next]);
+        self.error = None;
+    }
+
+    fn move_input(&mut self, delta: isize) {
+        const INPUT_COUNT: usize = 3;
+        self.input_index = if delta < 0 {
+            if self.input_index == 0 {
+                INPUT_COUNT - 1
+            } else {
+                self.input_index - 1
+            }
+        } else if self.input_index + 1 >= INPUT_COUNT {
+            0
+        } else {
+            self.input_index + 1
+        };
+    }
+
+    fn toggle_current_input(&mut self) {
+        match self.input_index {
+            0 => self.inputs.image = !self.inputs.image,
+            1 => self.inputs.video = !self.inputs.video,
+            _ => self.inputs.audio = !self.inputs.audio,
+        }
+        self.error = None;
     }
 }
 
@@ -79,15 +147,15 @@ pub fn model_items_for_provider(
 }
 
 impl TuiState {
-    /// 打开「上下文窗口」编辑器：目标 = 模型面板当前高亮项 + 当前活动 provider。
+    /// 打开「模型能力」编辑器：目标 = 模型面板当前高亮项 + 当前活动 provider。
     ///
     /// 返回 `Err` 时面板保持原样（不进入编辑态），由调用方把原因写进状态提示。
     pub fn open_model_window_editor(&mut self) -> Result<(), String> {
         let Some(item) = model_panel_item_at(self, self.selected_model_index) else {
             return Err("模型面板为空，没有可编辑的模型".to_string());
         };
-        let provider_id = resolve_active_provider_id(self)
-            .unwrap_or_else(|| self.current_provider_id.clone());
+        let provider_id =
+            resolve_active_provider_id(self).unwrap_or_else(|| self.current_provider_id.clone());
         let store = self.registry_store();
         let entry = find_context_window(&store, &provider_id, &item.id)
             .ok_or_else(|| format!("注册表里没有模型 `{}`（{provider_id}）", item.name))?;
@@ -105,6 +173,10 @@ impl TuiState {
                 .unwrap_or_default(),
             declared: entry.declared,
             effective: entry.effective,
+            original_inputs: entry.inputs,
+            inputs: entry.inputs,
+            focus: CapabilityFocus::Window,
+            input_index: 0,
             error: None,
         });
         // 覆盖层入栈：编辑器退出后回到模型面板，而不是裸 Normal（面板仍开着）。
@@ -126,24 +198,69 @@ impl TuiState {
                 true
             }
             KeyCode::Enter => self.commit_model_window_editor(),
+            KeyCode::Tab | KeyCode::BackTab => {
+                if let Some(edit) = self.model_window_edit.as_mut() {
+                    edit.focus = match edit.focus {
+                        CapabilityFocus::Window => CapabilityFocus::Inputs,
+                        CapabilityFocus::Inputs => CapabilityFocus::Window,
+                    };
+                    edit.error = None;
+                }
+                true
+            }
             KeyCode::Backspace => {
                 if let Some(edit) = self.model_window_edit.as_mut() {
-                    edit.buffer.pop();
-                    edit.error = None;
+                    if edit.focus == CapabilityFocus::Window {
+                        edit.buffer.pop();
+                        edit.error = None;
+                    }
                 }
                 true
             }
             KeyCode::Delete => {
                 if let Some(edit) = self.model_window_edit.as_mut() {
-                    edit.buffer.clear();
-                    edit.error = None;
+                    if edit.focus == CapabilityFocus::Window {
+                        edit.buffer.clear();
+                        edit.error = None;
+                    }
                 }
                 true
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(edit) = self.model_window_edit.as_mut() {
-                    edit.buffer.clear();
-                    edit.error = None;
+                    if edit.focus == CapabilityFocus::Window {
+                        edit.buffer.clear();
+                        edit.error = None;
+                    }
+                }
+                true
+            }
+            KeyCode::Left | KeyCode::Up => {
+                if let Some(edit) = self.model_window_edit.as_mut() {
+                    match edit.focus {
+                        CapabilityFocus::Window => edit.cycle_preset(-1),
+                        CapabilityFocus::Inputs => edit.move_input(-1),
+                    }
+                }
+                true
+            }
+            KeyCode::Right | KeyCode::Down => {
+                if let Some(edit) = self.model_window_edit.as_mut() {
+                    match edit.focus {
+                        CapabilityFocus::Window => edit.cycle_preset(1),
+                        CapabilityFocus::Inputs => edit.move_input(1),
+                    }
+                }
+                true
+            }
+            KeyCode::Char(' ')
+                if self
+                    .model_window_edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.focus == CapabilityFocus::Inputs) =>
+            {
+                if let Some(edit) = self.model_window_edit.as_mut() {
+                    edit.toggle_current_input();
                 }
                 true
             }
@@ -151,13 +268,14 @@ impl TuiState {
                 // 只收窗口表达式允许的字符：脏字符进 buffer 只会换来一条更难懂的解析错误。
                 if accepts_window_char(ch) {
                     if let Some(edit) = self.model_window_edit.as_mut() {
-                        edit.buffer.push(ch);
-                        edit.error = None;
+                        if edit.focus == CapabilityFocus::Window {
+                            edit.buffer.push(ch);
+                            edit.error = None;
+                            return true;
+                        }
                     }
-                    true
-                } else {
-                    false
                 }
+                false
             }
             _ => false,
         }
@@ -172,6 +290,8 @@ impl TuiState {
         let model_id = edit.model_id.clone();
         let model = edit.model.clone();
         let model_name = edit.model_name.clone();
+        let inputs = edit.inputs;
+        let original_inputs = edit.original_inputs;
 
         let parsed = match parse_context_window_input(&edit.buffer) {
             Ok(value) => value,
@@ -183,20 +303,27 @@ impl TuiState {
             }
         };
 
-        // 没有任何变化就不写盘（避免「打开即保存」把文件 mtime 与内容无谓地刷一遍）。
-        if parsed == edit.declared {
+        // 没有任何变化就不写盘（避免「打开即保存」把文件 mtime 与内容无谓地刷一遍，
+        // 也避免把预设补缺固化成显式声明）。
+        if parsed == edit.declared && inputs == original_inputs {
             let window = edit
                 .effective
                 .map(format_context_window)
                 .unwrap_or_else(|| "—".to_string());
             self.model_window_edit = None;
             self.end_overlay();
-            self.set_status_notice(format!("上下文窗口未变化 · {model_name} · {window}"));
+            self.set_status_notice(format!("模型能力未变化 · {model_name} · {window}"));
             return true;
         }
 
         let store = self.registry_store();
-        let entry = match set_context_window(&store, &provider_id, &model_id, parsed) {
+        let entry = match set_model_capabilities(
+            &store,
+            &provider_id,
+            &model_id,
+            Some(parsed),
+            Some(inputs),
+        ) {
             Ok(entry) => entry,
             Err(error) => {
                 if let Some(edit) = self.model_window_edit.as_mut() {
@@ -219,19 +346,14 @@ impl TuiState {
                 .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
         }
 
-        let notice = match entry.declared {
-            Some(tokens) => format!(
-                "上下文窗口已设为 {} · {model_name}",
-                format_context_window(tokens)
-            ),
-            None => format!(
-                "已恢复跟随预设 · {model_name} · 生效 {}",
-                entry
-                    .effective
-                    .map(format_context_window)
-                    .unwrap_or_else(|| "—".to_string())
-            ),
-        };
+        let window = entry
+            .effective
+            .map(format_context_window)
+            .unwrap_or_else(|| "—".to_string());
+        let notice = format!(
+            "模型能力已更新 · {model_name} · 上下文 {window} · 多模态 {}",
+            entry.inputs.label()
+        );
         self.model_window_edit = None;
         self.end_overlay();
         self.set_status_notice(notice);
@@ -269,12 +391,12 @@ pub fn render(f: &mut Frame, state: &TuiState) {
     let Some(edit) = state.model_window_edit.as_ref() else {
         return;
     };
-    let rect = editor_rect(f.area(), 72, 9);
+    let rect = editor_rect(f.area(), 78, 14);
     let body = draw_panel(
         f,
         rect,
-        "上下文窗口",
-        "↵ 保存 · esc 取消 · 留空 / - 恢复跟随预设",
+        "模型能力",
+        "tab 切字段 · ←/→ 选规格 · 空格 开关 · ↵ 保存 · esc 取消",
     );
     let inner_w = body.width as usize;
 
@@ -292,7 +414,18 @@ pub fn render(f: &mut Frame, state: &TuiState) {
         Span::styled(edit.effective_label(), ink()),
     ]));
     rows.push(blank());
-    let caret = if state.spinner_tick % 2 == 0 { CARET } else { "" };
+
+    // ── 上下文窗口 ──────────────────────────────────────────────────────
+    let caret = if state.spinner_tick % 2 == 0 && edit.focus == CapabilityFocus::Window {
+        CARET
+    } else {
+        ""
+    };
+    let marker = if edit.focus == CapabilityFocus::Window {
+        "› "
+    } else {
+        "  "
+    };
     let value = if edit.buffer.is_empty() {
         // 空缓冲 = 恢复跟随预设：直接把这个选择的后果显示出来，用户不用猜。
         Span::styled(
@@ -308,12 +441,68 @@ pub fn render(f: &mut Frame, state: &TuiState) {
         Span::styled(edit.buffer.clone(), ink())
     };
     rows.push(Line::from(vec![
-        Span::styled("  › ", Style::default().fg(theme::ACCENT)),
+        Span::styled(
+            format!("  {marker}上下文窗口  "),
+            Style::default().fg(theme::ACCENT),
+        ),
         value,
         Span::styled(caret, Style::default().fg(theme::ACCENT)),
     ]));
+
+    // 常用规格：当前值（或预设补缺值）命中的那一项高亮，←/→ 直接填入。
+    let current = edit.current_window_tokens();
+    let mut preset_spans = vec![Span::styled("     常用规格  ", faint())];
+    for preset in CONTEXT_WINDOW_PRESETS {
+        let label = format_context_window(*preset);
+        let selected = current == Some(*preset);
+        let text = if selected {
+            format!("[{label}]")
+        } else {
+            format!(" {label} ")
+        };
+        preset_spans.push(Span::styled(
+            text,
+            if selected {
+                Style::default().fg(theme::ACCENT)
+            } else {
+                faint()
+            },
+        ));
+    }
+    rows.push(Line::from(preset_spans));
+
+    // ── 多模态输入 ──────────────────────────────────────────────────────
+    let mut input_spans = vec![Span::styled("  多模态输入  ", faint())];
+    for (index, (label, enabled)) in [
+        ("图片", edit.inputs.image),
+        ("视频", edit.inputs.video),
+        ("音频", edit.inputs.audio),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let selected = edit.focus == CapabilityFocus::Inputs && index == edit.input_index;
+        let check = if enabled { "✓" } else { "✗" };
+        let text = if selected {
+            format!("▸{label} {check} ")
+        } else {
+            format!(" {label} {check} ")
+        };
+        input_spans.push(Span::styled(
+            text,
+            if selected {
+                Style::default().fg(theme::ACCENT)
+            } else if enabled {
+                ink()
+            } else {
+                faint()
+            },
+        ));
+    }
+    rows.push(Line::from(input_spans));
+
     rows.push(Line::from(Span::styled(
-        "  支持 200000 / 200K / 1M；清空后按预设补缺",
+        "  支持 200000 / 200K / 1M；留空 / - 跟随预设；空格 切换模态",
         faint(),
     )));
     if let Some(error) = edit.error.as_deref() {
@@ -354,6 +543,10 @@ mod unit_tests {
             declared: Some(200_000),
             effective: Some(200_000),
             buffer: String::new(),
+            original_inputs: ModelInputCapabilities::default(),
+            inputs: ModelInputCapabilities::default(),
+            focus: CapabilityFocus::Window,
+            input_index: 0,
             error: None,
         };
         assert_eq!(declared.effective_label(), "200K（声明）");
@@ -364,7 +557,35 @@ mod unit_tests {
             effective: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             ..declared
         };
-        assert_eq!(inherited.effective_label(), "262.1K（预设）");
+        assert_eq!(inherited.effective_label(), "256K（预设）");
         assert!(inherited.is_following_preset());
+    }
+
+    #[test]
+    fn cycling_presets_uses_common_specs_and_wraps() {
+        let mut edit = ModelWindowEditState {
+            provider_id: "p".into(),
+            provider_name: "P".into(),
+            model_id: "m".into(),
+            model: "m".into(),
+            model_name: "M".into(),
+            declared: None,
+            effective: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
+            buffer: String::new(),
+            original_inputs: ModelInputCapabilities::default(),
+            inputs: ModelInputCapabilities::default(),
+            focus: CapabilityFocus::Window,
+            input_index: 0,
+            error: None,
+        };
+        // 空缓冲从「生效值 256K」起步：→ 512K，再 → 1M，再 → 32K（回环）。
+        edit.cycle_preset(1);
+        assert_eq!(edit.buffer, "512K");
+        edit.cycle_preset(1);
+        assert_eq!(edit.buffer, "1M");
+        edit.cycle_preset(1);
+        assert_eq!(edit.buffer, "32K");
+        edit.cycle_preset(-1);
+        assert_eq!(edit.buffer, "1M");
     }
 }

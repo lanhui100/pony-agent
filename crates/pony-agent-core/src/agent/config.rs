@@ -17,9 +17,13 @@ const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
 /// 模型的真实窗口是 128K~256K，压缩**永远晚于上游溢出**触发（溢出是硬失败，直接
 /// 终止本轮并丢失本轮上下文）；256K 让水位落在约 180K~205K，压缩先于溢出发生。
 ///
+/// 口径取**十进制 256_000**（而非 2^18 = 262_144）：面板按桌面端
+/// `CONTEXT_TOKEN_PRESETS` / `formatTokenUnit` 的 K=1000 显示，262_144 会渲染成
+/// 「262.1K」，与「256K」的用户预期不符（ADR 2026-11-18-tui-model-capabilities）。
+///
 /// 这是**压缩预算的默认真值**：TUI/CLI 不得各自硬编码副本（曾出现 1M 与 32K 两套
 /// 分叉：界面按 1M 算占用率、压缩按另一套算预算，同一会话两个结论）。
-pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 262_144;
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
 const DEFAULT_MODERN_MAX_OUTPUT_TOKENS: u32 = 64000;
 
 // ── PA-172 §2：上游调用策略（超时/重试/退避）配置面 ──────────────────────────────
@@ -379,7 +383,7 @@ impl Default for ProviderModelCapabilities {
 ///
 /// 必须与 [`ProviderModelCapabilities::default`] 区分开：`default()` 的
 /// `context_window_tokens` 是**补缺值**（256K 保守水位）；若把它当成声明值，
-/// 「用户从未填过窗口」就与「用户填了 262144」不可分辨，预设再也补不了缺。
+/// 「用户从未填过窗口」就与「用户填了 256000」不可分辨，预设再也补不了缺。
 fn undeclared_model_capabilities() -> ProviderModelCapabilities {
     ProviderModelCapabilities {
         context_window_tokens: None,
