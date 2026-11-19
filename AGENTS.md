@@ -48,6 +48,17 @@
 - **构建产物保留深度（分层）**：`bash scripts/artifacts-status.sh` 看体积与磁盘水位（>70% 非零退出，`--json` 供 CI）；清理只用 `bash scripts/clean-targets.sh`——**默认 light 只删可再生产物**（`target-check*`/`target-test*`/`target-perf`/`target-codex-*`），根 `target/`（含 `target/release`）是热缓存**不删**；`--with-frontend` 才删 `dist`/`coverage`/`playwright-report`/`test-results`；`--deep` 才动根 `target/`，仅限四类触发：工具链升级、C/link 失败（`failed to run custom build`）、依赖大换血、磁盘 <20%。产物一律不入库；证据类落 `docs/release/evidence/`，过程类落 `/tmp` 并收口清理。负样本自检 `bash scripts/artifacts-tools.spec.sh`。当前实测产物 ≈80G（target 46G + target-test 23G + target-check 9.4G），故禁止「多槽位同时长驻」。
 - **可观测性归属先决**：新增/修改对外接口、网络 IO、后台任务、LLM 调用或 UI 交互前，先更新 `docs/observability.yaml` 的四维归属（适用 / N-A + 结构性理由）与收口点；验收跑
   `~/.agents/skills/observability-onboarding/scripts/audit-diff.sh` 与 `check-declaration.sh`（判定口径见该 skill 的 `references/declaration-rubric.md`）。N-A 必须写结构性理由，不得为让门禁变绿而伪造 `/metrics` 或改 `applicable`。
+## 4. Git 并发与合并契约（多会话强制）
+
+多会话同时 AI coding 时，冲突源头不是「谁写错代码」，而是共享索引、共享分支尖端与共享文件。以下四组硬规则无场景例外（决策真源：[ADR 2026-11-18](.agents/notes/implemented/process/2026-11-18-multi-session-git-contract.md)，操作手册：[`git-flow` skill](.agents/skills/git-flow/SKILL.md)）：
+
+1. **一个会话一个 worktree**：`git worktree add -b <类型>/<主题> ~/pony-agent-worktrees/<主题> main`。主工作区不与其他会话共用索引；收口后 `git worktree remove <路径>`。
+2. **命名纪律**：分支 `<类型>/<任务号或主题>`，类型 ∈ {feat, fix, chore, docs, refactor, test, perf, build, ci, revert, release, integrate, backup, exp}；提交信息走 Conventional Commits（`fix(tui): 修复焦点丢失`）。
+3. **`main` 只能经 PR 前进**：推特性分支 → 开 PR → CI `verify` 全绿 → **人工点 Merge**。本地 `pre-push`（`scripts/git-guard.mjs`）与远端 ruleset 双重拦截直推与历史改写；灾备确需直推时显式 `PONY_GUARD_ALLOW_MAIN_PUSH=1` 并在提交信息说明理由。
+4. **发版不改写主干**：`npm run release`（本地 bump + commit + tag）→ 走 PR 合并 → `npm run release:push`（只推 tag 触发发布）。普通 PR 用 **Squash**，发版 PR（`chore/release-v*`）用 **Merge commit**，否则 tag 会指向不在 `main` 历史上的提交。
+
+配套门禁：`npm run git:guard:selftest`（本地守卫正负样本自检，已接入 `npm run verify` 与 CI governance）、`gh api repos/lanhui100/pony-agent/branches/main/protection`（远端保护在册，非 404）。共享文件（`backlog/tasks.jsonl`、四处同步版本文件）合并前须确认无并发写入；并发场景下版本 bump 收敛到发版 PR 一次完成。
+
 <!-- BEGIN constitution -->
 
 ## 常载命约（Standing Orders）
@@ -58,4 +69,3 @@
 4. 每个事实一个家：文档治理规则的家是 `docs/AGENTS.md`（agent 自动加载），人读契约是 README；改行为/契约的那次提交同步更新对应文档。
 5. 非平凡交付必须在 backlog 账本留痕（record / start / resolve）；账本一致性与租约对账由 `backlog-gate`（lint + doctor）机械校验，证据成立性靠 review。
 <!-- END constitution -->
-
