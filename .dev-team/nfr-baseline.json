@@ -44,7 +44,7 @@
       "code": "crates/pony-agent-core/src/agent/config.rs: UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT=10（[2,10]）、UPSTREAM_RETRY_BUDGET_MS_DEFAULT=60_000；短退避 SHORT_BACKOFF_INITIAL_DELAY_MS=500 / ×2 / SHORT_BACKOFF_MAX_DELAY_MS=8_000；限流 followup 专用档 provider_rate_limit_backoff_config（2 次、20s→40s、sleep 预算 90s）",
       "semantics": "上游重试次数默认 10、退避 500ms 指数退避封顶 8s、sleep-only 预算默认 60s；限流/配额命中走 followup 专用 2 次长退避档。",
       "why_not_base": "退避与 sleep 预算决定重试耐心，不是单次外部调用往返时限；若压进 3000ms 会退化为不重试。",
-      "guarantee": "跨 attempt 总墙钟受 180s 聚合 deadline 封顶；B254 C2 只放行 body 断流/读失败（UpstreamNetwork）可重试。",
+      "guarantee": "同步入口跨 attempt 总墙钟受 aggregate_sync_call_budget_ms 封顶（180s）；B254 C3：supports_streaming=true 的 tool_followup 只走流式，不注入该聚合 deadline，由 ProviderStreamGuard 的取消预算与单次读空闲 180s 约束；body 断流/读失败可重试，完整 SSE 帧解析失败不可重试，已发出增量后不得重试。",
       "registered_at": "2026-11-19",
       "updated_at": "2026-11-19"
     }

@@ -1725,10 +1725,8 @@ impl ProviderManager {
     where
         F: FnMut(ProviderStreamChunk),
     {
-        // PA-174 A2：流式失败后的 stream→sync 回退同样是**同步调用**（生产入口
-        // `turn_flow.rs:3555`），必须与其它同步入口共享同一聚合 deadline，否则最坏
-        // `5 × 45s ≈ 235s` 突破 180s 上限。流式 attempt 本身不注入（沿用 guard 的预算）。
-        let sync_fallback = self.with_aggregate_sync_deadline();
+        // B254 C3：流式 followup 不再回退同步缓冲通道，故这里不派生聚合 deadline
+        // （180s 每轮预算只约束同步调用；流式 attempt 沿用 guard 的取消预算）。
         let request_cow = self.sanitize_request(request);
         let request = request_cow.as_ref();
         if !self.config.capabilities.supports_streaming {
@@ -1768,10 +1766,6 @@ impl ProviderManager {
 
         match self.config.protocol {
             ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
-                let protocol_label = match self.config.protocol {
-                    ProviderProtocol::OpenAiResponses => "openai-responses",
-                    _ => "openai-completions",
-                };
                 // PA-100（code-review B P1-2）：流已发出增量后任何重试都必然失败，
                 // 用共享 AtomicBool 让重试循环在 sleep 前放弃、并禁止 RL 长退避切换。
                 let streamed_any_delta = std::sync::atomic::AtomicBool::new(false);
@@ -1822,66 +1816,11 @@ impl ProviderManager {
                     },
                     &|| streamed_any_delta.load(std::sync::atomic::Ordering::Relaxed),
                 );
+                // B254 C1/C4：流式是唯一通道。策略重试已耗尽时**原样上抛**真实错误，
+                // 不再回退同步 buffered 请求，也不再合成「本地兜底摘要」冒充模型输出。
                 match stream_result {
                     Ok(response) => Ok(response),
-                    Err(stream_error) => {
-                        provider_log(format!(
-                            "followup:stream-fallback protocol={} provider={} model={} reason={}",
-                            protocol_label, self.config.provider_name, request.model, stream_error
-                        ));
-                        // B198：阶段切换即发通知（展示层据此显示「流式中断→转同步重试」）。
-                        crate::agent::retry::notify_provider_phase(
-                            &crate::agent::retry::ProviderPhase::StreamFallback,
-                        );
-                        // stream→sync 回退与本地 fallback 语义对齐 completions 分支。
-                        // B198：**首次**同步尝试没有重试计数，必须单独报阶段，否则这 31s 静默。
-                        crate::agent::retry::notify_provider_phase(
-                            &crate::agent::retry::ProviderPhase::SyncAttempt { attempt: 1 },
-                        );
-                        let response = match retry_provider_followup_timeout_with_policy_deadline(
-                            "followup_sync_fallback",
-                            &self.policy,
-                            sync_fallback.sleep_deadline,
-                            || match self.config.protocol {
-                                ProviderProtocol::OpenAiResponses => sync_fallback
-                                    .send_responses_tool_followup_request(
-                                        request,
-                                        tools,
-                                        accumulated_messages,
-                                        assistant_message,
-                                        tool_call,
-                                        tool_result,
-                                    ),
-                                _ => sync_fallback.send_openai_tool_followup_request(
-                                    request,
-                                    tools,
-                                    accumulated_messages,
-                                    assistant_message,
-                                    tool_call,
-                                    tool_result,
-                                ),
-                            },
-                        ) {
-                            Ok(response) => Ok(response),
-                            Err(sync_error) => {
-                                provider_log(format!(
-                                    "followup:stream-error protocol={} provider={} model={} reason={}",
-                                    protocol_label, self.config.provider_name, request.model, sync_error
-                                ));
-                                // B198：同步兜底也失败 ⇒ 本轮以本地兜底摘要收尾，事实必须可见。
-                                crate::agent::retry::notify_provider_phase(
-                                    &crate::agent::retry::ProviderPhase::LocalFallback,
-                                );
-                                Ok(local_tool_followup_fallback_response(
-                                    request,
-                                    tool_call,
-                                    tool_result,
-                                    sync_error,
-                                ))
-                            }
-                        };
-                        response
-                    }
+                    Err(stream_error) => Err(stream_error),
                 }
             }
             ProviderProtocol::AnthropicMessages => self

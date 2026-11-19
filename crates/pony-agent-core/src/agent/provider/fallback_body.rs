@@ -33,18 +33,19 @@ pub fn fallback_body_text(tool_name: &str, error: &str, summary: &str) -> String
     } else {
         scrubbed_tool.as_str()
     };
+    // B254 C5：面向用户的正文用朴素中文，不出现 provider/兜底/解析失败等技术词。
     let mut text = format!(
-        "工具 `{tool}` 已执行完成，但 provider 在整合工具结果时失败（原因：{}），本轮未产出最终回复。",
+        "工具 `{tool}` 已执行完成，但本轮没能拿到模型的总结（{}）。",
         fallback_error_category(error)
     );
     let digest = scrub_fallback_fragment(summary);
     if !digest.is_empty() {
         text.push_str(&format!(
-            "本地兜底摘要：{}。",
+            "已执行内容摘要：{}。",
             truncate_chars(&digest, FALLBACK_SUMMARY_MAX_CHARS)
         ));
     }
-    text.push_str("建议下一步：先确认该工具的实际结果，再决定是否重试或继续下一步。");
+    text.push_str("可直接发送「继续」接着做。");
     text
 }
 
@@ -62,16 +63,16 @@ pub fn fallback_body_text(tool_name: &str, error: &str, summary: &str) -> String
 fn fallback_error_category(error: &str) -> &'static str {
     let lowered = error.to_ascii_lowercase();
     if lowered.contains("decoding response body") || lowered.contains("解析 provider 返回失败") {
-        return "上游响应解析失败";
+        return "返回内容解析异常";
     }
     match crate::agent::retry::classify_error_class(error) {
-        "timeout" => "上游响应超时",
-        "network" => "连接上游失败",
-        "rate_limited" => "上游限流",
-        "quota" => "上游额度耗尽",
-        "auth" => "上游鉴权失败",
-        "bad_request" => "请求被上游拒绝",
-        _ => "上游返回异常",
+        "timeout" => "响应超时",
+        "network" => "连接中断",
+        "rate_limited" => "请求过于频繁",
+        "quota" => "额度已用尽",
+        "auth" => "鉴权未通过",
+        "bad_request" => "请求未被接受",
+        _ => "返回异常",
     }
 }
 
@@ -210,23 +211,24 @@ mod tests {
     #[test]
     fn categories_are_mapped_from_error_text() {
         // 超时 / 连接 / 解析三类必须各自命中（含大小写混写）。
-        assert_eq!(fallback_error_category("type=timeout+request"), "上游响应超时");
-        assert_eq!(fallback_error_category("request TIMED OUT"), "上游响应超时");
-        assert_eq!(fallback_error_category("connect error: dns lookup failed"), "连接上游失败");
+        // B254 C5：用户可见类别改朴素中文（不再出现「上游」等工程词）。
+        assert_eq!(fallback_error_category("type=timeout+request"), "响应超时");
+        assert_eq!(fallback_error_category("request TIMED OUT"), "响应超时");
+        assert_eq!(fallback_error_category("connect error: dns lookup failed"), "连接中断");
         // P1-5：实测死因——CDN 断连属传输层（`type=request`，无 HTTP 状态码），
         // 旧子串桥把它归成「上游返回异常」，语义码（network）归「连接上游失败」。
         assert_eq!(
             fallback_error_category("调用 provider 失败：error sending request；type=request；elapsed=26951ms"),
-            "连接上游失败"
+            "连接中断"
         );
-        assert_eq!(fallback_error_category("connection reset by peer"), "连接上游失败");
+        assert_eq!(fallback_error_category("connection reset by peer"), "连接中断");
         assert_eq!(
             fallback_error_category("error decoding response body: unexpected eof"),
-            "上游响应解析失败"
+            "返回内容解析异常"
         );
-        // 限流不再是「上游返回异常」。
-        assert_eq!(fallback_error_category("HTTP 429 rate limit exceeded"), "上游限流");
-        assert_eq!(fallback_error_category("boom"), "上游返回异常");
+        // 限流不再是「返回异常」。
+        assert_eq!(fallback_error_category("HTTP 429 rate limit exceeded"), "请求过于频繁");
+        assert_eq!(fallback_error_category("boom"), "返回异常");
     }
 
     #[test]
@@ -240,7 +242,14 @@ mod tests {
         assert!(text.contains("Write"), "必须点名工具：{text:?}");
         assert!(text.contains("超时"), "timeout 必须归类为超时：{text:?}");
         assert!(text.contains("已执行完成"), "必须含已执行语义：{text:?}");
-        assert!(text.contains("建议下一步"), "必须含可执行建议：{text:?}");
+        assert!(
+            text.contains("可直接发送「继续」"),
+            "必须含可执行建议（朴素措辞）：{text:?}"
+        );
+        assert!(
+            !text.contains("上游") && !text.contains("兜底") && !text.contains("provider"),
+            "B254 C5：用户正文不得含技术词：{text:?}"
+        );
     }
 
     #[test]

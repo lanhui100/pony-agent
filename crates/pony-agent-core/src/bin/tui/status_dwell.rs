@@ -281,16 +281,16 @@ impl UpstreamIdle {
 /// B198：followup 阶段 ⇒ 状态行文案（固定短语，不拼接 URL / elapsed / provider 细节）。
 ///
 /// 与 [`UpstreamIdle`] 正交：`UpstreamIdle` 只回答「是否在等首字节」（渲染层据此切等待态），
-/// 本函数回答「兜底链路卡在哪个阶段」（流程维度）——两者都只给用户可读短语，不拼接工程细节。
+/// 本函数回答「重试/中断链路卡在哪个阶段」（流程维度）——两者都只给用户可读短语，不拼接工程细节。
 ///
 /// 为什么文案在这里而不是 provider 层：provider 只上报**事实**（阶段枚举），
 /// 用户可见措辞归展示层（同一事实一个家，避免库层被 UI 文案污染）。
 pub fn followup_phase_text(phase: &pony_agent_core::agent::retry::ProviderPhase) -> String {
     use pony_agent_core::agent::retry::ProviderPhase;
     match phase {
-        ProviderPhase::StreamFallback => "流式中断，转同步重试…".to_string(),
-        ProviderPhase::SyncAttempt { attempt } => format!("同步兜底第 {attempt} 次…"),
-        ProviderPhase::LocalFallback => "上游不可用，已切本地兜底摘要".to_string(),
+        ProviderPhase::StreamFallback => "连接不稳定，重试中…".to_string(),
+        ProviderPhase::SyncAttempt { attempt } => format!("连接不稳定，重试中（第 {attempt} 次）…"),
+        ProviderPhase::LocalFallback => "本轮未能完成，请稍后重试。".to_string(),
     }
 }
 
@@ -545,7 +545,7 @@ mod tests {
         let sync = followup_phase_text(&ProviderPhase::SyncAttempt { attempt: 3 });
         let local = followup_phase_text(&ProviderPhase::LocalFallback);
 
-        assert_eq!(stream, "流式中断，转同步重试…");
+        assert_eq!(stream, "连接不稳定，重试中…");
         assert!(sync.contains('3'), "同步兜底的尝试序号必须真实透出：{sync}");
         assert_ne!(stream, local, "降级收尾必须与过程中断可区分");
         for text in [&stream, &sync, &local] {

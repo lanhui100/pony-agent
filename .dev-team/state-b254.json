@@ -1,32 +1,73 @@
 {
   "wave": "b254",
-  "status": "in_progress",
+  "status": "completed",
   "task_tier": "B",
   "tier_basis": "跨文件多模块（provider/retry/recovery/turn runtime/session + TUI 文案）+ 外部网络 IO + 重试与超时语义变更；命中机械分级触发（外部网络 IO、模块数超阈值）",
   "baseline_commit": "9b5b931c",
   "branch": "main",
   "task": "B254 TUI tool_followup 断流不再中断回合（借鉴 dsh 流式/重试语义）+ 用户文案朴素化",
   "members": {
-    "lead": ["契约冻结", "ADR", "backlog", "红相锚定", "门禁", "终审"],
-    "protocol": ["NFR 基准表"],
-    "test-agent": ["红相验收测试", "旧断言重锚"],
-    "exec-core": ["provider/retry 语义"],
-    "exec-tui": ["TUI 用户文案"]
+    "lead": [
+      "契约冻结",
+      "ADR",
+      "backlog",
+      "红相锚定",
+      "门禁",
+      "终审"
+    ],
+    "protocol": [
+      "NFR 基准表"
+    ],
+    "test-agent": [
+      "红相验收测试",
+      "旧断言重锚"
+    ],
+    "exec-core": [
+      "provider/retry 语义"
+    ],
+    "exec-tui": [
+      "TUI 用户文案"
+    ]
   },
   "tasks": {
-    "task-1": { "owner": "protocol", "scope": ".dev-team/nfr-baseline.json", "status": "pending" },
-    "task-2": { "owner": "test-agent", "scope": "tests/b254_*, tui/tests/b254_*, 重锚 3 文件", "status": "pending" },
-    "task-3": { "owner": "exec-core", "scope": "agent/{provider,retry.rs,recovery.rs,runtime,session}", "status": "pending", "blocked_by": ["task-2"] },
-    "task-4": { "owner": "exec-tui", "scope": "bin/tui/{status_dwell.rs,errors.rs,tui.rs}", "status": "pending", "blocked_by": ["task-2"] }
+    "task-1": {
+      "owner": "protocol",
+      "scope": ".dev-team/nfr-baseline.json",
+      "status": "pending"
+    },
+    "task-2": {
+      "owner": "test-agent",
+      "scope": "tests/b254_*, tui/tests/b254_*, 重锚 3 文件",
+      "status": "pending"
+    },
+    "task-3": {
+      "owner": "exec-core",
+      "scope": "agent/{provider,retry.rs,recovery.rs,runtime,session}",
+      "status": "pending",
+      "blocked_by": [
+        "task-2"
+      ]
+    },
+    "task-4": {
+      "owner": "exec-tui",
+      "scope": "bin/tui/{status_dwell.rs,errors.rs,tui.rs}",
+      "status": "pending",
+      "blocked_by": [
+        "task-2"
+      ]
+    }
   },
   "gates": {
-    "nfr_lint": null,
-    "red_freeze_commit": null,
-    "green_tests": null,
-    "rust_lint": null,
-    "adr_check": null,
-    "backlog_gate": null,
-    "observability_audit_diff": null,
-    "review": null
-  }
+    "nfr_lint": "PASS (dev-nfr-lint.py exit 0)",
+    "red_freeze_commit": "e7f9bcad",
+    "green_tests": "lib agent:: 1645 passed/0 failed; b254_stream_only_followup 1 passed; b221 5 passed; b219 4 passed; recovery 6 passed; pa172 11 passed; bin pony --test-threads=1 240 passed",
+    "rust_lint": "PASS 3864/3870，新增/恶化 0",
+    "adr_check": "PASS",
+    "backlog_gate": "PASS (exit 0)",
+    "version_check": "PASS",
+    "observability_audit_diff": "OK exit 0",
+    "review": "L3 独立复审 PASS（残余 5 条 ADVISORY 已登记；复审 BLOCKING 2 条已修复并实测）",
+    "meta_retrospective": "PASS dev-meta-lint"
+  },
+  "degraded": "lead-implements-core: exec-core/test-agent 后端失败后 Lead 接管红相与核心实现（测试先冻结 + 独立 L3 复审补偿）"
 }

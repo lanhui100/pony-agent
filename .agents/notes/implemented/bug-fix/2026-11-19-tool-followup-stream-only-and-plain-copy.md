@@ -66,6 +66,17 @@ B247 之后 `degraded` 已改为诚实的 `interrupted`，但**中断本身仍�
 - **在 UI 层维护禁用词黑名单过滤文案**：会把「事实」与「措辞」的家混在一处；改在文案源头
   （provider 正文 + TUI 状态行）一次性解决。
 
+## Known limitations
+
+- **上游忽略 `stream:true` 的网关**：若某 provider 被标记 `supports_streaming=true` 却对
+  流式请求返回非 SSE 的整包 JSON，本改动后该 followup 会直接失败（dsh 同样只接受 SSE：
+  `MALFORMED_RESPONSE` 不可重试）。纠偏路径是把该模型能力改成 `supports_streaming=false`
+  （走同步通道并按新分类重试），本波不引入 content-type 嗅探式自动降级。
+- **`ProviderPhase` 三阶段** 在流式路径已无生产发射点（保留类型供旧回放/非流式路径与
+  TUI 文案映射），后续可单独做死代码收口（backlog 跟踪，不在本波夹带）。
+- TUI 终态摘要 `errors.rs` 仍含「上游服务」等措辞：限流摘要前缀是严重级分类契约
+  （`starts_with` 判定），改动需同批迁移分类器与测试，留作独立波次。
+
 ## Verification
 
 - 冻结验收测试：`crates/pony-agent-core/tests/b254_stream_only_followup.rs`（回环 mock 计数：
