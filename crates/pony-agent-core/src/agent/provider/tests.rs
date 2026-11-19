@@ -1861,7 +1861,7 @@
     }
 
     #[test]
-    fn openai_reasoning_tool_followup_stream_attempts_live_stream_before_fallback() {
+    fn openai_reasoning_tool_followup_stream_failure_propagates_without_fallback() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         let config = ResolvedProviderSelection {
@@ -1887,7 +1887,13 @@
             },
             thinking_param_pattern: ThinkingParamPattern::EffortStandard,
         };
-        let manager = ProviderManager::new(config);
+        let manager = ProviderManager::new(config).with_policy(
+            crate::agent::config::UpstreamPolicy {
+                decision_max_attempts: 2,
+                retry_budget_ms: 1_000,
+                ..Default::default()
+            },
+        );
         let request = ProviderRequest {
             model: "gpt-5.4".to_string(),
             input: vec![ProviderMessage::user("继续总结工具结果")],
@@ -1911,7 +1917,8 @@
         };
         let mut deltas = Vec::new();
 
-        let response = manager
+        // B254 C1/C4：流式断流且重试耗尽后必须上抛真实错误；不得回退同步、不得合成兜底正文。
+        let error = manager
             .continue_with_tool_result_stream(
                 &request,
                 &[ToolDefinition {
@@ -1925,15 +1932,18 @@
                 &tool_result,
                 |delta| deltas.push(delta),
             )
-            .expect("follow-up should degrade after stream failure");
+            .expect_err("B254：流式失败后必须返回 Err，不得合成 assistant 正文");
 
-        assert_eq!(response.provider_source, "provider_followup_local_fallback");
-        assert_eq!(response.provider_mode, "fallback");
-        assert!(response
-            .fallback_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("provider_followup_failed"));
+        assert!(
+            !error.contains("兜底"),
+            "B254：错误文本不得含合成摘要话术：{error}"
+        );
+        assert!(
+            error.contains("调用 provider")
+                || error.contains("读取 provider SSE 流失败")
+                || error.contains("decoding response body"),
+            "B254 C4：必须上抛真实的流式失败原因（不得改写/伪造）：{error}"
+        );
         assert!(deltas.is_empty());
     }
 

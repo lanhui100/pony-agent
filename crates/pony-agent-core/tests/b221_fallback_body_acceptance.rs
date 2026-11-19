@@ -5,6 +5,10 @@
 //! 用户看到的是 `error sending request for url (https://tokens.ponyjob.top/...)；
 //! type=timeout+request；elapsed=21161ms；…`，并落库成为历史消息（污染后续上下文与剪枝判定）。
 //!
+//! B254 修订（产品要求「面向用户简化」）：正文压成**一句话**——点名工具 + 已执行事实 +
+//! 短类别词 + 「发送「继续」接着做」；不再拼接摘要片段。本文件按新契约重锚类别词
+//! （超时 / 网络 / 回复），其余不变量（单行、非空、无 URL/elapsed/域名、点名工具）不变。
+//!
 //! 本文件全部为真实断言：不读真实时钟、不 sleep、不吞异常。
 
 use pony_agent_core::agent::provider::fallback_body_text;
@@ -68,8 +72,8 @@ fn b221_connect_error_classification() {
     // Assert
     assert_user_facing_single_line("connect", &text);
     assert!(
-        text.contains("连接"),
-        "connect/dns 类错误必须归类为「连接」，实际 = {text:?}"
+        text.contains("网络"),
+        "connect/dns 类错误必须归类为「网络中断」，实际 = {text:?}"
     );
     assert!(
         text.contains(TOOL),
@@ -90,8 +94,8 @@ fn b221_decode_error_classification() {
     // Assert
     assert_user_facing_single_line("decode", &text);
     assert!(
-        text.contains("解析"),
-        "decode/body 类错误必须归类为「解析」，实际 = {text:?}"
+        text.contains("回复"),
+        "decode/body 类错误必须归类为「回复异常」，实际 = {text:?}"
     );
     assert!(
         text.contains(TOOL),

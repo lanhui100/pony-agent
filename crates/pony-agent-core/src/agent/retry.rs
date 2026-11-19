@@ -354,7 +354,17 @@ pub(crate) const UPSTREAM_NETWORK_HINTS: &[&str] =
 /// `type=connect+request`。这类失败**没有 HTTP 状态码**（Connect/SendRequest 阶段即终止），
 /// 码表按状态码与措辞匹配全部落空 ⇒ 直接 Abort。判据用结构化标志而非裸 `connect`
 /// 泛词（`connect` 单独出现仍不命中，沿用 R1④ 禁扩约束）。
-pub(crate) const UPSTREAM_TRANSPORT_HINTS: &[&str] = &["type=connect", "type=request"];
+/// B254 C2（对照 dsh `TRANSPORT` 可重试 / `MALFORMED_RESPONSE` 不可重试的二分）：
+/// body 读失败/断流属于**传输层**事实，必须可重试；完整 SSE 帧内的 JSON 解析失败
+/// （`type=decode；sse 解析失败` 一类）仍不在此表 ⇒ 保持 NonRetryable。
+pub(crate) const UPSTREAM_TRANSPORT_HINTS: &[&str] = &[
+    "type=connect",
+    "type=request",
+    "decoding response body",
+    "unexpected eof",
+    "error reading a body",
+    "connection closed before message completed",
+];
 pub(crate) const UPSTREAM_BAD_REQUEST_HINTS: &[&str] =
     &["400", "401", "403", "404", "422", "407", "413"];
 pub(crate) const UPSTREAM_CONTEXT_OVERFLOW_HINTS: &[&str] = &[

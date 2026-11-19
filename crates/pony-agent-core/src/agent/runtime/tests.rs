@@ -6765,7 +6765,12 @@ fn start_turn_stream_preserves_tool_error_activity_when_tool_execution_errors() 
     let server = MockHttpServer::start(vec![sse_decision_tool_call(
         "workspace_list_files",
         json!({"path": ".", "limit": 40}),
-    )]);
+    ),
+        // B254 C4：流式失败不再合成兜底正文 ⇒ mock 必须给出真实 followup 流式响应。
+        sse_response(&[json!({
+            "choices": [{ "delta": { "content": "工具执行失败，已记录。" }, "finish_reason": "stop" }]
+        })]),
+    ]);
     let mut runtime = build_runtime_for_test_with_tool_executor(
         test_provider_selection(server.base_url.clone()),
         Box::new(ErrorToolExecutor),
@@ -6834,7 +6839,9 @@ fn start_turn_stream_preserves_tool_error_activity_when_tool_execution_errors() 
     );
     assert!(events.iter().any(|(name, _)| name == "turn:completed"));
     assert!(!events.iter().any(|(name, _)| name == "turn:failed"));
-    assert_eq!(request_bodies.len(), 1);
+    // B254：followup 不再走「同步回退 + 本地兜底」保底，mock 必须真实应答两跳
+    // （决策流 + 工具结果回灌后的 followup 流），故真实请求数 = 2。
+    assert_eq!(request_bodies.len(), 2);
 
     let snapshot = runtime.load_session_snapshot(Some("stream-tool-error"));
     let persisted_trace = snapshot
@@ -6845,9 +6852,11 @@ fn start_turn_stream_preserves_tool_error_activity_when_tool_execution_errors() 
     assert_eq!(persisted_trace.error.as_deref(), None);
     assert_eq!(persisted_trace.tool_activities.len(), 1);
     let completed_text = completed.text.as_deref().unwrap_or_default();
-    assert!(completed_text.contains("provider 在整合工具结果时失败"));
-    assert!(!completed_text.contains("tool workspace_list_files failed in test") && !completed_text.contains('\n'), "B221：降级正文必须单行且不含结果预览（内部细节只进 trace/fallback_reason），实际 = {completed_text:?}");
-    assert!(completed_text.contains("status=error"));
+    // B254 C4：流式 followup 不再合成「本地兜底摘要」；本轮由真实 followup 流收尾。
+    // 用户正文必须是模型输出且单行（工具错误的内部细节只进 trace / tool 事件）。
+    assert_eq!(completed_text, "工具执行失败，已记录。");
+    assert!(!completed_text.contains("tool workspace_list_files failed in test"));
+    assert!(!completed_text.contains('\n'));
 }
 
 #[test]
@@ -10443,7 +10452,9 @@ fn governed_stream_normal_glob_tool_turn_completes() {
     std::fs::write(workspace.join("b.md"), "world").expect("write file");
     let executor = build_governed_executor(Some(workspace.clone()), None);
     // One followup response (the assistant's final answer after the tool executes).
-    let server = MockHttpServer::start(vec![json_completion("done listing files")]);
+    let server = MockHttpServer::start(vec![sse_response(&[json!({
+        "choices": [{ "delta": { "content": "done listing files" }, "finish_reason": "stop" }]
+    })])]);
     let runtime = AgentRuntime::with_dependencies(
         SessionStore::memory_only(),
         Box::new(StaticResolver {

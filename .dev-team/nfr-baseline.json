@@ -1,8 +1,8 @@
 {
   "external_call_timeout_ms": 3000,
   "retry": {
-    "max_attempts": 3,
-    "backoff_cap_ms": 1000,
+    "max_attempts": 10,
+    "backoff_cap_ms": 8000,
     "backoff_ms": 500
   },
   "concurrency_lock": {
@@ -11,12 +11,43 @@
   },
   "logging": {
     "format": "json",
-    "trace_id": "true"
+    "trace_id": true,
+    "trace_id_required": true
   },
   "resource_release": [
     "file_handles",
     "network_connections",
-    "subagent_processes"
+    "subagent_processes",
+    "stream_response_body_dropped_before_retry"
+  ],
+  "external_call_timeout_exceptions": [
+    {
+      "surface": "llm_upstream_single_attempt",
+      "code": "crates/pony-agent-core/src/agent/config.rs: UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT=45_000 / MIN=15_000 / MAX=300_000",
+      "semantics": "单次上游 LLM HTTP 请求（含流式 attempt）的请求级预算：默认 45s，用户可调 [15s, 300s]。B254 现场 elapsed≈40–80s 属正常量级。",
+      "why_not_base": "external_call_timeout_ms=3000 是「一次外部往返」的通用上限；上游模型生成/推理按 45s 量级设计，压到 3s 会误杀所有正常长输出及 body 读取。",
+      "guarantee": "跨 attempt 墙钟由 aggregate_sync_call_budget_ms 按 UPSTREAM_AGGREGATE_DEADLINE_MS_MAX=180_000 封顶，并由 effective_attempt_timeout_ms 逐 attempt 收紧到最小可用预算；B254 C3：流式 followup 不注入该聚合 deadline。",
+      "registered_at": "2026-11-19",
+      "updated_at": "2026-11-19"
+    },
+    {
+      "surface": "llm_upstream_stream_transport",
+      "code": "crates/pony-agent-core/src/agent/provider/mod.rs: build_streaming_http_client（connect_timeout=15s、read_timeout=180s；SYNC_CONNECT_TIMEOUT_MS=15_000，流式读调用点 Duration::from_secs(180)）",
+      "semantics": "流式客户端只设两类预算：建连 15s + 单次读空闲 180s，不设「整个请求」总 deadline。",
+      "why_not_base": "3s 是请求级往返上限；流式是持续到达的增量流，总时限会截断长推理流（provider/mod.rs F7 既有缺陷口径）。",
+      "guarantee": "仅当 180s 无任何字节才判失败，字节持续到达即存活；B254 C1/C2：supports_streaming=true 的 tool_followup 只走流式，body 断流/读失败按 UpstreamNetwork 可重试，完整 SSE 帧解析失败（malformed）仍不可重试，已发出增量后不得重试。",
+      "registered_at": "2026-11-19",
+      "updated_at": "2026-11-19"
+    },
+    {
+      "surface": "llm_upstream_retry_budget",
+      "code": "crates/pony-agent-core/src/agent/config.rs: UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT=10（[2,10]）、UPSTREAM_RETRY_BUDGET_MS_DEFAULT=60_000；短退避 SHORT_BACKOFF_INITIAL_DELAY_MS=500 / ×2 / SHORT_BACKOFF_MAX_DELAY_MS=8_000；限流 followup 专用档 provider_rate_limit_backoff_config（2 次、20s→40s、sleep 预算 90s）",
+      "semantics": "上游重试次数默认 10、退避 500ms 指数退避封顶 8s、sleep-only 预算默认 60s；限流/配额命中走 followup 专用 2 次长退避档。",
+      "why_not_base": "退避与 sleep 预算决定重试耐心，不是单次外部调用往返时限；若压进 3000ms 会退化为不重试。",
+      "guarantee": "同步入口跨 attempt 总墙钟受 aggregate_sync_call_budget_ms 封顶（180s）；B254 C3：supports_streaming=true 的 tool_followup 只走流式，不注入该聚合 deadline，由 ProviderStreamGuard 的取消预算与单次读空闲 180s 约束；body 断流/读失败可重试，完整 SSE 帧解析失败不可重试，已发出增量后不得重试。",
+      "registered_at": "2026-11-19",
+      "updated_at": "2026-11-19"
+    }
   ],
   "acp": {
     "request_timeout_ms": 5000,
