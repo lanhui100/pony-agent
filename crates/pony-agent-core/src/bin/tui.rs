@@ -1821,6 +1821,18 @@ impl TuiState {
         // 重试意味着上一跳的等待窗口已作废（下一次真实 `calling_model` 会重新点亮）；
         // 不复位会让「正在重试（1/5）」被上一跳的等待词覆盖。
         self.upstream_idle.reset();
+        // 重试期上一 attempt 流式输出的半截未闭合增量失效，回滚清空，确保新 attempt
+        // 产出时从干净起点开始，不与旧残片重叠拼接。
+        self.rollback_streaming_message();
+    }
+
+    /// 回滚当前正在流式生成的未闭合消息（`Assistant` 或 `Thinking`）。
+    pub fn rollback_streaming_message(&mut self) {
+        if let Some(last) = self.messages.last() {
+            if matches!(last.role, MessageRole::Assistant | MessageRole::Thinking) {
+                self.messages.pop();
+            }
+        }
     }
 
     /// B198：记录一次**真实发生**的 followup 阶段切换（幂等覆盖，只保留当前阶段）。
