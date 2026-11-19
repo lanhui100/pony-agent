@@ -2236,6 +2236,55 @@
         );
     }
 
+    #[test]
+    fn followup_stream_recovers_from_sse_body_decode_error_on_retry() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<&'static str, String> = retry_provider_scoped_with_sleeper(
+            "followup_stream",
+            ProviderRetryScope::Followup,
+            || {
+                let next = attempts.get() + 1;
+                attempts.set(next);
+                if next == 1 {
+                    Err("读取 provider SSE 流失败: error decoding response body; elapsed=42401ms; parsed_bytes=82614; endpoint=https://tokens.ponyjob.top/v1/chat/completions".to_string())
+                } else {
+                    Ok("recovered")
+                }
+            },
+            &sleeper,
+            None,
+        );
+
+        assert_eq!(result.unwrap(), "recovered");
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn followup_stream_with_emitted_delta_recovers_when_sse_breaks() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let cancel_requested = std::sync::atomic::AtomicBool::new(false);
+        let result: Result<&'static str, String> = retry_provider_scoped_with_sleeper(
+            "followup_stream",
+            ProviderRetryScope::Followup,
+            || {
+                let next = attempts.get() + 1;
+                attempts.set(next);
+                if next == 1 {
+                    Err("读取 provider SSE 流失败: error decoding response body; elapsed=42401ms; parsed_bytes=82614".to_string())
+                } else {
+                    Ok("recovered_after_stream_reset")
+                }
+            },
+            &sleeper,
+            Some(&|| cancel_requested.load(std::sync::atomic::Ordering::Relaxed)),
+        );
+
+        assert_eq!(result.unwrap(), "recovered_after_stream_reset");
+        assert_eq!(attempts.get(), 2);
+    }
+
     /// T2-B：quota-only 报文不触发 RL 长退避——`classify` 不含 quota 特征，
     /// 直接 Abort（安全方向：不在永久配额耗尽上烧退避）。
     #[test]
@@ -3006,4 +3055,3 @@
             "同一轮重复记账必须幂等（只留一条）"
         );
     }
-

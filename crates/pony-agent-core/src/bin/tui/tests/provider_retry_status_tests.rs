@@ -133,3 +133,25 @@ fn retry_observer_guard_detaches_on_drop() {
         "守卫 drop 后观察者必须已摘除（否则后续轮次的线程会收到悬挂通道的错误投递）"
     );
 }
+
+#[test]
+fn retry_rolls_back_uncommitted_streaming_message() {
+    let mut state = TuiState::default();
+    state.is_streaming = true;
+    state.append_assistant_chunk("半截未完成回复...");
+    assert_eq!(state.messages.len(), 1);
+    assert_eq!(state.messages[0].content, "半截未完成回复...");
+
+    // 触发重试通知：半截消息必须被回滚，状态行转为警示态重试文案
+    state.note_provider_retry(2, 5);
+    assert_eq!(state.messages.len(), 0, "重试时末尾未闭合的 Assistant 增量必须被弹出回滚");
+    let (text, tone) = status_word_base(&state);
+    assert_eq!(text, "正在重试（2/5）…");
+    assert_eq!(tone, StatusTone::Warn);
+
+    // 新 attempt 增量到达：重新生成干净完整回复，重试状态清空
+    state.append_assistant_chunk("全新干净完整回复。");
+    state.clear_provider_retry();
+    assert_eq!(state.messages.len(), 1);
+    assert_eq!(state.messages[0].content, "全新干净完整回复。");
+}

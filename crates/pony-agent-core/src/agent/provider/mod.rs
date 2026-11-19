@@ -1470,7 +1470,7 @@ impl ProviderManager {
         guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
-        mut on_delta: F,
+        on_delta: F,
     ) -> Result<ProviderDecision, String>
     where
         F: FnMut(ProviderStreamChunk),
@@ -1495,25 +1495,14 @@ impl ProviderManager {
             return Err(error);
         }
 
-        let mut streamed_any_delta = false;
+        let on_delta_cell = std::cell::RefCell::new(on_delta);
         let result = retry_provider_timeout_with_policy("decision_stream", &self.policy, || {
-            if streamed_any_delta {
-                // PA-100：措辞刻意不含 timeout/rate-limit 特征——classify 判不可重试，
-                // 退避循环立即 Abort，不再为必然失败的哨兵白睡（原 ≤7.5s 浪费归零）。
-                return Err("stream already emitted delta; auto-retry forbidden".to_string());
-            }
-
+            let mut delta_sink = on_delta_cell.borrow_mut();
             match self.config.protocol {
                 ProviderProtocol::OpenAiCompletions => self
-                    .send_openai_tool_decision_stream_request(guard, request, tools, &mut |chunk| {
-                        streamed_any_delta = true;
-                        on_delta(chunk);
-                    }),
+                    .send_openai_tool_decision_stream_request(guard, request, tools, &mut *delta_sink),
                 ProviderProtocol::OpenAiResponses => self
-                    .send_responses_tool_decision_stream_request(guard, request, tools, &mut |chunk| {
-                        streamed_any_delta = true;
-                        on_delta(chunk);
-                    }),
+                    .send_responses_tool_decision_stream_request(guard, request, tools, &mut *delta_sink),
                 ProviderProtocol::AnthropicMessages => {
                     self.send_anthropic_tool_decision_request(request, tools)
                 }
@@ -1766,24 +1755,14 @@ impl ProviderManager {
 
         match self.config.protocol {
             ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
-                // PA-100（code-review B P1-2）：流已发出增量后任何重试都必然失败，
-                // 用共享 AtomicBool 让重试循环在 sleep 前放弃、并禁止 RL 长退避切换。
-                let streamed_any_delta = std::sync::atomic::AtomicBool::new(false);
-                let mark_streamed =
-                    || streamed_any_delta.store(true, std::sync::atomic::Ordering::Relaxed);
+                // 流式断流/超时等网络瞬态错误允许退避重试；仅在用户显式取消时提前放弃。
+                let on_delta_cell = std::cell::RefCell::new(on_delta);
                 let stream_result = retry_provider_followup_stream_timeout_with_policy(
                     "followup_stream",
                     &self.policy,
                     || {
-                        if streamed_any_delta.load(std::sync::atomic::Ordering::Relaxed) {
-                            // 措辞刻意不含 timeout/rate-limit 特征：classify 应判为
-                            // 不可重试，避免被退避循环消费。
-                            return Err(
-                                "stream already emitted delta; auto-retry forbidden".to_string()
-                            );
-                        }
-
-                        let stream_fn_result = match self.config.protocol {
+                        let mut delta_sink = on_delta_cell.borrow_mut();
+                        match self.config.protocol {
                             ProviderProtocol::OpenAiResponses => self
                                 .send_responses_tool_followup_stream_request(
                                     guard,
@@ -1793,10 +1772,7 @@ impl ProviderManager {
                                     assistant_message,
                                     tool_call,
                                     tool_result,
-                                    &mut |chunk| {
-                                        mark_streamed();
-                                        on_delta(chunk);
-                                    },
+                                    &mut *delta_sink,
                                 ),
                             _ => self.send_openai_tool_followup_stream_request(
                                 guard,
@@ -1806,15 +1782,11 @@ impl ProviderManager {
                                 assistant_message,
                                 tool_call,
                                 tool_result,
-                                &mut |chunk| {
-                                    mark_streamed();
-                                    on_delta(chunk);
-                                },
+                                &mut *delta_sink,
                             ),
-                        };
-                        stream_fn_result
+                        }
                     },
-                    &|| streamed_any_delta.load(std::sync::atomic::Ordering::Relaxed),
+                    &|| guard.cancel_requested(),
                 );
                 // B254 C1/C4：流式是唯一通道。策略重试已耗尽时**原样上抛**真实错误，
                 // 不再回退同步 buffered 请求，也不再合成「本地兜底摘要」冒充模型输出。
