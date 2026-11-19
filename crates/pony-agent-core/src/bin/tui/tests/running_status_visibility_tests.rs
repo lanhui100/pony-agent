@@ -490,7 +490,7 @@ fn b198_phase_keeps_running_status_visible() {
     );
     let (text, _tone) = status_word_base(&state);
     assert!(
-        text.contains("同步兜底") && text.contains('1'),
+        text.contains("重试中") && text.contains('1'),
         "状态词必须点名阶段与真实尝试序号，实际 = {text:?}"
     );
 }
@@ -507,8 +507,10 @@ fn b198_phase_texts_are_distinguishable() {
     state.note_provider_phase(ProviderPhase::LocalFallback);
     let (local, tone) = status_word_base(&state);
 
-    assert!(stream.contains("流式中断"), "实际 = {stream:?}");
-    assert!(local.contains("本地兜底"), "实际 = {local:?}");
+    // B254 契约变更：三阶段文案改为朴素短语（禁用「兜底/SSE/同步」等技术词），
+    // 仍要求可区分且降级收尾带警示色。
+    assert!(stream.contains("重试中"), "实际 = {stream:?}");
+    assert!(local.contains("未能完成"), "实际 = {local:?}");
     assert_ne!(stream, local, "过程中断与降级收尾必须可区分");
     assert!(
         matches!(tone, StatusTone::Warn),
@@ -535,7 +537,7 @@ fn b198_retry_outranks_phase_and_both_clear_together() {
     assert!(state.provider_phase.is_none(), "阶段位必须与重试位一并摘除");
     let (after, _tone) = status_word_base(&state);
     assert!(
-        !after.contains("正在重试") && !after.contains("同步兜底"),
+        !after.contains("正在重试") && !after.contains("重试中"),
         "两处都清空后不得残留进度文案，实际 = {after:?}"
     );
 }

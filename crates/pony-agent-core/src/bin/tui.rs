@@ -13332,6 +13332,11 @@ mod provider_retry_status_tests;
 #[path = "tui/tests/running_status_visibility_tests.rs"]
 mod running_status_visibility_tests;
 
+/// 2026-11-19：用户可见文案禁用技术词（backlog:B254 C5；Test Agent 冻结）。
+#[cfg(test)]
+#[path = "tui/tests/b254_plain_copy.rs"]
+mod b254_plain_copy;
+
 // ═════════════════════════════════════════════════════════════════════════════
 // wave-67：`pony update` CLI 自更新验收测试（契约矩阵 C2 / C4 / C7；Test Agent 冻结）
 //
