@@ -223,11 +223,11 @@ pub fn queue_dispatch_fields(
 }
 
 /// 面板类斜杠命令（只读快照类；流式期允许打开，不排队、不拒绝）：
-/// `/agents` `/tasks` `/plan` `/models` `/thinking` `/settings` `/provider` `/help` `/update`。
+/// `/panel` `/agents` `/tasks` `/plan` `/models` `/thinking` `/settings` `/provider` `/help` `/update`。
 pub fn is_panel_command(command: &str) -> bool {
     const PANEL_COMMANDS: &[&str] = &[
-        "/agents", "/teams", "/tasks", "/plan", "/models", "/thinking", "/settings", "/provider",
-        "/help", "/update",
+        "/panel", "/agents", "/teams", "/tasks", "/plan", "/models", "/thinking", "/settings",
+        "/provider", "/help", "/update",
     ];
     let trimmed = command.trim();
     PANEL_COMMANDS

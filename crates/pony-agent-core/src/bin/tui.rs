@@ -700,6 +700,7 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
     ("/goal", "设置或查看当前会话目标"),
     ("/approve", "批准当前会话的草稿计划（解除写保护）"),
+    ("/panel", "打开任务抽屉：Goal / Plan / Tasks / Agents / Jobs（同 Ctrl+T）"),
     ("/tasks", "切换/查看完整 Team 任务看板（Ctrl+T 打开任务抽屉）"),
     ("/agents", "查看 Team 角色与状态"),
     ("/teams", "查看 Team 角色与状态（同 /agents）"),
@@ -11380,6 +11381,12 @@ fn tui_event_loop(
                                 // `/approve`：宿主盖章入口（PA-141），无 Draft 时如实汇报。
                                 if known_command == Some("/approve") {
                                     handle_approve_command(&control_plane, &mut state);
+                                    continue;
+                                }
+                                // `/panel`：任务抽屉的斜杠入口（与 Ctrl+T 同一路径，先同步真实 todo 存储）。
+                                if known_command == Some("/panel") {
+                                    sync_tasks_from_store(&mut state);
+                                    state.toggle_task_center();
                                     continue;
                                 }
                                 if known_command == Some("/tasks") {

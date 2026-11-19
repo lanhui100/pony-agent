@@ -307,14 +307,30 @@ fn tab_bar(state: &TuiState, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// 抽屉高度（渲染与布局共用的**唯一**口径）：发丝线 1 + 页签 1 + 内容行（最多 [height_cap]）。
+/// 页签与内容之间的呼吸行数（没有它页签栏会贴住内容，读起来像内容的标题）。
+const TAB_CONTENT_GAP: u16 = 1;
+
+/// 呼吸行生效的最小抽屉高度：低于此高度时优先保内容可见，呼吸行让位。
+const GAP_MIN_HEIGHT: u16 = 5;
+
+/// 固定开销（发丝线 1 + 页签 1 [+ 呼吸行]）：布局与渲染共用的同一口径。
+fn chrome_rows(total_height: u16) -> u16 {
+    if total_height >= GAP_MIN_HEIGHT {
+        2 + TAB_CONTENT_GAP
+    } else {
+        2
+    }
+}
+
+/// 抽屉高度（渲染与布局共用的**唯一**口径）：发丝线 1 + 页签 1 + 呼吸行 + 内容行（最多 [height_cap]）。
 pub fn height(state: &TuiState, available_height: u16) -> u16 {
     if state.task_center.is_none() {
         return 0;
     }
     let cap = height_cap(available_height);
+    let chrome = chrome_rows(cap);
     let content = content_lines(state).len() as u16;
-    (2 + content.min(cap.saturating_sub(2).max(1))).min(cap)
+    (chrome + content.min(cap.saturating_sub(chrome).max(1))).min(cap)
 }
 
 /// 渲染抽屉：无边框、CANVAS 底色（与 Ask/Queue 内联面板同一视觉语法）。
@@ -330,9 +346,15 @@ pub fn render(f: &mut Frame, rect: Rect, state: &TuiState) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(hairline(width));
     lines.push(tab_bar(state, width));
+    // 页签与内容之间留一行呼吸区：没有它页签栏会贴住首行内容（高度不足时让位给内容）。
+    let chrome = chrome_rows(rect.height);
+    let gap = usize::from(chrome.saturating_sub(2));
+    for _ in 0..gap {
+        lines.push(blank());
+    }
 
     let content = content_lines(state);
-    let visible = rect.height.saturating_sub(2) as usize;
+    let visible = usize::from(rect.height.saturating_sub(chrome));
     let max_scroll = content.len().saturating_sub(visible);
     let scroll = center.scroll.min(max_scroll);
     for (text, style) in content.iter().skip(scroll).take(visible) {
