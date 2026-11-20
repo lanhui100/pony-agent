@@ -53,6 +53,50 @@ pub use process_range::RangeOwnership;
 #[cfg(not(windows))]
 use process_range::{RangeOwner, RangeQuiescence};
 
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+
+/// Unix: 跟踪当前运行中的活跃子进程 PID，防止子进程向宿主发送信号（如误执行 kill）时导致宿主意外退出。
+#[cfg(unix)]
+pub static TRACKED_CHILD_PIDS: [AtomicI32; 128] =
+    [const { AtomicI32::new(0) }; 128];
+
+#[cfg(unix)]
+pub fn register_active_child_pid(pid: u32) {
+    let pid_i32 = pid as i32;
+    for slot in &TRACKED_CHILD_PIDS {
+        if slot
+            .compare_exchange(0, pid_i32, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn unregister_active_child_pid(pid: u32) {
+    let pid_i32 = pid as i32;
+    for slot in &TRACKED_CHILD_PIDS {
+        if slot
+            .compare_exchange(pid_i32, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn is_tracked_child_pid(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    TRACKED_CHILD_PIDS
+        .iter()
+        .any(|slot| slot.load(Ordering::SeqCst) == pid)
+}
+
 /// Windows: 让 GUI 宿主（Tauri 无控制台）派生的控制台子进程（cmd/powershell/git 等）
 /// 不弹出可见控制台窗口。父进程无控制台时，Windows 默认会为控制台子进程分配一个新的
 /// 控制台窗口（用户可见的"闪窗/弹 PowerShell 窗口"）；`CREATE_NO_WINDOW` 抑制该窗口。
@@ -733,6 +777,15 @@ struct ManagedProcess {
     stderr_done: Arc<AtomicBool>,
     #[cfg(windows)]
     job: Job,
+}
+
+#[cfg(unix)]
+impl Drop for ManagedProcess {
+    fn drop(&mut self) {
+        if let Ok(child) = self.child.lock() {
+            unregister_active_child_pid(child.id());
+        }
+    }
 }
 
 struct Inner {
@@ -1492,6 +1545,8 @@ impl ProcessManager {
 
         #[cfg(all(windows, test))]
         let child_pid = child.id();
+        #[cfg(unix)]
+        register_active_child_pid(child.id());
         let handle = self.next_handle(child.id());
         let entry = Arc::new(ManagedProcess {
             session_id: request.session_id.clone(),
@@ -1533,6 +1588,8 @@ impl ProcessManager {
             let mut child = entry.child.lock().expect("process child poisoned");
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    #[cfg(unix)]
+                    unregister_active_child_pid(child.id());
                     *state = ExitState::Exited {
                         exit_code: status.code().unwrap_or(-1),
                     };
@@ -1816,6 +1873,16 @@ mod tests {
         assert!(manager.kill("session-a", "proc-nonexistent").is_err());
         // kill_if_exists 在 handle 不存在时幂等安全返回 Ok(())
         assert!(manager.kill_if_exists("session-a", "proc-nonexistent").is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_tracked_child_pids_lifecycle() {
+        assert!(!is_tracked_child_pid(999999));
+        register_active_child_pid(999999);
+        assert!(is_tracked_child_pid(999999));
+        unregister_active_child_pid(999999);
+        assert!(!is_tracked_child_pid(999999));
     }
 
     /// wave-9 task-5：`is_tracked` 存活探针（平台无关）与 `tracked_count` 的物理收据。

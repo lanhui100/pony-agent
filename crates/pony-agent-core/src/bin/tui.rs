@@ -115,7 +115,28 @@ static RESTORE_TTY_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI
 
 
 #[cfg(unix)]
-extern "C" fn handle_shutdown_signal(sig: libc::c_int) {
+extern "C" fn handle_shutdown_sigaction(
+    sig: libc::c_int,
+    info: *mut libc::siginfo_t,
+    _ucontext: *mut libc::c_void,
+) {
+    let sender_pid = if !info.is_null() {
+        unsafe {
+            #[cfg(target_os = "linux")]
+            let pid = (*info).si_pid();
+            #[cfg(not(target_os = "linux"))]
+            let pid = (*info).si_pid;
+            pid
+        }
+    } else {
+        0
+    };
+
+    if sender_pid > 0 && is_child_or_descendant(sender_pid) {
+        write_ignored_signal_notice(sig, sender_pid);
+        return;
+    }
+
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     write_signal_notice(sig);
 }

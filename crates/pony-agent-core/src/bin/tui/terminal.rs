@@ -136,6 +136,152 @@ pub fn write_signal_notice(sig: libc::c_int) {
     }
 }
 
+/// 拦截到子进程发来的非法终止信号时的诊断行输出（不分配内存）。
+#[cfg(unix)]
+pub fn write_ignored_signal_notice(sig: libc::c_int, pid: libc::pid_t) {
+    const P1: &[u8] = b"[pony-tui] ignored shutdown signal ";
+    const P2: &[u8] = b" from child process (PID ";
+    const P3: &[u8] = b")\n";
+    let mut buf = [0u8; 128];
+    let mut len = 0usize;
+    buf[..P1.len()].copy_from_slice(P1);
+    len += P1.len();
+
+    let mut digits = [0u8; 3];
+    let mut remaining = sig.max(0) as u32;
+    let mut count = 0usize;
+    loop {
+        digits[count] = b'0' + (remaining % 10) as u8;
+        count += 1;
+        remaining /= 10;
+        if remaining == 0 || count == digits.len() {
+            break;
+        }
+    }
+    for index in (0..count).rev() {
+        buf[len] = digits[index];
+        len += 1;
+    }
+
+    buf[len..len + P2.len()].copy_from_slice(P2);
+    len += P2.len();
+
+    let mut pid_digits = [0u8; 10];
+    let mut pid_rem = pid.unsigned_abs();
+    let mut pid_count = 0usize;
+    loop {
+        pid_digits[pid_count] = b'0' + (pid_rem % 10) as u8;
+        pid_count += 1;
+        pid_rem /= 10;
+        if pid_rem == 0 || pid_count == pid_digits.len() {
+            break;
+        }
+    }
+    for index in (0..pid_count).rev() {
+        buf[len] = pid_digits[index];
+        len += 1;
+    }
+
+    buf[len..len + P3.len()].copy_from_slice(P3);
+    len += P3.len();
+
+    unsafe {
+        libc::write(
+            libc::STDERR_FILENO,
+            buf.as_ptr() as *const libc::c_void,
+            len,
+        );
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+fn is_descendant_via_proc(mut target_pid: libc::pid_t, my_pid: libc::pid_t) -> bool {
+    if target_pid <= 1 || target_pid == my_pid {
+        return target_pid == my_pid;
+    }
+    for _ in 0..16 {
+        let mut path = [0u8; 32];
+        let mut len = 0;
+        const PREFIX: &[u8] = b"/proc/";
+        path[..PREFIX.len()].copy_from_slice(PREFIX);
+        len += PREFIX.len();
+        let mut digits = [0u8; 10];
+        let mut d_len = 0;
+        let mut n = target_pid.unsigned_abs();
+        loop {
+            digits[d_len] = b'0' + (n % 10) as u8;
+            d_len += 1;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        for d in digits[..d_len].iter().rev() {
+            path[len] = *d;
+            len += 1;
+        }
+        const SUFFIX: &[u8] = b"/stat\0";
+        path[len..len + SUFFIX.len()].copy_from_slice(SUFFIX);
+
+        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+        if fd < 0 {
+            return false;
+        }
+        let mut buf = [0u8; 512];
+        let bytes_read =
+            unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len() - 1) };
+        unsafe { libc::close(fd) };
+        if bytes_read <= 0 {
+            return false;
+        }
+        let s = match std::str::from_utf8(&buf[..bytes_read as usize]) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let Some(after_paren) = s.rfind(')') else {
+            return false;
+        };
+        let rest = &s[after_paren + 1..];
+        let mut parts = rest.split_whitespace();
+        let _state = parts.next();
+        let Some(ppid_str) = parts.next() else {
+            return false;
+        };
+        let Ok(ppid) = ppid_str.parse::<libc::pid_t>() else {
+            return false;
+        };
+        if ppid == my_pid {
+            return true;
+        }
+        if ppid <= 1 {
+            return false;
+        }
+        target_pid = ppid;
+    }
+    false
+}
+
+#[cfg(unix)]
+pub fn is_child_or_descendant(sender_pid: libc::pid_t) -> bool {
+    if sender_pid <= 1 {
+        return false;
+    }
+    let my_pid = unsafe { libc::getpid() };
+    if sender_pid == my_pid {
+        return true;
+    }
+    if pony_agent_core::agent::process::is_tracked_child_pid(sender_pid) {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if is_descendant_via_proc(sender_pid, my_pid) {
+            return true;
+        }
+    }
+    false
+}
+
 /// 安装 SIGTSTP 接管。
 ///
 /// `signal(2)` 属 async-signal-safe，故 SIGCONT 处理器内也可安全调用（用于重新武装）。
@@ -152,14 +298,16 @@ pub fn install_suspend_signal_handler() {
 #[cfg(unix)]
 pub fn install_shutdown_signal_handlers() {
     unsafe {
-        // Rust 禁止把函数项直接 cast 成整数（"direct cast of function item into an integer"），
-        // 必须先经 `*const ()` 中转再转成 sighandler_t。
-        let shutdown_handler = handle_shutdown_signal as *const () as libc::sighandler_t;
-        libc::signal(libc::SIGINT, shutdown_handler);
-        libc::signal(libc::SIGTERM, shutdown_handler);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handle_shutdown_sigaction as usize;
+        sa.sa_flags = libc::SA_SIGINFO;
+        libc::sigemptyset(&mut sa.sa_mask);
+
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
         // pty 会话被关闭（如 `script` 收到 SIGINT 后退出）时，TUI 进程会收到 SIGHUP；
         // 同样走优雅退出路径以执行终端恢复，而不是默认终止并留下 alternate screen。
-        libc::signal(libc::SIGHUP, shutdown_handler);
+        libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
 
         let cont_handler = handle_sigcont_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGCONT, cont_handler);
