@@ -697,3 +697,85 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String;
    旧实现的裸 `return` 由 `report_goal_rounds_stopped` 取代（状态行 + 消息区 + 结构化日志三通道）。
 3. **§6.1 结构化日志 `goal_rounds_stopped.reason` 枚举扩容**：新增 `first_round_not_succeeded`
    （字段集合不变，仍为 `trace_id` / `session_id` / `reason` / `consecutive_failures` / `rounds_started` / `max_rounds`）。
+
+---
+
+### Amendment: b193-2（2026-11-20，停止原因结构化拆分 · 对齐 deepseek-harness `GoalBlockReason`）
+
+> 只**追加**登记，不改写 §2–§5 任何冻结断言文字。**本条 supersedes b193-1 第 1 条的文案列**：
+> 变体集合与触发路径不变，只有「逐字文案」与「严重级来源」两项被替换。
+
+**问题（三处已取证缺陷）**
+
+1. **一个字符串服务四种消费者**：`visible_line()` 同时喂状态行（宽窄、寿命短）、消息区（历史留痕）、
+   Ctrl+G 面板（被套前缀）、结构化日志（不需要人话）。为了填满消息区就长出同义反复（括号尾巴复述主句）。
+2. **严重级靠关键词猜**：`errors.rs` 的 `system_message_severity` 用 `error/fail/失败/错误…` 关键词表判级。
+   `FirstRoundNotSucceeded` 文案含「未成功」但不含任何 error 词 ⇒ 判 `Info` 灰字，
+   **为可见性新增的那条消息成了 10 条里视觉权重最低的一条**（与 B193 的目的直接相反）。
+3. **面板前缀制造自我否认**：`goal_panel.rs` 硬编码 `已停止：{visible_line()}` ⇒
+   `已停止：goal 续轮未启动（…）`；且 `row_style` 对 `已停止：` 一律涂 `DANGER`，
+   把「未启动」一并涂成危险色 ——「未启动 vs 已停止」的语义区分在这一层被彻底抹掉。
+
+**Decision：一条字符串 → 五个结构化访问器（一个事实一个家）**
+
+| 访问器 | 唯一职责 | 消费方 |
+|---|---|---|
+| `code() -> &'static str` | 机器可路由码（lower_snake_case） | 结构化日志 `reason` 字段（`tui.rs` 原 `goal_round_stop_reason_tag` **已删除**） |
+| `severity() -> GoalStopSeverity` | 渲染严重级（`Info`/`Warning`/`Error`，core 中性枚举） | 消息区图标/配色、面板行样式、状态条 |
+| `headline() -> &'static str` | 人话主句（现在是什么状态） | `visible_line()` 首段 |
+| `detail() -> Option<String>` | 可核对的原因细节（计数/轮次） | `visible_line()` 中段 |
+| `action_hint() -> Option<&'static str>` | 下一步动作 | `visible_line()` 末段 |
+| `enters_history() -> bool` | 是否值得写入会话可见历史 | `GoalRoundsStopped` 事件处理（决定是否 push 消息区） |
+| `never_started() -> bool` | 续轮是否**从未启动**（非「跑起来后停下」） | 状态条措辞（`·未续` vs `·停`）、面板 |
+| `visible_line()` | 三段式拼接（`headline｜detail｜action_hint`，`None` 段省略） | 状态行 + 消息区 |
+
+**逐字文案表（十变体，冻结）**
+
+| 变体 | `visible_line()` | `severity` | `enters_history` | `never_started` |
+|---|---|---|---|---|
+| `Cancelled` | `目标已暂停：续轮已停止｜用户取消｜发消息可继续` | Info | true | false |
+| `ConsecutiveFailures { failures }` | `目标已暂停：续轮已停止｜连续 {failures} 轮失败｜查看上方错误，修复后发「继续」` | Error | true | false |
+| `BudgetExhausted { rounds_started, max_rounds }` | `目标已暂停：续轮已停止｜目标轮次已用尽 {rounds_started}/{max_rounds}｜/goal 查看或提高轮次上限` | Error | true | false |
+| `AutoContinueBudget` | `目标已暂停：续轮已停止｜连续自动推进达上限｜发消息可继续` | Warning | true | false |
+| `TurnSuspended` | `目标已暂停：续轮已停止｜本轮在等你作答/审批｜先回答上面的提问` | Warning | true | false |
+| `TurnUnclassified` | `目标已暂停：续轮已停止｜本轮未产出可用终态｜查看日志后发「继续」` | Warning | true | false |
+| `LoopAlreadyOwned` | `本会话已有续轮循环在运行｜本线程让位，未推进轮次` | Info | **false** | **true** |
+| `BudgetPersistFailed` | `目标已暂停：续轮已停止｜本轮预算推进写盘失败｜检查磁盘后发「继续」` | Error | true | false |
+| `NoActiveGoal` | `目标已暂停：续轮已停止｜当前会话没有可续的目标｜/goal 创建目标` | Warning | true | **true** |
+| `FirstRoundNotSucceeded` | `目标已暂停：本轮未成功｜首轮失败，自动续轮未启动｜发「继续」重试` | **Error** | true | **true** |
+
+**硬约束（机器可判）**
+
+- `FirstRoundNotSucceeded` 的 `visible_line()` 必须含「未启动」且**不含**「已停止」（B193 语义区分不回退）。
+- 十变体 `visible_line()` 一律不得含「进行中」。
+- 十变体 `visible_line()` 必须以对应 `headline()` 开头。
+- `code()` 十个取值唯一且匹配 `^[a-z][a-z0-9_]*$`，与 `goal_rounds_stopped.reason` 历史取值逐字一致
+  （`cancelled` / `consecutive_failures` / `budget_exhausted` / `auto_continue_budget` / `turn_suspended` /
+  `turn_unclassified` / `loop_already_owned` / `budget_persist_failed` / `no_active_goal` / `first_round_not_succeeded`）。
+- 禁用词不得出现在 `headline`/`detail`/`action_hint`：`收口`、`落盘`。**唯一例外**：`LoopAlreadyOwned`
+  的 detail 含「让位」——它是机制说明（本线程确实让位了），不是让用户执行的内部动作。
+
+**为什么严重级必须由枚举给、不能继续用关键词表**
+
+关键词表对「失败」语义的识别依赖字面用词，而文案一改（去术语化）就会静默降级；这正是本波要修的病根。
+`errors.rs` 新增 `severity_for_goal_stop()`（枚举 → `SystemMessageSeverity` 纯翻译）与
+`goal_stop_severity_for_line()`（按 `all_variants()` 的逐字文案做身份比对），并在
+`system_message_severity()` **最前面**短路：goal 停止族文案一律取枚举严重级，绝不落到关键词表。
+
+**取证（改动点）**
+
+- `crates/pony-agent-core/src/agent/goal.rs`：`GoalStopSeverity` + 七个访问器 + `all_variants()` + 7 条契约单测。
+- `crates/pony-agent-core/src/bin/tui/errors.rs`：`severity_for_goal_stop` / `goal_stop_severity_for_line`；
+  `system_message_severity` 前置枚举短路。
+- `crates/pony-agent-core/src/bin/tui/goal_panel.rs`：删除 `已停止：` 前缀；`row_style` 按枚举严重级着色。
+- `crates/pony-agent-core/src/bin/tui/status_bar.rs`：`·停` 拆为 `·停` / `·未续`（由 `never_started()` 决定）。
+- `crates/pony-agent-core/src/bin/tui.rs`：`goal_round_stop_reason_tag` **删除**（日志 tag 收敛到 `code()`）；
+  `GoalRoundsStopped` 处理按 `enters_history()` 决定是否 push 消息区。
+
+**显式 deferred（不在本波，理由成立性靠 review）**
+
+`GoalData.blocked_reason` 保持 `Option<String>`，**不**改结构化 `{ code, message }`。理由：该字段跨越
+serde 持久化格式 / 桌面端 `src/types/` / 工具 JSON schema（`agent/tools/schema.rs:949`）三处契约，
+改动面远超「停止原因可见性」这一最小必要闭包；且本轮所有缺陷都能在 TUI 投影层闭合。
+dsh 的 `GoalBlockReason { code, message }` 结构化收益（跨进程路由、模型可读）在本仓尚无消费者，
+提前引入等于为「以后可能用得上」立法。

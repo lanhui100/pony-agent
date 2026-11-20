@@ -21,6 +21,10 @@ Status: implemented
 1. 新增 additive 变体 `GoalRoundStopReason::FirstRoundNotSucceeded`（`crates/pony-agent-core/src/agent/goal.rs`），
    逐字文案 `goal 续轮未启动（首轮未成功收口，未进入自动续轮）`——用「未启动」而不是「已停止」，
    因为续轮从未进入。日志 `reason` tag 为 `first_round_not_succeeded`。
+   > **⚠ 本条逐字文案已被取代（2026-11-20）**：现行为
+   > `目标已暂停：本轮未成功｜首轮失败，自动续轮未启动｜发「继续」重试`。
+   > 变体、触发路径、日志 tag 全部不变；「未启动 vs 已停止」的语义区分**保留并加强**（`never_started()`）。
+   > 改动理由与全表见 [2026-11-20-goal-stop-reason-structured-split](2026-11-20-goal-stop-reason-structured-split.md)。
 2. 「首轮终态 → 停止原因」收成纯函数 `first_round_stop_reason`（新模块
    `crates/pony-agent-core/src/bin/tui/goal_round_stop.rs`），映射：`Completed ⇒ None` /
    `Cancelled ⇒ Cancelled` / `Suspended ⇒ TurnSuspended` / `Unknown ⇒ TurnUnclassified` /

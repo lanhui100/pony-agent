@@ -333,6 +333,26 @@ pub fn turn_stream_outcome_from_terminal(terminal: /* 既有入参 */) -> TurnSt
 
 > 说明：`BudgetPersistFailed` 与 `NoActiveGoal` 同为 additive 变体，**不得**被 `goal_round_stop_reason`（三值真值表）产出。
 
+---
+
+### Amendment: b193-2 对 §8 B4/B5 文案列的取代（2026-11-20）
+
+> 只**追加**登记。变体集合、触发路径、日志 `reason` 取值**全部不变**；本条的 B4/B5 两条
+> `visible_line()` 逐字值被 `.dev-team/contract-matrix-pa171.md` 的 `Amendment: b193-2` 取代。
+
+| 条目 | 旧逐字（作废） | 现行逐字 |
+|---|---|---|
+| B4 `BudgetPersistFailed` | `goal 续轮已停止（本轮预算推进落盘失败，已暂停自动续轮）` | `目标已暂停：续轮已停止｜本轮预算推进写盘失败｜检查磁盘后发「继续」` |
+| B5 `NoActiveGoal` | `goal 续轮已停止（当前会话无进行中的目标）` | `目标已暂停：续轮已停止｜当前会话没有可续的目标｜/goal 创建目标` |
+
+**同时修正 B2 的读取点描述**：横幅不再派生「已停止（{visible_line}）」这样的拼接串。
+状态条只取短后缀 `·停` / `·未续`（由 `GoalRoundStopReason::never_started()` 决定），
+`visible_line()` 只进状态行与消息区 —— 同一事实不在一处以上重复陈述。
+
+理由与全表见 pa171 契约矩阵 `Amendment: b193-2`（一条字符串服务四种消费者 ⇒ 拆成
+`code`/`severity`/`headline`/`detail`/`action_hint`/`enters_history`/`never_started` 七个访问器，
+严重级由枚举给而非关键词猜）。
+
 ## 9. 写域、依赖与合并顺序
 
 | 契约 | 文件 | 归属任务 | 依赖 |

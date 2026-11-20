@@ -547,11 +547,26 @@ pub enum GoalRoundOutcome {
     Failed,
 }
 
+/// 停止原因的用户可见严重级（core 层中性枚举，不依赖 TUI 渲染类型）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalStopSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
 /// PA-171 C1/C2：续轮循环的停止原因（`Some` ⇒ 停止新增 goal 轮，且**必须告知用户**）。
 ///
-/// 契约矩阵 §2.2 C1-S3/C1-S4：前三变体由 [`goal_round_stop_reason`] 产出；
-/// [`Self::AutoContinueBudget`] 是 additive 第四变体，由 TUI 侧在
-/// `should_abort_goal_rounds`（每线程 8 轮自动续轮预算）命中时构造——该判据语义**不变**。
+/// ### 一个事实一个家与结构化契约
+/// - 对齐 deepseek-harness 的 `GoalBlockReason { code, message }` 结构化拆分规范：
+///   - [`Self::code`]: 日志唯一来源（全小写 snake_case 稳定代号）。
+///   - [`Self::severity`]: 配色与渲染等级的唯一来源（[`GoalStopSeverity`] 中性枚举）。
+///   - [`Self::headline`] / [`Self::detail`] / [`Self::action_hint`]: 用户可见文案的唯一结构化真源，由 [`Self::visible_line`] 拼装。
+/// - **本轮不改持久化格式**：[`GoalData::blocked_reason`] 仍保留为 `Option<String>`，
+///   理由是持久化升级涉及 serde 向后兼容、桌面端线缆契约以及工具 schema 联动，超出本轮
+///   最小必要闭包，显式 deferred。
+/// - 契约矩阵 §2.2 C1-S3/C1-S4：前三变体由 [`goal_round_stop_reason`] 产出；
+///   其余变体为宿主或 TUI 在特定边界下构造的 additive 变体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalRoundStopReason {
     /// 用户按 Esc 取消（最高优先级，不得被失败计数掩盖）。
@@ -577,6 +592,10 @@ pub enum GoalRoundStopReason {
     TurnUnclassified,
     /// PA-171 C1-T2：**同一会话**已有另一个续轮循环持租约（NFR `concurrency_lock` 声明按会话
     /// 互斥）。本线程不推进任何 goal 轮，但必须可见（不得静默 return）。
+    ///
+    /// 其 detail（「本线程让位，未推进轮次」）含「让位」是整张表中机制说明的唯一例外，
+    /// 理由是并发租约冲突属于运行时调度层面的多线程避让，必须向用户阐明本线程主动让位且
+    /// 未推进轮次，避免用户误解为当前任务异常挂死。
     LoopAlreadyOwned,
     /// PA-172 §8 B4（遗留 #9）：本轮成功但**预算推进落盘失败** ⇒ 停止自动续轮。
     ///
@@ -602,41 +621,132 @@ pub enum GoalRoundStopReason {
 }
 
 impl GoalRoundStopReason {
-    /// 停止原因的 **TUI 可见状态行**（C1/C2：不得静默 break，也不得仍显示「进行中」）。
-    ///
-    /// 文案逐字冻结于 `.dev-team/contract-matrix-pa171.md` §2.2 C1-S3（红相只锁关键词，
-    /// 此处逐字取值以消除歧义）。
-    pub fn visible_line(&self) -> String {
+    /// 稳定机器识别码（snake_case），作为结构化日志与追踪的唯一来源。
+    pub fn code(&self) -> &'static str {
         match self {
-            Self::Cancelled => "goal 续轮已停止（用户取消）".to_string(),
-            Self::ConsecutiveFailures { failures } => {
-                format!("goal 续轮已停止（连续 {failures} 轮失败）")
-            }
+            Self::Cancelled => "cancelled",
+            Self::ConsecutiveFailures { .. } => "consecutive_failures",
+            Self::BudgetExhausted { .. } => "budget_exhausted",
+            Self::AutoContinueBudget => "auto_continue_budget",
+            Self::TurnSuspended => "turn_suspended",
+            Self::TurnUnclassified => "turn_unclassified",
+            Self::LoopAlreadyOwned => "loop_already_owned",
+            Self::BudgetPersistFailed => "budget_persist_failed",
+            Self::NoActiveGoal => "no_active_goal",
+            Self::FirstRoundNotSucceeded => "first_round_not_succeeded",
+        }
+    }
+
+    /// 停止原因的用户可见严重级（用于 TUI/UI 配色与指示图标）。
+    pub fn severity(&self) -> GoalStopSeverity {
+        match self {
+            Self::Cancelled | Self::LoopAlreadyOwned => GoalStopSeverity::Info,
+            Self::AutoContinueBudget
+            | Self::TurnSuspended
+            | Self::TurnUnclassified
+            | Self::NoActiveGoal => GoalStopSeverity::Warning,
+            Self::ConsecutiveFailures { .. }
+            | Self::BudgetExhausted { .. }
+            | Self::BudgetPersistFailed
+            | Self::FirstRoundNotSucceeded => GoalStopSeverity::Error,
+        }
+    }
+
+    /// 用户可见的简短标题/主说明。
+    pub fn headline(&self) -> &'static str {
+        match self {
+            Self::LoopAlreadyOwned => "本会话已有续轮循环在运行",
+            Self::FirstRoundNotSucceeded => "目标已暂停：本轮未成功",
+            _ => "目标已暂停：续轮已停止",
+        }
+    }
+
+    /// 停止原因的具体详细信息（若有）。
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::Cancelled => Some("用户取消".to_string()),
+            Self::ConsecutiveFailures { failures } => Some(format!("连续 {failures} 轮失败")),
             Self::BudgetExhausted {
                 rounds_started,
                 max_rounds,
-            } => format!(
-                "goal 续轮已停止（目标轮次预算已用尽：{rounds_started}/{max_rounds}）"
-            ),
-            Self::AutoContinueBudget => "goal 续轮已停止（自动续轮次数用尽）".to_string(),
-            Self::TurnSuspended => "goal 续轮已停止（本轮挂起：等待用户作答/审批）".to_string(),
-            Self::TurnUnclassified => {
-                "goal 续轮已停止（本轮无可用终态，已暂停自动续轮）".to_string()
-            }
-            Self::LoopAlreadyOwned => {
-                "goal 续轮已停止（本会话已有续轮循环在运行，本线程让位）".to_string()
-            }
-            // PA-172 §8 B4：逐字冻结（契约矩阵 §8 / pa171-a1）——预算推进落盘失败 ≠ 预算用尽。
-            Self::BudgetPersistFailed => {
-                "goal 续轮已停止（本轮预算推进落盘失败，已暂停自动续轮）".to_string()
-            }
-            // PA-172 §8 B5：逐字冻结——无进行中的目标，无轮可续。
-            Self::NoActiveGoal => "goal 续轮已停止（当前会话无进行中的目标）".to_string(),
-            // B193：首轮门未通过 ⇒ 续轮从未启动，措辞用「未启动」而非「已停止」。
-            Self::FirstRoundNotSucceeded => {
-                "goal 续轮未启动（首轮未成功收口，未进入自动续轮）".to_string()
-            }
+            } => Some(format!("目标轮次已用尽 {rounds_started}/{max_rounds}")),
+            Self::AutoContinueBudget => Some("连续自动推进达上限".to_string()),
+            Self::TurnSuspended => Some("本轮在等你作答/审批".to_string()),
+            Self::TurnUnclassified => Some("本轮未产出可用终态".to_string()),
+            Self::LoopAlreadyOwned => Some("本线程让位，未推进轮次".to_string()),
+            Self::BudgetPersistFailed => Some("本轮预算推进写盘失败".to_string()),
+            // 撞词避让：「进行中」是 `GoalPhase::Active` 的既有译词（`goal_panel::phase_label`），
+            // 这里若沿用「没有进行中的目标」会让横幅的「阶段 进行中」与停止原因互相打脸。
+            Self::NoActiveGoal => Some("当前会话没有可续的目标".to_string()),
+            Self::FirstRoundNotSucceeded => Some("首轮失败，自动续轮未启动".to_string()),
         }
+    }
+
+    /// 面向下一步操作的用户指引动作提示（若有）。
+    pub fn action_hint(&self) -> Option<&'static str> {
+        match self {
+            Self::Cancelled | Self::AutoContinueBudget => Some("发消息可继续"),
+            Self::ConsecutiveFailures { .. } => Some("查看上方错误，修复后发「继续」"),
+            Self::BudgetExhausted { .. } => Some("/goal 查看或提高轮次上限"),
+            Self::TurnSuspended => Some("先回答上面的提问"),
+            Self::TurnUnclassified => Some("查看日志后发「继续」"),
+            Self::LoopAlreadyOwned => None,
+            Self::BudgetPersistFailed => Some("检查磁盘后发「继续」"),
+            Self::NoActiveGoal => Some("/goal 创建目标"),
+            Self::FirstRoundNotSucceeded => Some("发「继续」重试"),
+        }
+    }
+
+    /// 是否应写入会话历史/持久化阻塞记录。
+    pub fn enters_history(&self) -> bool {
+        !matches!(self, Self::LoopAlreadyOwned)
+    }
+
+    /// 续轮**从未启动**（而非「跑起来后停下」）。
+    ///
+    /// 语义区分是 B193 决策记录的硬约束：`FirstRoundNotSucceeded`（首轮门未过）、
+    /// `NoActiveGoal`（本就无轮可续）、`LoopAlreadyOwned`（本线程没推进任何轮）都不存在
+    /// 「停下来」这个事实，任何把它们说成「已停止 / ·停」的展示都是假结论。
+    /// 状态条与面板必须经本判据取措辞，不得各自拼字面量。
+    pub fn never_started(&self) -> bool {
+        matches!(
+            self,
+            Self::FirstRoundNotSucceeded | Self::NoActiveGoal | Self::LoopAlreadyOwned
+        )
+    }
+
+    /// 全部 10 个变体（参数变体取代表值）：契约测试与「枚举驱动映射」的唯一遍历源。
+    ///
+    /// 新增变体时本表必须同步，否则 `goal_stop_*` 系列契约测试会因长度不符而红——
+    /// 这是刻意的：漏登记新变体 = 日志 / 配色 / 文案三处同时漏配。
+    pub fn all_variants() -> [GoalRoundStopReason; 10] {
+        [
+            Self::Cancelled,
+            Self::ConsecutiveFailures { failures: 2 },
+            Self::BudgetExhausted {
+                rounds_started: 20,
+                max_rounds: 20,
+            },
+            Self::AutoContinueBudget,
+            Self::TurnSuspended,
+            Self::TurnUnclassified,
+            Self::LoopAlreadyOwned,
+            Self::BudgetPersistFailed,
+            Self::NoActiveGoal,
+            Self::FirstRoundNotSucceeded,
+        ]
+    }
+
+    /// 停止原因的单行可见文本。以 `headline` 开头，用全角 `｜` 拼接非 None 段。
+    pub fn visible_line(&self) -> String {
+        let mut parts = vec![self.headline().to_string()];
+        if let Some(detail) = self.detail() {
+            parts.push(detail);
+        }
+        if let Some(hint) = self.action_hint() {
+            parts.push(hint.to_string());
+        }
+        parts.join("｜")
     }
 }
 
@@ -1649,5 +1759,191 @@ mod b130_event_tests {
         })
         .expect("create_goal without observer");
         assert!(clear_goal(session).expect("clear_goal without observer"));
+    }
+
+    fn all_stop_reasons_for_test() -> Vec<GoalRoundStopReason> {
+        vec![
+            GoalRoundStopReason::Cancelled,
+            GoalRoundStopReason::ConsecutiveFailures { failures: 3 },
+            GoalRoundStopReason::BudgetExhausted {
+                rounds_started: 5,
+                max_rounds: 5,
+            },
+            GoalRoundStopReason::AutoContinueBudget,
+            GoalRoundStopReason::TurnSuspended,
+            GoalRoundStopReason::TurnUnclassified,
+            GoalRoundStopReason::LoopAlreadyOwned,
+            GoalRoundStopReason::BudgetPersistFailed,
+            GoalRoundStopReason::NoActiveGoal,
+            GoalRoundStopReason::FirstRoundNotSucceeded,
+        ]
+    }
+
+    #[test]
+    fn code_values_are_unique_and_snake_case() {
+        let reasons = all_stop_reasons_for_test();
+        assert_eq!(reasons.len(), 10);
+        let mut codes = std::collections::HashSet::new();
+
+        for reason in &reasons {
+            let code = reason.code();
+            assert!(!code.is_empty(), "code 不得为空");
+            assert!(
+                codes.insert(code),
+                "code 必须全局唯一，发现重复: {code}"
+            );
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "code 必须为全小写 snake_case: {code}"
+            );
+            assert!(
+                !code.starts_with('_') && !code.ends_with('_'),
+                "code 不得以下划线开头或结尾: {code}"
+            );
+            assert!(
+                !code.contains("__"),
+                "code 不得包含连续下划线: {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_round_not_succeeded_says_not_started() {
+        let reason = GoalRoundStopReason::FirstRoundNotSucceeded;
+        let line = reason.visible_line();
+        assert!(
+            line.contains("未启动"),
+            "FirstRoundNotSucceeded visible_line 必须包含「未启动」: {line}"
+        );
+        assert!(
+            !line.contains("已停止"),
+            "FirstRoundNotSucceeded visible_line 不得包含「已停止」: {line}"
+        );
+    }
+
+    #[test]
+    fn visible_line_never_says_in_progress() {
+        for reason in all_stop_reasons_for_test() {
+            let line = reason.visible_line();
+            assert!(
+                !line.contains("进行中"),
+                "停止原因 visible_line 不得包含「进行中」: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_already_owned_does_not_enter_history() {
+        let reasons = all_stop_reasons_for_test();
+        let mut false_count = 0;
+        let mut true_count = 0;
+
+        for reason in &reasons {
+            if reason.enters_history() {
+                true_count += 1;
+            } else {
+                false_count += 1;
+                assert_eq!(
+                    *reason,
+                    GoalRoundStopReason::LoopAlreadyOwned,
+                    "enters_history 为 false 的变体只能是 LoopAlreadyOwned"
+                );
+            }
+        }
+
+        assert_eq!(false_count, 1, "必须恰好 1 个 false");
+        assert_eq!(true_count, 9, "必须恰好 9 个 true");
+        assert!(!GoalRoundStopReason::LoopAlreadyOwned.enters_history());
+    }
+
+    #[test]
+    fn visible_line_starts_with_headline() {
+        for reason in all_stop_reasons_for_test() {
+            let line = reason.visible_line();
+            let headline = reason.headline();
+            assert!(
+                line.starts_with(headline),
+                "visible_line 必须以 headline 开头: {line}"
+            );
+
+            let segments: Vec<&str> = line.split('｜').collect();
+            assert_eq!(segments[0], headline);
+
+            if let Some(detail) = reason.detail() {
+                assert!(
+                    segments.contains(&detail.as_str()),
+                    "visible_line 必须包含 detail 作为独立段: {line}"
+                );
+            }
+            if let Some(hint) = reason.action_hint() {
+                assert!(
+                    segments.contains(&hint),
+                    "visible_line 必须包含 action_hint 作为独立段: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn severity_is_explicit_not_keyword_derived() {
+        assert_eq!(
+            GoalRoundStopReason::FirstRoundNotSucceeded.severity(),
+            GoalStopSeverity::Error
+        );
+        assert_eq!(GoalRoundStopReason::Cancelled.severity(), GoalStopSeverity::Info);
+        assert_eq!(
+            GoalRoundStopReason::ConsecutiveFailures { failures: 2 }.severity(),
+            GoalStopSeverity::Error
+        );
+        assert_eq!(
+            GoalRoundStopReason::BudgetExhausted {
+                rounds_started: 1,
+                max_rounds: 1
+            }
+            .severity(),
+            GoalStopSeverity::Error
+        );
+        assert_eq!(
+            GoalRoundStopReason::AutoContinueBudget.severity(),
+            GoalStopSeverity::Warning
+        );
+        assert_eq!(
+            GoalRoundStopReason::TurnSuspended.severity(),
+            GoalStopSeverity::Warning
+        );
+        assert_eq!(
+            GoalRoundStopReason::TurnUnclassified.severity(),
+            GoalStopSeverity::Warning
+        );
+        assert_eq!(
+            GoalRoundStopReason::LoopAlreadyOwned.severity(),
+            GoalStopSeverity::Info
+        );
+        assert_eq!(
+            GoalRoundStopReason::BudgetPersistFailed.severity(),
+            GoalStopSeverity::Error
+        );
+        assert_eq!(
+            GoalRoundStopReason::NoActiveGoal.severity(),
+            GoalStopSeverity::Warning
+        );
+    }
+
+    #[test]
+    fn banned_terms_absent() {
+        for reason in all_stop_reasons_for_test() {
+            if matches!(reason, GoalRoundStopReason::LoopAlreadyOwned) {
+                continue;
+            }
+            let line = reason.visible_line();
+            assert!(
+                !line.contains("收口"),
+                "除 LoopAlreadyOwned 外 visible_line 不得包含「收口」: {line}"
+            );
+            assert!(
+                !line.contains("落盘"),
+                "除 LoopAlreadyOwned 外 visible_line 不得包含「落盘」: {line}"
+            );
+        }
     }
 }

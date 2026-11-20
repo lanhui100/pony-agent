@@ -46,9 +46,14 @@ pub fn render_lines(state: &TuiState) -> Vec<String> {
         Some(max) => format!("轮次 {} / {}", goal.round_count, max),
         None => format!("轮次 {}（无上限）", goal.round_count),
     });
-    // PA-172 §8 B2：自动续轮已停时必须与轮数共存可见（`visible_line` 是唯一文案真源）。
+    // PA-172 §8 B2：自动续轮已停时必须与轮数共存可见。
+    //
+    // 措辞由 `visible_line()` 唯一提供（它已含 headline 的状态措辞），**不得**再套
+    // 「已停止：」之类硬编码前缀：B193 的 `FirstRoundNotSucceeded` 语义是「从未启动」，
+    // 旧前缀会把面板渲染成「已停止：…未启动」——一句自我否认，且前缀着色还会把
+    // 「未启动」一并涂成 DANGER。前缀与配色一律改由枚举驱动。
     if let Some(reason) = state.goal_rounds_stopped.as_ref() {
-        lines.push(format!("已停止：{}", reason.visible_line()));
+        lines.push(reason.visible_line());
     }
     lines.push(String::new());
     lines.push(GOAL_PANEL_HINT.to_string());
@@ -56,11 +61,14 @@ pub fn render_lines(state: &TuiState) -> Vec<String> {
 }
 
 /// 行 → 样式：只分类**本模块自己生成**的行（文案即契约），不做模糊猜测。
-fn row_style(text: &str) -> Style {
+///
+/// 停止行不再靠「已停止：」前缀识别（该前缀已删除），改为按 `state.goal_rounds_stopped`
+/// 的枚举严重级着色——与消息区/状态栏共用 [`severity_for_goal_stop`]，三处配色同源。
+fn row_style(text: &str, stopped: Option<SystemMessageSeverity>) -> Style {
     if text == GOAL_PANEL_HINT {
         faint()
-    } else if text.starts_with("已停止：") {
-        Style::default().fg(theme::DANGER)
+    } else if let Some(severity) = stopped {
+        severity_style(severity, muted())
     } else if text.starts_with("阶段 ") || text.starts_with("轮次 ") {
         Style::default().fg(theme::INK_SOFT)
     } else if text.starts_with("用 /goal") || text.starts_with("（") {
@@ -75,11 +83,25 @@ pub fn render(f: &mut Frame, area: Rect, state: &TuiState) {
     let pw = 72u16.min(area.width.saturating_sub(4)).max(20);
     let inner_w = (pw as usize).saturating_sub(2).max(8);
     let mut lines: Vec<Line<'static>> = Vec::new();
+    // 停止行是本模块唯一「带严重级」的行：先算出它，`row_style` 按同一严重级着色。
+    let stopped = state
+        .goal_rounds_stopped
+        .as_ref()
+        .map(pony_agent_core::agent::goal::GoalRoundStopReason::severity)
+        .map(severity_for_goal_stop);
+    let stop_text = state
+        .goal_rounds_stopped
+        .as_ref()
+        .map(pony_agent_core::agent::goal::GoalRoundStopReason::visible_line);
     for text in render_lines(state) {
         if text.is_empty() {
             lines.push(blank());
         } else {
-            let style = row_style(&text);
+            let style = if stop_text.as_deref() == Some(text.as_str()) {
+                row_style(&text, stopped)
+            } else {
+                row_style(&text, None)
+            };
             lines.extend(wrap_line(&Line::from(Span::styled(text, style)), inner_w));
         }
     }
@@ -154,21 +176,47 @@ mod tests {
         state.goal_state = Some(TuiGoal::new("goal-3".to_string(), "被取消的目标".to_string(), Some(4)));
         state.goal_rounds_stopped = Some(GoalRoundStopReason::Cancelled);
         let joined = render_lines(&state).join("\n");
-        assert!(joined.contains("已停止："), "{joined}");
+        // 措辞完全来自 core 的 `visible_line()`：面板**不得**再套「已停止：」之类前缀
+        // —— B193 的「未启动」一旦被套上前缀就成了「已停止：…未启动」的自我否认。
         assert!(
-            joined.contains("goal 续轮已停止（用户取消）"),
-            "文案必须来自 core 的 visible_line：{joined}"
+            !joined.contains("已停止："),
+            "面板不得硬编码「已停止：」前缀：{joined}"
+        );
+        assert!(
+            joined.contains(&GoalRoundStopReason::Cancelled.visible_line()),
+            "文案必须逐字来自 core 的 visible_line：{joined}"
+        );
+    }
+
+    /// 面板行的配色必须与消息区同源（枚举严重级），不得靠前缀字面量识别停止行。
+    #[test]
+    fn stopped_row_style_follows_enum_severity() {
+        let reason = GoalRoundStopReason::FirstRoundNotSucceeded;
+        let severity = severity_for_goal_stop(reason.severity());
+        assert_eq!(
+            severity,
+            SystemMessageSeverity::Error,
+            "首轮失败在面板里也必须是 Error 级（旧实现套前缀涂 DANGER，把「未启动」也涂成危险色）"
+        );
+        let style = row_style(&reason.visible_line(), Some(severity));
+        assert_eq!(
+            style.fg,
+            Some(theme::DANGER),
+            "Error 级停止行必须用 DANGER 前景色"
         );
     }
 
     #[test]
     fn row_style_classifies_own_rows() {
-        // 提示行用 faint、停止行用 DANGER、元信息用 INK_SOFT、objective 用 INK。
-        assert_eq!(row_style(GOAL_PANEL_HINT), faint());
-        assert_eq!(row_style("已停止：x").fg, Some(theme::DANGER));
-        assert_eq!(row_style("阶段 进行中").fg, Some(theme::INK_SOFT));
-        assert_eq!(row_style("轮次 1 / 2").fg, Some(theme::INK_SOFT));
-        assert_eq!(row_style("目标正文").fg, Some(theme::INK));
+        // 提示行用 faint、停止行按枚举严重级、元信息用 INK_SOFT、objective 用 INK。
+        assert_eq!(row_style(GOAL_PANEL_HINT, None), faint());
+        assert_eq!(
+            row_style("目标已暂停：续轮已停止", Some(SystemMessageSeverity::Error)).fg,
+            Some(theme::DANGER)
+        );
+        assert_eq!(row_style("阶段 进行中", None).fg, Some(theme::INK_SOFT));
+        assert_eq!(row_style("轮次 1 / 2", None).fg, Some(theme::INK_SOFT));
+        assert_eq!(row_style("目标正文", None).fg, Some(theme::INK));
     }
 
     #[test]
