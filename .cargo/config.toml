@@ -28,8 +28,10 @@
 
 [build]
 target-dir = "target"
-# 平衡编译速度与内存占用，避免 8 线程并发重型 crate 时耗尽内存（OOM）
-jobs = 3
+# ⚠️ 并发真源是 `.dev-team/build-budget.json` 的 `max_jobs_per_lane`（lane 会注入 CARGO_BUILD_JOBS）。
+# 这里保留同一个值，只是给**绕过 lane 直接敲 cargo** 的场景兜底；两处漂移由
+# `bash scripts/cargo-lane.spec.sh` 的 P6 断言机械拦截，改一处必须同步改另一处。
+jobs = 8
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "linker=rust-lld"]

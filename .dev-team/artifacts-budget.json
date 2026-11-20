@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "notes": "单目录产物预算（KiB）。超过即 exit 1：产物涨到磁盘告警才发现是反模式，预算要在『涨起来』那一刻就红。数值按 2026-11-20 实测留 2 倍余量。target 的 64G 覆盖『既有陈旧依赖产物』这段已知债（清完 incremental 后实测 49G，其中 43G 是不可增量式的陈旧 rlib；降到 ~30G 需要 --deep 冷编，见 ADR 2026-11-20 的记录）；等一次计划内 --deep 之后应把该值下调到 40G 以内。改预算属于策略变更，须同提交更新 AGENTS.md 与 ADR。",
+  "thresholds_kb": {
+    "target": 67108864,
+    "target-check": 12582912,
+    "target-test": 26214400,
+    "target-perf": 4194304,
+    "target-test-exact-a": 8388608,
+    "target-test-exact-b": 8388608,
+    "target-test-exact-c": 8388608,
+    "dist": 1048576,
+    "coverage": 1048576
+  },
+  "incremental_total_kb": 8388608
+}
