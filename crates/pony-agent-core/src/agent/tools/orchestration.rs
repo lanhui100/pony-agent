@@ -123,6 +123,16 @@ impl ToolRouter {
             );
         }
 
+        // B170：纯输入校验必须在 spawn 之前（否则不可启动 agent 时会先报 acp_spawn_failed / 先付子进程开销）。
+        if matches!(args.timeout_ms, Some(0)) {
+            return error_result(
+                TOOL_ACP_DELEGATE,
+                "invalid_arguments",
+                "acp_delegate 的 timeoutMs 必须大于 0。".to_string(),
+                None,
+            );
+        }
+
         // 清单解析（用户清单 → 内置默认）；未知 agent 保留 `acp_config_agent_not_found` 来源。
         let spec = match crate::acp::config::resolve_agent(args.agent.trim()) {
             Ok(spec) => spec,
@@ -204,16 +214,7 @@ impl ToolRouter {
         // 与 `names.rs` 的 ToolExecutionPolicy / CLI `--timeout-secs` 同源），
         // **不得** leave 成 transport 的单请求 5s 硬顶（否则 >5s 的真实 agent 被误判 acp_timeout）。
         let turn_budget = match args.timeout_ms {
-            Some(0) => {
-                session.close();
-                return error_result(
-                    TOOL_ACP_DELEGATE,
-                    "invalid_arguments",
-                    "acp_delegate 的 timeoutMs 必须大于 0。".to_string(),
-                    None,
-                );
-            }
-            Some(ms) => std::time::Duration::from_millis(ms),
+            Some(ms) => Duration::from_millis(ms),
             None => crate::acp::ACP_DEFAULT_TURN_BUDGET,
         };
         session.set_turn_budget(turn_budget);

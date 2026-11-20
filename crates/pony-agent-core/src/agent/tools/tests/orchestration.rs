@@ -755,3 +755,54 @@ fn terminal_goal_wrapup_is_injected_into_tool_result_b129() {
 
     let _ = std::fs::remove_dir_all(&workspace);
 }
+
+/// B170：timeoutMs=0 是纯输入校验，必须在 agent 解析/spawn 之前拦下，
+/// 因此即使 agent id 不存在也应报 invalid_arguments 而非 acp_config_agent_not_found。
+#[test]
+fn acp_delegate_zero_timeout_checked_before_agent_resolution() {
+    let workspace = temp_workspace();
+    let router = ToolRouter::with_workspace_root(workspace.clone());
+
+    let zero = router.execute(&ToolCall {
+        call_id: None,
+        name: TOOL_ACP_DELEGATE.to_string(),
+        arguments: json!({
+            "agent": "definitely-not-a-configured-agent",
+            "prompt": "x",
+            "timeoutMs": 0
+        }),
+        plan: None,
+    });
+    assert_eq!(zero.status, "error");
+    let payload = serde_json::from_str::<Value>(&zero.output).expect("acp_delegate error json");
+    let error = payload.get("error").expect("error 键");
+    assert_eq!(error.get("code").and_then(Value::as_str), Some("invalid_arguments"));
+    assert!(
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("timeoutMs 必须大于 0"),
+        "文案应说明 timeoutMs 必须大于 0：{payload}"
+    );
+
+    // 对照：非 0 值必须走到 agent 解析失败，证明前移只拦 0。
+    let positive = router.execute(&ToolCall {
+        call_id: None,
+        name: TOOL_ACP_DELEGATE.to_string(),
+        arguments: json!({
+            "agent": "definitely-not-a-configured-agent",
+            "prompt": "x",
+            "timeoutMs": 200
+        }),
+        plan: None,
+    });
+    assert_eq!(positive.status, "error");
+    let payload = serde_json::from_str::<Value>(&positive.output).expect("acp_delegate error json");
+    assert_eq!(
+        payload.get("error").and_then(|e| e.get("code")).and_then(Value::as_str),
+        Some("acp_config_agent_not_found")
+    );
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}

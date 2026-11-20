@@ -57,8 +57,20 @@
 | `acp.malformed_line_streak_limit` | 3 | `transport.rs:36` `MALFORMED_LINE_STREAK_LIMIT` |
 | `acp.spawn_reap_grace_ms` | 500 | `transport.rs:41` `SPAWN_REAP_GRACE` |
 | stderr 尾部行数 | 32 | `transport.rs:44` `STDERR_TAIL_LINES` |
+| `acp.turn_budget_ms` | 120000 | `acp/mod.rs:36` `ACP_DEFAULT_TURN_BUDGET` |
 
 > 注意：5000ms 是 **stdio 子进程会话级往返**，不是网络类 `external_call_timeout_ms(≤3000)`；schema 已按 additive-only 登记。
+
+## 3.1 ACP 诊断结构化出口清单（B164 补登）
+
+| 位置 | 诊断通道 | 备注 |
+|---|---|---|
+| `acp/transport.rs` | `otel::log::log_json*` | B164 原始清单 |
+| `acp/client.rs` | `otel::log::log_json*` | B164 原始清单 |
+| `acp/session.rs` | `otel::log::log_json*` | B164 原始清单 |
+| `acp/handlers.rs` | `otel::log::log_json*` | B164 原始清单 |
+| `agent/tools/orchestration.rs:231` | `otel::log::log_json_with_fields`（`acp_delegate 起轮`） | **B170 补登**：B164 收口时漏登 `[acp]` 起轮诊断 |
+| `bin/cli/acp.rs` | stderr（用户面输出） | 按 B237 C3 契约不属结构化日志通道，B164 已豁免 |
 
 ## 4. 空桩禁止实现项（P0 边界，越界即拒收）
 
