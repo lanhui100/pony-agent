@@ -1,4 +1,7 @@
 ﻿$ErrorActionPreference = "Stop"
+# ── POSIX 落点转派：非 Windows 主机 → start-tauri-dev.sh（WebView2 / Job Object 仅 Windows 需要）──
+. "$PSScriptRoot/lib/posix-dispatch.ps1"
+Invoke-PonyPosixTwin -Name 'start-tauri-dev' -ForwardArgs $args
 
 $workspace = Split-Path -Parent $PSScriptRoot
 $workspaceNormalized = [System.IO.Path]::GetFullPath($workspace)

@@ -62,6 +62,39 @@ export function buildCargoInvocation(slot, cargoArgs, repoRoot = REPO_ROOT) {
   };
 }
 
+/** 并发预算包装器（真源 `.dev-team/build-budget.json`）。 */
+export const LANE_SCRIPT_RELATIVE = path.join('scripts', 'cargo-lane.sh');
+
+/**
+ * 把一次 cargo 调用包成 lane 调用：`bash scripts/cargo-lane.sh <cargo 子命令> <参数...>`。
+ * 纯函数（不读环境、不执行进程），便于 parity 用例断言。
+ */
+export function buildLaneInvocation(invocation, repoRoot = REPO_ROOT) {
+  return {
+    command: 'bash',
+    cwd: invocation.cwd ?? repoRoot,
+    args: [path.join(repoRoot, LANE_SCRIPT_RELATIVE), ...invocation.args]
+  };
+}
+
+/**
+ * 是否经 lane 执行。返回 true 的条件：预算配置存在 且 未被 `PONY_BUILD_LANE=0` 关闭 且
+ * 该平台可获得 bash（win32 默认不做假设，需显式 `PONY_BUILD_LANE=1`）。
+ */
+export function shouldUseLane(options = {}) {
+  const {
+    env = process.env,
+    platform = process.platform,
+    repoRoot = REPO_ROOT,
+    fileExists = fs.existsSync
+  } = options;
+  const flag = env.PONY_BUILD_LANE;
+  if (flag === '0' || flag === 'false') return false;
+  if (!fileExists(path.join(repoRoot, '.dev-team', 'build-budget.json'))) return false;
+  if (platform === 'win32') return flag === '1' || flag === 'true';
+  return flag !== '0';
+}
+
 export function main(argv) {
   const [slot, ...cargoArgs] = argv;
   if (!slot) {
@@ -76,6 +109,13 @@ export function main(argv) {
     console.error(`[rust-target] ${error.message}`);
     console.error(usage());
     return 1;
+  }
+
+  if (shouldUseLane()) {
+    invocation = buildLaneInvocation(invocation);
+    if (process.env.PONY_BUILD_VERBOSE === '1') {
+      console.error('[rust-target] 经 scripts/cargo-lane.sh 执行（并发预算 + 负载熔断）');
+    }
   }
 
   const result = spawnSync(invocation.command, invocation.args, {

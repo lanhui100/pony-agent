@@ -33,6 +33,12 @@ param(
   [switch]$Watch,
   [switch]$Quiet
 )
+# ── POSIX 落点转派：非 Windows 主机 → normalize-generated-schemas.sh ──
+. "$PSScriptRoot/lib/posix-dispatch.ps1"
+$ponyForward = @()
+if ($Watch) { $ponyForward += '--watch' }
+if ($Quiet) { $ponyForward += '--quiet' }
+Invoke-PonyPosixTwin -Name 'normalize-generated-schemas' -ForwardArgs $ponyForward
 
 $ErrorActionPreference = "Stop"
 

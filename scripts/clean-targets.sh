@@ -4,6 +4,10 @@
 # 深度分层（见 AGENTS.md「构建产物保留深度」）：
 #   light（默认）  只删**可再生产物**：target-check* / target-test* / target-perf / target-codex-*
 #                  —— 根 target/ 与 target/release 保持不动（热缓存，删了要付冷编 20min+）。
+#   --incremental  只删每个 target 槽位下的 debug/release **incremental 目录**（增量编译中间态）。
+#                  这是本仓最大的单块浪费：213k 行单 crate 的增量目录实测合计 70G+；删掉后
+#                  依赖产物（deps/build）与热缓存全部保留，代价只是下一次编译失去增量复用。
+#                  与 light/deep 互斥（它不删任何 rlib/二进制）。
 #   --with-frontend 额外删 dist/ coverage/ playwright-report/ test-results/（前端可重建产物）。
 #   --deep         额外删根 target/（只在工具链升级 / link 失败 / 依赖大换血 / 磁盘告警时用）。
 #   --dry-run      只列大小与将删清单，不动磁盘。
@@ -17,12 +21,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRY_RUN=0
 DEEP=0
 WITH_FRONTEND=0
+INCREMENTAL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --deep) DEEP=1; shift ;;
     --with-frontend) WITH_FRONTEND=1; shift ;;
-    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --incremental) INCREMENTAL=1; shift ;;
+    -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "[clean-targets] 未知参数：$1" >&2; exit 2 ;;
   esac
 done
@@ -48,8 +54,33 @@ if [ "$DEEP" -eq 1 ] && [ -d "$REPO_ROOT/target" ]; then
   CANDIDATES+=("target")
 fi
 
+# 增量档：不删槽位，只删各槽位下的 debug/release incremental（含根 target/，热缓存不受损）。
+if [ "$INCREMENTAL" -eq 1 ]; then
+  CANDIDATES=()
+  while IFS= read -r slot; do
+    for profile in debug release; do
+      rel="$slot/$profile/incremental"
+      [ -d "$REPO_ROOT/$rel" ] && CANDIDATES+=("$rel")
+    done
+  done < <(
+    cd "$REPO_ROOT" || exit 2
+    find . -maxdepth 1 -type d -name 'target*' 2>/dev/null | sed 's|^\./||' | sort
+  )
+  # 重置候选后必须把前端产物**重新**放回来：否则 `--incremental --with-frontend` 会打印
+  # 「+ frontend」却一个前端目录都不删（日志与行为脱节，审核 P1）。
+  if [ "$WITH_FRONTEND" -eq 1 ]; then
+    for name in dist coverage playwright-report test-results; do
+      [ -d "$REPO_ROOT/$name" ] && CANDIDATES+=("$name")
+    done
+  fi
+fi
+
 if [ "${#CANDIDATES[@]}" -eq 0 ]; then
-  echo "[clean-targets] 没有可清理的产物目录（light 深度保留根 target/）"
+  if [ "$INCREMENTAL" -eq 1 ]; then
+    echo "[clean-targets] 没有 incremental 目录可清理"
+  else
+    echo "[clean-targets] 没有可清理的产物目录（light 深度保留根 target/）"
+  fi
   exit 0
 fi
 
@@ -66,7 +97,14 @@ for rel in "${CANDIDATES[@]}"; do
 done
 
 echo "[clean-targets] 仓库：$REPO_ROOT"
-echo "[clean-targets] 深度：$([ "$DEEP" -eq 1 ] && echo deep || echo light)$([ "$WITH_FRONTEND" -eq 1 ] && echo ' + frontend')"
+if [ "$INCREMENTAL" -eq 1 ]; then
+  depth_label="incremental（增量中间态，保留依赖产物）"
+elif [ "$DEEP" -eq 1 ]; then
+  depth_label="deep"
+else
+  depth_label="light"
+fi
+echo "[clean-targets] 深度：$depth_label$([ "$WITH_FRONTEND" -eq 1 ] && echo ' + frontend')"
 total_kb=0
 for rel in "${safe_paths[@]}"; do
   kb="$(du -sk "$REPO_ROOT/$rel" 2>/dev/null | awk '{print $1}')"
@@ -98,4 +136,10 @@ done
 if [ "$skipped" -ne 0 ]; then
   exit 1
 fi
-echo "[clean-targets] 完成（保留根 target/ 热缓存$([ "$DEEP" -eq 1 ] && echo '——本轮为 deep，已删）' || echo '）')"
+if [ "$INCREMENTAL" -eq 1 ]; then
+  echo "[clean-targets] 完成（仅清增量中间态，依赖产物与 target/release 保留）"
+elif [ "$DEEP" -eq 1 ]; then
+  echo "[clean-targets] 完成（本轮为 deep，已删根 target/）"
+else
+  echo "[clean-targets] 完成（保留根 target/ 热缓存）"
+fi

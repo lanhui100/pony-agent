@@ -2,26 +2,36 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { SLOT_TARGET_DIRS, buildCargoInvocation, usage } from '../scripts/invoke-rust-target.mjs';
+import { SLOT_TARGET_DIRS, buildCargoInvocation, buildLaneInvocation, shouldUseLane, usage } from '../scripts/invoke-rust-target.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-/** 从 PowerShell 版调用器里抽取槽位表，用于拦截两份实现漂移。 */
-function readPs1SlotMap(): Record<string, string> {
-  const source = fs.readFileSync(path.join(repoRoot, 'scripts/invoke-rust-target.ps1'), 'utf8');
-  const body = source.slice(source.indexOf('$targetMap'), source.indexOf('$targetDir'));
-  const map: Record<string, string> = {};
-  for (const line of body.split('\n')) {
-    const match = line.match(/^\s*"?([\w-]+)"?\s*=\s*"([^"]+)"\s*$/);
-    if (match) map[match[1]] = match[2];
-  }
-  return map;
+/**
+ * 读取 PowerShell 版调用器源码。
+ *
+ * 契约已从「两份槽位表逐槽比对」升级为「ps1 退化成薄壳」：旧实现里 ps1 自带 `$targetMap`
+ * 并裸调 cargo（不吃并发预算、不加全局 flock），与 .mjs 的漂移实测已让 Windows 侧绕过构建治理。
+ * 现在槽位表只存在于 .mjs，因此这里断言「ps1 不再有第二份槽位表」——漂移这一类缺陷从根上消失。
+ */
+function readPs1Source(): string {
+  return fs.readFileSync(path.join(repoRoot, 'scripts/invoke-rust-target.ps1'), 'utf8');
 }
 
 describe('invoke-rust-target 槽位调用器', () => {
-  it('mjs 与 ps1 的槽位表逐槽一致（漂移即红）', () => {
-    expect(readPs1SlotMap()).toEqual({ ...SLOT_TARGET_DIRS });
+  it('ps1 已收敛为薄壳：不含独立槽位表（漂移类别消失）', () => {
+    const source = readPs1Source();
+    expect(source).not.toContain('$targetMap');
+    expect(source).not.toMatch(/target-(check|test|perf)/);
   });
+
+  it('ps1 强制转派 mjs 单一真源（所有平台，含 Windows）', () => {
+    const source = readPs1Source();
+    expect(source).toContain('lib/posix-dispatch.ps1');
+    expect(source).toContain("Invoke-PonyPosixTwin -Name 'invoke-rust-target'");
+    expect(source).toContain('-AlwaysDelegate');
+    expect(source).toContain('invoke-rust-target.mjs');
+  });
+
 
   it('五个 cargo 槽位都映射到各自的 target 目录', () => {
     for (const [slot, targetDir] of Object.entries(SLOT_TARGET_DIRS)) {
@@ -73,5 +83,23 @@ describe('invoke-rust-target 槽位调用器', () => {
       expect(scripts[name]).toBe(`node scripts/invoke-rust-target.mjs ${slotAndSubcommand}`);
       expect(scripts[name]).not.toMatch(/powershell|pwsh/i);
     }
+  });
+
+  it('包成 lane 调用时保留 cargo 参数原序，且不再直接 spawn cargo', () => {
+    const cargoInvocation = buildCargoInvocation('check', ['check', '--all-targets'], '/repo');
+    const lane = buildLaneInvocation(cargoInvocation, '/repo');
+    expect(lane.command).toBe('bash');
+    expect(lane.args[0]).toBe(path.join('/repo', 'scripts', 'cargo-lane.sh'));
+    expect(lane.args.slice(1)).toEqual(cargoInvocation.args);
+    expect(lane.args).not.toContain('--target-dir=undefined');
+  });
+
+  it('lane 启用判定：预算缺失/显式关闭/win32 默认都不上 lane', () => {
+    const exists = () => true;
+    expect(shouldUseLane({ env: {}, platform: 'linux', fileExists: exists })).toBe(true);
+    expect(shouldUseLane({ env: { PONY_BUILD_LANE: '0' }, platform: 'linux', fileExists: exists })).toBe(false);
+    expect(shouldUseLane({ env: {}, platform: 'win32', fileExists: exists })).toBe(false);
+    expect(shouldUseLane({ env: { PONY_BUILD_LANE: '1' }, platform: 'win32', fileExists: exists })).toBe(true);
+    expect(shouldUseLane({ env: {}, platform: 'linux', fileExists: () => false })).toBe(false);
   });
 });

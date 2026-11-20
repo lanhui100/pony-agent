@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "max_jobs_per_lane": 4,
+  "max_jobs_per_lane": 8,
   "job_env": {
     "name": "CARGO_BUILD_JOBS",
-    "value": "4"
+    "value": "8"
   },
   "serialize_across_output_dirs": true,
   "serialize_lock_path": "/tmp/pony-agent-build.lock",
@@ -12,5 +12,5 @@
   "load_ceiling_factor": 1.5,
   "lane_wrapper_cmd": "bash scripts/cargo-lane.sh",
   "heavy_wrapper_cmd": "bash scripts/cargo-lane.sh --heavy",
-  "notes": "2026-11-17 事故：4 条 target 目录（debug/test/check/release）各持独立 cargo 锁 × 16 job ⇒ load 45.86（16 核），release 构建 90min 未完成，单跑 3m07s–5m32s。lane 一律 4 job + 全局 flock；release/全量回归只由 Lead 走 --heavy 独跑；load > 1.5×核数停一条 lane。"
+  "notes": "2026-11-17 事故：4 条 target 目录（debug/test/check/release）各持独立 cargo 锁 × 16 job ⇒ load 45.86（16 核），release 构建 90min 未完成，单跑 3m07s–5m32s。lane 一律走全局 flock（跨 target 目录串行化），release/全量回归只由 Lead 走 --heavy 独跑。2026-11-20：load_ceiling_factor 由 scripts/cargo-lane.sh 真正执行（超限先等 300s，超时继续并告警；--strict 硬失败 / --no-wait 止损 / --allow-busy 跳过）；max_jobs_per_lane 成为并发单源，.cargo/config.toml 的 jobs 必须与之相等（cargo-lane.spec.sh P6 判红）；npm 的 cargo 入口经 invoke-rust-target.mjs 自动包成 lane 调用。2026-11-20 标定（bash scripts/build-bench.sh，16 核 / 30G，target-check 槽位）：cargo check --all-targets（pony-agent-core）冷编 4job=247.7s / 8job=151.5s / 12job=123.5s，热编 4job=142.3s / 8job=151.5s / 12job=128.5s（±10% 噪声，单 crate 串行上限），峰值 rustc RSS 2.4G / 3.8G / 5.0G。故取 8：冷编 1.63×，热编不退化，内存留余量；12 job 再快 19% 但峰值 5G，按需 PONY_BUILD_JOBS=12 临时覆盖。"
 }

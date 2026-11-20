@@ -56,6 +56,10 @@ param(
   [switch]$DryRun,
   [switch]$Stage
 )
+# ── POSIX 落点：**暂无**（bump 逻辑仅 PowerShell 实现）→ 非 Windows 主机 fail-closed exit 4，
+# 并指向跨平台发版入口 npm run release。缺口可见性由 scripts/check-ps1-portability.sh 托管。──
+. "$PSScriptRoot/lib/posix-dispatch.ps1"
+Invoke-PonyPosixTwin -Name 'bump-version' -WindowsOnly -ForwardArgs @()
 
 $ErrorActionPreference = "Stop"
 
