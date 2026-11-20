@@ -32,10 +32,14 @@ use std::path::Path;
 /// 不参与任何业务判断：真值始终是上游模型自己的容量。
 pub const MAX_CONTEXT_WINDOW_TOKENS: u32 = 10_000_000;
 
-/// 常用上下文窗口规格（token，十进制），与桌面端 `CONTEXT_TOKEN_PRESETS` 同口径。
+/// 常用上下文窗口规格（token，十进制）。
 ///
 /// 面板用 ←/→ 在这些规格间快选，手输仍接受任意 `200000` / `200K` / `1.5M`。
-pub const CONTEXT_WINDOW_PRESETS: &[u32] = &[32_000, 64_000, 128_000, 256_000, 512_000, 1_000_000];
+///
+/// 下限 **256K**（2026-11-20 用户裁决）：32K / 64K / 128K 档留给快选只会把压缩水位
+/// 压到几十 K（几乎每轮都触发压缩），实操上只会误选；真要用小窗口手输即可。
+/// 桌面端 `CONTEXT_TOKEN_PRESETS` 仍保留更宽的列表，本表只收敛 TUI 快选档位。
+pub const CONTEXT_WINDOW_PRESETS: &[u32] = &[256_000, 512_000, 1_000_000];
 
 /// 模型接受的**输入模态**（图片 / 视频 / 音频）。
 ///
@@ -696,9 +700,14 @@ mod tests {
 
     #[test]
     fn presets_are_decimal_and_parse_back_exactly() {
-        assert_eq!(
-            CONTEXT_WINDOW_PRESETS,
-            &[32_000, 64_000, 128_000, 256_000, 512_000, 1_000_000]
+        assert_eq!(CONTEXT_WINDOW_PRESETS, &[256_000, 512_000, 1_000_000]);
+        let floor = CONTEXT_WINDOW_PRESETS
+            .first()
+            .copied()
+            .expect("presets 不能为空");
+        assert!(
+            floor >= 256_000,
+            "快选档位下限必须 >= 256K（用户裁决），实际 {floor}"
         );
         for preset in CONTEXT_WINDOW_PRESETS {
             let label = format_context_window(*preset);

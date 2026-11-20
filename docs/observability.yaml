@@ -129,6 +129,14 @@
 # (4) 四维归属不变：tracing / issues 仍 applicable（落点不变 agent/otel/mod.rs、agent/ponysentry/client.rs），
 #     metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
+# 模型发现保留逐模型窗口 + provider 默认窗口 1M（ADR 2026-11-20-model-discovery-preserves-per-model-window）归属说明：
+# (1) 变更面是**本地注册表视图变换**（`bin/tui.rs::apply_models_discovered` 只改内存 view，持久化仍由既有的
+#     `ProviderRegistryStore::save_view` 完成）与**常量取值**（`DEFAULT_CONTEXT_WINDOW_TOKENS` 1M、
+#     TUI 快选档位下限 256K）；无新增接口、无网络出口变更、无后台任务、无 LLM 调用、无 exporter 变更。
+# (2) 既有远程模型发现的网络出口与线程模型不变（`spawn_model_discovery` + `fetch_model_ids`），本卡不改其落点。
+# (3) TUI 面板为纯呈现 + 本地写；失败仍只落面板文案 / 状态行，不新增 stderr 结构化行。
+# (4) 四维归属不变：tracing / issues 仍 applicable（落点不变），metrics / logs 维持结构性 N-A。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
 service: pony-agent
 kind: desktop
 reviewed_at: "2026-11-09"

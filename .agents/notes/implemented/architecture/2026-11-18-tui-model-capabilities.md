@@ -21,6 +21,8 @@ Status: implemented
    面板从此显示 `256K`，与桌面端 `CONTEXT_TOKEN_PRESETS` 的 `256K = 256000` 同口径。
 2. **常用规格成为共享常量**：`agent::model_window::CONTEXT_WINDOW_PRESETS`
    = `[32K, 64K, 128K, 256K, 512K, 1M]`，TUI 快选只引用它，不另写一张表。
+   **2026-11-20 后续**：TUI 快选档位收敛为 `[256K, 512K, 1M]`（下限 256K），默认窗口回到 1M，
+   见 [2026-11-20-model-discovery-preserves-per-model-window](../bug-fix/2026-11-20-model-discovery-preserves-per-model-window.md)。
 3. **写入面扩展为 `set_model_capabilities`**：一次定点写入上下文窗口 + 输入模态
    （图片/视频/音频），仍只改目标模型的键、仍用临时文件 + rename。
    - 窗口语义不变：`Some(Some(tokens))` 声明；`Some(None)` 删键（跟随预设）。

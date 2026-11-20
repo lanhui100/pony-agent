@@ -9,21 +9,26 @@ use std::sync::Arc;
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
-/// 默认上下文窗口（token）= **256K**：未显式声明窗口的模型一律按此计。
+/// 默认上下文窗口（token）= **1M**：未显式声明窗口的模型一律按此计。
 ///
-/// 为什么是 256K 而不是 1M：压缩水位由窗口推导
+/// 为什么改回 1M（2026-11-20 用户裁决）：provider 默认值即「模型没声明窗口时按多少算」，
+/// 桌面端自始就是 1M（`src/stores/providers.ts`），TUI 曾是 256K ⇒ 同一份配置两端算出
+/// 两套占用率。现在两端同口径（ADR 2026-11-20-model-discovery-preserves-per-model-window）。
+///
+/// 代价必须记住：压缩水位由窗口推导
 /// （`compression::calculate_threshold_tokens` =
-/// `min(0.8×窗口, 窗口 − 输出预留 − headroom)`）。旧默认 1M ⇒ 水位约 800K，而主流
-/// 模型的真实窗口是 128K~256K，压缩**永远晚于上游溢出**触发（溢出是硬失败，直接
-/// 终止本轮并丢失本轮上下文）；256K 让水位落在约 180K~205K，压缩先于溢出发生。
+/// `min(0.8×窗口, 窗口 − 输出预留 − headroom)`）。1M 默认 ⇒ 水位约 800K，而真实窗口
+/// 128K~256K 的模型会「压缩晚于上游溢出」（溢出是硬失败，直接终止本轮并丢失本轮上下文）。
+/// 这类模型必须在 TUI `/models` 面板的 `w` 里**声明真实窗口**——逐模型声明优先于本默认值，
+/// 声明后水位按该模型的真实容量推导。
 ///
-/// 口径取**十进制 256_000**（而非 2^18 = 262_144）：面板按桌面端
-/// `CONTEXT_TOKEN_PRESETS` / `formatTokenUnit` 的 K=1000 显示，262_144 会渲染成
-/// 「262.1K」，与「256K」的用户预期不符（ADR 2026-11-18-tui-model-capabilities）。
+/// 口径取**十进制 1_000_000**（而非 2^20 = 1_048_576）：面板按桌面端
+/// `CONTEXT_TOKEN_PRESETS` / `formatTokenUnit` 的 K=1000 / M=1_000_000 显示
+/// （ADR 2026-11-18-tui-model-capabilities）。
 ///
 /// 这是**压缩预算的默认真值**：TUI/CLI 不得各自硬编码副本（曾出现 1M 与 32K 两套
 /// 分叉：界面按 1M 算占用率、压缩按另一套算预算，同一会话两个结论）。
-pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 256_000;
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 const DEFAULT_MODERN_MAX_OUTPUT_TOKENS: u32 = 64000;
 
 // ── PA-172 §2：上游调用策略（超时/重试/退避）配置面 ──────────────────────────────
@@ -382,8 +387,8 @@ impl Default for ProviderModelCapabilities {
 /// `capabilities` 整段缺席时的「未声明」哨兵：窗口为 `None`，其余布尔能力取默认值。
 ///
 /// 必须与 [`ProviderModelCapabilities::default`] 区分开：`default()` 的
-/// `context_window_tokens` 是**补缺值**（256K 保守水位）；若把它当成声明值，
-/// 「用户从未填过窗口」就与「用户填了 256000」不可分辨，预设再也补不了缺。
+/// `context_window_tokens` 是**补缺值**（1M 默认窗口）；若把它当成声明值，
+/// 「用户从未填过窗口」就与「用户填了 1000000」不可分辨，预设再也补不了缺。
 fn undeclared_model_capabilities() -> ProviderModelCapabilities {
     ProviderModelCapabilities {
         context_window_tokens: None,
@@ -3078,5 +3083,3 @@ mod tests {
         assert!(custom_caps.supports_image_input);
     }
 }
-
-

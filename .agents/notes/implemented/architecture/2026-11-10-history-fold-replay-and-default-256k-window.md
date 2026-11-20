@@ -51,6 +51,9 @@ P0/P1 修好了「失败轮写不进上下文」「压缩只写 blob」，但读
    TUI / CLI 统一引用该常量，删除各自的 `1_000_000` 副本。水位由此约 180K~205K，
    压缩先于溢出发生。**2026-11-18 后续**：数值改为十进制 `256_000`（面板显示 `256K`），
    见 [2026-11-18-tui-model-capabilities](./2026-11-18-tui-model-capabilities.md)。
+   **2026-11-20 后续**：本条的「默认 256K」已被
+   [2026-11-20-model-discovery-preserves-per-model-window](../bug-fix/2026-11-20-model-discovery-preserves-per-model-window.md)
+   取代——默认窗口回到 1M，小窗口风险改由「逐模型声明真实窗口」承担。
 
 ## Alternatives considered
 
