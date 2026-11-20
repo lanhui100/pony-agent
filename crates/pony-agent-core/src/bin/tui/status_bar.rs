@@ -88,14 +88,14 @@ fn goal_segment(state: &TuiState) -> Option<String> {
         None => format!("轮{}", goal.round_count),
     };
     let suffix = match goal.phase {
-        GoalPhase::Active => {
+        GoalPhase::Active => match state.goal_rounds_stopped.as_ref() {
             // 「已停止」与「进行中」必须共存可见：否则横幅会谎称还在自动续轮。
-            if state.goal_rounds_stopped.is_some() {
-                "·停"
-            } else {
-                ""
-            }
-        }
+            // 但**从未启动**的情形（首轮门未过 / 无轮可续 / 本线程让位）说「停」同样是假结论，
+            // 措辞改由 `never_started()` 唯一决定（B193 的语义区分不能在横幅这一层被抹掉）。
+            Some(reason) if reason.never_started() => "·未续",
+            Some(_) => "·停",
+            None => "",
+        },
         GoalPhase::Paused => "·暂停",
         GoalPhase::Blocked => "·阻塞",
         GoalPhase::Completed => "·完成",

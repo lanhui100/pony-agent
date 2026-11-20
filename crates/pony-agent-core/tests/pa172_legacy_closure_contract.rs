@@ -528,8 +528,13 @@ fn budget_persist_failed_visible_line_is_frozen_and_distinct() {
 
     // Assert
     assert_eq!(
-        persist_line, "goal 续轮已停止（本轮预算推进落盘失败，已暂停自动续轮）",
-        "§8 B4：`BudgetPersistFailed` 文案逐字冻结"
+        persist_line,
+        GoalRoundStopReason::BudgetPersistFailed.visible_line(),
+        "§8 B4：`BudgetPersistFailed` 文案由 `visible_line()` 唯一提供"
+    );
+    assert!(
+        persist_line.contains("写盘失败"),
+        "§8 B4/b193-2：必须说清是**写盘**失败（不是预算用尽），实际：{persist_line}"
     );
     assert_ne!(
         persist_line, exhausted_line,
@@ -553,8 +558,18 @@ fn no_active_goal_visible_line_is_frozen_and_distinct() {
 
     // Assert
     assert_eq!(
-        line, "goal 续轮已停止（当前会话无进行中的目标）",
-        "§8 B5：`NoActiveGoal` 文案逐字冻结"
+        line,
+        GoalRoundStopReason::NoActiveGoal.visible_line(),
+        "§8 B5：`NoActiveGoal` 文案由 `visible_line()` 唯一提供"
+    );
+    assert!(
+        line.contains("没有可续的目标"),
+        "§8 B5/b193-2：必须说清「没有可续的目标」，实际：{line}"
+    );
+    // 撞词避让：「进行中」是 `GoalPhase::Active` 的既有译词，停止文案不得占用。
+    assert!(
+        !line.contains("进行中"),
+        "§8 B5/b193-2：停止文案不得占用「进行中」（与阶段译词冲突），实际：{line}"
     );
     assert_ne!(
         line,

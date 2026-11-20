@@ -131,6 +131,10 @@ pub enum SystemMessageSeverity {
 /// 消息区渲染与状态栏共用同一真值源，替代此前散落在三处的 `contains("失败")` 关键词
 /// 判定 —— `ERROR_SUMMARY_*` 文案不含任何既有关键词，导致真实的终态错误反而被渲染成
 /// 灰色 Info 样式（这就是「错误信息不醒目」的根因）。
+///
+/// **结构化来源优先**：凡文案由领域枚举生成（如 goal 续轮停止原因），必须走
+/// [`severity_for_goal_stop`] 而**不要**把文案回灌本函数——关键词表对「首轮未成功」
+/// 这类不含 error 词的失败句必然判错（历史缺陷：为可见性新增的消息成了权重最低的一条）。
 pub fn system_message_severity(content: &str) -> SystemMessageSeverity {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -146,6 +150,11 @@ pub fn system_message_severity(content: &str) -> SystemMessageSeverity {
             | ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW
     ) {
         return SystemMessageSeverity::Error;
+    }
+    // 结构化来源优先：凡文案由领域枚举生成（goal 停止族），直接取枚举严重级，
+    // **不得**落到下面的关键词表——「首轮失败，自动续轮未启动」不含 error 词，必被判错。
+    if let Some(severity) = goal_stop_severity_for_line(trimmed) {
+        return severity;
     }
     // PA-171 C5-S4：限流/配额摘要是动态文案（含恢复时间）⇒ 按固定开头判定。
     if trimmed.starts_with(ERROR_SUMMARY_RATE_LIMITED) {
@@ -177,6 +186,40 @@ pub fn system_message_severity(content: &str) -> SystemMessageSeverity {
         return SystemMessageSeverity::Warning;
     }
     SystemMessageSeverity::Info
+}
+
+/// 按**领域枚举**识别一条 goal 停止文案的严重级（`None` = 不是 goal 停止文案）。
+///
+/// 为什么不复用关键词表：`FirstRoundNotSucceeded` 的文案里没有 `error`/`失败` 之外的
+/// error 词，关键词表必然把它降级成 Info 灰字。这里不做语义猜测，只拿
+/// [`GoalRoundStopReason::all_variants`] 的**逐字文案**做身份比对——文案与严重级同出
+/// 一个枚举，改文案时两边一起动，不存在漂移。
+pub fn goal_stop_severity_for_line(
+    content: &str,
+) -> Option<SystemMessageSeverity> {
+    use pony_agent_core::agent::goal::GoalRoundStopReason;
+    let trimmed = content.trim();
+    GoalRoundStopReason::all_variants()
+        .into_iter()
+        .find(|reason| reason.visible_line() == trimmed)
+        .map(|reason| severity_for_goal_stop(reason.severity()))
+}
+
+/// 领域枚举 → 渲染严重级的**唯一映射**（枚举驱动，禁止关键词猜测）。
+///
+/// 为什么必须独立于 [`system_message_severity`]：后者靠文案关键词判级，而
+/// `FirstRoundNotSucceeded` 的文案「首轮失败，自动续轮未启动」不含 `error`/`失败`
+/// 之外的任何 error 词，实测被降级成 Info 灰字——**为可见性新增的消息反而最不醒目**。
+/// 领域枚举本身就是真值，无需再猜；这里只做一次纯翻译。
+pub fn severity_for_goal_stop(
+    severity: pony_agent_core::agent::goal::GoalStopSeverity,
+) -> SystemMessageSeverity {
+    use pony_agent_core::agent::goal::GoalStopSeverity;
+    match severity {
+        GoalStopSeverity::Info => SystemMessageSeverity::Info,
+        GoalStopSeverity::Warning => SystemMessageSeverity::Warning,
+        GoalStopSeverity::Error => SystemMessageSeverity::Error,
+    }
 }
 
 /// 严重级 → 文本样式（消息区与状态栏共用，避免两处配色漂移）。

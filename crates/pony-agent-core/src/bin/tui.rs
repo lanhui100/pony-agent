@@ -9535,7 +9535,7 @@ fn report_goal_rounds_stopped(
 ) {
     log_goal_rounds_stopped(
         session_id,
-        goal_round_stop_reason_tag(&reason),
+        reason.code(),
         consecutive_failures,
         rounds_started,
         max_rounds,
@@ -9567,26 +9567,9 @@ fn goal_round_stop_reason_for_outcome(
     }
 }
 
-/// PA-171 C1/C2：停止原因的**机器可判**取值（结构化日志 `reason` 字段；与枚举一一对应）。
-fn goal_round_stop_reason_tag(
-    reason: &pony_agent_core::agent::goal::GoalRoundStopReason,
-) -> &'static str {
-    use pony_agent_core::agent::goal::GoalRoundStopReason;
-    match reason {
-        GoalRoundStopReason::Cancelled => "cancelled",
-        GoalRoundStopReason::ConsecutiveFailures { .. } => "consecutive_failures",
-        GoalRoundStopReason::BudgetExhausted { .. } => "budget_exhausted",
-        GoalRoundStopReason::AutoContinueBudget => "auto_continue_budget",
-        GoalRoundStopReason::TurnSuspended => "turn_suspended",
-        GoalRoundStopReason::TurnUnclassified => "turn_unclassified",
-        GoalRoundStopReason::LoopAlreadyOwned => "loop_already_owned",
-        // PA-172 §8 B4/B5：additive 两变体的日志 reason tag（pa171-a1 扩容）。
-        GoalRoundStopReason::BudgetPersistFailed => "budget_persist_failed",
-        GoalRoundStopReason::NoActiveGoal => "no_active_goal",
-        // B193：首轮门未通过（续轮从未启动）——与「已停止」区分，便于日志侧统计。
-        GoalRoundStopReason::FirstRoundNotSucceeded => "first_round_not_succeeded",
-    }
-}
+// PA-171 C1/C2 的 `goal_round_stop_reason_tag` 已删除：日志 `reason` 字段的唯一来源
+// 收敛到 `GoalRoundStopReason::code()`（core 层枚举），本文件不再保留第二份字符串表
+// ——两份表并存正是「日志 tag 与枚举漂移」的根因（一处改文案、一处忘改，审计面静默错配）。
 
 /// PA-171（NFR wave68_logging_events）：续轮停止的**唯一结构化出口**。
 ///
@@ -12588,13 +12571,16 @@ fn tui_event_loop(
                         }
                     }
                     state.status_text = status_line.clone();
+                    // 只有「续轮真的停下来了」才写消息区历史；`LoopAlreadyOwned` 等
+                    // 「从未启动 / 本线程让位」的事实写进历史就是一条假结论（`enters_history`）。
+                    if reason.enters_history() {
+                        state.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: status_line,
+                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                        });
+                    }
                     state.goal_rounds_stopped = Some(reason);
-                    // 走消息区（历史留痕）：状态行会被下一轮进度短语覆盖，停止原因的结论必须留存。
-                    state.messages.push(ChatMessage {
-                        role: MessageRole::System,
-                        content: status_line,
-                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                    });
                     // 本轮已收口（续轮循环是轮次线程的最后一段），刷新 goal 投影让横幅显示真实轮数。
                     if let Some(goal_data) =
                         pony_agent_core::agent::goal::active_goal_for_session(&state.session_id)

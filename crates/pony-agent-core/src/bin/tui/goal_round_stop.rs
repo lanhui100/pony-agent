@@ -78,14 +78,27 @@ mod tests {
     }
 
     /// 文案是用户唯一能读到的结论：首轮门用「未启动」，不得冒充「已停止」。
+    ///
+    /// b193-2 起文案去术语化（不再出现「收口」），但**语义锁不变**：必须说「未启动」，
+    /// 且绝不能出现「已停止」——这是 B193 决策记录冻结的区分，不随措辞改造回退。
     #[test]
     fn first_round_not_succeeded_line_says_not_started() {
         let line = GoalRoundStopReason::FirstRoundNotSucceeded.visible_line();
         assert!(line.contains("未启动"), "实际文案：{line}");
-        assert!(line.contains("首轮未成功收口"), "实际文案：{line}");
         assert!(
             !line.contains("已停止"),
             "首轮门从未进入续轮，不得说「已停止」：{line}"
+        );
+        // 严重级必须由枚举给：旧关键词表把它判成 Info 灰字（B193 目的被反向实现）。
+        assert_eq!(
+            GoalRoundStopReason::FirstRoundNotSucceeded.severity(),
+            pony_agent_core::agent::goal::GoalStopSeverity::Error,
+            "首轮失败必须是 Error 级：{line}"
+        );
+        // 必须给出可执行动作，否则用户仍只能干等或乱试。
+        assert!(
+            line.contains("继续"),
+            "停止文案必须含下一步动作（发「继续」）：{line}"
         );
     }
 }
