@@ -34,6 +34,9 @@ Date: 2026-11-18
 
 1. **`main` 只在人工动作下前进**：PR → 必过检查全绿 → 人点 Merge。禁止脚本直推 `main`；本地 `pre-push` 与远端 ruleset 双重拦截。
 2. **一个会话一个 worktree**：`git worktree add -b <分支> /home/dm/pony-agent-worktrees/<主题> main`。主工作区不与其他会话共用索引。
+   **2026-11-20 修订**：本条收窄为「并发按需」——单会话串行时直接在主工作区开分支，
+   同一时刻 ≥2 个会话写代码时后加入者才建 worktree。见
+   [2026-11-20-worktree-on-demand](2026-11-20-worktree-on-demand.md)。
 
 合并策略：普通 PR 用 **Squash**（`main` 线性、一 PR 一提交）；发版 PR（`chore/release-v*`）用 **Merge commit**——squash 会重写提交哈希，使 tag 指向不在 `main` 历史上的提交。
 
