@@ -10,7 +10,9 @@ description: 何时用：多会话/多 worktree 并行开发时的 git 操作—
 
 ## 四条不可协商的规则
 
-1. 一个会话一个 worktree，主工作区不与他人共用索引。
+1. 写会话隔离**按需**：单会话串行时直接在主工作区开分支；同一时刻 ≥2 个会话写代码时，
+   后加入者必须开 worktree（主工作区不与他人共用索引）。回退条件见
+   [2026-11-20-worktree-on-demand](../../notes/implemented/process/2026-11-20-worktree-on-demand.md)。
 2. 分支名 `<类型>/<任务号或主题>`；提交信息 Conventional Commits。
 3. `main` 只能经 PR 前进，合并动作必须人工点。
 4. 发版只额外推 tag，不推进 `main` 历史。
@@ -18,10 +20,14 @@ description: 何时用：多会话/多 worktree 并行开发时的 git 操作—
 ## 日常流程
 
 ```bash
-# 1) 开隔离工作区（从最新 main）
+# 1) 开分支：单会话直接在主工作区切（无需 worktree）
 git -C ~/pony-agent fetch origin main
-git -C ~/pony-agent worktree add -b feat/B999-my-change ~/pony-agent-worktrees/B999-my-change origin/main
-cd ~/pony-agent-worktrees/B999-my-change
+cd ~/pony-agent
+git switch -c feat/B999-my-change origin/main
+
+# 1b) 仅并发场景（已有别的会话在写本仓）才建隔离 worktree，见 worktree-on-demand ADR
+# git worktree add -b feat/B999-other ~/pony-agent-worktrees/B999-other origin/main
+# cd ~/pony-agent-worktrees/B999-other
 
 # 2) 干活 + 提交（钩子自动跑：敏感信息 / 产物卫生 / 尾随换行 / 提交信息规范）
 git add <paths>
@@ -32,10 +38,13 @@ git push -u origin feat/B999-my-change
 gh pr create --fill
 
 # 4) CI verify 全绿后，人工在 GitHub 点 Squash and merge
+#    纯文档/账本 PR 只跑轻量门（ci-scope 判定），代码 PR 才跑全量 Rust
 
 # 5) 收口
-git -C ~/pony-agent worktree remove ~/pony-agent-worktrees/B999-my-change
+git -C ~/pony-agent switch main && git -C ~/pony-agent pull --ff-only
 git -C ~/pony-agent branch -d feat/B999-my-change
+# 并发 worktree 才需要：
+# git -C ~/pony-agent worktree remove ~/pony-agent-worktrees/B999-other
 ```
 
 ## 被钩子拦下时怎么判断

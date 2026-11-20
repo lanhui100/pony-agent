@@ -15,5 +15,8 @@ jobs:
       - run: bash .meta/gates/ci-verify.sh
       - run: bash .meta/gates/scratch-hygiene.sh && bash .meta/gates/scratch-hygiene.spec.sh
       - run: bash scripts/git-guard.spec.sh
+      # ci-scope 决定「本次改动要不要跑 Rust 全量门」：判错方向等于门禁静默消失，
+      # 故其正负样本必须与门禁本体同批执行（spec 内部在临时仓库里跑，不读真实工作区）。
+      - run: bash scripts/ci-scope.spec.sh
       - run: bash .meta/gates/backlog-gate.sh
       - run: bash .meta/gates/backlog-gate.spec.sh

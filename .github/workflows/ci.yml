@@ -10,7 +10,35 @@ permissions:
   contents: read
 
 jobs:
+  # 变更面判定：单点决定「本次改动是否落在 Rust 编译/测试面内」。
+  # 为什么单独成 job：verify（Windows）与 core-platform-check（Linux/macOS 矩阵）都需要这个
+  # 结论，各算一次 git diff 会漂移。判定逻辑与正负样本在 scripts/ci-scope.mjs +
+  # scripts/ci-scope.spec.sh（spec 由 ponygo-governance 工作流执行，本 job 只消费输出）。
+  # fail-safe 口径：base 解析不了 / 脚本意外 ⇒ needs_rust=true（多跑一次，绝不少跑一次）。
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_rust: ${{ steps.scope.outputs.needs_rust }}
+      scope_reason: ${{ steps.scope.outputs.scope_reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ci-scope 要 diff PR base 与 HEAD；浅克隆拿不到 base 提交 ⇒ 退化成「永远全量」。
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 变更面判定
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE" ]; then BASE="${{ github.event.before }}"; fi
+          node scripts/ci-scope.mjs --base "$BASE" >> "$GITHUB_OUTPUT"
+
   verify:
+    needs: changes
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +51,11 @@ jobs:
           node-version: 22
           cache: npm
 
+      # 以下 Rust 步骤统一挂 needs_rust：纯文档/账本 PR 不该为一次 .md 改动付 Windows
+      # 全量 cargo 构建（实测 32min，见 ADR 2026-11-20-ci-scope-split）。
+      # 「必过」语义不变：job 名仍是 verify、仍必然出现并 success，只是内部跳过编译面。
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: needs.changes.outputs.needs_rust == 'true'
         with:
           # B245：与 rust-toolchain.toml 同值，clippy 门基线按该工具链生成；显式写死避免 action 默认取 latest。
           toolchain: "1.91.1"
@@ -32,6 +64,7 @@ jobs:
       # 缓存必须对齐 AGENT.md 的 target 槽位约定：cargo 操作走
       # cargo:check:shared → --target-dir target-check，而非默认 ./target
       - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.needs_rust == 'true'
         with:
           workspaces: . -> target-check
 
@@ -59,6 +92,7 @@ jobs:
         run: npm run test:unit
 
       - name: Rust 检查（shared 槽位，deny-warnings 与发版构建对齐）
+        if: needs.changes.outputs.needs_rust == 'true'
         env:
           RUSTFLAGS: -D warnings
         run: npm run cargo:check:shared
@@ -68,29 +102,36 @@ jobs:
       # platforms.win32 分册冻结（该分册由 lint-baseline-bootstrap 工作流在 Windows runner
       # 生成，禁止套用 Linux 口径：cfg(windows) 让违例集合不同）。
       - name: Rust 组件（clippy，幂等）
+        if: needs.changes.outputs.needs_rust == 'true'
         run: rustup component add clippy
 
       - name: Clippy 棘轮门 + 门自检（Windows 分册；存量冻结，新增/恶化即红）
+        if: needs.changes.outputs.needs_rust == 'true'
         run: |
           npm run rust:lint:selftest
           npm run rust:lint
 
       - name: Clippy 棘轮门（src-tauri 分册；第二份基线，B244 扩面）
+        if: needs.changes.outputs.needs_rust == 'true'
         run: npm run rust:lint:tauri
 
       # tools/tui-audit/*.py 需要 Pillow（render_ansi.py: from PIL import Image）。
       # Windows runner 预装 Python 但不带 Pillow ⇒ tui_audit_*_regression 4 例因
       # ModuleNotFoundError: No module named 'PIL' 恒红（既有 Windows 可移植性缺口）。
       - name: Python 审计依赖（tools/tui-audit：Pillow + fontTools）
+        if: needs.changes.outputs.needs_rust == 'true'
         run: python3 -m pip install --disable-pip-version-check pillow fonttools
 
       # 首错即停会掩盖整批平台缺口：cargo test 默认首个失败用例即中止，
       # 同 runner 上后续用例根本不会执行，缺口只能靠多轮 CI 逐层剥出。
       # 代价已知：Windows 全量首跑十连红即为代价（B050–B066）。
       - name: Core 单元与集成测试（含 Windows Job 生命周期）
+        if: needs.changes.outputs.needs_rust == 'true'
         run: npm run cargo:test:shared -- --package=pony-agent-core --no-fail-fast
 
   core-platform-check:
+    needs: changes
+    if: needs.changes.outputs.needs_rust == 'true'
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]

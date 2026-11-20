@@ -39,6 +39,7 @@
 ## 3. 本地与 CI 门禁命令速查
 
 - **全量合规自检**：`npm run verify`（依次校验版本同步、决策记录、账本门、前端单测、构建、Rust 检查）
+- **CI 变更面分流**：`.github/workflows/ci.yml` 的 `changes` job 用 `scripts/ci-scope.mjs` 判定——纯文档/账本 PR（`docs/`、`backlog/`、`openspec/`、`.agents/notes/`、`.agents/skills/`、根级 `*.md`）跳过 Rust 全量步骤，其余路径照旧全量跑。口径 fail-safe 到「跑全量」（`.meta/` 下的 markdown 也算代码面）。负样本自检 `bash scripts/ci-scope.spec.sh`，真源 ADR `2026-11-20-ci-scope-split`。
 - **决策记录校验**：`npm run adr:check`（判定真源 `.agents/skills/write-adr/verify-note.sh`，pre-commit 调 `adr-verify.sh`）
 - **版本同步校验**：`npm run version:check`
 - **前端测试**：`npm test`
@@ -52,7 +53,7 @@
 
 多会话同时 AI coding 时，冲突源头不是「谁写错代码」，而是共享索引、共享分支尖端与共享文件。以下四组硬规则无场景例外（决策真源：[ADR 2026-11-18](.agents/notes/implemented/process/2026-11-18-multi-session-git-contract.md)，操作手册：[`git-flow` skill](.agents/skills/git-flow/SKILL.md)）：
 
-1. **一个会话一个 worktree**：`git worktree add -b <类型>/<主题> ~/pony-agent-worktrees/<主题> main`。主工作区不与其他会话共用索引；收口后 `git worktree remove <路径>`。
+1. **写会话隔离（并发才建 worktree）**：单会话串行时直接在主工作区开 `<类型>/<主题>` 分支；**同一时刻 ≥2 个会话要写代码**时，后加入者必须 `git worktree add -b <类型>/<主题> ~/pony-agent-worktrees/<主题> origin/main`，主工作区不与其他会话共用索引，收口后 `git worktree remove <路径>`。判定口径与回退条件见 ADR [2026-11-20-worktree-on-demand](.agents/notes/implemented/process/2026-11-20-worktree-on-demand.md)。
 2. **命名纪律**：分支 `<类型>/<任务号或主题>`，类型 ∈ {feat, fix, chore, docs, refactor, test, perf, build, ci, revert, release, integrate, backup, exp}；提交信息走 Conventional Commits（`fix(tui): 修复焦点丢失`）。
 3. **`main` 只能经 PR 前进**：推特性分支 → 开 PR → CI `verify` 全绿 → **人工点 Merge**。本地 `pre-push`（`scripts/git-guard.mjs`）与远端 ruleset 双重拦截直推与历史改写；灾备确需直推时显式 `PONY_GUARD_ALLOW_MAIN_PUSH=1` 并在提交信息说明理由。
 4. **发版不改写主干**：`npm run release`（本地 bump + commit + tag）→ 走 PR 合并 → `npm run release:push`（只推 tag 触发发布）。普通 PR 用 **Squash**，发版 PR（`chore/release-v*`）用 **Merge commit**，否则 tag 会指向不在 `main` 历史上的提交。
