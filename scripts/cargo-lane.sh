@@ -69,8 +69,22 @@ else
   NICE_VALUE="${PONY_BUILD_NICE:-5}"
 fi
 
-if ! command -v flock >/dev/null 2>&1; then
-  echo "[cargo-lane] fail-closed：缺少 flock（跨输出目录串行化不可用，拒绝无界并发）" >&2
+# ── 跨输出目录串行化：flock 优先，缺失时降级为 mkdir 原子锁 ──────────────────
+# 为什么不再「缺 flock 就拒绝」：macOS 自带环境没有 flock(1)，而 CI 的
+# core-platform-check(macos-latest) 与本机 macOS 开发走的是同一条 lane。
+# 硬拒绝等于「本仓在 macOS 上不可构建」——2026-11-20 PR #34 实测到的正是这个后果
+# （.ps1 收口后 CI 首次真正进入 lane，随即 exit 1）。mkdir 是 POSIX 原子的，
+# 用它实现同一把锁；锁目录内存 pid，用于回收崩溃残留（只删自身 pid 再 rmdir，不递归删）。
+LOCK_IMPL="${PONY_BUILD_LOCK_IMPL:-auto}"
+case "$LOCK_IMPL" in
+  auto)
+    if command -v flock >/dev/null 2>&1; then LOCK_IMPL=flock; else LOCK_IMPL=mkdir; fi ;;
+  flock|mkdir) ;;
+  *) echo "[cargo-lane] 用法错误：PONY_BUILD_LOCK_IMPL 只接受 auto|flock|mkdir，收到 $LOCK_IMPL" >&2; exit 2 ;;
+esac
+
+if [ "$LOCK_IMPL" = "flock" ] && ! command -v flock >/dev/null 2>&1; then
+  echo "[cargo-lane] fail-closed：显式要求 flock 但本机缺少 flock(1)（可用 PONY_BUILD_LOCK_IMPL=mkdir 降级）" >&2
   exit 2
 fi
 
@@ -183,12 +197,57 @@ elif [ -n "$ACCEL_SKIP_NOTE" ]; then
   echo "[cargo-lane] 加速通道：$ACCEL_SKIP_NOTE"
 fi
 
-CMD=(flock "$LOCK" nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
+if [ "$LOCK_IMPL" = "flock" ]; then
+  CMD=(flock "$LOCK" nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
+else
+  CMD=(nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   # 空数组展开可能留下双空格，这里只影响 dry-run 展示
-  printf '%s\n' "${CMD[*]}" | sed 's/  */ /g'
+  if [ "$LOCK_IMPL" = "flock" ]; then
+    printf '%s\n' "${CMD[*]}" | sed 's/  */ /g'
+  else
+    # 无 flock 的平台要如实展示实际用的锁，不能假装有 flock
+    printf 'mkdir-lock %s.d ; %s\n' "$LOCK" "$(printf '%s' "${CMD[*]}" | sed 's/  */ /g')"
+  fi
   exit 0
 fi
 
-exec "${CMD[@]}"
+if [ "$LOCK_IMPL" = "flock" ]; then
+  exec "${CMD[@]}"
+fi
+
+# ── mkdir 锁路径（无 flock 平台）────────────────────────────────────────
+LOCK_DIR="$LOCK.d"
+acquire_mkdir_lock() {
+  local waited=0 stale_pid=""
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    if [ -f "$LOCK_DIR/pid" ]; then
+      stale_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+      if [ -n "${stale_pid:-}" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+        echo "[cargo-lane] 回收陈旧锁：$LOCK_DIR（pid $stale_pid 已不存在）" >&2
+        rm -f "$LOCK_DIR/pid"
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+        continue
+      fi
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+    if [ "$waited" -ge 1500 ]; then
+      echo "[cargo-lane] fail-closed：等待 mkdir 锁 $LOCK_DIR 超过 300s（持有者 pid：${stale_pid:-未知}）" >&2
+      exit 3
+    fi
+  done
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+}
+release_mkdir_lock() {
+  rm -f "$LOCK_DIR/pid"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
+acquire_mkdir_lock
+trap 'release_mkdir_lock' EXIT INT TERM
+"${CMD[@]}"
+rc=$?
+exit "$rc"

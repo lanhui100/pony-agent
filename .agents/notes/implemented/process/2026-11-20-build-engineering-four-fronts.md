@@ -290,3 +290,23 @@ Rust 语言本身，而在本仓的构建设施与门禁缺口。本记录落四
 - **仍未做（显式留账）**：`build-bench.sh` 的 jobs 矩阵尚未在低负载独占窗口跑全量；
   `max_jobs_per_lane = 8` 的取值来自第四轮既有标定，本轮未重新标定。跑法已固化：
   `npm run bench:build -- --jobs 4,8,12`。
+
+### CI 暴露的缺陷（同日修复，PR #34 首轮）
+
+`.ps1` 薄壳化让 CI（`shell: pwsh`）**第一次真正进入 lane**，随即把一条既有缺陷打出来：
+
+- 现象：`core-platform-check(macos-latest)` 与 `(ubuntu-latest)` 双双 fail（55s / 1m6s）。
+- 日志序列：`[invoke-rust-target] 非 Windows 主机 → 转派 node scripts/invoke-rust-target.mjs …`
+  （dispatcher 按预期生效）→ `[cargo-lane] fail-closed：缺少 flock（跨输出目录串行化不可用，拒绝无界并发）` → exit 1。
+- 根因：`cargo-lane.sh` 把 `flock(1)` 当硬依赖。macOS 自带环境没有该命令，而「缺 flock 就拒绝」
+  等价于「本仓在 macOS 上不可构建」。此前 `.ps1` 裸调 cargo（不吃 lane）把这条缺陷遮住了——
+  正是本 PR 要消除的那类漂移。
+
+**修复**：flock 存在时行为完全不变；缺失时降级为 **mkdir 原子锁**（POSIX 通用）——
+锁目录存 `pid`，持有者已消亡则回收陈旧锁，等待 300s 超时 fail-closed(exit 3)；
+`PONY_BUILD_LOCK_IMPL=auto|flock|mkdir` 可显式覆盖，显式要求 flock 但本机缺失时仍 fail-closed(exit 2)。
+dry-run 在 mkdir 模式下如实打印 `mkdir-lock <path>.d`，不假装有 flock。
+
+**收据**：`cargo-lane.spec.sh` 新增 P14（mkdir 锁可见且不假装 flock）/P15（显式 flock 回归保护）/
+P16（非法值 fail-closed）全 PASS；`PONY_BUILD_LOCK_IMPL=mkdir bash scripts/cargo-lane.sh --version`
+→ rc=0 且 `/tmp/pony-agent-build.lock.d` 无残留。

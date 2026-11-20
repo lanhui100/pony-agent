@@ -129,6 +129,24 @@ else
   printf 'SKIP P11-P13 未安装 sccache\n'
 fi
 
+# P14：无 flock 平台降级为 mkdir 锁（dry-run 必须如实展示，不假装有 flock）
+out=$(PONY_BUILD_LOCK_IMPL=mkdir bash "$LANE" --dry-run test -p pony-agent-core 2>&1)
+assert_contains "P14 mkdir 锁可见" "$out" "mkdir-lock /tmp/pony-agent-build.lock.d"
+assert_not_contains "P14 不假装 flock" "$out" "flock /tmp/pony-agent-build.lock"
+
+# P15：显式 flock 且有 flock 时仍是原来的锁（回归保护）
+out=$(PONY_BUILD_LOCK_IMPL=flock bash "$LANE" --dry-run test 2>&1)
+assert_contains "P15 显式 flock 生效" "$out" "flock /tmp/pony-agent-build.lock"
+
+# P16：非法锁实现必须 fail-closed（不静默回落到 auto）
+out=$(PONY_BUILD_LOCK_IMPL=bogus bash "$LANE" --dry-run test 2>&1); code=$?
+if [ "$code" -eq 2 ] && printf '%s' "$out" | grep -qF "只接受 auto|flock|mkdir"; then
+  printf 'PASS P16 非法锁实现 fail-closed（exit 2）\n'
+else
+  printf 'FAIL P16 非法锁实现未 fail-closed（exit %s，输出：%s）\n' "$code" "$out"
+  FAIL=1
+fi
+
 if [ "$FAIL" -ne 0 ]; then
   echo "cargo-lane.spec: FAILED"
   exit 1
