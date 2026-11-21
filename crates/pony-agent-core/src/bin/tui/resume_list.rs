@@ -1,14 +1,13 @@
 //! `/resume` 列表行渲染 + 归档动作的**纯函数契约层**（C1~C5）。
 //!
 //! **契约真源 = `.dev-team/contract-matrix-tui-resume-archive.md`**（C1 行格式 / C2 可见性 /
-//! C3 空态计数 / C4 跨区提示 / C5 归档三态；验收断言 T1~T6）。本文件在冻结期只放**空桩**：
-//! 每个函数体 = `todo!()`，实现归 Executor；任何逻辑都不得写在这里以外的"顺手位置"。
+//! C3 空态计数 / C4 跨区提示 / C5 归档三态；验收断言 T1~T6）。行格式/可见性/裁决逻辑**只**
+//! 落在本模块（纯函数），渲染与事件循环的接线在 `tui.rs`；不得在别处另写一份行格式。
 //!
 //! 纯度约束（铁律）：本模块**不得**触终端、时钟、文件、环境变量或任何全局状态；
 //! 输入即全部信息，输出即结果（可用 `resume_row_parts` 在无 TTY 环境逐列断言）。
-//!
-//! 过渡豁免：契约冻结期这些函数尚无调用者（`todo!()` 也不消费入参），接线完成后应删除本行。
-#![allow(dead_code, unused_variables)]
+
+use super::{ellipsize_width, is_main_session_id, str_width};
 
 /// 单行 `/resume` 渲染的**全部**输入（数据面 + 视图面 + 当前工作区基准）。
 ///
@@ -49,6 +48,22 @@ pub struct ResumeRowParts {
     pub right: String,
 }
 
+/// 去空白后仍非空的 `Option<&str>`（C1/C4 的「非空」口径统一走这里，避免两处分歧）。
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// C1 短 id：`session_id` 按 `-` 末段再取前 8 个 **char**（不按字节，CJK 不被切半个字）。
+fn short_session_id(session_id: &str) -> String {
+    session_id
+        .rsplit('-')
+        .next()
+        .unwrap_or(session_id)
+        .chars()
+        .take(8)
+        .collect()
+}
+
 /// C1：把一行 `/resume` 会话投影为「左列 + 右列」，宽度单位为**列**（宽字符按 2 计）。
 ///
 /// 契约（逐条对应 `.dev-team/contract-matrix-tui-resume-archive.md` C1）：
@@ -62,10 +77,45 @@ pub struct ResumeRowParts {
 ///   `width.saturating_sub(宽度(right) + 1)` 收口，溢出统一以 `…` 收尾；
 /// - 不变量：`宽度(left) + 1 + 宽度(right) ≤ width`（`right` 非空时）；`width == 0` ⇒ 两者皆空；
 ///   任意 `width` 与任意超长标题（>200 字）**不得 panic、不得越界**。
-///
-/// 待实现（Executor）：当前为冻结空桩。
 pub fn resume_row_parts(input: &ResumeRowInput<'_>, width: usize) -> ResumeRowParts {
-    todo!()
+    // C1：`width == 0` ⇒ 左右皆空（不 panic、不越界）。
+    if width == 0 {
+        return ResumeRowParts::default();
+    }
+
+    // 右列 = 时间打头；仅 active 追加「 · 当前」、仅 selected 追加「 · <短id>」，顺序固定。
+    // 轮次（`N 轮`）**不再进入**右列（旧实现作废，回归点见 T1）。
+    let mut right = input.updated_at.to_string();
+    if input.is_active {
+        right.push_str(" · 当前");
+    }
+    if input.is_selected {
+        right.push_str(" · ");
+        right.push_str(&short_session_id(input.session_id));
+    }
+
+    // 跨区前缀：两个 id 去空白后都非空且不相等时才出现，`label` 空白回落 `workspace_id`。
+    let mut left = String::new();
+    if let (Some(workspace_id), Some(current_id)) = (
+        non_blank(input.workspace_id),
+        non_blank(input.current_workspace_id),
+    ) {
+        if workspace_id != current_id {
+            let label = non_blank(input.workspace_label).unwrap_or(workspace_id);
+            left.push_str(label);
+            left.push_str(" · ");
+        }
+    }
+    left.push_str(input.title);
+
+    // 截断顺序是契约：右列先按 `width - 2` 收口，左列再按「剩余预算 - 1 个间隔」收口，
+    // 保证 `宽度(left) + 1 + 宽度(right) ≤ width`。
+    let right_budget = width.saturating_sub(2);
+    let right = ellipsize_width(&right, right_budget);
+    let left_budget = width.saturating_sub(str_width(&right) + 1);
+    let left = ellipsize_width(&left, left_budget);
+
+    ResumeRowParts { left, right }
 }
 
 /// C2：单行 `/resume` 可见性谓词（「这一行该不该出现在列表里」）。
@@ -74,15 +124,15 @@ pub fn resume_row_parts(input: &ResumeRowInput<'_>, width: usize) -> ResumeRowPa
 /// `is_main_session_id(session_id) && !continuation_only && (show_archived || !archived)`。
 /// - `subagent-*` / `teammate-*` 前缀恒不可见（空 id 按主会话处理，沿用 core 口径）；
 /// - 只减行不改序：调用方按输入序（`updatedAt desc`）输出，**禁止**在本函数内排序/分组/去重。
-///
-/// 待实现（Executor）：当前为冻结空桩。
 pub fn session_visible(
     session_id: &str,
     archived: bool,
     continuation_only: bool,
     show_archived: bool,
 ) -> bool {
-    todo!()
+    // 口径逐字照契约 C2：主会话 && 非续轮碎片 && (显式看归档 || 未归档)。
+    // 只做判定不做排序/分组/去重 —— 顺序由调用方按输入序保持。
+    is_main_session_id(session_id) && !continuation_only && (show_archived || !archived)
 }
 
 /// C4：切换工作区后的提示文案（`None` = 不需要提示）。
@@ -92,15 +142,19 @@ pub fn session_visible(
 /// `Some("已切换到工作区 <label>（<root_path>）")`；否则 `None`。
 /// `<label>` = `label`（去空白后非空）否则回落 `new_id`；`root_path` 原样内嵌。
 /// `old_id == None` 视为与任何有效 `new_id` 不相等。
-///
-/// 待实现（Executor）：当前为冻结空桩。
 pub fn workspace_switch_notice(
     old_id: Option<&str>,
     new_id: Option<&str>,
     label: Option<&str>,
     root_path: &str,
 ) -> Option<String> {
-    todo!()
+    // `new_id` 无效（None / 空白）⇒ 无从提示；`old_id == None` 视为与任何有效新 id 不相等。
+    let new_id = non_blank(new_id)?;
+    if non_blank(old_id) == Some(new_id) {
+        return None;
+    }
+    let label = non_blank(label).unwrap_or(new_id);
+    Some(format!("已切换到工作区 {label}（{root_path}）"))
 }
 
 /// C5：`/archive` 的动作裁决（三态）。
@@ -123,8 +177,13 @@ pub enum ArchivePlan {
 /// 3. 否则（`None` 或全空白）⇒ [`ArchivePlan::ArchiveCurrentThenRotate`]。
 ///
 /// 阻塞态必须由调用方给出可见回执，不得静默吞掉。
-///
-/// 待实现（Executor）：当前为冻结空桩。
 pub fn archive_plan(is_streaming: bool, turn_in_flight: bool, arg: Option<&str>) -> ArchivePlan {
-    todo!()
+    // 阻塞优先：参数不参与判定（`/archive <id>` 同样被拦，C5 第 1 条）。
+    if is_streaming || turn_in_flight {
+        return ArchivePlan::BlockedDuringStreaming;
+    }
+    match non_blank(arg) {
+        Some(target) => ArchivePlan::ArchiveOther(target.to_string()),
+        None => ArchivePlan::ArchiveCurrentThenRotate,
+    }
 }

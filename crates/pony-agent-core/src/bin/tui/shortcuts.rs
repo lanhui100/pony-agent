@@ -110,6 +110,7 @@ pub const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
             ShortcutItem { keys: "Ctrl+M", description: "同 Ctrl+R（仅 kitty 协议终端可上报）" },
             ShortcutItem { keys: "Ctrl+↑", description: "子会话内返回主会话" },
             ShortcutItem { keys: "Ctrl+← / Ctrl+→", description: "切换子智能体会话" },
+            ShortcutItem { keys: "Ctrl+X", description: "归档当前会话（同 /archive；/resume 面板内用 d 归档 · u 取消归档 · a 显示归档）" },
             ShortcutItem { keys: "Esc", description: "关闭当前面板 / 取消选择" },
             ShortcutItem { keys: "Esc Esc（非流式）", description: "双击打开撤回（选轮次 → 选范围）" },
             ShortcutItem { keys: "Ctrl+G", description: "目标面板（Esc 或再按 Ctrl+G 关闭）" },

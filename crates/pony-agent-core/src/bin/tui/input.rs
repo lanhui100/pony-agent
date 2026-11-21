@@ -45,14 +45,11 @@ pub fn is_permission_mode_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bo
 /// 当前会话（`archive_plan(.., None)`，归档后换新 session_id，见 C5）；
 /// `InteractionMode::SelectingSession` 面板内**不生效**（面板内 `d`/`u` 归档/取消归档、
 /// `a` 显示归档）——同一快捷键不在两种模态下漂移语义。
-///
-/// 待实现（Executor）：当前为冻结空桩，函数体只有 `todo!()`。
-#[allow(dead_code, unused_variables)]
 pub fn is_archive_shortcut(
     code: crossterm::event::KeyCode,
     modifiers: crossterm::event::KeyModifiers,
 ) -> bool {
-    todo!()
+    modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('x')
 }
 
 pub fn composer_enter_action(key: &crossterm::event::KeyEvent) -> ComposerEnterAction {

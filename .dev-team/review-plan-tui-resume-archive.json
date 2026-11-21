@@ -1,0 +1,167 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "1580f4ff-c76f-42d0-a1ba-d13fb413d7ca",
+    "fresh_context": true
+  },
+  "executed_by": "1580f4ff-c76f-42d0-a1ba-d13fb413d7ca",
+  "reviewed_commit": "ed3b1a89",
+  "attestation": {
+    "self_signed": false,
+    "note": "独立 subagent（无 Lead 上下文）对冻结契约 + ADR + 冻结测试做方案逆向对抗审查；行号基线 ed3b1a89，工作树并发修改可能使行号漂移，按符号名定位。"
+  },
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/resume_list.rs",
+    "crates/pony-agent-core/src/bin/tui/input.rs",
+    "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+    ".dev-team/contract-matrix-tui-resume-archive.md",
+    "crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs",
+    "crates/pony-agent-core/tests/tui_resume_archive_adversarial.rs",
+    ".agents/notes/implemented/feature/2026-11-21-tui-resume-list-and-archive.md"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6789,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 C1 的 width 未绑定到真实面板宽度：会话面板恒 panel_rect(84,...)（tui.rs:6789/6812），body=inner.width=84-2=82 列（draw_panel tui.rs:4432-4490），而决策记录第 32 行冻结 width=min(96, 终端宽-4)：96 列终端 → width=96>82。按 resume_row_parts(width=96) 生成的行（right=29 列时 left_w=64，used=2+64+29=95）在 Paragraph(body.width=82) 里被右缘裁掉，整段 `· 当前 · 短id`/时间不可见。核: sed -n '6789,6814p' crates/pony-agent-core/src/bin/tui.rs; sed -n '31,32p' .agents/notes/implemented/feature/2026-11-21-tui-resume-list-and-archive.md",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/resume_list.rs",
+      "line": 41,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 C1 的 `…` 在接线后被 list_row 吃掉：resume_list.rs:41-42 明确要求渲染层复用 list_row(selected,&left,&right,width)，而 list_row 先 right_txt=ellipsize_width(right,width-8)（tui.rs:4945）、再 left_w=width-(3+right_w)（4947）、最后 truncate_width(left,left_w)（4948，不补省略号）。复现：width=82、title=40 汉字、right=`11-21 14:05`(11) → C1 给出 70 列含 `…` 的 left；list_row 再截到 68 列，`…` 正好落在第 69-70 列被切掉 ⇒ 屏幕上是无省略号的硬切，且比契约少 2 列。核: sed -n '4944,4961p' crates/pony-agent-core/src/bin/tui.rs; sed -n '114,139p' crates/pony-agent-core/src/bin/tui/text.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 1261,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 C2/C3 需要的 continuation_only 在冻结接口里不存在且不可追加：SessionItem（tui.rs:1261-1275）只有 id/title/updated_at/turn_count/workspace_id/workspace_label/archived；/resume 分支（tui.rs:11296-11322）在 open_session_selector 之前就把 `!s.continuation_only` 与 is_main 过滤掉并丢弃 raw 列表 ⇒ render 层既拿不到续轮碎片行，也算不出 C3 的 `all`（契约第 41 行要求含续轮碎片/队友会话）。而冻结测试以无 `..` 的穷举结构体字面量构造 SessionItem（tests/tui_resume_archive_acceptance.rs:148-158、tests/tui_resume_archive_adversarial.rs:120-130），Executor 一旦加字段即编译失败（且冻结测试禁改）。核: grep -n 'continuation_only' crates/pony-agent-core/src/bin/tui.rs; sed -n '148,158p' crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 10128,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言选中索引空间冲突会恢复到错会话/panic：render（6801-6806）在 C2 过滤后的行号上证 `selected` 并 clamp，Enter（10128）却用同一个 selected_session_index 直接下标 **原始** state.session_list（无 clamp、无映射）。反例：raw=[已归档A, 正常B]，show_archived=false，selected=0 → 高亮落到被隐藏的 A（屏上无高亮），按 Enter 恢复的是归档会话 A；若 d/u 真删/重拉列表使 index==len → 越界 panic。契约 C2/C6 与 T1~T8 对索引空间零规定零断言。核: sed -n '10115,10150p' crates/pony-agent-core/src/bin/tui.rs; sed -n '6800,6806p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-resume-archive.md",
+      "line": 60,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言无参 /archive 只抄了 /clear 三步、漏了 Ask 收口：契约第 60-61 行只要求 new_session_id+reset_session_scope+goal cancel_for/reset_for；而 /clear 在同一位置还做 state.pending_request=None、close_pending_request_overlay(state)、sync_pending_control_request（tui.rs:11467-11489，注释明写 ADR 0074「旧会话的 Ask 面板不得跟到新会话」）。归档本身会 GC 掉该会话的 pending Ask（workspace_commands.rs:89-99 → gc_orphan_asks/close_pending_asks_of_session），reset_session_scope 只清 pending_request 不清覆盖层（tui.rs:2065 有、mode 不变）⇒ 新会话残留指向已被回收 Ask 的面板，用户作答必然 CAS 失败。核: sed -n '11467,11490p' crates/pony-agent-core/src/bin/tui.rs; sed -n '80,101p' crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-resume-archive.md",
+      "line": 71,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言面板 `d` 与 C5 的归档语义分叉：C5（第 60-62 行）规定无参归档当前会话必须换新 session_id，C6（第 71 行）的 `d` 却只归档高亮行、不换 id、不复位作用域——高亮行恰是当前会话时（行上带 `· 当前`），当前会话被置 archived 后按 C2 默认从列表消失，而 TUI 仍在往它写；同时 C5 的「任何参数都拒绝」与面板 d 也不一致。契约未定义 d/u 作用于当前会话的行为，T7/T8 只测纯函数与命令表，零接线断言。核: sed -n '52,74p' .dev-team/contract-matrix-tui-resume-archive.md; grep -n 'archived' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-resume-archive.md",
+      "line": 28,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言 Ctrl+X / `/archive <id>` 在子会话里会归档一个 /resume 永远看不见的会话：C2 第 28-31 行把 subagent-*/teammate-* 恒判 false（T3 亦断言恒 false），而 C6 第 69 行把 Ctrl+X 定义为「Normal 模式全局可用」、C5 无模态/子会话守卫。进入队友会话（/agents ↵ 或 Ctrl+←/→，tui.rs:8920-8947）后按 Ctrl+X → ArchiveCurrentThenRotate 归档该 teammate 会话并换掉主 session_id，返回路径 return_session_id/sub_session 未复位；该归档行在 TUI 内无任何取消归档入口（`a` 也过滤掉它）。核: grep -n 'fn enter_sub_session_at' -A 30 crates/pony-agent-core/src/bin/tui.rs; sed -n '25,35p' .dev-team/contract-matrix-tui-resume-archive.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-resume-archive.md",
+      "line": 43,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 C3/T4 存在不可同时成立的数字约束：第 41 行定义 all=数据面总行数（含归档行），第 43 行要求 h>0 时显示「归档 h 条已隐藏」，而 T4（第 83 行）要求「归档 {h} 条已隐藏」且 `N == cur == all == 0` 时数字自洽——h>0 ⇒ all>=h>0，两个条件互斥；同时第 40 行定本文案在 all>0 时仍写「暂无历史会话（…全部 5 条）」，本身即自相矛盾文案。核: sed -n '37,44p' .dev-team/contract-matrix-tui-resume-archive.md; sed -n '83p' .dev-team/contract-matrix-tui-resume-archive.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs",
+      "line": 520,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 T4 是用空 Vec 自证的假绿：全仓唯一的空态用例只传 open_session_selector(Vec::new()) 并断言 0/0（第 520-540 行），任何「打印 items.len() 两次」的实现都绿；C2 过滤后的可见计数、cur≠all、h>0、仅归档行（N=0 但 all>0）、`（{sel+1}/{N}）` 分支全部零断言。t4_panel_title 的夹具三行全可见且同工作区（第 489-493 行），也无法发现「用原始行数当 N」。核: sed -n '484,540p' crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs",
+      "line": 662,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 T7 的「接线断言」只有文字没有机器门：contract 第 86 行把接线列为 review 级，冻结用例 t7 只测 is_archive_shortcut 纯函数（662-688 行），Ctrl+X 是否只在 Normal 分支派发、面板内是否确实不生效，零断言；本仓已有可复制的机械先例：tests/tui_ctrl_o_global_shortcut.rs:74-112 用 include_str! 做源序护栏证明 Ctrl+O 分支早于所有模态分支。按 AGENTS.md 常载命约 2（机械可查的承诺必须配非零退出命令）此处欠一条门。核: sed -n '74,112p' crates/pony-agent-core/tests/tui_ctrl_o_global_shortcut.rs; sed -n '659,689p' crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 8865,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 C4 没冻结调用点，两个自然落点都会误报：switch_session_scope 自述是 `/resume`+队友进入/左右切换+Ctrl+↑ 共用的唯一收口（tui.rs:8865-8890），接在这里会让队友会话切换也弹「已切换到工作区…」；接在 hydrate_state_from_session（9073）又会命中 `pony resume <id>` 启动路径（7863-7870 同样 hydrate），启动即误报。C4 只要求「hydrate 之后比对 old/new」，而唯一合规点是 SelectingSession 的 Enter 分支（10140-10147），契约未写；T5 只测纯函数，接线错误零拦截。核: sed -n '8865,8890p' crates/pony-agent-core/src/bin/tui.rs; sed -n '7860,7875p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 4026,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言 C1 前缀/C4 提示与真实切换语义不一致：恢复时只认**已注册**的 workspace id，未注册/空/死 id 一律回落 startup 绑定（resolve_resumed_workspace_binding，tui.rs:4026-4055）。因此会话 workspace_id 是死 id 时，C1 仍按 `Some!=Some` 画跨区前缀、C4 的 old!=new 也返回 Some，但 hydrate 后 active_workspace_id 不变（等于没切）⇒ 列表预告了不会发生的切换；C1/C4 都没有 registered_ids 这一输入面。核: sed -n '4020,4060p' crates/pony-agent-core/src/bin/tui.rs; sed -n '45,50p' .dev-team/contract-matrix-tui-resume-archive.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-resume-archive.md",
+      "line": 12,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 `a` 打开归档视图后无法分辨归档行：C1 第 11-12 行把右列 token 白名单限死为「时间 [+`· 当前`][+`· 短id`]」，全契约没有任何 `· 归档` 标记，show_archived=true 时归档行与普通行文本完全一致；而 h 只在**空态**显示（第 43 行），非空列表下用户既不知有 h 行被隐藏，也认不出哪些是归档行，`u` 只能盲按。核: grep -rn '归档' .dev-team/contract-matrix-tui-resume-archive.md | sed -n '1,20p'",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui/text.rs",
+      "line": 52,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言宽度口径与终端不一致、且 T1 用同一把尺自证：char_width 只把 0x1F300..=0x1F64F / 0x1F900..=0x1F9FF 等区间算 2 列（text.rs:52-76），U+1F680 🚀（EAW=W，终端/unicode-width 占 2 列）落在区间外按 1 列；`\"🚀\".repeat(30)` 被 str_width 报 30 列、实际占 60 列，右列被推出面板。冻结测试的 assert_row_budget 全部用 tui::str_width（acceptance.rs:73-88），与 SUT 同尺 ⇒ 永远绿。核: python3 -c \"import unicodedata as u;print(hex(0x1F680),u.east_asian_width(chr(0x1F680)))\"; sed -n '52,80p' crates/pony-agent-core/src/bin/tui/text.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/session/store.rs",
+      "line": 2422,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言 ArchiveOther 的失败面没有回执规定：archive_session 对未知 id 返回 Err(\"会话不存在：{id}\")（store.rs:2419-2432），而 C5 只规定「阻塞态必须给用户可见回执」（contract:63），对 `/archive <错 id>`/`d` 失败、以及 `/archive <当前 id>`（既不换 id 又归档活会话）均无行为定义；实现若 `let _ = ...` 就静默无反馈。核: sed -n '2417,2432p' crates/pony-agent-core/src/agent/session/store.rs; sed -n '52,64p' .dev-team/contract-matrix-tui-resume-archive.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2038,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言归档成功没有可见回执、且瞬间像「删了」：C5 只要求阻塞态回执（contract:63），无参归档走 reset_session_scope（tui.rs:2037-2038 起手就 messages.clear() 且 status_text=\"Ready\"），Ctrl+X 一下正文全清、只剩空白新会话，没有任何「已归档 <标题>，已开新会话」提示（对照 /clear 明写 set_status_notice(\"上下文已清空\")，tui.rs:11489）。用户可见后果：把归档误读成删除。核: sed -n '2035,2045p' crates/pony-agent-core/src/bin/tui.rs; sed -n '11486,11491p' crates/pony-agent-core/src/bin/tui.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-resume-archive.md",
+      "line": 49,
+      "rule": "SECURITY",
+      "counterexample_cmd": "断言 C4 明文要求「root_path 原样内嵌（不校验、不转义）」= 冻结一条 ANSI/OSC 注入通道：目录名可含 ESC（如 $'/tmp/a\\x1b]0;pwned\\x07'），C4 把 root_path 与 label 原样拼进提示串（第 49 行），C1 也把未净化的 workspace_label 拼进行文本；ratatui 只写 cell symbol，不做控制字符转义 ⇒ 终端可被改标题/写剪贴板。AT-3 只断言「不 panic+不越界」，不查净化。核: mkdir -p $'/tmp/ws\\x1b]0;pwned\\x07' && ls -b /tmp/ws*; sed -n '46,50p' .dev-team/contract-matrix-tui-resume-archive.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs",
+      "line": 81,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "断言 d/u 在 TUI 主线程做「全量装载 + 全仓写盘」：archive_session 取 sessions_rwlock.write()（workspace_commands.rs:81-88）→ store.archive_session 先 ensure_session_hydrated(session_id)（把该会话整段历史装进内存，稀疏模式下按 lazy 集合累积）再 persist_session_meta_command + save_to_backend（store.rs:2771-2775 全量提交），全部同步发生在按键处理里；连续按 d 归档 N 条 = N 次历史反序列化 + N 次全库写盘，事件循环无 busy 提示、无超时。核: sed -n '80,101p' crates/pony-agent-core/src/agent/control_plane/workspace_commands.rs; sed -n '2417,2432p' crates/pony-agent-core/src/agent/session/store.rs; sed -n '2771,2776p' crates/pony-agent-core/src/agent/session/store.rs",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".dev-team/contract-matrix-tui-resume-archive.md",
+      "line": 69,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言 C6 自相矛盾：第 69 行写「Normal 模式（输入框态）全局可用」，T7（第 86 行）又写「Ctrl+X 只在 Normal 分支派发」；而 InteractionMode::PlanMode 同样是输入框态（plan_mode_consumes_key 之外照常打字），按「只在 Normal 分支」实现则计划模式里 Ctrl+X 不归档，按「输入框态全局」实现则必须进 PlanMode 分支——两读法行为不同，契约未裁决，冻结测试只测纯函数无法定案。核: grep -n 'PlanMode' crates/pony-agent-core/src/bin/tui.rs | head -20; sed -n '65,74p' .dev-team/contract-matrix-tui-resume-archive.md",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": ".agents/notes/implemented/feature/2026-11-21-tui-resume-list-and-archive.md",
+      "line": 3,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言决策记录状态轴失真：文件第 3 行 `Status: implemented`，但实现仍是 5 个 todo!() 空桩（resume_list.rs:68/85/103/129、input.rs:55），红相收据自己记着 EXIT=101。.agents/notes/AGENTS.md 明写「状态轴失真零容忍：未实施的不进 implemented」，adr-verify 门对此无感。核: grep -n 'todo!()' crates/pony-agent-core/src/bin/tui/resume_list.rs crates/pony-agent-core/src/bin/tui/input.rs; sed -n '1,4p' .agents/notes/implemented/feature/2026-11-21-tui-resume-list-and-archive.md",
+      "severity": "ADVISORY"
+    }
+  ]
+}
