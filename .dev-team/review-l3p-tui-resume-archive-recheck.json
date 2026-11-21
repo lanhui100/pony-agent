@@ -1,0 +1,64 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3p-recheck-tui-resume-archive",
+    "fresh_context": true
+  },
+  "executed_by": "l3p-recheck-tui-resume-archive",
+  "reviewed_commit": "6180b2343ca1b478d2efbddff2a8e9987dbaa788",
+  "attestation": {
+    "self_signed": false,
+    "note": "独立只读复审（无 Lead/Executor 上下文），只做验证、不重开全面审查。审查起点 HEAD=469d4c0cf7fee70f8a8fcbf00ecee503e39771dc；审查期间 HEAD 被推进到 6180b234（chore(release) 收口回执，`git diff --stat 469d4c0c 6180b234` 仅 .dev-team/state.json + backlog 账本 + docs/release/evidence，未触 crates/）⇒ Rust 源面与代码修复提交 469d4c0c 逐字节相同，门禁与行号证据对最终 HEAD 同样成立。工作树全程干净（`git status --porcelain` 为空）。唯一写入 = 本 JSON。构建纪律：一律 `bash scripts/cargo-lane.sh ...`（全局 flock，等锁正常）；为消除「暖缓存不重放 warning」的疑点，先 `cargo-lane clean -p pony-agent-core --target-dir target-check`（仅可再生产物，非源码）再 check，使 rustc 真正重编译。上轮 1×BLOCKING（lint 门）+ 3×ADVISORY（流式 /archive <id> 入队、/archive <当前 id> 未拒、show_archived 未复位）逐条关闭，证据见六问与下方门禁收据。",
+    "gate_receipts": {
+      "rust_lint": "npm run rust:lint → EXIT 0。尾部：`[clippy-baseline] 扫描：pony-agent-core（--lib --bins）@linux  表=.meta/lints/lints.toml#0a03b8cf4f93  toolchain=clippy 0.1.91` / `[clippy-baseline] 实测 3858 / 基线 3870　新增/恶化 0　可瘦身 9` / `[clippy-baseline] PASS：无新增债（存量见 scripts/clippy-baseline.json）`。可瘦身 9 条均为存量下调提示（terminal.rs/task_center.rs/control_plane/mod.rs/tui.rs/text.rs），不构成新增或恶化。",
+      "cargo_check": "bash scripts/cargo-lane.sh check -p pony-agent-core --bin pony --target-dir target-check → EXIT 0。冷编尾部：`[cargo-lane] load 熔断：通过（load1=4.26 ≤ 上限 24.0）` / `Compiling pony-agent-core v0.1.174 (/home/dm/pony-agent/crates/pony-agent-core)` / `Finished dev profile [unoptimized] target(s) in 44.96s`；整份日志 `grep -ci warning` = 0。最终 HEAD 上复跑：EXIT 0、warning 计数 0。"
+    }
+  },
+  "verdict": "PASS",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/resume_list.rs",
+    "crates/pony-agent-core/src/bin/tui/tests/resume_row_layout_tests.rs",
+    ".dev-team/nfr-baseline.json"
+  ],
+  "six_questions": [
+    {
+      "key": "external_call_timeout_ms",
+      "baseline": "3000（一次外部往返上限；例外表只覆盖 LLM 上游 attempt/stream/retry）",
+      "evidence": "本轮只做 clippy 收口 + 分支守卫 + 视图位复位，无任何新增外部往返。新增行对 IO 形态零命中：`git diff 381802f3 HEAD -- crates/ | grep '^+' | grep -nE 'spawn|reqwest|http|std::fs|File::|env::var'` → 空。新增的 ResumeRowFlags/SelectionReset/ArchiveToggle 是纯枚举/结构体（tui.rs:4979-4985、8986-9006）；apply_archive_plan 只把 `turn_in_flight: bool` 换成 `&TurnLoopInFlightRegistry`（tui.rs:9216-9224，读取同源 `is_turn_loop_in_flight`），归档动作仍只经本地 HostControlPlane（archive_one_session tui.rs:9118-9165）；两条新增拒绝分支（tui.rs:9237-9250）在取任何锁/发起任何 turn 之前 return。故 3000ms 基准无适用面。",
+      "verdict": "N-A"
+    },
+    {
+      "key": "logging",
+      "baseline": "logging.format=json；trace_id 必在键（trace_id_required=true）；禁止吞异常/泄漏正文与凭据",
+      "evidence": "结论不变：归档两条执行路径仍走唯一 archive_one_session（tui.rs:9118-9165），成功/失败两分支各写 tui_queue_log + 状态行，Result 未被 `let _ =` 吞，extras 仅 action/target_session_id/error。本轮新增的拒绝/阻塞回执全部**用户可见**、无静默：阻塞回执走 `system_message` 通道（tui.rs:9228-9233，文案「本轮结束后可用 /archive」，因流式期 status_notice 被 P-5 抑制故用 queue_notice）；`/archive <当前 id>` 与非主会话拒绝走 set_status_notice（tui.rs:9238-9239、9243-9245）。拒绝分支不写结构化日志不构成吞异常：它们不是失败路径，且回执已落状态行/系统消息，与 R6 面板守卫（tui.rs:9226-9229 同一文案族）一致；本次 diff 未新增任何记录正文/prompt/token/apiKey 的字段。",
+      "verdict": "PASS"
+    },
+    {
+      "key": "resource_release",
+      "baseline": "file_handles / network_connections / subagent_processes / stream_response_body_dropped_before_retry",
+      "evidence": "无新增资源面：本轮新增/改写的函数（resume_row_line 的 ResumeRowFlags 化 tui.rs:4996-5003、refresh_session_selector 的 SelectionReset 化 tui.rs:9035-9095、archive_one_session 的 ArchiveToggle 化 tui.rs:9118-9165、toggle_archived_session 的按 id 重锚 tui.rs:9183-9209、apply_archive_plan tui.rs:9216-9255）全为同步内存操作 + 既有 control-plane 调用，不 open 文件/连接、不 spawn 线程或子进程（同上 grep 零命中）。apply_archive_plan 改成 `&TurnLoopInFlightRegistry` 只是借用既有登记表（调用点 tui.rs:10518-10523、11826-11831 传引用），不留悬挂句柄；toggle_archived_session 新增的只是索引重算（按 id position，tui.rs:9196-9206）。新增单测 resume_row_layout_tests.rs 纯渲染、无 IO。",
+      "verdict": "PASS"
+    },
+    {
+      "key": "concurrency_lock",
+      "baseline": "{type: mutex, timeout_ms: 2000}；重复归档必须幂等",
+      "evidence": "锁面未变：归档仍只经 control-plane 的 sessions_rwlock 单次 write（workspace_commands.rs archive_session/unarchive_session，语句末释放 guard），刷新另取读锁；本轮新增的判断（目标==当前会话 tui.rs:9237、非主会话 tui.rs:9242）在调用 archive_one_session **之前**完成，不持任何锁、不引入嵌套锁序。turn_in_flight 的读取改为传 `&TurnLoopInFlightRegistry` 在函数内单次读取（tui.rs:9223），与其它会话切换守卫同源，消掉了调用点各自计算 bool 的分叉，属收敛而非新增并发面。store 层重复归档仍幂等（no-op Ok），面板 d/u 连按的「归档到邻行」问题由按 id 重锚修复（tui.rs:9196-9206），不改锁语义。",
+      "verdict": "PASS"
+    },
+    {
+      "key": "config_selfcheck",
+      "baseline": "无新增配置项 / 无需 .env.example 同步（本变更预期无）",
+      "evidence": "无配置面变更：`git diff 381802f3 HEAD --stat` 仅 tui.rs(+217/-61 净)、tui/resume_list.rs(+8，两处 #[expect] 注解)、tui/tests/resume_row_layout_tests.rs(新增 97) 三个 Rust 文件，未触 .env.example / Cargo.toml / clippy.toml / feature 表；新增行无 env::var。`show_archived_sessions` 仍是运行时视图位（默认 false），本轮只增加两处复位（tui.rs:2802、11838），不落盘、不新增持久化键。clippy 侧未改阈值（lints.toml 指纹 0a03b8cf4f93 未变），冻结契约签名用 `#[expect(reason=...)]` 局部豁免（resume_list.rs:127-131、184-188）而非放宽全局阈值。",
+      "verdict": "PASS"
+    },
+    {
+      "key": "contract_compat",
+      "baseline": "pub 字段新增与命令表新增不得破坏既有消费方（bin 目标 + 仓内测试 + 渲染/补全消费方）",
+      "evidence": "复核结论仍 PASS，且本轮修复对契约面是**零变更**：`git diff 381802f3 HEAD -- crates/pony-agent-core/src/bin/tui.rs | grep -c AVAILABLE_COMMANDS` = 0（命令表未增删）；SessionItem/ResumeRowInput 的 pub 字段未动（新增类型 ResumeRowFlags/SelectionReset/ArchiveToggle 全为私有，tui.rs:4979-4985、8986-9006）；冻结验收面直接调用的两个签名 `session_visible`/`archive_plan`（resume_list.rs:131-141、188-197）保持原入参，仅加 `#[expect(clippy::fn_params_excessive_bools, reason=「契约 C2/C5 签名由冻结验收测试直接调用（T3/T6）」)]` ⇒ 冻结测试不改一行即可编译，避免「为过 lint 而破红相锚定」。行为面只做收紧，不放宽：①流式期 `/archive <id>` 由 QueueSubmit 改判 Forward（tui.rs:11551-11558，`archive_command_arg(&composer_text).is_some()` 进命令分发白名单），落到原 Enter 分发（tui.rs:11824-11832）→ archive_plan 阻塞优先（resume_list.rs:188-192）→ 回执「本轮结束后可用 /archive」（tui.rs:9228-9233），不入队、不清输入以外的副作用；②ArchiveOther 分支双重拒绝（当前 id tui.rs:9237-9240；`!is_main_session_id` tui.rs:9242-9245，前缀真源 id.rs:25-26/86-89/103-108 = subagent-/teammate-）；③`/resume` 打开与 cancel_session_selector 双复位 show_archived_sessions=false（tui.rs:11838、2802）。新增 `#[cfg(test)] #[path=「tui/tests/resume_row_layout_tests.rs」]`（tui.rs:13971-13973）位于 bin 内单测面、非 tests/** 冻结验收面，且断言为真实行宽等值（38/78/94/118 内在 80/120 列终端两档）。",
+      "verdict": "PASS"
+    }
+  ],
+  "findings": []
+}
