@@ -277,6 +277,20 @@ function guardPrePush() {
   const allowMainPush = process.env[ALLOW_PROTECTED_PUSH_ENV] === "1";
 
   for (const { localRef, localSha, remoteRef, remoteSha } of refs) {
+    // 0) tag 推送：发版流程（`npm run release:push` → `git push origin v<version>`）就是推 tag，
+    //    分支命名纪律（<类型>/<主题>）对它不适用——此前这里把 `refs/tags/v0.1.201` 当分支名判红，
+    //    导致「Linux 上 tag 永远推不出去、发版断裂」。tag 只保留一条硬约束：不许改写远端已有 tag。
+    if (remoteRef.startsWith("refs/tags/")) {
+      const tagName = remoteRef.replace(/^refs\/tags\//, "");
+      if (objectExists(remoteSha) && remoteSha !== localSha) {
+        violations.push(
+          `拒绝改写远端已有 tag: ${tagName}（${remoteSha.slice(0, 8)} → ${localSha.slice(0, 8)}）。` +
+            `发版请创建新版本号，不要复用既有 tag。`
+        );
+      }
+      continue;
+    }
+
     const branch = shortRef(remoteRef);
 
     // 1) 受保护分支：禁止任何形式的直接推送（含 force push）。
