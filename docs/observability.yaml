@@ -137,6 +137,17 @@
 # (3) TUI 面板为纯呈现 + 本地写；失败仍只落面板文案 / 状态行，不新增 stderr 结构化行。
 # (4) 四维归属不变：tracing / issues 仍 applicable（落点不变），metrics / logs 维持结构性 N-A。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
+# B264（2026-11-21，ADR 2026-11-21-tui-resume-list-and-archive）归属说明：TUI `/resume` 列表重排与会话归档。
+# (1) 变更面全在**本地 TUI 呈现层与输入层**：`bin/tui/resume_list.rs`（行格式 / 可见性 / 跨区提示 /
+#     归档三态四个纯函数）、`bin/tui.rs`（`/resume` 取数与渲染、`/archive` 命令分支、SelectingSession
+#     键位 a/d/u、Ctrl+X 分发）、`bin/tui/input.rs`（键位谓词）、`bin/tui/shortcuts.rs`（帮助清单）。
+#     无新增对外接口、网络 IO、后台任务、LLM 调用或依赖；归档复用既有 `archived` 数据面
+#     （`control_plane.archive_session/unarchive_session`），不新增持久化字段。
+# (2) 新增**本地取证面**（非遥测出口，只落既有 `tui_queue_log` 结构化行）：`session_archive`
+#     （字段 session_id / action；不含标题正文与凭据）。
+# (3) 四维归属不变：tracing / issues 仍 applicable（落点不变 agent/otel/mod.rs、agent/ponysentry/client.rs），
+#     metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）；
+#     不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
 service: pony-agent
 kind: desktop
 reviewed_at: "2026-11-09"
