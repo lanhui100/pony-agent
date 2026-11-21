@@ -474,12 +474,18 @@ fn panel_renders_inside_screen_and_keeps_footer() {
             title: "First session".into(),
             updated_at: "0".into(),
             turn_count: 0,
+            workspace_id: None,
+            workspace_label: None,
+            archived: false,
         },
         tui::SessionItem {
             id: "session-bbbb".into(),
             title: "Second session".into(),
             updated_at: "0".into(),
             turn_count: 0,
+            workspace_id: None,
+            workspace_label: None,
+            archived: false,
         },
     ]);
     // 相位显式钉住（ADR 0119）：不钉时 `status_carousel_phase` 用墙钟毫秒取模，

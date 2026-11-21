@@ -1,0 +1,9 @@
+{
+  "wave": "tui-resume-archive",
+  "baseline_commit": "2908d478",
+  "cmd": "bash scripts/cargo-lane.sh test -p pony-agent-core --test tui_acceptance --test slash_commands_acceptance --test tui_render_layout --test tui_dialog_wave39 --test tui_interaction_acceptance --test tui_batch3_regression --target-dir target-test",
+  "exit_code": 0,
+  "result": "all selected targets passed (final binary: 252 passed; 0 failed; 0 ignored; 384.67s)",
+  "note": "既有基线在 12:57 启动（协议空桩与任何改动落盘前，源码 = HEAD 2908d478），编译期读到的即改前内容；lane 于 13:45 收口 exit 0。观察：tui_dialog_wave39 / tui_render_layout 内含 ask_lifecycle 嵌套用例，单二进制耗时数分钟（曾出现长跑 269% CPU），记为既有慢速面，不作为本次回归判据。",
+  "measured_at": "2026-11-21T13:46:15.619953"
+}

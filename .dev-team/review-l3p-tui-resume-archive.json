@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3p-tui-resume-archive",
+    "fresh_context": true
+  },
+  "executed_by": "l3p-tui-resume-archive",
+  "reviewed_commit": "381802f3c1e9bf47ec0182524c1c6bd2eddb3c0c",
+  "attestation": {
+    "self_signed": false,
+    "note": "独立只读审查（无 Lead/Executor 上下文）。证据一律以 `git show 381802f3:<path>` 的 HEAD blob 为准（文中行号 = HEAD 行号）；审查期间工作树出现并发未提交修改（`git diff` 显示 tui.rs / tui/resume_list.rs 的 enum 化与 #[expect] 修复），本审查不采信工作树内容、也不计入 verdict；不修改任何源码，唯一写入 = 本 JSON。"
+  },
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/resume_list.rs",
+    "crates/pony-agent-core/src/bin/tui/input.rs",
+    "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+    ".dev-team/nfr-baseline.json"
+  ],
+  "six_questions": [
+    {
+      "key": "external_call_timeout_ms",
+      "baseline": "3000（一次外部往返上限；例外表只覆盖 LLM 上游 attempt/stream/retry）",
+      "evidence": "无新增调用：新代码只经本地 HostControlPlane 数据面——tui.rs:8981-8986 refresh_session_selector → list_sessions()/list_workspaces()、tui.rs:9064-9115 archive_one_session → archive_session/unarchive_session、tui.rs:9188-9245 archive_current_session；HEAD 新函数区 tui.rs:8956-9260 内 `spawn|reqwest|http|std::fs|File::` 全部零命中（git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '8956,9260p' | grep -nE 'spawn|reqwest|http|std::fs|File::' → 空）。/archive 不发起 turn、不触模型网络，故基准 3000ms 无适用面。",
+      "verdict": "N-A"
+    },
+    {
+      "key": "logging",
+      "baseline": "logging.format=json；trace_id 必在键（trace_id_required=true）；禁止吞异常/泄漏正文与凭据",
+      "evidence": "结构化且不吞：新增 4 处 tui_queue_log(\"info|warn\", \"session_archive\", …)（tui.rs:9080 / 9096 / 9203 / 9216）走 HEAD tui.rs:9682-9704 tui_queue_log → agent/otel/log.rs:99-110 log_json_with_extras → :113-146 build_json_line，统一产出 level/message/ts/trace_id 恒在键的单行 JSON（trace_id 显式 None 时回落 current_trace_id，取不到才是 null）；extras 与 message 同走 ponysentry::sanitize_json 脱敏（log.rs:136-144），字段仅 target_session_id/action/(error)，无正文、prompt、token、apiKey。成功与失败两分支都写日志 + 状态行（archive_one_session tui.rs:9064-9115；archive_current_session tui.rs:9200-9225），归档 Result 未被 `let _ =` 吞；仓内 `let _ =` 只在既有 sync_pending_control_request（tui.rs:9234，与 /clear tui.rs:11923 同形）和 hydrate（tui.rs:9455）上，均不承载归档结果。",
+      "verdict": "PASS"
+    },
+    {
+      "key": "resource_release",
+      "baseline": "file_handles / network_connections / subagent_processes / stream_response_body_dropped_before_retry",
+      "evidence": "无新增资源：新路径不 open 文件/连接、不 spawn 线程或子进程（同上 grep 零命中），archive_one_session / apply_archive_plan / refresh_session_selector / resume_row_line 全为同步内存操作 + 既有 control-plane 调用。归档落盘走既有 backend.commit_boundary（store_stage0.rs:131-159），句柄生命周期归 backend（既有路径，非本变更新增）；新增 TuiState 位（tui.rs:1592-1601 字段、1775-1781 初值）是普通内存计数，无订阅/句柄/后台任务。goal 续轮令牌先 cancel_for(old) 再 reset_for(new)（tui.rs:9219-9227，与 /clear tui.rs:11909-11912 同序），无悬挂登记。",
+      "verdict": "PASS"
+    },
+    {
+      "key": "concurrency_lock",
+      "baseline": "{type: mutex, timeout_ms: 2000}；重复归档必须幂等",
+      "evidence": "无重入/死锁新增：archive_session/unarchive_session 各取一次 sessions_rwlock.write()（workspace_commands.rs:80-101），guard 是 let 语句临时量、语句末即释放，gc_orphan_asks 在锁外执行（workspace_commands.rs:88-99）；store 层幂等（store.rs:2419-2432 / 2434-2443 已归档再归档 = no-op Ok，不产生重复写放大）；归档返回后刷新才另取读锁（tui.rs:8985-8986），无嵌套锁、无持锁回调。持锁窗口 = 本地 store 写 + commit，与 TUI 既有同步写锁路径同形（/resume Enter → hydrate_state_from_session → hydrate_session write 锁：tui.rs:9455 + history_commands.rs:54-62），本变更未新增锁层级/锁序，故主线程调用不引入新的死锁面。存量注记（不升级为本轮 BLOCKING）：std RwLock 无 acquire 超时，基线 2000ms 无对应实现，慢盘 commit 时主线程会被同步阻塞——该形态为控制面既有约定，非本变更引入。",
+      "verdict": "PASS"
+    },
+    {
+      "key": "config_selfcheck",
+      "baseline": "无新增配置项 / 无需 .env.example 同步（本变更预期无）",
+      "evidence": "无配置面变更：git show --stat HEAD 仅 5 个文件（tui.rs、tui/resume_list.rs、tui/input.rs、tui/shortcuts.rs、.dev-team/review-plan-tui-resume-archive.json），未触 .env.example / Cargo feature / 配置文件；新代码区无 env::var 读取；show_archived_sessions 是运行时视图开关（tui.rs:1596，默认 false:1778），不落盘、不新增持久化键，自检面无新增项。",
+      "verdict": "PASS"
+    },
+    {
+      "key": "contract_compat",
+      "baseline": "pub 字段新增与命令表新增不得破坏既有消费方（bin 目标 + 仓内测试 + 渲染/补全消费方）",
+      "evidence": "非破坏性：SessionItem 的 3 个 pub 字段（tui.rs:1261-1275 workspace_id/workspace_label/archived，来自冻结提交 2ab07d00）位于 [[bin]] pony（Cargo.toml:9-11），不是 lib 导出面，跨 crate 无法构造；仓内全部字面量构造点已带三字段并随冻结门禁编译通过（tests/tui_resume_archive_acceptance.rs:148-158、tui_resume_archive_adversarial.rs:120-130、tui_render_layout.rs:472-487、tui_dialog_wave39.rs:911-917）。AVAILABLE_COMMANDS 追加 /archive（tui.rs:719-721，紧随 /resume）后与 tests/slash_commands_acceptance.rs CONTRACT_COMMANDS 的 21 条逐项相等（脚本比对 equal=true，/archive 仅 1 条）；逐一核对消费方：projection.rs:436-442 首 token 大小写不敏感匹配、unknown_slash_command 不把 `/archivex` 当已知命令、splash.rs:397 只取前 4 条作文案位（/rewind、/provider 从引导块后移，无断言依赖）、/help 逐行渲染仅新增一行（tests/tui_acceptance.rs:110-124 的条数从命令表推导，不写死）。",
+      "verdict": "PASS"
+    }
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 4984,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "断言 npm run rust:lint 在 HEAD 上必红（新增 5 处 clippy::fn_params_excessive_bools，tui.rs 基线 14 → 19）：门的命令由 `node scripts/check-clippy-baseline.mjs --print-command` 给出，含 `-Wclippy::fn_params_excessive_bools` 且以 CLIPPY_CONF_DIR=.meta/lints 注入 clippy.toml 的 `max-fn-params-bools = 0`（任一 bool 入参即命中）；基线 scripts/clippy-baseline.json → platforms.linux 对 crates/pony-agent-core/src/bin/tui.rs 冻结 count=14，而 HEAD 新增 5 个带 bool 入参的函数：resume_row_line(selected:bool, archived:bool) :4984、refresh_session_selector(reset_selection:bool) :8981、archive_one_session(archive:bool) :9064、toggle_archived_session(archive:bool) :9132、apply_archive_plan(turn_in_flight:bool) :9154 ⇒ 计数上涨；check-clippy-baseline.mjs:347-351 按 (lint,path) 计数 diff，上涨即 exit 1（.meta/lints/README.md「新增/恶化非零退出」）。核: `python3 -c \"import json;d=json.load(open('scripts/clippy-baseline.json'));print([e for e in d['platforms']['linux']['entries'] if e['path'].endswith('bin/tui.rs') and 'fn_params' in e['lint']])\"`（=14）; `git show 381802f3:crates/pony-agent-core/src/bin/tui.rs | grep -nE -A5 \"fn (resume_row_line|refresh_session_selector|archive_one_session|toggle_archived_session|apply_archive_plan)\"`（5 处 bool 入参）。叠加上一轮冻结提交 2ab07d00 新建的 tui/resume_list.rs（session_visible 3 bool、archive_plan 2 bool；该文件在 11-17 基线里无任何条目）⇒ HEAD 的 lint 棘轮门不可能 exit 0。注：审查时工作树已有未提交 enum 化修复（ResumeRowFlags / SelectionReset / ArchiveToggle / registry 引用 + #[expect]，`git diff` 可见），该修复提交后在干净 HEAD 上复跑 `npm run rust:lint` 才可放行。",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 11470,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "断言契约 C5「阻塞优先：is_streaming || turn_in_flight 时任何参数都拒绝（参数不参与判定，`/archive <id>` 同样被拦）」的接线只对无参形态成立：流式期 Enter 的分类在 tui.rs:11460-11475 —— Reject 只认 is_session_mutating_command（queue.rs:240-246 名单 = /clear,/compact,/resume,/rewind，无 /archive），Forward 兜底只认 is_panel_command（queue.rs:227-236，无 /archive）、is_local_control_command（仅 /goal）、`parse_command_input(&composer_text).is_some()`（projection.rs:450-456 整串匹配）。因此 `/archive`（单 token）⇒ Forward ⇒ tui.rs:11736 apply_archive_plan ⇒ BlockedDuringStreaming 回执（符合 C5）；但 `/archive <id>`（两 token）⇒ parse_command_input=None、其余分类全不命中 ⇒ 落 QueueSubmit（tui.rs:11506 push_queued_message），回执变成「已排队 · 本轮结束后自动发送」，等回合结束才经 QueuedAutoSubmit 回灌并执行为归档（tui.rs:13207-13232 + queue.rs:79-81）。契约 C5 要求该形态与无参同拦并给阻塞回执；T6 只测纯函数 archive_plan，接线无断言（`grep -n 'archive_plan' crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs` 仅纯函数用例）。核: `git show 381802f3:crates/pony-agent-core/src/bin/tui/queue.rs | sed -n '227,256p'; git show 381802f3:crates/pony-agent-core/src/bin/tui.rs | sed -n '11455,11480p;13207,13232p'`",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 9171,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言 R6 的「当前会话不得被面板 d/u 归档」守卫只覆盖面板路径，`/archive <当前 id>` 可把活会话原地归档而不轮换：toggle_archived_session 显式拒绝 target == state.session_id（tui.rs:9132-9141「当前会话请用 /archive 或 Ctrl+X」），但 apply_archive_plan 的 ArchiveOther 分支（tui.rs:9171-9173）直接 archive_one_session，无 current-id 判定；resume_list::archive_plan 只按 arg 非空分流（resume_list.rs:181-193），契约 C5 也未写该守卫。反例：把回执 `pony resume <id>` 里的当前 id 复制回来，输入 `/archive <当前 id>` ⇒ 当前会话 archived=true、session_id 不换、TUI 继续往它写；随后 /resume 默认隐藏该行（需 `a` + `u` 找回）。与 R6 的守卫语义不一致：同一动作在面板里被拒、在命令里被放行。核: `git show 381802f3:crates/pony-agent-core/src/bin/tui.rs | sed -n '9132,9141p;9162,9175p'; git show 381802f3:crates/pony-agent-core/src/bin/tui/resume_list.rs | sed -n '181,193p'`",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2798,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "断言 C2/C6「归档默认隐藏（show_archived 默认 false）」只在进程首开成立：show_archived_sessions 初值 false（tui.rs:1596 字段 / 1778 Default），唯一写点是面板 `a` 的取反（tui.rs:10524-10531）；/resume 打开只经 refresh_session_selector 重置选中索引（tui.rs:8981-9058，reset_selection=true 时仅 index=0），cancel_session_selector 只清 session_list（tui.rs:2798-2801），两处都不复位该位。反例：`/resume` → 按 `a`（显示归档）→ Esc → 再次 `/resume` ⇒ 归档行仍可见、标题仍带「· 含归档」，与「默认隐藏」的默认语义不符；T4 只测默认态，无重开断言。核: `git show 381802f3:crates/pony-agent-core/src/bin/tui.rs | grep -n show_archived_sessions`（1596/1778/6880/8996/9006/10524/10526，无任何复位点）",
+      "severity": "ADVISORY"
+    }
+  ]
+}

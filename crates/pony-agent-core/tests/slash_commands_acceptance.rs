@@ -61,10 +61,12 @@ use pony_agent_core::agent::tools::{ToolCall, ToolExecutor, ToolResult};
 // 2026-11-10 wave-tui-permission：新增 /permission 命令支持查看与切换工具执行权限（ReadOnly / WorkspaceWrite / FullAccess）。
 // 2026-11-19 修订16：新增 /panel（任务抽屉斜杠入口，与 Ctrl+T 同路径；紧随 /approve，保持 /tasks→/agents 相邻），
 // 并把历史欠账（/permission、/goal、/title 早已入表但冻结表未同步）一次补齐为真值 20 条；断言未放宽。
-const CONTRACT_COMMANDS: [&str; 20] = [
-    "/resume", "/rewind", "/provider", "/models", "/thinking", "/permission", "/settings", "/plan",
-    "/goal", "/approve", "/panel", "/tasks", "/agents", "/teams", "/clear", "/compact", "/title",
-    "/help", "/update", "/quit",
+// 2026-11-21 修订17：新增 /archive（契约 C6，真源 `.dev-team/contract-matrix-tui-resume-archive.md`；
+// Ctrl+X 与无参 /archive 同语义，紧随 /resume 入表）→ 真值 21 条。其余条目顺序/文案逐字未动，断言未放宽。
+const CONTRACT_COMMANDS: [&str; 21] = [
+    "/resume", "/archive", "/rewind", "/provider", "/models", "/thinking", "/permission",
+    "/settings", "/plan", "/goal", "/approve", "/panel", "/tasks", "/agents", "/teams",
+    "/clear", "/compact", "/title", "/help", "/update", "/quit",
 ];
 
 // ── 沙箱与测试脚手架 ───────────────────────────────────────────────────────────────────
