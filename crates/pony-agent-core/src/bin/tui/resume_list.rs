@@ -124,6 +124,10 @@ pub fn resume_row_parts(input: &ResumeRowInput<'_>, width: usize) -> ResumeRowPa
 /// `is_main_session_id(session_id) && !continuation_only && (show_archived || !archived)`。
 /// - `subagent-*` / `teammate-*` 前缀恒不可见（空 id 按主会话处理，沿用 core 口径）；
 /// - 只减行不改序：调用方按输入序（`updatedAt desc`）输出，**禁止**在本函数内排序/分组/去重。
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "契约 C2 的入参签名由冻结验收测试直接调用（T3），改签名即破坏红相锚定"
+)]
 pub fn session_visible(
     session_id: &str,
     archived: bool,
@@ -177,6 +181,10 @@ pub enum ArchivePlan {
 /// 3. 否则（`None` 或全空白）⇒ [`ArchivePlan::ArchiveCurrentThenRotate`]。
 ///
 /// 阻塞态必须由调用方给出可见回执，不得静默吞掉。
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "契约 C5 的入参签名由冻结验收测试直接调用（T6），改签名即破坏红相锚定"
+)]
 pub fn archive_plan(is_streaming: bool, turn_in_flight: bool, arg: Option<&str>) -> ArchivePlan {
     // 阻塞优先：参数不参与判定（`/archive <id>` 同样被拦，C5 第 1 条）。
     if is_streaming || turn_in_flight {

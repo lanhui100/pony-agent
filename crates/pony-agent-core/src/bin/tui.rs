@@ -2798,6 +2798,8 @@ impl TuiState {
     pub fn cancel_session_selector(&mut self) {
         self.mode = InteractionMode::Normal;
         self.session_list.clear();
+        // A1：关闭面板即回到「默认隐藏归档」，下次 `/resume` 不会沿用上一次的显示态。
+        self.show_archived_sessions = false;
     }
 
     // ── 进阶交互模式切换与状态桩函数 ──
@@ -4974,6 +4976,16 @@ fn list_row(selected: bool, left: &str, right: &str, width: usize) -> Line<'stat
     ])
 }
 
+/// `/resume` 行渲染的两个视图位（选中 / 归档）。
+///
+/// 用结构体而不是两个 `bool` 入参：本仓 `clippy::fn_params_excessive_bools` 阈值为 0，
+/// 任何 bool 入参都算命中（`.meta/lints` 棘轮门）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ResumeRowFlags {
+    selected: bool,
+    archived: bool,
+}
+
 /// `/resume` 面板的一行：选择条 + 左列 + 间隔 + 右列，整行精确铺满 `width`（背景填到行尾）。
 ///
 /// 为什么不复用 [`list_row`]（Lead 裁决 R2）：它自带「右列 ≤ `width - 8`」的独立预算，并用
@@ -4982,11 +4994,12 @@ fn list_row(selected: bool, left: &str, right: &str, width: usize) -> Line<'stat
 /// 渲染层**不重新截断**，只负责配色、选中条与背景填充；归档行只加 dim，
 /// **不追加任何右列后缀**（保住 C1 的右列 token 白名单）。
 fn resume_row_line(
-    selected: bool,
-    archived: bool,
+    flags: ResumeRowFlags,
     parts: &resume_list::ResumeRowParts,
     width: usize,
 ) -> Line<'static> {
+    let selected = flags.selected;
+    let archived = flags.archived;
     let bg = if selected {
         theme::SURFACE_SEL
     } else {
@@ -6875,22 +6888,27 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
             .selected_session_index
             .min(total.saturating_sub(1));
         let (start, end) = panel_window(total, selected, shown);
-        let mut title = format!("会话 · 共 {total} 条");
         // 裁决 R8：`a` 打开归档显示时标题追加 `· 含归档`（归档行本身只 dim，不加右列后缀）。
-        if state.show_archived_sessions {
-            title.push_str(" · 含归档");
-        }
-        if total > shown {
-            title.push_str(&format!("（{}/{}）", selected + 1, total));
-        }
+        // 全程用 `format!` 拼接（`push_str(&format!(..))` 触 `clippy::format_push_string`）。
+        let shown_suffix = if total > shown {
+            format!("（{}/{}）", selected + 1, total)
+        } else {
+            String::new()
+        };
+        let title = if state.show_archived_sessions {
+            format!("会话 · 共 {total} 条 · 含归档{shown_suffix}")
+        } else {
+            format!("会话 · 共 {total} 条{shown_suffix}")
+        };
         // 面板宽 `min(96, 终端宽 - 4)`：`panel_rect` 自带 `min(area.width - 4)` 与 20 列下限。
         let rect = panel_rect(96, shown as u16 + 4);
-        let body = draw_panel(
-            f,
-            rect,
-            &title,
-            "↑↓ 选择 · ↵ 确认 · a 显示归档 · d 归档 · u 取消归档 · esc 取消",
-        );
+        // A3：面板内宽 < 70 时用短 hint —— 长 hint 与标题同排会把分隔行挤掉（80 列终端可复现）。
+        let hint = if usize::from(rect.width).saturating_sub(2) < 70 {
+            "↑↓ ↵ esc"
+        } else {
+            "↑↓ 选择 · ↵ 确认 · a 显示归档 · d 归档 · u 取消归档 · esc 取消"
+        };
+        let body = draw_panel(f, rect, &title, hint);
         // 裁决 R1：行宽一律用**面板内层正文宽度** `body.width`，绝不用面板外宽。
         // 行结构里固定预留 2 列（选择条 + 呼吸位），故纯函数的 width = `body.width - 2`，
         // 使 `resume_row_line` 的整行宽度精确等于 `body.width`（不越界、不二次截断）。
@@ -6901,16 +6919,18 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
         let mut lines_out: Vec<Line<'static>> = Vec::new();
         if state.session_list.is_empty() {
             // 契约 C3：空态首段固定带两个数据面计数；有归档被隐藏时明示「按 a 显示」。
-            let mut empty = format!(
+            let base = format!(
                 "  暂无历史会话（当前工作区 {} 条 · 全部 {} 条）",
                 state.session_data_current_workspace, state.session_data_total
             );
-            if state.session_hidden_archived > 0 {
-                empty.push_str(&format!(
-                    "（归档 {} 条已隐藏 · 按 a 显示）",
+            let empty = if state.session_hidden_archived > 0 {
+                format!(
+                    "{base}（归档 {} 条已隐藏 · 按 a 显示）",
                     state.session_hidden_archived
-                ));
-            }
+                )
+            } else {
+                base
+            };
             lines_out.push(Line::from(Span::styled(empty, faint())));
         } else {
             for (idx, item) in state.session_list.iter().enumerate().take(end).skip(start) {
@@ -6931,7 +6951,14 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
                     row_width,
                 );
                 // 裁决 R8：归档行只在 `a` 显示时出现（C2），渲染只加 dim，不加右列后缀。
-                lines_out.push(resume_row_line(selected_row, item.archived, &parts, inner_w));
+                lines_out.push(resume_row_line(
+                    ResumeRowFlags {
+                        selected: selected_row,
+                        archived: item.archived,
+                    },
+                    &parts,
+                    inner_w,
+                ));
             }
         }
         f.render_widget(
@@ -8956,6 +8983,34 @@ fn hydrate_goal_state(state: &mut TuiState, session_id: &str) {
     }
 }
 
+/// `/resume` 列表刷新后的选中索引策略。
+///
+/// 用枚举代替 `bool`：`clippy::fn_params_excessive_bools` 阈值 0，bool 入参一律算命中。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionReset {
+    /// `/resume` 首次打开：回到首行。
+    Reset,
+    /// `a`（显示归档）/ `d` / `u` 刷新：尽量保持原选中位置（clamp 到界内）。
+    Keep,
+}
+
+/// 归档方向（`/archive <id>` 与面板 `d`/`u` 共用；同上，避免 bool 入参）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveToggle {
+    Archive,
+    Unarchive,
+}
+
+impl ArchiveToggle {
+    /// 动作名（结构化日志的 `action` 字段 + 回执文案共用同一取值）。
+    fn action(self) -> &'static str {
+        match self {
+            Self::Archive => "archive",
+            Self::Unarchive => "unarchive",
+        }
+    }
+}
+
 /// 工作区 display name（契约 C1 跨区前缀）：注册表里有且非空白就用它，取不到回落 id。
 ///
 /// 只读注册表快照，不造 `ws-` 前缀、不做路径猜测——「显示的标签」与「真实的登记名」必须同源。
@@ -8981,7 +9036,7 @@ fn workspace_display_label(
 fn refresh_session_selector(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
-    reset_selection: bool,
+    reset: SelectionReset,
 ) {
     let raw = control_plane.list_sessions();
     let workspaces = control_plane.list_workspaces();
@@ -9033,10 +9088,9 @@ fn refresh_session_selector(
     state.session_data_total = total;
     state.session_data_current_workspace = current_workspace;
     state.session_hidden_archived = hidden_archived;
-    state.selected_session_index = if reset_selection {
-        0
-    } else {
-        previous.min(state.session_list.len().saturating_sub(1))
+    state.selected_session_index = match reset {
+        SelectionReset::Reset => 0,
+        SelectionReset::Keep => previous.min(state.session_list.len().saturating_sub(1)),
     };
 }
 
@@ -9065,13 +9119,12 @@ fn archive_one_session(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     session_id: &str,
-    archive: bool,
+    toggle: ArchiveToggle,
 ) {
-    let action = if archive { "archive" } else { "unarchive" };
-    let outcome = if archive {
-        control_plane.archive_session(session_id)
-    } else {
-        control_plane.unarchive_session(session_id)
+    let action = toggle.action();
+    let outcome = match toggle {
+        ArchiveToggle::Archive => control_plane.archive_session(session_id),
+        ArchiveToggle::Unarchive => control_plane.unarchive_session(session_id),
     };
     match outcome {
         Ok(()) => {
@@ -9084,10 +9137,9 @@ fn archive_one_session(
                     ("action", serde_json::json!(action)),
                 ],
             );
-            state.set_status_notice(if archive {
-                format!("已归档 {session_id}")
-            } else {
-                format!("已取消归档 {session_id}")
+            state.set_status_notice(match toggle {
+                ArchiveToggle::Archive => format!("已归档 {session_id}"),
+                ArchiveToggle::Unarchive => format!("已取消归档 {session_id}"),
             });
         }
         Err(error) => {
@@ -9101,10 +9153,9 @@ fn archive_one_session(
                     ("error", serde_json::json!(error.as_str())),
                 ],
             );
-            state.set_status_notice(if archive {
-                format!("归档 {session_id} 失败：{error}")
-            } else {
-                format!("取消归档 {session_id} 失败：{error}")
+            state.set_status_notice(match toggle {
+                ArchiveToggle::Archive => format!("归档 {session_id} 失败：{error}"),
+                ArchiveToggle::Unarchive => format!("取消归档 {session_id} 失败：{error}"),
             });
         }
     }
@@ -9132,7 +9183,7 @@ fn highlighted_session_id(state: &mut TuiState) -> Option<String> {
 fn toggle_archived_session(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
-    archive: bool,
+    toggle: ArchiveToggle,
 ) {
     let Some(target) = highlighted_session_id(state) else {
         return;
@@ -9141,8 +9192,18 @@ fn toggle_archived_session(
         state.set_status_notice("当前会话请用 /archive 或 Ctrl+X");
         return;
     }
-    archive_one_session(state, control_plane, &target, archive);
-    refresh_session_selector(state, control_plane, false);
+    // A2：记下操作前的行 id 与索引；刷新后**按 id 重锚**，连按两次不会归档到邻行。
+    let previous_index = state.selected_session_index;
+    archive_one_session(state, control_plane, &target, toggle);
+    refresh_session_selector(state, control_plane, SelectionReset::Keep);
+    state.selected_session_index = match state
+        .session_list
+        .iter()
+        .position(|item| item.id == target)
+    {
+        Some(index) => index,
+        None => previous_index.min(state.session_list.len().saturating_sub(1)),
+    };
 }
 
 /// C5/C6：`/archive` 命令与 Ctrl+X 共用的**唯一**归档执行路径（两条入口不得各写一份）。
@@ -9155,9 +9216,11 @@ fn apply_archive_plan(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
     goal_round_cancel: &GoalRoundCancelToken,
-    turn_in_flight: bool,
+    turn_loop_in_flight: &TurnLoopInFlightRegistry,
     arg: Option<&str>,
 ) {
+    // 「本轮在飞」与其它会话切换守卫同源读取（不在调用点各自算一份 bool）。
+    let turn_in_flight = is_turn_loop_in_flight(turn_loop_in_flight, &state.session_id);
     match resume_list::archive_plan(state.is_streaming, turn_in_flight, arg) {
         resume_list::ArchivePlan::BlockedDuringStreaming => {
             // 契约 C5：阻塞态必须给用户可见回执。`status_notice` 在流式期被 P-5 抑制，
@@ -9169,8 +9232,19 @@ fn apply_archive_plan(
             );
         }
         resume_list::ArchivePlan::ArchiveOther(session_id) => {
+            // B2：目标就是**当前活会话**时不得原地归档（否则活会话被标记归档、却仍在用）——
+            // 语义指引到无参路径（它归档后换新 session_id）。
+            if session_id == state.session_id {
+                state.set_status_notice("当前会话请用 /archive 或 Ctrl+X（无参）");
+                return;
+            }
+            // B2/R7：队友 / 子智能体会话不属于用户的历史会话，不得归档。
+            if !is_main_session_id(&session_id) {
+                state.set_status_notice(format!("{session_id} 是子智能体/队友会话，不能归档"));
+                return;
+            }
             // C5 第 2 条：只归档指定 id，**不**换当前 session_id、**不**复位作用域。
-            archive_one_session(state, control_plane, &session_id, true);
+            archive_one_session(state, control_plane, &session_id, ArchiveToggle::Archive);
         }
         resume_list::ArchivePlan::ArchiveCurrentThenRotate => {
             archive_current_session(state, control_plane, goal_round_cancel);
@@ -10437,13 +10511,11 @@ fn tui_event_loop(
                     // 非 Normal 模态吞键：既不触发归档，也不让 `x` 漏进 Composer。
                     if is_archive_shortcut(key.code, key.modifiers) {
                         if state.mode == InteractionMode::Normal {
-                            let turn_in_flight =
-                                is_turn_loop_in_flight(&turn_loop_in_flight, &state.session_id);
                             apply_archive_plan(
                                 &mut state,
                                 &control_plane,
                                 &goal_round_cancel,
-                                turn_in_flight,
+                                &turn_loop_in_flight,
                                 None,
                             );
                             dirty = true;
@@ -10520,9 +10592,13 @@ fn tui_event_loop(
                             }
                             // 契约 C6：面板内 `a` 切换「显示归档」，切换后**重新拉取**列表
                             // （可见面由 C2 重新计算；选中索引在 `refresh_session_selector` 里 clamp）。
-                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                            KeyCode::Char('a' | 'A') => {
                                 state.show_archived_sessions = !state.show_archived_sessions;
-                                refresh_session_selector(&mut state, &control_plane, false);
+                                refresh_session_selector(
+                                    &mut state,
+                                    &control_plane,
+                                    SelectionReset::Keep,
+                                );
                                 state.set_status_notice(if state.show_archived_sessions {
                                     "已显示归档会话"
                                 } else {
@@ -10532,11 +10608,19 @@ fn tui_event_loop(
                             // 契约 C6 + 裁决 R6：面板内 `d` 归档高亮行 / `u` 取消归档高亮行；
                             // 只对**非当前会话行**生效（当前会话走 `/archive` 或 Ctrl+X），
                             // 失败如实报错，成功后刷新列表并 clamp 选中索引。
-                            KeyCode::Char('d') | KeyCode::Char('D') => {
-                                toggle_archived_session(&mut state, &control_plane, true);
+                            KeyCode::Char('d' | 'D') => {
+                                toggle_archived_session(
+                                    &mut state,
+                                    &control_plane,
+                                    ArchiveToggle::Archive,
+                                );
                             }
-                            KeyCode::Char('u') | KeyCode::Char('U') => {
-                                toggle_archived_session(&mut state, &control_plane, false);
+                            KeyCode::Char('u' | 'U') => {
+                                toggle_archived_session(
+                                    &mut state,
+                                    &control_plane,
+                                    ArchiveToggle::Unarchive,
+                                );
                             }
                             KeyCode::Enter => {
                                 // 裁决 R4：索引空间只有一个（`session_list` = C2 过滤后的视图），
@@ -11467,6 +11551,10 @@ fn tui_event_loop(
                                         disposition = StreamingKeyDisposition::Reject;
                                     } else if is_panel_command(&composer_text)
                                         || is_local_control_command(&composer_text)
+                                        // B1：`/archive <id>` 带参形态**不是聊天消息** ——
+                                        // 交回命令分发，由 `apply_archive_plan` 的阻塞分支给出
+                                        // 「本轮结束后可用 /archive」回执（不入队、不发送）。
+                                        || archive_command_arg(&composer_text).is_some()
                                         || parse_command_input(&composer_text).is_some()
                                         || input_is_alias(&composer_text, "/exit")
                                         || input_is_alias(&composer_text, "/effort")
@@ -11734,15 +11822,11 @@ fn tui_event_loop(
                                 // 故必须在**整串匹配**的 `known_command` 分发之前判定；执行路径与
                                 // Ctrl+X 共用 `apply_archive_plan`（同一裁决、同一回执，不复制逻辑）。
                                 if let Some(arg) = archive_command_arg(&input) {
-                                    let turn_in_flight = is_turn_loop_in_flight(
-                                        &turn_loop_in_flight,
-                                        &state.session_id,
-                                    );
                                     apply_archive_plan(
                                         &mut state,
                                         &control_plane,
                                         &goal_round_cancel,
-                                        turn_in_flight,
+                                        &turn_loop_in_flight,
                                         Some(arg.as_str()),
                                     );
                                     dirty = true;
@@ -11750,9 +11834,15 @@ fn tui_event_loop(
                                 }
 
                                 if known_command == Some("/resume") {
+                                    // A1：面板默认视图 = 隐藏归档；每次打开都复位，避免跨会话粘滞。
+                                    state.show_archived_sessions = false;
                                     // 契约 C2/C3：取数收口 = `refresh_session_selector`
                                     // （工作区归属/归档标记/数据面计数 + 可见性过滤 + 输入序）。
-                                    refresh_session_selector(&mut state, &control_plane, true);
+                                    refresh_session_selector(
+                                        &mut state,
+                                        &control_plane,
+                                        SelectionReset::Reset,
+                                    );
                                     state.mode = InteractionMode::SelectingSession;
                                     continue;
                                 }
@@ -13876,3 +13966,8 @@ mod shortcuts_help_tests;
 #[cfg(test)]
 #[path = "tui/tests/model_window_editor_tests.rs"]
 mod model_window_editor_tests;
+
+/// B264/A4：`/resume` 行列宽守卫（`resume_row_line` 的 pad 算术；80/120 列两档必覆盖）。
+#[cfg(test)]
+#[path = "tui/tests/resume_row_layout_tests.rs"]
+mod resume_row_layout_tests;

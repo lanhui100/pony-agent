@@ -1,0 +1,78 @@
+{
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3-code-review-tui-resume-archive",
+    "fresh_context": true
+  },
+  "executed_by": "l3-code-review-tui-resume-archive",
+  "reviewed_commit": "381802f3c1e9bf47ec0182524c1c6bd2eddb3c0c",
+  "attestation": {
+    "self_signed": false
+  },
+  "verdict": "FAIL",
+  "audited_scopes": [
+    "crates/pony-agent-core/src/bin/tui.rs",
+    "crates/pony-agent-core/src/bin/tui/resume_list.rs",
+    "crates/pony-agent-core/src/bin/tui/input.rs",
+    "crates/pony-agent-core/src/bin/tui/shortcuts.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 4984,
+      "rule": "NFR_VIOLATION",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && printf 'BASELINE ' && python3 -c 'import json;e=json.load(open(\"scripts/clippy-baseline.json\"))[\"platforms\"][\"linux\"][\"entries\"];print({x[\"lint\"]:x[\"count\"] for x in e if x[\"path\"]==\"crates/pony-agent-core/src/bin/tui.rs\" and x[\"lint\"] in (\"clippy::fn_params_excessive_bools\",\"clippy::format_push_string\")})' ; printf 'CLIPPY_TOML ' ; grep -n 'max-fn-params-bools' .meta/lints/clippy.toml ; printf 'HEAD_NEW_BOOL_PARAM_FNS ' ; git show HEAD:crates/pony-agent-core/src/bin/tui.rs | grep -cE '^fn (resume_row_line|refresh_session_selector|archive_one_session|toggle_archived_session|apply_archive_plan)\\(' ; printf 'HEAD_NEW_PUSH_STR_FORMAT ' ; git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '6870,6915p' | grep -c 'push_str(&format!' ; printf 'RESUME_LIST_ROWS_IN_BASELINE ' ; python3 -c 'import json;e=json.load(open(\"scripts/clippy-baseline.json\"))[\"platforms\"][\"linux\"][\"entries\"];print(len([x for x in e if \"resume_list\" in x[\"path\"]]))' ; printf 'HEAD_RESUME_LIST_BOOL_PARAM_FNS ' ; git show HEAD:crates/pony-agent-core/src/bin/tui/resume_list.rs | grep -cE '^pub fn (session_visible|archive_plan)\\('"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 11736,
+      "rule": "CONTRACT_BREAK",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "cd /home/dm/pony-agent && echo '[1] streaming classifier: only exact whole-string commands Forward' && git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '11466,11474p' && echo '[2] /archive is NOT in the session-mutating list' && sed -n '240,247p' crates/pony-agent-core/src/bin/tui/queue.rs && echo '[3] parse_command_input returns None for 2-token input' && sed -n '450,455p' crates/pony-agent-core/src/bin/tui/projection.rs && echo '[4] the new /archive branch is only reachable through that Forward path' && git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '11733,11738p'"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 9173,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '9171,9175p' && echo '--- R7 sub-session guard exists ONLY on the current-session path:' && git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '9195,9199p' && echo '--- store.archive_session accepts any id it can hydrate (no main/current check):' && sed -n '2419,2428p' crates/pony-agent-core/src/agent/session/store.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 9200,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '9199,9211p' ; printf 'TUI_ensure_session_calls=' ; (git show HEAD:crates/pony-agent-core/src/bin/tui.rs | grep -c 'ensure_session' || true) ; git show HEAD:crates/pony-agent-core/src/bin/tui.rs | grep -n 'session_id: new_session_id()' ; echo '--- unknown id => Err(会话不存在), no rotation happens:' ; sed -n '2420,2426p' crates/pony-agent-core/src/agent/session/store.rs"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 10557,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '10544,10562p' ; echo '--- C2 hides archived rows unconditionally (resume_list.rs:127-136):' ; git show HEAD:crates/pony-agent-core/src/bin/tui/resume_list.rs | sed -n '127,136p' ; echo '--- unarchive_session has exactly one call site (archive_one_session), never the Enter path:' ; (git show HEAD:crates/pony-agent-core/src/bin/tui.rs | grep -n 'unarchive_session' || true)"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 6892,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '6888,6893p'\npython3 - <<'PY'\nimport re, subprocess, unicodedata\nsrc = subprocess.check_output(['git','show','HEAD:crates/pony-agent-core/src/bin/tui.rs'], text=True)\nhint = re.search(r'\"([^\"]*esc 取消)\"', src).group(1)\nw = lambda s: sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in s)\nprint('hint_width', w(hint), 'old_hint_width', w('↑↓ 选择 · ↵ 确认 · esc 取消'))\nfor inner, title in [(94, '会话 · 共 12 条（3/12）'), (74, '会话 · 共 12 条（3/12）'), (94, '会话 · 共 12 条 · 含归档（3/12）')]:\n    total = 2 + w(title) + max(1, inner - (w(title) + 2 + w(hint) + 3)) + w(hint) + 2\n    print('inner', inner, '| title', title, '| draw_panel head width', total, '| overflow', total > inner)\nPY"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 2049,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && echo '[reset_session_scope 2049-2119 resets the new fields? 0 = no]' ; (git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '2049,2119p' | grep -cE 'show_archived|session_data_|session_hidden' || true) ; echo '[cancel_session_selector clears only session_list]' ; git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '2798,2801p' ; echo '[every site that touches show_archived_sessions: decl / default / filter / title / toggle]' ; git show HEAD:crates/pony-agent-core/src/bin/tui.rs | grep -n 'show_archived_sessions'"
+    },
+    {
+      "file": "crates/pony-agent-core/src/bin/tui.rs",
+      "line": 9145,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "cd /home/dm/pony-agent && git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '9144,9145p' ; echo '--- Keep = previous.min(len-1) => same index now points at a different session:' ; git show HEAD:crates/pony-agent-core/src/bin/tui.rs | sed -n '9036,9040p'"
+    }
+  ]
+}
