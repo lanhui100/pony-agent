@@ -1,6 +1,6 @@
 {
   "wave": "tui-resume-archive",
-  "status": "in_progress",
+  "status": "green",
   "task_tier": "B",
   "tier_basis": "跨文件多模块（bin/tui.rs 渲染与命令分发 + bin/tui/{resume_list,input,shortcuts}.rs + tests + ADR + observability.yaml）与 UI 交互契约变更；未命中 blast 关键字（无 lock/thread/net/exec/fs/unsafe 变更面）、无外部网络 IO；按 skill 机械分级判 B",
   "baseline_commit": "2908d478",
@@ -13,16 +13,8 @@
     "status": "passed (exit 0, 13:45)"
   },
   "derivative_compilation_exemption": {
-    "declared_by": "protocol-agent",
-    "reason": "ProviderCallCacheRecord additive 字段导致既有结构体字面量必须补字段（纯机械同步，无逻辑改动）",
-    "scopes": [
-      "crates/pony-agent-core/src/agent/control_plane/mod.rs",
-      "crates/pony-agent-core/src/agent/session/tests.rs",
-      "crates/pony-agent-core/src/agent/projection.rs",
-      "crates/pony-agent-core/src/agent/sqlite_session.rs",
-      "crates/pony-agent-core/src/agent/runtime/stream_support.rs"
-    ],
-    "purity_check": "git diff 仅 +attempts:None/+failed_attempt_ms:None/+prelude_ms:None（含 1 行注释）"
+    "note": "Executor 修复轮新增 bin 内单测模块 crates/pony-agent-core/src/bin/tui/tests/resume_row_layout_tests.rs（97 行，#[cfg(test)] 子模块，非 tests/** 冻结验收面）",
+    "authorized_by": "lead（R 轮 A4 可选单测，已登记为衍生写域）"
   },
   "observability": {
     "surface": "TUI UI interaction（/resume 列表 + 归档命令/快捷键）",
@@ -86,15 +78,26 @@
         "task-4",
         "task-5"
       ],
-      "status": "in_progress",
+      "status": "green",
       "blocked_by": [],
       "write_scope_overlaps": [
         "task-1 与 task-3 均在 crates/pony-agent-core/src/bin/tui.rs 与 tui/input.rs：按 blocked_by 串行（非并发波次），已显式记录"
       ],
       "note": "B 级；单文件主战场（tui.rs）→ k=1 串行，无 worktree 强隔离；红相锚定后 Executor 才开工",
       "receipts": {
-        "regression_baseline": ".dev-team/regression-baseline-tui-resume-archive.json"
-      }
+        "regression_baseline": ".dev-team/regression-baseline-tui-resume-archive.json",
+        "plan_review": ".dev-team/review-plan-tui-resume-archive.json",
+        "l3_review": ".dev-team/review-l3-tui-resume-archive.json",
+        "l3p_review": ".dev-team/review-l3p-tui-resume-archive.json",
+        "l3p_recheck": ".dev-team/review-l3p-tui-resume-archive-recheck.json",
+        "meta_retrospective": ".dev-team/meta-retrospective.md",
+        "pty_smoke": "docs/release/evidence/tui-resume-archive/"
+      },
+      "protocol_commit": "2ab07d00",
+      "red_commit": "d0bef489",
+      "green_commit": "381802f3",
+      "postfix_commit": "469d4c0c",
+      "contract_amend_commit": "8d8cbdc7"
     }
   },
   "tasks": [
@@ -250,7 +253,7 @@
       "desc": "architecture 文档 usage 键名与实际 JSON 不一致"
     }
   ],
-  "final_head": "c738b26f",
+  "final_head": "469d4c0c",
   "history": [
     {
       "wave": "approval-resume-context",
@@ -292,5 +295,23 @@
     "max_jobs_per_lane": 8,
     "lane_wrapper_cmd": "bash scripts/cargo-lane.sh",
     "heavy_owner": "lead"
+  },
+  "gates": {
+    "rust_lint": "PASS（新增/恶化 0）",
+    "frozen_acceptance": "249 passed Exit 0（tui_resume_archive_acceptance + adversarial）",
+    "regression": "280 passed Exit 0（tui_acceptance + slash_commands_acceptance）；前一轮 6 target 全绿",
+    "cargo_check_bin_pony": "Exit 0 无 warning",
+    "adr_check": "PASS",
+    "backlog_gate": "PASS（B264 已闭环归档）",
+    "observability": "audit-diff Exit 0 / check-declaration PASS",
+    "file_size": "4 new violation 全为既有漂移（config.rs/process.rs/provider tests.rs/runtime tests.rs，自基线 commit 起未改动，归因为基线陈旧）",
+    "pty_smoke": "docs/release/evidence/tui-resume-archive/（真实 PTY，无 panic，空态三计数 + a 切换可见）"
+  },
+  "review_adjudication": {
+    "plan_review": "FAIL → Lead 裁决 R1~R10 并原地改写契约（8d8cbdc7），6 BLOCKING 全部落地",
+    "l3_review": "FAIL ×2 BLOCKING（clippy 棘轮 / 流式期 /archive <id> 入队）→ 469d4c0c 修复",
+    "l3p_review": "FAIL ×1 BLOCKING（同 clippy 棘轮）→ 修复后复检",
+    "advisories_closed": "A1 show_archived 复位、A2 d/u 按 id 重锚、A3 窄面板短 hint、A4 行宽单测",
+    "advisories_accepted": "Enter 恢复归档会话保持 archived（契约未裁定，行为可预期）；既有 text.rs emoji 宽度偏差（存量，不在本任务）"
   }
 }
