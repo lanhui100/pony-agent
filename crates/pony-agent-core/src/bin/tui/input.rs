@@ -34,6 +34,27 @@ pub fn is_permission_mode_shortcut(code: KeyCode, modifiers: KeyModifiers) -> bo
     modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('p')
 }
 
+/// Ctrl+X 是否为「归档当前会话」快捷键（纯函数，便于在无 TTY 环境断言）。
+///
+/// 契约真源 `.dev-team/contract-matrix-tui-resume-archive.md` **C6**，只认「**恰好**
+/// `CONTROL` + `Char('x')`」——判定口径是 `modifiers == KeyModifiers::CONTROL`（严格相等，
+/// 非 `contains`）。故以下一律**不命中**：`Ctrl+Shift+X`（字符变 `Char('X')` 或带 SHIFT 位）、
+/// `Alt+X`、`Shift+X`、`Ctrl+Alt+X`、裸 `x`（无修饰键）。
+///
+/// 生效范围（契约 C6，Lead 裁决）：**Normal 模式（输入框态）全局可用**，语义 = 无参归档
+/// 当前会话（`archive_plan(.., None)`，归档后换新 session_id，见 C5）；
+/// `InteractionMode::SelectingSession` 面板内**不生效**（面板内 `d`/`u` 归档/取消归档、
+/// `a` 显示归档）——同一快捷键不在两种模态下漂移语义。
+///
+/// 待实现（Executor）：当前为冻结空桩，函数体只有 `todo!()`。
+#[allow(dead_code, unused_variables)]
+pub fn is_archive_shortcut(
+    code: crossterm::event::KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) -> bool {
+    todo!()
+}
+
 pub fn composer_enter_action(key: &crossterm::event::KeyEvent) -> ComposerEnterAction {
     // Shift+Enter / Alt+Enter 是「换行」的显式语义；其余键（含裸 Enter）落到 Enter 分支的提交语义。
     if key.code == KeyCode::Enter

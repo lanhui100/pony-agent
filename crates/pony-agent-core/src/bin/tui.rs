@@ -583,6 +583,10 @@ pub use self::queue_panel::{
 };
 #[path = "tui/shortcuts.rs"]
 mod shortcuts;
+// `/resume` 行渲染 + 归档裁决的纯函数契约层（契约真源
+// `.dev-team/contract-matrix-tui-resume-archive.md` C1~C5）。
+#[path = "tui/resume_list.rs"]
+pub mod resume_list;
 // 2026-11-17：状态条（任务摘要 + 提示/队列 + 模型·权限）与后台作业投影。
 #[path = "tui/status_bar.rs"]
 mod status_bar;
@@ -714,6 +718,7 @@ pub enum InteractionMode {
 
 pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "选择并恢复历史会话"),
+    ("/archive", "归档当前会话（/archive <id> 归档指定会话）"),
     ("/rewind", "撤回到某个用户轮次（会话 + 已写文件）"),
     ("/provider", "管理与切换模型提供商"),
     ("/models", "切换当前活跃模型（Ctrl+R / Ctrl+M；面板内 w 改上下文窗口）"),
@@ -1257,9 +1262,16 @@ pub struct SessionItem {
     pub id: String,
     pub title: String,
     /// 已格式化的最近活动时间（同日 `HH:MM` / 同年 `MM-DD HH:MM` / 跨年 `YYYY-MM-DD`）。
+    /// 契约 C1 起时间独占右列、轮次不再展示（轮次只保留在本字段以备其它入口读取）。
     pub updated_at: String,
     /// 真实用户轮数（已剔除宿主续轮提示）。
     pub turn_count: usize,
+    /// 会话归属工作区 id（契约 C1 跨区前缀的判定输入；`None` = 默认工作区/未归属）。
+    pub workspace_id: Option<String>,
+    /// 工作区别名（契约 C1：缺失或空白时跨区前缀回落到 `workspace_id`）。
+    pub workspace_label: Option<String>,
+    /// 是否已归档（契约 C2：默认隐藏，列表内 `a` 切换显示）。
+    pub archived: bool,
 }
 
 /// `/resume` 列表的最近活动时间显示口径：同日只显示时刻，同年显示月日+时刻，
@@ -11298,6 +11310,12 @@ fn tui_event_loop(
                                             title: s.title,
                                             updated_at: format_session_row_time(s.updated_at_ms),
                                             turn_count: s.turn_count,
+                                            // 契约冻结期的机械占位（协议 Agent 只补字段、不接数据面）：
+                                            // 真实值在 `SessionOverview::workspace_id` / `archived`
+                                            // 上现成可得，接线归 Executor（契约 C1/C2）。
+                                            workspace_id: None,
+                                            workspace_label: None,
+                                            archived: false,
                                         })
                                         .collect();
                                     state.open_session_selector(items);
