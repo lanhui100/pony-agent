@@ -326,6 +326,25 @@ pub const INTERRUPTED_ERROR_LINE: &str = "上一轮因错误终止，已保留�
 
 const CHECKPOINT_MARKER: &str = "[中断轮次检查点]";
 
+/// resume 回放时该不该在信息流末尾补一行中断状态（`None` = 不补）。
+///
+/// 判据是「**历史末条**是否为中断载体」，不是「历史里最后一条能匹配的记录」。
+/// 正常完成的 assistant 行没有信号（`kind = None` 且正文不以检查点标记开头 ⇒
+/// [`interrupted_record_status_line`] 返回 `None`）；若反向逐条 `find_map`，扫描会越过
+/// 它继续往前翻，把若干轮之前的旧失败重新贴到末尾 —— 于是「上一轮明明成功」也报
+/// 「因错误终止」。末条不是 assistant（末轮尚未产出回复，或宿主补录了指令）时同样不报：
+/// 此时不存在「上一轮」这个可断言的对象。
+///
+/// 独立成函数是为了让「历史形状 → 是否补行」成为可机械断言的唯一判定点。
+pub fn resume_interrupted_status_line(
+    history: &[pony_agent_core::agent::session::TurnHistoryMessage],
+) -> Option<&'static str> {
+    history
+        .last()
+        .filter(|message| message.role == "assistant")
+        .and_then(|message| interrupted_record_status_line(&message.content, message.kind))
+}
+
 /// L2（dsh 对齐）：合成中断记录的一行状态文案。
 ///
 /// 判定顺序：结构化 `kind` **优先**；旧会话无 kind ⇒ 回退 `content` 标记嗅探。

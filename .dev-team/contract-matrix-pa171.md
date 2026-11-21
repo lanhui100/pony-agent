@@ -725,9 +725,9 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String;
 | `headline() -> &'static str` | 人话主句（现在是什么状态） | `visible_line()` 首段 |
 | `detail() -> Option<String>` | 可核对的原因细节（计数/轮次） | `visible_line()` 中段 |
 | `action_hint() -> Option<&'static str>` | 下一步动作 | `visible_line()` 末段 |
-| `enters_history() -> bool` | 是否值得写入会话可见历史 | `GoalRoundsStopped` 事件处理（决定是否 push 消息区） |
+| `enters_history() -> bool` | 是否值得写入会话可见历史（core 语义；TUI 侧自 2026-11-22 起**本轮一条都不进消息区**，见 ADR `2026-11-22-turn-end-status-noise`） | 契约判据 / 后续消费方 |
 | `never_started() -> bool` | 续轮是否**从未启动**（非「跑起来后停下」） | 状态条措辞（`·未续` vs `·停`）、面板 |
-| `visible_line()` | 三段式拼接（`headline｜detail｜action_hint`，`None` 段省略） | 状态行 + 消息区 |
+| `visible_line()` | 三段式拼接（`headline｜detail｜action_hint`，`None` 段省略） | 状态行 + Ctrl+G 面板 |
 
 **逐字文案表（十变体，冻结）**
 
@@ -770,7 +770,9 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String;
 - `crates/pony-agent-core/src/bin/tui/goal_panel.rs`：删除 `已停止：` 前缀；`row_style` 按枚举严重级着色。
 - `crates/pony-agent-core/src/bin/tui/status_bar.rs`：`·停` 拆为 `·停` / `·未续`（由 `never_started()` 决定）。
 - `crates/pony-agent-core/src/bin/tui.rs`：`goal_round_stop_reason_tag` **删除**（日志 tag 收敛到 `code()`）；
-  `GoalRoundsStopped` 处理按 `enters_history()` 决定是否 push 消息区。
+  `GoalRoundsStopped` 处理经 `TuiState::apply_goal_rounds_stopped` 只写状态行与结构化原因，
+  **不再 push 消息区**（2026-11-22 修订，ADR `2026-11-22-turn-end-status-noise`：轮末已由
+  `push_settled_turn_summary` 给出一行终态摘要，停止原因紧跟其后是重复信息）。
 
 **显式 deferred（不在本波，理由成立性靠 review）**
 
