@@ -148,7 +148,7 @@ fn open_leaves_buffer_blank_when_window_inherited_from_preset() {
     let edit = state.model_window_edit.as_ref().expect("edit state");
     assert!(
         edit.buffer.is_empty(),
-        "未声明窗口不能预填默认值，否则回车就把「跟随预设」变成了「声明 256000」"
+        "未声明窗口不能预填默认值，否则回车就把「跟随预设」变成了「声明 1000000」"
     );
     assert_eq!(edit.declared, None);
     assert_eq!(
@@ -308,7 +308,7 @@ fn model_panel_shows_window_and_its_source() {
     // 声明值裸写；预设补缺加后缀——两者绝不能在界面上长得一样。
     assert!(text.contains("200K"), "已声明窗口应显示声明值：{text}");
     assert!(
-        text.contains("256K·预设"),
+        text.contains("1M·预设"),
         "预设补缺窗口必须标注来源：{text}"
     );
     assert!(text.contains("w 能力"), "面板底栏必须给出入口提示：{text}");
@@ -327,9 +327,9 @@ fn editor_panel_render_makes_the_choice_explicit() {
     assert!(text.contains("上下文窗口"), "{text}");
     assert!(text.contains("Undeclared"), "{text}");
     // 空缓冲时必须直接写出「后果」：跟随预设以及它当前解析成什么。
-    assert!(text.contains("跟随预设（256K）"), "{text}");
-    // 常用规格与多模态开关必须同屏可见（可快选，也可手输）。
-    for preset in ["32K", "128K", "256K", "512K", "1M"] {
+    assert!(text.contains("跟随预设（1M）"), "{text}");
+    // 常用规格与多模态开关必须同屏可见（可快选，也可手输）；快选档位下限 256K。
+    for preset in ["256K", "512K", "1M"] {
         assert!(text.contains(preset), "缺少规格 {preset}：{text}");
     }
     assert!(text.contains("多模态输入"), "{text}");
@@ -345,11 +345,11 @@ fn right_arrow_fills_common_preset_and_commit_writes_it() {
     open_panel(&mut state, &provider_id, "model-undeclared");
     state.open_model_window_editor().expect("open editor");
 
-    // 未声明 ⇒ 跟随预设 256K；→ 快选到下一档 512K。
+    // 未声明 ⇒ 跟随预设 1M（档位表末项）；→ 从末项回绕到首项 256K（下限档位）。
     state.handle_model_window_editor_key(&key(KeyCode::Right));
     assert_eq!(
         state.model_window_edit.as_ref().expect("edit").buffer,
-        "512K",
+        "256K",
         "常用规格必须能一键填入"
     );
     assert!(state.handle_model_window_editor_key(&key(KeyCode::Enter)));
@@ -357,8 +357,8 @@ fn right_arrow_fills_common_preset_and_commit_writes_it() {
     let raw = registry_json(&state);
     assert_eq!(
         raw["providers"][0]["models"][1]["capabilities"]["contextWindowTokens"],
-        serde_json::json!(512_000),
-        "512K 必须按十进制口径落成 512000"
+        serde_json::json!(256_000),
+        "256K 必须按十进制口径落成 256000"
     );
 }
 
@@ -391,7 +391,7 @@ fn modality_toggles_switch_to_custom_and_persist() {
     assert_eq!(capabilities["supportsImageInput"], serde_json::json!(false));
     assert_eq!(capabilities["supportsVideoInput"], serde_json::json!(true));
     assert_eq!(capabilities["supportsAudioInput"], serde_json::json!(false));
-    // 未动窗口 ⇒ 不写窗口键（继续跟随 preset/custom 的默认 256K）。
+    // 未动窗口 ⇒ 不写窗口键（继续跟随 preset/custom 的默认 1M）。
     assert!(
         capabilities.get("contextWindowTokens").is_none(),
         "只改模态不得顺带声明窗口：{capabilities:?}"

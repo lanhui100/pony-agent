@@ -322,3 +322,28 @@ fn c10_restore_reports_completeness_idempotently() {
         "C10: 还原必须幂等——重复调用不得让「还原是否完整」标记漂移（退出提示据此决定是否附恢复命令）"
     );
 }
+
+// ── C11：子孙进程信号过滤（防止自身派生的命令脚本误杀 TUI 宿主） ───────────────────
+
+#[test]
+#[cfg(unix)]
+fn c11_child_process_signals_are_filtered_out_by_descendant_check() {
+    let my_pid = std::process::id() as libc::pid_t;
+    // 1. 自身 PID 判定为内部来源
+    assert!(tui::is_child_or_descendant(my_pid));
+    // 2. 外部非子代进程（如 PID 1 init）不应被过滤
+    assert!(!tui::is_child_or_descendant(1));
+
+    // 3. 真实派生的子进程能被精准判定为子孙进程
+    let mut child = std::process::Command::new("sleep")
+        .arg("1")
+        .spawn()
+        .expect("spawn child");
+    let child_pid = child.id() as libc::pid_t;
+    assert!(
+        tui::is_child_or_descendant(child_pid),
+        "子进程 PID 必须被判定为 is_child_or_descendant"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}

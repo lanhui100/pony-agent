@@ -133,6 +133,52 @@ fn run_command_denies_high_risk_commands() {
 }
 
 #[test]
+fn run_command_denies_host_termination_commands() {
+    let workspace = temp_workspace();
+    let router = ToolRouter::with_workspace_root(workspace);
+
+    let test_cases = [
+        "pkill pony",
+        "pkill -9 pony",
+        "pkill -15 pony-tui",
+        "killall pony",
+        "killall -9 ponycli",
+        "kill $(pgrep -x pony)",
+        "kill -9 `pgrep pony-tui`",
+        "taskkill /im pony.exe /f",
+        "taskkill /F /IM pony-tui.exe",
+        "taskkill -im ponycli.exe",
+        "Stop-Process -Name pony",
+        "stop-process -processname pony-tui",
+    ];
+
+    for cmd in test_cases {
+        let result = router.execute(&ToolCall {
+            call_id: None,
+            name: TOOL_WORKSPACE_RUN_COMMAND.to_string(),
+            arguments: json!({
+                "command": cmd
+            }),
+            plan: None,
+        });
+
+        assert_eq!(
+            result.status, "error",
+            "Command should be denied: {cmd}"
+        );
+        let payload = serde_json::from_str::<Value>(&result.output).expect("run output json");
+        assert_eq!(
+            payload
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("command_denied"),
+            "Expected command_denied for: {cmd}"
+        );
+    }
+}
+
+#[test]
 fn run_command_denies_rm_with_split_flags() {
     let workspace = temp_workspace();
     let router = ToolRouter::with_workspace_root(workspace);

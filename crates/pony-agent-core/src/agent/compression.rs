@@ -782,19 +782,21 @@ Some trailing text"#;
         assert_eq!(derive_squash_base_seq(&[], &[make_msg("user", "x")]), 0);
     }
 
-    /// 默认压缩预算 = 256K 窗口：水位必须落在「远早于 256K 硬顶」的区间。
+    /// 默认压缩预算 = 1M 窗口（2026-11-20 用户裁决）：水位必须仍严格早于窗口硬顶。
     ///
-    /// 旧默认 1M 会让水位停在 ~800K，而主流模型真实窗口是 128K~256K ⇒ 压缩永远晚于
-    /// 上游溢出（硬失败）触发，`RequiresRequestMutation` 之前直接终止本轮。
+    /// 历史包袱：2026-11-10 曾把默认窗口设为 256K，理由是「1M 默认 ⇒ 水位 ~800K，而主流
+    /// 模型真实窗口 128K~256K ⇒ 压缩永远晚于上游溢出」。现在默认值回到 1M 后，这条风险
+    /// 的处置方式改为**逐模型声明真实窗口**（TUI `/models` 的 `w`，声明值优先于默认值），
+    /// 而不是压低全局默认：真实窗口未知时按 1M 计，声明后就按真实容量推导水位。
     #[test]
-    fn test_default_context_window_is_256k_and_triggers_before_overflow() {
+    fn test_default_context_window_is_1m_and_triggers_before_overflow() {
         let window = crate::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS as usize;
-        assert_eq!(window, 256_000, "默认窗口真值必须是 256K（十进制口径）");
+        assert_eq!(window, 1_000_000, "默认窗口真值必须是 1M（十进制口径）");
         let threshold = calculate_threshold_tokens(window, 64_000, &CompressionConfig::default());
-        assert!(
-            threshold > 160_000 && threshold < 210_000,
-            "默认水位应在 160K~210K（含 64K 输出预留时为 181_760），实际 {threshold}"
+        assert_eq!(
+            threshold, 800_000,
+            "1M 默认下水位取触发比例 0.8（压力预算 919_616 更晚），实际 {threshold}"
         );
-        assert!(threshold < window);
+        assert!(threshold < window, "水位必须严格早于窗口硬顶");
     }
 }

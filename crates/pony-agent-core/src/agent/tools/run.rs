@@ -688,6 +688,9 @@ pub(super) fn denied_run_command_reason(command: &str) -> Option<String> {
     if is_git_clean_force_command(&tokens) {
         return Some("命令包含高风险片段 `git clean -fd`，当前 runtime 已拒绝执行。".to_string());
     }
+    if let Some(reason) = is_host_termination_command(&tokens, &normalized) {
+        return Some(reason);
+    }
 
     let deny_markers = [
         "remove-item",
@@ -968,6 +971,58 @@ pub(super) fn is_windows_format_command(tokens: &[&str]) -> bool {
                 .map(|value| value.is_ascii_alphabetic())
                 .unwrap_or(false)
     })
+}
+
+pub(super) fn is_host_termination_command(tokens: &[&str], normalized: &str) -> Option<String> {
+    const HOST_TARGETS: &[&str] = &[
+        "pony",
+        "pony-tui",
+        "ponycli",
+        "ponygo",
+        "ponyllm",
+        "pony.exe",
+        "pony-tui.exe",
+        "ponycli.exe",
+        "ponygo.exe",
+        "ponyllm.exe",
+    ];
+
+    let has_host_target = HOST_TARGETS.iter().any(|target| {
+        tokens.iter().any(|token| {
+            let clean = token.trim_matches(|c: char| c == '\'' || c == '"' || c == '`' || c == '(' || c == ')' || c == '$');
+            clean == *target || clean.ends_with(&format!("/{target}")) || clean.ends_with(&format!("\\{target}"))
+        }) || normalized.contains(&format!(" {target}"))
+           || normalized.contains(&format!(" {target}\""))
+           || normalized.contains(&format!(" {target}'"))
+           || normalized.contains(&format!(" {target}`"))
+           || normalized.contains(&format!("/{target}"))
+           || normalized.contains(&format!("\\{target}"))
+    });
+
+    if !has_host_target {
+        return None;
+    }
+
+    let is_pkill_or_killall = tokens.iter().any(|t| *t == "pkill" || *t == "killall");
+    if is_pkill_or_killall {
+        return Some("命令包含针对宿主/Agent进程的强制终止模式 `pkill/killall <host>`，当前 runtime 已拒绝执行。".to_string());
+    }
+
+    let has_kill = tokens.contains(&"kill");
+    let has_process_finder = normalized.contains("pgrep") || normalized.contains("pidof");
+    if has_kill && has_process_finder {
+        return Some("命令包含通过进程查找终止宿主/Agent进程的高危模式 `kill $(pgrep ...)`，当前 runtime 已拒绝执行。".to_string());
+    }
+
+    if normalized.contains("taskkill") {
+        return Some("命令包含针对宿主/Agent进程的终止模式 `taskkill /im <host>`，当前 runtime 已拒绝执行。".to_string());
+    }
+
+    if normalized.contains("stop-process") {
+        return Some("命令包含针对宿主/Agent进程的终止模式 `Stop-Process -Name <host>`，当前 runtime 已拒绝执行。".to_string());
+    }
+
+    None
 }
 
 /// P0-3：把进程退出码归类成可检索的**分类名**（trace 诊断的第一刀）。

@@ -115,7 +115,30 @@ static RESTORE_TTY_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI
 
 
 #[cfg(unix)]
-extern "C" fn handle_shutdown_signal(sig: libc::c_int) {
+extern "C" fn handle_shutdown_sigaction(
+    sig: libc::c_int,
+    info: *mut libc::siginfo_t,
+    _ucontext: *mut libc::c_void,
+) {
+    let sender_pid = if info.is_null() {
+        0
+    } else {
+        // SAFETY: 上面已判定 info 非空；该指针由内核在 SA_SIGINFO 回调期间提供，
+        // 在本函数返回前始终有效，借用出的引用不会悬垂。
+        let info_ref = unsafe { &*info };
+        #[cfg(target_os = "linux")]
+        // SAFETY: 只读取内核已填好的 siginfo_t 字段，info_ref 在本作用域内有效。
+        let pid = unsafe { info_ref.si_pid() };
+        #[cfg(not(target_os = "linux"))]
+        let pid = info_ref.si_pid;
+        pid
+    };
+
+    if sender_pid > 0 && is_child_or_descendant(sender_pid) {
+        write_ignored_signal_notice(sig, sender_pid);
+        return;
+    }
+
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     write_signal_notice(sig);
 }
@@ -2940,7 +2963,7 @@ impl TuiState {
 /// wave-39 R3：解析当前 provider/model 的上下文窗口 token 数。
 /// 命中注册表则取 `capabilities.context_window_tokens`，否则回退配置默认窗口。
 pub fn resolve_context_window_tokens(state: &TuiState) -> u32 {
-    // 真值只有一处：`config::DEFAULT_CONTEXT_WINDOW_TOKENS`（256K）。TUI 侧曾复制
+    // 真值只有一处：`config::DEFAULT_CONTEXT_WINDOW_TOKENS`（1M）。TUI 侧曾复制
     // 一份 `1_000_000` 字面量，于是界面占用率与压缩预算各按一套窗口算。
     const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 =
         pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS;
@@ -4815,7 +4838,7 @@ fn model_badges(state: &TuiState, item: &ModelItem) -> String {
         parts.push("当前".to_string());
     }
     // 上下文窗口必须显示**来源**：声明值裸写，预设补缺加后缀。
-    // 这是「按 256K 算的百分比对不对」在界面上唯一可自查的地方（`w` 可直接改）。
+    // 这是「按当前窗口算的百分比对不对」在界面上唯一可自查的地方（`w` 可直接改）。
     // 不再写 `ctx` 前缀：列里只有窗口一个数值型徽标，前缀纯占宽（ADR 2026-11-18）。
     if let Some(window) = item.context_window_tokens {
         let label = format_context_window(window);
@@ -8020,8 +8043,13 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
 /// 持久化由调用方执行（`ProviderRegistryStore::save_view(view)`），面板/状态刷新同样由调用方负责。
 ///
 /// 语义：
-/// - 以该 provider 既有首个模型条目为模板克隆（保留协议 / 能力配置语义），无模板时按
-///   OpenAiCompletions 兜底构造合法条目；
+/// - 发现结果只决定「有哪些模型、按什么顺序」：**已登记条目整条原样保留**（能力声明 /
+///   上下文窗口 / 温度 / 预设都是逐模型的个体事实）。旧实现用首个模型当模板重建全部条目，
+///   于是用户在 `/models` 面板 `w` 里声明的窗口会在下一次模型发现（打开面板即触发）时被
+///   静默改回模板值——「改完退出面板又回到默认值」的真因；
+/// - 新出现的 id 仍以既有首个条目为模板克隆（保留协议 / 能力族语义），但**不继承模板的窗口
+///   声明**：从未被编辑过的新模型应继续跟随自身能力预设，而不是被写成别人的数字；
+///   无模板时按 OpenAiCompletions 兜底构造合法条目；
 /// - **幂等**：同一 `(provider_id, models)` 重复调用结果一致（不追加、不改变顺序）；
 /// - `provider_id` 不在 `view` 中 ⇒ `Err`，且 `view` **保持原样**（半写入会让注册表状态不可预期）。
 pub fn apply_models_discovered(
@@ -8034,31 +8062,45 @@ pub fn apply_models_discovered(
             "provider {provider_id} 不在注册表中；模型发现结果未写入"
         ));
     };
-    let template = provider.models.first().cloned();
+    let existing = std::mem::take(&mut provider.models);
+    let template = existing.first().cloned();
     let protocol = provider.protocol.clone();
+    let mut reused = vec![false; existing.len()];
     provider.models = models
         .iter()
-        .map(|id| match &template {
-            Some(t) => {
-                let mut model = t.clone();
-                model.id = id.clone();
-                model.name = id.clone();
-                model.model = id.clone();
-                model
+        .map(|id| {
+            // 已登记条目优先：id 命中在前（稳定主键），线上模型名兜底（id 可能被归一化重写）。
+            let matched = existing.iter().enumerate().position(|(index, model)| {
+                !reused[index] && (model.id == *id || model.model == *id)
+            });
+            if let Some(index) = matched {
+                reused[index] = true;
+                return existing[index].clone();
             }
-            None => ProviderModelConfig {
-                id: id.clone(),
-                name: id.clone(),
-                model: id.clone(),
-                temperature: 0.2,
-                max_output_tokens: 8192,
-                capability_preset: ProviderCapabilityPreset::Auto,
-                reasoning_effort: None,
-                reasoning_budget_tokens: None,
-                protocol: Some(protocol.clone()),
-                base_url: None,
-                capabilities: Default::default(),
-            },
+            match &template {
+                Some(t) => {
+                    let mut model = t.clone();
+                    model.id = id.clone();
+                    model.name = id.clone();
+                    model.model = id.clone();
+                    // 窗口是逐模型声明：新条目不得顶替模板的数字，交回能力预设决定。
+                    model.capabilities.context_window_tokens = None;
+                    model
+                }
+                None => ProviderModelConfig {
+                    id: id.clone(),
+                    name: id.clone(),
+                    model: id.clone(),
+                    temperature: 0.2,
+                    max_output_tokens: 8192,
+                    capability_preset: ProviderCapabilityPreset::Auto,
+                    reasoning_effort: None,
+                    reasoning_budget_tokens: None,
+                    protocol: Some(protocol.clone()),
+                    base_url: None,
+                    capabilities: Default::default(),
+                },
+            }
         })
         .collect();
     Ok(())

@@ -557,7 +557,7 @@ mod unit_tests {
             effective: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
             ..declared
         };
-        assert_eq!(inherited.effective_label(), "256K（预设）");
+        assert_eq!(inherited.effective_label(), "1M（预设）");
         assert!(inherited.is_following_preset());
     }
 
@@ -578,14 +578,14 @@ mod unit_tests {
             input_index: 0,
             error: None,
         };
-        // 空缓冲从「生效值 256K」起步：→ 512K，再 → 1M，再 → 32K（回环）。
+        // 空缓冲从「生效值 1M」起步（档位表末项）：→ 回绕到 256K，再 → 512K，再 → 1M。
+        edit.cycle_preset(1);
+        assert_eq!(edit.buffer, "256K");
         edit.cycle_preset(1);
         assert_eq!(edit.buffer, "512K");
         edit.cycle_preset(1);
         assert_eq!(edit.buffer, "1M");
-        edit.cycle_preset(1);
-        assert_eq!(edit.buffer, "32K");
         edit.cycle_preset(-1);
-        assert_eq!(edit.buffer, "1M");
+        assert_eq!(edit.buffer, "512K");
     }
 }

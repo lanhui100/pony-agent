@@ -20,7 +20,10 @@
 #[allow(dead_code, unused_imports, unused_variables, unused_mut)]
 mod tui;
 
-use pony_agent_core::agent::config::{ProviderConfigView, ProviderModelConfig, ProviderRegistryView};
+use pony_agent_core::agent::config::{
+    ProviderCapabilityPreset, ProviderConfigView, ProviderModelCapabilities, ProviderModelConfig,
+    ProviderRegistryStore, ProviderRegistryView,
+};
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 
 // ── N16：大滚动偏移不得截断（F-H） ──────────────────────────────────────────────────
@@ -222,5 +225,155 @@ fn n17c_apply_models_discovered_is_idempotent() {
         models_of(&view, "ptarget").len(),
         2,
         "N17c: 重复调用后模型数仍为 2"
+    );
+}
+
+// ── N17d/N17e：模型发现不得覆盖逐模型能力声明 ─────────────────────────────────────
+// 缺陷形态（用户报告）：在 TUI `/models` 面板 `w` 里改好某个模型的上下文窗口，退出面板
+// 再进（打开面板即触发一次模型发现），窗口被改回「默认值」。真因是旧映射用首个模型条目
+// 当模板重建**全部**条目，逐模型的 `capabilities.contextWindowTokens` 因此被模板值顶替。
+
+fn model(id: &str, temperature: f32, window: Option<u32>) -> ProviderModelConfig {
+    ProviderModelConfig {
+        id: id.to_string(),
+        name: id.to_string(),
+        model: id.to_string(),
+        temperature,
+        max_output_tokens: 64_000,
+        capability_preset: ProviderCapabilityPreset::OpenAiChat,
+        reasoning_effort: None,
+        reasoning_budget_tokens: None,
+        protocol: Some(ProviderProtocol::OpenAiCompletions),
+        base_url: None,
+        capabilities: ProviderModelCapabilities {
+            context_window_tokens: window,
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn n17d_apply_models_discovered_preserves_per_model_declarations() {
+    let mut view = registry_view(&["ptarget"]);
+    view.providers[0].models = vec![
+        model("m-128k", 0.2, Some(128_000)),
+        model("m-200k", 0.7, Some(200_000)),
+    ];
+    let discovered = vec![
+        "m-128k".to_string(),
+        "m-200k".to_string(),
+        "m-new".to_string(),
+    ];
+
+    tui::apply_models_discovered(&mut view, "ptarget", &discovered).expect("映射必须成功");
+
+    let models = models_of(&view, "ptarget");
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec!["m-128k", "m-200k", "m-new"],
+        "N17d: 顺序必须跟随发现结果"
+    );
+    let declared = models
+        .iter()
+        .find(|m| m.id == "m-200k")
+        .expect("N17d: 已登记模型必须保留");
+    assert_eq!(
+        declared.capabilities.context_window_tokens,
+        Some(200_000),
+        "N17d: 用户声明的窗口不得被模板值覆盖（本用例钉死的缺陷形态）"
+    );
+    assert_eq!(
+        declared.temperature, 0.7,
+        "N17d: 逐模型温度同样不得被模板覆盖"
+    );
+    let fresh = models
+        .iter()
+        .find(|m| m.id == "m-new")
+        .expect("N17d: 新模型必须写入");
+    assert_eq!(
+        fresh.capabilities.context_window_tokens, None,
+        "N17d: 新模型不得继承模板的窗口声明（应跟随自身能力预设）"
+    );
+}
+
+#[test]
+fn n17e_discovery_roundtrip_on_disk_keeps_user_declared_window() {
+    // 端到端：磁盘真值 → load_view → 发现映射 → save_view → 磁盘真值。
+    // 这是用户实际路径（事件臂在 `ModelsDiscovered` 里正是 load_view/save_view）。
+    let root = std::env::temp_dir().join(format!(
+        "pony-tui-batch4-n17e-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&root).expect("create temp root");
+    let path = root.join("providers.json");
+    let raw = serde_json::json!({
+        "providers": [{
+            "id": "pdisk",
+            "name": "Disk",
+            "protocol": "openai-completions",
+            "base_url": "https://example.test/v1",
+            "api_key_env_var": "DISK_API_KEY",
+            "models": [
+                {
+                    "id": "m-declared",
+                    "name": "Declared",
+                    "model": "declared",
+                    "temperature": 0.2,
+                    "maxOutputTokens": 64000,
+                    "capabilityPreset": "open-ai-chat",
+                    "capabilities": { "contextWindowTokens": 200000 }
+                },
+                {
+                    "id": "m-undeclared",
+                    "name": "Undeclared",
+                    "model": "undeclared",
+                    "temperature": 0.2,
+                    "maxOutputTokens": 64000,
+                    "capabilityPreset": "open-ai-chat"
+                }
+            ],
+            "selectedModelId": "m-declared"
+        }],
+        "selectedProviderId": "pdisk"
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).expect("write fixture");
+
+    let store = ProviderRegistryStore::with_path(&path);
+    let mut view = store.load_view();
+    tui::apply_models_discovered(
+        &mut view,
+        "pdisk",
+        &["m-declared".to_string(), "m-undeclared".to_string()],
+    )
+    .expect("映射必须成功");
+    store.save_view(view).expect("保存必须成功");
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read after"))
+            .expect("parse after");
+    let models = after["providers"][0]["models"]
+        .as_array()
+        .expect("models 必须是数组");
+    assert_eq!(
+        models[0]["capabilities"]["contextWindowTokens"],
+        serde_json::json!(200_000),
+        "N17e: 用户声明的 200K 必须穿过整条 load→apply→save 链路存活"
+    );
+    // 未声明模型由预设补缺（默认 1M）落成显式值，但绝不能变成模板的 200000。
+    let undeclared_window = models[1]["capabilities"]["contextWindowTokens"]
+        .as_u64()
+        .expect("未声明模型经归一化后应有补缺窗口");
+    assert_ne!(
+        undeclared_window, 200_000,
+        "N17e: 未声明模型不得继承模板窗口"
+    );
+    assert_eq!(
+        undeclared_window,
+        u64::from(pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS),
+        "N17e: 未声明模型应回落到默认窗口"
     );
 }
