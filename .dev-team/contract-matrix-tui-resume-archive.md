@@ -86,6 +86,19 @@ is_main_session_id(session_id) && !continuation_only && (show_archived || !archi
 | T7 | 键位矩阵 | C6 | 纯函数：`Ctrl+X` 命中；`Ctrl+Shift+X`/`Alt+X`/裸 `x`/`Ctrl+Alt+X`/`Shift+X` 不命中。接线断言（review/渲染级）：`Ctrl+X` 只在 Normal 分支派发，面板内不得复用 |
 | T8 | 命令表 | C6 | `AVAILABLE_COMMANDS` 含且仅含一条 `/archive` 条目（描述逐字相等）；`/help` 渲染行含 `/archive` |
 
+## Lead 裁决修订（R1~R10，2026-11-21，优先于上文对应条款）
+
+- **R1（改 C1）**：`resume_row_parts` 的 `width` = 面板**正文内宽** `body.width`，不是面板外宽；面板宽 `min(96, area.width-4)`。
+- **R2（改 C1）**：不得复用 `list_row`（其右列预算 8 列、`truncate_width` 不补 `…`）；渲染层自建两列行，left 用补 `…` 的 ellipsize。
+- **R3（改 C3）**：`all`/`cur`/`h` 三个计数在 `/resume` 分支由**过滤前 raw 列表**算出并存入 `TuiState`；**禁止**给 `SessionItem` 增字段（冻结测试的结构体字面量无 `..`）。
+- **R4（补 C2 调用面）**：`state.session_list` 只存 C2 过滤后的视图；渲染 / Enter / `d` / `u` 共用同一索引并 clamp。
+- **R5（补 C5）**：无参归档换会话必须抄全 `/clear` 四步：`pending_request=None` + `close_pending_request_overlay` → `goal_round_cancel.cancel_for(old)` → `new_session_id()` + `reset_for(new)` + `reset_session_scope()` → `sync_pending_control_request`；并回执 `已归档 <id>，可用 pony resume <id> 找回`。
+- **R6（补 C6）**：面板 `d`/`u` 只对**非当前**会话行生效；当前行按 `d`/`u` 只给提示「当前会话请用 /archive 或 Ctrl+X」；`archive_session/unarchive_session` 的 `Err` 必须进状态行。
+- **R7（补 C6）**：处于队友/子会话时，`Ctrl+X` 与无参 `/archive` 拒绝并提示先返回主会话。
+- **R8（改 C1 渲染补充）**：归档行只 dim，不加 `· 归档` 后缀；`a` 显示归档时标题追加 `· 含归档`。
+- **R9（钉 C4 调用点）**：toast 唯一调用点 = `SelectingSession` Enter 恢复分支（hydrate 后比对前后 `active_workspace_id`）；禁接 `switch_session_scope` 与 `hydrate_state_from_session`。
+- **R10**：归档成功/失败一律可见回执，`let _ =` 视为未完成。
+
 ## 非目标（Out of scope）
 
 - 不改 `SessionOverview` / 会话后端 schema / 归档持久化语义（`archived` 已在数据面）。
@@ -97,3 +110,4 @@ is_main_session_id(session_id) && !continuation_only && (show_archived || !archi
 - 2026-11-21：Protocol Agent 冻结 C1~C6 + T1~T8，落 `todo!()` 空桩（`target = feat/tui-resume-archive`）。
 - 2026-11-21：Lead 裁决修订 C6 生效范围——Ctrl+X 改为 **Normal 模式（输入框态）全局无参归档**，
   `SelectingSession` 面板内不生效（面板内 `d`/`u` 归档/取消归档、`a` 显示归档）；T7 增「接线断言」一句。C1~C5 未动。
+- 2026-11-21：L3 方案审查 6 条 BLOCKING → Lead 裁决 R1~R10（宽度绑定/不复用 list_row/计数通道/索引空间/Ask 收口/面板 d-u 语义/子会话守卫/归档行样式/toast 调用点/回执）。
