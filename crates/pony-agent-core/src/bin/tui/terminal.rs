@@ -111,10 +111,10 @@ pub fn write_signal_notice(sig: libc::c_int) {
     buf[..PREFIX.len()].copy_from_slice(PREFIX);
     len += PREFIX.len();
     let mut digits = [0u8; 3];
-    let mut remaining = sig.max(0) as u32;
+    let mut remaining = u32::try_from(sig.max(0)).unwrap_or(0);
     let mut count = 0usize;
     loop {
-        digits[count] = b'0' + (remaining % 10) as u8;
+        digits[count] = b'0' + u8::try_from(remaining % 10).unwrap_or(0);
         count += 1;
         remaining /= 10;
         if remaining == 0 || count == digits.len() {
@@ -170,7 +170,7 @@ pub fn write_ignored_signal_notice(sig: libc::c_int, pid: libc::pid_t) {
     let mut pid_rem = pid.unsigned_abs();
     let mut pid_count = 0usize;
     loop {
-        pid_digits[pid_count] = b'0' + (pid_rem % 10) as u8;
+        pid_digits[pid_count] = b'0' + u8::try_from(pid_rem % 10).unwrap_or(0);
         pid_count += 1;
         pid_rem /= 10;
         if pid_rem == 0 || pid_count == pid_digits.len() {
@@ -185,10 +185,12 @@ pub fn write_ignored_signal_notice(sig: libc::c_int, pid: libc::pid_t) {
     buf[len..len + P3.len()].copy_from_slice(P3);
     len += P3.len();
 
+    // SAFETY: buf 与 len 都来自本函数栈上独占缓冲（已写入的长度），write(2) 只读取该区间；
+    // STDERR_FILENO 恒为有效文件描述符，且本函数不分配内存，适合在信号处理器语义下调用。
     unsafe {
         libc::write(
             libc::STDERR_FILENO,
-            buf.as_ptr() as *const libc::c_void,
+            buf.as_ptr().cast::<libc::c_void>(),
             len,
         );
     }
@@ -196,20 +198,21 @@ pub fn write_ignored_signal_notice(sig: libc::c_int, pid: libc::pid_t) {
 
 #[cfg(all(unix, target_os = "linux"))]
 fn is_descendant_via_proc(mut target_pid: libc::pid_t, my_pid: libc::pid_t) -> bool {
+    const PREFIX: &[u8] = b"/proc/";
+    const SUFFIX: &[u8] = b"/stat\0";
     if target_pid <= 1 || target_pid == my_pid {
         return target_pid == my_pid;
     }
     for _ in 0..16 {
         let mut path = [0u8; 32];
         let mut len = 0;
-        const PREFIX: &[u8] = b"/proc/";
         path[..PREFIX.len()].copy_from_slice(PREFIX);
         len += PREFIX.len();
         let mut digits = [0u8; 10];
         let mut d_len = 0;
         let mut n = target_pid.unsigned_abs();
         loop {
-            digits[d_len] = b'0' + (n % 10) as u8;
+            digits[d_len] = b'0' + u8::try_from(n % 10).unwrap_or(0);
             d_len += 1;
             n /= 10;
             if n == 0 {
@@ -220,23 +223,31 @@ fn is_descendant_via_proc(mut target_pid: libc::pid_t, my_pid: libc::pid_t) -> b
             path[len] = *d;
             len += 1;
         }
-        const SUFFIX: &[u8] = b"/stat\0";
         path[len..len + SUFFIX.len()].copy_from_slice(SUFFIX);
 
-        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+        // SAFETY: path 是栈上以 NUL 结尾的字节缓冲，本次调用期间不被移动或释放；
+        // path 不以 '/' 开头（固定前缀 "/proc/"），不会被当作相对路径逃逸。
+        let fd = unsafe { libc::open(path.as_ptr().cast::<libc::c_char>(), libc::O_RDONLY) };
         if fd < 0 {
             return false;
         }
         let mut buf = [0u8; 512];
-        let bytes_read =
-            unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len() - 1) };
+        // SAFETY: fd 由上面的 open 成功返回，buf 是本函数栈上独占缓冲，长度参数取 buf.len()-1
+        // 以保留结尾 NUL 的位置，写入范围必然落在 buf 内。
+        let bytes_read = unsafe {
+            libc::read(
+                fd,
+                buf.as_mut_ptr().cast::<libc::c_void>(),
+                buf.len() - 1,
+            )
+        };
+        // SAFETY: fd 有效且此后不再使用；close 失败也只返回错误码，不存在内存安全问题。
         unsafe { libc::close(fd) };
         if bytes_read <= 0 {
             return false;
         }
-        let s = match std::str::from_utf8(&buf[..bytes_read as usize]) {
-            Ok(v) => v,
-            Err(_) => return false,
+        let Ok(s) = std::str::from_utf8(&buf[..usize::try_from(bytes_read).unwrap_or(0)]) else {
+            return false;
         };
         let Some(after_paren) = s.rfind(')') else {
             return false;
@@ -266,6 +277,7 @@ pub fn is_child_or_descendant(sender_pid: libc::pid_t) -> bool {
     if sender_pid <= 1 {
         return false;
     }
+    // SAFETY: getpid(2) 无前置条件、不会失败，也不触碰任何指针。
     let my_pid = unsafe { libc::getpid() };
     if sender_pid == my_pid {
         return true;
@@ -299,15 +311,21 @@ pub fn install_suspend_signal_handler() {
 pub fn install_shutdown_signal_handlers() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handle_shutdown_sigaction as usize;
+        // sa_sigaction 字段类型是 usize，函数指针转整数只能经 as 完成（libc ABI 契约）。
+        #[expect(
+            clippy::as_conversions,
+            reason = "sa_sigaction 字段以 usize 承载函数指针，这是 sigaction(2) 的既定 ABI"
+        )]
+        let handler_addr = handle_shutdown_sigaction as usize;
+        sa.sa_sigaction = handler_addr;
         sa.sa_flags = libc::SA_SIGINFO;
-        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigemptyset(std::ptr::from_mut(&mut sa.sa_mask));
 
-        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, std::ptr::from_ref(&sa), std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, std::ptr::from_ref(&sa), std::ptr::null_mut());
         // pty 会话被关闭（如 `script` 收到 SIGINT 后退出）时，TUI 进程会收到 SIGHUP；
         // 同样走优雅退出路径以执行终端恢复，而不是默认终止并留下 alternate screen。
-        libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGHUP, std::ptr::from_ref(&sa), std::ptr::null_mut());
 
         let cont_handler = handle_sigcont_signal as *const () as libc::sighandler_t;
         libc::signal(libc::SIGCONT, cont_handler);

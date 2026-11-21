@@ -120,16 +120,18 @@ extern "C" fn handle_shutdown_sigaction(
     info: *mut libc::siginfo_t,
     _ucontext: *mut libc::c_void,
 ) {
-    let sender_pid = if !info.is_null() {
-        unsafe {
-            #[cfg(target_os = "linux")]
-            let pid = (*info).si_pid();
-            #[cfg(not(target_os = "linux"))]
-            let pid = (*info).si_pid;
-            pid
-        }
-    } else {
+    let sender_pid = if info.is_null() {
         0
+    } else {
+        // SAFETY: 上面已判定 info 非空；该指针由内核在 SA_SIGINFO 回调期间提供，
+        // 在本函数返回前始终有效，借用出的引用不会悬垂。
+        let info_ref = unsafe { &*info };
+        #[cfg(target_os = "linux")]
+        // SAFETY: 只读取内核已填好的 siginfo_t 字段，info_ref 在本作用域内有效。
+        let pid = unsafe { info_ref.si_pid() };
+        #[cfg(not(target_os = "linux"))]
+        let pid = info_ref.si_pid;
+        pid
     };
 
     if sender_pid > 0 && is_child_or_descendant(sender_pid) {

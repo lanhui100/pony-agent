@@ -1008,7 +1008,7 @@ pub(super) fn is_host_termination_command(tokens: &[&str], normalized: &str) -> 
         return Some("命令包含针对宿主/Agent进程的强制终止模式 `pkill/killall <host>`，当前 runtime 已拒绝执行。".to_string());
     }
 
-    let has_kill = tokens.iter().any(|t| *t == "kill");
+    let has_kill = tokens.contains(&"kill");
     let has_process_finder = normalized.contains("pgrep") || normalized.contains("pidof");
     if has_kill && has_process_finder {
         return Some("命令包含通过进程查找终止宿主/Agent进程的高危模式 `kill $(pgrep ...)`，当前 runtime 已拒绝执行。".to_string());

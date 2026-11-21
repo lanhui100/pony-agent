@@ -63,7 +63,7 @@ pub static TRACKED_CHILD_PIDS: [AtomicI32; 128] =
 
 #[cfg(unix)]
 pub fn register_active_child_pid(pid: u32) {
-    let pid_i32 = pid as i32;
+    let pid_i32 = i32::try_from(pid).unwrap_or(0);
     for slot in &TRACKED_CHILD_PIDS {
         if slot
             .compare_exchange(0, pid_i32, Ordering::SeqCst, Ordering::SeqCst)
@@ -76,7 +76,7 @@ pub fn register_active_child_pid(pid: u32) {
 
 #[cfg(unix)]
 pub fn unregister_active_child_pid(pid: u32) {
-    let pid_i32 = pid as i32;
+    let pid_i32 = i32::try_from(pid).unwrap_or(0);
     for slot in &TRACKED_CHILD_PIDS {
         if slot
             .compare_exchange(pid_i32, 0, Ordering::SeqCst, Ordering::SeqCst)
