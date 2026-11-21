@@ -1,0 +1,207 @@
+{
+  "ticket": "l2at-tui-resume-archive",
+  "task": "shared task-2 (T2/Test) —— 独立验收测试冻结（红相锚定）",
+  "agent": "test-agent",
+  "role": "independent-test-agent（L2-T 正向契约 + L2-AT 对抗注入）",
+  "branch": "feat/tui-resume-archive",
+  "contract": ".dev-team/contract-matrix-tui-resume-archive.md",
+  "contract_status": "frozen（C1~C6 / T1~T8；2026-11-21 Lead 裁决修订 C6 Ctrl+X 生效范围）",
+  "skill_loaded": "test-expert（分级 L2 + 零假测试规范 + 物理收据标准）",
+  "status": "red-phase-frozen（等 Executor T3 实现后转绿；本文件只记红相与基线，不含绿相结论）",
+  "src_untouched": true,
+  "files": {
+    "new": [
+      "crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs",
+      "crates/pony-agent-core/tests/tui_resume_archive_adversarial.rs",
+      ".dev-team/l2at-done-tui-resume-archive.json"
+    ],
+    "patched_compile_compat_only": [
+      {
+        "file": "crates/pony-agent-core/tests/tui_render_layout.rs",
+        "lines": "472-481 / 484-493",
+        "change": "SessionItem 字面量补 workspace_id: None, workspace_label: None, archived: false（各 3 行）",
+        "reason": "contract-add: SessionItem 新增 3 个必填字段后既有字面量不再编译",
+        "authorized_by": "lead（授权 A：只允许字段填充）"
+      },
+      {
+        "file": "crates/pony-agent-core/tests/tui_dialog_wave39.rs",
+        "lines": "911-921",
+        "change": "SessionItem 字面量补 workspace_id: None, workspace_label: None, archived: false（3 行）",
+        "reason": "同上",
+        "authorized_by": "lead（授权 A：只允许字段填充）"
+      },
+      {
+        "file": "crates/pony-agent-core/tests/slash_commands_acceptance.rs",
+        "lines": "64-70",
+        "change": "CONTRACT_COMMANDS 数组 20→21，紧随 /resume 追加 \"/archive\"，并加 2 行注释指向契约 C6；其余条目逐字未动",
+        "reason": "契约冻结表同提交改写（slash-commands C-4 ↔ tui-resume-archive C6）",
+        "authorized_by": "lead（明确授权：只允许这一处增量）"
+      }
+    ]
+  },
+  "cases": {
+    "acceptance": {
+      "file": "crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs",
+      "count": 17,
+      "mapping": {
+        "T1": [
+          "t1_right_column_is_time_then_fixed_order_markers_without_turn_count",
+          "t1_markers_follow_active_and_selected_flags",
+          "t1_short_id_is_first_8_chars_of_last_dash_segment",
+          "t1_width_budget_invariant_across_widths"
+        ],
+        "T2": [
+          "t2_cross_workspace_prefix_truth_table",
+          "t2_label_fallback_to_workspace_id"
+        ],
+        "T3": [
+          "t3_visibility_truth_table_exhaustive",
+          "t3_subagent_and_teammate_never_visible",
+          "t3_filter_preserves_input_order"
+        ],
+        "T4": [
+          "t4_panel_title_reports_visible_count",
+          "t4_empty_state_reports_current_and_total_counts"
+        ],
+        "T5": [
+          "t5_switch_notice_truth_table",
+          "t5_switch_notice_label_fallback_to_new_id"
+        ],
+        "T6": [
+          "t6_archive_plan_blocked_priority",
+          "t6_archive_plan_routing_matrix"
+        ],
+        "T7": [
+          "t7_archive_shortcut_key_matrix"
+        ],
+        "T8": [
+          "t8_available_commands_has_exactly_one_archive_entry"
+        ]
+      },
+      "assertion_scope_notes": [
+        "T1 行宽不变量口径 = SUT 自身 tui::str_width（宽字符按 2 列）；width ∈ {0,1,20,40,84,200}，标题含 300 汉字与 '中a🚀' 混排",
+        "T1 右列用整串相等断言（时间 · 当前 · 短id），并额外断言右列不含 '轮'、不含夹具 turn_count=7",
+        "T3 把契约要求的 8 组上界扩为 2×2×2×2=16 组穷举（严格更强），真值由 C2 原文独立推导，不复用被测实现",
+        "T4 为渲染级：ratatui TestBackend 渲染 tui::ui，因宽字符右占位列 symbol 为空格，CJK 断言统一先 squeeze 去空白再比"
+      ]
+    },
+    "adversarial": {
+      "file": "crates/pony-agent-core/tests/tui_resume_archive_adversarial.rs",
+      "count": 5,
+      "cases": [
+        "at_overlong_mixed_width_titles_never_panic_and_keep_budget",
+        "at_empty_session_list_in_narrow_terminal_renders_without_panic_or_overflow",
+        "at_hostile_workspace_labels_never_panic_and_prefix_stays_in_budget",
+        "at_active_and_selected_same_row_marks_once_in_fixed_order",
+        "at_archived_rows_hidden_by_default_but_restorable_from_data_plane"
+      ]
+    },
+    "total": 22
+  },
+  "red_phase": {
+    "mandated_combined_gate": {
+      "command": "cd /home/dm/pony-agent && bash scripts/cargo-lane.sh test -p pony-agent-core --test tui_resume_archive_acceptance --test tui_resume_archive_adversarial --target-dir target-test",
+      "exit_code": 101,
+      "observed": "cargo 在第一个失败的 test target 后即停止（tail 收据末尾为 `error: test failed, to rerun pass `-p pony-agent-core --test tui_resume_archive_acceptance``），故两个 target 各自单跑留双份收据（见下）",
+      "conclusion": "红相成立：失败原语为 resume_list.rs / input.rs 的 todo!() panic（SUT 未实现），以及 T4 渲染级契约未落地的断言不成立"
+    },
+    "acceptance_single_run": {
+      "command": "bash scripts/cargo-lane.sh test -p pony-agent-core --test tui_resume_archive_acceptance --target-dir target-test",
+      "exit_code": 101,
+      "summary": "test result: FAILED. 243 passed; 16 failed; 0 ignored; 0 measured; 0 filtered out; finished in 406.58s",
+      "note_243": "243 passed 全部来自 `mod tui` 带入的 tui.rs 既有 #[cfg(test)] 子模块（bin-as-module 模式的既有行为），非本波用例",
+      "panic_primitives": [
+        {"sut": "resume_list.rs:68", "fn": "resume_row_parts", "todo_macro": true},
+        {"sut": "resume_list.rs:85", "fn": "session_visible", "todo_macro": true},
+        {"sut": "resume_list.rs:103", "fn": "workspace_switch_notice", "todo_macro": true},
+        {"sut": "resume_list.rs:129", "fn": "archive_plan", "todo_macro": true},
+        {"sut": "input.rs:55", "fn": "is_archive_shortcut", "todo_macro": true}
+      ],
+      "failing": [
+        {"case": "t1_markers_follow_active_and_selected_flags", "primitive": "todo!() panic（resume_row_parts，与 t1_width_budget 同一调用点；日志 tail 截断未逐条回显）"},
+        {"case": "t1_right_column_is_time_then_fixed_order_markers_without_turn_count", "primitive": "todo!() panic（resume_row_parts，同上）"},
+        {"case": "t1_short_id_is_first_8_chars_of_last_dash_segment", "primitive": "todo!() panic（resume_row_parts，同上）"},
+        {"case": "t1_width_budget_invariant_across_widths", "primitive": "panicked at src/bin/tui/resume_list.rs:68:5: not yet implemented"},
+        {"case": "t2_cross_workspace_prefix_truth_table", "primitive": "panicked at src/bin/tui/resume_list.rs:68:5: not yet implemented"},
+        {"case": "t2_label_fallback_to_workspace_id", "primitive": "todo!() panic（resume_row_parts，同上）"},
+        {"case": "t3_visibility_truth_table_exhaustive", "primitive": "panicked at src/bin/tui/resume_list.rs:85:5: not yet implemented"},
+        {"case": "t3_subagent_and_teammate_never_visible", "primitive": "panicked at src/bin/tui/resume_list.rs:85:5: not yet implemented"},
+        {"case": "t3_filter_preserves_input_order", "primitive": "panicked at src/bin/tui/resume_list.rs:85:5: not yet implemented"},
+        {"case": "t4_panel_title_reports_visible_count", "primitive": "assert 不成立：`C3: 面板标题必须含「共 3 条」`；实屏旧实现标题仅 `会话`，行文本为 `7 轮 · 14:05 · 1a2b3c4d`（旧 C1 口径）", "evidence": "面板逐行：`│ 会 话                    ↑↓ 选 择 · ↵ 确 认 · esc 取 消 │` / `│▏ 会 话 甲          7 轮 · 14:05 · 1a2b3c4d │`"},
+        {"case": "t4_empty_state_reports_current_and_total_counts", "primitive": "assert 不成立：`文案缺少 marker \"当前工作区\"`；实屏空态仅 `│暂无历史会话│`", "evidence": "缺 C3 要求的 `（当前工作区 0 条 · 全部 0 条）` 计数段"},
+        {"case": "t5_switch_notice_truth_table", "primitive": "panicked at src/bin/tui/resume_list.rs:103:5: not yet implemented"},
+        {"case": "t5_switch_notice_label_fallback_to_new_id", "primitive": "panicked at src/bin/tui/resume_list.rs:103:5: not yet implemented"},
+        {"case": "t6_archive_plan_blocked_priority", "primitive": "panicked at src/bin/tui/resume_list.rs:129:5: not yet implemented"},
+        {"case": "t6_archive_plan_routing_matrix", "primitive": "panicked at src/bin/tui/resume_list.rs:129:5: not yet implemented"},
+        {"case": "t7_archive_shortcut_key_matrix", "primitive": "panicked at src/bin/tui/input.rs:55:5: not yet implemented"}
+      ],
+      "passed_at_red_not_faked": [
+        {
+          "case": "t8_available_commands_has_exactly_one_archive_entry",
+          "why": "T8 断言的是命令表，Protocol Agent 在冻结期已把 (\"/archive\", \"归档当前会话（/archive <id> 归档指定会话）\") 落到 AVAILABLE_COMMANDS；属契约已落地部分的真实绿，不是放宽"
+        }
+      ]
+    },
+    "adversarial_single_run": {
+      "command": "bash scripts/cargo-lane.sh test -p pony-agent-core --test tui_resume_archive_adversarial --target-dir target-test",
+      "exit_code": 101,
+      "summary": "test result: FAILED. 243 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 402.38s",
+      "failing": [
+        {"case": "at_overlong_mixed_width_titles_never_panic_and_keep_budget", "primitive": "panicked at src/bin/tui/resume_list.rs:68:5: not yet implemented"},
+        {"case": "at_hostile_workspace_labels_never_panic_and_prefix_stays_in_budget", "primitive": "panicked at src/bin/tui/resume_list.rs:68:5: not yet implemented"},
+        {"case": "at_active_and_selected_same_row_marks_once_in_fixed_order", "primitive": "panicked at src/bin/tui/resume_list.rs:68:5: not yet implemented"},
+        {"case": "at_archived_rows_hidden_by_default_but_restorable_from_data_plane", "primitive": "panicked at src/bin/tui/resume_list.rs:85:5: not yet implemented"}
+      ],
+      "passed_at_red_not_faked": [
+        {
+          "case": "at_empty_session_list_in_narrow_terminal_renders_without_panic_or_overflow",
+          "why": "该用例只走既有渲染路径（空列表 + 20/24/30 列 TestBackend），不触碰任何 todo!() 空桩；红相期即为真实绿。绿相期仍须复跑（面板标题/空态文案改动后不得越界）"
+        }
+      ]
+    }
+  },
+  "regression_baseline": {
+    "required_by": "lead（除 tui_dialog_wave39 外的五组，另含 slash_commands_acceptance 的 /archive 同步）",
+    "command": "bash scripts/cargo-lane.sh test -p pony-agent-core --test tui_acceptance --test slash_commands_acceptance --test tui_render_layout --test tui_interaction_acceptance --test tui_batch3_regression --target-dir target-test",
+    "exit_code": 0,
+    "summary": "五个 test target 全绿；末个 target 收据 `test result: ok. 252 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 344.62s`",
+    "notes": [
+      "该五组全部通过 ⇒ Protocol 新增 SessionItem 字段与 /archive 入表未造成回归（编译兼容补丁 + 冻结表同提交改写生效）",
+      "每个 test target 因 `mod tui` 会连带跑 tui.rs 的 #[cfg(test)] 子模块（约 243~255 条/二进制），故单二进制耗时 ~340-410s"
+    ]
+  },
+  "dialog_wave39_single_run": {
+    "command": "bash scripts/cargo-lane.sh test -p pony-agent-core --test tui_dialog_wave39 --target-dir target-test",
+    "exit_code": 0,
+    "summary": "test result: ok. 255 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 343.45s",
+    "wall_clock_elapsed_s": 359,
+    "verdict": "EXISTING-SLOW（不是 EXISTING-HANG）",
+    "verdict_basis": [
+      "总耗时有界、退出码 0、0 失败 ⇒ 不是挂死",
+      "慢因已定位：`tui::ask_lifecycle_settle_tests` 7 条 sqlite 用例各自 `has been running for over 60 seconds`（嵌套在 tui.rs 的既有 #[cfg(test)] 子模块，与本波无关）",
+      "lead 的 180s 阈值在此触发，但结论应记为「既有慢用例」而非挂死"
+    ]
+  },
+  "coverage_blind_spots": [
+    {
+      "gap": "C3 的「归档 h 条已隐藏 · 按 a 显示」空态追加文案未做断言",
+      "why": "`all` / `h` 取自数据面（list_sessions 原始行），而渲染层当前只拿到过滤后的 state.session_list；口径落点未在冻结契约中钉死（T3 任务说明只要求「当前工作区 X 条 · 全部 M 条」）。若实现不暴露数据面计数，该断言会变成无法满足的假红，故留白并在契约/实现收口后补"
+    },
+    {
+      "gap": "T7 的「接线断言」（Ctrl+X 只在 Normal 分支派发、SelectingSession 面板内不生效）未做自动化",
+      "why": "需要驱动 tui_event_loop 的事件循环（TTY/异步），超出 L2 纯函数+渲染级范围；契约矩阵本身把该句标注为 review/渲染级"
+    },
+    {
+      "gap": "T8 的「/help 逐行渲染必须能显示 /archive」未做自动化",
+      "why": "/help 文案在事件循环内拼装（tui.rs:11494 附近），无独立纯函数入口；已断言命令表含且仅含一条 /archive（渲染源即 AVALABLE_COMMANDS）"
+    },
+    {
+      "gap": "C5 的运行时副作用（归档当前会话后 new_session_id + reset_session_scope、goal 续轮 cancel/reset）未做自动化",
+      "why": "属状态机副作用，需 control_plane 夹具 + 事件循环；T6 只锁 archive_plan 三态裁决"
+    },
+    {
+      "gap": "C2 归档行「渲染级默认隐藏」未做断言（仅数据面 session_visible 已覆盖）",
+      "why": "过滤落点未钉死（可能在 /resume 拉列表侧过滤，也可能在渲染侧），直接调 open_session_selector 注入混合行会锁死未冻结的实现位置；AT-5 只断言含归档行渲染不 panic"
+    }
+  ]
+}

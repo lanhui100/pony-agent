@@ -1,18 +1,16 @@
 {
-  "wave": "acp-delegate-p0p2",
-  "status": "completed",
-  "task_tier": "C",
-  "tier_basis": "跨模块（acp/tools/runtime/session/sqlite/control_plane）+ 外部进程 IO（ACP spawn/stdio）+ 事件持久化契约变更 + 命中 blast 关键字（thread/lock/io/fs/spawn/unsafe/saturating_add）；无裁量降级权",
-  "baseline_commit": "c5761b27",
-  "branch": "fix/acp-delegate-p0p2",
-  "worktree": "/home/dm/pony-agent-worktrees/acp-delegate-p0p2",
-  "previous_wave_state": ".dev-team/state-acp-client-p0-p2.json",
+  "wave": "tui-resume-archive",
+  "status": "in_progress",
+  "task_tier": "B",
+  "tier_basis": "跨文件多模块（bin/tui.rs 渲染与命令分发 + bin/tui/{resume_list,input,shortcuts}.rs + tests + ADR + observability.yaml）与 UI 交互契约变更；未命中 blast 关键字（无 lock/thread/net/exec/fs/unsafe 变更面）、无外部网络 IO；按 skill 机械分级判 B",
+  "baseline_commit": "2908d478",
+  "branch": "feat/tui-resume-archive",
+  "worktree": "/home/dm/pony-agent（k=1 共享工作区轻量隔离）",
+  "previous_wave_state": ".dev-team/state.json（上一波 acp-delegate-p0p2 原地保留于 waves）",
   "regression_baseline": {
-    "cmd": "bash scripts/cargo-lane.sh test -p pony-agent-core --lib -- --test-threads=4",
-    "result": "ok. 1607 passed; 0 failed; finished in 216.97s",
-    "exit_code": 0,
-    "log": "/tmp/acp-baseline-lib.log",
-    "receipt": ".dev-team/regression-baseline-acp-delegate.json"
+    "cmd": "bash scripts/cargo-lane.sh test -p pony-agent-core --test tui_acceptance --test slash_commands_acceptance --test tui_render_layout --test tui_dialog_wave39 --test tui_interaction_acceptance --test tui_batch3_regression --target-dir target-test",
+    "artifact": ".dev-team/regression-baseline-tui-resume-archive.json",
+    "status": "passed (exit 0, 13:45)"
   },
   "derivative_compilation_exemption": {
     "declared_by": "protocol-agent",
@@ -27,8 +25,9 @@
     "purity_check": "git diff 仅 +attempts:None/+failed_attempt_ms:None/+prelude_ms:None（含 1 行注释）"
   },
   "observability": {
-    "applicable": true,
-    "reason": "触及 LLM 调用/后台任务/工具结果契约/事件持久化；需 audit-diff + check-declaration"
+    "surface": "TUI UI interaction（/resume 列表 + 归档命令/快捷键）",
+    "decision": "四维归属不变；新增本地取证面 tui_queue_log session_archive；不新增 applicable/enforcement_point",
+    "declaration_update": "docs/observability.yaml（B264 块）"
   },
   "waves": {
     "wave-w1": {
@@ -78,6 +77,24 @@
       "blocked_by": [
         "wave-w3"
       ]
+    },
+    "wave-tui-resume-archive": {
+      "members": [
+        "task-1",
+        "task-2",
+        "task-3",
+        "task-4",
+        "task-5"
+      ],
+      "status": "in_progress",
+      "blocked_by": [],
+      "write_scope_overlaps": [
+        "task-1 与 task-3 均在 crates/pony-agent-core/src/bin/tui.rs 与 tui/input.rs：按 blocked_by 串行（非并发波次），已显式记录"
+      ],
+      "note": "B 级；单文件主战场（tui.rs）→ k=1 串行，无 worktree 强隔离；红相锚定后 Executor 才开工",
+      "receipts": {
+        "regression_baseline": ".dev-team/regression-baseline-tui-resume-archive.json"
+      }
     }
   },
   "tasks": [
@@ -136,12 +153,7 @@
     "load_at_override": "5.8 / 16 cores（< 1.5× 上限）",
     "recorded_at": "2026-11-17T19:52+08:00"
   },
-  "backlog": {
-    "id": "B237",
-    "status": "in_progress",
-    "owner": "lead",
-    "note": "scripts/backlog.mjs 以 git common-dir 定位仓根，B237/租约落在主工作区 /home/dm/pony-agent/backlog（该处另有他人未提交账本改动）；本分支不携带 backlog 变更以避免合并冲突，闭环时在主账本 resolve。"
-  },
+  "backlog": "B264",
   "frozen_test_drift": [
     {
       "file": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs",
@@ -152,14 +164,7 @@
       "red_receipt": "4bfda7ec / .dev-team/red-phase/acp_delegate_adversarial.receipt.json"
     }
   ],
-  "acceptance": {
-    "contract": "12 passed/0 failed",
-    "adversarial": "6 passed/0 failed",
-    "persistence": "3 passed/0 failed",
-    "lib": "1614 passed/0 failed",
-    "acp_suites": "19 suites all green",
-    "evidence_dir": "docs/release/evidence/acp-delegate/"
-  },
+  "acceptance": "crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs（L2-T + L2-AT 对抗）",
   "observability_gate": {
     "audit_diff": "exit 0",
     "check_declaration": "PASS exit 0"
@@ -282,5 +287,10 @@
         ]
       }
     }
-  ]
+  ],
+  "build_budget": {
+    "max_jobs_per_lane": 8,
+    "lane_wrapper_cmd": "bash scripts/cargo-lane.sh",
+    "heavy_owner": "lead"
+  }
 }
