@@ -431,7 +431,12 @@ describe('作用域解析（每 worktree 独立账本）', () => {
   it('无环境变量时落到当前 worktree 顶层（不是 git common dir）', () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'backlog-git-'));
     execFileSync('git', ['init', '-q'], { cwd: repo });
-    expect(resolveLedgerRoot({} as any, repo)).toBe(fs.realpathSync(repo));
+    // Windows：git 输出长路径、realpath 可能给 8.3 短名 ⇒ 两边都取原生 realpath 再按平台大小写归一比较。
+    const canonical = (value: string) => {
+      const real = fs.realpathSync.native(value);
+      return process.platform === 'win32' ? real.toLowerCase() : real;
+    };
+    expect(canonical(resolveLedgerRoot({} as any, repo))).toBe(canonical(repo));
     fs.rmSync(repo, { recursive: true, force: true });
   });
 });
