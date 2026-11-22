@@ -130,15 +130,15 @@ mod tests {
         }
     }
 
-    // 注册表是进程级静态：同一测试内串行使用，避免并发用例互相看见条目。
+    // 注册表是进程级静态：本组用例以**唯一 delegate_id** 断言归属，不依赖全局条目总数
+    //（测试默认并行，其他用例的登记/注销同时发生，任何 `len()` 绝对值都是竞态假红——
+    // Windows CI 首跑即抓到一次 `before + 1` 断言失败）。
     #[test]
     fn guard_registers_and_deregisters_on_drop() {
-        let before = active_delegates().len();
         let guard = ActiveDelegateGuard::register(registration(Some("host-a")));
         let id = guard.delegate_id();
 
         let listed = active_delegates();
-        assert_eq!(listed.len(), before + 1, "登记后必须可见");
         let entry = listed
             .iter()
             .find(|delegate| delegate.delegate_id == id)

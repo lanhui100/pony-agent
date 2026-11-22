@@ -43,6 +43,12 @@ Status: implemented
    `TuiState::todos_state`，`projection::sync_todos_from_store` 读 `todo_list(session_id)`）；
    `task_board_state` 与 `sync_tasks_from_store` 保留给 `/tasks` 覆盖层（团队共享看板），
    两者不互相冒充。空列表保留 `None`（一行空态，不出 0/0 进度）。
+5b. **抽屉高度口径统一**：旧 `chrome_rows(total)` 在「实际抽屉高度 < 5」时让呼吸行让位，而
+   `height()` 用的是**可用区 cap** 判同一分支 ⇒ 空态收紧成一行后出现「布局按 3 行开销算、渲染按
+   2 行开销画」，内容被顶到页签行（Windows CI 的
+   `drawer_puts_a_breathing_row_between_tabs_and_content` / `drawer_height_never_exceeds_two_thirds`
+   抓红）。改为常量 `CHROME_ROWS = 3`（发丝线 + 页签 + 呼吸行），布局与渲染同源；冻结用例断言
+   **不变**（最小 4 行 = 3 固定开销 + 1 行内容）。
 6. **常驻刷新**：`status_bar::sync_task_glance` 扩参 `&HostControlPlane`，在既有 500ms 节流块内
    追加 `projection::sync_drawer_live_sources`（todo + plan，均为进程内注册表）。goal 不进常驻刷新
    （它有自己的命令/事件通道，且读取失败会 fail-closed 清横幅），改在**打开抽屉时**

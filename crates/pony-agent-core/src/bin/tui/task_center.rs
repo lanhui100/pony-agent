@@ -317,17 +317,13 @@ fn tab_bar(state: &TuiState, width: usize) -> Line<'static> {
 /// 页签与内容之间的呼吸行数（没有它页签栏会贴住内容，读起来像内容的标题）。
 const TAB_CONTENT_GAP: u16 = 1;
 
-/// 呼吸行生效的最小抽屉高度：低于此高度时优先保内容可见，呼吸行让位。
-const GAP_MIN_HEIGHT: u16 = 5;
-
-/// 固定开销（发丝线 1 + 页签 1 [+ 呼吸行]）：布局与渲染共用的同一口径。
-fn chrome_rows(total_height: u16) -> u16 {
-    if total_height >= GAP_MIN_HEIGHT {
-        2 + TAB_CONTENT_GAP
-    } else {
-        2
-    }
-}
+/// 固定开销（发丝线 1 + 页签 1 + 呼吸行）：布局（[`height`]）与渲染（[`render`]）共用的**唯一**口径。
+///
+/// 2026-11-22：旧实现在抽屉实际高度 < 5 时让呼吸行「让位」（`chrome_rows` 返回 2），
+/// 而 `height()` 却按**可用区的 cap** 判定同一分支 ⇒ 空态收紧成一行后，布局算出「带呼吸行」的 4 行、
+/// 渲染却按 2 行开销把内容顶上页签（`tests/tui_task_visibility.rs` 的呼吸行用例在 Windows CI 抓红）。
+/// 现统一为恒 3 行：抽屉最小高度本身是 4（发丝线 + 页签 + 呼吸行 + 1 行内容），不需要双口径。
+const CHROME_ROWS: u16 = 2 + TAB_CONTENT_GAP;
 
 /// 抽屉高度（渲染与布局共用的**唯一**口径）：发丝线 1 + 页签 1 + 呼吸行 + 内容行（最多 [height_cap]）。
 pub fn height(state: &TuiState, available_height: u16) -> u16 {
@@ -335,9 +331,8 @@ pub fn height(state: &TuiState, available_height: u16) -> u16 {
         return 0;
     }
     let cap = height_cap(available_height);
-    let chrome = chrome_rows(cap);
     let content = content_lines(state).len() as u16;
-    (chrome + content.min(cap.saturating_sub(chrome).max(1))).min(cap)
+    (CHROME_ROWS + content.min(cap.saturating_sub(CHROME_ROWS).max(1))).min(cap)
 }
 
 /// 渲染抽屉：无边框、CANVAS 底色（与 Ask/Queue 内联面板同一视觉语法）。
@@ -353,15 +348,13 @@ pub fn render(f: &mut Frame, rect: Rect, state: &TuiState) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(hairline(width));
     lines.push(tab_bar(state, width));
-    // 页签与内容之间留一行呼吸区：没有它页签栏会贴住首行内容（高度不足时让位给内容）。
-    let chrome = chrome_rows(rect.height);
-    let gap = usize::from(chrome.saturating_sub(2));
-    for _ in 0..gap {
+    // 页签与内容之间留一行呼吸区（`CHROME_ROWS` 与 `height()` 同一口径，不再按实际高度二次判定）。
+    for _ in 0..usize::from(TAB_CONTENT_GAP) {
         lines.push(blank());
     }
 
     let content = content_lines(state);
-    let visible = usize::from(rect.height.saturating_sub(chrome));
+    let visible = usize::from(rect.height.saturating_sub(CHROME_ROWS));
     let max_scroll = content.len().saturating_sub(visible);
     let scroll = center.scroll.min(max_scroll);
     for (text, style) in content.iter().skip(scroll).take(visible) {
