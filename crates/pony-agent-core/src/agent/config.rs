@@ -7,6 +7,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod capabilities;
+pub use capabilities::{
+    ProviderCapabilityPreset, ProviderModelCapabilities, ProviderReasoningEffort,
+};
+pub(crate) use capabilities::{undeclared_model_capabilities, CAPABILITY_CATALOG};
+
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;
 /// 默认上下文窗口（token）= **1M**：未显式声明窗口的模型一律按此计。
@@ -280,120 +286,6 @@ fn warn_failover_candidate_ignored(provider_id: &str, reason: &str) {
             ("reason", serde_json::json!(reason)),
         ],
     );
-}
-
-struct CapabilityCatalogEntry {
-    protocol: Option<&'static str>,
-    patterns: &'static [&'static str],
-    preset: ProviderCapabilityPreset,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ProviderReasoningEffort {
-    Low,
-    Medium,
-    High,
-    Max,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProviderCapabilityPreset {
-    Auto,
-    OpenAiChat,
-    OpenAiReasoning,
-    AnthropicThinking,
-    DeepseekChat,
-    DeepseekReasoner,
-    Custom,
-}
-
-impl Default for ProviderCapabilityPreset {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
-const CAPABILITY_CATALOG: &[CapabilityCatalogEntry] = &[
-    CapabilityCatalogEntry {
-        protocol: Some("anthropic"),
-        patterns: &["claude-3-7", "claude-sonnet-4", "claude-opus-4"],
-        preset: ProviderCapabilityPreset::AnthropicThinking,
-    },
-    CapabilityCatalogEntry {
-        protocol: Some("openai"),
-        patterns: &["gpt-5", "gpt-5.4", "gpt-5.5", "o1", "o3", "reason"],
-        preset: ProviderCapabilityPreset::OpenAiReasoning,
-    },
-    CapabilityCatalogEntry {
-        protocol: Some("openai"),
-        patterns: &["gpt-4.1", "vision"],
-        preset: ProviderCapabilityPreset::OpenAiChat,
-    },
-    CapabilityCatalogEntry {
-        protocol: Some("openai"),
-        patterns: &["deepseek-reasoner", "deepseek-r1", "deepseek-v4-pro"],
-        preset: ProviderCapabilityPreset::DeepseekReasoner,
-    },
-    CapabilityCatalogEntry {
-        protocol: Some("openai"),
-        patterns: &["deepseek-chat", "deepseek-v4-flash"],
-        preset: ProviderCapabilityPreset::DeepseekChat,
-    },
-];
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderModelCapabilities {
-    pub context_window_tokens: Option<u32>,
-    #[serde(default = "default_true")]
-    pub supports_tools: bool,
-    #[serde(default = "default_true")]
-    pub supports_streaming: bool,
-    #[serde(default)]
-    pub supports_image_input: bool,
-    #[serde(default)]
-    pub supports_reasoning: bool,
-    #[serde(default)]
-    pub supports_video_input: bool,
-    #[serde(default)]
-    pub supports_audio_input: bool,
-    #[serde(default)]
-    pub supports_image_output: bool,
-    #[serde(default)]
-    pub supports_video_output: bool,
-    #[serde(default)]
-    pub supports_audio_output: bool,
-}
-
-impl Default for ProviderModelCapabilities {
-    fn default() -> Self {
-        Self {
-            context_window_tokens: Some(DEFAULT_CONTEXT_WINDOW_TOKENS),
-            supports_tools: true,
-            supports_streaming: true,
-            supports_image_input: true,
-            supports_reasoning: true,
-            supports_video_input: false,
-            supports_audio_input: false,
-            supports_image_output: false,
-            supports_video_output: false,
-            supports_audio_output: false,
-        }
-    }
-}
-
-/// `capabilities` 整段缺席时的「未声明」哨兵：窗口为 `None`，其余布尔能力取默认值。
-///
-/// 必须与 [`ProviderModelCapabilities::default`] 区分开：`default()` 的
-/// `context_window_tokens` 是**补缺值**（1M 默认窗口）；若把它当成声明值，
-/// 「用户从未填过窗口」就与「用户填了 1000000」不可分辨，预设再也补不了缺。
-fn undeclared_model_capabilities() -> ProviderModelCapabilities {
-    ProviderModelCapabilities {
-        context_window_tokens: None,
-        ..ProviderModelCapabilities::default()
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

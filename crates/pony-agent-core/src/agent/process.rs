@@ -1301,9 +1301,7 @@ impl ProcessManager {
     // ── internals ─────────────────────────────────────────────────────────────────────────────
 
     fn start_inner(&self, request: &ProcessStartRequest) -> Result<String, String> {
-        if request.program.trim().is_empty() {
-            return Err("program must not be empty".to_string());
-        }
+        ensure_program_present(request)?;
         // B207b：spawn 侧接线（scope 包装 + 管道 / cwd / 平台隔离 / 沙箱环境）收在
         // `configured_command` 一处：装配细节与「spawn 之后如何纳管」是两件事。
         // `wants_scope` 只在 unix 分支被消费（Windows 走 Job Object），非 Windows 构建必须显式 allow
@@ -1859,6 +1857,15 @@ fn describe_command(program: &str, arguments: &[String]) -> String {
     let mut parts = vec![program.to_string()];
     parts.extend(arguments.iter().cloned());
     parts.join(" ")
+}
+
+/// 空 `program` 属于调用方 bug（不是上游错误）：在进入 spawn 之前就拒绝，
+/// 避免不同平台对空串 spawn 给出不一致的行为。
+fn ensure_program_present(request: &ProcessStartRequest) -> Result<(), String> {
+    if request.program.trim().is_empty() {
+        return Err("program must not be empty".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

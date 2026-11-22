@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T173926Z-legacy-migration-79de","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-22T17:39:26.741Z"}
+{"kind":"annotate","at":"2026-11-22T17:39:26.862Z","id":"B249","description":"收口进度：config.rs（3085→2977，抽 capabilities 子模块）与 process.rs start_inner（280→277，抽 ensure_program_present）已修；size:check 由 4 条降至 2 条（余 provider/tests.rs 3057、runtime/tests.rs 13913，待 B139 等 PR 合入后处理）。ADR 2026-11-23-size-gate-closeout-part1。"}
