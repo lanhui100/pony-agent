@@ -2,6 +2,7 @@
 //! 任务板 / 团队花名册 / Goal / Plan / 待处理控制请求的唯一投影真值源。
 
 use super::*;
+use pony_agent_core::agent::todo::{todo_list, TodoListArgs};
 
 /// 真实 todo 存储 → 任务看板投影。`id` 按存储顺序稳定生成，避免每帧抖动。
 /// W3：`/tasks` 已切到**真实 Team 任务看板**（`orchestration::team_task_list`）。
@@ -83,6 +84,60 @@ pub fn sync_tasks_from_store(state: &mut TuiState) {
     }
 }
 
+/// 当前会话的 **todo 存储** → `TuiState::todos_state`（抽屉 Tasks 页签的唯一数据源）。
+///
+/// 数据源是 `todo_write` 写入的会话级注册表（进程内、无网络、无磁盘）：**不是** `task_board_state`
+/// 那份进程全局团队看板 —— 单会话 TUI 下团队看板几乎恒空，旧实现让 Tasks 页签「永远没有任务」。
+/// 空列表保留 `None`，让抽屉走一行空态而不是 0/0 进度。
+pub fn sync_todos_from_store(state: &mut TuiState) {
+    match todo_list(TodoListArgs {
+        session_id: Some(state.session_id.clone()),
+    }) {
+        Ok(result) => {
+            let todos = tui_tasks_from_todos(result.todos);
+            state.todos_state = if todos.is_empty() { None } else { Some(todos) };
+        }
+        Err(error) => state.status_text = format!("任务同步失败: {error}"),
+    }
+}
+
+/// control plane 计划存储 → `TuiState::plan_state`（抽屉 Plan 页签）。
+///
+/// 旧实现只有 `/plan` / `/approve` 两条命令会投影计划——模型在轮内 `plan_control` 建/改的计划
+/// 在抽屉里**永远不可见**。本函数是打开抽屉与轮末的统一同步点；无计划 ⇒ 清空，避免把上一会话
+/// 的计划残留成当前会话的实施计划。
+pub fn sync_plan_from_store(state: &mut TuiState, control_plane: &HostControlPlane) {
+    let plans = control_plane.plan_list(&state.session_id);
+    match tui_plan_from_value(&plans) {
+        Some(plan) => state.update_plan(plan),
+        None => state.plan_state = None,
+    }
+}
+
+/// 抽屉数据源的**常驻**刷新（500ms 与状态条摘要同周期）：todo + plan。
+///
+/// 两者都是进程内注册表（todo 是 HashMap，plan 是 PlanStore），不含网络/磁盘，可安全节流刷新。
+/// goal 不在此列：它有自己的命令/事件回写通道，且读取失败会 fail-closed 清横幅，不宜每 500ms 触发。
+pub fn sync_drawer_live_sources(state: &mut TuiState, control_plane: &HostControlPlane) {
+    sync_todos_from_store(state);
+    sync_plan_from_store(state, control_plane);
+}
+
+/// 打开/切换抽屉时的**全量**同步点：live 数据源 + goal（含 fail-closed 清空语义）。
+pub fn sync_drawer_sources(state: &mut TuiState, control_plane: &HostControlPlane) {
+    sync_drawer_live_sources(state, control_plane);
+    hydrate_goal_state(state, &state.session_id.clone());
+}
+
+/// 计划是否已终态（`completed` / `aborted`）：终态计划只在「没有未终态计划」时兜底展示。
+fn is_terminal_plan(plan: &serde_json::Value) -> bool {
+    matches!(
+        plan.get("lifecycle").and_then(|lifecycle| lifecycle.as_str()),
+        Some("completed" | "aborted")
+    )
+}
+
+
 /// W3：名册状态 → 面板展示文案（wire 小写，与 `TeammateStatus` 的 serde 口径一致）。
 pub fn teammate_status_label(status: &TeammateStatus) -> String {
     match status {
@@ -132,6 +187,28 @@ pub fn agent_roster_state_from_runtime() -> AgentRosterState {
             .then_with(|| left.target.cmp(&right.target))
     });
     AgentRosterState::new(entries)
+}
+
+/// 活跃 ACP 委派注册表 → TUI 视图行（按当前宿主会话过滤；`None` 宿主的条目不串到任意会话）。
+///
+/// 为什么按会话过滤：`acp_delegate` 会话由**某个宿主会话的轮次线程**发起，别的会话的 Agents
+/// 页签里出现它既不可操作也会误导（与 B012 作业归属同一条纪律）。
+pub fn acp_delegates_from_runtime(host_session_id: &str) -> Vec<AcpDelegateRow> {
+    let target = host_session_id.trim();
+    if target.is_empty() {
+        return Vec::new();
+    }
+    pony_agent_core::acp::registry::active_delegates_for_session(target)
+        .into_iter()
+        .map(|delegate| AcpDelegateRow {
+            delegate_id: delegate.delegate_id,
+            agent_id: delegate.agent_id,
+            acp_session_id: delegate.acp_session_id,
+            host_session_id: delegate.host_session_id,
+            cwd: delegate.cwd,
+            started_at_ms: delegate.started_at_ms,
+        })
+        .collect()
 }
 
 /// W3b：名册快照 → 可切换的子会话候选（顺序与输入一致，不重排、不去重）。
@@ -224,8 +301,17 @@ pub fn tui_goal_from_goal(goal: &GoalData) -> TuiGoal {
 }
 
 /// `control_plane.plan_list(session)` 的 JSON 投影 → PlanState。空数组/格式不符返回 `None`。
+///
+/// 版本选择口径（2026-11-22）：优先**最新一份未终态**计划（`draft` / `executing`）；
+/// 该会话所有计划都已终态时退回**最新一份**。旧实现固定取 `first()`——会话产生第二份计划后
+/// 抽屉会一直显示最早那份，新计划永远不出现（用户侧表现为「plan 从没显示过」）。
 pub fn tui_plan_from_value(value: &serde_json::Value) -> Option<PlanState> {
-    let plan = value.as_array()?.first()?;
+    let plans = value.as_array()?;
+    let plan = plans
+        .iter()
+        .rev()
+        .find(|plan| !is_terminal_plan(plan))
+        .or_else(|| plans.last())?;
     let steps = plan
         .get("steps")
         .and_then(|steps| steps.as_array())

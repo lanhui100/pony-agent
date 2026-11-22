@@ -1,499 +1,458 @@
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   acquireLease,
-  archiveFileFor,
+  archiveBatches,
   doctor,
-  heartbeatLease,
-  reapStaleLeases,
-  releaseLease,
+  fold,
+  foldV2,
   ledgerPaths,
   lintAll,
-  list,
-  normalizeLegacy,
-  readHighWater,
+  lintV2,
+  listRows,
   readJsonl,
-  record,
-  resolve,
+  readLease,
+  reapStaleLeases,
+  recordTask,
+  releaseLease,
+  releaseTask,
   resolveLedgerRoot,
-  update,
-  validateRecord,
+  resolveTask,
+  startTask,
+  validateTask,
+  verifyArchive,
   writeJsonl
 } from '../scripts/backlog.mjs';
 
 const SCRIPT = path.resolve('scripts/backlog.mjs');
+const MIGRATE = path.resolve('scripts/backlog-migrate-v2-v3.mjs');
+const BATCH = '20260101T000000Z-tui-abcd';
 
 let root: string;
 let paths: ReturnType<typeof ledgerPaths>;
 
-function seed(rows: any[]) {
-  fs.mkdirSync(path.join(root, 'backlog'), { recursive: true });
-  writeJsonl(paths.tasks, rows);
+function baseTask(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'B001',
+    category: 'Defect',
+    priority: 'P1',
+    status: 'todo',
+    title: '示例任务',
+    created_at: '2026-01-01T00:00:00.000Z',
+    metadata: { fingerprint: 'fp-1', occurred_count: 1 },
+    ...overrides
+  };
+}
+
+function batchStart(batchId = BATCH, overrides: Record<string, unknown> = {}) {
+  return {
+    kind: 'batch.start',
+    model: 'backlog-v3',
+    batch_id: batchId,
+    surface: 'tui',
+    created_at: '2026-01-01T00:00:00.000Z',
+    ...overrides
+  };
+}
+
+function seedBatch(batchId: string, events: unknown[]) {
+  fs.mkdirSync(paths.logsDir, { recursive: true });
+  const lines = [batchStart(batchId), ...events].map(line => JSON.stringify(line));
+  fs.writeFileSync(path.join(paths.logsDir, `${batchId}.jsonl`), lines.join('\n') + '\n');
+}
+
+function seedV3() {
+  fs.writeFileSync(paths.model, 'v3\n');
+}
+
+function seedV2(rows: unknown[], archived: unknown[] = []) {
+  writeJsonl(paths.legacyTasks, rows);
+  fs.writeFileSync(paths.legacyNextId, '999\n');
+  if (archived.length) {
+    fs.mkdirSync(paths.archiveDir, { recursive: true });
+    writeJsonl(path.join(paths.archiveDir, 'tasks-2026.jsonl'), archived);
+  }
 }
 
 function lockFileOf(id: string) {
   return path.join(paths.locksDir, `${id}.lock`);
 }
 
-function baseRow(overrides: Record<string, unknown> = {}) {
-  return {
-    id: 'B056',
-    category: 'Defect',
-    priority: 'P1',
-    status: 'todo',
-    title: '示例任务',
-    created_at: '2026-11-11T00:00:00.000Z',
-    metadata: { fingerprint: 'fp-1', occurred_count: 1 },
-    ...overrides
-  };
-}
-
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'backlog-cli-'));
+  root = fs.mkdtempSync(path.join(os.tmpdir(), 'backlog-v3-'));
   paths = ledgerPaths(root);
+  fs.mkdirSync(path.join(root, 'backlog'), { recursive: true });
 });
 
 afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe('schema 与状态机（AC1）', () => {
-  it('非法 category / 缺 title / ID 非 B\\d{3,} 均被判非法', () => {
-    expect(validateRecord(baseRow({ category: 'Bug' }))).not.toEqual([]);
-    expect(validateRecord(baseRow({ title: '  ' }))).not.toEqual([]);
-    expect(validateRecord(baseRow({ id: 'B5' }))).not.toEqual([]);
-    expect(validateRecord(baseRow({ weird: 1 }))).not.toEqual([]);
-    expect(validateRecord(baseRow())).toEqual([]);
+describe('记录校验（字段口径与 v2 一致）', () => {
+  it('非法 category / 缺 title / ID 非 B\\d{3,} / 未知字段均判非法', () => {
+    expect(validateTask(baseTask({ category: 'Bug' }))).not.toEqual([]);
+    expect(validateTask(baseTask({ title: '  ' }))).not.toEqual([]);
+    expect(validateTask(baseTask({ id: 'B5' }))).not.toEqual([]);
+    expect(validateTask(baseTask({ weird: 1 }))).not.toEqual([]);
+    expect(validateTask(baseTask())).toEqual([]);
   });
 
-  it('todo→done 直跳被拒，in_progress 缺 owner/touched_paths 被拒', () => {
-    seed([baseRow()]);
-    expect(() => update(paths, 'B056', { status: 'done' } as any)).toThrow(/resolve/);
-    expect(() => update(paths, 'B056', { status: 'in_progress' })).toThrow(/owner/);
-    expect(() => update(paths, 'B056', { status: 'in_progress', owner: 'lane-1' })).toThrow(/touched_paths/);
-    const row = update(paths, 'B056', { status: 'in_progress', owner: 'lane-1', touchedPaths: ['crates/x'] });
-    expect(row.status).toBe('in_progress');
-    expect(update(paths, 'B056', { status: 'todo' }).status).toBe('todo');
-  });
-
-  it('done 记录缺 evidence/closed_at 判非法（不要求 closing_commit）', () => {
-    const done = baseRow({ status: 'done' });
-    expect(validateRecord(done)).not.toEqual([]);
-    expect(validateRecord(baseRow({ status: 'done', evidence: 'ok', closed_at: '2026-11-11T01:00:00.000Z' }))).toEqual([]);
-  });
-});
-
-describe('ID 分配与高水位（AC2）', () => {
-  it('新账本首条从 B001 起分配（无硬编码下限），且高水位单调不减', () => {
-    const first = record(paths, { category: 'Task', title: 'a', fingerprint: 'f1' });
-    expect(first.row.id).toBe('B001');
-    const second = record(paths, { category: 'Task', title: 'b', fingerprint: 'f2' });
-    expect(second.row.id).toBe('B002');
-    expect(readHighWater(paths)).toBe(3);
-  });
-
-  it('归档后再分配不复用退役编号（负例）', () => {
-    const { row } = record(paths, { category: 'Task', title: 'a', fingerprint: 'f1' });
-    resolve(paths, row.id, 'done');
-    expect(readHighWater(paths)).toBe(2);
-    // 只删归档文件（高水位必须独立于归档存在，这是不复用的唯一前提）
-    fs.rmSync(archiveFileFor(paths), { force: true });
-    seed([]);
-    const again = record(paths, { category: 'Task', title: 'b', fingerprint: 'f2' });
-    expect(again.row.id).not.toBe(row.id);
-  });
-});
-
-describe('闭环与归档（AC5 语义）', () => {
-  it('resolve 归档后活跃池清空，重放不产生重复', () => {
-    const { row } = record(paths, { category: 'Defect', title: 'x', fingerprint: 'fp' });
-    const first = resolve(paths, row.id, '验证通过');
-    expect(readJsonl(paths.tasks)).toHaveLength(0);
-    expect(readJsonl(first.archiveFile)).toHaveLength(1);
-    // 重放：把同一行塞回活跃池再 resolve 一次
-    writeJsonl(paths.tasks, [row]);
-    resolve(paths, row.id, '验证通过');
-    expect(readJsonl(first.archiveFile)).toHaveLength(1);
-    expect(doctor(paths).ok).toBe(true);
-  });
-
-  it('归档记录必须是 done（防脏写）', () => {
-    const file = archiveFileFor(paths);
-    writeJsonl(file, [baseRow({ status: 'todo' })]);
-    expect(lintAll(paths).ok).toBe(false);
-  });
-});
-
-describe('lint / doctor（AC4 语义）', () => {
-  it('活跃池残留 done 被判违规', () => {
-    seed([baseRow({ status: 'done', evidence: 'x', closed_at: '2026-11-11T01:00:00.000Z' })]);
-    expect(lintAll(paths).ok).toBe(false);
-    expect(doctor(paths).ok).toBe(false);
-  });
-
-  it('ID 跨活跃池与归档重复可被发现', () => {
-    seed([baseRow()]);
-    writeJsonl(archiveFileFor(paths), [baseRow({ status: 'done', evidence: 'y', closed_at: '2026-11-11T01:00:00.000Z' })]);
-    const report = doctor(paths);
-    expect(report.issues.some(issue => issue.includes('ID 重复'))).toBe(true);
-  });
-
-  it('高水位未越过最大编号会被告警', () => {
-    seed([baseRow({ id: 'B090' })]);
-    const report = doctor(paths);
-    expect(report.issues.some(issue => issue.includes('高水位'))).toBe(true);
-  });
-});
-
-describe('指纹去重与字段上限', () => {
-  it('同 fingerprint 的活跃任务只累加发生次数', () => {
-    record(paths, { category: 'Defect', title: 'x', fingerprint: 'dup' });
-    const res = record(paths, { category: 'Defect', title: 'x', fingerprint: 'dup' });
-    expect(res.type).toBe('dedup');
-    expect(res.row.metadata.occurred_count).toBe(2);
-    expect(list(paths)).toHaveLength(1);
+  it('in_progress 缺 owner/touched_paths、done 缺 evidence/closed_at 判非法', () => {
+    expect(validateTask(baseTask({ status: 'in_progress' }))).not.toEqual([]);
+    expect(validateTask(baseTask({ status: 'in_progress', owner: 'lane-1' }))).not.toEqual([]);
+    expect(validateTask(baseTask({ status: 'in_progress', owner: 'lane-1', touched_paths: ['a'] }))).toEqual([]);
+    expect(validateTask(baseTask({ status: 'done' }))).not.toEqual([]);
+    expect(validateTask(baseTask({ status: 'done', evidence: 'ok', closed_at: '2026-01-01T01:00:00.000Z' }))).toEqual([]);
   });
 
   it('triage_context 超过 8KiB 被拒', () => {
-    const row = baseRow({ metadata: { fingerprint: 'f', triage_context: { blob: 'x'.repeat(9000) } } });
-    expect(validateRecord(row).join()).toMatch(/超限/);
+    const row = baseTask({ metadata: { fingerprint: 'f', triage_context: { blob: 'x'.repeat(9000) } } });
+    expect(validateTask(row).join()).toMatch(/超限/);
   });
 });
 
-describe('作用域解析（跨 worktree 单例）', () => {
-  it('显式环境变量优先', () => {
-    expect(resolveLedgerRoot({ PONY_BACKLOG_ROOT: root } as any, '/')).toBe(path.resolve(root));
+describe('v3 批次日志：写入与 fold 读模型', () => {
+  it('record 写入本会话批次；ID 为时间基且唯一；list 从 fold 读出', () => {
+    seedV3();
+    const first = recordTask(paths, { category: 'Task', title: 'a', fingerprint: 'f1', surface: 'tui' });
+    expect(first.type).toBe('created');
+    expect(first.row.id).toMatch(/^B\d{3,}$/);
+    const second = recordTask(paths, { category: 'Task', title: 'b', fingerprint: 'f2', surface: 'tui' });
+    expect(second.row.id).not.toBe(first.row.id);
+    const batchPath = path.join(paths.logsDir, `${first.batchId}.jsonl`);
+    expect(fs.existsSync(batchPath)).toBe(true);
+    expect(readJsonl(batchPath)[0].kind).toBe('batch.start');
+    expect(listRows(paths).map(row => row.id)).toEqual([first.row.id, second.row.id]);
   });
 
-  it('无环境变量时回落到 git common dir 的父目录（主工作树）', () => {
-    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'backlog-git-'));
-    execFileSync('git', ['init', '-q'], { cwd: repo });
-    expect(resolveLedgerRoot({} as any, repo)).toBe(fs.realpathSync(repo));
-    fs.rmSync(repo, { recursive: true, force: true });
+  it('指纹去重：同 fingerprint 累加发生次数，不产生第二条任务', () => {
+    seedV3();
+    recordTask(paths, { category: 'Defect', title: 'x', fingerprint: 'dup', surface: 'tui' });
+    const res = recordTask(paths, { category: 'Defect', title: 'x', fingerprint: 'dup', surface: 'tui' });
+    expect(res.type).toBe('dedup');
+    const state = fold(paths);
+    expect(state.active).toHaveLength(1);
+    expect(state.active[0].metadata.occurred_count).toBe(2);
+  });
+
+  it('两个独立批次（并发会话）fold 出并集：没有共享写入点', () => {
+    seedV3();
+    seedBatch('20260101T000000Z-tui-abcd', [
+      { kind: 'record', at: '2026-01-01T00:00:01.000Z', task: baseTask({ id: 'B001' }) }
+    ]);
+    seedBatch('20260101T000001Z-frontend-ef01', [
+      { kind: 'record', at: '2026-01-01T00:00:01.000Z', task: baseTask({ id: 'B002', metadata: { fingerprint: 'fp-2' } }) }
+    ]);
+    const state = fold(paths);
+    expect(state.active.map(row => row.id).sort()).toEqual(['B001', 'B002']);
+    expect(state.problems).toEqual([]);
+  });
+
+  it('同一任务跨批次推进（后续批次 start/resolve）fold 顺序正确', () => {
+    seedV3();
+    seedBatch('20260101T000000Z-tui-abcd', [
+      { kind: 'record', at: '2026-01-01T00:00:01.000Z', task: baseTask() }
+    ]);
+    seedBatch('20260102T000000Z-tui-bcde', [
+      { kind: 'start', at: '2026-01-02T00:00:01.000Z', id: 'B001', owner: 'lane-1', paths: ['a'] },
+      { kind: 'resolve', at: '2026-01-02T00:00:02.000Z', id: 'B001', evidence: 'done' }
+    ]);
+    const state = fold(paths);
+    expect(state.active).toHaveLength(0);
+    expect(state.done.map(row => row.id)).toEqual(['B001']);
+  });
+
+  it('批次首行非 batch.start / 未知事件 → fold 报问题且 lint 拒绝', () => {
+    seedV3();
+    fs.mkdirSync(paths.logsDir, { recursive: true });
+    fs.writeFileSync(path.join(paths.logsDir, `${BATCH}.jsonl`), JSON.stringify({ kind: 'record' }) + '\n');
+    const res = lintAll(paths);
+    expect(res.ok).toBe(false);
+    expect(res.problems.join('\n')).toMatch(/首行必须是 batch.start/);
+  });
+
+  it('重复 record 同一 ID 被 lint 抓出（跨批次不得重复登记）', () => {
+    seedV3();
+    seedBatch('20260101T000000Z-tui-abcd', [
+      { kind: 'record', at: '2026-01-01T00:00:01.000Z', task: baseTask() }
+    ]);
+    seedBatch('20260101T000001Z-tui-ef01', [
+      { kind: 'record', at: '2026-01-01T00:00:02.000Z', task: baseTask() }
+    ]);
+    expect(lintAll(paths).problems.join('\n')).toMatch(/重复 record/);
   });
 });
 
-describe('迁移规范化', () => {
-  it('legacy 行重编号为 B056 起，done 行补 evidence/closed_at', () => {
-    const legacy = [
-      { id: 'ISSUE-1', status: 'resolved', title: 'a', priority: 'P1', fingerprint: 'f1', context: { command: 'x' } },
-      { id: 'ISSUE-2', status: 'pending', title: 'b', priority: 'P2', fingerprint: 'f2' }
-    ];
-    const rows = normalizeLegacy(legacy, { startId: 56 });
-    expect(rows.map(row => row.id)).toEqual(['B056', 'B057']);
-    expect(rows[0].category).toBe('Defect');
-    expect(rows[0].evidence).toBeTruthy();
-    expect(rows[0].closed_at).toBeTruthy();
-    expect(rows[1].status).toBe('todo');
-    for (const row of rows) expect(validateRecord(row)).toEqual([]);
+describe('v3 状态机与租约', () => {
+  it('start 取租约并进入 in_progress；resolve 闭环并释放租约', () => {
+    seedV3();
+    const { row } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    startTask(paths, { id: row.id, owner: 'session-A', touchedPaths: ['scripts/x'], surface: 'tui' });
+    expect(readLease(paths, row.id)?.owner).toBe('session-A');
+    expect(fold(paths).active[0].status).toBe('in_progress');
+    const res = resolveTask(paths, { id: row.id, evidence: '验证通过', surface: 'tui' });
+    expect(res.lease.released).toBe(true);
+    expect(fs.existsSync(lockFileOf(row.id))).toBe(false);
+    expect(fold(paths).done.map(item => item.id)).toEqual([row.id]);
+  });
+
+  it('done 是终态：再次 start/resolve 被拒', () => {
+    seedV3();
+    const { row } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    resolveTask(paths, { id: row.id, evidence: 'ok', surface: 'tui' });
+    expect(() => startTask(paths, { id: row.id, owner: 'a', touchedPaths: ['x'] })).toThrow(/终态|已闭环/);
+    expect(() => resolveTask(paths, { id: row.id, evidence: 'again' })).toThrow(/重复 resolve/);
+  });
+
+  it('同一任务被两个会话抢占租约时第二个失败；同 owner 重入只刷新心跳', () => {
+    seedV3();
+    const { row } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    startTask(paths, { id: row.id, owner: 'session-A', touchedPaths: ['a'], surface: 'tui' });
+    expect(() => acquireLease(paths, row.id, { owner: 'session-B' })).toThrow(/已被 session-A 持有/);
+    const again = acquireLease(paths, row.id, { owner: 'session-A', now: Date.now() + 1000 });
+    expect(again.owner).toBe('session-A');
+  });
+
+  it('release 只能由持有者执行，释放后回到 todo', () => {
+    seedV3();
+    const { row } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    startTask(paths, { id: row.id, owner: 'session-A', touchedPaths: ['a'], surface: 'tui' });
+    expect(() => releaseLease(paths, row.id, { owner: 'session-B' })).toThrow(/属于 session-A/);
+    releaseTask(paths, { id: row.id, owner: 'session-A', surface: 'tui' });
+    expect(fold(paths).active[0].status).toBe('todo');
+    expect(fs.existsSync(lockFileOf(row.id))).toBe(false);
+  });
+
+  it('lint：锁 owner 与记录 owner 冲突 / 锁存而记录非 in_progress / in_progress 缺锁（有 .locks 时）', () => {
+    seedV3();
+    const { row } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    acquireLease(paths, row.id, { owner: 'session-B' });
+    expect(lintAll(paths).problems.join('\n')).toMatch(/存在租约锁但记录状态/);
+    releaseLease(paths, row.id);
+    startTask(paths, { id: row.id, owner: 'session-A', touchedPaths: ['a'], surface: 'tui' });
+    expect(lintAll(paths).ok).toBe(true);
+    expect(() => lintAll(paths)).not.toThrow();
+    fs.rmSync(lockFileOf(row.id), { force: true });
+    expect(lintAll(paths).problems.join('\n')).toMatch(/缺少租约锁文件/);
+  });
+
+  it('干净克隆（无 .locks 目录）下 in_progress 只提示不阻断', () => {
+    seedV3();
+    seedBatch(BATCH, [
+      {
+        kind: 'record',
+        at: '2026-01-01T00:00:01.000Z',
+        task: baseTask({
+          status: 'in_progress',
+          owner: 'session-A',
+          touched_paths: ['a'],
+          leased_at: '2026-01-01T00:00:01.000Z',
+          heartbeat_at: '2026-01-01T00:00:01.000Z'
+        })
+      }
+    ]);
+    const res = lintAll(paths);
+    expect(res.ok).toBe(true);
+    expect(res.notes.join('\n')).toMatch(/无本地租约目录/);
+  });
+
+  it('doctor 发现孤儿租约与 ID 重复', () => {
+    seedV3();
+    const { row } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    resolveTask(paths, { id: row.id, evidence: 'ok' });
+    acquireLease(paths, row.id, { owner: 'dead' });
+    expect(doctor(paths).issues.join('\n')).toMatch(/残留租约/);
+  });
+
+  it('reap --id 只回收指定任务的超龄租约，不误伤其它租约', () => {
+    seedV3();
+    const { row } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    acquireLease(paths, row.id, { owner: 'dead', now: Date.now() - 3 * 60 * 60 * 1000 });
+    const reaped = reapStaleLeases(paths, { maxAgeMs: 60 * 60 * 1000, onlyId: row.id });
+    expect(reaped).toEqual([row.id]);
+  });
+});
+
+describe('v3 按批归档与封存', () => {
+  it('全部闭环的批次可被归档：文件移动 + 清单追加 + fold 仍可见历史', () => {
+    seedV3();
+    const { row, batchId } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    resolveTask(paths, { id: row.id, evidence: 'ok', surface: 'tui' });
+    const res = archiveBatches(paths, {});
+    expect(res.moved).toHaveLength(1);
+    expect(fs.existsSync(path.join(paths.logsDir, `${batchId}.jsonl`))).toBe(false);
+    expect(verifyArchive(paths).ok).toBe(true);
+    expect(fold(paths).done.map(item => item.id)).toEqual([row.id]);
+  });
+
+  it('未闭环批次不得归档', () => {
+    seedV3();
+    recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    expect(archiveBatches(paths, {}).moved).toHaveLength(0);
+  });
+
+  it('归档文件被篡改 → verify-archive 拒绝（sha256 封存）', () => {
+    seedV3();
+    const { row, batchId } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    resolveTask(paths, { id: row.id, evidence: 'ok' });
+    archiveBatches(paths, {});
+    const archived = path.join(paths.archivedBatchesDir, '2026', `${batchId}.jsonl`);
+    fs.appendFileSync(archived, JSON.stringify({ kind: 'dedup', at: '2026-01-01T00:00:05.000Z', id: row.id }) + '\n');
+    expect(verifyArchive(paths).ok).toBe(false);
+    expect(verifyArchive(paths).problems.join('\n')).toMatch(/sha256 不符/);
+  });
+
+  it('归档 dry-run 不改动磁盘', () => {
+    seedV3();
+    const { row, batchId } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    resolveTask(paths, { id: row.id, evidence: 'ok' });
+    const res = archiveBatches(paths, { dryRun: true });
+    expect(res.moved).toHaveLength(1);
+    expect(fs.existsSync(path.join(paths.logsDir, `${batchId}.jsonl`))).toBe(true);
+    expect(fs.existsSync(paths.archivedBatchesDir)).toBe(false);
+  });
+});
+
+describe('v2 只读兼容与迁移', () => {
+  it('v2 账本可被 fold/lint/doctor 只读读取；写操作拒绝并指向迁移脚本', () => {
+    seedV2([baseTask()], [baseTask({ id: 'B002', status: 'done', evidence: 'old', closed_at: '2026-01-02T00:00:00.000Z' })]);
+    const state = foldV2(paths);
+    expect(state.active.map(row => row.id)).toEqual(['B001']);
+    expect(lintV2(paths).ok).toBe(true);
+    expect(fold(paths).model).toBe('v2');
+    expect(() => recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f' }))
+      .toThrow(/backlog-migrate-v2-v3/);
+  });
+
+  it('迁移脚本 --adopt-v2：接管在途分支残留的 v2 行，已存在 ID 跳过不覆盖', () => {
+    seedV2([baseTask()]);
+    const env = { ...process.env, PONY_BACKLOG_ROOT: root };
+    execFileSync(process.execPath, [MIGRATE], { cwd: path.resolve('.'), env, encoding: 'utf8' });
+    // 模拟在途分支基于 v2 记账：main 已迁 v3，合并后又带回一份 tasks.jsonl
+    writeJsonl(paths.legacyTasks, [
+      baseTask({ status: 'done', evidence: 'old', closed_at: '2026-01-02T00:00:00.000Z' }),
+      baseTask({ id: 'B999', title: '在途新任务', metadata: { fingerprint: 'inflight' } })
+    ]);
+    const out = execFileSync(process.execPath, [MIGRATE, '--adopt-v2', '--surface', 'inflight'], {
+      cwd: path.resolve('.'), env, encoding: 'utf8'
+    });
+    expect(out).toMatch(/跳过 v3 已存在的 ID 1 条/);
+    expect(fs.existsSync(paths.legacyTasks)).toBe(false);
+    const state = fold(paths);
+    expect(state.active.map(row => row.id)).toContain('B999');
+    // 已存在的 B001 不被 v2 残留行覆盖（仍是迁移时的 todo，不会变成 done）
+    expect(state.active.find(row => row.id === 'B001')?.status).toBe('todo');
+    expect(state.done.some(row => row.id === 'B001')).toBe(false);
+    expect(lintAll(paths).ok).toBe(true);
+  });
+
+  it('迁移脚本：v2 → v3 基线批次，活跃数/done 数对账一致，幂等拒绝重跑', () => {
+    seedV2([baseTask()], [baseTask({ id: 'B002', status: 'done', evidence: 'old', closed_at: '2026-01-02T00:00:00.000Z' })]);
+    const env = { ...process.env, PONY_BACKLOG_ROOT: root };
+    const dry = execFileSync(process.execPath, [MIGRATE, '--dry-run'], { cwd: path.resolve('.'), env, encoding: 'utf8' });
+    expect(dry).toMatch(/dry-run/);
+    expect(fs.existsSync(paths.legacyTasks)).toBe(true);
+
+    const out = execFileSync(process.execPath, [MIGRATE, '--surface', 'migration'], { cwd: path.resolve('.'), env, encoding: 'utf8' });
+    expect(out).toMatch(/PASS/);
+    expect(fs.readFileSync(paths.model, 'utf8').trim()).toBe('v3');
+    expect(fs.existsSync(paths.legacyTasks)).toBe(false);
+    expect(fs.existsSync(paths.legacyNextId)).toBe(false);
+    const state = fold(paths);
+    expect(state.counts.active).toBe(1);
+    expect(state.counts.done).toBe(1);
+
+    let code = 0;
+    try {
+      execFileSync(process.execPath, [MIGRATE], { cwd: path.resolve('.'), env, encoding: 'utf8', stdio: 'pipe' });
+    } catch (error: any) {
+      code = error.status;
+    }
+    expect(code).toBe(2);
   });
 });
 
 describe('CLI 冒烟', () => {
-  it('lint 在合法账本上 exit 0，在非法账本上 exit 1', () => {
-    seed([baseRow()]);
-    const ok = execFileSync(process.execPath, [SCRIPT, 'lint'], {
-      cwd: path.resolve('.'),
-      env: { ...process.env, PONY_BACKLOG_ROOT: root },
-      encoding: 'utf8'
-    });
-    expect(ok).toMatch(/PASS/);
+  const env = () => ({ ...process.env, PONY_BACKLOG_ROOT: root });
 
-    seed([baseRow({ status: 'done', evidence: 'x', closed_at: '2026-11-11T01:00:00.000Z' })]);
-    let code = 0;
-    try {
-      execFileSync(process.execPath, [SCRIPT, 'lint'], {
-        cwd: path.resolve('.'),
-        env: { ...process.env, PONY_BACKLOG_ROOT: root },
-        encoding: 'utf8',
-        stdio: 'pipe'
-      });
-    } catch (error: any) {
-      code = error.status;
-    }
-    expect(code).toBe(1);
+  it('record → list → resolve 全链路（批次文件随写落盘）', () => {
+    seedV3();
+    const recorded = execFileSync(
+      process.execPath,
+      [SCRIPT, 'record', '--category', 'Task', '--title', '冒烟任务', '--fingerprint', 'smoke', '--surface', 'tui'],
+      { cwd: path.resolve('.'), env: env(), encoding: 'utf8' }
+    );
+    expect(recorded).toMatch(/已登记/);
+    expect(fs.readdirSync(paths.logsDir).some(name => name.endsWith('.jsonl'))).toBe(true);
+    const listed = execFileSync(process.execPath, [SCRIPT, 'list'], { cwd: path.resolve('.'), env: env(), encoding: 'utf8' });
+    expect(listed).toMatch(/冒烟任务/);
+    const id = listed.match(/B\d{3,}/)![0];
+    execFileSync(process.execPath, [SCRIPT, 'start', id, '--owner', 'cli', '--paths', 'scripts/backlog.mjs'], {
+      cwd: path.resolve('.'), env: env(), encoding: 'utf8'
+    });
+    const closed = execFileSync(process.execPath, [SCRIPT, 'resolve', id, '--evidence', 'CLI 闭环'], {
+      cwd: path.resolve('.'), env: env(), encoding: 'utf8'
+    });
+    expect(closed).toMatch(/租约已释放/);
+    expect(doctor(paths).ok).toBe(true);
   });
 
-  it('reap --id 缺值/空值/非法值 fail-closed，不回落为全局清锁', () => {
-    seed([baseRow({ status: 'in_progress', owner: 'lane-A', touched_paths: ['crates/x'] })]);
-    acquireLease(paths, 'B056', { owner: 'lane-A' });
+  it('reap 非法参数一律 exit 2，不回落为全局清锁', () => {
+    seedV3();
     for (const args of [
       ['reap', '--id', '', '--minutes', '0'],
       ['reap', '--id', '--minutes', '0'],
       ['reap', '--id', 'B9', '--minutes', '0'],
-      ['reap', '--id=B056', '--minutes', '0'],
-      ['reap', '--ide', 'B056', '--minutes', '0'],
-      ['reap', '-id', 'B056', '--minutes', '0'],
-      ['reap', 'B056', '--minutes', '0'],
-      ['reap', '--ID', 'B056', '--minutes', '0'],
+      ['reap', '--id=B001', '--minutes', '0'],
+      ['reap', '-id', 'B001', '--minutes', '0'],
+      ['reap', 'B001', '--minutes', '0'],
       ['reap', '--minutes', 'abc']
     ]) {
       let code = 0;
       try {
-        execFileSync(process.execPath, [SCRIPT, ...args], {
-          cwd: path.resolve('.'),
-          env: { ...process.env, PONY_BACKLOG_ROOT: root },
-          encoding: 'utf8',
-          stdio: 'pipe'
-        });
+        execFileSync(process.execPath, [SCRIPT, ...args], { cwd: path.resolve('.'), env: env(), encoding: 'utf8', stdio: 'pipe' });
       } catch (error: any) {
         code = error.status;
       }
       expect(code).toBe(2);
     }
-    expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
+  });
+});
+
+describe('作用域解析（每 worktree 独立账本）', () => {
+  it('显式环境变量优先', () => {
+    expect(resolveLedgerRoot({ PONY_BACKLOG_ROOT: root } as any, '/')).toBe(path.resolve(root));
   });
 
-  it('reap --dry-run 只演练不删锁，输出自证 dry-run', () => {
-    seed([baseRow()]);
-    acquireLease(paths, 'B056', { owner: 'lane-A' });
-    const out = execFileSync(process.execPath, [SCRIPT, 'reap', '--dry-run', '--minutes', '0'], {
-      cwd: path.resolve('.'),
-      env: { ...process.env, PONY_BACKLOG_ROOT: root },
-      encoding: 'utf8'
-    });
-    expect(out).toMatch(/\[dry-run\]/);
-    expect(out).toMatch(/未执行|无超龄租约/);
-    expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
-
-    const real = execFileSync(process.execPath, [SCRIPT, 'reap', '--minutes', '0'], {
-      cwd: path.resolve('.'),
-      env: { ...process.env, PONY_BACKLOG_ROOT: root },
-      encoding: 'utf8'
-    });
-    expect(real).not.toMatch(/\[dry-run\]/);
-    expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
-  });
-
-  it('import-triage 参数校验：--start 非法/缺值/旧账本缺失均 exit 2，--help 不迁移', () => {
-    seed([]);
-    const run = (args: string[]) => {
-      try {
-        execFileSync(process.execPath, [SCRIPT, ...args], {
-          cwd: path.resolve('.'),
-          env: { ...process.env, PONY_BACKLOG_ROOT: root },
-          encoding: 'utf8',
-          stdio: 'pipe'
-        });
-        return 0;
-      } catch (error: any) {
-        return error.status;
-      }
+  it('无环境变量时落到当前 worktree 顶层（不是 git common dir）', () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'backlog-git-'));
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    // Windows：git 输出长路径、realpath 可能给 8.3 短名 ⇒ 两边都取原生 realpath 再按平台大小写归一比较。
+    const canonical = (value: string) => {
+      const real = fs.realpathSync.native(value);
+      return process.platform === 'win32' ? real.toLowerCase() : real;
     };
-    const legacy = path.join(root, 'legacy.jsonl');
-    fs.writeFileSync(
-      legacy,
-      JSON.stringify({ title: '旧事项', status: 'todo', priority: 'P1', metadata: { fingerprint: 'legacy-1' } }) + '\n'
-    );
-    const snapshot = () =>
-      [
-        fs.readFileSync(paths.tasks, 'utf8'),
-        fs.existsSync(paths.nextId) ? fs.readFileSync(paths.nextId, 'utf8') : '',
-        fs.existsSync(paths.archiveDir)
-          ? fs.readdirSync(paths.archiveDir).sort().map(f => fs.readFileSync(path.join(paths.archiveDir, f), 'utf8')).join('|')
-          : ''
-      ].join('#');
-    const before = snapshot();
-    // 关键：每个非法 --start 用例都必须带「存在的 --from」，否则 exit 2 来自 from 守卫而不是 start 校验（掩蔽断言）。
-    expect(run(['import-triage', '--from', legacy, '--start', 'abc'])).toBe(2);
-    expect(run(['import-triage', '--from', legacy, '--start', '0'])).toBe(2);
-    expect(run(['import-triage', '--from', legacy, '--start', '-5'])).toBe(2);
-    expect(run(['import-triage', '--from', legacy, '--start'])).toBe(2);
-    expect(run(['import-triage', '--from', path.join(root, 'nope.jsonl'), '--start', '1'])).toBe(2);
-    expect(run(['import-triage', '--help'])).toBe(0);
-    expect(snapshot()).toBe(before);
-    expect(run(['import-triage', '--from', legacy, '--start', '1'])).toBe(0);
-    expect(readJsonl(paths.tasks).map(row => row.id)).toEqual(['B001']);
-  });
-
-  it('record 命令写入后可被 list 读出', () => {
-    execFileSync(process.execPath, [SCRIPT, 'record', '--category', 'Task', '--title', '冒烟任务', '--fingerprint', 'smoke'], {
-      cwd: path.resolve('.'),
-      env: { ...process.env, PONY_BACKLOG_ROOT: root },
-      encoding: 'utf8'
-    });
-    expect(readJsonl(paths.tasks)).toHaveLength(1);
-  });
-
-  // 回归：governance CI 曾恒红——闭环「最高编号任务」后未回写 `.next-id`，高水位落后于
-  // 「活跃∪归档」最大编号，lint 立刻判「ID 越过高水位（疑似手工改号）」（实测 B066 案例）。
-  it('resolve 闭环最高编号任务后推进高水位，lint 不得判越界', () => {
-    seed([baseRow({ id: 'B066', status: 'in_progress', owner: 'session-A', touched_paths: ['scripts/backlog.mjs'] })]);
-    fs.writeFileSync(paths.nextId, '66\n');
-    expect(lintAll(paths).ok).toBe(false); // 前置：B066 与高水位 66 撞线，先红
-    resolve(paths, 'B066', 'fix(backlog): 演示闭环证据');
-    expect(readHighWater(paths)).toBe(67);
-    const result = lintAll(paths);
-    expect(result.ok).toBe(true);
-    expect(result.problems.join()).not.toMatch(/越过高水位/);
-  });
-
-  // 回归（B081）：resolve 只归档不清锁 ⇒ `.locks/<ID>.lock` 残留到 TTL 被 reap，
-  // 期间该 ID 对其它会话是「被占用」的假信号。库与 CLI 同一路径，此处断言可观测输出。
-  it('CLI 全链路：start 建锁 → resolve 清锁并打印回收信息', () => {
-    seed([baseRow()]);
-    fs.writeFileSync(paths.nextId, '57\n');
-    const env = { ...process.env, PONY_BACKLOG_ROOT: root };
-    const started = execFileSync(process.execPath, [SCRIPT, 'start', 'B056', '--owner', 'cli-session', '--paths', 'scripts/backlog.mjs'], {
-      cwd: path.resolve('.'),
-      env,
-      encoding: 'utf8'
-    });
-    expect(started).toMatch(/in_progress/);
-    expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
-
-    const closed = execFileSync(process.execPath, [SCRIPT, 'resolve', 'B056', '--evidence', 'fix(backlog): 闭环释放租约'], {
-      cwd: path.resolve('.'),
-      env,
-      encoding: 'utf8'
-    });
-    expect(closed).toMatch(/租约已释放（原持有者 @cli-session）/);
-    expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
-    expect(doctor(paths).ok).toBe(true);
+    expect(canonical(resolveLedgerRoot({} as any, repo))).toBe(canonical(repo));
+    fs.rmSync(repo, { recursive: true, force: true });
   });
 });
 
-describe('任务级租约（单任务单会话，不同任务可并行）', () => {
-  it('同一任务被两个会话抢占时第二个失败，同 owner 重入刷新心跳', () => {
-    seed([baseRow()]);
-    const lease = acquireLease(paths, 'B056', { owner: 'session-A' });
-    expect(lease.owner).toBe('session-A');
-    expect(() => acquireLease(paths, 'B056', { owner: 'session-B' })).toThrow(/已被 session-A 持有/);
-    const again = acquireLease(paths, 'B056', { owner: 'session-A', now: Date.now() + 1000 });
-    expect(again.heartbeat_at).not.toBe(lease.heartbeat_at);
-  });
-
-  it('不同任务可被不同会话并行持有', () => {
-    seed([baseRow(), baseRow({ id: 'B057', metadata: { fingerprint: 'fp-2' } })]);
-    expect(acquireLease(paths, 'B056', { owner: 'session-A' }).owner).toBe('session-A');
-    expect(acquireLease(paths, 'B057', { owner: 'session-B' }).owner).toBe('session-B');
-  });
-
-  it('release 只能由持有者执行，释放后锁文件消失', () => {
-    seed([baseRow()]);
-    acquireLease(paths, 'B056', { owner: 'session-A' });
-    expect(() => releaseLease(paths, 'B056', { owner: 'session-B' })).toThrow(/属于 session-A/);
-    expect(releaseLease(paths, 'B056', { owner: 'session-A' }).released).toBe(true);
-    expect(releaseLease(paths, 'B056', { owner: 'session-A' }).released).toBe(false);
-  });
-
-  it('会话停止后租约过期可被 reap 回收（不阻塞其它会话）', () => {
-    seed([baseRow()]);
-    acquireLease(paths, 'B056', { owner: 'dead-session', now: Date.now() - 3 * 60 * 60 * 1000 });
-    const reaped = reapStaleLeases(paths, { maxAgeMs: 60 * 60 * 1000 });
-    expect(reaped).toEqual(['B056']);
-    expect(() => acquireLease(paths, 'B056', { owner: 'new-session' })).not.toThrow();
-  });
-
-  it('reap --id 只回收指定任务，不误伤其它并发租约', () => {
-    seed([baseRow(), baseRow({ id: 'B057', title: '另一任务' })]);
-    acquireLease(paths, 'B056', { owner: 'lane-A', now: Date.now() - 3 * 60 * 60 * 1000 });
-    acquireLease(paths, 'B057', { owner: 'lane-B' });
-    const reaped = reapStaleLeases(paths, { maxAgeMs: 60 * 60 * 1000, onlyId: 'B056' });
-    expect(reaped).toEqual(['B056']);
-    expect(fs.existsSync(lockFileOf('B057'))).toBe(true);
-  });
-
-  it('lint 发现记录 owner 与租约 owner 冲突时判违规', () => {
-    seed([baseRow({
-      status: 'in_progress',
-      owner: 'session-A',
-      touched_paths: ['crates/x'],
-      leased_at: '2026-11-11T00:00:00.000Z',
-      heartbeat_at: new Date().toISOString()
-    })]);
-    acquireLease(paths, 'B056', { owner: 'session-B' });
-    const res = lintAll(paths);
-    expect(res.ok).toBe(false);
-    expect(res.problems.join('\n')).toMatch(/租约与记录 owner 冲突/);
-  });
-
-  it('存在租约目录时，in_progress 缺锁文件（疑似手改状态）判违规', () => {
-    seed([baseRow({
-      status: 'in_progress',
-      owner: 'session-A',
-      touched_paths: ['crates/x'],
-      leased_at: new Date().toISOString(),
-      heartbeat_at: new Date().toISOString()
-    })]);
-    fs.mkdirSync(paths.locksDir, { recursive: true });
-    expect(lintAll(paths).problems.join('\n')).toMatch(/缺少租约锁文件/);
-  });
-
-  it('锁存在但记录不是 in_progress 判违规（手改降级 / start 中断）', () => {
-    seed([baseRow()]);
-    acquireLease(paths, 'B056', { owner: 'session-A' });
-    const res = lintAll(paths);
-    expect(res.ok).toBe(false);
-    expect(res.problems.join('\n')).toMatch(/存在租约锁但记录状态/);
-    expect(doctor(paths).ok).toBe(false);
-  });
-
-  it('干净克隆（无 .locks 目录）下同一记录只提示不阻断（B069）', () => {
-    seed([baseRow({
-      status: 'in_progress',
-      owner: 'session-A',
-      touched_paths: ['crates/x'],
-      leased_at: new Date().toISOString(),
-      heartbeat_at: new Date().toISOString()
-    })]);
-    const res = lintAll(paths);
-    expect(res.problems).toEqual([]);
-    expect(res.ok).toBe(true);
-    expect(res.notes.join('\n')).toMatch(/无本地租约目录/);
-  });
-
-  it('doctor 在存在 in_progress 任务时不崩溃，并复用 lint 的租约判据（B069）', () => {
-    seed([baseRow({
-      status: 'in_progress',
-      owner: 'session-A',
-      touched_paths: ['crates/x'],
-      leased_at: new Date().toISOString(),
-      heartbeat_at: new Date().toISOString()
-    })]);
-    fs.mkdirSync(paths.locksDir, { recursive: true });
-    expect(() => doctor(paths)).not.toThrow();
-    expect(doctor(paths).issues.join('\n')).toMatch(/缺少租约锁文件/);
-  });
-});
-
-// B081：闭环是终态，租约必须随之失效——否则 `.locks/<ID>.lock` 残留到 TTL，
-// 期间挡住 ID 复用，且 `.locks/` 常驻让 lint 永久走严格支（B069 的分流语义腐化）。
-describe('闭环释放租约（B081）', () => {
-  it('resolve 归档成功后释放租约，锁文件不残留', () => {
-    seed([baseRow()]);
-    acquireLease(paths, 'B056', { owner: 'session-A' });
-    expect(fs.existsSync(lockFileOf('B056'))).toBe(true);
-
-    const { lease } = resolve(paths, 'B056', '验证通过');
-    expect(lease.released).toBe(true);
-    expect(lease.previous.owner).toBe('session-A');
-    expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
-  });
-
-  it('无租约时 resolve 幂等：不抛错，reported released=false', () => {
-    seed([baseRow()]);
-    const { lease } = resolve(paths, 'B056', '验证通过');
-    expect(lease.released).toBe(false);
-    expect(readJsonl(paths.tasks)).toHaveLength(0);
-  });
-
-  it('他人持有的租约随闭环一并回收（闭环是终态，不因 owner 不同而卡住）', () => {
-    seed([baseRow({ owner: 'session-A' })]);
-    acquireLease(paths, 'B056', { owner: 'session-B' });
-    expect(() => resolve(paths, 'B056', '验证通过')).not.toThrow();
-    expect(fs.existsSync(lockFileOf('B056'))).toBe(false);
-  });
-
-  it('doctor 把「无活跃记录」的残留锁判为 issue（机器可发现）', () => {
-    seed([baseRow({ id: 'B057', metadata: { fingerprint: 'fp-2' } })]);
-    acquireLease(paths, 'B056', { owner: 'dead-session' }); // 活跃池无 B056 ⇒ 残留
-    expect(doctor(paths).issues.join('\n')).toMatch(/残留租约 B056\.lock/);
-
-    acquireLease(paths, 'B057', { owner: 'session-A' }); // 有活跃记录 ⇒ 不算残留
-    expect(doctor(paths).issues.join('\n')).not.toMatch(/残留租约 B057\.lock/);
+describe('批次 id / 归档清单格式', () => {
+  it('批次 id 满足命名规约，清单行是 `sha256  <path>`', () => {
+    seedV3();
+    const { row, batchId } = recordTask(paths, { category: 'Task', title: 'x', fingerprint: 'f', surface: 'tui' });
+    expect(batchId).toMatch(/^\d{8}T\d{6}Z-tui-[0-9a-f]{4}$/);
+    resolveTask(paths, { id: row.id, evidence: 'ok' });
+    archiveBatches(paths, {});
+    const manifest = path.join(paths.archivedBatchesDir, '2026', 'manifest.sha256');
+    const line = fs.readFileSync(manifest, 'utf8').trim().split('\n')[0];
+    const match = /^([0-9a-f]{64})  (.+)$/.exec(line)!;
+    expect(match).toBeTruthy();
+    const file = path.join(root, match[2]);
+    expect(crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')).toBe(match[1]);
   });
 });

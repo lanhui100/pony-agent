@@ -1,54 +1,62 @@
-# 元复盘 · B264 波次 `tui-resume-archive`（TUI /resume 列表重排 + 会话归档）
+# 元复盘 · `runtime-store-split`（前端 runtime store 按域拆解）
 
-> 范围：2026-11-21 单会话交付（B 级，k=1 共享工作区串行，无 worktree）。
-> 审查收据：`.dev-team/review-plan-tui-resume-archive.json`（方案逆向对抗，FAIL→R1~R10 裁决）、
-> `.dev-team/review-l3-tui-resume-archive.json`（L3 代码对抗）、`.dev-team/review-l3p-tui-resume-archive.json`（L3-P 六问）。
-> 上手经验见 `history` 段：与 `wave-acp-delegate` 同一套拓扑，但本轮名册峰值 4、审查 3 路，墙钟大幅下降。
+> 范围：2026-11-22 单会话交付（B 级；worktree 强隔离 `~/pony-agent-worktrees/runtime-split`，
+> 因主工作区被另一会话 `fix/tui-panel-visibility` 占用）。名册峰值 5 常驻 + 4 子代理（L3-A/L3-B/L3-P/Gate-1）。
 
-## 通信拓扑与信噪比
+## 1. 通信拓扑与信噪比
 
-- 名册 4 人（Lead + protocol + test + executor），审查全部走 Subagent 计算池，未挤占槽位；无持久参谋。
-- 三次真实阻塞都不是沟通问题，而是**共享构建锁**：test lane 的 `tui_dialog_wave39` / `tui_render_layout`
-  单二进制各跑 340~400s（`ask_lifecycle_settle_tests` 内 sqlite 用例 >60s/条），把 protocol 的 `cargo check`
-  压在队列里 55 分钟。两名 Agent 主动上报等待证据并要求裁决（而不是静默重试或绕锁裸跑），是本轮最有效的降噪行为。
-- 冗余观察：既有回归基线在**改动前**跑了一遍（6 target / exit 0），Executor 又跑了一遍（exit 0）。
-  这两遍在「同一分支、同一 target 目录」下语义重叠，时间成本 ≈25 分钟。下个波次应显式约定：
-  基线只在基线 commit 上跑一次，绿相验证复用同一份收据 + 只增量跑本次触及的用例集。
+**事实**：常驻 5 名（Lead / Protocol / Test / Executor A / Executor B）全部按「文件数 + 行数 + 命令 + exit code + 未决项」
+回报，没有过程性吹捧。唯一一次信噪比事故是 Lead 自己用 `ls .dev-team/*.json | head` 把 300 条历史审查文件全量打屏（约 13KB）。
 
-## 门禁穿透与误杀率
+**重复命令率**：`npx vue-tsc --noEmit` 全程被 5 个角色各跑 2–4 次（合计 ≈14 次，单次 20–60s），其中至少 4 次是同结论复跑
+（Protocol 基线、Executor A 前后、Executor B、Lead 独立）。这是「独立收据 vs 重复计算」的取舍：用 5–8 分钟墙钟换跨角色
+独立取证。可优化：把 tsc 结论写 `.dev-team/…/tsc-receipt.json`（HEAD + cmd + exit + 输出 hash），下游只验 hash 不重跑。
 
-- **真正拦住缺陷的是 Plan 期的 L3 方案审查（6 BLOCKING）**：宽度绑定错面、`list_row` 二次截断吃 `…`、
-  视图索引与原始索引混用、`/archive` 漏 Ask 收口、`d` 对当前行的未定义语义。这些若留到实现后才发现，
-  返工面是整个渲染分支。**结论：B 级任务把契约冻结后先审设计，ROI 明显高于事后审 diff。**
-- **两路 Review 各自独立命中同一致命项**（HEAD 过不了 `rust:lint` 的 bool 入参棘轮），说明棘轮是
-  真实防线；但 lint 门在实现提交后才跑，导致「实现绿 → 门红 → 再改一轮」。改进：把 `npm run rust:lint`
-  前移到 Executor 完成回执前（已在本轮回执模板里体现）。
-- 误杀/噪声：`dev-review-lint` 首轮把我的单条 `--scopes "a,b,c"` 当成一个范围判未闭合（工具期望多参数），
-  以及 v1 收据缺溯源字段被判无效——都是**接口约定问题**，非审查质量；已在流程中固定为「先包 schema v2 再 lint」。
-- 假绿风险（已记录、未修）：冻结测试 T4 只用 `open_session_selector(Vec::new())` 断言 0/0；
-  `format_push_string`/`unnested_or_patterns` 类问题靠棘轮而非测试发现。测试分权挡住了「Executor 自证」，
-  但挡不住「测试自己覆盖不全」——下一轮 test-agent prompt 要补验收模板（要求含「全可见/部分隐藏/仅归档」三态）。
+**Token 效率**：一次 Explorer 派发产出 90 行事实地图，替 Lead 省掉读 6075 行的注意力消耗，是本波最划算的一笔。
+反面：Lead 在等子代理期间做了 3 次低价值轮询（2 次 `wait_agent` 空转 + 1 次巨量 `ls`），应改为以任务板 revision / 产物 mtime 为唤醒信号。
 
-## 分工契约与隔离有效性
+## 2. 门禁穿透与误杀率
 
-- 写域切分有效：protocol 只落契约 + `todo!()` 空桩，test 只写 tests，executor 只写 src；
-  唯一越界是 executor 在修复轮新增 `src/bin/tui/tests/resume_row_layout_tests.rs`（A4 可选单测），
-  已按「衍生写域」登记而非打回——**教训**：给 Executor 的「可选」项必须同时给写域，否则它只能越界。
-- 红相锚定（`2ab07d00` protocol → `d0bef489` test freeze → `381802f3` impl）让「测试只读」从口头变成
-  commit 结构：Executor 想改断言必须先改历史。这一条在本轮零争议。
-- 契约演进门禁生效：Plan 审查后由 Lead 原地改写 C1/C3/C5/C6 + 追加 R1~R10 流水，再交 Executor；
-  Executor 报 4 条偏差（width 预留、日志字段避撞、阻塞回执通道、失败不轮换），全部可追溯。
+**true positive**：Test Agent 变异自检 3/3 全部按预期由绿转红并回滚复绿（`persistHistory` 少写 `cursorVersion`、
+delta 不推进 `messageRevision`、completed 不清 `phase`），证明 23 条等价用例不是「跑起来不报错」的假测试。
 
-## 元协议迭代建议
+**false positive**：Lead 自写的字节级等价脚本前两版误报 80/108、10/108，根因是**去缩进基准取错**（把首行 `{` 的 0 缩进算进 min）
+与只归一 `RuntimeStoreThis` 漏掉 `TurnEventsThis`；修正后 108/108 全过。教训：等价核验脚本必须先做负样本再用于判绿。
 
-1. **把 lint 棘轮加入 Executor 完成定义**（现在只在 Join Barrier 跑）：`check --bin` 绿 ≠ 交付合格。
-2. **测试分权的补位**：test-agent 的 prompt 增加「必须覆盖可见面三态（全可见/部分隐藏/仅归档）与接线断言
-   （源序护栏 `include_str!`，参考 `tests/tui_ctrl_o_global_shortcut.rs`）」，否则纯函数测试会给出假绿。
-3. **共享构建锁的调度策略**：波次开始前由 Lead 统一声明「谁在何时持有 lane」，避免 protocol 的 3 秒 check
-   排在 7 分钟回归后面；建议 lane 增加优先级（重活 heavy 与轻 check 分队列）。
-4. **既有慢测隔离**：`tui_dialog_wave39` / `tui_render_layout` 的 sqlite 子模块用例应拆出独立 target，
-   否则每次回归都要为它付 6~7 分钟。
-5. **L3-P 的判定基准要与真实门对齐**：本轮 L3-P 的 BLOCKING 完全等价于 `rust:lint` 一条门，
-   六问里 5 问是 N-A/PASS——说明对「纯本地 UI 变更」这类任务，L3-P 的边际价值主要在**契约兼容性**一问，
-   建议按任务类型裁剪六问（保留契约兼容 + 日志/凭据，其余记 N-A 并给结构性理由），把省下的审查预算
-   转投 Plan 期对抗（本轮 ROI 最高的一环）。
+**真实穿透风险**：23 条用例只覆盖 57/97 actions、13/18 getters；40 个未覆盖 action 的行为漂移不会被任何门禁拦住，
+只能靠 Lead 的 token 级函数体比对兜底。已登记为 Wave 2 测试补强项。
+
+**Gate-1 时序偏差（自省）**：`dev-team` 要求方案对抗审查先于编码，本轮实际是编码完成后补做 Gate-1。
+补救是真做了对抗审查（靶点全部落 ADVISORY 并进 Wave 2 清单），但时序属流程穿透，记入 §4。
+
+**共享文件名竞态（CI 抓到，已修）**：本波 Protocol 直接把 `dev-team` 要求的 NFR 基准写成 `.dev-team/nfr-baseline.json`，
+覆盖了仓库共享的既有文件 —— 该文件同时是 `acp_p1_blockers` / `acp_realtime_permission` / `acp_tool_policy` 等
+Rust 验收用例的阈值真源（`acp.request_timeout_ms` 等 5 个键）。本地前端门禁全绿，直到 PR CI 跑到 Rust 用例才炸
+（6 条 panicked: 「nfr-baseline.json 缺 acp.request_timeout_ms」）。修正：恢复共享文件为 base 内容，本波基准改为
+`.dev-team/nfr-baseline-runtime-store-split.json`（wave 作用域，与 `nfr-baseline-wave45.json` 同惯例），两份都过 `dev-nfr-lint`。
+教训：`dev-team` 里凡以通用名落盘的文件（`nfr-baseline.json`、`state.json`、`review-*.json`、`meta-retrospective.md`）
+都是跨波共享面，写入前必须 `git ls-files` 确认归属；CI 的 Rust 用例是这条的唯一机械门禁，前端绿灯不能替代。
+
+## 3. 分工契约与隔离有效性
+
+**写域隔离有效**：Executor A（4 文件 / 28 actions）与 B（6 文件 / 69 actions）零重叠，最终 `git diff --name-only`
+恰为 10 个域模块，机械写域审计 `ALL_IN_SCOPE`。
+
+**事实耦合两处**：① Protocol 冻结的 `types.ts` 与任务描述出现 3 处归属冲突（`getAttachmentAssets` /
+`persistHistory`+`updatePersistedBackgroundSession` / `recallLastUserMessage`），由 Protocol 落盘前主动上报纠正 ——
+说明「契约文件 vs 任务描述」双真源本身就是风险，任务描述应引用接口名+行号而非复述清单。
+② 两位 Executor 共享同一工作树同一分支，靠 write_scopes 约定而非物理隔离；本波文件正交所以安全，
+若下次需多人改同一文件必须升级 worktree 强隔离。
+
+**测试分权有效**：Test Agent 独立写用例并冻结（2f11dc2f），Executor 全程无测试写权限；两次测试侧缺陷
+（`$patch` 类型错、`cursorVersion` 陈旧断言）均由 Test Agent 自己发现并以「断言注释 + 依据行号」修复，
+未出现「Executor 改测试让自己变绿」的路径。
+
+## 4. 元协议迭代建议
+
+1. **门禁收据去重**：tsc/vitest 结论写 `receipt.json`（HEAD + cmd + exit + hash），下游只验 hash；本波 14 次 tsc 至少 4 次可省。
+2. **Gate-1 前置硬约束**：把「`review-plan.json` 存在」设为开波前置门禁（本轮是后补），缺则不得 claim 任何编码任务。
+3. **等价核验脚本入 skill**：把修好的「token 归一化函数体比对」脚本附负样本自检，作为 dev-team 复用资产，避免每次重构重踩去缩进基准的坑。
+4. **契约单真源**：任务板描述只允许引用 `types.ts` 接口名 + 行号，禁止复述键/方法清单（本波 3 处冲突全部源于复述）。
+5. **等待策略**：peer 全 inactive、只有 subagent 在跑时 `wait_agent` 必然空转；改为轮询产物 mtime / 任务板 revision，
+   并把子代理产物落盘路径写进任务描述。

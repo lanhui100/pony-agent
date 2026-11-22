@@ -1,0 +1,95 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/stores/runtime/",
+    "src/stores/runtime.ts",
+    ".dev-team/runtime-split/fact-map.md",
+    ".dev-team/review-plan.json"
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "gate1-plan-adversary-20261122T1020",
+    "fresh_context": true
+  },
+  "executed_by": "gate1-plan-adversary-20261122T1020",
+  "reviewed_commit": "0bfd83e4",
+  "attestation": {
+    "self_signed": false,
+    "note": "对抗复核未发现行为漂移：115/115 个 getter+action 成员体与原 2f11dc2f:src/stores/runtime.ts 逐字一致（归一化空白与新增 this/state 形参后），state 初始化体一致，23/23 用例绿、vue-tsc 0、无 import 环、as any 仍为 9、14 消费方与 tests/src-lib/src-tauri 零改动。下列 9 条均为规范/证明强度/未来可拆性的 ADVISORY，不构成当前行为缺陷。"
+  },
+  "findings": [
+    {
+      "file": "src/stores/runtime/types.ts",
+      "line": 170,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && cp src/stores/runtime/state.ts /tmp/s.bak && sed -i '/toolAuthorizationMode: \"workspace_write\"/d;/  ToolAuthorizationMode,/d' src/stores/runtime/state.ts && npx vue-tsc --noEmit; echo \"TSC_EXIT=$?\"; cp /tmp/s.bak src/stores/runtime/state.ts",
+      "severity": "ADVISORY",
+      "claim": "84 键冻结断言（StateKeysMissing / StateKeysUnexpected / FacadeStateKeysMissing）只覆盖类型键集，不覆盖运行时初始化：RuntimeState 的 activeTurnStartedAtMs?、toolAuthorizationMode? 与 RuntimeStoreState 的 activeStreamKind? 三个键是可选的，从 createInitialState 删除后 vue-tsc 仍 exit 0（实测 TSC_EXIT=0）。types.ts:169 注释「缺一多一都会以键名报错」与 ADR 草案 Consequences「由 npm run typecheck 保障」因此不成立；真正兜住它的是 concurrency-lifecycle.spec.ts:201 的 Object.keys(store.$state) 运行时等值断言。后果：删掉 toolAuthorizationMode 默认值不会在编译期被发现，只会在 submitTurn 请求体里静默变成 undefined；删掉那条测试即失去唯一护栏。修法很便宜：在 types.ts 本地把这三个键收窄为必填（不动 src/lib/runtime/types.ts）。"
+    },
+    {
+      "file": "src/stores/runtime/types.ts",
+      "line": 629,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && grep -n 'type TurnEventsThis = RuntimeStoreThis &' src/stores/runtime/turn-events.ts && grep -c 'this\\.\\$patch(' src/stores/runtime/turn-events.ts",
+      "severity": "ADVISORY",
+      "claim": "RuntimeStoreThis = RuntimeStore 不含 Pinia 内建成员，实际 this 却被 6 处 this.$patch 使用（另 1 处注释命中），只能靠 turn-events.ts:65 的局部 TurnEventsThis 补类型面。契约类型因此不是 action 真实 this 的类型：下一个需要 $patch/$reset/$subscribe/$onAction 的域模块必须各自再复制一个局部别名，或退回 as any（本波 as any 已 9 处，telemetry.ts:409/425 就是 this 逃逸）。另：6 处 $patch 里 5 处只写 phase/isSubmitting/activeTurnId（D3），1 处（:970）一次写 D4+D5 七个键 —— $patch(state => …) 这种整店 mutator 是多 store 化的反向结构，Wave 2 必须逐处重写。"
+    },
+    {
+      "file": "src/stores/runtime/types.ts",
+      "line": 624,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && grep -rc 'this: RuntimeStoreThis' src/stores/runtime/*.ts | grep -v ':0' && grep -c 'Slice' src/stores/runtime/types.ts",
+      "severity": "ADVISORY",
+      "claim": "ADR 草案 Decision 5 与 Consequences 宣称「窄契约以类型形式就位，未来视图/贡献点可只依赖所需切片」。实际只有 state 侧有切片（*State = Pick<RuntimeStoreState, …>）；18 getters 与 97 actions 的签名一律是整店口径（10 个模块共 106 处 this: RuntimeStoreThis 形参，types.ts 内部另有 12 处接口声明），types.ts 里没有任何 *Slice 组合类型（grep 'Slice' 命中 0）。因此只想用 D3 的面板仍拿不到可调用的窄接口：要 invoke submitTurn 就得依赖 84 键 + 97 action 的整店类型，「窄契约」对纯读成立、对行为不成立。再叠加 getter 两种写法并存（12 个方法式带 this/state 双参，6 个箭头式无 this），模块作者无法从接口判断某个 getter 能否安全 this.xxx。"
+    },
+    {
+      "file": ".dev-team/runtime-split/fact-map.md",
+      "line": 13,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && grep -n 'this.sidebarOpInflightSet' src/stores/runtime/session-catalog.ts",
+      "severity": "ADVISORY",
+      "claim": "事实图把 sidebarOpInflightSet 归 D2（workspace.ts），但真正的读写发生在 D1：session-catalog.ts 的 deleteSession/renameSession/archiveSession 共 9 处 this.sidebarOpInflightSet（:157/:185/:213 写 true，:166/:205/:226 delete），isSidebarOpInflight 只是 D2 侧只读入口。后果：未来拆多 store 时 D1 必须反向依赖 D2 state 或把该键搬去 D1 —— 这才是「必须再搬一次」的那个键，而事实图 §1 的铰链键只登记了 messageRevision。你点名的四个键反而站得住：messageRevision 写侧在 messages.ts + orchestration、读侧 D6/D3，归 D4 正确；conversationCheckpointEntries（D6 读 D4 messages）与 activeTraceId（D5 读 D3 activeTurnId）都只跨一个 store，多 store 下 import 对方 store 即可复用；只有 agentRuntimeStatus（D3 读 D1 的 sessionOperation/sessionError/sessionNotice + D4 的 messages/error/toolActivities + D3 自身）横跨三域，Wave 2 必须把它移到 selector/协调层，归 D3 只是「主要输出」口径下的权宜。"
+    },
+    {
+      "file": "src/stores/runtime/orchestration.ts",
+      "line": 147,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && wc -l src/stores/runtime/orchestration.ts src/stores/runtime/turn-events.ts && git show 2f11dc2f:src/stores/runtime.ts | wc -l && grep -n 'async registerTurnEventListeners' src/stores/runtime/turn-events.ts",
+      "severity": "ADVISORY",
+      "claim": "拆解实际分区只覆盖 2265 行（D1-D8 域模块）：orchestration.ts 2034 + turn-events.ts 1785 = 3819 行，占原 6075 行的 63%。turn-events.ts 的 registerTurnEventListeners 单函数从 :253 一直到文件末 :1785（1533 行；原 :4042-5573 为 1532 行），函数级粒度零改善；orchestration 内 21 个事务入口有 102 处 this.action() 调用、31 个不同 action、97 个不同 this.* 记号。结论：对 D2(169)/D7(61)/D8(144)/D6(223) 是实质提升（可定位、可评审），对 D3/D5/orchestration/turn-events（≈63% 代码、100% 并发与订阅面）只是换文件不改认知负荷 ——「把巨石换了个位置」在这两个文件上成立，ADR 里「域文件各自 ≤ 模块尺度」对它们不成立。"
+    },
+    {
+      "file": "src/stores/runtime/__tests__/concurrency-lifecycle.spec.ts",
+      "line": 129,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && grep -n '\"stopTurn\"\\|\"enterStoppingPhase\"\\|\"restoreBranchHead\"\\|\"createSession\"\\|\"rollbackToTurnBoundary\"' src/stores/runtime/__tests__/*.ts",
+      "severity": "ADVISORY",
+      "claim": "57/97 是人工维护的 COVERED_ACTIONS 清单，不是插桩覆盖率：清单只断言「已覆盖∪未覆盖==97 且不相交」，任何用例退化都不会让这个数字变红。缺口集中在最该被保护的地方 —— orchestration 的 21 个跨域入口有 10 个未覆盖（48%：stopTurn / createSession / enterFreshSession / rollbackToInitialState / rollbackToTurnBoundary / restoreBranchHead / fetchHealth / runBrowserPreviewTurn / cancelBrowserPreviewTurn / updatePersistedBackgroundSession），其中停止链是用户可见路径；停止链另一半 enterStoppingPhase（D3）、D5 的 scheduleThrottledTraceTimeline（200ms 节流合并）与 D1/D2 的目录写操作同样无基线。对本波（逐字搬运）强度够 —— 我独立比对 115/115 成员体一致；对 ADR 明说「Wave 2 唯一需要重写」的 orchestration/turn-events 面强度不够：要重写的正是没有行为基线的 48%。"
+    },
+    {
+      "file": "src/stores/runtime/turn-events.ts",
+      "line": 117,
+      "rule": "LEAK",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && grep -n 'export const turnEventRegistry' src/stores/runtime/turn-events.ts && grep -n 'turnEventRegistry\\.get' src/stores/runtime/turn-execution.ts",
+      "severity": "ADVISORY",
+      "claim": "为跨模块共享新增的 4 个 export 里，turnEventRegistry（可变 WeakMap）本可私有：跨模块只需 turnEventRegistryFor / releaseTurnEventRegistry，而 turn-execution.ts:490 又直接 .get() 了裸表，于是这张可写表成了事实公共 API；turnEventRegistryFor(store: object) 还接受任意对象。具体误用路径：Wave 2 的工作台/插件或测试脚手架想「重置订阅」时调 turnEventRegistry.delete(store)（看起来像清状态），不执行任何 unlisten → 14 个 Tauri 监听器永久泄漏，且 eventsReady 仍为 true，initializeTurnEvents 会早退，事件从此静默不再到达。SUBMISSION_WATCHDOG_TIMEOUT_MS 属同类扩散但风险低（不可变常量，仅 orchestration.ts:140/:1774 使用）。建议：WeakMap 收回模块私有，只暴露 store→lifecycle 函数。"
+    },
+    {
+      "file": ".dev-team/runtime-split/fact-map.md",
+      "line": 118,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && grep -c 'runningTurnId\\|resolveTurnTraceTimeline\\|loadPersistedRuntimeCache' backlog/tasks.jsonl; echo \"grep_exit=$?\"",
+      "severity": "ADVISORY",
+      "claim": "事实图 §8.4 与 ADR 草案 Alternative E 都写了死路径「登记为后续独立任务」，但账本里没有对应行：worktree 与主仓 backlog/tasks.jsonl（9/15 行）grep runningTurnId / resolveTurnTraceTimeline / loadPersistedRuntimeCache 命中 0（主仓仅有本波 B271）。待登记项至少五条：runningTurnId 只写不读、loadPersistedRuntimeCache 丢运行态导致三处恢复死路径、buildRuntimeViewFromPersistedState 恒 checkpoint=null、normalizeHistoryCheckoutResult 不回 cursorVersion、resetSessionRuntimeState 不清 latestExecutionCheckpoint，外加 resolveTurnTraceTimeline 无调用方。实际后果：这些死路径已被本波 fixtures 冻结成「正确行为」（initialize-sessions-restore.json 等），将来谁想修都要先推翻 golden fixture，而账本没有任何行指向它们 ——「不顺手清理」退化为「永久保留」。建议合并为 1 条 Debt 任务（P2）并在 B271 收口前落账。"
+    },
+    {
+      "file": ".dev-team/review-plan.json",
+      "line": 1,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && git log --oneline -1 -- .dev-team/review-plan.json && git show c912def2:.dev-team/review-plan.json | head -14 | tail -3",
+      "severity": "ADVISORY",
+      "claim": "该路径在本分支上已被另一波（B218-B223，reviewed_commit d821f003，verdict FAIL）的已提交收据占用（c912def2 入库）；本波按同名路径写入会顶掉那份 FAIL 证据，并让本分支 diff 多出一处与 runtime store 无关的已跟踪文件修改。旧内容仅剩 git 历史可查（本次已留 /tmp/review-plan.b218-b223.json 备份）。建议 Gate 产物按波次分文件（review-runtime-split.json 或 review-<branch>.json，lint 文档本身也写作 review-<id>.json），并在 B271 收口时把本波收据挂到波次目录而不是复用通用名。"
+    }
+  ]
+}

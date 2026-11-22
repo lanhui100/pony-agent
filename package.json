@@ -82,7 +82,7 @@
     "conformance:test": "cargo test -p pony-agent-core --test conformance",
     "backlog:lint": "node scripts/backlog.mjs lint",
     "backlog:doctor": "node scripts/backlog.mjs doctor",
-    "backlog:gate": "node scripts/backlog.mjs lint && node scripts/backlog.mjs doctor",
+    "backlog:gate": "node scripts/backlog.mjs lint && node scripts/backlog.mjs doctor && node scripts/backlog.mjs verify-archive",
     "backlog:list": "node scripts/backlog.mjs list",
     "hooks:install": "git config core.hooksPath .githooks",
     "artifacts:spec": "bash scripts/artifacts-tools.spec.sh",

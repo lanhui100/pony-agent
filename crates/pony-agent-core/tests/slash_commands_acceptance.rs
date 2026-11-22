@@ -335,16 +335,20 @@ fn t1b_panel_command_opens_the_task_drawer_like_ctrl_t() {
         );
     }
 
-    // 分发点必须与 Ctrl+T 同一路径：先同步真实 todo 存储，再切抽屉。
+    // 分发点必须与 Ctrl+T 同一路径：先同步真实数据源，再切抽屉。
     // 顺序颠倒会让抽屉展示上一轮快照（用户看到的仍是「空的」）。
+    //
+    // 2026-11-22 契约修订（ADR `2026-11-22-tui-task-drawer-visibility`）：同步点由
+    // `sync_tasks_from_store`（只同步团队看板）升级为 `projection::sync_drawer_sources`
+    // （plan + todo + goal）。「先同步再开」这条不变量不变，只换同步函数的真值。
     let source = include_str!("../src/bin/tui.rs");
     let branch = source
         .find("if known_command == Some(\"/panel\")")
         .expect("T1b: 分发点必须存在 `/panel` 分支");
     let block = &source[branch..(branch + 400).min(source.len())];
     let sync = block
-        .find("sync_tasks_from_store")
-        .expect("T1b: `/panel` 必须先 sync_tasks_from_store");
+        .find("projection::sync_drawer_sources")
+        .expect("T1b: `/panel` 必须先 projection::sync_drawer_sources");
     let toggle = block
         .find("toggle_task_center")
         .expect("T1b: `/panel` 必须 toggle_task_center");

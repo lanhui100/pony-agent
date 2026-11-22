@@ -1,0 +1,492 @@
+{
+  "d1_session": {
+    "sessionId": "rt-session-main",
+    "sessionList": [],
+    "sessionOperation": null,
+    "sessionHydrating": false,
+    "deletingSessionSet": {},
+    "sessionSwitchToken": 0,
+    "sessionError": null,
+    "sessionNotice": null,
+    "runningSessionMap": {},
+    "completedSessionSet": {},
+    "failedSessionSet": {}
+  },
+  "d3_turn": {
+    "phase": "waiting_user",
+    "phaseLabel": "waiting_user",
+    "isSubmitting": false,
+    "activeTurnId": null,
+    "activeTurnStartedAtMs": 1760000000000,
+    "activeRunId": null,
+    "activeStreamKind": null,
+    "retryProgress": null,
+    "browserPreviewRunToken": 0,
+    "streamBufferTurnId": null,
+    "streamBufferText": "",
+    "streamBufferReasoning": "",
+    "eventsReady": true,
+    "streamDebugDeltaCount": 1,
+    "streamDebugFlushCount": 1,
+    "streamDebugTextCharsReceived": 8,
+    "streamDebugTextCharsFlushed": 8,
+    "timers": {
+      "deferredPersistTimerId": null,
+      "streamFlushFrameId": null,
+      "streamFlushTimerId": null,
+      "traceTimelineThrottleTimerId": null,
+      "submissionWatchdogTimerId": null
+    }
+  },
+  "d4_messages": {
+    "messages": [
+      {
+        "id": "user-1760000000000",
+        "turnId": "1760000000000",
+        "role": "user",
+        "content": "异常路径提问",
+        "attachments": [],
+        "status": "done",
+        "tokenCount": 96
+      },
+      {
+        "id": "assistant-1760000000000",
+        "turnId": "1760000000000",
+        "role": "assistant",
+        "reasoningContent": null,
+        "content": "需要你确认后继续",
+        "status": "done",
+        "tokenCount": 17,
+        "modelName": null,
+        "errorDetail": null
+      }
+    ],
+    "draftMessage": "",
+    "pendingAttachments": [],
+    "attachmentAssets": [],
+    "sessionSummary": "",
+    "error": null,
+    "toolActivities": [],
+    "traceSteps": [
+      {
+        "id": "step-plan",
+        "label": "接收输入",
+        "state": "completed"
+      },
+      {
+        "id": "step-context",
+        "label": "组织上下文",
+        "state": "completed"
+      },
+      {
+        "id": "step-call-model",
+        "label": "调用模型",
+        "state": "active"
+      },
+      {
+        "id": "step-call-tool",
+        "label": "调用工具",
+        "state": "pending"
+      }
+    ],
+    "messageRevision": null,
+    "retrievedContext": null,
+    "recallLastUserMessage": "异常路径提问",
+    "agentRuntimeStatus": null,
+    "failedTurnRetry": null,
+    "canSubmitPrompt": true,
+    "isInputDisabled": false
+  },
+  "d5_telemetry": {
+    "traceTimeline": [
+      {
+        "id": "input-1",
+        "kind": "input",
+        "label": "TRACE",
+        "state": "completed",
+        "sequence": 1,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": "异常路径提问",
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      },
+      {
+        "id": "build_context-2",
+        "kind": "build_context",
+        "label": "BUILD CONTEXT",
+        "state": "completed",
+        "sequence": 2,
+        "providerName": "OpenAI",
+        "providerProtocol": "openai",
+        "providerModel": "gpt-5",
+        "providerSource": "",
+        "providerMode": "",
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      },
+      {
+        "id": "call_model-3",
+        "kind": "call_model",
+        "label": "CALL MODEL #1",
+        "state": "completed",
+        "sequence": 3,
+        "providerName": "OpenAI",
+        "providerProtocol": "openai",
+        "providerModel": "gpt-5",
+        "providerSource": "",
+        "providerMode": "",
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      }
+    ],
+    "turnTraceHistory": [
+      {
+        "turnId": "1760000000000",
+        "title": "异常路径提问",
+        "phase": "waiting_user",
+        "traceSteps": [
+          {
+            "id": "step-plan",
+            "label": "接收输入",
+            "state": "completed"
+          },
+          {
+            "id": "step-context",
+            "label": "组织上下文",
+            "state": "completed"
+          },
+          {
+            "id": "step-call-model",
+            "label": "调用模型",
+            "state": "active"
+          },
+          {
+            "id": "step-call-tool",
+            "label": "调用工具",
+            "state": "pending"
+          }
+        ],
+        "traceTimeline": [
+          {
+            "id": "input-1",
+            "kind": "input",
+            "label": "TRACE",
+            "state": "completed",
+            "sequence": 1,
+            "providerName": null,
+            "providerProtocol": null,
+            "providerModel": null,
+            "providerSource": null,
+            "providerMode": null,
+            "buildContextObservation": null,
+            "toolActivities": [],
+            "text": "异常路径提问",
+            "reasoningContent": null,
+            "fallbackReason": null,
+            "error": null,
+            "inputTokens": null,
+            "cacheHitInputTokens": null,
+            "reasoningTokens": null,
+            "outputTokens": null,
+            "totalTokens": null,
+            "firstTokenLatencyMs": null,
+            "turnDurationMs": null
+          },
+          {
+            "id": "build_context-2",
+            "kind": "build_context",
+            "label": "BUILD CONTEXT",
+            "state": "completed",
+            "sequence": 2,
+            "providerName": "OpenAI",
+            "providerProtocol": "openai",
+            "providerModel": "gpt-5",
+            "providerSource": "",
+            "providerMode": "",
+            "buildContextObservation": null,
+            "toolActivities": [],
+            "text": null,
+            "reasoningContent": null,
+            "fallbackReason": null,
+            "error": null,
+            "inputTokens": null,
+            "cacheHitInputTokens": null,
+            "reasoningTokens": null,
+            "outputTokens": null,
+            "totalTokens": null,
+            "firstTokenLatencyMs": null,
+            "turnDurationMs": null
+          },
+          {
+            "id": "call_model-3",
+            "kind": "call_model",
+            "label": "CALL MODEL #1",
+            "state": "completed",
+            "sequence": 3,
+            "providerName": "OpenAI",
+            "providerProtocol": "openai",
+            "providerModel": "gpt-5",
+            "providerSource": "",
+            "providerMode": "",
+            "buildContextObservation": null,
+            "toolActivities": [],
+            "text": null,
+            "reasoningContent": null,
+            "fallbackReason": null,
+            "error": null,
+            "inputTokens": null,
+            "cacheHitInputTokens": null,
+            "reasoningTokens": null,
+            "outputTokens": null,
+            "totalTokens": null,
+            "firstTokenLatencyMs": null,
+            "turnDurationMs": null
+          }
+        ],
+        "traceId": "trace-exc",
+        "toolActivities": [],
+        "providerCallRecords": [
+          {
+            "requestKind": "initial_request",
+            "providerSource": "provider_decision",
+            "providerMode": "live",
+            "inputTokens": 96,
+            "cacheHitInputTokens": 0,
+            "cacheMissInputTokens": 96,
+            "reasoningTokens": 0,
+            "outputTokens": 17,
+            "totalTokens": 113,
+            "firstTokenLatencyMs": 210,
+            "turnDurationMs": 1500,
+            "latencyKind": "provider_stream",
+            "prefixMutationReasons": []
+          }
+        ],
+        "hookTraceRecords": [],
+        "providerRequestedName": "OpenAI",
+        "providerName": "OpenAI",
+        "providerProtocol": "openai",
+        "providerModel": "gpt-5",
+        "providerSource": "",
+        "providerMode": "",
+        "buildContextObservation": null,
+        "sessionSummary": "",
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": 0,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": 1500,
+        "updatedAt": 1760000000120,
+        "eventId": "ev-4",
+        "eventType": "turn.suspended",
+        "eventVersion": "1.0",
+        "sequence": 4,
+        "emittedAtMs": 1400
+      }
+    ],
+    "eventCursorByTurnId": {
+      "1760000000000": {
+        "eventId": "ev-4",
+        "sequence": 4,
+        "emittedAtMs": 1400
+      }
+    },
+    "liveMetrics": null,
+    "activeProviderCallRecords": [],
+    "providerRequestedName": "OpenAI",
+    "providerName": "OpenAI",
+    "providerProtocol": "openai",
+    "providerModel": "gpt-5",
+    "providerSource": "",
+    "providerMode": "",
+    "fallbackReason": null,
+    "inputTokens": 96,
+    "outputTokens": null,
+    "totalTokens": null,
+    "firstTokenLatencyMs": null,
+    "sessionTotalCostUsd": 0,
+    "hasUnpricedTurns": true,
+    "formattedSessionCost": "—",
+    "formattedGovernanceCost": "—",
+    "usageGovernanceSummary": {
+      "session": {
+        "cost_usd": 0,
+        "unpriced_turns": 1
+      },
+      "days": [],
+      "policy_version": "v1",
+      "governance_degraded": false
+    }
+  },
+  "d6_history": {
+    "visibleNodeId": null,
+    "branchHeadNodeId": null,
+    "activeBranchId": null,
+    "cursorVersion": null,
+    "historyCursorMode": "live",
+    "historyNodes": [],
+    "historyBranches": [],
+    "initialRollbackActive": false,
+    "latestExecutionCheckpoint": null,
+    "latestGraphRunSubmissionPlan": null,
+    "latestGraphRunControlBoundaryEvidence": [],
+    "latestRunControlAuditSummary": null,
+    "latestHistoryStateAuditSummary": null,
+    "isHistoricalMode": false,
+    "conversationCheckpointEntries": [
+      {
+        "nodeId": "synthetic-1760000000000",
+        "turnId": "1760000000000",
+        "branchId": "branch-main",
+        "summary": "异常路径提问",
+        "createdAtMs": 1760000000129,
+        "isLatest": true,
+        "isVisible": false,
+        "workspaceRollbackCapable": false,
+        "availableModes": [
+          "transcript_only"
+        ],
+        "forkTargets": []
+      }
+    ]
+  },
+  "d7_queue": {
+    "pendingQueuedMessages": [],
+    "queueDeliveryMode": "queue",
+    "toolAuthorizationMode": "workspace_write"
+  },
+  "d8_catalog": {
+    "health": null,
+    "availableToolNames": [
+      "Run",
+      "Ask",
+      "Read",
+      "Search",
+      "List",
+      "Glob",
+      "WebFetch",
+      "WebSearch",
+      "MCPResource",
+      "ToolSearch",
+      "Write",
+      "Edit",
+      "BatchExecute"
+    ],
+    "capabilitySourceIds": [
+      "builtin-tools"
+    ],
+    "capabilityIds": [
+      "builtin:workspace_run_command",
+      "builtin:echo_input",
+      "builtin:workspace_gather_context",
+      "builtin:workspace_search_text",
+      "builtin:workspace_list_files",
+      "builtin:workspace_glob_files",
+      "builtin:web_fetch_url",
+      "builtin:web_search_query",
+      "builtin:mcp_resource_read",
+      "builtin:tool_search",
+      "builtin:workspace_write_file",
+      "builtin:workspace_edit_file",
+      "builtin:workspace_batch"
+    ]
+  },
+  "persistence": {
+    "sessionKeys": [
+      "rt-session-main"
+    ],
+    "payload": {
+      "cachedStateVersion": 2,
+      "phase": "waiting_user",
+      "messages": [
+        {
+          "id": "user-1760000000000",
+          "turnId": "1760000000000",
+          "role": "user",
+          "content": "异常路径提问",
+          "attachments": [],
+          "status": "done",
+          "tokenCount": 96
+        },
+        {
+          "id": "assistant-1760000000000",
+          "turnId": "1760000000000",
+          "role": "assistant",
+          "reasoningContent": null,
+          "content": "需要你确认后继续",
+          "status": "done",
+          "tokenCount": 17,
+          "modelName": null,
+          "errorDetail": null
+        }
+      ],
+      "attachmentAssets": [],
+      "sessionSummary": "",
+      "providerRequestedName": "OpenAI",
+      "providerName": "OpenAI",
+      "providerProtocol": "openai",
+      "providerModel": "gpt-5",
+      "providerSource": "",
+      "providerMode": "",
+      "fallbackReason": null,
+      "inputTokens": 96,
+      "outputTokens": null,
+      "totalTokens": null,
+      "firstTokenLatencyMs": null,
+      "visibleNodeId": null,
+      "branchHeadNodeId": null,
+      "activeBranchId": null,
+      "historyCursorMode": "live",
+      "historyNodes": [],
+      "historyBranches": [],
+      "cursorVersion": null,
+      "initialRollbackActive": false,
+      "checkpoint": null,
+      "runningTurnId": null,
+      "sessionWorkspaceId": "default"
+    },
+    "runningSessionMap": {},
+    "completedSet": {},
+    "failedSet": {}
+  }
+}

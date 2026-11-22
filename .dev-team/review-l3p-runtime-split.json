@@ -1,0 +1,84 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/stores/runtime/",
+    "src/stores/runtime/catalog.ts",
+    "src/stores/runtime/history.ts",
+    "src/stores/runtime/messages.ts",
+    "src/stores/runtime/orchestration.ts",
+    "src/stores/runtime/queue.ts",
+    "src/stores/runtime/session-catalog.ts",
+    "src/stores/runtime/telemetry.ts",
+    "src/stores/runtime/turn-events.ts",
+    "src/stores/runtime/turn-execution.ts",
+    "src/stores/runtime/workspace.ts"
+  ],
+  "reviewed_commit": "51df4176",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "l3p-runtime-split-reviewer",
+    "fresh_context": true,
+    "perspective": "L3-P production six-questions"
+  },
+  "executed_by": "l3p-runtime-split-reviewer",
+  "attestation": {
+    "self_signed": false,
+    "note": "只读审查 + 复跑门禁；被审实现由其他 Executor 编写，审查者未改动 src/ 任何文件。审计对象 = 工作区未提交变更 vs 51df4176 的 10 文件 diff（+6099/-59）。"
+  },
+  "findings": [
+    {
+      "file": "src/stores/runtime/__tests__/concurrency-lifecycle.spec.ts",
+      "line": 206,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "cd /home/dm/pony-agent-worktrees/runtime-split && npx vitest run src/stores/runtime/__tests__ --no-file-parallelism",
+      "severity": "ADVISORY",
+      "note": "收据可复现性（非本波 diff 缺陷）：冷缓存首跑时同一目录命令曾出现 2 次红灯（15 failed/23、14 failed/23，报错含 84 state 键断言缺 3 键与 golden 逐字不符），但 state.ts 源码实测确为 84 键（工厂层与店铺层双层探针均 84），且 --no-file-parallelism、后续并行跑、以及全量 npm test 176 文件全绿，故判为首次 Vite 缓存预热/共享 node_modules(.vite) 环境抖动，非产品语义回归。建议收据命令固定 --no-file-parallelism 或注明冷缓存需二次复跑。"
+    }
+  ],
+  "six_questions": [
+    {
+      "q": 1,
+      "baseline_field": "external_call_timeout_ms",
+      "verdict": "N-A",
+      "evidence": "本波新增外部调用 = 0（结构性 N/A，已实证非假设）：safeInvoke 调用点 22 vs 22（原文件 22 处调用 + 1 行 import；新侧 `grep -rnE 'safeInvoke' src/stores/runtime/*.ts | grep -vE 'import|//' | wc -l` = 22），命令名逐字一致（usage_governance_summary / list_sessions / load_session_runtime_view / load_retrieved_context / checkout_history_node / delete_session / health_check / list_available_tools / list_capability_sources / list_capabilities / inspect_capability / inspect_capability_source / resolve_graph_run_submission_plan / start_graph_run_stream / resume_graph_run_stream / continue_graph_run_stream / stop_graph_run ×2 / stop_turn ×2 / fail_turn_for_watchdog / options.cmd 动态透传）；超时包装 3/3 未改（src/stores/runtime/orchestration.ts:809,1044,1066 ↔ 原 2431,2980,3002，均 withTimeout(..., HYDRATION_TIMEOUT_MS, \"加载对话\")）；看门狗阈值 240_000 未改（src/stores/runtime/turn-execution.ts:39），数字字面量多重集 orig vs new 差异 = 0；无新增 fetch/XMLHttpRequest/WebSocket/EventSource（双侧均 0）。"
+    },
+    {
+      "q": 2,
+      "baseline_field": "logging",
+      "verdict": "PASS",
+      "evidence": "无新增裸 catch{} / 裸 console.log：catch 块 36 vs 36，归一化体多重集差异 0，bare `catch {}` 计数 0 vs 0（花括号配平逐块提取）；debugLog 调用点 70 vs 70 且 tag 集合逐项相同（raw 计数 +8 全来自 8 处 import 行）；console.* 4 行 vs 4 行且全为既有 console.warn（src/stores/runtime/turn-events.ts:104,107 ↔ 原 297,300；src/stores/runtime/messages.ts:338 ↔ 原 3766）；reportError 2 vs 2。既有 catch 处理原样（注册失败回滚链、能力目录优雅降级等 catch 体逐字一致）。"
+    },
+    {
+      "q": 3,
+      "baseline_field": "resource_release",
+      "verdict": "PASS",
+      "evidence": "unlisten 句柄：注册体在 src/stores/runtime/turn-events.ts（listen 辅助 :275、turn:retry :284 逐条入 registry.unlisteners），释放体 releaseTurnEventRegistry 同文件 :128-140（splice(0) 后逐个 unlisten，异常只记 debugLog）；跨模块调用方 src/stores/runtime/turn-execution.ts:26 引用的仍是同一个 `./turn-events` 模块实例（ESM 单例，全仓无第二 specifier），故不存在「注册在 A、释放在 B」的悬空。定时器成对：streamFlush :281/:341、submissionWatchdog :347,:360/:366、deferredPersist :376/:391、traceTimeline 节流 telemetry.ts:247/:260,:271、看门狗局部 orchestration.ts:1003/:1104，共 9 处 setTimeout + 1 处 cancelAnimationFrame（turn-execution.ts:336），与原实现逐一对应（原 1087,1171,1181,1194,2939,3299,5131,5348,5547 / 1014）。HMR dispose 保留在装配壳 src/stores/runtime.ts:54-63 且正文逐字未变（原 6066-6070）。实证：concurrency-lifecycle.spec「dispose 中途调用 → 全量 unlisten 且可重新注册」通过。"
+    },
+    {
+      "q": 4,
+      "baseline_field": "concurrency_lock",
+      "verdict": "PASS",
+      "evidence": "并发单例与 dispose 序保留：src/stores/runtime/turn-execution.ts:450-480 initializeTurnEvents（eventsReady 早退 + turnEventRegistryFor(this).initPromise 单例，注册失败时 releaseTurnEventRegistry 回滚并释放锁）、:489-510 disposeTurnEvents（先取 inFlight=registry.initPromise、置空后 await 落定，再 release + eventsReady=false），二者归一化 token 与原文完全相等（115/115 方法体 0 mismatch）；registry 以 store 实例 `this` 为 WeakMap key（turn-events.ts:115-127），注册体（turn-events）与 dispose（turn-execution）共用同一 key 与同一模块实例，依赖图无环（orchestration→turn-execution→turn-events），无状态可见性变化。实证：concurrency-lifecycle.spec 4/4 通过（并发初始化单例、dispose 中途介入、5000 delta 风暴）。"
+    },
+    {
+      "q": 5,
+      "baseline_field": "config/self-check（基线表无独立 config 段，按同义核对：新增配置项 / 自检入口）",
+      "verdict": "N-A",
+      "evidence": "本波新增配置项 = 0：`git status --porcelain -- . ':!src/stores/runtime'` 仅 `.dev-team/meta-retrospective.md`（文档）与新增 ADR 笔记，无配置文件/环境变量/常量变更；`grep -rnE 'import.meta.env|process.env' src/stores/runtime.ts src/stores/runtime/*.ts` 空；阈值类数字字面量多重集 orig vs new 差异 0；`.dev-team/nfr-baseline.json` 本波未被改动；自检入口未改（typecheck / npm test 仍是唯一自检面）。"
+    },
+    {
+      "q": 6,
+      "baseline_field": "契约矩阵（接口 / Schema 字段 / 序列化键 / 命令名 / 事件名 / 退役键）",
+      "verdict": "PASS",
+      "evidence": "无删除、无重编号：state 键 84 vs 84 且集合与顺序完全一致（原 state 字面量 vs src/stores/runtime/state.ts createInitialState 逐项比对 only-orig=[] / only-new=[] / same order=true）；getters 18 / actions 97 全集可由 types.ts 接口穷举，且 `npx vue-tsc --noEmit` = EXIT 0（14 个消费方 import 面未破）；公开导出面保留（useRuntimeStore / TurnEventRegistry / ActiveStreamKind，由 shell :66-78 再导出，仅新增无删减）；safeInvoke 命令名 22 处逐字一致（见 Q1）；safeListen 事件名 14 个逐字一致（turn:retry + started/delta/trace/phase_changed/checkpoint_persisted/tool/output_end/hop_complete/completed/failed/cancelled/stop_requested/suspended，turn-events.ts:281-1603 ↔ 原 4070-5392）；localStorage 持久化键集合不变，仅 ACTIVE_WORKSPACE_STORAGE_KEY=\"pony-agent.active-workspace.v1\"（state.ts:44 读、workspace.ts:62 删、workspace.ts:163 写；键定义 src/lib/runtime/workspace-constants.ts:7 未改）；落盘 payload 字段集合由 persistHistory 方法体 token 等价锁定，并由 golden fixture persist-history-payload.json 逐字校验通过；本波无键退役，故不涉 reserved 迁移。去注释后的字符串字面量多重集仅差 import 路径与 types.ts 键名清单，实质语义字面量 0 丢失。"
+    }
+  ],
+  "receipts": [
+    "python3 /home/dm/.agents/skills/dev-team/scripts/dev-nfr-lint.py .dev-team/nfr-baseline.json → PASS, EXIT=0",
+    "npx vue-tsc --noEmit → EXIT=0（/tmp/l3p/tsc.log）",
+    "npx vitest run src/stores/runtime/__tests__ → 6 files / 23 passed, EXIT=0（--no-file-parallelism 亦 23/23 EXIT=0）",
+    "npm test → 176 files passed / 1591 passed / 12 skipped, EXIT=0（/tmp/l3p/npm-test.log）",
+    "等价性独立复核：115/115 方法体（96 带行号 actions + 18 getters + 泛型 performHistoryOperation）归一化 token 0 missing / 0 mismatch；catch 36=36；实质字符串字面量 0 丢失；数字字面量 0 差异"
+  ]
+}

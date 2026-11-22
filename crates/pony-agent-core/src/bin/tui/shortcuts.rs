@@ -105,7 +105,7 @@ pub const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
     ShortcutSection {
         title: "面板与会话",
         items: &[
-            ShortcutItem { keys: "Ctrl+T / /panel", description: "任务抽屉（Goal/Plan/Tasks/Agents/Jobs · 抽屉内 Tab 切页签 · ↑↓ 滚动 · Esc 关闭；流式期同样可用）" },
+            ShortcutItem { keys: "Ctrl+T / /panel", description: "任务抽屉（Goal/Plan/Tasks/Agents/Jobs · 抽屉内 ←→ 切页签 · ↑↓ 滚动 · Esc 关闭；流式期同样可用）" },
             ShortcutItem { keys: "Ctrl+R", description: "模型面板，拉取并切换模型（面板内 w 改上下文窗口；流式期同样可用）" },
             ShortcutItem { keys: "Ctrl+M", description: "同 Ctrl+R（仅 kitty 协议终端可上报）" },
             ShortcutItem { keys: "Ctrl+↑", description: "子会话内返回主会话" },

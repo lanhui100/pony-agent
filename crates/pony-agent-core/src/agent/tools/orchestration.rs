@@ -228,6 +228,17 @@ impl ToolRouter {
         if let Some(parent_turn) = parent_turn.as_ref() {
             session.set_parent_turn(parent_turn.clone());
         }
+        // 可见性面（2026-11-22）：把本次委派登记进**活跃 ACP 注册表**，宿主 TUI 的 Agents 页签
+        // 因此能看到「现在有哪些 ACP 子智能体在跑」。guard 覆盖 spawn 之后的全部收口路径
+        // （成功/错误/取消/panic），Drop 即注销；注册表只做只读快照，不参与委派裁决。
+        let _active_delegate = crate::acp::registry::ActiveDelegateGuard::register(
+            crate::acp::registry::DelegateRegistration {
+                agent_id: spec.id.clone(),
+                acp_session_id: session.session_id().to_string(),
+                host_session_id: context.session_id.clone(),
+                cwd: cwd.display().to_string(),
+            },
+        );
         crate::agent::otel::log::log_json_with_fields(
             "info",
             "acp_delegate 起轮（budget/能力/父 turn 归属）",
