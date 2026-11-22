@@ -4,7 +4,10 @@ import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..");
+// PONY_RELEASE_REPO_ROOT 仅作自检沙箱注入点（scripts/release-push.spec.mjs），生产调用不设置。
+const repoRoot = process.env.PONY_RELEASE_REPO_ROOT
+  ? path.resolve(process.env.PONY_RELEASE_REPO_ROOT)
+  : path.resolve(__dirname, "..");
 const versionFile = path.join(repoRoot, ".version.json");
 const coreCargo = path.join(repoRoot, "crates/pony-agent-core/Cargo.toml");
 const tauriCargo = path.join(repoRoot, "src-tauri/Cargo.toml");
@@ -32,6 +35,107 @@ if (!fs.existsSync(versionFile)) {
 }
 
 const state = JSON.parse(fs.readFileSync(versionFile, "utf8"));
+
+function runGit(gitArgs, { allowFail = false } = {}) {
+  try {
+    const out = execSync(`git ${gitArgs}`, {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+    });
+    return out.trim();
+  } catch (err) {
+    if (allowFail) return null;
+    throw err;
+  }
+}
+
+function failPush(lines) {
+  console.error("");
+  for (const line of lines) console.error(line);
+  console.error("");
+  process.exit(1);
+}
+
+// B1795338249961（2026-11-22 v0.1.203 发版实测）：--push 过去先走完整 bump 再校验 HEAD 是否在 origin/main，
+// 校验失败时本地已多出一个未推送的 bump commit 与 tag，只能手工 reset + tag -d 恢复。
+// 现在 --push 是纯操作：只读校验 + 推送已存在的 tag，任何一步失败都不写工作区/不改 HEAD。
+function pushTagOnly() {
+  const tagName = `v${getVersionString(state.tauri.major, state.tauri.minor, state.tauri.patch)}`;
+  console.log(`[release:push] 目标 tag: ${tagName}（取自 .version.json 的 tauri 版本）`);
+
+  if (runGit("status --porcelain", { allowFail: true })) {
+    console.warn("[release:push] WARN: 工作区有未提交改动；tag 只指向已提交内容，这些改动不会进入本次发布。");
+  }
+
+  const tagCommit = runGit(`rev-parse --verify --quiet ${tagName}^{commit}`, { allowFail: true });
+  if (!tagCommit) {
+    failPush([
+      `[release:push] 拒绝执行：本地不存在 tag ${tagName}。`,
+      "  --push 只推已存在的 tag，不会替代 bump（这样误触也不会在 main 上留下脏 commit/tag）。",
+      "  完整发版流程：",
+      "    1. git switch -c chore/release-v<version> main",
+      "    2. npm run release                              # 本地 bump + commit + tag",
+      "    3. git push -u origin <branch> && gh pr create",
+      "    4. 人工用 merge commit（不要 squash）合并，保证 tag 指向 main 历史",
+      "    5. npm run release:push                         # 只推 tag，触发发布"
+    ]);
+  }
+
+  runGit("fetch origin main --quiet", { allowFail: true });
+  if (!runGit("rev-parse --verify --quiet origin/main", { allowFail: true })) {
+    failPush([
+      "[release:push] 拒绝执行：读不到 origin/main，无法校验 tag 是否已在主干历史上。",
+      "  网络/权限修好后重跑；本地未做任何改动。",
+      "  手工核对：git fetch origin main && git merge-base --is-ancestor " + tagName + " origin/main"
+    ]);
+  }
+  if (runGit(`merge-base --is-ancestor ${tagCommit} origin/main`, { allowFail: true }) === null) {
+    failPush([
+      `[release:push] 拒绝推送 tag：${tagName} 指向的提交尚未进入 origin/main。`,
+      "  main 受保护（禁止直推），版本 bump 必须经 PR 合并后再推 tag：",
+      "    1. git push -u origin chore/release-v<version> && gh pr create",
+      "    2. 人工用 merge commit（不要 squash）合并",
+      "    3. npm run release:push",
+      "  本地未做任何改动（无新 commit、无新 tag），无需清理。"
+    ]);
+  }
+
+  const remoteLines = (runGit(`ls-remote --tags origin refs/tags/${tagName}`, { allowFail: true }) || "")
+    .split("\n")
+    .filter(Boolean);
+  if (remoteLines.length > 0) {
+    const remoteSha = (remoteLines.find((l) => l.endsWith("^{}")) || remoteLines[0]).split(/\s+/)[0];
+    if (remoteSha === tagCommit) {
+      console.log(`[release:push] tag ${tagName} 已在远端且指向 ${tagCommit.slice(0, 7)}，幂等跳过（本地无改动）。`);
+      return;
+    }
+    failPush([
+      `[release:push] 拒绝推送：远端 tag ${tagName} 已存在，但指向 ${remoteSha.slice(0, 7)}；本地指向 ${tagCommit.slice(0, 7)}。`,
+      "  同名 tag 重指会覆盖发布历史，需人工确认，脚本不代劳：",
+      `    确认本地为准：git push --force origin refs/tags/${tagName}   # 慎用`,
+      `    确认远端为准：git tag -d ${tagName} && git fetch origin tag ${tagName}`
+    ]);
+  }
+
+  console.log(`[release:push] 推送 tag ${tagName} -> origin（只推 tag，不推分支）`);
+  try {
+    execSync(`git push origin refs/tags/${tagName}`, { stdio: "inherit", cwd: repoRoot, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  } catch {
+    failPush([
+      `[release:push] git push 失败：tag ${tagName} 未推送。`,
+      "  本地未做任何改动，排除网络/权限问题后重跑本命令即可。"
+    ]);
+  }
+  console.log(`[release:push] tag ${tagName} 已推送，release workflow 将从该 tag 构建。`);
+}
+
+if (pushAfter) {
+  pushTagOnly();
+  process.exit(0);
+}
+
 const now = new Date().toISOString();
 const bumpTargets = target === "all" ? ["core", "tauri"] : [target];
 const bumpLog = [];
@@ -121,40 +225,8 @@ execSync(`git commit -m "chore(release): bump version to ${tauriVer}"`, { stdio:
 execSync(`git tag ${tagName}`, { stdio: "inherit", cwd: repoRoot });
 console.log(`[bump-version] Created git commit and tag ${tagName}`);
 
-// ADR 2026-11-18-multi-session-git-contract：main 已受保护，发版不再直推 main。
-// 版本 bump 提交必须经 PR 合并（人工点 Merge），本脚本只负责把 tag 推到远端触发 release workflow。
-if (pushAfter) {
-  try {
-    execSync("git fetch origin main --quiet", { stdio: "inherit", cwd: repoRoot });
-  } catch {
-    console.warn("[bump-version] WARN: git fetch origin main 失败，跳过「是否已合并」校验。");
-  }
-
-  let mergedIntoMain = true;
-  try {
-    execSync("git merge-base --is-ancestor HEAD origin/main", { stdio: "ignore", cwd: repoRoot });
-  } catch {
-    mergedIntoMain = false;
-  }
-
-  if (!mergedIntoMain) {
-    console.error("");
-    console.error("[bump-version] 拒绝推送 tag：当前 HEAD 尚未进入 origin/main。");
-    console.error("  main 受保护（禁止直推），版本 bump 必须走 PR：");
-    console.error("    1. git switch -c chore/release-v<version> main   # 若已在特性分支可跳过");
-    console.error("    2. npm run release                              # 本地 bump + commit + tag");
-    console.error("    3. git push -u origin <branch> && gh pr create");
-    console.error("    4. 人工用 merge commit（不要 squash）合并，保证 tag 指向 main 历史");
-    console.error("    5. npm run release:push                         # 只推 tag，触发发布");
-    console.error("");
-    process.exit(1);
-  }
-
-  console.log(`[bump-version] Pushing tag ${tagName} only (main is protected)...`);
-  execSync(`git push origin ${tagName}`, { stdio: "inherit", cwd: repoRoot });
-  console.log(`[bump-version] Tag ${tagName} pushed. Release workflow builds from the tag.`);
-} else {
-  console.log(
-    `[bump-version] NOTE: tag ${tagName} 已本地创建。main 受保护，请先把 bump 提交经 PR 合并，再 'npm run release:push' 只推 tag。`
-  );
-}
+// ADR 2026-11-18-multi-session-git-contract：main 已受保护，bump 这一步不推送任何东西。
+// 推 tag 只在 `npm run release:push`（pushTagOnly）里发生，且必须先经 PR 合并。
+console.log(
+  `[bump-version] NOTE: tag ${tagName} 已本地创建。main 受保护，请先把 bump 提交经 PR 合并，再 'npm run release:push' 只推 tag。`
+);
