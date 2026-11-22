@@ -1,0 +1,6 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T074952Z-backlog-0385","surface":"backlog","session_id":"session-mwqzhqv2eisr1f","created_at":"2026-11-22T07:49:52.621Z"}
+{"kind":"resolve","at":"2026-11-22T07:49:52.620Z","id":"B272","evidence":"PR #45 合并（ca9cc481）CI verify 32m59s；turn_end_status_noise 9 例（resume 只判最后一条 assistant）"}
+{"kind":"resolve","at":"2026-11-22T07:49:52.687Z","id":"B273","evidence":"PR #45：停止原因不再写消息区（状态栏·停/·未续 + /goal 面板 + 结构化日志三处保留）"}
+{"kind":"resolve","at":"2026-11-22T07:49:52.744Z","id":"B274","evidence":"PR #45：HistoryMessageKind 分离 degraded/interrupted；b219_degraded_turn_acceptance 4 例 + turn_end_status_noise 9 例"}
+{"kind":"resolve","at":"2026-11-22T07:49:52.803Z","id":"B275","evidence":"PR #45：前端 interruptedRecordStatusLine kind 四态；tests/interrupted-record-status.spec.ts 8 例"}
+{"kind":"resolve","at":"2026-11-22T07:49:52.859Z","id":"B276","evidence":"PR #45：消息区唯一一行断言（turn_end_status_noise_tests 覆盖）"}
