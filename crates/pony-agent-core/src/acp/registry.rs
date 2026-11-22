@@ -34,6 +34,7 @@ pub struct ActiveDelegate {
 }
 
 /// 登记入参：`delegate_id` / `started_at_ms` 由注册表生成，调用方不得自行编造。
+#[derive(Debug, Clone)]
 pub struct DelegateRegistration {
     pub agent_id: String,
     pub acp_session_id: String,
@@ -48,13 +49,14 @@ static NEXT_DELEGATE_ID: AtomicU64 = AtomicU64::new(1);
 fn registry_guard() -> std::sync::MutexGuard<'static, Option<BTreeMap<u64, ActiveDelegate>>> {
     ACTIVE_DELEGATES
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// RAII guard：`drop` 即从注册表移除。
 ///
 /// 委派的四条收口路径（成功返回 / 错误返回 / 取消 / panic unwind）都经过 Drop，
 /// 因此不存在「跑完还挂在界面上」的残留。
+#[derive(Debug)]
 pub struct ActiveDelegateGuard {
     delegate_id: u64,
 }
@@ -74,7 +76,9 @@ impl ActiveDelegateGuard {
             cwd: registration.cwd,
             started_at_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_millis() as u64)
+                // Unix 毫秒 → u64：`as` 转换被 lint 表拒绝（可能截断），按 try_from 收口；
+                // 超出 u64 的时间戳在物理上不可达，`unwrap_or(MAX)` 只作定理外的兜底。
+                .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0),
         };
         registry_guard()

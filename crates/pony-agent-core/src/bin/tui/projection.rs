@@ -133,7 +133,7 @@ pub fn sync_drawer_sources(state: &mut TuiState, control_plane: &HostControlPlan
 fn is_terminal_plan(plan: &serde_json::Value) -> bool {
     matches!(
         plan.get("lifecycle").and_then(|lifecycle| lifecycle.as_str()),
-        Some("completed") | Some("aborted")
+        Some("completed" | "aborted")
     )
 }
 
