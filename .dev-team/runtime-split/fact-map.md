@@ -116,3 +116,14 @@ TraceInspector.vue。
 3. **禁止**：改 14 个消费方、`tests/` 下既有 107 个用例、`src/lib/**`、`src/types/**`、任何 Rust 文件。
 4. **禁止顺手清理**：死分支（`state.backendGovernanceSummary`）、只写不读键（`runningTurnId`）、
    注释里的历史缺陷一律原样保留，登记为后续独立任务。
+
+## 9. 修订记录（Wave 1 实测回写）
+
+- **2026-11-22 · actions 97**：§3 表初版记 96，漏计泛型辅助 `performHistoryOperation`（归 `history.ts`）。
+  以 `src/stores/runtime/types.ts` 实测为准：9+7+14+14+13+4+7+5+21+3 = **97**；加 18 getters 共 **115** 成员。
+- **2026-11-22 · 铰链键补登 `sidebarOpInflightSet`**：原登记只有 `messageRevision`。Gate-1 审查实测该键归 D2
+  （`workspace.ts` 的 state 切片），但由 D1 的 `session-catalog.ts` 写 9 处（:157/:166/:185/:205/:213/:226 等）。
+  Wave 2 拆多 store 时它是第二个必须迁移归属的键，已入账本 B280。
+- **2026-11-22 · 键集冻结断言的强度边界**：`types.ts` 的类型级断言对 3 个 optional 键（`activeStreamKind`/
+  `liveMetrics`/`retryProgress`）不双向闭合 —— 删掉其默认值仍可 `vue-tsc` 通过（Gate-1 反例实测 TSC_EXIT=0）。
+  真正的机械兜底是 `__tests__` 里对 `Object.keys(store.$state)` 的运行时断言（84 键），Wave 1 已补键集完整性用例。

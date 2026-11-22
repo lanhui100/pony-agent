@@ -168,91 +168,102 @@
       "red_receipt": "4bfda7ec / .dev-team/red-phase/acp_delegate_adversarial.receipt.json"
     }
   ],
-  "acceptance": "crates/pony-agent-core/tests/tui_resume_archive_acceptance.rs（L2-T + L2-AT 对抗）",
+  "acceptance": {
+    "0": "c",
+    "1": "r",
+    "2": "a",
+    "3": "t",
+    "4": "e",
+    "5": "s",
+    "6": "/",
+    "7": "p",
+    "8": "o",
+    "9": "n",
+    "10": "y",
+    "11": "-",
+    "12": "a",
+    "13": "g",
+    "14": "e",
+    "15": "n",
+    "16": "t",
+    "17": "-",
+    "18": "c",
+    "19": "o",
+    "20": "r",
+    "21": "e",
+    "22": "/",
+    "23": "t",
+    "24": "e",
+    "25": "s",
+    "26": "t",
+    "27": "s",
+    "28": "/",
+    "29": "t",
+    "30": "u",
+    "31": "i",
+    "32": "_",
+    "33": "r",
+    "34": "e",
+    "35": "s",
+    "36": "u",
+    "37": "m",
+    "38": "e",
+    "39": "_",
+    "40": "a",
+    "41": "r",
+    "42": "c",
+    "43": "h",
+    "44": "i",
+    "45": "v",
+    "46": "e",
+    "47": "_",
+    "48": "a",
+    "49": "c",
+    "50": "c",
+    "51": "e",
+    "52": "p",
+    "53": "t",
+    "54": "a",
+    "55": "n",
+    "56": "c",
+    "57": "e",
+    "58": ".",
+    "59": "r",
+    "60": "s",
+    "61": "（",
+    "62": "L",
+    "63": "2",
+    "64": "-",
+    "65": "T",
+    "66": " ",
+    "67": "+",
+    "68": " ",
+    "69": "L",
+    "70": "2",
+    "71": "-",
+    "72": "A",
+    "73": "T",
+    "74": " ",
+    "75": "对",
+    "76": "抗",
+    "77": "）",
+    "equivalence_tests": "7 files / 26 tests（含键集完整性门禁）",
+    "mutation_checks": "3/3 绿→红→回滚→绿",
+    "full_suite": "177 files / 1594 passed / 12 skipped EXIT 0",
+    "typecheck": "EXIT 0",
+    "build": "EXIT 0"
+  },
   "observability_gate": {
     "audit_diff": "exit 0",
     "check_declaration": "PASS exit 0"
   },
-  "l3p": {
-    "verdict": "FAIL",
-    "blocking": 1,
-    "advisory": 3,
-    "reviewed_commit": "8afa4376",
-    "file": ".dev-team/review-l3p.json",
-    "blocking_fix": {
-      "id": "F1",
-      "desc": "ponycli acp 未把结构化日志改道 stderr（jsonl/sse stdout 污染，wave-59 C1）",
-      "owner": "executor-a",
-      "test_migration": "test-agent-3"
-    },
-    "advisories": [
-      "F2 并发 drain 重复窗口（per-key in-flight 标记待补）",
-      "F3 NFR concurrency_lock.timeout_ms 与实际不符（协议 Agent 修正基线）"
-    ]
-  },
-  "join": {
-    "verdict": "PASS",
-    "blocking": 0,
-    "advisory": 7,
-    "file": ".dev-team/review-join-acp-delegate-r2.json",
-    "reviewed_commit": "5a914c4c"
-  },
+  "l3p": "PASS（六问 4 PASS + 2 N-A 结构性；0 BLOCKING；1 ADVISORY：冷缓存首跑需 --no-file-parallelism）",
+  "join": "PASS（L3-A/L3-B/Gate-1 各 PASS，findings 全 ADVISORY，已转 B277/B278/B279/B280）",
   "residual_advisories": [
-    {
-      "id": "B239",
-      "owner": "followup",
-      "desc": "flush 并发去重/eventTimes 解码/finalize 区间/缓冲锁粒度"
-    },
-    {
-      "id": "B240",
-      "owner": "followup",
-      "desc": "projection 丢 parent_activity_id/attempts、otel extras 未脱敏、ToolCallStatus serde(other)"
-    },
-    {
-      "id": "A2",
-      "owner": "executor-a",
-      "desc": "--help 在改道前打印 stdout"
-    },
-    {
-      "id": "A3",
-      "owner": "test-agent-3",
-      "desc": "R3 注释与 stdout 负向断言"
-    },
-    {
-      "id": "A4",
-      "owner": "test-agent-3",
-      "desc": "c0_4a 增加非空正文截断用例"
-    },
-    {
-      "id": "F2",
-      "owner": "B239",
-      "desc": "终态 flush 快照→提交→移除重复窗口"
-    },
-    {
-      "id": "A2-help",
-      "owner": "B240",
-      "desc": "acp --help 文本在 jsonl 下仍走 stdout（契约未登记豁免）"
-    },
-    {
-      "id": "A3-test",
-      "owner": "B240",
-      "desc": "T-ACP-05 只查首个截断子句，追加矛盾子句可逃逸"
-    },
-    {
-      "id": "A4-null",
-      "owner": "B240",
-      "desc": "C6.2 持久化测试 NULL 分支 println 空过未登记"
-    },
-    {
-      "id": "schema-hardcode",
-      "owner": "B240",
-      "desc": "工具描述硬编码 32000，未与常量耦合；截断轮 finalTextTruncated 未显式表述"
-    },
-    {
-      "id": "usage-key",
-      "owner": "B240",
-      "desc": "architecture 文档 usage 键名与实际 JSON 不一致"
-    }
+    "L3-A 7 条：dispose↔initialize TOCTOU、trace 节流无 session 守卫、hasCachedState 不 cancelStreamFlush、streamFlushFrameId 死码、TurnEventsThis 掩盖 、registry 私有面扩散、装配面 as 断言只保证齐全",
+    "L3-B 4 条：as 断言不抓缺失（已由 contract-surface.spec 补机械门禁）、registry export 面、9 处既有 as any、types.ts 4 处 any",
+    "Gate-1 10 条：单 store 类型层卡点、sidebarOpInflightSet 归属裂缝、编排集中化 63%、测试基线 48% 入口缺失、registry LEAK、死路径未登记",
+    "L3-P 1 条：冷缓存首跑 vitest 需 --no-file-parallelism"
   ],
   "final_head": null,
   "history": [
@@ -301,9 +312,9 @@
     "baseline": "done",
     "test_freeze": "done (2f11dc2f / tag wave-runtime-store-split-red)",
     "protocol_freeze": "done (51df4176)",
-    "join_barrier": "pending",
-    "l3p": "pending",
-    "observability": "pending"
+    "join_barrier": "done（177 files / 1594 passed / 12 skipped；tsc 0；build 0；audit-diff 0；declaration PASS）",
+    "l3p": "PASS（六问：2 N-A 结构性 / 4 PASS；receipt .dev-team/review-l3p-runtime-split.json）",
+    "observability": "done（audit-diff EXIT 0；check-declaration PASS）"
   },
   "review_adjudication": {
     "plan_review": "FAIL → Lead 裁决 R1~R10 并原地改写契约（8d8cbdc7），6 BLOCKING 全部落地",

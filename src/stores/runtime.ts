@@ -50,7 +50,7 @@ export const useRuntimeStore = defineStore("runtime", {
   }
 });
 
-// F5b：HMR 重建本模块前释放已注册的 turn 事件监听器（否则热更后监听器成倍泄漏）。
+// F5b：HMR 重建本模块前释放已注册的 12 个 turn 事件监听器（否则热更后监听器成倍泄漏）。
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     try {
