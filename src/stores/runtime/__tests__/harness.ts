@@ -143,18 +143,126 @@ type NodeFs = {
   writeFileSync: (path: string, data: string) => void;
   existsSync: (path: string) => boolean;
   mkdirSync: (path: string, options?: { recursive?: boolean }) => void;
+  readdirSync: (path: string) => string[];
 };
 
-/** 运行时加载 node:fs（本仓 tsconfig 未引入 @types/node，用非字面量说明符规避类型依赖）。 */
+type NodeUrl = { fileURLToPath: (url: string | URL) => string };
+type NodePath = {
+  dirname: (p: string) => string;
+  join: (...parts: string[]) => string;
+  sep: string;
+};
+
+/**
+ * 运行时加载 node 内建（本仓 tsconfig 未引入 @types/node，用非字面量说明符规避类型依赖）。
+ * 说明符由数组拼接而非字面量，避免 TS 静态解析 `node:*` 类型。
+ */
 async function loadNodeFs(): Promise<NodeFs> {
   const specifier = ["node", "fs"].join(":");
   return (await import(/* @vite-ignore */ specifier)) as NodeFs;
 }
 
-function fixturesDir(): string {
-  const decoded = decodeURIComponent(import.meta.url).replace(/^file:\/\//, "");
-  const dir = decoded.slice(0, decoded.lastIndexOf("/"));
-  return `${dir.replace(/\/__tests__$/, "")}/fixtures`;
+async function loadNodeUrl(): Promise<NodeUrl> {
+  const specifier = ["node", "url"].join(":");
+  return (await import(/* @vite-ignore */ specifier)) as NodeUrl;
+}
+
+let cachedPathModule: NodePath | null = null;
+async function loadNodePath(): Promise<NodePath> {
+  if (!cachedPathModule) {
+    const specifier = ["node", "path"].join(":");
+    cachedPathModule = (await import(/* @vite-ignore */ specifier)) as NodePath;
+  }
+  return cachedPathModule;
+}
+
+const FIXTURES_RELATIVE_TO_REPO = ["src", "stores", "runtime", "fixtures"] as const;
+
+let cachedFixturesDir: string | null = null;
+
+/**
+ * 解析 fixtures 的**绝对目录**（跨平台，Windows CI 必过）。
+ *
+ * 候选序：
+ *   1. `import.meta.url` → `node:url` 的 `fileURLToPath` → 去掉 `__tests__` → `fixtures`
+ *      （Windows `file:///D:/a/…/harness.ts` 会被正确换算为 `D:\a\…`，不再出现 `/D:/…` 前导斜杠）；
+ *   2. cwd 兜底 `<process.cwd()>/src/stores/runtime/fixtures`（CI 与本地 vitest 的 cwd 均为仓库根）。
+ *
+ * 选择规则：优先「存在且含 *.json」的候选；其次「存在」的候选（`UPDATE_RUNTIME_FIXTURES=1`
+ * 首次捕获时目录可能为空）；都不存在时返回第一个候选（由调用方报错并打印全部候选）。
+ */
+async function resolveFixturesDir(): Promise<string> {
+  if (cachedFixturesDir) {
+    return cachedFixturesDir;
+  }
+  const fs = await loadNodeFs();
+  const path = await loadNodePath();
+  const candidates: string[] = [];
+
+  try {
+    const { fileURLToPath } = await loadNodeUrl();
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    const packageDir = moduleDir.replace(new RegExp(`[\\\\/]__tests__$`), "");
+    candidates.push(path.join(packageDir, "fixtures"));
+  } catch {
+    // import.meta.url 不可解析（非 file: URL 宿主）：直接走 cwd 兜底。
+  }
+
+  const cwd = (globalThis as { process?: { cwd?: () => string } }).process?.cwd?.();
+  if (cwd) {
+    candidates.push(path.join(cwd, ...FIXTURES_RELATIVE_TO_REPO));
+  }
+
+  const exists = (dir: string) => {
+    try {
+      return fs.existsSync(dir);
+    } catch {
+      return false;
+    }
+  };
+  const hasJson = (dir: string) => {
+    try {
+      return exists(dir) && fs.readdirSync(dir).some((entry) => entry.endsWith(".json"));
+    } catch {
+      return false;
+    }
+  };
+
+  cachedFixturesDir =
+    candidates.find((dir) => hasJson(dir)) ??
+    candidates.find((dir) => exists(dir)) ??
+    candidates[0]!;
+  return cachedFixturesDir;
+}
+
+/** 暴露解析结果供失败文案/诊断复用（不改变断言强度）。 */
+export async function resolveFixturesDirForDiagnostics(): Promise<{
+  dir: string;
+  exists: boolean;
+  candidates: string[];
+}> {
+  const fs = await loadNodeFs();
+  const path = await loadNodePath();
+  const dir = await resolveFixturesDir();
+  const cwd = (globalThis as { process?: { cwd?: () => string } }).process?.cwd?.();
+  const candidates: string[] = [];
+  try {
+    const { fileURLToPath } = await loadNodeUrl();
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    candidates.push(path.join(moduleDir.replace(new RegExp(`[\\\\/]__tests__$`), ""), "fixtures"));
+  } catch {
+    candidates.push("<import.meta.url 不可解析>");
+  }
+  if (cwd) {
+    candidates.push(path.join(cwd, ...FIXTURES_RELATIVE_TO_REPO));
+  }
+  let exists = false;
+  try {
+    exists = fs.existsSync(dir);
+  } catch {
+    exists = false;
+  }
+  return { dir, exists, candidates };
 }
 
 /**
@@ -162,14 +270,30 @@ function fixturesDir(): string {
  * 正常运行时做双重比对 —— 结构 `toEqual`（可读 diff）+ 逐字 `toBe`（字节锁）。
  */
 export async function expectGolden(name: string, actual: unknown): Promise<void> {
-  const file = `${fixturesDir()}/${name}.json`;
-  const text = `${JSON.stringify(actual, null, 2)}\n`;
   const fs = await loadNodeFs();
+  const path = await loadNodePath();
+  const dir = await resolveFixturesDir();
+  const file = path.join(dir, `${name}.json`);
+  const text = `${JSON.stringify(actual, null, 2)}\n`;
+
   if (CAPTURE_FIXTURES) {
-    fs.mkdirSync(fixturesDir(), { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(file, text);
   }
-  expect(fs.existsSync(file), `缺少 golden fixture：${name}.json（先以 UPDATE_RUNTIME_FIXTURES=1 冻结）`).toBe(true);
+
+  const diagnostics = await resolveFixturesDirForDiagnostics();
+  const dirExists = fs.existsSync(dir);
+  const fileExists = fs.existsSync(file);
+  expect(
+    fileExists,
+    [
+      `缺少 golden fixture：${name}.json（先以 UPDATE_RUNTIME_FIXTURES=1 冻结）`,
+      `  解析到的 fixtures 目录：${dir}`,
+      `  该目录是否存在：${dirExists}`,
+      `  目标文件：${file}`,
+      `  候选目录：${JSON.stringify(diagnostics.candidates)}`
+    ].join("\n")
+  ).toBe(true);
   const expectedText = fs.readFileSync(file, "utf8");
   expect(actual).toEqual(JSON.parse(expectedText));
   expect(text).toBe(expectedText);
