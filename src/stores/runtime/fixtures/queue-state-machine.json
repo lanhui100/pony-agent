@@ -1,0 +1,225 @@
+{
+  "d1_session": {
+    "sessionId": "rt-session-main",
+    "sessionList": [],
+    "sessionOperation": null,
+    "sessionHydrating": false,
+    "deletingSessionSet": {},
+    "sessionSwitchToken": 0,
+    "sessionError": null,
+    "sessionNotice": null,
+    "runningSessionMap": {},
+    "completedSessionSet": {},
+    "failedSessionSet": {}
+  },
+  "d3_turn": {
+    "phase": "idle",
+    "phaseLabel": "空闲",
+    "isSubmitting": false,
+    "activeTurnId": null,
+    "activeTurnStartedAtMs": null,
+    "activeRunId": null,
+    "retryProgress": null,
+    "browserPreviewRunToken": 0,
+    "streamBufferTurnId": null,
+    "streamBufferText": "",
+    "streamBufferReasoning": "",
+    "eventsReady": false,
+    "streamDebugDeltaCount": 0,
+    "streamDebugFlushCount": 0,
+    "streamDebugTextCharsReceived": 0,
+    "streamDebugTextCharsFlushed": 0,
+    "timers": {
+      "deferredPersistTimerId": null,
+      "streamFlushFrameId": null,
+      "streamFlushTimerId": null,
+      "traceTimelineThrottleTimerId": null,
+      "submissionWatchdogTimerId": null
+    }
+  },
+  "d4_messages": {
+    "messages": [],
+    "draftMessage": "",
+    "pendingAttachments": [],
+    "attachmentAssets": [],
+    "sessionSummary": "",
+    "error": null,
+    "toolActivities": [],
+    "traceSteps": [
+      {
+        "id": "step-plan",
+        "label": "接收输入",
+        "state": "completed"
+      },
+      {
+        "id": "step-context",
+        "label": "组织上下文",
+        "state": "active"
+      },
+      {
+        "id": "step-call-model",
+        "label": "调用模型",
+        "state": "pending"
+      },
+      {
+        "id": "step-call-tool",
+        "label": "调用工具",
+        "state": "pending"
+      }
+    ],
+    "messageRevision": null,
+    "retrievedContext": null,
+    "recallLastUserMessage": null,
+    "agentRuntimeStatus": null,
+    "failedTurnRetry": null,
+    "canSubmitPrompt": true,
+    "isInputDisabled": false
+  },
+  "d5_telemetry": {
+    "traceTimeline": [
+      {
+        "id": "build_context-1",
+        "kind": "build_context",
+        "label": "BUILD CONTEXT",
+        "state": "completed",
+        "sequence": 1,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      },
+      {
+        "id": "call_model-2",
+        "kind": "call_model",
+        "label": "CALL MODEL #1",
+        "state": "active",
+        "sequence": 2,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      }
+    ],
+    "turnTraceHistory": [],
+    "eventCursorByTurnId": {},
+    "liveMetrics": null,
+    "activeProviderCallRecords": [],
+    "providerRequestedName": "",
+    "providerName": "",
+    "providerProtocol": "",
+    "providerModel": "",
+    "providerSource": "",
+    "providerMode": "",
+    "fallbackReason": null,
+    "inputTokens": null,
+    "outputTokens": null,
+    "totalTokens": null,
+    "firstTokenLatencyMs": null,
+    "sessionTotalCostUsd": 0,
+    "hasUnpricedTurns": false,
+    "formattedSessionCost": "—",
+    "formattedGovernanceCost": "—",
+    "usageGovernanceSummary": {
+      "session": {
+        "cost_usd": 0,
+        "unpriced_turns": 0
+      },
+      "days": [],
+      "policy_version": "v1",
+      "governance_degraded": false
+    }
+  },
+  "d6_history": {
+    "visibleNodeId": null,
+    "branchHeadNodeId": null,
+    "activeBranchId": null,
+    "cursorVersion": null,
+    "historyCursorMode": "live",
+    "historyNodes": [],
+    "historyBranches": [],
+    "initialRollbackActive": false,
+    "latestExecutionCheckpoint": null,
+    "latestGraphRunSubmissionPlan": null,
+    "latestGraphRunControlBoundaryEvidence": [],
+    "latestRunControlAuditSummary": null,
+    "latestHistoryStateAuditSummary": null,
+    "isHistoricalMode": false,
+    "conversationCheckpointEntries": []
+  },
+  "d7_queue": {
+    "pendingQueuedMessages": [],
+    "queueDeliveryMode": "steer",
+    "toolAuthorizationMode": "read_only"
+  },
+  "d8_catalog": {
+    "health": null,
+    "availableToolNames": [
+      "Run",
+      "Ask",
+      "Read",
+      "Search",
+      "List",
+      "Glob",
+      "WebFetch",
+      "WebSearch",
+      "MCPResource",
+      "ToolSearch",
+      "Write",
+      "Edit",
+      "BatchExecute"
+    ],
+    "capabilitySourceIds": [
+      "builtin-tools"
+    ],
+    "capabilityIds": [
+      "builtin:workspace_run_command",
+      "builtin:echo_input",
+      "builtin:workspace_gather_context",
+      "builtin:workspace_search_text",
+      "builtin:workspace_list_files",
+      "builtin:workspace_glob_files",
+      "builtin:web_fetch_url",
+      "builtin:web_search_query",
+      "builtin:mcp_resource_read",
+      "builtin:tool_search",
+      "builtin:workspace_write_file",
+      "builtin:workspace_edit_file",
+      "builtin:workspace_batch"
+    ]
+  },
+  "persistence": {
+    "sessionKeys": [],
+    "payload": null,
+    "runningSessionMap": null,
+    "completedSet": null,
+    "failedSet": null
+  }
+}

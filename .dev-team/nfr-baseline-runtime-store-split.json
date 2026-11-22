@@ -1,0 +1,34 @@
+{
+  "task": "task-2 / Wave 1 runtime store 拆解（类型契约 + 装配壳 + 空模块）",
+  "level": "B（轻量基准）",
+  "owner": "protocol-agent",
+  "write_scopes_only": true,
+  "external_call_timeout_ms": 3000,
+  "external_call_timeout_ms_note": "N/A（结构性理由）：本任务只做类型契约、初始状态工厂、装配壳与空模块骨架，新增外部调用数为 0 —— 不新增 invoke / listen / fetch / 定时器 / 网络 IO，全部既有调用点均为逐字搬运。故本字段非实测值，而取本表硬上限 3000：若后续 Executor 波次新增任何外部调用，此值即为其超时上限（fail-closed）。既有面（HYDRATION_TIMEOUT_MS=15000 / SUBMISSION_WATCHDOG_TIMEOUT_MS=240000）属既有机制，本波不改数值、不纳入本表。",
+  "retry": {
+    "max_attempts": 0,
+    "backoff": "not-applicable",
+    "note": "本任务不新增重试逻辑。上游 provider 重试沿用既有 Rust `agent::retry::RetryNotice`（attempt / maxAttempts 同源），前端只做进度渲染（`applyTurnRetryProgress` → `retryProgress`），不新增重试次数或退避参数。"
+  },
+  "concurrency_lock": {
+    "mechanism": "turn 事件注册的并发单例锁：`eventsReady` 早退 + 每 store 实例 WeakMap registry 的 `initPromise`（并发初始化复用同一 Promise，避免重复注册 14 个监听器）",
+    "evidence": [
+      "src/stores/runtime.ts:3981 initializeTurnEvents",
+      "src/stores/runtime.ts:306-309 turnEventRegistry / initPromise 并发单例注释",
+      "src/stores/runtime.ts:4020 disposeTurnEvents（先 await 在飞 init 再清理）"
+    ],
+    "note": "Wave 1 原样保留该锁语义，不新增锁、不改锁口径；监听器注册体落 turn-events.ts 后仍由 turn-execution.ts 的 initialize/dispose 调用。"
+  },
+  "logging": {
+    "format": "json",
+    "trace_id": "otel.trace_id（既有，见 src/lib/telemetry；前端不新增日志出口）",
+    "new_log_sites": 0,
+    "note": "本任务不新增日志面：装配壳只保留既有 HMR dispose 的 debugLog('events:hmr-dispose:skipped')，其余日志语句随业务实现留在各域模块（Executor 逐字搬运）。"
+  },
+  "resource_release": [
+    "turn: 事件监听器：disposeTurnEvents → releaseTurnEventRegistry 一次性 unlisten 全部句柄（幂等）",
+    "定时器：streamFlushTimerId / deferredPersistTimerId / traceTimelineThrottleTimerId / submissionWatchdogTimerId 分别在 cancelStreamFlush / cancelDeferredPersist / clearPendingTraceTimeline / clearSubmissionWatchdog 内清理",
+    "HMR：import.meta.hot.dispose 钩子保留在装配壳（src/stores/runtime.ts），热更前释放监听器",
+    "本任务不新增任何需释放的资源（空模块无运行时代码）"
+  ]
+}

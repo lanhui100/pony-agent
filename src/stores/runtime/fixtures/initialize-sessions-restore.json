@@ -1,0 +1,430 @@
+{
+  "d1_session": {
+    "sessionId": "rt-init",
+    "sessionList": [
+      {
+        "conversationId": "rt-init",
+        "title": "冷启动会话",
+        "summary": "冷启动摘要",
+        "turnCount": 1,
+        "lastReferencedFile": null,
+        "updatedAtMs": 1759999999000
+      }
+    ],
+    "sessionOperation": null,
+    "sessionHydrating": false,
+    "deletingSessionSet": {},
+    "sessionSwitchToken": 0,
+    "sessionError": null,
+    "sessionNotice": null,
+    "runningSessionMap": {},
+    "completedSessionSet": {},
+    "failedSessionSet": {}
+  },
+  "d3_turn": {
+    "phase": "completed",
+    "phaseLabel": "本轮完成",
+    "isSubmitting": false,
+    "activeTurnId": null,
+    "activeTurnStartedAtMs": null,
+    "activeRunId": null,
+    "retryProgress": null,
+    "browserPreviewRunToken": 0,
+    "streamBufferTurnId": null,
+    "streamBufferText": "",
+    "streamBufferReasoning": "",
+    "eventsReady": false,
+    "streamDebugDeltaCount": 0,
+    "streamDebugFlushCount": 0,
+    "streamDebugTextCharsReceived": 0,
+    "streamDebugTextCharsFlushed": 0,
+    "timers": {
+      "deferredPersistTimerId": null,
+      "streamFlushFrameId": null,
+      "streamFlushTimerId": null,
+      "traceTimelineThrottleTimerId": null,
+      "submissionWatchdogTimerId": null
+    }
+  },
+  "d4_messages": {
+    "messages": [
+      {
+        "id": "i-u-1",
+        "turnId": "turn-i-1",
+        "role": "user",
+        "content": "冷启动问题",
+        "attachments": [],
+        "status": "done",
+        "tokenCount": 50
+      },
+      {
+        "id": "i-a-1",
+        "turnId": "turn-i-1",
+        "role": "assistant",
+        "content": "冷启动回答",
+        "attachments": [],
+        "status": "done",
+        "reasoningContent": null,
+        "tokenCount": 25,
+        "modelName": "OpenAI/gpt-5",
+        "errorDetail": null
+      }
+    ],
+    "draftMessage": "",
+    "pendingAttachments": [],
+    "attachmentAssets": [],
+    "sessionSummary": "冷启动摘要",
+    "error": null,
+    "toolActivities": [],
+    "traceSteps": [
+      {
+        "id": "step-plan",
+        "label": "接收输入",
+        "state": "completed"
+      },
+      {
+        "id": "step-context",
+        "label": "组织上下文",
+        "state": "active"
+      },
+      {
+        "id": "step-call-model",
+        "label": "调用模型",
+        "state": "pending"
+      },
+      {
+        "id": "step-call-tool",
+        "label": "调用工具",
+        "state": "pending"
+      }
+    ],
+    "messageRevision": null,
+    "retrievedContext": {
+      "turnContext": {
+        "userMessage": "冷启动问题",
+        "images": [],
+        "referencesImage": false
+      },
+      "sessionContext": {
+        "conversationId": "rt-init",
+        "title": "冷启动问题",
+        "summary": "冷启动摘要",
+        "recentHistory": [
+          {
+            "role": "user",
+            "content": "冷启动问题",
+            "attachments": [],
+            "turnId": "turn-i-1",
+            "status": "done",
+            "tokenCount": 50
+          },
+          {
+            "role": "assistant",
+            "content": "冷启动回答",
+            "attachments": [],
+            "turnId": "turn-i-1",
+            "status": "done",
+            "modelName": "OpenAI/gpt-5",
+            "tokenCount": 25
+          }
+        ],
+        "recentAttachmentAssets": [],
+        "turnCount": 1,
+        "lastReferencedFile": null
+      },
+      "runState": {},
+      "longTermMemory": {
+        "status": "empty",
+        "summary": "当前会话尚未从 Tauri 宿主加载结构化 retrieval 上下文。",
+        "entries": []
+      },
+      "transcript": {
+        "providerNativeMessages": []
+      }
+    },
+    "recallLastUserMessage": "冷启动问题",
+    "agentRuntimeStatus": null,
+    "failedTurnRetry": null,
+    "canSubmitPrompt": true,
+    "isInputDisabled": false
+  },
+  "d5_telemetry": {
+    "traceTimeline": [
+      {
+        "id": "build_context-1",
+        "kind": "build_context",
+        "label": "BUILD CONTEXT",
+        "state": "completed",
+        "sequence": 1,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      },
+      {
+        "id": "call_model-2",
+        "kind": "call_model",
+        "label": "CALL MODEL #1",
+        "state": "active",
+        "sequence": 2,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      }
+    ],
+    "turnTraceHistory": [],
+    "eventCursorByTurnId": {},
+    "liveMetrics": null,
+    "activeProviderCallRecords": [],
+    "providerRequestedName": "OpenAI",
+    "providerName": "OpenAI",
+    "providerProtocol": "openai",
+    "providerModel": "gpt-5",
+    "providerSource": "primary",
+    "providerMode": "standard",
+    "fallbackReason": null,
+    "inputTokens": 50,
+    "outputTokens": 25,
+    "totalTokens": 75,
+    "firstTokenLatencyMs": 150,
+    "sessionTotalCostUsd": 0,
+    "hasUnpricedTurns": false,
+    "formattedSessionCost": "—",
+    "formattedGovernanceCost": "—",
+    "usageGovernanceSummary": {
+      "session": {
+        "cost_usd": 0,
+        "unpriced_turns": 0
+      },
+      "days": [],
+      "policy_version": "v1",
+      "governance_degraded": false
+    }
+  },
+  "d6_history": {
+    "visibleNodeId": "node-1",
+    "branchHeadNodeId": "node-1",
+    "activeBranchId": "branch-1",
+    "cursorVersion": 4,
+    "historyCursorMode": "live",
+    "historyNodes": [
+      {
+        "nodeId": "node-1",
+        "sessionId": "rt-init",
+        "parentNodeId": null,
+        "branchId": "branch-1",
+        "kind": "turn_committed",
+        "turnId": "turn-1",
+        "summary": "第一轮",
+        "createdAtMs": 1759999992000,
+        "workspaceRef": null,
+        "history": [],
+        "turnTraceHistory": [],
+        "turnTraceRefs": []
+      }
+    ],
+    "historyBranches": [
+      {
+        "branchId": "branch-1",
+        "sessionId": "rt-init",
+        "baseNodeId": "node-1",
+        "headNodeId": "node-1",
+        "label": "主线",
+        "createdAtMs": 1759999992000,
+        "updatedAtMs": 1759999993000
+      }
+    ],
+    "initialRollbackActive": false,
+    "latestExecutionCheckpoint": null,
+    "latestGraphRunSubmissionPlan": null,
+    "latestGraphRunControlBoundaryEvidence": [],
+    "latestRunControlAuditSummary": null,
+    "latestHistoryStateAuditSummary": null,
+    "isHistoricalMode": false,
+    "conversationCheckpointEntries": [
+      {
+        "nodeId": "synthetic-turn-i-1",
+        "turnId": "turn-i-1",
+        "branchId": "branch-1",
+        "summary": "冷启动问题",
+        "createdAtMs": 1759999999999,
+        "isLatest": false,
+        "isVisible": false,
+        "workspaceRollbackCapable": false,
+        "availableModes": [
+          "transcript_only"
+        ],
+        "forkTargets": []
+      },
+      {
+        "nodeId": "node-1",
+        "turnId": "turn-1",
+        "branchId": "branch-1",
+        "summary": "第一轮",
+        "createdAtMs": 1759999992000,
+        "isLatest": true,
+        "isVisible": true,
+        "workspaceRollbackCapable": false,
+        "availableModes": [
+          "transcript_only"
+        ],
+        "forkTargets": []
+      }
+    ]
+  },
+  "d7_queue": {
+    "pendingQueuedMessages": [],
+    "queueDeliveryMode": "queue",
+    "toolAuthorizationMode": "workspace_write"
+  },
+  "d8_catalog": {
+    "health": null,
+    "availableToolNames": [
+      "Run",
+      "Ask",
+      "Read",
+      "Search",
+      "List",
+      "Glob",
+      "WebFetch",
+      "WebSearch",
+      "MCPResource",
+      "ToolSearch",
+      "Write",
+      "Edit",
+      "BatchExecute"
+    ],
+    "capabilitySourceIds": [
+      "builtin-tools"
+    ],
+    "capabilityIds": [
+      "builtin:workspace_run_command",
+      "builtin:echo_input",
+      "builtin:workspace_gather_context",
+      "builtin:workspace_search_text",
+      "builtin:workspace_list_files",
+      "builtin:workspace_glob_files",
+      "builtin:web_fetch_url",
+      "builtin:web_search_query",
+      "builtin:mcp_resource_read",
+      "builtin:tool_search",
+      "builtin:workspace_write_file",
+      "builtin:workspace_edit_file",
+      "builtin:workspace_batch"
+    ]
+  },
+  "persistence": {
+    "sessionKeys": [
+      "rt-init"
+    ],
+    "payload": {
+      "cachedStateVersion": 2,
+      "phase": "completed",
+      "canonicalTerminalPhase": "completed",
+      "messages": [
+        {
+          "id": "i-u-1",
+          "turnId": "turn-i-1",
+          "role": "user",
+          "content": "冷启动问题",
+          "attachments": [],
+          "status": "done",
+          "tokenCount": 50
+        },
+        {
+          "id": "i-a-1",
+          "turnId": "turn-i-1",
+          "role": "assistant",
+          "content": "冷启动回答",
+          "attachments": [],
+          "status": "done",
+          "reasoningContent": null,
+          "tokenCount": 25,
+          "modelName": "OpenAI/gpt-5",
+          "errorDetail": null
+        }
+      ],
+      "attachmentAssets": [],
+      "sessionSummary": "冷启动摘要",
+      "providerRequestedName": "OpenAI",
+      "providerName": "OpenAI",
+      "providerProtocol": "openai",
+      "providerModel": "gpt-5",
+      "providerSource": "primary",
+      "providerMode": "standard",
+      "fallbackReason": null,
+      "inputTokens": 50,
+      "outputTokens": 25,
+      "totalTokens": 75,
+      "firstTokenLatencyMs": 150,
+      "visibleNodeId": "node-1",
+      "branchHeadNodeId": "node-1",
+      "activeBranchId": "branch-1",
+      "historyCursorMode": "live",
+      "historyNodes": [
+        {
+          "nodeId": "node-1",
+          "sessionId": "rt-init",
+          "parentNodeId": null,
+          "branchId": "branch-1",
+          "kind": "turn_committed",
+          "turnId": "turn-1",
+          "summary": "第一轮",
+          "createdAtMs": 1759999992000,
+          "workspaceRef": null,
+          "history": [],
+          "turnTraceHistory": [],
+          "turnTraceRefs": []
+        }
+      ],
+      "historyBranches": [
+        {
+          "branchId": "branch-1",
+          "sessionId": "rt-init",
+          "baseNodeId": "node-1",
+          "headNodeId": "node-1",
+          "label": "主线",
+          "createdAtMs": 1759999992000,
+          "updatedAtMs": 1759999993000
+        }
+      ],
+      "cursorVersion": 4,
+      "initialRollbackActive": false,
+      "checkpoint": null,
+      "runningTurnId": null,
+      "sessionWorkspaceId": "default"
+    },
+    "runningSessionMap": {},
+    "completedSet": {},
+    "failedSet": {}
+  }
+}

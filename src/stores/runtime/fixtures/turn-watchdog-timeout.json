@@ -1,0 +1,429 @@
+{
+  "d1_session": {
+    "sessionId": "rt-session-main",
+    "sessionList": [],
+    "sessionOperation": null,
+    "sessionHydrating": false,
+    "deletingSessionSet": {},
+    "sessionSwitchToken": 0,
+    "sessionError": null,
+    "sessionNotice": null,
+    "runningSessionMap": {},
+    "completedSessionSet": {},
+    "failedSessionSet": {}
+  },
+  "d3_turn": {
+    "phase": "failed",
+    "phaseLabel": "失败",
+    "isSubmitting": false,
+    "activeTurnId": null,
+    "activeTurnStartedAtMs": 1760000000000,
+    "activeRunId": null,
+    "activeStreamKind": null,
+    "retryProgress": null,
+    "browserPreviewRunToken": 0,
+    "streamBufferTurnId": null,
+    "streamBufferText": "",
+    "streamBufferReasoning": "",
+    "eventsReady": true,
+    "streamDebugDeltaCount": 0,
+    "streamDebugFlushCount": 0,
+    "streamDebugTextCharsReceived": 0,
+    "streamDebugTextCharsFlushed": 0,
+    "timers": {
+      "deferredPersistTimerId": null,
+      "streamFlushFrameId": null,
+      "streamFlushTimerId": null,
+      "traceTimelineThrottleTimerId": null,
+      "submissionWatchdogTimerId": null
+    }
+  },
+  "d4_messages": {
+    "messages": [
+      {
+        "id": "user-1760000000000",
+        "turnId": "1760000000000",
+        "role": "user",
+        "content": "看门狗提问",
+        "attachments": [],
+        "status": "done",
+        "tokenCount": null
+      },
+      {
+        "id": "assistant-1760000000000",
+        "turnId": "1760000000000",
+        "role": "assistant",
+        "reasoningContent": null,
+        "content": "",
+        "status": "error",
+        "tokenCount": null,
+        "errorDetail": "submission_watchdog_timeout"
+      }
+    ],
+    "draftMessage": "",
+    "pendingAttachments": [],
+    "attachmentAssets": [],
+    "sessionSummary": "",
+    "error": "响应超时，已停止等待",
+    "toolActivities": [],
+    "traceSteps": [
+      {
+        "id": "step-plan",
+        "label": "接收输入",
+        "state": "completed"
+      },
+      {
+        "id": "step-context",
+        "label": "组织上下文",
+        "state": "completed"
+      },
+      {
+        "id": "step-call-model",
+        "label": "调用模型",
+        "state": "error"
+      },
+      {
+        "id": "step-call-tool",
+        "label": "调用工具",
+        "state": "pending"
+      }
+    ],
+    "messageRevision": null,
+    "retrievedContext": null,
+    "recallLastUserMessage": "看门狗提问",
+    "agentRuntimeStatus": {
+      "mode": "error",
+      "label": "响应超时，已停止等待 · 上游失败，可重试",
+      "startTime": null
+    },
+    "failedTurnRetry": {
+      "code": "timeout",
+      "retryable": true,
+      "label": "上游失败，可重试",
+      "title": "上游响应超时（瞬时故障）：点此续跑，或直接输入「继续」"
+    },
+    "canSubmitPrompt": true,
+    "isInputDisabled": false
+  },
+  "d5_telemetry": {
+    "traceTimeline": [
+      {
+        "id": "build_context-1",
+        "kind": "build_context",
+        "label": "BUILD CONTEXT",
+        "state": "completed",
+        "sequence": 1,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      },
+      {
+        "id": "call_model-2",
+        "kind": "call_model",
+        "label": "CALL MODEL #1",
+        "state": "error",
+        "sequence": 2,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": "submission_watchdog_timeout",
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      }
+    ],
+    "turnTraceHistory": [
+      {
+        "turnId": "1760000000000",
+        "title": "看门狗提问",
+        "phase": "failed",
+        "traceSteps": [
+          {
+            "id": "step-plan",
+            "label": "接收输入",
+            "state": "completed"
+          },
+          {
+            "id": "step-context",
+            "label": "组织上下文",
+            "state": "completed"
+          },
+          {
+            "id": "step-call-model",
+            "label": "调用模型",
+            "state": "error"
+          },
+          {
+            "id": "step-call-tool",
+            "label": "调用工具",
+            "state": "pending"
+          }
+        ],
+        "traceTimeline": [
+          {
+            "id": "build_context-1",
+            "kind": "build_context",
+            "label": "BUILD CONTEXT",
+            "state": "completed",
+            "sequence": 1,
+            "providerName": null,
+            "providerProtocol": null,
+            "providerModel": null,
+            "providerSource": null,
+            "providerMode": null,
+            "buildContextObservation": null,
+            "toolActivities": [],
+            "text": null,
+            "reasoningContent": null,
+            "fallbackReason": null,
+            "error": null,
+            "inputTokens": null,
+            "cacheHitInputTokens": null,
+            "reasoningTokens": null,
+            "outputTokens": null,
+            "totalTokens": null,
+            "firstTokenLatencyMs": null,
+            "turnDurationMs": null
+          },
+          {
+            "id": "call_model-2",
+            "kind": "call_model",
+            "label": "CALL MODEL #1",
+            "state": "error",
+            "sequence": 2,
+            "providerName": null,
+            "providerProtocol": null,
+            "providerModel": null,
+            "providerSource": null,
+            "providerMode": null,
+            "buildContextObservation": null,
+            "toolActivities": [],
+            "text": null,
+            "reasoningContent": null,
+            "fallbackReason": null,
+            "error": "submission_watchdog_timeout",
+            "inputTokens": null,
+            "cacheHitInputTokens": null,
+            "reasoningTokens": null,
+            "outputTokens": null,
+            "totalTokens": null,
+            "firstTokenLatencyMs": null,
+            "turnDurationMs": null
+          }
+        ],
+        "traceId": null,
+        "toolActivities": [],
+        "providerCallRecords": [],
+        "hookTraceRecords": [],
+        "providerRequestedName": "",
+        "providerName": "",
+        "providerProtocol": "",
+        "providerModel": "",
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "sessionSummary": "",
+        "fallbackReason": null,
+        "error": "submission_watchdog_timeout",
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null,
+        "updatedAt": 1760000240000
+      }
+    ],
+    "eventCursorByTurnId": {
+      "1760000000000": {
+        "eventId": null,
+        "sequence": null,
+        "emittedAtMs": null
+      }
+    },
+    "liveMetrics": null,
+    "activeProviderCallRecords": [],
+    "providerRequestedName": "",
+    "providerName": "",
+    "providerProtocol": "",
+    "providerModel": "",
+    "providerSource": "",
+    "providerMode": "",
+    "fallbackReason": null,
+    "inputTokens": null,
+    "outputTokens": null,
+    "totalTokens": null,
+    "firstTokenLatencyMs": null,
+    "sessionTotalCostUsd": 0,
+    "hasUnpricedTurns": true,
+    "formattedSessionCost": "—",
+    "formattedGovernanceCost": "—",
+    "usageGovernanceSummary": {
+      "session": {
+        "cost_usd": 0,
+        "unpriced_turns": 1
+      },
+      "days": [],
+      "policy_version": "v1",
+      "governance_degraded": false
+    }
+  },
+  "d6_history": {
+    "visibleNodeId": null,
+    "branchHeadNodeId": null,
+    "activeBranchId": null,
+    "cursorVersion": null,
+    "historyCursorMode": "live",
+    "historyNodes": [],
+    "historyBranches": [],
+    "initialRollbackActive": false,
+    "latestExecutionCheckpoint": null,
+    "latestGraphRunSubmissionPlan": null,
+    "latestGraphRunControlBoundaryEvidence": [],
+    "latestRunControlAuditSummary": null,
+    "latestHistoryStateAuditSummary": null,
+    "isHistoricalMode": false,
+    "conversationCheckpointEntries": [
+      {
+        "nodeId": "synthetic-1760000000000",
+        "turnId": "1760000000000",
+        "branchId": "branch-main",
+        "summary": "看门狗提问",
+        "createdAtMs": 1760000240000,
+        "isLatest": true,
+        "isVisible": false,
+        "workspaceRollbackCapable": false,
+        "availableModes": [
+          "transcript_only"
+        ],
+        "forkTargets": []
+      }
+    ]
+  },
+  "d7_queue": {
+    "pendingQueuedMessages": [],
+    "queueDeliveryMode": "queue",
+    "toolAuthorizationMode": "workspace_write"
+  },
+  "d8_catalog": {
+    "health": null,
+    "availableToolNames": [
+      "Run",
+      "Ask",
+      "Read",
+      "Search",
+      "List",
+      "Glob",
+      "WebFetch",
+      "WebSearch",
+      "MCPResource",
+      "ToolSearch",
+      "Write",
+      "Edit",
+      "BatchExecute"
+    ],
+    "capabilitySourceIds": [
+      "builtin-tools"
+    ],
+    "capabilityIds": [
+      "builtin:workspace_run_command",
+      "builtin:echo_input",
+      "builtin:workspace_gather_context",
+      "builtin:workspace_search_text",
+      "builtin:workspace_list_files",
+      "builtin:workspace_glob_files",
+      "builtin:web_fetch_url",
+      "builtin:web_search_query",
+      "builtin:mcp_resource_read",
+      "builtin:tool_search",
+      "builtin:workspace_write_file",
+      "builtin:workspace_edit_file",
+      "builtin:workspace_batch"
+    ]
+  },
+  "persistence": {
+    "sessionKeys": [
+      "rt-session-main"
+    ],
+    "payload": {
+      "cachedStateVersion": 2,
+      "phase": "failed",
+      "canonicalTerminalPhase": "failed",
+      "messages": [
+        {
+          "id": "user-1760000000000",
+          "turnId": "1760000000000",
+          "role": "user",
+          "content": "看门狗提问",
+          "attachments": [],
+          "status": "done",
+          "tokenCount": null
+        },
+        {
+          "id": "assistant-1760000000000",
+          "turnId": "1760000000000",
+          "role": "assistant",
+          "reasoningContent": null,
+          "content": "",
+          "status": "error",
+          "tokenCount": null,
+          "errorDetail": "submission_watchdog_timeout"
+        }
+      ],
+      "attachmentAssets": [],
+      "sessionSummary": "",
+      "providerRequestedName": "",
+      "providerName": "",
+      "providerProtocol": "",
+      "providerModel": "",
+      "providerSource": "",
+      "providerMode": "",
+      "fallbackReason": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "firstTokenLatencyMs": null,
+      "visibleNodeId": null,
+      "branchHeadNodeId": null,
+      "activeBranchId": null,
+      "historyCursorMode": "live",
+      "historyNodes": [],
+      "historyBranches": [],
+      "cursorVersion": null,
+      "initialRollbackActive": false,
+      "checkpoint": null,
+      "runningTurnId": null,
+      "sessionWorkspaceId": "default"
+    },
+    "runningSessionMap": {},
+    "completedSet": {},
+    "failedSet": {}
+  }
+}
