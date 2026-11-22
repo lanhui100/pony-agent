@@ -244,8 +244,16 @@ export const telemetryActions = {
     if (this.traceTimelineThrottleTimerId != null) {
       return;
     }
+    // B279：节流回调必须带归属守卫 —— 定时器存活期间可能发生会话切换或轮次更替，
+    // 旧归属的 pending timeline 不得落到新会话的活跃轮上（跨会话串味）。
+    const ownerSessionId = this.sessionId;
+    const ownerTurnId = this.activeTurnId;
     this.traceTimelineThrottleTimerId = window.setTimeout(() => {
       this.traceTimelineThrottleTimerId = null;
+      if (this.sessionId !== ownerSessionId || this.activeTurnId !== ownerTurnId) {
+        // 归属已变：丢弃本次投递；pending 由新归属的下一次调度重建定时器。
+        return;
+      }
       const pending = this.pendingThrottledTraceTimeline;
       this.pendingThrottledTraceTimeline = null;
       if (pending) {

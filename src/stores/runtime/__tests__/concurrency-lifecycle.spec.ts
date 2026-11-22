@@ -1,5 +1,5 @@
 /**
- * 场景 6（task-1）· 并发与生命周期 + store 表面契约（84 state / 18 getters / 97 actions）
+ * 场景 6（task-1）· 并发与生命周期 + store 表面契约（83 state / 18 getters / 97 actions）
  *
  * 覆盖：
  * - 并发 `initializeTurnEvents()` 幂等（单例 initPromise，14 个监听器只注册一次）；
@@ -36,7 +36,7 @@ import { advance, BASE_TIME, drainMicrotasks, SESSION_ID, setupRuntimeHarness } 
 const harness = setupRuntimeHarness(tauriMocks);
 const TURN_ID = String(BASE_TIME);
 
-/** fact-map §1 的 84 状态键（按域排序，作为逐项对账基线）。 */
+/** fact-map §1 的 83 状态键（按域排序，作为逐项对账基线）。 */
 const STATE_KEYS = [
   // D1 会话目录与生命周期（11）
   "sessionId", "sessionList", "sessionOperation", "sessionHydrating", "deletingSessionSet",
@@ -46,7 +46,7 @@ const STATE_KEYS = [
   // D3 轮次执行与流式传输（20）
   "phase", "isSubmitting", "activeTurnId", "activeTurnStartedAtMs", "activeRunId", "activeStreamKind",
   "retryProgress", "browserPreviewRunToken", "streamBufferTurnId", "streamBufferText", "streamBufferReasoning",
-  "streamFlushFrameId", "streamFlushTimerId", "deferredPersistTimerId", "submissionWatchdogTimerId", "eventsReady",
+  "streamFlushTimerId", "deferredPersistTimerId", "submissionWatchdogTimerId", "eventsReady",
   "streamDebugDeltaCount", "streamDebugFlushCount", "streamDebugTextCharsReceived", "streamDebugTextCharsFlushed",
   // D4 消息与输入（10）
   "messages", "draftMessage", "pendingAttachments", "attachmentAssets", "sessionSummary", "error",
@@ -191,7 +191,7 @@ function storeAsRecord(store: ReturnType<typeof harness.getStore>): Record<strin
 }
 
 describe("场景 6 · 并发与生命周期", () => {
-  it("store 表面契约：84 键 / 18 getters / 97 actions，且覆盖清单与 action 全集可机械对账", () => {
+  it("store 表面契约：83 键 / 18 getters / 97 actions，且覆盖清单与 action 全集可机械对账", () => {
     const store = harness.getStore();
     const record = storeAsRecord(store);
     const storeKeys = Object.keys(record).filter((key) => !key.startsWith("$") && !key.startsWith("_"));
@@ -202,9 +202,9 @@ describe("场景 6 · 并发与生命周期", () => {
     const actionKeys = fnKeys.filter((key) => !GETTER_NAMES.includes(key));
     const valueGetters = valueKeys.filter((key) => !stateKeys.includes(key));
 
-    // 状态键：与 fact-map §1 的 84 键（8 域）逐项一致。
+    // 状态键：与 fact-map §1 的 83 键（8 域）逐项一致。
     expect([...stateKeys].sort()).toEqual([...STATE_KEYS].sort());
-    expect(STATE_KEYS).toHaveLength(84);
+    expect(STATE_KEYS).toHaveLength(83);
     // getter：16 个值式 + 2 个方法式（isSessionDeleting / isSessionRunning）= 18。
     expect([...functionGetters, ...valueGetters].sort()).toEqual([...GETTER_NAMES].sort());
     expect(GETTER_NAMES).toHaveLength(18);
