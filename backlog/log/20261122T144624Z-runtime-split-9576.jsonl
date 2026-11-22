@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T144624Z-runtime-split-9576","surface":"runtime-split","release":"v0.1.204","created_at":"2026-11-22T14:46:24.423Z"}
+{"kind":"start","at":"2026-11-22T14:46:56.948Z","id":"B277","owner":"me","paths":["src/stores/runtime/__tests__/equivalence-wave2a.spec.ts","src/stores/runtime/__tests__/concurrency-lifecycle.spec.ts",".agents/notes/implemented/testing/2026-11-22-runtime-store-equivalence-wave2.md"],"session_id":"me"}
