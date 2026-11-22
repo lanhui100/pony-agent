@@ -107,9 +107,9 @@
         "executor-b"
       ],
       "status": "in_progress",
-      "red_commit": null,
+      "red_commit": "2f11dc2f",
       "green_commit": null,
-      "protocol_commit": null,
+      "protocol_commit": "51df4176",
       "receipts_commit": null
     }
   },
@@ -298,12 +298,12 @@
     "note": "本波为纯前端，无 cargo 编译；vitest/tsc 不走 lane，但同一时刻只由 Lead 跑全量套件，Executor 只跑自身 scope 用例"
   },
   "gates": {
-    "baseline": "done（.dev-team/regression-baseline-runtime-store-split.json）",
-    "test_freeze": "pending",
-    "protocol_freeze": "pending",
+    "baseline": "done",
+    "test_freeze": "done (2f11dc2f / tag wave-runtime-store-split-red)",
+    "protocol_freeze": "done (51df4176)",
     "join_barrier": "pending",
-    "l3p": "pending（B 级硬门禁）",
-    "observability": "pending（audit-diff.sh）"
+    "l3p": "pending",
+    "observability": "pending"
   },
   "review_adjudication": {
     "plan_review": "FAIL → Lead 裁决 R1~R10 并原地改写契约（8d8cbdc7），6 BLOCKING 全部落地",
