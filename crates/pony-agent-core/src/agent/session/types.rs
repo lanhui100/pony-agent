@@ -257,7 +257,7 @@ pub const CANCELLED_TURN_SENTINEL: &str = "用户终止，发送消息可继续�
 /// **结构化事实**（本枚举），展示层据此渲染一行状态条，读写语义不变。
 ///
 /// 旧会话无该字段（`None`）⇒ 消费者按 `content` 回退既有判定（标记嗅探），零迁移。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryMessageKind {
     /// 用户主动终止：`content` = 已渲染正文 + 已执行步骤清单。
@@ -267,6 +267,30 @@ pub enum HistoryMessageKind {
     /// B217：本轮**真的失败**（上游报错等）收口——与 [`Self::Interrupted`]（进程中断）分离，
     /// 历史与状态条据此给出不同的一句人话，不把失败读成「被中断」。
     Error,
+    /// B274：provider 本地兜底收尾（**跑完了、降级交付**）——与 [`Self::Interrupted`] 分离。
+    ///
+    /// 此前降级轮被硬写成 `Interrupted`，展示层据此渲染「上一轮已中断」，用户把「降级成功」
+    /// 读成「没跑完」，续跑判断被带偏。降级是「已交付但质量打折」，与「失败/中断」是三种
+    /// 不同的续跑决策，必须在历史行种类上分开。
+    Degraded,
+}
+
+impl<'de> Deserialize<'de> for HistoryMessageKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = String::deserialize(deserializer)?;
+        Ok(match wire.as_str() {
+            "cancelled" => Self::Cancelled,
+            "error" => Self::Error,
+            "degraded" => Self::Degraded,
+            // `"interrupted"` 与**未知 wire 值**同桶，故不单列分支（`match_same_arms` 会判红）：
+            // fail-soft 读与 `TurnEndReason` 同口径 —— `Interrupted` 是最保守的「非正常收口」
+            // 桶，展示层据此给出一行状态，绝不让整条历史因一个新枚举值而反序列化失败。
+            _ => Self::Interrupted,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

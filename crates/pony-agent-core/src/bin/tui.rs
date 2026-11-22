@@ -1928,6 +1928,22 @@ impl TuiState {
         self.auto_scroll = true;
     }
 
+    /// PA-171 C1/C2：续轮停止的**纯状态迁移** —— 只写状态行与结构化原因，**不写消息区**。
+    ///
+    /// 为什么不再往 `messages` 补一行：轮末已由 [`Self::push_settled_turn_summary`] 给出
+    /// 一行终态摘要（`本轮完成 · 用时 … · 工具 N 次` / `本轮失败 · 工具 N 次`），停止原因
+    /// 紧跟其后就成了第二行——信息与摘要重复（「本轮在等你作答」正是屏幕上方的提问），
+    /// 且把「目标已暂停」这个状态事实塞进对话流。可见性由三条既有通道承担：状态栏 goal 段
+    /// （`·停` / `·未续`）、`/goal` 面板的 `visible_line()`、`goal_rounds_stopped` 结构化日志。
+    pub fn apply_goal_rounds_stopped(
+        &mut self,
+        reason: pony_agent_core::agent::goal::GoalRoundStopReason,
+        status_line: String,
+    ) {
+        self.status_text = status_line;
+        self.goal_rounds_stopped = Some(reason);
+    }
+
     /// wave-60 §C9：`turn:stop_requested` 驱动的**纯状态迁移** —— 只进入「正在停止…」。
     ///
     /// 不变量：
@@ -9640,18 +9656,12 @@ fn hydrate_state_from_session(
 
     // L2（dsh 对齐）：中断轮只留**一行状态**（"上一轮已停止/中断"），不再把检查点原文
     // 当正文回放。判定顺序：结构化 `kind` 优先，旧会话回退标记嗅探
-    // （`interrupted_record_status_line`）。只取最后一条——更早的中断轮之后既然还有对话，
-    // 就说明会话已经继续过。
-    let last_interrupted_line = session_snapshot
-        .history
-        .iter()
-        .rev()
-        .find_map(|hist| {
-            if hist.role != "assistant" {
-                return None;
-            }
-            interrupted_record_status_line(&hist.content, hist.kind)
-        });
+    // （`interrupted_record_status_line`）。
+    //
+    // 判据收在 `resume_interrupted_status_line`：只看**历史末条**。旧实现用
+    // `rev().find_map(..)` 反向逐条匹配，正常完成的末条没有信号 ⇒ 扫描越过它继续往前翻，
+    // 把若干轮之前的旧失败重新贴到末尾（「上一轮明明成功了」却报「因错误终止」）。
+    let last_interrupted_line = resume_interrupted_status_line(&session_snapshot.history);
     if let Some(line) = last_interrupted_line {
         // `resume_from_checkpoint` 的幂等判据（已完成文本里已含该行则不重复）在这里就是
         // 「同一条状态不得出现两次」的守卫。
@@ -13187,17 +13197,18 @@ fn tui_event_loop(
                             continue;
                         }
                     }
-                    state.status_text = status_line.clone();
-                    // 只有「续轮真的停下来了」才写消息区历史；`LoopAlreadyOwned` 等
-                    // 「从未启动 / 本线程让位」的事实写进历史就是一条假结论（`enters_history`）。
-                    if reason.enters_history() {
-                        state.messages.push(ChatMessage {
-                            role: MessageRole::System,
-                            content: status_line,
-                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                        });
-                    }
-                    state.goal_rounds_stopped = Some(reason);
+                    // 停止原因**只进状态栏 / Ctrl+G 面板 / 结构化日志**，不再往消息区补一行。
+                    //
+                    // 旧实现在这里 push 一条 System 消息，结果是轮末连续两行：
+                    // `本轮完成 · 用时 35分7秒 · 工具 13 次`（B216 轮末摘要）紧跟
+                    // `目标已暂停：续轮已停止｜本轮在等你作答/审批｜先回答上面的提问。`——
+                    // 后者与前者的信息重复（「本轮在等你作答」正是屏幕上方的提问），且
+                    // 把「目标已暂停」这个状态事实塞进对话流，读者只能读到冗余。
+                    //
+                    // 可见性不降级：状态栏 goal 段（`·停` / `·未续`）、`/goal` 面板的
+                    // `visible_line()`、以及 `goal_rounds_stopped` 结构化日志三条通道全保留，
+                    // `enters_history()` 的历史准入语义仍由 core 与契约测试持有。
+                    state.apply_goal_rounds_stopped(reason, status_line);
                     // 本轮已收口（续轮循环是轮次线程的最后一段），刷新 goal 投影让横幅显示真实轮数。
                     if let Some(goal_data) =
                         pony_agent_core::agent::goal::active_goal_for_session(&state.session_id)
@@ -14003,6 +14014,11 @@ mod model_window_editor_tests;
 #[cfg(test)]
 #[path = "tui/tests/resume_row_layout_tests.rs"]
 mod resume_row_layout_tests;
+
+/// 轮末状态噪声回归：resume 误报旧失败（末条判据）+ 停止原因重复占两行（不写消息区）。
+#[cfg(test)]
+#[path = "tui/tests/turn_end_status_noise_tests.rs"]
+mod turn_end_status_noise_tests;
 
 /// Ctrl+T 任务抽屉表现层（2026-11-22 批次 A）：页签空态单行、`←/→` 切页签、
 /// 状态栏「后台任务」措辞且计数旁无警告图标。
