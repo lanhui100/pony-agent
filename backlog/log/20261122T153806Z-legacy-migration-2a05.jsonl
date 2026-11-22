@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T153806Z-legacy-migration-2a05","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-22T15:38:06.851Z"}
+{"kind":"annotate","at":"2026-11-22T15:38:06.914Z","id":"B261","description":"两半均已实现：#55 补 ponycli --version（进程级测试），本 PR 在 install-cli.mjs 安装收尾探测两 bin 版本并在漂移时告警（三场景实测：一致/漂移/不支持均符合预期）。待两个 PR 合入后 resolve。"}
