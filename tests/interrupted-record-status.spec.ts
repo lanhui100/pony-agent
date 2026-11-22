@@ -6,7 +6,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEGRADED_TURN_LINE,
   INTERRUPTED_CANCELLED_LINE,
+  INTERRUPTED_ERROR_LINE,
   INTERRUPTED_FAILED_LINE,
   interruptedRecordStatusLine
 } from "@/lib/runtime/cancelled-turn";
@@ -45,6 +47,38 @@ describe("interruptedRecordStatusLine", () => {
     expect(
       interruptedRecordStatusLine(`前置说明\n${CHECKPOINT_TEXT}`, null)
     ).toBeNull();
+  });
+
+  // B275：桌面端此前 kind 联合类型缺 "error"，同一份历史在 TUI 说「因错误终止」、
+  // 在桌面端降级成「已中断」——同一条记录两种说法。四态必须逐一对齐 Rust 真源。
+  it("四种终态各给一句不同的话（与 Rust errors.rs 逐字一致）", () => {
+    expect(interruptedRecordStatusLine("任意落库文本", "cancelled")).toBe(
+      INTERRUPTED_CANCELLED_LINE
+    );
+    expect(interruptedRecordStatusLine("任意落库文本", "interrupted")).toBe(
+      INTERRUPTED_FAILED_LINE
+    );
+    expect(interruptedRecordStatusLine("任意落库文本", "error")).toBe(
+      INTERRUPTED_ERROR_LINE
+    );
+    expect(interruptedRecordStatusLine("任意落库文本", "degraded")).toBe(
+      DEGRADED_TURN_LINE
+    );
+
+    // 四句必须两两不同：任一撞词就说明两种终态又被合并了。
+    const lines = [
+      INTERRUPTED_CANCELLED_LINE,
+      INTERRUPTED_FAILED_LINE,
+      INTERRUPTED_ERROR_LINE,
+      DEGRADED_TURN_LINE
+    ];
+    expect(new Set(lines).size).toBe(4);
+  });
+
+  // B274：降级轮是「跑完了、降级交付」，措辞不得自称中断/失败（否则用户会去重跑）。
+  it("降级文案不自称中断或失败", () => {
+    expect(DEGRADED_TURN_LINE).not.toContain("中断");
+    expect(DEGRADED_TURN_LINE).not.toContain("失败");
   });
 });
 

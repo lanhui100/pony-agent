@@ -878,11 +878,12 @@ export type TurnHistoryMessage = {
   tokenCount?: number | null;
   reasoningContent?: string | null;
   /**
-   * 合成记录种类（后端 `HistoryMessageKind`）：`cancelled` = 用户终止，
-   * `interrupted` = 上游失败/崩溃收口。缺省表示模型真实产出或旧会话。
+   * 合成记录种类（后端 `HistoryMessageKind`），四值互不借用：
+   * `cancelled` = 用户终止，`interrupted` = 进程中断，`error` = 本轮真失败，
+   * `degraded` = 降级交付（跑完了但质量打折）。缺省表示模型真实产出或旧会话。
    * 展示层据此渲染一行状态，而不是把上下文载体当正文直出。
    */
-  kind?: "cancelled" | "interrupted" | null;
+  kind?: "cancelled" | "interrupted" | "error" | "degraded" | null;
 };
 
 export type SessionOverview = {

@@ -324,6 +324,12 @@ pub const INTERRUPTED_FAILED_LINE: &str = "上一轮已中断，已保留已执�
 /// 与 [`INTERRUPTED_FAILED_LINE`] 严格区分：把 Error 说成「已中断」会误导续跑判断。
 pub const INTERRUPTED_ERROR_LINE: &str = "上一轮因错误终止，已保留已执行的步骤记录。";
 
+/// B274：降级收尾（**跑完了、降级交付**）的一行状态。
+///
+/// 措辞刻意不说「中断」「失败」：降级轮有交付物，只是质量打折（provider 兜底摘要）。
+/// 用户据此判断的是「内容可能不完整」，而不是「需要重跑」。
+pub const DEGRADED_TURN_LINE: &str = "上一轮以降级方式收尾，已保留已执行的步骤记录。";
+
 const CHECKPOINT_MARKER: &str = "[中断轮次检查点]";
 
 /// resume 回放时该不该在信息流末尾补一行中断状态（`None` = 不补）。
@@ -361,6 +367,8 @@ pub fn interrupted_record_status_line(
         Some(HistoryMessageKind::Interrupted) => Some(INTERRUPTED_FAILED_LINE),
         // B217：失败不是中断 —— 文案必须给出不同的续跑判断依据。
         Some(HistoryMessageKind::Error) => Some(INTERRUPTED_ERROR_LINE),
+        // B274：降级是「已交付但打折」，第三种续跑判断。
+        Some(HistoryMessageKind::Degraded) => Some(DEGRADED_TURN_LINE),
         None => {
             let trimmed = content.trim();
             if trimmed == pony_agent_core::agent::session::CANCELLED_TURN_SENTINEL {
@@ -450,5 +458,36 @@ mod interrupted_record_status_tests {
             interrupted_record_status_line(&format!("前置说明\n{CHECKPOINT}"), None),
             None
         );
+    }
+
+    /// B274：降级轮是第四种终态——不得冒充「已中断」，也不得冒充「因错误终止」。
+    ///
+    /// 三种非正常收口各给一句不同的话：中断 = 没跑完；错误 = 失败无交付；
+    /// 降级 = 跑完了但质量打折。共用一个 kind 会让用户按错误方式续跑。
+    #[test]
+    fn degraded_kind_has_its_own_line() {
+        assert_eq!(
+            interrupted_record_status_line(CHECKPOINT, Some(HistoryMessageKind::Degraded)),
+            Some(DEGRADED_TURN_LINE)
+        );
+        assert_ne!(DEGRADED_TURN_LINE, INTERRUPTED_FAILED_LINE);
+        assert_ne!(DEGRADED_TURN_LINE, INTERRUPTED_ERROR_LINE);
+        // 措辞纪律：降级轮有交付物，不得说成「中断」或「失败」。
+        assert!(
+            !DEGRADED_TURN_LINE.contains("中断") && !DEGRADED_TURN_LINE.contains("失败"),
+            "降级文案不得自称中断/失败：{DEGRADED_TURN_LINE}"
+        );
+    }
+
+    /// B274：`Degraded` 的 wire 值双向可达；未知值 fail-soft 落到最保守的 `Interrupted`。
+    #[test]
+    fn degraded_kind_wire_round_trips_and_unknown_is_fail_soft() {
+        let wire = serde_json::to_string(&HistoryMessageKind::Degraded).unwrap();
+        assert_eq!(wire, "\"degraded\"");
+        let parsed: HistoryMessageKind = serde_json::from_str("\"degraded\"").unwrap();
+        assert_eq!(parsed, HistoryMessageKind::Degraded);
+        // 旧二进制读新值不炸开：未知 wire 落到 Interrupted（非正常收口的保守桶）。
+        let unknown: HistoryMessageKind = serde_json::from_str("\"some_future_kind\"").unwrap();
+        assert_eq!(unknown, HistoryMessageKind::Interrupted);
     }
 }

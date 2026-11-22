@@ -145,7 +145,9 @@ impl AgentRuntime {
                     reason,
                     provider_native_transcript,
                 );
-                (text, transcript, Some(HistoryMessageKind::Interrupted))
+                // B274：降级轮是「跑完了、降级交付」，不是「没跑完」——
+                // 标成 `Interrupted` 会让历史与状态条把降级成功读成中断。
+                (text, transcript, Some(HistoryMessageKind::Degraded))
             }
             None => (assistant_message.to_string(), provider_native_transcript, None),
         };

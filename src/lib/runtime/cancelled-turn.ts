@@ -22,21 +22,36 @@ export const INTERRUPTED_CANCELLED_LINE = "上一轮已停止，发送消息可�
 /** 上游中断/崩溃收口的一行状态（面向用户；步骤明细由 trace 工具行承载）。 */
 export const INTERRUPTED_FAILED_LINE = "上一轮中断，已保留已执行的步骤记录。";
 
+/** B275：本轮**真的失败**收口的一行状态（与 Rust `INTERRUPTED_ERROR_LINE` 逐字一致）。 */
+export const INTERRUPTED_ERROR_LINE = "上一轮因错误终止，已保留已执行的步骤记录。";
+
+/** B274：降级收尾（跑完了、降级交付）的一行状态（与 Rust `DEGRADED_TURN_LINE` 逐字一致）。 */
+export const DEGRADED_TURN_LINE = "上一轮以降级方式收尾，已保留已执行的步骤记录。";
+
 /**
  * 合成中断记录的一行状态文案（L2，dsh 对齐）。
  *
  * 判定顺序：结构化 `kind` **优先**；旧会话无 kind ⇒ 回退 `content` 标记嗅探。
  * 返回 `null` 表示「这是模型真实正文」（取消哨兵句仍按 PA-118 口径清洗为空串）。
+ *
+ * B275：`kind` 联合类型此前缺 `"error"`，桌面端把「因错误终止」降级显示成「已中断」——
+ * 与 TUI（`errors.rs` 四分支）语义不同步。此处补齐 `error` / `degraded`，文案逐字对齐。
  */
 export function interruptedRecordStatusLine(
   content: string,
-  kind?: "cancelled" | "interrupted" | null
+  kind?: "cancelled" | "interrupted" | "error" | "degraded" | null
 ): string | null {
   if (kind === "cancelled") {
     return INTERRUPTED_CANCELLED_LINE;
   }
   if (kind === "interrupted") {
     return INTERRUPTED_FAILED_LINE;
+  }
+  if (kind === "error") {
+    return INTERRUPTED_ERROR_LINE;
+  }
+  if (kind === "degraded") {
+    return DEGRADED_TURN_LINE;
   }
   if (content.trim().startsWith(INTERRUPTED_CHECKPOINT_MARKER)) {
     return INTERRUPTED_FAILED_LINE;

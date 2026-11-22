@@ -222,7 +222,8 @@ fn upgrade_degraded_assistant_message(
         failure_reason,
     ) {
         message.content = text;
-        message.kind = Some(HistoryMessageKind::Interrupted);
+        // B274：降级轮**跑完了、降级交付**，不得标成「中断」——两种终态的续跑判断不同。
+        message.kind = Some(HistoryMessageKind::Degraded);
     }
 }
 
@@ -1021,14 +1022,23 @@ impl Projection<TraceProjectionState> for TraceProjectionState {
     }
 }
 
-/// B217：终态 → 历史行种类。失败（`Error`）与进程中断（其余非取消终态）必须分开：
-/// 前者是本轮真失败，后者是「没跑完就被进程终止」，续跑判断与人读文案都不同。
+/// B217/B274：终态 → 历史行种类。
+///
+/// 四种终态各自独立，互不借用：
+/// - `Error` = 本轮真失败；
+/// - `Interrupted` = 没跑完就被进程终止；
+/// - `Degraded` = 跑完但降级交付（provider 兜底收尾）；
+/// - `Cancelled` = 用户/宿主主动终止。
+///
+/// B274 之前 `Degraded` 落在 `_` 兜底里被写成 `Interrupted`，展示层据此说「上一轮已中断」——
+/// 把「降级成功」读成「没跑完」，续跑判断被带偏。
 ///
 /// 独立成函数而非内联在 `apply` 里：`apply` 已触函数规模基线（`npm run size:check`）。
 fn checkpoint_kind_for(reason: &TurnEndReason) -> HistoryMessageKind {
     match reason {
         TurnEndReason::Cancelled => HistoryMessageKind::Cancelled,
         TurnEndReason::Error => HistoryMessageKind::Error,
+        TurnEndReason::Degraded => HistoryMessageKind::Degraded,
         _ => HistoryMessageKind::Interrupted,
     }
 }
@@ -1613,6 +1623,10 @@ mod tests {
     /// B217：终态三分不得互借 —— 失败写 `Error`、进程中断写 `Interrupted`、
     /// 用户取消写 `Cancelled`。此前 `Error` 与进程中断共用 `Interrupted`，
     /// 历史与状态条把「本轮失败」读成「被中断」，误导续跑判断。
+    ///
+    /// 测试名保持 `three_states`：ADR `2026-11-17-turn-end-reason-interrupted.md` 的回归口径
+    /// 逐字引用它。B274 的第四态（`Degraded`）由 `..._keeps_degraded_apart_from_interrupted`
+    /// 单独覆盖，不在此处扩表——改名会让历史 ADR 的回归命令失效。
     #[test]
     fn history_projection_terminal_kind_keeps_three_states_apart() {
         use crate::agent::session::HistoryMessageKind;
@@ -1644,6 +1658,39 @@ mod tests {
                 "reason={reason:?} 必须映射到独立的历史行种类"
             );
         }
+    }
+
+    /// B274：降级轮不得冒充「中断」——第四态必须独立。
+    ///
+    /// 降级轮是**跑完了、降级交付**（provider 本地兜底摘要），与「没跑完就被进程终止」
+    /// 是两种不同的续跑决策。B274 之前 `checkpoint_kind_for` 把 `Degraded` 落进 `_` 兜底
+    /// 写成 `Interrupted`，展示层据此说「上一轮已中断」，用户把降级成功读成没跑完。
+    #[test]
+    fn history_projection_keeps_degraded_apart_from_interrupted() {
+        use crate::agent::session::HistoryMessageKind;
+
+        let mut events = failed_turn_events(Some("boom"), None);
+        events[4].1 = TurnEvent::TurnEnd {
+            turn_id: "t9".into(),
+            reason: TurnEndReason::Degraded,
+            turn_duration_ms: Some(1200),
+            error: None,
+            stop_reason: None,
+            failure_code: None,
+        };
+        let state = fold_all::<_, HistoryProjectionState>(&events);
+        let kind = state.messages().last().and_then(|message| message.kind);
+
+        assert_eq!(
+            kind,
+            Some(HistoryMessageKind::Degraded),
+            "降级轮必须映射到 Degraded，不得落进 Interrupted 兜底"
+        );
+        assert_ne!(
+            kind,
+            Some(HistoryMessageKind::Interrupted),
+            "降级 ≠ 中断：前者有交付物，后者没跑完"
+        );
     }
 
     #[test]

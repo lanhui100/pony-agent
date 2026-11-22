@@ -137,11 +137,15 @@ fn b219_degraded_turn_has_checkpoint() {
         )
     });
 
-    // Assert 2：结构化身份与中断轮同形。
+    // Assert 2：结构化身份独立成第四态（B274）。
+    //
+    // 旧口径要求「与中断轮同形（Interrupted）」——但降级轮是**跑完了、降级交付**，
+    // 与「没跑完就被终止」是两种不同的续跑决策。共用一个 kind 会让展示层把降级成功
+    // 说成「上一轮已中断」。B274 起 `Degraded` 独立成变体，本断言随契约迁移。
     assert_eq!(
         assistant.kind,
-        Some(HistoryMessageKind::Interrupted),
-        "降级轮合成记录的 kind 必须是 Interrupted，实际 = {:?}",
+        Some(HistoryMessageKind::Degraded),
+        "降级轮合成记录的 kind 必须是 Degraded，实际 = {:?}",
         assistant.kind
     );
 

@@ -152,3 +152,58 @@ fn goal_rounds_stopped_keeps_visibility_channels() {
         "结构化原因必须留痕（状态栏 `·未续` 与 /goal 面板据此取措辞）"
     );
 }
+
+/// B276：失败轮同样只留一行——「本轮失败 · 工具 N 次」之后不得再跟一条「目标已暂停」。
+///
+/// 现场症状：重试 5 次后失败，消息区连续两行
+/// `✕ 本轮失败 · 工具 5 次` + `✕ 目标已暂停：本轮未成功｜首轮失败，自动续轮未启动｜发「继续」重试。`
+/// 后者把「未成功」与「本轮失败」同义复述。首轮门（`FirstRoundNotSucceeded`）是最容易
+/// 与摘要撞车的原因，故单独锁一条。
+#[test]
+fn failed_turn_keeps_single_row_even_for_first_round_gate() {
+    let mut state = TuiState::default();
+    state.turn_started_at = Some(std::time::Instant::now());
+    state.push_settled_turn_summary(SettledTurnOutcome::Failed);
+    assert_eq!(state.messages.len(), 1, "失败轮摘要必须落一行");
+    assert!(
+        state.messages[0].content.starts_with("本轮失败"),
+        "摘要首段必须是终态，实际 = {:?}",
+        state.messages[0].content
+    );
+
+    state.apply_goal_rounds_stopped(
+        GoalRoundStopReason::FirstRoundNotSucceeded,
+        GoalRoundStopReason::FirstRoundNotSucceeded.visible_line(),
+    );
+
+    assert_eq!(
+        state.messages.len(),
+        1,
+        "首轮门停止原因不得在失败摘要之后再补一行（两者语义重复）"
+    );
+    // 可见性仍由状态栏承担：状态行就是 core 那句完整文案。
+    assert_eq!(
+        state.status_text,
+        GoalRoundStopReason::FirstRoundNotSucceeded.visible_line()
+    );
+}
+
+/// B276：取消轮同理——「本轮已停止」之后不得再跟一条停止原因。
+#[test]
+fn cancelled_turn_keeps_single_row() {
+    let mut state = TuiState::default();
+    state.turn_started_at = Some(std::time::Instant::now());
+    state.push_settled_turn_summary(SettledTurnOutcome::Cancelled);
+
+    state.apply_goal_rounds_stopped(
+        GoalRoundStopReason::Cancelled,
+        GoalRoundStopReason::Cancelled.visible_line(),
+    );
+
+    assert_eq!(
+        state.messages.len(),
+        1,
+        "取消轮同样只留一行终态摘要"
+    );
+    assert!(state.messages[0].content.starts_with("本轮已停止"));
+}

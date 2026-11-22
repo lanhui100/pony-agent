@@ -38,4 +38,6 @@ Status: implemented
 
 - `2026-11-16-degraded-turn-reason-and-trace.md`（`Degraded`：provider 兜底收尾的第四态）
 - `2026-11-17-followup-phase-observer.md`（降级**过程**的阶段披露）
+- `2026-11-22-degraded-turn-kind-separation.md`（同族第三步：`Degraded` 也独立成
+  `HistoryMessageKind::Degraded`，不再借用 `Interrupted`；本条把 `Error` 分出，那条把降级分出）
 - B209（轮内增量落盘 + 恢复补写，`Interrupted` 的写侧归属）
