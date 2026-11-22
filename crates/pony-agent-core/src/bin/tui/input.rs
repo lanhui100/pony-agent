@@ -95,6 +95,38 @@ pub fn composer_history_recall(key: &crossterm::event::KeyEvent, composer_is_emp
             .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL)
 }
 
+/// 输入框内的垂直移动方向（↑/↓）。键位判据与光标目标共用同一类型，
+/// 避免「同语义两处各传一个 bool」的漂移面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerVerticalDirection {
+    Up,
+    Down,
+}
+
+/// ↑/↓ 是否走「输入框内跨行移动」语义（纯函数，命中时返回方向）。
+///
+/// 口径：
+/// - 只认**裸** `Up` / `Down`：带 Shift（终端选中等原生行为）、Ctrl（子会话切换，
+///   见 [`sub_session_shortcut`]）、Alt 一律 `None`，交由既有分支处理；
+/// - 历史回填（[`composer_history_recall`]）与命令补全弹窗在调用点**先于**本判定生效；
+/// - 命中后由调用方按 `vertical_cursor_target` 算目标位置：跨可视行同列移动，
+///   首行再按 ↑ ⇒ 文字头部、尾行再按 ↓ ⇒ 文字末尾（不滚动消息区）。
+pub fn composer_vertical_navigation(
+    key: &crossterm::event::KeyEvent,
+) -> Option<ComposerVerticalDirection> {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Up => Some(ComposerVerticalDirection::Up),
+        KeyCode::Down => Some(ComposerVerticalDirection::Down),
+        _ => None,
+    }
+}
+
 /// 流式期该按键是否应被丢弃：只有**会话控制**类按键要等本轮结束，
 /// 输入框编辑类快捷键不等（回归护栏见 `tests/tui_six_fixes_acceptance.rs`）。
 ///

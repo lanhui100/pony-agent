@@ -1492,6 +1492,9 @@ pub struct TuiState {
     pub input_buffer: String,
     /// 输入光标（按 char 计数的插入点），与 input_buffer 严格同步。
     pub input_cursor: usize,
+    /// Up/Down 垂直移动时保留的目标显示列；任何水平移动或编辑都会清空。
+    /// 只用于「连续上下移动不横向漂移」，不参与渲染。
+    pub input_desired_col: Option<usize>,
     pub is_streaming: bool,
     /// AI 标题自动生成是否已在飞（防每轮 StreamCompleted 重复并发发起）。
     pub auto_title_in_flight: bool,
@@ -1738,6 +1741,7 @@ impl Default for TuiState {
             messages: Vec::new(),
             input_buffer: String::new(),
             input_cursor: 0,
+            input_desired_col: None,
             is_streaming: false,
             auto_title_in_flight: false,
             spinner_tick: 0,
@@ -3111,6 +3115,7 @@ impl TuiState {
     pub fn set_input(&mut self, text: &str) {
         self.input_buffer = text.to_string();
         self.input_cursor = self.input_buffer.chars().count();
+        self.input_desired_col = None;
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -3118,6 +3123,7 @@ impl TuiState {
         let byte = self.input_byte_index(cursor);
         self.input_buffer.insert(byte, c);
         self.input_cursor = cursor + 1;
+        self.input_desired_col = None;
     }
 
     pub fn insert_newline(&mut self) {
@@ -3137,6 +3143,7 @@ impl TuiState {
         let byte = self.input_byte_index(cursor);
         self.input_buffer.insert_str(byte, &normalized);
         self.input_cursor = cursor + normalized.chars().count();
+        self.input_desired_col = None;
     }
 
     pub fn backspace(&mut self) {
@@ -3147,6 +3154,7 @@ impl TuiState {
         let byte = self.input_byte_index(cursor - 1);
         self.input_buffer.remove(byte);
         self.input_cursor = cursor - 1;
+        self.input_desired_col = None;
     }
 
     pub fn delete_forward(&mut self) {
@@ -3156,18 +3164,41 @@ impl TuiState {
         }
         let byte = self.input_byte_index(cursor);
         self.input_buffer.remove(byte);
+        self.input_desired_col = None;
     }
 
     pub fn move_cursor_left(&mut self) {
         if self.input_cursor > 0 {
             self.input_cursor -= 1;
         }
+        self.input_desired_col = None;
     }
 
     pub fn move_cursor_right(&mut self) {
         if self.input_cursor < self.input_char_len() {
             self.input_cursor += 1;
         }
+        self.input_desired_col = None;
+    }
+
+    /// ↑/↓：输入框内跨可视行移动光标（列对齐见 [`vertical_cursor_target`]）。
+    ///
+    /// 首行再 ↑ ⇒ 文字头部；尾行再 ↓ ⇒ 文字末尾——即「到顶/到底」时仍停在输入框内，
+    /// 不把按键让给消息区滚动（滚动走 PgUp/PgDn 与滚轮，口径见快捷键帮助）。
+    /// 宽度取上一帧渲染的文本区宽度（提示符 2 列 + 右侧 1 列留白之外），保证列映射与所见一致。
+    pub fn move_cursor_vertical(&mut self, direction: ComposerVerticalDirection) {
+        let width = self
+            .last_input_rect
+            .map_or(1, |rect| rect.width.max(1) as usize);
+        let (cursor, desired_col) = vertical_cursor_target(
+            &self.input_buffer,
+            self.input_cursor,
+            width,
+            direction,
+            self.input_desired_col,
+        );
+        self.input_cursor = cursor;
+        self.input_desired_col = desired_col;
     }
 
     pub fn cursor_line_home(&mut self) {
@@ -3177,6 +3208,7 @@ impl TuiState {
             idx -= 1;
         }
         self.input_cursor = idx;
+        self.input_desired_col = None;
     }
 
     pub fn cursor_line_end(&mut self) {
@@ -3186,6 +3218,7 @@ impl TuiState {
             idx += 1;
         }
         self.input_cursor = idx;
+        self.input_desired_col = None;
     }
 
     /// Ctrl+W：向左删除一个词。
@@ -3203,7 +3236,8 @@ impl TuiState {
     }
 
     pub fn clear_input(&mut self) {
-        let lines_count = (self.input_buffer.lines().count() + 1).clamp(2, 6) as u16;
+        self.input_desired_col = None;
+        let lines_count = composer_input_height(self.input_buffer.lines().count() + 1);
         if lines_count > 2 {
             self.anim_composer_h = Some(lines_count);
         }
@@ -4473,6 +4507,83 @@ fn layout_input(text: &str, width: usize) -> Vec<(usize, usize)> {
     }
     ranges.push((start, chars.len()));
     ranges
+}
+
+/// 输入区**最大显示行数**（含底部 1 行呼吸留白）。
+///
+/// 口径：输入框最多占 8 行；正文可视行 = `MAX_COMPOSER_ROWS - 1` 时开始出现呼吸行，
+/// 正文超过可视行时窗口跟随光标（见 `render_input`）。旧口径是 6 行，多行草稿在
+/// 常见 24~30 行终端里过早进入滚动窗口，读不全自己刚写的那段。
+pub const MAX_COMPOSER_ROWS: u16 = 8;
+
+/// 输入区高度（行）：可视行数 + 1 行呼吸，夹在 `[2, MAX_COMPOSER_ROWS]`。
+///
+/// 纯函数，便于在无 TTY 环境断言 8 行上限（见
+/// `tui/tests/composer_multiline_nav_tests.rs`）。
+pub fn composer_input_height(visual_lines: usize) -> u16 {
+    let lines = u16::try_from(visual_lines).unwrap_or(u16::MAX);
+    lines.saturating_add(1).clamp(2, MAX_COMPOSER_ROWS)
+}
+
+/// 光标所在可视行的显示列（字符宽度口径，CJK 算 2 列）。
+fn visual_cursor_col(chars: &[char], range: (usize, usize), cursor: usize) -> usize {
+    let end = cursor.clamp(range.0, range.1);
+    chars[range.0..end].iter().map(|c| char_width(*c)).sum()
+}
+
+/// 可视行内「显示列 → char 索引」：列越过行尾时落到行尾（宽字符不落中间）。
+fn visual_char_at_col(chars: &[char], range: (usize, usize), col: usize) -> usize {
+    let mut used = 0usize;
+    for (offset, ch) in chars[range.0..range.1].iter().enumerate() {
+        let w = char_width(*ch);
+        if used + w > col {
+            return range.0 + offset;
+        }
+        used += w;
+    }
+    range.1
+}
+
+/// ↑/↓ 在输入框内的跨行移动目标：返回 `(新光标 char 索引, 期望显示列)`。
+///
+/// 语义（与快捷键帮助里的 ↑/↓ 条目一一对应）：
+/// - 中间行：移到相邻可视行**同一显示列**；该行更短则落到行尾（不横向漂移，
+///   `desired_col` 由调用方跨连续移动保存）；
+/// - **首行再按 ↑** ⇒ 文字头部（索引 0）；
+/// - **尾行再按 ↓** ⇒ 文字末尾（字符数）；
+/// - `width` 必须与渲染同口径（提示符 2 列 + 右侧 1 列留白之外），否则列映射会错位。
+///
+/// 纯函数，便于在无 TTY 环境断言（见 `tui/tests/composer_multiline_nav_tests.rs`）。
+pub fn vertical_cursor_target(
+    text: &str,
+    cursor: usize,
+    width: usize,
+    direction: ComposerVerticalDirection,
+    desired_col: Option<usize>,
+) -> (usize, Option<usize>) {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let ranges = layout_input(text, width.max(1));
+    // 与 `render_input` 的 active_line 同一判据（多行边界取靠前那一行），
+    // 否则「光标画在上一行行尾、↑ 却跳到下一行」的错位会立刻被用户看到。
+    let active = ranges
+        .iter()
+        .position(|(s, e)| cursor >= *s && cursor <= *e)
+        .unwrap_or(ranges.len().saturating_sub(1));
+    let target_col = desired_col.unwrap_or_else(|| visual_cursor_col(&chars, ranges[active], cursor));
+
+    match direction {
+        ComposerVerticalDirection::Down if active + 1 >= ranges.len() => (chars.len(), Some(target_col)),
+        ComposerVerticalDirection::Down => (
+            visual_char_at_col(&chars, ranges[active + 1], target_col),
+            Some(target_col),
+        ),
+        ComposerVerticalDirection::Up if active == 0 => (0, Some(target_col)),
+        ComposerVerticalDirection::Up => (
+            visual_char_at_col(&chars, ranges[active - 1], target_col),
+            Some(target_col),
+        ),
+    }
 }
 
 /// 浮动面板：发丝描边 + 表面底色 + 标题行（hint 右对齐），返回标题下方的内容区。
@@ -6333,11 +6444,12 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
 
     // ── 底部区块尺寸：色带（1 行顶部内边距 + 输入区）+ 紧贴的指标行 ──────────
     let composer_text_width = content.width.saturating_sub(3).max(1) as usize;
-    let visual_lines = layout_input(&state.input_buffer, composer_text_width).len() as u16;
-    // wave-39 v3 R9：正文 + 1 行呼吸（单行输入 = 2 行），最多 6 行；色带 = input_h + 顶部内边距。
+    let visual_lines = layout_input(&state.input_buffer, composer_text_width).len();
+    // wave-39 v3 R9：正文 + 1 行呼吸（单行输入 = 2 行）；色带 = input_h + 顶部内边距。
     // wave-39 v4 R13：删除独立 CANVAS 间距行，input_h 末行即色带内呼吸行 → 间距视觉 2 行收为 1 行。
     // wave-41：发送时 Composer 高度平滑衰减收拢，正文平滑展开，底部平稳下移。
-    let target_input_h = (visual_lines + 1).clamp(2, 6);
+    // `MAX_COMPOSER_ROWS`：输入框最多 8 行（含呼吸行），超出后正文窗口跟随光标。
+    let target_input_h = composer_input_height(visual_lines);
     let input_h = if let Some(anim_h) = state.anim_composer_h {
         if anim_h > target_input_h {
             let next_h = anim_h.saturating_sub(1);
@@ -12493,6 +12605,11 @@ fn tui_event_loop(
                                 if !state.recall_last_user_message() {
                                     state.scroll_up(2);
                                 }
+                            } else if let Some(direction) = composer_vertical_navigation(&key)
+                                .filter(|_| !state.input_buffer.is_empty())
+                            {
+                                // 非空输入框 + 裸 Up：输入框内跨行移动（首行再按 ⇒ 文字头部）。
+                                state.move_cursor_vertical(direction);
                             } else {
                                 state.scroll_up(2);
                             }
@@ -12503,6 +12620,11 @@ fn tui_event_loop(
                                 if state.selected_command_index + 1 < match_cmds.len() {
                                     state.selected_command_index += 1;
                                 }
+                            } else if let Some(direction) = composer_vertical_navigation(&key)
+                                .filter(|_| !state.input_buffer.is_empty())
+                            {
+                                // 非空输入框 + 裸 Down：输入框内跨行移动（尾行再按 ⇒ 文字末尾）。
+                                state.move_cursor_vertical(direction);
                             } else {
                                 state.scroll_down(2, state.max_scroll_offset);
                             }
@@ -13885,6 +14007,11 @@ mod wave43_unit_tests;
 #[cfg(test)]
 #[path = "tui/tests/composer_history_recall_tests.rs"]
 mod composer_history_recall_tests;
+
+/// 输入框多行导航：↑/↓ 跨行移动（首行 ↑ ⇒ 文字头部 / 尾行 ↓ ⇒ 文字末尾）+ 8 行显示上限。
+#[cfg(test)]
+#[path = "tui/tests/composer_multiline_nav_tests.rs"]
+mod composer_multiline_nav_tests;
 
 #[cfg(test)]
 #[path = "tui/tests/io_hygiene_tests.rs"]
