@@ -9640,12 +9640,18 @@ fn hydrate_state_from_session(
 
     // L2（dsh 对齐）：中断轮只留**一行状态**（"上一轮已停止/中断"），不再把检查点原文
     // 当正文回放。判定顺序：结构化 `kind` 优先，旧会话回退标记嗅探
-    // （`interrupted_record_status_line`）。
-    //
-    // B272：判据抽成纯函数 [`last_turn_interrupted_status_line`]（**只判最后一条 assistant**）。
-    // 旧实现在此处用 `find_map` 反向扫描，会越过正常完成的末轮继续前移，把历史上任何一次
-    // 旧失败/取消重新贴到信息流末尾——「上一轮因错误终止」于是出现在一轮正常完成之后。
-    let last_interrupted_line = last_turn_interrupted_status_line(&session_snapshot.history);
+    // （`interrupted_record_status_line`）。只取最后一条——更早的中断轮之后既然还有对话，
+    // 就说明会话已经继续过。
+    let last_interrupted_line = session_snapshot
+        .history
+        .iter()
+        .rev()
+        .find_map(|hist| {
+            if hist.role != "assistant" {
+                return None;
+            }
+            interrupted_record_status_line(&hist.content, hist.kind)
+        });
     if let Some(line) = last_interrupted_line {
         // `resume_from_checkpoint` 的幂等判据（已完成文本里已含该行则不重复）在这里就是
         // 「同一条状态不得出现两次」的守卫。
@@ -13182,18 +13188,15 @@ fn tui_event_loop(
                         }
                     }
                     state.status_text = status_line.clone();
-                    // B273：停止原因**只走状态栏 + /goal 面板**，不再写消息区。
-                    //
-                    // 旧实现按 `enters_history()` 往消息区塞一条 System 行，于是轮末常见两行相邻：
-                    // 「本轮完成 · 用时 35分7秒 · 工具 13 次」+「目标已暂停：续轮已停止｜…」，
-                    // 失败轮则是「本轮失败 · 工具 5 次」+「目标已暂停：本轮未成功｜…」——
-                    // 后者把「未成功」与「本轮失败」同义复述，且「本轮在等你作答」与屏幕上方的
-                    // 提问重复。可见性并未因此丢失，仍有三处承载：
-                    //   1. 状态栏 `goal_segment` 的「·停 / ·未续」后缀（status_bar.rs）；
-                    //   2. `/goal` 面板的停止行（goal_panel.rs，配色由枚举严重级驱动）；
-                    //   3. `report_goal_rounds_stopped` 的 `goal_rounds_stopped` 结构化日志。
-                    // 因此 `enters_history()` 不再参与 UI 决策（它仍被 b193-2 契约测试锁定，
-                    // 语义保留给「是否需要持久化留痕」这类非展示消费者）。
+                    // 只有「续轮真的停下来了」才写消息区历史；`LoopAlreadyOwned` 等
+                    // 「从未启动 / 本线程让位」的事实写进历史就是一条假结论（`enters_history`）。
+                    if reason.enters_history() {
+                        state.messages.push(ChatMessage {
+                            role: MessageRole::System,
+                            content: status_line,
+                            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                        });
+                    }
                     state.goal_rounds_stopped = Some(reason);
                     // 本轮已收口（续轮循环是轮次线程的最后一段），刷新 goal 投影让横幅显示真实轮数。
                     if let Some(goal_data) =
