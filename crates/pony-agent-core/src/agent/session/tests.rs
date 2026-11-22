@@ -3004,6 +3004,7 @@ fn sample_roundtrip_turn_trace_record() -> TurnTraceRecord {
             }),
         }],
         provider_call_records: vec![ProviderCallCacheRecord {
+            upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
             request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
             provider_source: Some("provider_decision".to_string()),
             provider_mode: Some("live".to_string()),
@@ -3784,6 +3785,7 @@ fn file_backend_roundtrip_restores_failed_terminal_envelope_and_existing_evidenc
                 capability_invocation: None,
             }],
             provider_call_records: vec![ProviderCallCacheRecord {
+                upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
                 request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
                 provider_source: Some("provider_decision".to_string()),
                 provider_mode: Some("live".to_string()),
@@ -4074,6 +4076,7 @@ fn file_backend_roundtrip_restores_cancelled_terminal_envelope_and_existing_evid
                 capability_invocation: None,
             }],
             provider_call_records: vec![ProviderCallCacheRecord {
+                upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
                 request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
                 provider_source: Some("provider_decision".to_string()),
                 provider_mode: Some("live".to_string()),

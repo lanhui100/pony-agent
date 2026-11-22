@@ -333,6 +333,8 @@ pub(super) fn build_provider_call_cache_record(
     }
 
     ProviderCallCacheRecord {
+        // B139：非 2xx 才有值（键缺席即「本次调用没失败」），取走即清空。
+        upstream_status: crate::agent::telemetry::take_upstream_status(),
         request_kind,
         provider_source: provider_source.map(str::to_string),
         provider_mode: provider_mode.map(str::to_string),

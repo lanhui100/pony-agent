@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T155031Z-legacy-migration-4dba","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-22T15:50:31.029Z"}
+{"kind":"annotate","at":"2026-11-22T15:50:31.113Z","id":"B139","description":"已实施（本 PR）：provider_status_error 唯一写入 + build_provider_call_cache_record 唯一取走 + ProviderCallCacheRecord.upstream_status(additive, 仅非 2xx) + 前端镜像；机制改用线程局部旁路（不改 74 处签名），理由见 ADR 2026-11-22-upstream-status-observer。"}
