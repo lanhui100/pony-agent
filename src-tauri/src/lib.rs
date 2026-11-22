@@ -8,6 +8,7 @@ pub mod turn_task_registry;
 
 use crate::blocking_helper::BlockingHelper;
 use crate::turn_task_registry::TurnTaskRegistry;
+use pony_agent_core::acp::config::AcpAgentSpec;
 use agent::app_settings::{AppSettings, AppSettingsStore};
 use agent::capability_bridge::{CapabilitySourceView, CapabilityView, McpSourceSnapshot, SkillDescriptor};
 use agent::config::{ProviderRegistryStore, ProviderRegistryView};
@@ -789,6 +790,20 @@ fn usage_governance_summary(
 #[tauri::command]
 async fn list_sessions(app: AppHandle) -> Result<Vec<SessionOverview>, String> {
     BlockingHelper::spawn(move || app.state::<HostControlPlane>().list_sessions()).await
+}
+
+/// ACP P2（B163）：外部 agent 清单（只读面）。
+///
+/// 语义与 `ponycli acp --list` 一致：清单文件缺省 ⇒ 内置默认两条；解析/校验失败 ⇒
+/// 显式错误（fail-closed，绝不伪造清单）。`AcpAgentSpec` 以 camelCase 序列化，
+/// 前端 `src/types/acp.ts` 的 `AcpAgentSpec` 与之逐字段对齐。
+#[tauri::command]
+async fn acp_list_agents() -> Result<Vec<AcpAgentSpec>, String> {
+    BlockingHelper::spawn(|| {
+        pony_agent_core::acp::config::load_agents()
+            .map_err(|error| format!("{}: {error}", error.code()))
+    })
+    .await?
 }
 
 /// Trace tab 一键上传：手动上报指定会话的持久化 trace 至 PonySentry。
@@ -1591,7 +1606,8 @@ pub fn run() {
             get_service_api_key,
             set_service_api_key,
             open_url,
-            ponysentry_capture
+            ponysentry_capture,
+            acp_list_agents
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
