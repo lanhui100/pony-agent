@@ -29,6 +29,14 @@ delta 不推进 `messageRevision`、completed 不清 `phase`），证明 23 条�
 **Gate-1 时序偏差（自省）**：`dev-team` 要求方案对抗审查先于编码，本轮实际是编码完成后补做 Gate-1。
 补救是真做了对抗审查（靶点全部落 ADVISORY 并进 Wave 2 清单），但时序属流程穿透，记入 §4。
 
+**共享文件名竞态（CI 抓到，已修）**：本波 Protocol 直接把 `dev-team` 要求的 NFR 基准写成 `.dev-team/nfr-baseline.json`，
+覆盖了仓库共享的既有文件 —— 该文件同时是 `acp_p1_blockers` / `acp_realtime_permission` / `acp_tool_policy` 等
+Rust 验收用例的阈值真源（`acp.request_timeout_ms` 等 5 个键）。本地前端门禁全绿，直到 PR CI 跑到 Rust 用例才炸
+（6 条 panicked: 「nfr-baseline.json 缺 acp.request_timeout_ms」）。修正：恢复共享文件为 base 内容，本波基准改为
+`.dev-team/nfr-baseline-runtime-store-split.json`（wave 作用域，与 `nfr-baseline-wave45.json` 同惯例），两份都过 `dev-nfr-lint`。
+教训：`dev-team` 里凡以通用名落盘的文件（`nfr-baseline.json`、`state.json`、`review-*.json`、`meta-retrospective.md`）
+都是跨波共享面，写入前必须 `git ls-files` 确认归属；CI 的 Rust 用例是这条的唯一机械门禁，前端绿灯不能替代。
+
 ## 3. 分工契约与隔离有效性
 
 **写域隔离有效**：Executor A（4 文件 / 28 actions）与 B（6 文件 / 69 actions）零重叠，最终 `git diff --name-only`

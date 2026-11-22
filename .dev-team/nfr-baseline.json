@@ -1,34 +1,60 @@
 {
-  "task": "task-2 / Wave 1 runtime store 拆解（类型契约 + 装配壳 + 空模块）",
-  "level": "B（轻量基准）",
-  "owner": "protocol-agent",
-  "write_scopes_only": true,
   "external_call_timeout_ms": 3000,
-  "external_call_timeout_ms_note": "N/A（结构性理由）：本任务只做类型契约、初始状态工厂、装配壳与空模块骨架，新增外部调用数为 0 —— 不新增 invoke / listen / fetch / 定时器 / 网络 IO，全部既有调用点均为逐字搬运。故本字段非实测值，而取本表硬上限 3000：若后续 Executor 波次新增任何外部调用，此值即为其超时上限（fail-closed）。既有面（HYDRATION_TIMEOUT_MS=15000 / SUBMISSION_WATCHDOG_TIMEOUT_MS=240000）属既有机制，本波不改数值、不纳入本表。",
   "retry": {
-    "max_attempts": 0,
-    "backoff": "not-applicable",
-    "note": "本任务不新增重试逻辑。上游 provider 重试沿用既有 Rust `agent::retry::RetryNotice`（attempt / maxAttempts 同源），前端只做进度渲染（`applyTurnRetryProgress` → `retryProgress`），不新增重试次数或退避参数。"
+    "max_attempts": 10,
+    "backoff_cap_ms": 8000,
+    "backoff_ms": 500
   },
   "concurrency_lock": {
-    "mechanism": "turn 事件注册的并发单例锁：`eventsReady` 早退 + 每 store 实例 WeakMap registry 的 `initPromise`（并发初始化复用同一 Promise，避免重复注册 14 个监听器）",
-    "evidence": [
-      "src/stores/runtime.ts:3981 initializeTurnEvents",
-      "src/stores/runtime.ts:306-309 turnEventRegistry / initPromise 并发单例注释",
-      "src/stores/runtime.ts:4020 disposeTurnEvents（先 await 在飞 init 再清理）"
-    ],
-    "note": "Wave 1 原样保留该锁语义，不新增锁、不改锁口径；监听器注册体落 turn-events.ts 后仍由 turn-execution.ts 的 initialize/dispose 调用。"
+    "type": "mutex",
+    "timeout_ms": 2000
   },
   "logging": {
     "format": "json",
-    "trace_id": "otel.trace_id（既有，见 src/lib/telemetry；前端不新增日志出口）",
-    "new_log_sites": 0,
-    "note": "本任务不新增日志面：装配壳只保留既有 HMR dispose 的 debugLog('events:hmr-dispose:skipped')，其余日志语句随业务实现留在各域模块（Executor 逐字搬运）。"
+    "trace_id": true,
+    "trace_id_required": true
   },
   "resource_release": [
-    "turn: 事件监听器：disposeTurnEvents → releaseTurnEventRegistry 一次性 unlisten 全部句柄（幂等）",
-    "定时器：streamFlushTimerId / deferredPersistTimerId / traceTimelineThrottleTimerId / submissionWatchdogTimerId 分别在 cancelStreamFlush / cancelDeferredPersist / clearPendingTraceTimeline / clearSubmissionWatchdog 内清理",
-    "HMR：import.meta.hot.dispose 钩子保留在装配壳（src/stores/runtime.ts），热更前释放监听器",
-    "本任务不新增任何需释放的资源（空模块无运行时代码）"
-  ]
+    "file_handles",
+    "network_connections",
+    "subagent_processes",
+    "stream_response_body_dropped_before_retry"
+  ],
+  "external_call_timeout_exceptions": [
+    {
+      "surface": "llm_upstream_single_attempt",
+      "code": "crates/pony-agent-core/src/agent/config.rs: UPSTREAM_REQUEST_TIMEOUT_MS_DEFAULT=45_000 / MIN=15_000 / MAX=300_000",
+      "semantics": "单次上游 LLM HTTP 请求（含流式 attempt）的请求级预算：默认 45s，用户可调 [15s, 300s]。B254 现场 elapsed≈40–80s 属正常量级。",
+      "why_not_base": "external_call_timeout_ms=3000 是「一次外部往返」的通用上限；上游模型生成/推理按 45s 量级设计，压到 3s 会误杀所有正常长输出及 body 读取。",
+      "guarantee": "跨 attempt 墙钟由 aggregate_sync_call_budget_ms 按 UPSTREAM_AGGREGATE_DEADLINE_MS_MAX=180_000 封顶，并由 effective_attempt_timeout_ms 逐 attempt 收紧到最小可用预算；B254 C3：流式 followup 不注入该聚合 deadline。",
+      "registered_at": "2026-11-19",
+      "updated_at": "2026-11-19"
+    },
+    {
+      "surface": "llm_upstream_stream_transport",
+      "code": "crates/pony-agent-core/src/agent/provider/mod.rs: build_streaming_http_client（connect_timeout=15s、read_timeout=180s；SYNC_CONNECT_TIMEOUT_MS=15_000，流式读调用点 Duration::from_secs(180)）",
+      "semantics": "流式客户端只设两类预算：建连 15s + 单次读空闲 180s，不设「整个请求」总 deadline。",
+      "why_not_base": "3s 是请求级往返上限；流式是持续到达的增量流，总时限会截断长推理流（provider/mod.rs F7 既有缺陷口径）。",
+      "guarantee": "仅当 180s 无任何字节才判失败，字节持续到达即存活；B254 C1/C2：supports_streaming=true 的 tool_followup 只走流式，body 断流/读失败按 UpstreamNetwork 可重试，完整 SSE 帧解析失败（malformed）仍不可重试，已发出增量后不得重试。",
+      "registered_at": "2026-11-19",
+      "updated_at": "2026-11-19"
+    },
+    {
+      "surface": "llm_upstream_retry_budget",
+      "code": "crates/pony-agent-core/src/agent/config.rs: UPSTREAM_DECISION_MAX_ATTEMPTS_DEFAULT=10（[2,10]）、UPSTREAM_RETRY_BUDGET_MS_DEFAULT=60_000；短退避 SHORT_BACKOFF_INITIAL_DELAY_MS=500 / ×2 / SHORT_BACKOFF_MAX_DELAY_MS=8_000；限流 followup 专用档 provider_rate_limit_backoff_config（2 次、20s→40s、sleep 预算 90s）",
+      "semantics": "上游重试次数默认 10、退避 500ms 指数退避封顶 8s、sleep-only 预算默认 60s；限流/配额命中走 followup 专用 2 次长退避档。",
+      "why_not_base": "退避与 sleep 预算决定重试耐心，不是单次外部调用往返时限；若压进 3000ms 会退化为不重试。",
+      "guarantee": "同步入口跨 attempt 总墙钟受 aggregate_sync_call_budget_ms 封顶（180s）；B254 C3：supports_streaming=true 的 tool_followup 只走流式，不注入该聚合 deadline，由 ProviderStreamGuard 的取消预算与单次读空闲 180s 约束；body 断流/读失败可重试，完整 SSE 帧解析失败不可重试，已发出增量后不得重试。",
+      "registered_at": "2026-11-19",
+      "updated_at": "2026-11-19"
+    }
+  ],
+  "acp": {
+    "request_timeout_ms": 5000,
+    "malformed_line_streak_limit": 3,
+    "spawn_reap_grace_ms": 500,
+    "handshake_timeout_ms": 30000,
+    "turn_budget_ms": 120000
+  },
+  "team_tool_surface_exact_count": 39
 }
