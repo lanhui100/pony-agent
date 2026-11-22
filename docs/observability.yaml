@@ -1733,3 +1733,22 @@ note: >-
   job_start_scoped 跨会话隔离与 ACP guard 生命周期）、`acp/registry.rs` 内联 2 例；契约修订同步改写的
   冻结用例见 ADR §Decision 10（`tests/tui_task_visibility.rs`、`tests/slash_commands_acceptance.rs`）。
   提交信息须带 [decl-change-approved]。
+
+  【归属登记（2026-11-22）｜TUI 输入框多行体验：↑/↓ 跨行导航 + 8 行显示上限（ADR：.agents/notes/implemented/feature/2026-11-22-tui-composer-multiline-nav.md；backlog: B1795354932331）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地 TUI 输入层与呈现层**，
+  无新增对外接口、无网络 IO、无后台任务、无 LLM 调用、无新增环境变量或依赖。
+  (1) 变更面（全部本地）：`crates/pony-agent-core/src/bin/tui.rs`（`MAX_COMPOSER_ROWS = 8`、
+  `composer_input_height`、`vertical_cursor_target`、`TuiState::input_desired_col` /
+  `move_cursor_vertical` 与 Normal 模式 ↑/↓ 分支）、`bin/tui/input.rs`（键位谓词
+  `composer_vertical_navigation`）、`bin/tui/shortcuts.rs`（帮助清单一条）。
+  输入区高度上限由 6 行改为 8 行（含底部呼吸行），正文超出后窗口跟随光标；
+  非空输入框的裸 ↑/↓ 改为行间移动光标（首行 ↑ ⇒ 文字头部、尾行 ↓ ⇒ 文字末尾）。
+  (2) 无新增取证面：不新增日志事件、不新增 span / metric；键位不落库、不落日志
+  （既有 `key_class_label` 只记键类别、不记正文字符的口径不变）。
+  (3) 四维归属不变：tracing / issues 仍 applicable（落点不变 `agent/otel/mod.rs`、
+  `agent/ponysentry/client.rs`）；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、
+  无 `/metrics`、Prometheus pull 模型不成立）。不新增 applicable 判定、不新增 enforcement_point。
+  (4) 行为门落在测试层：`crates/pony-agent-core/src/bin/tui/tests/composer_multiline_nav_tests.rs`
+  （8 例：键位谓词矩阵、8 行上限、首/尾行边界、软折行与 CJK 列对齐、期望列不漂移、
+  编辑清空期望列、空输入框不越界、`TuiState` 宽度接线）。
+  提交信息须带 [decl-change-approved]。

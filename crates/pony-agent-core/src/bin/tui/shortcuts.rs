@@ -91,6 +91,7 @@ pub const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
             ShortcutItem { keys: "Ctrl+W", description: "删除光标前一个词" },
             ShortcutItem { keys: "Ctrl+A", description: "移到行首" },
             ShortcutItem { keys: "Ctrl+E", description: "移到行尾" },
+            ShortcutItem { keys: "↑ / ↓", description: "输入框内跨行移动光标；首行 ↑ 到文字头部，尾行 ↓ 到文字末尾（最多显示 8 行）" },
         ],
     },
     ShortcutSection {
