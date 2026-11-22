@@ -110,28 +110,28 @@ pub fn content_lines(state: &TuiState) -> Vec<(String, Style)> {
     let warn = Style::default().fg(theme::DANGER);
 
     match center.tab {
-        TaskCenterTab::Goal => goal_panel::render_lines(state)
-            .into_iter()
-            .map(|line| {
-                let style = if line.starts_with("已停止") {
-                    warn
-                } else if line.is_empty() {
-                    faint
-                } else {
-                    ink
-                };
-                (line, style)
-            })
-            .collect(),
+        TaskCenterTab::Goal => {
+            // 抽屉空态一行（明细与 `/goal` 引导留给 Ctrl+G 覆盖层，不在抽屉重复长句）。
+            if state.goal_state.is_none() {
+                return vec![("当前会话没有目标".to_string(), faint)];
+            }
+            goal_panel::render_lines(state)
+                .into_iter()
+                .map(|line| {
+                    let style = if line.starts_with("已停止") {
+                        warn
+                    } else if line.is_empty() {
+                        faint
+                    } else {
+                        ink
+                    };
+                    (line, style)
+                })
+                .collect()
+        }
         TaskCenterTab::Plan => {
             let Some(plan) = state.plan_state.as_ref() else {
-                return vec![
-                    ("当前会话还没有计划".to_string(), faint),
-                    (
-                        "模型调用 Plan 后会实时显示步骤进度；/plan 可打开完整面板".to_string(),
-                        faint,
-                    ),
-                ];
+                return vec![("当前会话还没有计划".to_string(), faint)];
             };
             let mut rows: Vec<(String, Style)> = Vec::new();
             rows.push((
@@ -169,25 +169,19 @@ pub fn content_lines(state: &TuiState) -> Vec<(String, Style)> {
             rows
         }
         TaskCenterTab::Tasks => {
-            let Some(board) = state.task_board_state.as_ref() else {
-                return vec![
-                    ("当前没有共享任务".to_string(), faint),
-                    (
-                        "Agent 调用 team_task_create 后会实时汇总到这里；/tasks 可打开完整看板"
-                            .to_string(),
-                        faint,
-                    ),
-                ];
+            // 数据源 = **本会话** todo（`todo_write`），不是进程全局团队看板：
+            // 单会话 TUI 下团队看板几乎恒空，旧实现让 Tasks 页签永远显示「没有任务」。
+            let Some(todos) = state.todos_state.as_ref() else {
+                return vec![("当前没有任务".to_string(), faint)];
             };
             let mut rows: Vec<(String, Style)> = Vec::new();
-            let total = board.tasks.len();
-            let completed = board
-                .tasks
+            let total = todos.len();
+            let completed = todos
                 .iter()
                 .filter(|task| task.status == TuiTaskStatus::Completed)
                 .count();
             rows.push((format!("任务进度：{completed}/{total} 已完成"), ink));
-            for task in &board.tasks {
+            for task in todos {
                 let (mark, style) = match task.status {
                     TuiTaskStatus::Completed => ("✔", Style::default().fg(theme::ACCENT)),
                     TuiTaskStatus::InProgress => ("●", Style::default().fg(theme::ACCENT)),
@@ -209,46 +203,59 @@ pub fn content_lines(state: &TuiState) -> Vec<(String, Style)> {
             rows
         }
         TaskCenterTab::Agents => {
-            let Some(roster) = state.agent_roster_state.as_ref() else {
-                return vec![
-                    ("当前没有 teammate".to_string(), faint),
-                    (
-                        "spawn_teammate 派生队友后此处显示真实名册；/agents 可进入队友会话"
-                            .to_string(),
-                        faint,
-                    ),
-                ];
-            };
+            // 两段内容共用一页：teammate 名册（进程内团队）+ **活跃 ACP 委派**（`acp_delegate`
+            // 同步工具调用期间在跑的外部子智能体）。空态必须等两段都为空才出现。
             let mut rows: Vec<(String, Style)> = Vec::new();
-            let driving = roster.entries.iter().filter(|entry| entry.driving).count();
-            rows.push((
-                format!(
-                    "队友 {} · 驱动中 {driving}",
-                    roster.entries.len()
-                ),
-                ink,
-            ));
-            for entry in &roster.entries {
-                let style = if entry.status.eq_ignore_ascii_case("failed") {
-                    warn
-                } else if entry.driving {
-                    Style::default().fg(theme::ACCENT)
-                } else {
-                    faint
-                };
-                let mark = if entry.driving { "●" } else { "○" };
-                let inbox = if entry.pending_inbox > 0 {
-                    format!(" · 待处理 {}", entry.pending_inbox)
-                } else {
-                    String::new()
-                };
+            if let Some(roster) = state.agent_roster_state.as_ref() {
+                let driving = roster.entries.iter().filter(|entry| entry.driving).count();
                 rows.push((
-                    format!(
-                        "  {mark} {} · {} · {}{inbox}",
-                        entry.name, entry.role, entry.status
-                    ),
-                    style,
+                    format!("队友 {} · 驱动中 {driving}", roster.entries.len()),
+                    ink,
                 ));
+                for entry in &roster.entries {
+                    let style = if entry.status.eq_ignore_ascii_case("failed") {
+                        warn
+                    } else if entry.driving {
+                        Style::default().fg(theme::ACCENT)
+                    } else {
+                        faint
+                    };
+                    let mark = if entry.driving { "●" } else { "○" };
+                    let inbox = if entry.pending_inbox > 0 {
+                        format!(" · 待处理 {}", entry.pending_inbox)
+                    } else {
+                        String::new()
+                    };
+                    rows.push((
+                        format!(
+                            "  {mark} {} · {} · {}{inbox}",
+                            entry.name, entry.role, entry.status
+                        ),
+                        style,
+                    ));
+                }
+            }
+            if !state.acp_delegates.is_empty() {
+                rows.push((
+                    format!("ACP 委派 {} · 运行中", state.acp_delegates.len()),
+                    ink,
+                ));
+                for delegate in &state.acp_delegates {
+                    // 只展示排障必需的三个字段：外部 agent、ACP 会话尾号、委派工作目录；
+                    // 委派正文与输出留在聊天流（工具回执），不进可见面板。
+                    rows.push((
+                        format!(
+                            "  ● {} · {} · {}",
+                            delegate.agent_id,
+                            session_tail(&delegate.acp_session_id),
+                            delegate.cwd
+                        ),
+                        Style::default().fg(theme::ACCENT),
+                    ));
+                }
+            }
+            if rows.is_empty() {
+                rows.push(("当前没有子智能体".to_string(), faint));
             }
             rows
         }
@@ -293,7 +300,7 @@ fn tab_bar(state: &TuiState, width: usize) -> Line<'static> {
         };
         spans.push(Span::styled(text, style));
     }
-    let hint = "Tab 切页签 · ↑↓ 滚动 · Esc 关闭";
+    let hint = "←→ 切页签 · ↑↓ 滚动 · Esc 关闭";
     let used = RAIL
         + TaskCenterTab::ALL
             .iter()

@@ -37,11 +37,11 @@ pub struct TaskGlance {
 /// `TuiState::last_glance_sync` 是唯一时间戳。
 pub const GLANCE_REFRESH_MS: u64 = 500;
 
-/// 刷新常驻任务摘要：三条数据源都是**进程内**注册表（无网络、无 LLM、无磁盘）。
+/// 刷新常驻任务摘要与抽屉 live 数据源：全部是**进程内**注册表（无网络、无 LLM、无磁盘）。
 ///
 /// 与 `sync_tasks_from_store` / `sync_jobs_from_registry` 同一投影纪律：失败只写状态文案，
 /// 不让既有快照瞬间归零。节流口径见 [`GLANCE_REFRESH_MS`]：作业起止最多延迟一个周期可见。
-pub fn sync_task_glance(state: &mut TuiState) {
+pub fn sync_task_glance(state: &mut TuiState, control_plane: &HostControlPlane) {
     if let Some(last) = state.last_glance_sync {
         if last.elapsed().as_millis() < GLANCE_REFRESH_MS as u128 {
             return;
@@ -78,6 +78,12 @@ pub fn sync_task_glance(state: &mut TuiState) {
         .count();
 
     jobs_panel::sync_jobs_from_registry(state);
+    // Agents 页签的「ACP 委派」分区：活跃 ACP 注册表与名册同周期刷新（进程内、无网络）。
+    state.acp_delegates = acp_delegates_from_runtime(&state.session_id);
+
+    // 抽屉 Plan / Tasks 页签的 live 数据源（plan 存储 + 会话 todo）：与摘要同周期刷新，
+    // 让抽屉开着时也能看到轮内计划/待办推进；goal 不在此列（见 `sync_drawer_live_sources`）。
+    projection::sync_drawer_live_sources(state, control_plane);
 }
 
 /// Goal 摘要段（`None` = 没有目标，不出段）。
@@ -144,15 +150,18 @@ fn agents_segment(glance: &TaskGlance) -> Option<String> {
     }
 }
 
-/// 作业摘要段：只报「在跑」与「失败」，都为空时不出段。
+/// 后台任务摘要段：只报「在跑」与「失败」，都为空时不出段。
+///
+/// 计数旁**不带警告图标**：失败数用「失败 N」文字表达（`⚠` 与「队友」段的图标语义
+/// 混在同一条状态栏里会被读成整句告警，与「后台任务计数」混淆）。
 fn jobs_segment(state: &TuiState) -> Option<String> {
     let view = state.jobs_state.as_ref()?;
     let (running, attention) = view.counts();
     match (running, attention) {
         (0, 0) => None,
-        (running, 0) => Some(format!("作业 {running}")),
-        (0, attention) => Some(format!("作业 ⚠{attention}")),
-        (running, attention) => Some(format!("作业 {running}⚠{attention}")),
+        (running, 0) => Some(format!("后台任务 {running}")),
+        (0, attention) => Some(format!("后台任务 失败 {attention}")),
+        (running, attention) => Some(format!("后台任务 {running}·失败 {attention}")),
     }
 }
 

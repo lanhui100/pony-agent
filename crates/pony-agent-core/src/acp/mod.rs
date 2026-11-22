@@ -17,6 +17,8 @@ pub mod config;
 pub(crate) mod delegate_events;
 pub mod handlers;
 pub mod protocol;
+/// 活跃 ACP 委派注册表（进程内只读可见面；见模块文档）。
+pub mod registry;
 /// wave-acp-delegate C0：`acp_delegate` 最终正文归约（W1 签名骨架，实现归 W2a）。
 pub(crate) mod result;
 pub mod session;

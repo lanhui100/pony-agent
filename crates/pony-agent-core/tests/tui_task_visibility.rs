@@ -1,9 +1,13 @@
 //! 任务可见性重构的验收测试（ADR `2026-11-17-tui-task-visibility-bottom-drawer`）：
 //!
-//! 1. 状态条左槽的**常驻任务摘要**（goal / plan / 团队 / 队友 / 作业）与让位顺序；
+//! 1. 状态条左槽的**常驻任务摘要**（goal / plan / 团队 / 队友 / 后台任务）与让位顺序；
 //! 2. 底部**任务抽屉**：高度上限、页签轮转、渲染时不遮最新消息；
 //! 3. 后台**作业投影**：wire 状态解析与计数；
 //! 4. 权限审批**底部内联**：不再整块清正文。
+//!
+//! 2026-11-22 契约修订（ADR `2026-11-22-tui-task-drawer-visibility`）：
+//! - 摘要第五段措辞由「作业」改为「后台任务」（用户心智 = background jobs），且**不再带 `⚠`**；
+//! - 抽屉 Jobs 空态由 3 行改成 1 行「当前没有后台任务」（空态一律一行）。
 //!
 //! 渲染接缝沿用 `tests/tui_ask_panel_layout.rs`：`#[path] mod tui` + TestBackend。
 
@@ -108,11 +112,11 @@ fn summary_lists_goal_plan_team_agents_jobs_in_order() {
     state.jobs_state = Some(JobsViewState::from_items(vec![job("running")]));
 
     let summary = tui::task_summary(&state).expect("摘要必须存在");
-    let positions = ["goal", "plan", "团队", "队友", "作业"]
+    let positions = ["goal", "plan", "团队", "队友", "后台任务"]
         .map(|needle| summary.find(needle).unwrap_or_else(|| panic!("缺少 {needle} 段：{summary:?}")));
     assert!(
         positions.windows(2).all(|pair| pair[0] < pair[1]),
-        "摘要段顺序必须是 goal → plan → 团队 → 队友 → 作业，实际 {summary:?}"
+        "摘要段顺序必须是 goal → plan → 团队 → 队友 → 后台任务，实际 {summary:?}"
     );
     assert!(summary.contains("轮3/5"), "goal 段必须带轮次：{summary:?}");
     assert!(summary.contains("2/5"), "plan 段必须带完成比：{summary:?}");
@@ -278,8 +282,8 @@ fn jobs_tab_renders_an_actionable_empty_state() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        text.contains("当前没有后台作业"),
-        "空态必须给出可读结论，实际 {text:?}"
+        text.contains("当前没有后台任务"),
+        "空态必须给出可读结论（且只一行），实际 {text:?}"
     );
 }
 
