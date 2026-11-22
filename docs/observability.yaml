@@ -1712,3 +1712,24 @@ note: >-
       `crates/pony-agent-core/src/agent/provider/fallback_body.rs` 内的归因真值表用例
       （`type=request` ⇒ 连接上游失败、429 ⇒ 上游限流），以及前端
       `tests/turn-retry.test.ts`（6 例：实测两类死因文本 + 不可重试类 + 畸形输入红线）。
+
+  【归属登记（2026-11-22）｜Ctrl+T 任务抽屉可见性整批修复（ADR：.agents/notes/implemented/bug-fix/2026-11-22-tui-task-drawer-visibility.md；backlog: B265–B270）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地 TUI 呈现/投影层**与一个**进程内只读注册表**，
+  无新增对外接口、无新增网络出口、无新增后台常驻线程、无 `/metrics` 出口、无新增环境变量或依赖。
+  (1) 变更面（全部本地）：`crates/pony-agent-core/src/bin/tui/task_center.rs`（←→ 切页签、空态单行、
+  Agents 页签 ACP 分区）、`status_bar.rs`（后台任务措辞、无警告图标）、`jobs_panel.rs`（`job_list_scoped`
+  按会话过滤）、`projection.rs`（todo/plan 同步与计划版本选择）、`bin/tui.rs`（打开抽屉/轮末同步点、
+  `todos_state` 与 `acp_delegates` 快照）。
+  (2) 新增**进程内只读注册表**（非遥测出口）：`crates/pony-agent-core/src/acp/registry.rs`
+  （`ActiveDelegateGuard` RAII 登记/注销活跃 ACP 委派；Mutex<BTreeMap> 只读快照，条目只含
+  agent id / ACP session id / 宿主会话 / cwd / 起始毫秒，**不含委派正文与输出**；写入只发生在
+  `execute_acp_delegate` spawn 成功后，不参与 ACP 生命周期、预算与权限裁决）。
+  该面不产生 span / metric / 日志行：tracing 收口点仍是 `agent/otel/mod.rs`，issues 落点仍是
+  `agent/ponysentry/client.rs`，均不变。
+  (3) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 `/metrics`、Prometheus pull 与
+  节点日志采集前提均不成立）；不新增 applicable 判定、不新增 enforcement_point。
+  (4) 行为门落在测试层：`crates/pony-agent-core/src/bin/tui/tests/task_center_panel_tests.rs`（5 例）、
+  `task_center_data_sources_tests.rs`（4 例）、`task_center_acp_and_jobs_tests.rs`（3 例，含真实
+  job_start_scoped 跨会话隔离与 ACP guard 生命周期）、`acp/registry.rs` 内联 2 例；契约修订同步改写的
+  冻结用例见 ADR §Decision 10（`tests/tui_task_visibility.rs`、`tests/slash_commands_acceptance.rs`）。
+  提交信息须带 [decl-change-approved]。

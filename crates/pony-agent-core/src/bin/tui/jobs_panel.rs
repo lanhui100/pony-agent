@@ -8,7 +8,7 @@
 //! 刷新是**拉取式**（与 `team-panel-live-polling` 同构），不新增事件通道、不改作业生命周期。
 
 use super::*;
-use pony_agent_core::agent::jobs::{job_list, JobListArgs, JobListItem};
+use pony_agent_core::agent::jobs::{job_list_scoped, JobListArgs, JobListItem};
 
 /// 作业状态（wire 口径：`running` / `completed` / `failed` / `killed`）。
 ///
@@ -110,40 +110,40 @@ impl JobsViewState {
     }
 }
 
-/// 读全局作业注册表 → `TuiState::jobs_state`（唯一同步点）。
+/// 读作业注册表 → `TuiState::jobs_state`（唯一同步点）。
+///
+/// **只装当前会话归属**的作业（契约 B012）：注册表是进程级的，`job_start` / Run 到期 promote
+/// 的作业带 `owner = 发起会话`；不分会话过滤会把别的会话（含 teammate 子会话）的后台任务
+/// 混进本条会话的状态栏与抽屉。过滤在注册表层完成（`job_list_scoped`），非 owner 的作业
+/// **连存在性都不暴露**。
 ///
 /// 与 `sync_tasks_from_store` 同一形态：失败只写状态文案，不清空既有快照
 /// （清空会让「正在跑」在界面上瞬间消失，比显示旧数据更误导）。
 pub fn sync_jobs_from_registry(state: &mut TuiState) {
-    match job_list(JobListArgs {}) {
+    match job_list_scoped(JobListArgs {}, Some(state.session_id.as_str())) {
         Ok(result) => {
             state.jobs_state = Some(JobsViewState::from_items(result.jobs));
         }
         Err(error) => {
-            state.status_text = format!("作业同步失败: {error}");
+            state.status_text = format!("后台任务同步失败: {error}");
         }
     }
 }
 
 /// 抽屉 Jobs 页签的纯文本行（无 `Frame` 依赖，渲染与测试共用）。
+///
+/// 空态**一行**：抽屉空间有限，解释性长句留给 `/panel` 之外的可发现性通道；
+/// 同一页签同一时刻只给一句可行动结论。
 pub fn render_lines(state: &TuiState) -> Vec<String> {
     let Some(view) = state.jobs_state.as_ref() else {
-        return vec![
-            "尚未同步后台作业".to_string(),
-            String::new(),
-            "模型调用 job_start / 长任务转入后台后，作业会出现在这里".to_string(),
-        ];
+        return vec!["尚未同步后台任务".to_string()];
     };
     if view.jobs.is_empty() {
-        return vec![
-            "当前没有后台作业".to_string(),
-            String::new(),
-            "job_start 起的进程与 Run 到期转后台的进程都汇总到这里".to_string(),
-        ];
+        return vec!["当前没有后台任务".to_string()];
     }
     let (running, attention) = view.counts();
     let mut lines = vec![format!(
-        "作业 {} · 运行中 {running} · 需关注 {attention}",
+        "后台任务 {} · 运行中 {running} · 需关注 {attention}",
         view.jobs.len()
     )];
     lines.push(String::new());

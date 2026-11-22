@@ -1651,6 +1651,11 @@ pub struct TuiState {
     pub ask_user_state: Option<AskUserState>,
     pub plan_state: Option<PlanState>,
     pub task_board_state: Option<TaskBoardState>,
+    /// 当前会话的 **todo 快照**（`todo_write` 工具写入；抽屉 Tasks 页签的唯一数据源）。
+    ///
+    /// 与 [`Self::task_board_state`] 分属两种语义：后者是 `/tasks` 覆盖层的**进程全局团队看板**，
+    /// 单会话 TUI 下几乎恒空；抽屉要回答的是「本会话的待办做到哪了」。
+    pub todos_state: Option<Vec<TuiTask>>,
     pub goal_state: Option<TuiGoal>,
     /// 常驻任务摘要计数（状态条左槽的数据源；与面板生命周期无关）。
     pub task_glance: TaskGlance,
@@ -1698,6 +1703,10 @@ pub struct TuiState {
     pub resume_instruction: Option<String>,
     /// W3：Team 角色花名册面板（`None` = 未打开/已关闭）。
     pub agent_roster_state: Option<AgentRosterState>,
+    /// 活跃 **ACP 委派**快照（Tasks 抽屉 Agents 页签的「ACP 委派」分区；空 = 无委派在跑）。
+    ///
+    /// 与会话绑定：只装当前宿主会话发起的委派（注册表见 `pony_agent_core::acp::registry`）。
+    pub acp_delegates: Vec<AcpDelegateRow>,
     /// W3：进入 teammate 子会话前保存的主会话 id（`r` 返回用；`None` = 当前不在队友会话）。
     pub return_session_id: Option<String>,
     /// W3b：当前所处的子智能体会话身份（`None` = **主会话**；`Some` = 输入框下方显示身份徽标）。
@@ -1809,6 +1818,7 @@ impl Default for TuiState {
             ask_user_state: None,
             plan_state: None,
             task_board_state: None,
+            todos_state: None,
             goal_state: None,
             task_glance: TaskGlance::default(),
             last_glance_sync: None,
@@ -1825,6 +1835,7 @@ impl Default for TuiState {
             pending_user_turn: None,
             resume_instruction: None,
             agent_roster_state: None,
+            acp_delegates: Vec::new(),
             return_session_id: None,
             sub_session: None,
             splash_image: None,
@@ -2068,6 +2079,8 @@ impl TuiState {
         self.context_window_tokens = 0;
         self.plan_state = None;
         self.task_board_state = None;
+        // todo 快照同属会话作用域：`todo_write` 按 session_id 分区存储，切会话后必须重同步。
+        self.todos_state = None;
         self.goal_state = None;
         // 抽屉是会话作用域的瞬时视图：切走后旧会话的任务视图不得挂在头上。
         self.task_center = None;
@@ -2112,6 +2125,8 @@ impl TuiState {
         // W3：花名册面板与"返回主会话"目标都绑定会话作用域，复位时一并清空
         //（调用方若需要保留 return_session_id，必须在 reset 之后再写入）。
         self.agent_roster_state = None;
+        // ACP 委派快照同属会话作用域：切走后旧会话的在跑委派不得挂到新会话页签上。
+        self.acp_delegates = Vec::new();
         self.return_session_id = None;
         self.sub_session = None;
         // 会话作用域复位 ⇒ 布局缓存必须失效（/clear 与 /resume 共用本方法）。
@@ -2870,6 +2885,8 @@ impl TuiState {
     /// W3：刷新 `/agents` 花名册快照（每次打开/按 R 重读真实运行时）。
     pub fn refresh_agent_roster(&mut self) {
         self.agent_roster_state = Some(agent_roster_state_from_runtime());
+        // ACP 委派与队友名册同一刷新时机：抽屉 Agents 页签两段内容同帧一致。
+        self.acp_delegates = acp_delegates_from_runtime(&self.session_id);
     }
 
     /// W3：`/agents` 切换（面板内再按 `/agents` 等价于关闭）。
@@ -10346,8 +10363,9 @@ fn tui_event_loop(
             cap_poll_ms = Some(cap_poll_ms.map_or(remaining, |cap| cap.min(remaining)));
         }
 
-        // 常驻任务摘要 + 后台作业快照：三条数据源都是进程内注册表（无网络），每轮刷新。
-        status_bar::sync_task_glance(&mut state);
+        // 常驻任务摘要 + 后台作业快照 + 抽屉 live 数据源（plan/todo）：全是进程内注册表（无网络），
+        // 按 GLANCE_REFRESH_MS 节流刷新。
+        status_bar::sync_task_glance(&mut state, &control_plane);
 
         let mut poll_ms = if state.is_streaming || state.has_pending_animation() { 16 } else { 120 };
         if let Some(cap) = cap_poll_ms {
@@ -11380,9 +11398,12 @@ fn tui_event_loop(
                         continue;
                     }
 
-                    // 1b. 任务抽屉是**非模态**覆盖层：↑↓/PgUp/PgDn/Tab/Esc 优先归抽屉，
+                    // 1b. 任务抽屉是**非模态**覆盖层：←→/Tab 切页签、↑↓/PgUp/PgDn 滚动、Esc 关闭优先归抽屉，
                     //     其余按键照常落进 Composer（用户可在抽屉开着时继续输入）。
+                    //     `←→` 只认**裸方向键**：带 Ctrl 的 `Ctrl+←/→` 是子会话切换（W3b），不得被抽屉吞掉。
                     if state.task_center.is_some() {
+                        let bare_arrow = !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT);
                         match key.code {
                             KeyCode::Esc => {
                                 state.close_task_center();
@@ -11399,6 +11420,20 @@ fn tui_event_loop(
                             KeyCode::BackTab => {
                                 if let Some(center) = state.task_center.as_mut() {
                                     center.prev_tab();
+                                }
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::Left if bare_arrow => {
+                                if let Some(center) = state.task_center.as_mut() {
+                                    center.prev_tab();
+                                }
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::Right if bare_arrow => {
+                                if let Some(center) = state.task_center.as_mut() {
+                                    center.next_tab();
                                 }
                                 dirty = true;
                                 continue;
@@ -11704,11 +11739,12 @@ fn tui_event_loop(
                     // 面板类快捷键（Ctrl+T 任务看板 / Ctrl+R 模型面板）在流式期同样可用（C3）。
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         match key.code {
-                            // 波次 44：Ctrl+T 呼出任务看板（与 /tasks 同路径：先同步真实 todo 存储）。
+                            // 波次 44：Ctrl+T 呼出任务抽屉。
                             // 不占用裸 `t`，避免无法输入以 t 开头的消息。
                             KeyCode::Char('t') => {
-                                // 抽屉是五类任务信息的统一入口；`/tasks` 仍可直达完整看板。
-                                sync_tasks_from_store(&mut state);
+                                // 抽屉是五类任务信息的统一入口；打开瞬间同步 plan/todo/goal
+                                // （旧实现只同步团队看板 ⇒ 抽屉里 Plan/Tasks/Goal 页签永远空）。
+                                projection::sync_drawer_sources(&mut state, &control_plane);
                                 state.toggle_task_center();
                                 continue;
                             }
@@ -11951,10 +11987,7 @@ fn tui_event_loop(
                                     continue;
                                 }
                                 if known_command == Some("/plan") {
-                                    let plans_val = control_plane.plan_list(&state.session_id);
-                                    if let Some(plan_state) = tui_plan_from_value(&plans_val) {
-                                        state.update_plan(plan_state);
-                                    }
+                                    projection::sync_plan_from_store(&mut state, &control_plane);
                                     state.toggle_plan_mode();
                                     continue;
                                 }
@@ -11963,9 +11996,9 @@ fn tui_event_loop(
                                     handle_approve_command(&control_plane, &mut state);
                                     continue;
                                 }
-                                // `/panel`：任务抽屉的斜杠入口（与 Ctrl+T 同一路径，先同步真实 todo 存储）。
+                                // `/panel`：任务抽屉的斜杠入口（与 Ctrl+T 同一路径：打开前同步 plan/todo/goal）。
                                 if known_command == Some("/panel") {
-                                    sync_tasks_from_store(&mut state);
+                                    projection::sync_drawer_sources(&mut state, &control_plane);
                                     state.toggle_task_center();
                                     continue;
                                 }
@@ -12622,10 +12655,9 @@ fn tui_event_loop(
                     state.status_text = "Turn completed".to_string();
                     // B216：状态行随终态消失 ⇒ 轮末摘要落到消息区（耗时/工具数是可回看的持久信息）。
                     state.push_settled_turn_summary(SettledTurnOutcome::Completed);
+                    // 轮末统一刷新：团队看板（/tasks 覆盖层）+ 抽屉 live 数据源（plan/todo）+ goal。
                     sync_tasks_from_store(&mut state);
-                    if let Some(goal_data) = pony_agent_core::agent::goal::active_goal_for_session(&state.session_id) {
-                        state.set_goal(tui_goal_from_goal(&goal_data));
-                    }
+                    projection::sync_drawer_sources(&mut state, &control_plane);
                     // AI 标题：首轮完成后自动生成（仅当标题来源仍为「派生」）。后台线程发起，
                     // 结果经事件回主循环；in-flight 旗标防止每轮重复并发（生成成功即置 ai_title，
                     // 次轮 `needs_ai_title` 即返回 false）。
@@ -13971,3 +14003,21 @@ mod model_window_editor_tests;
 #[cfg(test)]
 #[path = "tui/tests/resume_row_layout_tests.rs"]
 mod resume_row_layout_tests;
+
+/// Ctrl+T 任务抽屉表现层（2026-11-22 批次 A）：页签空态单行、`←/→` 切页签、
+/// 状态栏「后台任务」措辞且计数旁无警告图标。
+#[cfg(test)]
+#[path = "tui/tests/task_center_panel_tests.rs"]
+mod task_center_panel_tests;
+
+/// Ctrl+T 任务抽屉数据接线（2026-11-22 批次 B）：Tasks 读会话 todo、Plan 选最新未终态、
+/// Goal 在抽屉内渲染真实目标。
+#[cfg(test)]
+#[path = "tui/tests/task_center_data_sources_tests.rs"]
+mod task_center_data_sources_tests;
+
+/// Ctrl+T 任务抽屉归属与可见性（2026-11-22 批次 C）：Jobs 按会话过滤、Agents 页签展示
+/// 活跃 ACP 委派。
+#[cfg(test)]
+#[path = "tui/tests/task_center_acp_and_jobs_tests.rs"]
+mod task_center_acp_and_jobs_tests;
