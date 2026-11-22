@@ -1,0 +1,408 @@
+{
+  "d1_session": {
+    "sessionId": "rt-checkout",
+    "sessionList": [],
+    "sessionOperation": null,
+    "sessionHydrating": false,
+    "deletingSessionSet": {},
+    "sessionSwitchToken": 0,
+    "sessionError": null,
+    "sessionNotice": null,
+    "runningSessionMap": {},
+    "completedSessionSet": {},
+    "failedSessionSet": {}
+  },
+  "d3_turn": {
+    "phase": "ready",
+    "phaseLabel": "已就绪",
+    "isSubmitting": false,
+    "activeTurnId": null,
+    "activeTurnStartedAtMs": null,
+    "activeRunId": null,
+    "retryProgress": null,
+    "browserPreviewRunToken": 0,
+    "streamBufferTurnId": null,
+    "streamBufferText": "",
+    "streamBufferReasoning": "",
+    "eventsReady": false,
+    "streamDebugDeltaCount": 0,
+    "streamDebugFlushCount": 0,
+    "streamDebugTextCharsReceived": 0,
+    "streamDebugTextCharsFlushed": 0,
+    "timers": {
+      "deferredPersistTimerId": null,
+      "streamFlushFrameId": null,
+      "streamFlushTimerId": null,
+      "traceTimelineThrottleTimerId": null,
+      "submissionWatchdogTimerId": null
+    }
+  },
+  "d4_messages": {
+    "messages": [
+      {
+        "attachments": [],
+        "status": "done",
+        "tokenCount": null,
+        "id": "m-1",
+        "turnId": "turn-1",
+        "role": "user",
+        "content": "第一问"
+      },
+      {
+        "attachments": [],
+        "status": "done",
+        "tokenCount": null,
+        "id": "m-2",
+        "turnId": "turn-1",
+        "role": "assistant",
+        "content": "第一答"
+      }
+    ],
+    "draftMessage": "",
+    "pendingAttachments": [],
+    "attachmentAssets": [],
+    "sessionSummary": "",
+    "error": null,
+    "toolActivities": [],
+    "traceSteps": [
+      {
+        "id": "step-plan",
+        "label": "接收输入",
+        "state": "completed"
+      },
+      {
+        "id": "step-context",
+        "label": "组织上下文",
+        "state": "active"
+      },
+      {
+        "id": "step-call-model",
+        "label": "调用模型",
+        "state": "pending"
+      },
+      {
+        "id": "step-call-tool",
+        "label": "调用工具",
+        "state": "pending"
+      }
+    ],
+    "messageRevision": "rev-1",
+    "retrievedContext": null,
+    "recallLastUserMessage": "第一问",
+    "agentRuntimeStatus": null,
+    "failedTurnRetry": null,
+    "canSubmitPrompt": true,
+    "isInputDisabled": false
+  },
+  "d5_telemetry": {
+    "traceTimeline": [
+      {
+        "id": "build_context-1",
+        "kind": "build_context",
+        "label": "BUILD CONTEXT",
+        "state": "completed",
+        "sequence": 1,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      },
+      {
+        "id": "call_model-2",
+        "kind": "call_model",
+        "label": "CALL MODEL #1",
+        "state": "active",
+        "sequence": 2,
+        "providerName": null,
+        "providerProtocol": null,
+        "providerModel": null,
+        "providerSource": null,
+        "providerMode": null,
+        "buildContextObservation": null,
+        "toolActivities": [],
+        "text": null,
+        "reasoningContent": null,
+        "fallbackReason": null,
+        "error": null,
+        "inputTokens": null,
+        "cacheHitInputTokens": null,
+        "reasoningTokens": null,
+        "outputTokens": null,
+        "totalTokens": null,
+        "firstTokenLatencyMs": null,
+        "turnDurationMs": null
+      }
+    ],
+    "turnTraceHistory": [],
+    "eventCursorByTurnId": {},
+    "liveMetrics": null,
+    "activeProviderCallRecords": [],
+    "providerRequestedName": "",
+    "providerName": "",
+    "providerProtocol": "",
+    "providerModel": "",
+    "providerSource": "",
+    "providerMode": "",
+    "fallbackReason": null,
+    "inputTokens": null,
+    "outputTokens": null,
+    "totalTokens": null,
+    "firstTokenLatencyMs": null,
+    "sessionTotalCostUsd": 0,
+    "hasUnpricedTurns": false,
+    "formattedSessionCost": "—",
+    "formattedGovernanceCost": "—",
+    "usageGovernanceSummary": {
+      "session": {
+        "cost_usd": 0,
+        "unpriced_turns": 0
+      },
+      "days": [],
+      "policy_version": "v1",
+      "governance_degraded": false
+    }
+  },
+  "d6_history": {
+    "visibleNodeId": "node-2",
+    "branchHeadNodeId": "node-3",
+    "activeBranchId": "branch-1",
+    "cursorVersion": null,
+    "historyCursorMode": "historical",
+    "historyNodes": [
+      {
+        "nodeId": "node-1",
+        "sessionId": "rt-checkout",
+        "parentNodeId": null,
+        "branchId": "branch-1",
+        "kind": "turn_committed",
+        "turnId": "turn-1",
+        "summary": "第一轮",
+        "createdAtMs": 1759999992000,
+        "workspaceRef": null,
+        "history": [],
+        "turnTraceHistory": [],
+        "turnTraceRefs": []
+      },
+      {
+        "nodeId": "node-2",
+        "sessionId": "rt-checkout",
+        "parentNodeId": "node-1",
+        "branchId": "branch-1",
+        "kind": "turn_committed",
+        "turnId": "turn-2",
+        "summary": "第二轮",
+        "createdAtMs": 1759999993000,
+        "workspaceRef": null,
+        "history": [],
+        "turnTraceHistory": [],
+        "turnTraceRefs": []
+      }
+    ],
+    "historyBranches": [
+      {
+        "branchId": "branch-1",
+        "sessionId": "rt-checkout",
+        "baseNodeId": "node-1",
+        "headNodeId": "node-3",
+        "label": "主线",
+        "createdAtMs": 1759999992000,
+        "updatedAtMs": 1759999993000
+      }
+    ],
+    "initialRollbackActive": false,
+    "latestExecutionCheckpoint": null,
+    "latestGraphRunSubmissionPlan": null,
+    "latestGraphRunControlBoundaryEvidence": [],
+    "latestRunControlAuditSummary": null,
+    "latestHistoryStateAuditSummary": {
+      "action": {
+        "kind": "checkout",
+        "nodeId": "node-2"
+      },
+      "currentContext": {
+        "visibleNodeId": "node-2"
+      }
+    },
+    "isHistoricalMode": true,
+    "conversationCheckpointEntries": [
+      {
+        "nodeId": "node-2",
+        "turnId": "turn-2",
+        "branchId": "branch-1",
+        "summary": "第二轮",
+        "createdAtMs": 1759999993000,
+        "isLatest": false,
+        "isVisible": true,
+        "workspaceRollbackCapable": false,
+        "availableModes": [
+          "transcript_only"
+        ],
+        "forkTargets": []
+      },
+      {
+        "nodeId": "node-1",
+        "turnId": "turn-1",
+        "branchId": "branch-1",
+        "summary": "第一轮",
+        "createdAtMs": 1759999992000,
+        "isLatest": false,
+        "isVisible": false,
+        "workspaceRollbackCapable": false,
+        "availableModes": [
+          "transcript_only"
+        ],
+        "forkTargets": []
+      }
+    ]
+  },
+  "d7_queue": {
+    "pendingQueuedMessages": [],
+    "queueDeliveryMode": "queue",
+    "toolAuthorizationMode": "workspace_write"
+  },
+  "d8_catalog": {
+    "health": null,
+    "availableToolNames": [
+      "Run",
+      "Ask",
+      "Read",
+      "Search",
+      "List",
+      "Glob",
+      "WebFetch",
+      "WebSearch",
+      "MCPResource",
+      "ToolSearch",
+      "Write",
+      "Edit",
+      "BatchExecute"
+    ],
+    "capabilitySourceIds": [
+      "builtin-tools"
+    ],
+    "capabilityIds": [
+      "builtin:workspace_run_command",
+      "builtin:echo_input",
+      "builtin:workspace_gather_context",
+      "builtin:workspace_search_text",
+      "builtin:workspace_list_files",
+      "builtin:workspace_glob_files",
+      "builtin:web_fetch_url",
+      "builtin:web_search_query",
+      "builtin:mcp_resource_read",
+      "builtin:tool_search",
+      "builtin:workspace_write_file",
+      "builtin:workspace_edit_file",
+      "builtin:workspace_batch"
+    ]
+  },
+  "persistence": {
+    "sessionKeys": [
+      "rt-checkout"
+    ],
+    "payload": {
+      "cachedStateVersion": 2,
+      "phase": "ready",
+      "messages": [
+        {
+          "attachments": [],
+          "status": "done",
+          "tokenCount": null,
+          "id": "m-1",
+          "turnId": "turn-1",
+          "role": "user",
+          "content": "第一问"
+        },
+        {
+          "attachments": [],
+          "status": "done",
+          "tokenCount": null,
+          "id": "m-2",
+          "turnId": "turn-1",
+          "role": "assistant",
+          "content": "第一答"
+        }
+      ],
+      "attachmentAssets": [],
+      "sessionSummary": "",
+      "providerRequestedName": "",
+      "providerName": "",
+      "providerProtocol": "",
+      "providerModel": "",
+      "providerSource": "",
+      "providerMode": "",
+      "fallbackReason": null,
+      "inputTokens": null,
+      "outputTokens": null,
+      "totalTokens": null,
+      "firstTokenLatencyMs": null,
+      "visibleNodeId": "node-2",
+      "branchHeadNodeId": "node-3",
+      "activeBranchId": "branch-1",
+      "historyCursorMode": "historical",
+      "historyNodes": [
+        {
+          "nodeId": "node-1",
+          "sessionId": "rt-checkout",
+          "parentNodeId": null,
+          "branchId": "branch-1",
+          "kind": "turn_committed",
+          "turnId": "turn-1",
+          "summary": "第一轮",
+          "createdAtMs": 1759999992000,
+          "workspaceRef": null,
+          "history": [],
+          "turnTraceHistory": [],
+          "turnTraceRefs": []
+        },
+        {
+          "nodeId": "node-2",
+          "sessionId": "rt-checkout",
+          "parentNodeId": "node-1",
+          "branchId": "branch-1",
+          "kind": "turn_committed",
+          "turnId": "turn-2",
+          "summary": "第二轮",
+          "createdAtMs": 1759999993000,
+          "workspaceRef": null,
+          "history": [],
+          "turnTraceHistory": [],
+          "turnTraceRefs": []
+        }
+      ],
+      "historyBranches": [
+        {
+          "branchId": "branch-1",
+          "sessionId": "rt-checkout",
+          "baseNodeId": "node-1",
+          "headNodeId": "node-3",
+          "label": "主线",
+          "createdAtMs": 1759999992000,
+          "updatedAtMs": 1759999993000
+        }
+      ],
+      "cursorVersion": null,
+      "initialRollbackActive": false,
+      "checkpoint": null,
+      "runningTurnId": null,
+      "sessionWorkspaceId": "default"
+    },
+    "runningSessionMap": {},
+    "completedSet": {},
+    "failedSet": {}
+  }
+}
