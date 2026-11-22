@@ -127,14 +127,14 @@ const COVERED_ACTIONS = [
   "fetchHealth", "fetchAvailableTools", "fetchCapabilitySources", "fetchCapabilities", "inspectCapability", "inspectCapabilitySource", "overrideGovernanceBlock", "fetchUsageGovernanceSummary", "stopTurn", "enterStoppingPhase", "setSessionNotice", "addPendingAttachments", "removePendingAttachment", "getAttachmentAssets",
   // Wave 2b（B277）：等价测试见 `equivalence-wave2b.spec.ts`（D1 会话目录写 + D2 工作区注册表）。
   "loadWorkspaces", "createNewWorkspace", "renameWorkspace", "deleteWorkspace",
-  "renameSession", "archiveSession", "unarchiveSession"
+  "renameSession", "archiveSession", "unarchiveSession",
+  // Wave 2c（B277）：激活态 / inflight 守卫 / 节流归属 / 续跑入口，见 `equivalence-wave2c.spec.ts`。
+  "activateWorkspace", "normalizeActiveWorkspace", "isSidebarOpInflight",
+  "scheduleThrottledTraceTimeline", "retryLastTurn"
 ];
 
 /** 未覆盖 action + 结构性原因（不得省略：覆盖自评要与代码事实可机械对账）。 */
 const UNCOVERED_ACTIONS: Array<{ name: string; reason: string }> = [
-  { name: "activateWorkspace", reason: "D2 localStorage 激活态（非 6 类场景）" },
-  { name: "normalizeActiveWorkspace", reason: "D2 激活态归一（需注册表投影）" },
-  { name: "isSidebarOpInflight", reason: "D2/D1 侧边栏 inflight 守卫（需并发 UI 操作）" },
   { name: "deleteSession", reason: "D1 删除语义（会话目录 + 回落策略）" },
   { name: "createSession", reason: "D1 新建会话（UUID + 列表投影）" },
   { name: "enterFreshSession", reason: "D1 空白会话落点（UUID + 列表投影）" },
@@ -147,10 +147,8 @@ const UNCOVERED_ACTIONS: Array<{ name: string; reason: string }> = [
   { name: "resolveDerivedSessionRun", reason: "宿主 run 派生（同上）" },
   { name: "updatePersistedBackgroundSession", reason: "后台会话轮事件（需先切走后持续收流）" },
   { name: "resolveTurnTraceTimeline", reason: "既有死代码：src 内无调用方（Wave-1 不清理）" },
-  { name: "scheduleThrottledTraceTimeline", reason: "delta 未携带 traceTimeline（节流分支未触发）" },
   { name: "runBrowserPreviewTurn", reason: "浏览器预览兜底（无宿主分支）" },
   { name: "cancelBrowserPreviewTurn", reason: "浏览器预览兜底（无宿主分支）" },
-  { name: "retryLastTurn", reason: "续跑入口（判定侧已由 failed + failedTurnRetry 覆盖）" },
 ];
 
 const EXPECTED_LISTENER_NAMES = [
@@ -199,8 +197,8 @@ describe("场景 6 · 并发与生命周期", () => {
     const uncoveredNames = UNCOVERED_ACTIONS.map((item) => item.name);
     expect([...COVERED_ACTIONS, ...uncoveredNames].sort()).toEqual([...ACTION_NAMES].sort());
     expect(COVERED_ACTIONS.filter((name) => uncoveredNames.includes(name))).toEqual([]);
-    expect(COVERED_ACTIONS).toHaveLength(78);
-    expect(uncoveredNames).toHaveLength(19);
+    expect(COVERED_ACTIONS).toHaveLength(83);
+    expect(uncoveredNames).toHaveLength(14);
     // 每个 action 名字确实可调用（类型面契约，非行为门禁）。
     for (const name of ACTION_NAMES) {
       expect(typeof record[name], `action ${name} 应可调用`).toBe("function");
