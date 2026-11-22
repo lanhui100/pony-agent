@@ -132,6 +132,9 @@ pub const ATTR_AGENT_TURN_COST_USD: &str = "agent.turn.cost.usd";
 /// 单次 provider 调用耗时（毫秒，I64）；wave-54 C1，与 `ProviderCallCacheRecord.turnDurationMs`
 /// 同窗口；`None` ⇒ 不输出该键。
 pub const ATTR_LLM_CALL_DURATION_MS: &str = "llm.call.duration_ms";
+/// B135：被排除出 `llm.call.duration_ms` 的重试等待（失败 attempt + 退避 sleep）。
+/// 只在真的发生过重试时输出；`duration_ms + retry.wait_ms` 即外层总耗时。
+pub const ATTR_LLM_RETRY_WAIT_MS: &str = "llm.retry.wait_ms";
 
 /// 单次 provider 调用首包耗时（毫秒，I64）；wave-54 C1，**仅** `Some` 时输出
 /// （buffered/无首包 ⇒ 键不存在）。
@@ -2571,6 +2574,7 @@ pub fn start_llm_span_with_provider(
         context_normalized_input: None,
         call_duration_ms: None,
         call_ttft_ms: None,
+        retry_wait_ms: None,
         usage_origin: None,
         cost_usd: None,
         cost_details: None,
@@ -2611,6 +2615,7 @@ pub fn start_llm_span_with_provider(
         context_normalized_input: None,
         call_duration_ms: None,
         call_ttft_ms: None,
+        retry_wait_ms: None,
         usage_origin: None,
         cost_usd: None,
         cost_details: None,
@@ -2638,6 +2643,8 @@ pub struct LlmSpanGuard {
     call_duration_ms: Option<u64>,
     /// wave-54 C1：本次调用首包耗时；`None` ⇒ 不输出 [`ATTR_LLM_CALL_TTFT_MS`]（buffered 无首包）。
     call_ttft_ms: Option<u64>,
+    /// B135：被排除出 duration 的重试等待；`None` ⇒ 不输出 [`ATTR_LLM_RETRY_WAIT_MS`]。
+    retry_wait_ms: Option<u64>,
     /// wave-54 C3：usage 来源（`provider` | `estimated_chars`）；`None` ⇒ 不输出
     /// [`ATTR_AGENT_USAGE_ORIGIN`]（未知不得冒充真值）。
     usage_origin: Option<&'static str>,
@@ -2765,13 +2772,20 @@ impl LlmSpanGuard {
     /// `duration > ttft`；否则 `generation = duration`（`ttft > duration` 时按 C2 退化，
     /// **不**抵扣、**不**产出负值）。只做赋值，落 span 在 `Drop`。
     pub fn record_call_timing(&mut self, duration_ms: Option<u64>, ttft_ms: Option<u64>) {
-        self.call_duration_ms = duration_ms;
-        self.call_ttft_ms = ttft_ms;
+        // B135：外层耗时含重试等待（失败 attempt + 退避 sleep）。这里重基到「最后一次成功
+        // attempt」的纯窗口，并把被排除的等待单列成 `llm.retry.wait_ms`——两个数相加即总耗时，
+        // 所以既能回答「模型多慢」，也不丢「用户等了多久」。
+        // 账本是**窥视**而非取走：per-call 记录构建（`take_pure_call_window`）还要用同一份窗口。
+        let rebased = crate::agent::retry::rebase_timing_to_pure_call(duration_ms, ttft_ms);
+        self.call_duration_ms = rebased.duration_ms;
+        self.call_ttft_ms = rebased.first_token_ms;
+        self.retry_wait_ms = rebased.retry_wait_ms;
         // wave-54 C2（L3 收口）：累加到**当前活动 turn**（同一 task/线程上下文），
         // 这样根 span 的真值不依赖「每个终态出口都记得显式调用」——所有 provider 路径
         // 都会经此函数，Drop 时统一结算。门禁关闭（无 span）时不累加。
         if self.span.is_some() {
-            accumulate_active_turn_call(duration_ms, ttft_ms, self.output_tokens);
+            // turn 级累加与 span 同一口径（重基后的纯耗时），避免根 span 与子 span 对不上。
+            accumulate_active_turn_call(rebased.duration_ms, rebased.first_token_ms, self.output_tokens);
         }
     }
 
@@ -2866,6 +2880,10 @@ impl Drop for LlmSpanGuard {
                     ATTR_LLM_CALL_GENERATION_MS,
                     generation_ms as i64,
                 ));
+            }
+            // B135：被排除的重试等待。无重试 ⇒ 无键（禁止 0 占位冒充真值）。
+            if let Some(wait_ms) = self.retry_wait_ms.filter(|ms| *ms > 0) {
+                span.set_attribute(KeyValue::new(ATTR_LLM_RETRY_WAIT_MS, wait_ms as i64));
             }
             if let Some(ttft_ms) = self.call_ttft_ms {
                 span.set_attribute(KeyValue::new(ATTR_LLM_CALL_TTFT_MS, ttft_ms as i64));
