@@ -1,0 +1,21 @@
+{
+  "startGraphRunStreamArgs": {
+    "turnId": "1760000000000",
+    "runId": null,
+    "goal": "授权模式透传验证",
+    "input": {
+      "message": "授权模式透传验证",
+      "displayMessage": "授权模式透传验证",
+      "providerId": null,
+      "modelId": null,
+      "reasoningEffort": null,
+      "workspaceMode": "coding",
+      "toolAuthorizationMode": "read_only",
+      "sessionId": "rt-session-main",
+      "nodeId": null,
+      "history": [],
+      "images": [],
+      "workspaceId": "ws-authorization"
+    }
+  }
+}

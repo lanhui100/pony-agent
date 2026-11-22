@@ -1,0 +1,50 @@
+{
+  "verdict": "PASS",
+  "audited_scopes": ["src/stores/runtime/"],
+  "findings": [
+    {
+      "file": "src/stores/runtime/catalog.ts",
+      "line": 144,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "message": "20 处 `as XActions`/`as XGetters`（10 域 × 2）对『少成员』与『多成员』都静默放行：tsc 只做可比较性断言，实现缺键不报错；types.ts 的 ActionKeysMissing/ActionKeysUnexpected/FacadeActionKeysMissing 只校验接口键集，不校验实现对象。本轮实测实现侧恰好 97 actions + 18 getters，0 少/0 多/0 重复（静态扫描 + 运行时 Object.keys 枚举 97 unique / 18 unique + createInitialState 84 键与 FrozenStateKeys 逐一对齐），故无现网缺口；但测试目录零键集门禁（`grep -rn FrozenActionKeys src/stores/runtime/__tests__/` 计 0），后续任何模块漏搬运一条 action 仍能 tsc 全绿 + 23 用例全绿。",
+      "counterexample_cmd": "d=$(mktemp -d); echo 'interface A { foo(): void; bar(): void; }' > \"$d/t.ts\"; echo 'export const a = { foo() {} } as A;' >> \"$d/t.ts\"; echo '{\"compilerOptions\":{\"strict\":true,\"noEmit\":true,\"target\":\"es2020\",\"types\":[]},\"files\":[\"t.ts\"]}' > \"$d/tsconfig.json\"; /home/dm/pony-agent/node_modules/.bin/tsc -p \"$d/tsconfig.json\"; echo \"EXIT=$?\""
+    },
+    {
+      "file": "src/stores/runtime/turn-events.ts",
+      "line": 117,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "message": "turnEventRegistry / turnEventRegistryFor / releaseTurnEventRegistry 在原实现是模块私有（2f11dc2f:src/stores/runtime.ts:314/316/326），拆分后为跨模块共享在 turn-events.ts:117/119/128 加了 export（函数体 token 级逐字一致，仅多 export 关键字）。可写面扩大：任何 import 该深路径的模块都能对任意 registry 调 releaseTurnEventRegistry 批量 unlisten（把别的 store 实例 12 个 turn 事件监听一次摘掉，而 eventsReady 仍为 true ⇒ 静默失聪）或直接改写 unlisteners 数组。当前唯一消费方是 turn-execution.ts（initializeTurnEvents/disposeTurnEvents 需要共享 registry），全仓无第三方使用者，属可接受的拆解副作用但未做收窄。建议：registry WeakMap 保持私有，只导出 narrow accessor，或把 initialize/dispose 迁入 turn-events.ts。",
+      "counterexample_cmd": "git show 2f11dc2f:src/stores/runtime.ts | grep -nE \"^(const|function) (turnEventRegistry|releaseTurnEventRegistry)\"; grep -nE \"^(export const|export function) (turnEventRegistry|releaseTurnEventRegistry)\" src/stores/runtime/turn-events.ts"
+    },
+    {
+      "file": "src/stores/runtime/telemetry.ts",
+      "line": 86,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "message": "既有 `as any` 共 9 处，全部为逐字搬迁、0 新增 0 删除（原 2f11dc2f 9 处 → 新代码 9 处，逐条内容一一对应：telemetry.ts:86/96/102/103/142/174/409/425 ← 原 :838/848/854/855/894/915/931/3061，turn-events.ts:1371 ← 原 :5160）。`@ts-ignore` / `@ts-expect-error` / `as unknown as` 新旧均为 0。根因（governanceDecision / backendGovernanceSummary 未进 state 类型）属既有技术债，不是本轮引入，故不阻塞；但搬迁后已分散到两个模块，后续治理需同时改 types.ts 与调用点。",
+      "counterexample_cmd": "git show 2f11dc2f:src/stores/runtime.ts | grep -c \"as any\"; grep -rc \"as any\" src/stores/runtime/*.ts | awk -F: '{s+=$2} END{print s}'"
+    },
+    {
+      "file": "src/stores/runtime/types.ts",
+      "line": 240,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "message": "冻结契约自身仍有 4 处 any：usageGovernanceSummary(:240) 与 governanceBlockDetail(:244) 返回 any，performHistoryOperation 的 normalize payload(:411)、selectNodeId result(:412) 为 any（第 620 行是 GetterValues 映射类型惯用法，不计）。门面断言只比键名，这 4 处使两条 getter 与历史操作的返回形状完全不受契约约束。该文件为 51df4176 冻结面、本轮未改动，故 ADVISORY；建议下一波把 any 换成具体返回类型，否则『97 actions 冻结』对这几项只有名字强度。",
+      "counterexample_cmd": "grep -n \"any\" src/stores/runtime/types.ts"
+    }
+  ],
+  "schema_version": 2,
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "54aad318-fe79-4f14-ace3-ad82936931de",
+    "fresh_context": true
+  },
+  "executed_by": "54aad318-fe79-4f14-ace3-ad82936931de",
+  "reviewed_commit": "0bfd83e4",
+  "attestation": {
+    "self_signed": false,
+    "note": "审查对象 = 未提交工作区 diff（git diff 51df4176 -- src/stores/runtime/，10 文件 +6099/-59）叠在 head 0bfd83e4 上；原实现取 git show 2f11dc2f:src/stores/runtime.ts。"
+  }
+}

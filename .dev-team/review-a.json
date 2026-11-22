@@ -1,0 +1,85 @@
+{
+  "schema_version": 2,
+  "verdict": "PASS",
+  "audited_scopes": [
+    "src/stores/runtime/",
+    "src/stores/runtime.ts"
+  ],
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "e5e8fe0d-bbda-4b97-ad28-30789ee2a14a",
+    "fresh_context": true,
+    "lens": "A / concurrency-scheduling-state-flow"
+  },
+  "executed_by": "e5e8fe0d-bbda-4b97-ad28-30789ee2a14a",
+  "reviewed_commit": "51df4176",
+  "reviewed_state": "uncommitted working tree on 51df4176 (10 files, +6099/-59)",
+  "attestation": {
+    "self_signed": false,
+    "note": "reviewer is an independent L3 subagent; executor is a different session. All counterexample commands were run by the reviewer on the reviewed working tree."
+  },
+  "verdict_basis": {
+    "equivalence": "Machine-extracted every getter/action/top-level helper/state key from git show 2f11dc2f:src/stores/runtime.ts and from the 10 split modules: 84/84 state keys, 18/18 getters, 96/96 actions + performHistoryOperation + 8/8 top-level functions + 6/6 module constants all present; 102 member bodies byte-identical after stripping the added `this: RuntimeStoreThis` annotation; 13 differ only by Prettier line-wrapping plus 2 added `state: RuntimeStoreState` param annotations (isSessionDeleting / isSessionRunning); 4 top-level helpers differ only by the added `export` keyword and the RuntimeStateW59->RuntimeStoreState rename; state factory differs only by one line-wrap. Public export surface is a strict superset (0 removed).",
+    "facade": "10 domain objects x (getters+actions) yield 115 distinct member names = 97 actions + 18 getters, 0 cross-module duplicates; types.ts Frozen*Keys double-sided assertions + vue-tsc EXIT 0 pin the facade.",
+    "gates_rerun_by_reviewer": "npx vitest run src/stores/runtime/__tests__ --no-file-parallelism => 6 files / 23 tests passed, EXIT 0 (2026-11-22T10:18+08:00). Lead's vue-tsc EXIT 0 / full npm test 1591 passed not re-run by me (out of my read-only budget).",
+    "stale_receipt_note": ".dev-team/runtime-split/lead-freeze-vitest.log is a 09:43 RED run (1 failed / 22 passed, cursorVersion null vs 11) and predates the 10:06 working-tree edits; the current tree is green, so that log must not be cited as a delivery receipt."
+  },
+  "findings": [
+    {
+      "file": "src/stores/runtime/turn-execution.ts",
+      "line": 464,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"import sys;s=open('src/stores/runtime/turn-execution.ts').read();gate=any(k in s for k in ('disposing','pendingDispose','disposePromise'));sys.exit(0 if gate else 'CONCURRENCY: initializeTurnEvents gates only on registry.initPromise; disposeTurnEvents sets initPromise=null then awaits the in-flight register while eventsReady is still false, so a concurrent initializeTurnEvents starts a 2nd registerTurnEventListeners on the same registry (28 listeners; releaseTurnEventRegistry then splices both sets)')\"",
+      "detail": "Dispose/initialize TOCTOU: disposeTurnEvents (489-510) nulls initPromise, awaits the in-flight register and only then sets eventsReady=false, while initializeTurnEvents (450-481) gates exclusively on `eventsReady` + `registry.initPromise`. During the await both are effectively open (eventsReady still false, initPromise null), so one interleaved initialize starts a second full registration on the same registry => 28 listeners / duplicated delta handling, then releaseTurnEventRegistry splices both sets. Verbatim from 2f11dc2f (same code, same hole) => amnestied to ADVISORY, but the split moved the registry into a separately-imported module, so a future fix must land in two files. Existing concurrency-lifecycle.spec.ts covers sequential dispose-mid-init and idempotent init, not this interleaving."
+    },
+    {
+      "file": "src/stores/runtime/telemetry.ts",
+      "line": 242,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"import sys;r=open('src/stores/runtime/orchestration.ts').read();t=open('src/stores/runtime/telemetry.ts').read();body=r[r.index('resetSessionRuntimeState(this'):r.index('applySessionSnapshot(this')];cb=t[t.index('scheduleThrottledTraceTimeline'):t.index('flushPendingTraceTimeline')];cleared='clearPendingTraceTimeline' in body;guarded='sessionId' in cb;sys.exit(0 if (cleared and guarded) else 'CONCURRENCY: resetSessionRuntimeState clears throttle timer=%s, callback session-guard=%s => traceTimelineThrottleTimerId/pendingThrottledTraceTimeline armed in session A survive the switch and updateActiveTraceTimeline() publishes A trace into session B' % (cleared,guarded))\"",
+      "detail": "Cross-session timer pollution (trace timeline): scheduleThrottledTraceTimeline arms a 200ms window.setTimeout into state.traceTimelineThrottleTimerId and stashes state.pendingThrottledTraceTimeline; neither resetSessionRuntimeState (orchestration.ts:148-205, which does cancel cancelDeferredPersist/clearSubmissionWatchdog/cancelStreamFlush) nor applySessionSnapshot clears/republishes them, and the callback calls updateActiveTraceTimeline(pending) with no session identity check. A timer armed in session A therefore fires after the switch and writes A's timeline into session B. Verbatim => ADVISORY, but it is the one timer of the four that the session-boundary cleanup forgot, and target #2 asks precisely about stale cross-session timers."
+    },
+    {
+      "file": "src/stores/runtime/orchestration.ts",
+      "line": 763,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"import sys;r=open('src/stores/runtime/orchestration.ts').read();i=r.index('if (hasCachedState) {');br=r[i:r.index('} else {',i)];snap=r[r.index('applySessionSnapshot(this'):r.index('async submitTurn(this')];canc='cancelStreamFlush' in br or 'cancelDeferredPersist' in br;buf='streamBufferTurnId' in snap;sys.exit(0 if (canc and buf) else 'LEAK: cached-session switch cancels stream timer=%s, applySessionSnapshot clears buffer=%s => a 120ms streamFlushTimerId armed on session A fires after B state is applied and flushBufferedStreamText(A_turnId)->ensureAssistantMessage appends A tail text into B.messages' % (canc,buf))\"",
+      "detail": "Cached-session switch keeps the stream-flush timer and buffer alive: the hasCachedState branch (763-790) neither calls cancelStreamFlush/cancelDeferredPersist nor clears streamBufferTurnId/streamBufferText (only the uncached branch does so via resetSessionRuntimeState at 792, and applySessionSnapshot never touches them). Switching away mid-stream leaves a 120ms streamFlushTimerId armed for turn A and buffered text; when it fires after B's snapshot is applied, flushBufferedStreamText(A_turnId) -> ensureAssistantMessage(A_turnId) creates an assistant message inside B.messages carrying A's tail text. Verbatim from the monolith => ADVISORY."
+    },
+    {
+      "file": "src/stores/runtime/turn-execution.ts",
+      "line": 335,
+      "rule": "LEAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"import sys,re;s=open('src/stores/runtime/turn-execution.ts').read();armed=[v for v in re.findall(r'streamFlushFrameId\\s*=(?!=)\\s*([^;\\n]+)', s) if v.strip() != 'null'];sys.exit(0 if armed else 'LEAK: streamFlushFrameId is never armed (only state init null plus a cancelAnimationFrame guard) => the requestAnimationFrame half of the flush pair is dead; cancelStreamFlush protects a handle that is always null, so the rAF/setTimeout pairing is nominal only')\"",
+      "detail": "The rAF half of the flush pair is dead: streamFlushFrameId is only ever initialised to null (state.ts:126) and read/cancelled; nothing assigns a requestAnimationFrame id, so cancelStreamFlush's cancelAnimationFrame branch guards a handle that is always null and the eager-flush guard at 277 always sees null. `streamFlushTimerId` is the only live handle, so the setTimeout pairing is correct but the rAF/setTimeout symmetry target #2 asks about is nominal. Pre-existing (identical in 2f11dc2f:1007-1015, 1083) and it is one of the 84 frozen state keys, so it cannot be removed in this wave."
+    },
+    {
+      "file": "src/stores/runtime/turn-events.ts",
+      "line": 65,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"import sys;ty=open('src/stores/runtime/types.ts').read();te=open('src/stores/runtime/turn-events.ts').read();p=chr(36)+'patch';n=len([l for l in te.splitlines() if ('this.'+p+'(') in l and not l.strip().startswith(('*','//'))]);sys.exit(0 if p in ty else 'CONTRACT_BREAK: %d this.%s() calls in registerTurnEventListeners rely on a Pinia builtin absent from the frozen RuntimeStoreThis contract (types.ts occurrences=0); the widening alias TurnEventsThis (turn-events.ts:65) is local and unexported, so the contract file cannot detect drift' % (n,p))\"",
+      "detail": "`TurnEventsThis = RuntimeStoreThis & { $patch }` masks a real contract gap: 6 `this.$patch(...)` call sites inside registerTurnEventListeners depend on a Pinia builtin that the frozen `RuntimeStoreThis` (= RuntimeStore) does not declare (types.ts occurrences = 0). The alias is local and unexported, so nothing in types.ts (the single source of truth for the facade) records that this one action's `this` is wider; a future move of that action, or a switch away from $patch, is invisible to the contract assertions. Runtime behaviour is unchanged (this is the same Pinia store instance) — flagged as drift risk, not a live defect."
+    },
+    {
+      "file": "src/stores/runtime/turn-events.ts",
+      "line": 117,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"import sys;s=open('src/stores/runtime/turn-events.ts').read();sys.exit(0 if 'export const turnEventRegistry' not in s else 'CONTRACT_BREAK: the per-store registry WeakMap (turn-events.ts:117) with its initPromise/unlisteners fields is now module-level exported mutable state; any importer can splice unlisteners or null initPromise without disposeTurnEvents await-then-release ordering, and SUBMISSION_WATCHDOG_TIMEOUT_MS (turn-execution.ts:40) is likewise exported. The only consumer today is turn-execution.ts, so this is surface widening with no active violation.')\"",
+      "detail": "The 4 added exports widen private mutable state into a cross-module shared surface: `turnEventRegistry` (WeakMap<object,{initPromise,unlisteners}>) plus `turnEventRegistryFor` / `releaseTurnEventRegistry` and `SUBMISSION_WATCHDOG_TIMEOUT_MS`. Any importer can splice unlisteners or null initPromise out of band, bypassing the one place (disposeTurnEvents) that knows the await-then-release ordering. Verified consumer set is exactly one file (src/stores/runtime/turn-execution.ts), and the const is imported by orchestration.ts so the 240s value has a single source (no numeric drift) — hence widening without a current violation; recommend re-internalising behind a single registry-owning module in a later wave."
+    },
+    {
+      "file": "src/stores/runtime.ts",
+      "line": 39,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "python3 -c \"import sys;s=open('src/stores/runtime.ts').read();guard=('satisfies' in s) or ('assertUnique' in s);sys.exit(0 if guard else 'CONTRACT_BREAK: the assembly spreads 10 domain objects declared with  as XxxActions/XxxGetters  assertions (20 casts, which suppress excess and duplicate-key checking); runtime.ts has no uniqueness guard (satisfies/assertUnique present=%s). Extraction of the tree shows 115 member names (97 actions + 18 getters) and 0 cross-module duplicates today, so the shadowing risk is latent rather than active.' % guard)\"",
+      "detail": "The assembly seam is guarded for completeness but not for uniqueness: each of the 10 domain objects is declared with a `as XxxActions` / `as XxxGetters` assertion (20 casts), which suppresses excess-property and duplicate-key checking, and runtime.ts simply spreads them in a fixed order — a name defined in two domains would silently last-write-win with no tsc error and no runtime assertion. types.ts Frozen*Keys + Facade{State,Getter,Action}KeysMissing pin presence (vue-tsc EXIT 0) and my extraction shows 115 distinct names / 0 cross-module duplicates today, so the risk is latent. Note the state-flow itself is unaffected: every cross-domain write order in the extracted bodies is byte-identical to the monolith."
+    }
+  ]
+}
