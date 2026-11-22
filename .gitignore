@@ -106,3 +106,6 @@ venv/
 # .dev-team 其余文档必须跟踪，故只忽略 tmp-* 前缀的临时脚本；temp-eval-env 是 loop 运行态。
 .dev-team/tmp-*
 temp-eval-env/
+
+# 任务账本 v3 的本地活动批次指针（运行时产物，不入仓）
+backlog/.state/
