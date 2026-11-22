@@ -6,14 +6,14 @@
 
 | 门 | 脚本 | 负样本 spec | 接线 | 退出语义 |
 |---|---|---|---|---|
-| backlog 账本门 | `.meta/gates/backlog-gate.sh` | `.meta/gates/backlog-gate.spec.sh` | pre-commit（哨兵块之外）+ `ponygo-governance.yml` + `npm run verify`（`backlog:gate`） | 0 放行 / 非零拒绝；账本缺失 → 明确跳过；无 `node` → 拒绝 |
+| backlog 账本门 | `.meta/gates/backlog-gate.sh` | `.meta/gates/backlog-gate.spec.sh` | pre-commit（哨兵块之外）+ `ponygo-governance.yml` + `npm run verify`（`backlog:gate`） | 0 放行 / 非零拒绝；账本缺失 → 明确跳过；v2 过渡期只读兼容放行（NOTE）；布局不一致（有 log 缺 MODEL）→ 拒绝；无 `node` → 拒绝 |
 
 ## 承诺 → 非零退出命令
 
 | 承诺 | 命令 | 命中判据 |
 |---|---|---|
-| 账本记录合法且跨归档/租约对账干净 | `bash .meta/gates/backlog-gate.sh` | `lint`（必填字段/条件必填/状态字段合法性/租约-状态互斥/活跃池 done 残留/ID 唯一/高水位）+ `doctor`（ID 重复/高水位/孤儿租约/租约-状态互斥） |
-| 门自己会拒绝非法样本 | `bash .meta/gates/backlog-gate.spec.sh` | P1 放行 + N1–N7（缺 fingerprint / 活跃 done / 孤儿租约 / 高水位越界 / 无账本跳过 / 无 node 拒绝 / 锁存而记录非 in_progress）+ H（pre-commit 接线：门在场放行 / 门缺失 fail-closed） |
+| 账本记录合法且跨归档/租约对账干净 | `bash .meta/gates/backlog-gate.sh` | `lint`（批次头/事件结构/时间单调/fold 不变量/状态字段合法性/租约-状态互斥/ID 唯一）+ `doctor`（ID 重复/孤儿租约/租约-状态互斥/归档清单）+ `verify-archive`（归档批次 sha256 封存） |
+| 门自己会拒绝非法样本 | `bash .meta/gates/backlog-gate.spec.sh` | P1–P3 放行（v3 单批次 / 双批次并集 / v2 过渡）+ N1–N8（批次头缺失 / 未知事件 / v2 缺 fingerprint / 归档被改动 / 归档未入清单 / 锁存而记录非 in_progress / 有 log 缺 MODEL / 无 node）+ H（pre-commit 接线：门在场放行 / 门缺失 fail-closed） |
 
 ## 契约与真源
 

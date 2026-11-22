@@ -15,7 +15,7 @@
   - 文档分层清单：[`.meta/docs-tier/README.md`](.meta/docs-tier/README.md)
 - **技术决策记录 (ADR)**：[`.agents/notes/`](.agents/notes/)（最高优先级决策真源，技术方案选型、现在时记录、替代方案考量；受 `adr-verify` 强门禁保护）
 - **架构与设计指南**：[`docs/architecture/`](docs/architecture/)（系统拓扑、模块交互、运行时设计）
-- **待办任务与执行账本 (Backlog)**：[`backlog/`](backlog/)（唯一活账本 [`tasks.jsonl`](backlog/tasks.jsonl)，支持任务级并发租约锁与行级强校验；契约见 [`backlog/README.md`](backlog/README.md)，由 `scripts/backlog.mjs` 驱动、`backlog-gate`（lint + doctor）门禁约束）
+- **待办任务与执行账本 (Backlog)**：[`backlog/`](backlog/)（唯一活账本，v3 **批次日志**：`backlog/log/<批次>.jsonl` 只追加、`fold` 现算视图、按批归档封存 `archive/batches/` + sha256 清单；契约见 [`backlog/README.md`](backlog/README.md)，由 `scripts/backlog.mjs` 驱动、`backlog-gate`（lint + doctor + verify-archive）门禁约束）
 - **工程复用技能库**：[`.agents/skills/`](.agents/skills/)
 - **历史归档档案（已冻结退役，只读）**：
   - OpenSpec 规范归档：[`openspec/`](openspec/)（历史规格与设计草案，见 [`RETIRED.md`](openspec/RETIRED.md)）
@@ -58,7 +58,7 @@
 3. **`main` 只能经 PR 前进**：推特性分支 → 开 PR → CI `verify` 全绿 → **人工点 Merge**。本地 `pre-push`（`scripts/git-guard.mjs`）与远端 ruleset 双重拦截直推与历史改写；灾备确需直推时显式 `PONY_GUARD_ALLOW_MAIN_PUSH=1` 并在提交信息说明理由。
 4. **发版不改写主干**：`npm run release`（本地 bump + commit + tag）→ 走 PR 合并 → `npm run release:push`（只推 tag 触发发布）。普通 PR 用 **Squash**，发版 PR（`chore/release-v*`）用 **Merge commit**，否则 tag 会指向不在 `main` 历史上的提交。
 
-配套门禁：`npm run git:guard:selftest`（本地守卫正负样本自检，已接入 `npm run verify` 与 CI governance）、`gh api repos/lanhui100/pony-agent/branches/main/protection`（远端保护在册，非 404）。共享文件（`backlog/tasks.jsonl`、四处同步版本文件）合并前须确认无并发写入；并发场景下版本 bump 收敛到发版 PR 一次完成。
+配套门禁：`npm run git:guard:selftest`（本地守卫正负样本自检，已接入 `npm run verify` 与 CI governance）、`gh api repos/lanhui100/pony-agent/branches/main/protection`（远端保护在册，非 404）。共享文件（四处同步版本文件）合并前须确认无并发写入；账本 v3 起按会话/发布面批次**各写各的** `backlog/log/<批次>.jsonl`（合并零冲突，不要再改他人的批次文件）；并发场景下版本 bump 收敛到发版 PR 一次完成。
 
 <!-- BEGIN constitution -->
 
@@ -68,5 +68,5 @@
 2. 凡机械可查的承诺，配一条非零退出的命令；机器到不了的，显式标注「靠 review」。
 3. 删除代码前先搜消费者；恢复条件立法，拒绝「以后可能用得上」式怀旧。
 4. 每个事实一个家：文档治理规则的家是 `docs/AGENTS.md`（agent 自动加载），人读契约是 README；改行为/契约的那次提交同步更新对应文档。
-5. 非平凡交付必须在 backlog 账本留痕（record / start / resolve）；账本一致性与租约对账由 `backlog-gate`（lint + doctor）机械校验，证据成立性靠 review。
+5. 非平凡交付必须在 backlog 账本留痕（record / start / resolve；v3 记账即写本会话批次日志，随 PR 提交 `backlog/log/<批次>.jsonl`）；账本一致性与租约对账由 `backlog-gate`（lint + doctor + verify-archive）机械校验，证据成立性靠 review。
 <!-- END constitution -->
