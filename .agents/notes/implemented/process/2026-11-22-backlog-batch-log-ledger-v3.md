@@ -1,6 +1,6 @@
 # Agent Note: backlog 账本 v3——批次日志（write-per-batch, fold-on-read）+ 按批归档封存
 
-Status: proposed
+Status: implemented
 
 ## Problem
 
@@ -14,7 +14,7 @@ v2 账本把全部任务写进同一个 `backlog/tasks.jsonl`，用 `backlog/.ne
   （一次会话按 release surface 选一批任务一起做、一起提交）。单位错配 ⇒ 冲突是必然，不是偶然；
   逐分支手工解冲突只是把成本转嫁给每个 PR。
 
-## Proposal
+## Decision
 
 1. **写入模型改为批次日志**：`backlog/log/<batchId>.jsonl`，每个会话/发布面批次一个文件，只追加；
    `batchId = <YYYYMMDD>T<HHMMSS>Z-<surface>-<rand4>`，首行 `batch.start`（含 `surface` / `release?`）。
@@ -70,3 +70,18 @@ v2 账本把全部任务写进同一个 `backlog/tasks.jsonl`，用 `backlog/.ne
 - 判定真源：`scripts/backlog.mjs`、`scripts/backlog-migrate-v2-v3.mjs`
 - 门禁：`.meta/gates/backlog-gate.sh` + `.meta/gates/backlog-gate.spec.sh`
 - 全局技能：`~/.agents/skills/pg-backlog`（v3 模型与迁移指引，dogfood 后提炼）
+
+## Implementation record（2026-11-22）
+
+- 工具链与门禁：commit `47d969ed`（`scripts/backlog.mjs` v3、迁移脚本、`backlog-gate` v3 语义、
+  负样本 spec P1–P3/N1–N8/H、`tests/backlog-cli.spec.ts` 28 例、`backlog/README.md` 与 AGENTS 同步、
+  `package.json` 的 `backlog:gate` 加 `verify-archive`）。
+- 本仓账本迁移：随本提交落地——`backlog/MODEL`（v3）+ 基线批次
+  `backlog/log/20261122T052552Z-legacy-migration-507e.jsonl`（14 条活跃，原 ID/字段不变）+
+  删除 `backlog/tasks.jsonl`/`backlog/.next-id`；迁移对账 PASS（活跃 14 / done 205），
+  迁移后 `lint`+`doctor`+`backlog-gate`（v3）全绿。
+- 记账自查（dogfood）：本迁移工作本身记在会话批次
+  `backlog/log/20261122T052610Z-backlog-760a.jsonl`（账本 ID `B1795325170487`/`B1795325170545`
+  已闭环；`B1795325170602` = 全局技能 v3、`B1795325170667` = 夹具演练 仍为 todo）。
+- 全局技能（`~/.agents/skills/pg-backlog`）的 v3 文档与迁移指引、夹具演练：待后续提交补齐
+  （本 ADR 的 Decision 9 已登记约束：技能实现须晚于本仓实证）。
