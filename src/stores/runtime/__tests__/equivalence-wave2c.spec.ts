@@ -63,9 +63,15 @@ vi.mock("@/lib/runtime/file-attachments", async (importOriginal) => {
 });
 
 import { ACTIVE_WORKSPACE_STORAGE_KEY } from "@/lib/runtime/workspace-constants";
+import type { TraceTimelineEntry } from "@/types/runtime";
 import { advance, seedStore, setupRuntimeHarness } from "./harness";
 
 const harness = setupRuntimeHarness(tauriMocks);
+
+/** 最小合法 timeline 条目（本波只关心「条目数量」与「投递归属」，不关心渲染字段）。 */
+function timelineEntry(id: string, sequence = 1): TraceTimelineEntry {
+  return { id, kind: "call_model", label: id, state: "pending", sequence };
+}
 
 describe("D2 · 工作区激活态（activateWorkspace / normalizeActiveWorkspace）", () => {
   it("activateWorkspace：设置创建目标并写入 localStorage 单一真相源", () => {
@@ -122,12 +128,12 @@ describe("D3 · 流式 trace timeline 节流（scheduleThrottledTraceTimeline）
     const store = harness.getStore();
     seedStore(store, { sessionId: "s1", activeTurnId: "t1" });
 
-    store.scheduleThrottledTraceTimeline([{ traceId: "a" }]);
+    store.scheduleThrottledTraceTimeline([timelineEntry("a")]);
     const firstTimerId = store.traceTimelineThrottleTimerId;
     expect(firstTimerId).not.toBeNull();
     expect(store.pendingThrottledTraceTimeline).toHaveLength(1);
 
-    store.scheduleThrottledTraceTimeline([{ traceId: "a" }, { traceId: "b" }]);
+    store.scheduleThrottledTraceTimeline([timelineEntry("a"), timelineEntry("b", 2)]);
     expect(store.traceTimelineThrottleTimerId).toBe(firstTimerId);
     expect(store.pendingThrottledTraceTimeline).toHaveLength(2);
   });
@@ -136,7 +142,7 @@ describe("D3 · 流式 trace timeline 节流（scheduleThrottledTraceTimeline）
     const store = harness.getStore();
     seedStore(store, { sessionId: "s1", activeTurnId: "t1" });
 
-    store.scheduleThrottledTraceTimeline([{ traceId: "a" }]);
+    store.scheduleThrottledTraceTimeline([timelineEntry("a")]);
     // 定时器存活期间切会话：旧归属的 pending 不得落到新会话的活跃轮。
     seedStore(store, { sessionId: "s2" });
     await advance(260);
