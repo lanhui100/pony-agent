@@ -2883,7 +2883,10 @@ impl Drop for LlmSpanGuard {
             }
             // B135：被排除的重试等待。无重试 ⇒ 无键（禁止 0 占位冒充真值）。
             if let Some(wait_ms) = self.retry_wait_ms.filter(|ms| *ms > 0) {
-                span.set_attribute(KeyValue::new(ATTR_LLM_RETRY_WAIT_MS, wait_ms as i64));
+                // `as` 会新增 `clippy::as_conversions` / `cast_possible_wrap` 计数（棘轮门按键冻结），
+                // 故用饱和转换：毫秒量级不可能溢出，这里只是不引入新的 cast 告警。
+                let wait_ms = i64::try_from(wait_ms).unwrap_or(i64::MAX);
+                span.set_attribute(KeyValue::new(ATTR_LLM_RETRY_WAIT_MS, wait_ms));
             }
             if let Some(ttft_ms) = self.call_ttft_ms {
                 span.set_attribute(KeyValue::new(ATTR_LLM_CALL_TTFT_MS, ttft_ms as i64));

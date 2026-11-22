@@ -1319,7 +1319,7 @@ pub fn take_provider_attempt_window() -> Option<ProviderAttemptWindow> {
 /// 之后到来的 `llm.chat` span 记账就只剩外层（含重试等待）耗时。本函数提供只读视图，
 /// 让「记录构建」与「span 记账」共享同一份窗口，而不改变任一方的取走语义。
 pub fn peek_provider_attempt_window() -> Option<ProviderAttemptWindow> {
-    ATTEMPT_WINDOW.with(|slot| slot.borrow().as_ref().map(|state| state.snapshot()))
+    ATTEMPT_WINDOW.with(|slot| slot.borrow().as_ref().map(AttemptWindowState::snapshot))
 }
 
 /// 重基后的耗时三元组（B135）。
