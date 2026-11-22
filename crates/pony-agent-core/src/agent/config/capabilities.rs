@@ -3,6 +3,21 @@
 //! 为什么独立：`config.rs` 的增长主要来自「注册表读写 + 持久化 + 一堆纯声明」混在一个文件里，
 //! 文件行数棘轮门（size:check，≤3000 行/文件）因此反复被顶到基线边缘。本模块只保留
 //! 「模型支持什么」这一层纯数据与查表逻辑，不碰文件 IO、不碰注册表可变状态。
+// 抽取注记：这三项在 `config.rs` 里是「已计入基线」的存量（棘轮按 (lint, 文件) 冻结计数）；
+// 搬到新文件后不带声明就会被记成「新增债」。故在新家显式 expect，理由与原语义一致。
+#![expect(
+    missing_debug_implementations,
+    reason = "能力声明是纯数据快照，不进日志/不参与错误链，Debug 对调用方无价值"
+)]
+#![expect(
+    clippy::derivable_impls,
+    reason = "ProviderCapabilityPreset 的 Default 显式写出 DeepseekChat，比 derive 的隐式首变体更达意"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "模型能力本就是一组布尔开关；拆子结构会改变 wire 形状，得不偿失"
+)]
+
 use super::{default_true, DEFAULT_CONTEXT_WINDOW_TOKENS};
 use serde::{Deserialize, Serialize};
 
