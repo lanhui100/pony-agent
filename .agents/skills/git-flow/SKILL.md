@@ -68,7 +68,7 @@ git switch -c chore/release-v0.1.200 origin/main
 npm run release                      # 本地 bump + commit + 打 tag，不推送
 git push -u origin chore/release-v0.1.200
 gh pr create --fill                  # → 人工用 Merge commit 合并（不要 squash）
-npm run release:push                 # 只推 tag；未合并进 origin/main 会被拒绝
+npm run release:push                 # 只推已存在的 tag（不代替 bump）；无 tag / 未合入 origin/main 直接 exit 1，本地零副作用
 ```
 
 **发版 PR 必须用 Merge commit**：squash 会重写提交哈希，tag 将指向不在 `main` 历史上的提交，追溯断链。

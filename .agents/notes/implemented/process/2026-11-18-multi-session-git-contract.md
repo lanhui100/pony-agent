@@ -27,7 +27,7 @@ Date: 2026-11-18
 | L1 命名纪律 | 分支 `<类型>/<任务号或主题>`，类型 ∈ {feat, fix, chore, docs, refactor, test, perf, build, ci, revert, release, integrate, backup, exp}；提交信息走 Conventional Commits | `bash scripts/git-guard.spec.sh`（E 段分支名负样本、D 段提交信息负样本） |
 | L2 跨平台本地守卫 | `scripts/git-guard.mjs` 单实现覆盖三平台：暂存卫生（产物目录/二进制/20MB/尾随换行/敏感信息）+ pre-push 纪律（禁直推 `main`、禁改写远端既有历史、分支命名）+ commit-msg 规范。`scripts/git-guard.ps1` 退役 | `npm run git:guard:selftest`（11 条正负样本断言） |
 | L3 远端闸门 | `main` 受保护：必须走 PR、必须通过必过检查、禁 force push、禁删除；PR 模板带并发安全自查栏 | `gh api repos/lanhui100/pony-agent/branches/main/protection`（非 404） |
-| L4 发版路径 | `npm run release` 只做本地 bump + commit + tag；`npm run release:push` 只推 tag，且必须先校验 HEAD 已是 `origin/main` 祖先。`main` 只能经 PR 进入 | `node scripts/release.mjs --push` 在未合并时 exit 1 |
+| L4 发版路径 | `npm run release` 只做本地 bump + commit + tag（不推送任何东西）；`npm run release:push` 是纯操作：只校验「tag 已存在且指向 `origin/main` 历史」并推送该 tag，任何失败都不留 commit/tag（见 [2026-11-22-release-push-idempotent-and-cli-install-atomic](../bug-fix/2026-11-22-release-push-idempotent-and-cli-install-atomic.md)）。`main` 只能经 PR 进入 | `npm run release:push:selftest`（沙箱 5 组正负样本：缺 tag / 未合入 / 正常推 / 幂等重跑 / 远端指向冲突） |
 | L5 文档与技能 | 本 ADR + `AGENTS.md` 常载契约章节 + `.agents/skills/git-flow/SKILL.md` 操作手册 | `npm run adr:check` |
 
 两条硬约束（不随场景放宽）：
