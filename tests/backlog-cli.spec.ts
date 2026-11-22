@@ -328,6 +328,28 @@ describe('v2 只读兼容与迁移', () => {
       .toThrow(/backlog-migrate-v2-v3/);
   });
 
+  it('迁移脚本 --adopt-v2：接管在途分支残留的 v2 行，已存在 ID 跳过不覆盖', () => {
+    seedV2([baseTask()]);
+    const env = { ...process.env, PONY_BACKLOG_ROOT: root };
+    execFileSync(process.execPath, [MIGRATE], { cwd: path.resolve('.'), env, encoding: 'utf8' });
+    // 模拟在途分支基于 v2 记账：main 已迁 v3，合并后又带回一份 tasks.jsonl
+    writeJsonl(paths.legacyTasks, [
+      baseTask({ status: 'done', evidence: 'old', closed_at: '2026-01-02T00:00:00.000Z' }),
+      baseTask({ id: 'B999', title: '在途新任务', metadata: { fingerprint: 'inflight' } })
+    ]);
+    const out = execFileSync(process.execPath, [MIGRATE, '--adopt-v2', '--surface', 'inflight'], {
+      cwd: path.resolve('.'), env, encoding: 'utf8'
+    });
+    expect(out).toMatch(/跳过 v3 已存在的 ID 1 条/);
+    expect(fs.existsSync(paths.legacyTasks)).toBe(false);
+    const state = fold(paths);
+    expect(state.active.map(row => row.id)).toContain('B999');
+    // 已存在的 B001 不被 v2 残留行覆盖（仍是迁移时的 todo，不会变成 done）
+    expect(state.active.find(row => row.id === 'B001')?.status).toBe('todo');
+    expect(state.done.some(row => row.id === 'B001')).toBe(false);
+    expect(lintAll(paths).ok).toBe(true);
+  });
+
   it('迁移脚本：v2 → v3 基线批次，活跃数/done 数对账一致，幂等拒绝重跑', () => {
     seedV2([baseTask()], [baseTask({ id: 'B002', status: 'done', evidence: 'old', closed_at: '2026-01-02T00:00:00.000Z' })]);
     const env = { ...process.env, PONY_BACKLOG_ROOT: root };

@@ -119,6 +119,12 @@ node scripts/backlog.mjs lint && node scripts/backlog.mjs doctor && node scripts
 git add backlog/MODEL backlog/log backlog/archive && git rm backlog/tasks.jsonl backlog/.next-id
 ```
 
+在途分支（基于 v2 记账，合到已迁移的 v3 main 后残留 `tasks.jsonl`）：
+
+```bash
+node scripts/backlog-migrate-v2-v3.mjs --adopt-v2 --surface <s>   # 只接管 fold 里尚不存在的 ID
+```
+
 脚本做的事：把现有活跃任务写成**一个基线批次**（原 ID/字段不变）→ 临时写 `MODEL` 用 v3 fold
 对账（活跃数、done 数必须一致，不一致自动回滚）→ 删除 `tasks.jsonl` 与 `.next-id`；v2 遗留归档
 `tasks-<YYYY>.jsonl` 保留只读。迁移是断言式失败关闭的，**不可重复执行**（MODEL 已存在 → exit 2）。

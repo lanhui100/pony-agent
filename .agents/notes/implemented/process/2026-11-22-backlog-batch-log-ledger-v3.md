@@ -80,6 +80,9 @@ v2 账本把全部任务写进同一个 `backlog/tasks.jsonl`，用 `backlog/.ne
   `backlog/log/20261122T052552Z-legacy-migration-507e.jsonl`（14 条活跃，原 ID/字段不变）+
   删除 `backlog/tasks.jsonl`/`backlog/.next-id`；迁移对账 PASS（活跃 14 / done 205），
   迁移后 `lint`+`doctor`+`backlog-gate`（v3）全绿。
+- 在途分支接管：迁移脚本提供 `--adopt-v2`——目标已是 v3 但工作树又带回 v2 `tasks.jsonl` 时，
+  只接管 fold 里尚不存在的 ID（已存在者跳过、不覆盖），然后删除残留 `tasks.jsonl`/`.next-id`；
+  测试见 `tests/backlog-cli.spec.ts` 的 adopt 用例。
 - 记账自查（dogfood）：本迁移工作本身记在会话批次
   `backlog/log/20261122T052610Z-backlog-760a.jsonl`（账本 ID `B1795325170487`/`B1795325170545`
   已闭环；`B1795325170602` = 全局技能 v3、`B1795325170667` = 夹具演练 仍为 todo）。
