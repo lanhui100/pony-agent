@@ -371,6 +371,14 @@ pub enum AcpMcpTransportSpec {
 /// - `mcp-config-v1` 只允许 stdio（schema `not:{required:[url]}`；出现 `url` 即被 loader 拒绝），
 ///   故 **inherit 只能产出 [`McpServer::Stdio`]**。
 ///
+/// # 明文与 headers 的两条硬事实（B177 ADVISORY ⑩）
+/// - **`${env:VAR}` 在加载期就被替换成明文**：转换后的 spec 里保存的是密钥**值**，不保留变量引用。
+///   本层不做二次屏蔽、也不知道哪个值敏感 —— 因此**任何把 spec 落盘 / 写日志 / 上报的调用方
+///   都必须自行脱敏**（现有实现只对 deny 表命中的键做 fail-closed，不覆盖其余明文）。
+/// - **显式条目的 `http` / `sse` `headers` 原样透传**给外部 agent：不清洗、不加 header 白名单、
+///   写日志时也不抹除。因此 headers 里不得放长期凭据；需要密钥时应在外部 agent 侧用它自己的
+///   配置去引用环境变量，而不是让 Pony 把明文塞进 headers。
+///
 /// # diagnostics 不得吞
 /// inherit 的每条 `McpConfigDiagnostic` 都以 `code` + `server` + `message` 记入 stderr
 /// （`[acp][config]` 前缀）；文件级致命诊断（`invalid_json` / `invalid_root` /
