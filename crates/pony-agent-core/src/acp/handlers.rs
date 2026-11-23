@@ -274,7 +274,16 @@ fn read_slice(
     let mut collected = 0usize;
     loop {
         let mut line_buffer = String::new();
-        let read = reader.read_line(&mut line_buffer).map_err(SliceReadError::Io)?;
+        // 非 UTF-8 字节：`read_line` 以 `ErrorKind::InvalidData` 报错（不是 IO 失败）。
+        // 归到 `NotUtf8` 才能给出「拒绝以文本读取」的准确文案；否则用户会看到误导性的
+        // 「读取文件失败（…）：stream did not contain valid UTF-8」（B177 ADVISORY ⑥）。
+        let read = match reader.read_line(&mut line_buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(SliceReadError::NotUtf8)
+            }
+            Err(error) => return Err(SliceReadError::Io(error)),
+        };
         if read == 0 {
             break;
         }
@@ -291,9 +300,6 @@ fn read_slice(
         if collected >= take {
             break;
         }
-    }
-    if index == 0 && !selected.is_empty() {
-        return Err(SliceReadError::NotUtf8);
     }
     Ok(selected)
 }
