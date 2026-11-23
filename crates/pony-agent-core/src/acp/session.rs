@@ -984,6 +984,22 @@ impl AcpAgentSession {
             .unwrap_or_default();
 
         match response {
+            // ── 契约登记（B169）：cancel-race 下 **Ok 优先**，取消不覆盖已到达的终态 ──
+            //
+            // 场景：调用方在 prompt 进行中置位取消令牌（`cancel_observed = true`），但 agent
+            // 在同一时刻已经发完 `session/prompt` 的终态响应（`stop_reason = EndTurn/MaxTokens/...`）。
+            // 此时这里**仍然按 agent 的终态归约**，不退化成 aborted。
+            //
+            // 为什么这样定：Ok 说明外部 agent 已经完成了这一轮，输出是完整可信的；若因为
+            // 本地取消信号把结果改写成 aborted，用户会看到「已取消」但正文已经产出并被丢弃，
+            // 且 `errors: [tool_cancelled]` 与真实情况不符。
+            //
+            // 谁来兜住「用户确实想停」这件事：取消信号在轮询里已经 `session/cancel` 发给 agent，
+            // 且宿主侧 dispatcher 负责停止链的最终裁决（`stop_turn` / 停止短语），不依赖这里改写
+            // 归约结果。也就是说：**这里只对「这一轮的事实」负责，不对「用户意图」做二次裁决**。
+            //
+            // 反向场景（取消已发但 agent 不回包 ⇒ 传输层 timeout/断链）仍归约 aborted + tool_cancelled，
+            // 见下方 `Err(error) if cancel_observed || self.cancellation_requested()` 分支。
             Ok(response) => self.outcome_result(
                 Self::reduce_stop_reason(response.stop_reason),
                 response.stop_reason,
