@@ -302,7 +302,11 @@ fn h3_installed_handler_cannot_enable_undeclared_capability() {
         Err(error) => panic!("h3：spawn_with_mcp 必须成功：{error:?}"),
     };
     // 握手后再注入 handler：未声明能力不得因此变为可接受。
-    session.install_fs_handler(workspace_fs_handler(&cwd));
+    // ADVISORY ⑤：装配返回值必须可观测——被闸门拒绝时返回 `false`（旧签名返回 `()`，静默）。
+    assert!(
+        !session.install_fs_handler(workspace_fs_handler(&cwd)),
+        "h3 违约：握手未声明 fs 时 install_fs_handler 必须返回 false（装配被拒），实际返回 true"
+    );
     run_prompt(&session);
 
     let responses = captured_responses(&cwd);
@@ -315,6 +319,17 @@ fn h3_installed_handler_cannot_enable_undeclared_capability() {
         assert!(
             response.get("result").is_none(),
             "h3 违约：不得执行未声明能力的 fs/* 并返回 result，实际 {response}"
+        );
+        // ADVISORY ⑤：不只断言「有 error」，还要锁住错误码与负载形状。
+        assert_eq!(
+            response["error"]["code"].as_i64(),
+            Some(-32601),
+            "h3 违约：未声明能力的反向请求必须以 JSON-RPC -32601（method not found）拒绝，实际 {response}"
+        );
+        assert_eq!(
+            response["error"]["data"]["code"].as_str(),
+            Some("acp_unavailable"),
+            "h3 违约：错误负载必须带 data.code=acp_unavailable（供调用方降级），实际 {response}"
         );
         let text = response["error"].to_string();
         assert!(

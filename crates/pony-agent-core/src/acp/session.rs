@@ -750,13 +750,15 @@ impl AcpAgentSession {
     /// B175 additive：装配 `fs/*` handler（热替换；保留既有 permission / terminal 槽位）。
     ///
     /// 只对**握手时已声明** fs 能力的会话有效：声明已在 `initialize` 固化，注入不追认新能力。
-    pub fn install_fs_handler(&self, handler: Arc<dyn FsHandler>) {
-        self.client.install_fs_handler(handler);
+    /// 返回 `true` = 装配成功；`false` = 被闸门拒绝（握手未声明 fs）。
+    pub fn install_fs_handler(&self, handler: Arc<dyn FsHandler>) -> bool {
+        self.client.install_fs_handler(handler)
     }
 
     /// B175 additive：装配 `terminal/*` handler（热替换；保留既有 permission / fs 槽位）。
-    pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) {
-        self.client.install_terminal_handler(handler);
+    /// 返回 `true` = 装配成功；`false` = 被闸门拒绝（握手未声明 terminal）。
+    pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) -> bool {
+        self.client.install_terminal_handler(handler)
     }
 
     /// B185：把 `session/list` 结果格式化为**冻结 JSONL 行**（`ponycli acp --list-sessions` 共用）。
