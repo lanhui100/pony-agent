@@ -278,6 +278,64 @@ fn h2_untrusted_workspace_mcp_config_is_ignored_not_fatal() {
 
 /// h3：caps 全 false 的会话事后 `install_fs_handler` 不得追认能力：
 /// agent 的 `fs/read_text_file` / `fs/write_text_file` 必须 JSON-RPC error，不得真实执行。
+/// h3b（B177 ADVISORY ⑤ 的 terminal 对偶）：caps 全 false 的会话里，agent 发 `terminal/create`
+/// 及后续 `terminal/*` 必须被 JSON-RPC `-32601` + `data.code=acp_unavailable` 拒绝，不得真实执行。
+///
+/// 与 h3 的差别：h3 走 fs 一侧（`probe_fs`），本条走 terminal 一侧（`probe_terminal` 的 9201..9206），
+/// 锁的是分发闸门对**未声明能力**的终态，而不是「装了 handler 会不会追认」。
+#[test]
+fn h3b_undeclared_terminal_is_rejected_at_dispatch() {
+    let cwd = temp_dir("undeclared-terminal");
+    let marker = cwd.join("marker.txt");
+    std::fs::write(&marker, "TERMINAL-PROBE-MARKER").expect("写 terminal 探针 marker");
+    let init_file = cwd.join("initialize.jsonl");
+    let resp_file = cwd.join("responses.jsonl");
+    let marker_arg = marker.to_string_lossy().into_owned();
+    let spec = spec_with_hint(
+        hint(false, false), // 未声明任何能力
+        "probe_terminal",
+        &[
+            init_file.to_string_lossy().as_ref(),
+            resp_file.to_string_lossy().as_ref(),
+            marker_arg.as_str(),
+        ],
+    );
+
+    let session = match AcpAgentSession::spawn_with_mcp(&spec, &cwd, Vec::new()) {
+        Ok(session) => session,
+        Err(error) => panic!("h3b：spawn_with_mcp 必须成功：{error:?}"),
+    };
+    run_prompt(&session);
+
+    let responses = captured_responses(&cwd);
+    for id in [9201u64, 9202, 9203, 9204, 9205, 9206] {
+        let response = response_for(&responses, id);
+        assert!(
+            response.get("error").is_some(),
+            "h3b 违约：未声明 terminal 的会话必须拒绝 terminal/* 反向请求（id={id}），实际 {response}"
+        );
+        assert!(
+            response.get("result").is_none(),
+            "h3b 违约：不得执行未声明的 terminal/* 并返回 result（id={id}），实际 {response}"
+        );
+        assert_eq!(
+            response["error"]["code"].as_i64(),
+            Some(-32601),
+            "h3b 违约：terminal/* 必须以 JSON-RPC -32601 拒绝（id={id}），实际 {response}"
+        );
+        assert_eq!(
+            response["error"]["data"]["code"].as_str(),
+            Some("acp_unavailable"),
+            "h3b 违约：错误负载必须带 data.code=acp_unavailable（id={id}），实际 {response}"
+        );
+        let text = response["error"].to_string();
+        assert!(
+            !text.contains("TERMINAL-PROBE-MARKER"),
+            "h3b 违约：错误消息不得泄漏命令内容（id={id}），实际 {text}"
+        );
+    }
+}
+
 #[test]
 fn h3_installed_handler_cannot_enable_undeclared_capability() {
     let cwd = temp_dir("late-handler");

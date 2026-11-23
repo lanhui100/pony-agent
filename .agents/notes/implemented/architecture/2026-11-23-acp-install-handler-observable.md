@@ -33,15 +33,22 @@ if !slots.declared.fs {
 ## Verification
 
 - `bash scripts/cargo-lane.sh test -p pony-agent-core --test acp_config_regressions`
-  → **8 passed / 0 failed**（含强化后的 `h3_installed_handler_cannot_enable_undeclared_capability`）
+  → **9 passed / 0 failed**（含强化后的 `h3_...` 与新增的 `h3b_undeclared_terminal_is_rejected_at_dispatch`）
 - 未跑全量 lib 单测：当前会话测试约束只允许 `--test <单个解耦测试>`；本改动触及的两个函数
   由该集成文件与 `acp_capabilities_contract` 覆盖。
 
-## 未收口的部分（诚实标注）
+## terminal 侧的对偶反例（本轮也已收口）
 
-复审 ⑤ 还要求 **terminal 侧的对偶反例**（`install_terminal_handler` 被拒 + 入站 `terminal/create`
-回 `-32601`）。这需要 fake agent 夹具新增一条"未声明 terminal 时仍发 terminal/create"的探针，
-属改 `fixtures/acp_fake_agent.sh` + 新增用例的独立工作，本 PR 未做——已在 B177 账本里留明确待办。
+复审 ⑤ 要求的 terminal 对偶，**不需要改夹具**就能做到：既有 `probe_terminal` 探针在 prompt 期间
+会发 `terminal/create`（id 9201）及后续 `terminal/output`、`wait_for_exit`、`kill`×2、`release`
+（9202..9206）。于是新增用例 `h3b_undeclared_terminal_is_rejected_at_dispatch`：
+
+- caps 全 false、不装任何 handler，直接跑 `probe_terminal`；
+- 对 9201..9206 **每一条**都断言：有 `error`、无 `result`、`error.code == -32601`、
+  `error.data.code == "acp_unavailable"`、错误文本不含探针 marker（不泄漏命令内容）。
+
+红相：若分发闸门对未声明能力失效，`terminal/create` 会被真实执行并返回 `terminalId`，
+第一条断言即红——因此这条用例是有判别力的，不是摆设。
 
 ## Alternatives considered
 
