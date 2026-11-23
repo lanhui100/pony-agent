@@ -8,9 +8,8 @@
 // `keyboard_enhancement_flags` 空桩（`unimplemented!()`），本文件必须
 // 「编译通过（Exit 0）+ 运行失败（panic / 断言失败）」。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+// wave-40 解耦：直接引用 core::agent::tui_enter_action
+use pony_agent_core::agent::tui_enter_action as tui;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags};
 

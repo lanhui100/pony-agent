@@ -58,21 +58,9 @@ pub fn is_archive_shortcut(
 /// 宣称键位；Alt+Enter 是传统终端兜底；Ctrl+Enter 在 kitty 协议下上报为
 /// `CSI 13;5u`，若落到提交语义会把用户「想换行」的手势直接发出去，故一并归为换行。
 /// 判定用 `intersects`（含 `Ctrl+Shift+Enter`），不看具体组合顺序。
-fn is_newline_enter(key: &crossterm::event::KeyEvent) -> bool {
-    key.code == KeyCode::Enter
-        && key
-            .modifiers
-            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL)
-}
-
-pub fn composer_enter_action(key: &crossterm::event::KeyEvent) -> ComposerEnterAction {
-    // 带修饰键 Enter = 换行；其余键（含裸 Enter）落到 Enter 分支的提交语义。
-    if is_newline_enter(key) {
-        ComposerEnterAction::Newline
-    } else {
-        ComposerEnterAction::Submit
-    }
-}
+// Enter 语义与键盘增强标志的真值源已抽到 core 纯函数层（`agent::tui_enter_action`）；
+// 此处 glob 再导出，让 `tui::` 路径与内联本文件的测试二进制照旧解析。
+pub use pony_agent_core::agent::tui_enter_action::*;
 
 pub fn composer_control_action(key: &crossterm::event::KeyEvent) -> Option<ComposerControlAction> {
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -193,15 +181,7 @@ pub fn key_class_label(key: &crossterm::event::KeyEvent) -> String {
     }
 }
 
-/// wave-40 R2（契约冻结空桩）：终端支持键盘增强时返回要 push 的标志。
-pub fn keyboard_enhancement_flags(supported: bool) -> Option<KeyboardEnhancementFlags> {
-    // kitty 协议的 DISAMBIGUATE_ESCAPE_CODES：把 Shift+Enter 与裸 Enter 区分开。
-    if supported {
-        Some(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    } else {
-        None
-    }
-}
+
 
 /// Shift+Enter 换行依赖 kitty 键盘协议的 DISAMBIGUATE 标志。
 ///

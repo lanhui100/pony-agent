@@ -385,12 +385,8 @@ pub enum UiEvent {
     },
 }
 
-/// wave-40 R1（契约冻结空桩）：Composer 中 Enter 键语义。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposerEnterAction {
-    Submit,
-    Newline,
-}
+/// wave-40 R1: Composer 中 Enter 键语义 (重构抽离至 core::agent::tui_enter_action 纯函数层)
+pub use pony_agent_core::agent::tui_enter_action::ComposerEnterAction;
 
 
 /// Composer 编辑类快捷键的语义（Ctrl+U / Ctrl+J / Ctrl+W / Ctrl+A / Ctrl+E）。
@@ -2753,7 +2749,7 @@ impl TuiState {
                 "relaxed_spacing",
                 "宽松行距",
                 self.relaxed_spacing,
-                "正文相邻行之间留 1 行呼吸（代码块、表格、连续列表保持紧凑）",
+                "段落与标题前后留白加厚 1 行（正文行内保持紧凑）",
             ),
             (
                 "default_permission_mode",
@@ -4328,24 +4324,15 @@ fn blank() -> Line<'static> {
     Line::raw("")
 }
 
-/// 宽松行距的行间豁免判定：`- ` / `* ` / `+ ` / `1. ` / `1) ` 开头的列表项行。
+/// 宽松行距的块边界判定：ATX 标题行（`#`~`######` 后跟空格）。
 ///
-/// 列表项之间不插空行——否则一条一行的「紧凑清单」会被行距拆成一屏。缩进续行
-/// 由调用方按「上一行也是列表项」并入同一豁免，故这里只认块首记号。
-fn is_markdown_list_item_line(raw: &str) -> bool {
+/// 口径与 `markdown::render_markdown_line` 的标题分支严格一致（同一判据的两处表达，
+/// 改动必须同提交对齐）：标题是段落级视觉节点，只有它在宽松行距下拿到前后各 1 行呼吸；
+/// 正文相邻行一律不插行。
+fn is_markdown_heading_line(raw: &str) -> bool {
     let trimmed = raw.trim_start();
-    if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
-        return true;
-    }
-    let digits_len = trimmed
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .count();
-    if digits_len == 0 {
-        return false;
-    }
-    let rest = &trimmed[digits_len..];
-    rest.starts_with(". ") || rest.starts_with(") ")
+    let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+    hash_count > 0 && trimmed[hash_count..].starts_with(' ')
 }
 
 /// 按显示宽度折行，保留 span 样式；用于所有正文（CJK 不会错位）。
@@ -5829,7 +5816,8 @@ struct MessageRenderCtx {
     hide_process: bool,
     /// 契约 C4：`true` ⇒ 思考块折叠成一行摘要（只影响 `Thinking` 块自身）。
     thinking_collapsed: bool,
-    /// 宽松行距：`true` ⇒ 正文相邻行之间插 1 行呼吸（代码块 / 表格 / 连续列表项除外）。
+    /// 宽松行距：`true` ⇒ **只在块边界加厚留白**（段间 2 行、ATX 标题前后各 1 行呼吸），
+    /// 正文相邻行保持紧凑 —— 终端行高不可调，插整行是唯一手段，全行插行会让视口腰斩。
     relaxed_spacing: bool,
 }
 
@@ -5881,8 +5869,6 @@ fn message_lines_with_ctx(
                     let mut in_code = false;
                     let src: Vec<&str> = message.content.lines().collect();
                     let mut idx = 0usize;
-                    // 宽松行距：上一源行是否为列表项（缩进续行据此并入同一豁免）。
-                    let mut prev_was_list = false;
                     while idx < src.len() {
                         let raw = src[idx];
                         idx += 1;
@@ -5912,8 +5898,6 @@ fn message_lines_with_ctx(
                                 // 代码块结束：增加与下方后续文字的 1 行外呼吸留白间距（必须无条件插入空行，即便上一行是带底色的内衬行）
                                 lines.push(blank());
                             }
-                            // 宽松行距只作用于正文行：代码块进出都重置列表延续状态。
-                            prev_was_list = false;
                             continue;
                         }
                         if in_code {
@@ -5923,17 +5907,16 @@ fn message_lines_with_ctx(
                                 Line::from(highlight_code_line(raw)),
                                 width,
                             );
-                            prev_was_list = false;
                             continue;
                         }
                         if trimmed.is_empty() {
-                            // 段间呼吸：宽松行距下必须大于行距（1 行），否则段落读成连续行。
+                            // 段间呼吸：宽松行距只在**块边界**加厚（紧凑 1 行 → 宽松 2 行）。
+                            // 正文行内不插行，故开启后同屏密度与紧凑口径一致。
                             if ctx.relaxed_spacing {
                                 push_gap(&mut lines, 2);
                             } else {
                                 push_blank(&mut lines);
                             }
-                            prev_was_list = false;
                             continue;
                         }
                         // 块级表格：命中则整块输出（表头 / 发丝线 / 折行数据），并在块前后各留 1 行呼吸。
@@ -5946,19 +5929,23 @@ fn message_lines_with_ctx(
                             }
                             push_blank(&mut lines);
                             idx += used.saturating_sub(1);
-                            prev_was_list = false;
                             continue;
+                        }
+                        // 宽松行距：ATX 标题是段落级视觉节点，前后各留 1 行呼吸；
+                        // 正文相邻行不插行（`push_blank` 自带去重，段首/已有空行处不会叠行）。
+                        let heading_breath = ctx.relaxed_spacing && is_markdown_heading_line(raw);
+                        if heading_breath {
+                            push_blank(&mut lines);
                         }
                         let body = Line::from(render_markdown_line(raw));
                         push_prefixed(&mut lines, rail_blank(), rail_blank(), body, body_w);
-                        // 宽松行距：正文行之间插 1 行呼吸；连续列表项（含缩进续行）保持紧凑。
-                        let is_list_item = is_markdown_list_item_line(raw)
-                            || (prev_was_list
-                                && (raw.starts_with(' ') || raw.starts_with('\t')));
-                        if ctx.relaxed_spacing && !is_list_item && !prev_was_list {
+                        // 标题后只在「下一源行是正文」时补呼吸；下一行是空行时由上面的段间
+                        // 分支统一压成 2 行，避免叠出 3 行。
+                        if heading_breath
+                            && src.get(idx).is_some_and(|line| !line.trim().is_empty())
+                        {
                             push_blank(&mut lines);
                         }
-                        prev_was_list = is_list_item;
                     }
                 }
                 MessageRole::ToolCall | MessageRole::ToolResult => {

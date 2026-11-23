@@ -433,7 +433,7 @@ fn a7_settings_panel_rows_and_render() {
         "默认权限模式",
         "轮次间只保留状态消息",
         "思考块折叠为一行摘要",
-        "正文相邻行之间留 1 行呼吸",
+        "段落与标题前后留白加厚 1 行",
     ] {
         assert!(
             squeeze(&text).contains(&squeeze(needle)),
