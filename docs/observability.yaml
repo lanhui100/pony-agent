@@ -1752,3 +1752,20 @@ note: >-
   （8 例：键位谓词矩阵、8 行上限、首/尾行边界、软折行与 CJK 列对齐、期望列不漂移、
   编辑清空期望列、空输入框不越界、`TuiState` 宽度接线）。
   提交信息须带 [decl-change-approved]。
+
+  【归属登记（2026-11-23）｜TUI 正文可选宽松行距（ADR：.agents/notes/implemented/feature/2026-11-23-tui-relaxed-line-spacing.md；backlog: B1795405235359）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地 TUI 呈现层与显示偏好持久化**，
+  无新增对外接口、无网络 IO、无后台任务、无 LLM 调用、无新增环境变量或依赖。
+  (1) 变更面（全部本地）：`crates/pony-agent-core/src/bin/tui.rs`（`TuiState::relaxed_spacing`、
+  `toggle_relaxed_spacing`、`settings_rows` / `toggle_selected_setting` / `handle_settings_key` 分支、
+  `MessageRenderCtx::relaxed_spacing`、正文渲染行间插行与豁免判定 `is_markdown_list_item_line`）、
+  `crates/pony-agent-core/src/agent/tui_preferences.rs`（新增 `relaxed_spacing` 字段，缺字段按 `false` 反序列化）。
+  (2) 无新增取证面：不新增日志事件、不新增 span / metric；偏好仍落本地 `tui-preferences.json`，
+  不改变既有落盘路径与文件位置。
+  (3) 四维归属不变：tracing / issues 仍 applicable（落点不变 `agent/otel/mod.rs`、
+  `agent/ponysentry/client.rs`）；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、
+  无 `/metrics`、Prometheus pull 模型不成立）。不新增 applicable 判定、不新增 enforcement_point。
+  (4) 行为门落在测试层：`crates/pony-agent-core/src/bin/tui/tests/relaxed_spacing_tests.rs`
+  （6 例：紧凑基线不变、正文行距恰 1 行、段间距 2 > 1、代码块紧邻、连续列表项紧邻、
+  `settings` 切换往返）；契约断言同步改写于 `tests/tui_process_fold_acceptance.rs`（A7/A8）。
+  提交信息须带 [decl-change-approved]。

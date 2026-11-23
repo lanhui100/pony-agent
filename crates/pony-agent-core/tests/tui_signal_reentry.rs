@@ -77,13 +77,13 @@ fn r3_reentry_plan_rebuilds_capabilities_in_startup_order() {
         plan,
         vec![
             TerminalReentryStep::RawMode,
-            TerminalReentryStep::KeyboardEnhancement,
             TerminalReentryStep::AlternateScreen,
+            TerminalReentryStep::KeyboardEnhancement,
             TerminalReentryStep::MouseCapture,
             TerminalReentryStep::BracketedPaste,
             TerminalReentryStep::ClearAndRedraw,
         ],
-        "R3: 重入顺序必须与启动初始化一致（raw → 键盘协议 → 备用屏 → 鼠标 → paste → 清屏重绘）"
+        "R3: 重入顺序必须与启动初始化一致（raw → 备用屏 → 键盘协议 → 鼠标 → paste → 清屏重绘）"
     );
     assert_eq!(
         plan.last(),
@@ -94,6 +94,19 @@ fn r3_reentry_plan_rebuilds_capabilities_in_startup_order() {
         plan.first(),
         Some(&TerminalReentryStep::RawMode),
         "R3: raw mode 必须最先恢复（否则 EnterAlternateScreen 的响应会落进 shell 回显）"
+    );
+    // B277：pty 代理层（herdr）在 pane 进入备用屏时会清掉逐 pane 记录的 kitty 标志，
+    // 故「键盘增强」必须排在「备用屏」之后，否则 Shift+Enter 退回 modifyOtherKeys
+    // 编码（`CSI 27;2;13~`，crossterm 不解析）而被静默丢弃。
+    let alt = plan
+        .iter()
+        .position(|step| *step == TerminalReentryStep::AlternateScreen);
+    let enhancement = plan
+        .iter()
+        .position(|step| *step == TerminalReentryStep::KeyboardEnhancement);
+    assert!(
+        alt.is_some() && enhancement.is_some() && alt < enhancement,
+        "R3/B277: 键盘增强 push 必须在备用屏之后（plan={plan:?}）"
     );
 }
 
@@ -110,8 +123,8 @@ fn r4_reentry_plan_respects_disabled_mouse_capture() {
         plan,
         vec![
             TerminalReentryStep::RawMode,
-            TerminalReentryStep::KeyboardEnhancement,
             TerminalReentryStep::AlternateScreen,
+            TerminalReentryStep::KeyboardEnhancement,
             TerminalReentryStep::BracketedPaste,
             TerminalReentryStep::ClearAndRedraw,
         ],

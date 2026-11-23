@@ -1435,6 +1435,7 @@ pub struct RenderCache {
     cache_lines: Vec<Vec<Line<'static>>>,
     cache_hide_process: bool,
     cache_thinking_collapsed: bool,
+    cache_relaxed_spacing: bool,
     stats: RenderCacheStats,
 }
 
@@ -1446,6 +1447,7 @@ impl Default for RenderCache {
             cache_lines: Vec::new(),
             cache_hide_process: false,
             cache_thinking_collapsed: false,
+            cache_relaxed_spacing: false,
             stats: RenderCacheStats::default(),
         }
     }
@@ -1564,6 +1566,10 @@ pub struct TuiState {
     pub hide_process: bool,
     /// 思考块折叠：`true` ⇒ `MessageRole::Thinking` 只渲染一行摘要（行数 + 已折叠）。
     pub thinking_collapsed: bool,
+    /// 宽松行距（`/settings` 可切换）：`true` ⇒ 正文相邻行之间插 1 行呼吸。
+    /// 终端没有行高概念，插空行是唯一的「行距」手段；代码块 / 表格 / 连续列表项
+    /// 保持紧凑，避免整块内容被拆散。默认关闭，与 `TuiPreferences::default()` 一致。
+    pub relaxed_spacing: bool,
     /// 会话权限模式（只读 / 工作区写入 / 完全访问），对齐内核 PermissionMode 契约。
     pub permission_mode: PermissionMode,
     /// `/settings` 面板当前选中项下标（0 起，越界由渲染钳制）。
@@ -1774,6 +1780,7 @@ impl Default for TuiState {
             // 产品默认（隐藏 + 折叠）由 `TuiPreferences::default()` 在 run_tui 启动时覆盖。
             hide_process: false,
             thinking_collapsed: false,
+            relaxed_spacing: false,
             permission_mode: PermissionMode::WorkspaceWrite,
             settings_selected_index: 0,
             rewind_state: None,
@@ -2207,13 +2214,15 @@ impl TuiState {
             || self.render_cache.cache_msg_count != message_count
             || self.render_cache.cache_lines.len() != message_count
             || self.render_cache.cache_hide_process != self.hide_process
-            || self.render_cache.cache_thinking_collapsed != self.thinking_collapsed;
+            || self.render_cache.cache_thinking_collapsed != self.thinking_collapsed
+            || self.render_cache.cache_relaxed_spacing != self.relaxed_spacing;
 
         if must_rebuild {
             self.render_cache.cache_width = width_u16;
             self.render_cache.cache_msg_count = message_count;
             self.render_cache.cache_hide_process = self.hide_process;
             self.render_cache.cache_thinking_collapsed = self.thinking_collapsed;
+            self.render_cache.cache_relaxed_spacing = self.relaxed_spacing;
             self.render_cache.cache_lines = Vec::with_capacity(message_count);
             let mut rebuilt_lines = 0usize;
             let mut prev_role: Option<MessageRole> = None;
@@ -2229,6 +2238,7 @@ impl TuiState {
                         spinner_tick,
                         hide_process: self.hide_process,
                         thinking_collapsed: self.thinking_collapsed,
+                        relaxed_spacing: self.relaxed_spacing,
                     },
                 );
                 has_preceding_lines = has_preceding_lines || !block.is_empty();
@@ -2259,6 +2269,7 @@ impl TuiState {
                     spinner_tick,
                     hide_process: self.hide_process,
                     thinking_collapsed: self.thinking_collapsed,
+                    relaxed_spacing: self.relaxed_spacing,
                 },
             );
             let laid_out_lines = block.len();
@@ -2638,6 +2649,7 @@ impl TuiState {
     pub fn apply_tui_preferences(&mut self, prefs: &TuiPreferences) {
         self.hide_process = prefs.hide_process;
         self.thinking_collapsed = prefs.thinking_collapsed;
+        self.relaxed_spacing = prefs.relaxed_spacing;
         self.permission_mode = prefs.default_permission_mode;
         self.invalidate_render_cache();
     }
@@ -2687,6 +2699,20 @@ impl TuiState {
         }
     }
 
+    /// 宽松行距开关（`/settings` 唯一入口，同上：只改内存，写盘由事件循环负责），
+    /// 返回切换后的值。
+    ///
+    /// 只提供 `toggle` 不提供 `set_*(bool)`：bool 形参在调用点不可读，且本仓 clippy
+    /// 口径 `fn_params_excessive_bools` 阈值为 0（新增即判红，见 `.meta/lints/clippy.toml`）。
+    /// 启动时的偏好应用走 [`Self::apply_tui_preferences`]，无需 setter。
+    pub fn toggle_relaxed_spacing(&mut self) -> bool {
+        self.relaxed_spacing = !self.relaxed_spacing;
+        self.invalidate_render_cache();
+        // 行距变化整体重排行数 ⇒ 同口径瞬时贴底。
+        self.snap_to_bottom_if_following();
+        self.relaxed_spacing
+    }
+
     /// 契约 C12：`Ctrl+O` 快捷开关，返回切换后的值。
     pub fn toggle_hide_process(&mut self) -> bool {
         self.set_hide_process(!self.hide_process);
@@ -2724,6 +2750,12 @@ impl TuiState {
                 "思考块折叠为一行摘要（原文仍保留在会话历史）",
             ),
             (
+                "relaxed_spacing",
+                "宽松行距",
+                self.relaxed_spacing,
+                "正文相邻行之间留 1 行呼吸（代码块、表格、连续列表保持紧凑）",
+            ),
+            (
                 "default_permission_mode",
                 "默认权限模式",
                 self.permission_mode != PermissionMode::ReadOnly,
@@ -2754,6 +2786,10 @@ impl TuiState {
                 self.set_thinking_collapsed(!self.thinking_collapsed);
                 Some(("thinking_collapsed", self.thinking_collapsed))
             }
+            "relaxed_spacing" => {
+                self.toggle_relaxed_spacing();
+                Some(("relaxed_spacing", self.relaxed_spacing))
+            }
             "default_permission_mode" => {
                 let next = self.rotate_permission_mode();
                 Some(("default_permission_mode", next != PermissionMode::ReadOnly))
@@ -2782,6 +2818,10 @@ impl TuiState {
                         ),
                         "thinking_collapsed" => format!(
                             "折叠思考：{}",
+                            if enabled { "已开启" } else { "已关闭" }
+                        ),
+                        "relaxed_spacing" => format!(
+                            "宽松行距：{}",
                             if enabled { "已开启" } else { "已关闭" }
                         ),
                         "default_permission_mode" => format!(
@@ -4288,6 +4328,26 @@ fn blank() -> Line<'static> {
     Line::raw("")
 }
 
+/// 宽松行距的行间豁免判定：`- ` / `* ` / `+ ` / `1. ` / `1) ` 开头的列表项行。
+///
+/// 列表项之间不插空行——否则一条一行的「紧凑清单」会被行距拆成一屏。缩进续行
+/// 由调用方按「上一行也是列表项」并入同一豁免，故这里只认块首记号。
+fn is_markdown_list_item_line(raw: &str) -> bool {
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+        return true;
+    }
+    let digits_len = trimmed
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .count();
+    if digits_len == 0 {
+        return false;
+    }
+    let rest = &trimmed[digits_len..];
+    rest.starts_with(". ") || rest.starts_with(") ")
+}
+
 /// 按显示宽度折行，保留 span 样式；用于所有正文（CJK 不会错位）。
 fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
@@ -5740,6 +5800,7 @@ fn persist_tui_preferences(state: &TuiState) {
     let prefs = TuiPreferences {
         hide_process: state.hide_process,
         thinking_collapsed: state.thinking_collapsed,
+        relaxed_spacing: state.relaxed_spacing,
         default_permission_mode: state.permission_mode,
     };
     if let Err(error) = store.save(&prefs) {
@@ -5768,6 +5829,8 @@ struct MessageRenderCtx {
     hide_process: bool,
     /// 契约 C4：`true` ⇒ 思考块折叠成一行摘要（只影响 `Thinking` 块自身）。
     thinking_collapsed: bool,
+    /// 宽松行距：`true` ⇒ 正文相邻行之间插 1 行呼吸（代码块 / 表格 / 连续列表项除外）。
+    relaxed_spacing: bool,
 }
 
 /// 把一条消息渲染成行（内部实现，带跨消息上下文）。
@@ -5818,6 +5881,8 @@ fn message_lines_with_ctx(
                     let mut in_code = false;
                     let src: Vec<&str> = message.content.lines().collect();
                     let mut idx = 0usize;
+                    // 宽松行距：上一源行是否为列表项（缩进续行据此并入同一豁免）。
+                    let mut prev_was_list = false;
                     while idx < src.len() {
                         let raw = src[idx];
                         idx += 1;
@@ -5847,6 +5912,8 @@ fn message_lines_with_ctx(
                                 // 代码块结束：增加与下方后续文字的 1 行外呼吸留白间距（必须无条件插入空行，即便上一行是带底色的内衬行）
                                 lines.push(blank());
                             }
+                            // 宽松行距只作用于正文行：代码块进出都重置列表延续状态。
+                            prev_was_list = false;
                             continue;
                         }
                         if in_code {
@@ -5856,10 +5923,17 @@ fn message_lines_with_ctx(
                                 Line::from(highlight_code_line(raw)),
                                 width,
                             );
+                            prev_was_list = false;
                             continue;
                         }
                         if trimmed.is_empty() {
-                            push_blank(&mut lines);
+                            // 段间呼吸：宽松行距下必须大于行距（1 行），否则段落读成连续行。
+                            if ctx.relaxed_spacing {
+                                push_gap(&mut lines, 2);
+                            } else {
+                                push_blank(&mut lines);
+                            }
+                            prev_was_list = false;
                             continue;
                         }
                         // 块级表格：命中则整块输出（表头 / 发丝线 / 折行数据），并在块前后各留 1 行呼吸。
@@ -5872,10 +5946,19 @@ fn message_lines_with_ctx(
                             }
                             push_blank(&mut lines);
                             idx += used.saturating_sub(1);
+                            prev_was_list = false;
                             continue;
                         }
                         let body = Line::from(render_markdown_line(raw));
                         push_prefixed(&mut lines, rail_blank(), rail_blank(), body, body_w);
+                        // 宽松行距：正文行之间插 1 行呼吸；连续列表项（含缩进续行）保持紧凑。
+                        let is_list_item = is_markdown_list_item_line(raw)
+                            || (prev_was_list
+                                && (raw.starts_with(' ') || raw.starts_with('\t')));
+                        if ctx.relaxed_spacing && !is_list_item && !prev_was_list {
+                            push_blank(&mut lines);
+                        }
+                        prev_was_list = is_list_item;
                     }
                 }
                 MessageRole::ToolCall | MessageRole::ToolResult => {
@@ -6056,6 +6139,8 @@ pub fn message_lines_for_with_flags(
             spinner_tick: 0,
             hide_process,
             thinking_collapsed,
+            // 纯函数入口保持紧凑基线（宽松行距由 `/settings` 显式开启，见 `TuiPreferences`）。
+            relaxed_spacing: false,
         },
     )
 }
@@ -8070,12 +8155,6 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
     install_panic_restore_hook();
     let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
     let mut stdout = io::stdout();
-    if let Some(flags) = keyboard_enhancement_push_flags() {
-        if let Err(error) = execute!(stdout, PushKeyboardEnhancementFlags(flags)) {
-            eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
-        }
-    }
-
     // 契约 F-C：启用 bracketed paste —— 大段粘贴作为单个 `Event::Paste` 送达，
     // 而不是被拆成成百上千个按键（后者会触发自动补全/回车提交等误动作）。
     execute!(
@@ -8084,6 +8163,17 @@ fn run_tui(resume_session: Option<ResumeTarget>) -> Result<(), Box<dyn std::erro
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
+    // **顺序不变量（B277）**：键盘增强 push 必须晚于 `EnterAlternateScreen`。
+    // pty 代理层（herdr 0.7.5）在 pane 进入备用屏的那一刻会清掉它逐 pane 记录的 kitty
+    // 标志：push 早于备用屏 ⇒ 代理退回 xterm modifyOtherKeys 编码（Shift+Enter 变成
+    // `CSI 27;2;13~`），而 crossterm 0.28.1 不解析该序列 ⇒ 按键被静默丢弃（现场症状：
+    // Shift+Enter / Ctrl+Enter 既不换行也不发送）。实测：push 在备用屏之后 ⇒ 代理改为
+    // 发 `CSI 13;2u`（回归守卫见 `tools/tui-audit/check_shift_enter.py` 的 a2.7）。
+    if let Some(flags) = keyboard_enhancement_push_flags() {
+        if let Err(error) = execute!(stdout, PushKeyboardEnhancementFlags(flags)) {
+            eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
+        }
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -8255,12 +8345,6 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
     install_panic_restore_hook();
     let mut terminal_guard = TerminalGuard::new(restore_terminal_modes);
     let mut stdout = io::stdout();
-    if let Some(flags) = keyboard_enhancement_push_flags() {
-        if let Err(error) = execute!(stdout, PushKeyboardEnhancementFlags(flags)) {
-            eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
-        }
-    }
-
     // 契约 F-C：启用 bracketed paste —— 大段粘贴作为单个 `Event::Paste` 送达，
     // 而不是被拆成成百上千个按键（后者会触发自动补全/回车提交等误动作）。
     execute!(
@@ -8269,6 +8353,12 @@ fn run_tui_demo_ask() -> Result<(), Box<dyn std::error::Error>> {
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
+    // 顺序不变量见 `run_tui` 同名注释（B277）：push 必须晚于备用屏。
+    if let Some(flags) = keyboard_enhancement_push_flags() {
+        if let Err(error) = execute!(stdout, PushKeyboardEnhancementFlags(flags)) {
+            eprintln!("[pony-tui] 键盘增强协议 push 失败（降级为传统键码）：{error}");
+        }
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -12187,6 +12277,9 @@ fn tui_event_loop(
                                         "\n子智能体会话内：Ctrl+↑ 返回主会话 · Ctrl+←/→ 切换子智能体",
                                     );
                                     // Ctrl+H / Ctrl+G 覆盖层入口（同时是它们的可发现路径）。
+                                    help.push_str(
+                                        "\n输入框：Enter 发送 · Shift+Enter 换行（Alt+Enter / Ctrl+J 亦可） · ↑/↓ 跨行移动",
+                                    );
                                     help.push_str("\nCtrl+H 快捷键帮助 · Ctrl+G 目标面板");
                                     // 契约 F-L：/cost 移除后网关需要可见入口；只展示剥离凭据后的
                                     // scheme://host[:port]/path（userinfo/query/fragment 全丢弃）。
@@ -13617,7 +13710,7 @@ fn cli_help_string() -> String {
 用法: pony [选项]\n       pony resume [<session-id>]   恢复会话（缺省 = 最近一次）\n       pony update [选项]          升级本机 pony 二进制到最新 CLI 版本（详见 `pony update --help`）\n\n\
 选项:\n  --version, -V   显示版本与二进制路径后退出\n  --help, -h      显示本帮助后退出\n  --doctor        终端环境自检（TTY/颜色/尺寸/locale/日志目录/PATH 冲突）\n\n\
 退出 TUI 后会打印 `pony resume <session-id>`，复制即可以同一会话继续。\n\n\
-交互键位:\n  Enter           发送输入\n  Alt+Enter       输入内换行\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  F2              切换鼠标捕获（默认开；关闭后可用鼠标选择文本）\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
+交互键位:\n  Enter           发送输入\n  Shift+Enter     输入内换行（Alt+Enter / Ctrl+J 同为换行）\n  /               命令前缀（/help /clear /quit /exit 等）\n  Esc             清空输入 / 中断弹窗\n  Ctrl-C          退出 TUI\n  F2              切换鼠标捕获（默认开；关闭后可用鼠标选择文本）\n  ↑ / ↓           历史翻页\n  PageUp/PageDown 消息滚动\n",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -14020,6 +14113,11 @@ mod io_hygiene_tests;
 #[cfg(test)]
 #[path = "tui/tests/table_wiring_tests.rs"]
 mod table_wiring_tests;
+
+/// 宽松行距（`relaxed_spacing`）：正文行间呼吸 / 段间距 > 行距 / 代码块与列表豁免。
+#[cfg(test)]
+#[path = "tui/tests/relaxed_spacing_tests.rs"]
+mod relaxed_spacing_tests;
 
 /// wave-65 C4 单测：审批续轮文案与决策接缝（契约 §2 C4）。
 ///

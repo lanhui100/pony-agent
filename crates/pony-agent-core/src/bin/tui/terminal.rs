@@ -607,10 +607,14 @@ pub enum TerminalReentryStep {
 ///
 /// `mouse_capture=false`（用户按 F2 关过）时跳过鼠标重建：恢复执行不得悄悄改回用户选择。
 pub fn terminal_reentry_plan(mouse_capture: bool) -> Vec<TerminalReentryStep> {
+    // **顺序不变量（B277）**：`KeyboardEnhancement` 必须排在 `AlternateScreen` 之后，
+    // 与启动路径同序。pty 代理层（herdr）在 pane 进入备用屏时会清掉逐 pane 记录的
+    // kitty 标志，push 早于备用屏会被作废 ⇒ Shift+Enter 退回 modifyOtherKeys 编码而
+    // crossterm 不解析（按键静默丢失）。回归守卫见 `tui_signal_reentry.rs`。
     let mut plan = vec![
         TerminalReentryStep::RawMode,
-        TerminalReentryStep::KeyboardEnhancement,
         TerminalReentryStep::AlternateScreen,
+        TerminalReentryStep::KeyboardEnhancement,
     ];
     if mouse_capture {
         plan.push(TerminalReentryStep::MouseCapture);

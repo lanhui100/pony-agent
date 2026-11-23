@@ -396,8 +396,13 @@ fn a7_settings_panel_rows_and_render() {
     let keys: Vec<&str> = rows.iter().map(|row| row.0).collect();
     assert_eq!(
         keys,
-        vec!["hide_process", "thinking_collapsed", "default_permission_mode"],
-        "C7：设置项顺序必须固定为 hide_process → thinking_collapsed → default_permission_mode，实际 = {keys:?}"
+        vec![
+            "hide_process",
+            "thinking_collapsed",
+            "relaxed_spacing",
+            "default_permission_mode"
+        ],
+        "C7：设置项顺序必须固定为 hide_process → thinking_collapsed → relaxed_spacing → default_permission_mode，实际 = {keys:?}"
     );
     assert_eq!(
         rows[0].2, state.hide_process,
@@ -408,7 +413,11 @@ fn a7_settings_panel_rows_and_render() {
         "C7：行内开关状态必须直读同一字段（thinking_collapsed）"
     );
     assert_eq!(
-        rows[2].2, state.permission_mode != pony_agent_core::agent::headless::PermissionMode::ReadOnly,
+        rows[2].2, state.relaxed_spacing,
+        "C7：行内开关状态必须直读同一字段（relaxed_spacing）"
+    );
+    assert_eq!(
+        rows[3].2, state.permission_mode != pony_agent_core::agent::headless::PermissionMode::ReadOnly,
         "C7：行内开关状态必须直读同一字段（default_permission_mode）"
     );
 
@@ -420,20 +429,22 @@ fn a7_settings_panel_rows_and_render() {
         "↑↓ 选择",
         "隐藏 Agent 过程",
         "折叠思考",
+        "宽松行距",
         "默认权限模式",
         "轮次间只保留状态消息",
         "思考块折叠为一行摘要",
+        "正文相邻行之间留 1 行呼吸",
     ] {
         assert!(
             squeeze(&text).contains(&squeeze(needle)),
             "C7：面板必须渲染 `{needle}`，实际屏幕 = {text}"
         );
     }
-    // 默认（TuiState::default 基线）前两项均为关闭 ⇒ 两个 `[关]`；第三项默认工作区写入 ⇒ `[工作区]`。
+    // 默认（TuiState::default 基线）前三项均为关闭 ⇒ 三个 `[关]`；末项默认工作区写入 ⇒ `[工作区]`。
     assert_eq!(
         count_occurrences(&text, "[关]"),
-        2,
-        "C7：基线下前两项均为关闭，必须渲染 2 个 `[关]`，实际屏幕 = {text}"
+        3,
+        "C7：基线下前三项均为关闭，必须渲染 3 个 `[关]`，实际屏幕 = {text}"
     );
     assert!(
         squeeze(&text).contains(&squeeze("[工作区]")),
@@ -467,9 +478,11 @@ fn a8_settings_key_state_machine() {
     state.move_settings_selection(1);
     assert_eq!(state.settings_selected_index, 1, "C7：下移必须前进一项");
     state.move_settings_selection(1);
-    assert_eq!(state.settings_selected_index, 2, "C7：再次下移前进到末项");
+    assert_eq!(state.settings_selected_index, 2, "C7：再次下移前进一项");
     state.move_settings_selection(1);
-    assert_eq!(state.settings_selected_index, 2, "C7：末项再下移必须夹紧");
+    assert_eq!(state.settings_selected_index, 3, "C7：再次下移前进到末项");
+    state.move_settings_selection(1);
+    assert_eq!(state.settings_selected_index, 3, "C7：末项再下移必须夹紧");
 
     // ② Space/Enter 切换选中项，返回 (key, 新值)，且各项互不串扰。
     state.settings_selected_index = 1;
@@ -536,6 +549,7 @@ fn a8_settings_key_state_machine() {
     let saved = TuiPreferences {
         hide_process: false,
         thinking_collapsed: false,
+        relaxed_spacing: false,
         default_permission_mode: pony_agent_core::agent::headless::PermissionMode::WorkspaceWrite,
     };
     store.save(&saved).expect("A8 harness：临时偏好必须可写");
@@ -596,6 +610,7 @@ fn a9_preferences_store_defaults_and_fallbacks() {
     let prefs = TuiPreferences {
         hide_process: false,
         thinking_collapsed: true,
+        relaxed_spacing: false,
         default_permission_mode: pony_agent_core::agent::headless::PermissionMode::FullAccess,
     };
     store.save(&prefs).expect("A9 harness：偏好必须可落盘");
@@ -767,6 +782,7 @@ fn a13_product_default_hides_process_and_folds_thinking() {
     visible.apply_tui_preferences(&TuiPreferences {
         hide_process: false,
         thinking_collapsed: false,
+        relaxed_spacing: false,
         default_permission_mode: pony_agent_core::agent::headless::PermissionMode::WorkspaceWrite,
     });
     let buf = screen(&mut visible, 100, 30);
