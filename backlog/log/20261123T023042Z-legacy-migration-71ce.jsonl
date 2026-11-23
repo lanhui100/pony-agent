@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261123T023042Z-legacy-migration-71ce","surface":"legacy-migration","created_at":"2026-11-23T02:30:42.951Z"}
+{"kind":"record","at":"2026-11-23T02:30:42.943Z","task":{"id":"B1795401042949","category":"Task","priority":"P3","status":"todo","title":"legacy-migration","created_at":"2026-11-23T02:30:42.943Z","metadata":{"fingerprint":"manual","occurred_count":1},"description":"turn trace 继承测试口径错误：用 TurnTraceGuard::trace_id()（导出态，未采样即 None）当继承判据，导致 Windows CI 连续四次偶发失败；改以 current_trace_id()（span context）为主判据"}}
