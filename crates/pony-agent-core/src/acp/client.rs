@@ -646,10 +646,12 @@ impl AcpAgentClient {
     /// `terminal/wait_for_exit` 的等待预算必须同源，否则"调大了轮次预算但长命令仍被 120s 截断"
     /// 这类错位会一直存在（B177 ADVISORY ⑧）。
     pub fn set_terminal_turn_budget(&self, budget: std::time::Duration) {
-        let slots = self
-            .handlers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 用 match 而非 `unwrap_or_else(|p| p.into_inner())`：后者会新增一条
+        // `clippy::redundant_closure_for_method_calls`（棘轮门按新增计数判红）。
+        let slots = match self.handlers.lock() {
+            Ok(slots) => slots,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if let Some(terminal) = slots.terminal.as_ref() {
             terminal.set_turn_budget(budget);
         }

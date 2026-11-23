@@ -632,11 +632,10 @@ impl TerminalHandler for ManagedTerminalHandler {
         // B4：预算取 NFR 派生的整轮预算（不是传输层单请求 5s）；且入站分发已移出读线程
         // （transport 专用分发线程），这里的阻塞等待不再拖住其它入站帧的读取。
         // ADVISORY ⑧：预算来自槽位（可被 `set_turn_budget` 热替换），不再写死常量。
-        let budget = self
-            .turn_budget
-            .lock()
-            .map(|budget| *budget)
-            .unwrap_or(ACP_DEFAULT_TURN_BUDGET);
+        let budget = match self.turn_budget.lock() {
+            Ok(budget) => *budget,
+            Err(_) => ACP_DEFAULT_TURN_BUDGET,
+        };
         let deadline = Instant::now() + budget;
         loop {
             let (state, exit_code) = self.poll_into(&entry)?;
