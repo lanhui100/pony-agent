@@ -51,12 +51,16 @@ fn test_rotate_permission_mode_cycles_through_all_three_modes() {
 fn test_settings_panel_permission_row_toggle() {
     let mut state = tui::TuiState::default();
     state.open_settings();
-    assert_eq!(state.settings_rows().len(), 3);
-    assert_eq!(state.settings_rows()[2].0, "default_permission_mode");
-    assert_eq!(state.settings_rows()[2].1, "默认权限模式");
+    // 行序真源是 `TuiState::settings_rows()`，按 key 定位避免新增开关后下标漂移。
+    let rows = state.settings_rows();
+    let permission_row = rows
+        .iter()
+        .position(|row| row.0 == "default_permission_mode")
+        .expect("设置面板必须含 default_permission_mode 行");
+    assert_eq!(rows[permission_row].1, "默认权限模式");
 
-    // 选中第 3 项
-    state.settings_selected_index = 2;
+    // 选中权限模式项
+    state.settings_selected_index = permission_row;
 
     // 触发切换（WorkspaceWrite -> FullAccess）
     let res = state.handle_settings_key(KeyCode::Enter);

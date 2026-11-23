@@ -1,4 +1,5 @@
-//! TUI 显示偏好持久化：过程隐藏（hide_process）、思考折叠（thinking_collapsed）与默认权限模式（default_permission_mode）。
+//! TUI 显示偏好持久化：过程隐藏（hide_process）、思考折叠（thinking_collapsed）、
+//! 宽松行距（relaxed_spacing）与默认权限模式（default_permission_mode）。
 //!
 //! 存储与 `model-preferences.json` 同目录（`<config_dir>/pony-agent/tui-preferences.json`），
 //! 但**独立成文件**：这些是纯终端渲染侧开关与默认选项，与 `providers.json`（provider 注册表契约）
@@ -29,6 +30,11 @@ pub struct TuiPreferences {
     /// 思考块折叠为单行摘要，默认折叠。
     #[serde(default = "default_true")]
     pub thinking_collapsed: bool,
+    /// 宽松行距：只在块边界加厚留白（段间 2 行、ATX 标题前后各 1 行呼吸），正文行内保持紧凑。
+    /// 终端行高不可调、插整行是唯一手段，故「更细的行距」在应用侧不存在（详见 ADR）。
+    /// 代码块 / 表格 / 连续列表项整体紧邻渲染，不参与加厚（避免整块内容被拆散）。默认关闭。
+    #[serde(default)]
+    pub relaxed_spacing: bool,
     /// 默认工具权限级别，默认工作区写入 (WorkspaceWrite)。
     #[serde(default = "default_permission_mode")]
     pub default_permission_mode: PermissionMode,
@@ -39,6 +45,7 @@ impl Default for TuiPreferences {
         Self {
             hide_process: true,
             thinking_collapsed: true,
+            relaxed_spacing: false,
             default_permission_mode: PermissionMode::WorkspaceWrite,
         }
     }
@@ -109,6 +116,7 @@ mod tests {
         let prefs = TuiPreferences::default();
         assert!(prefs.hide_process);
         assert!(prefs.thinking_collapsed);
+        assert!(!prefs.relaxed_spacing);
         assert_eq!(prefs.default_permission_mode, PermissionMode::WorkspaceWrite);
     }
 
@@ -127,6 +135,7 @@ mod tests {
         let prefs = TuiPreferences {
             hide_process: false,
             thinking_collapsed: false,
+            relaxed_spacing: true,
             default_permission_mode: PermissionMode::FullAccess,
         };
         store.save(&prefs).unwrap();

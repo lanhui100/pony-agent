@@ -100,6 +100,7 @@ CAPABILITY_QUERIES = (
 SHIFT_ENTER = b"\x1b[13;2u"  # kitty CSI u: codepoint 13 (Enter), modifier 2 (Shift)
 PLAIN_ENTER = b"\r"
 CTRL_C = b"\x03"
+ENTER_ALT_SCREEN = b"\x1b[?1049h"
 LEAVE_ALT_SCREEN = b"\x1b[?1049l"
 CSI_RE = re.compile(r"\x1b\[([0-9;:?<>!=]*)([ -/]*)([@-~])")
 SUBMIT_MARKERS = ("思考中", "生成中", "Thinking", "Responding", "准备就绪中")
@@ -459,6 +460,31 @@ def run(bin_path: str, evidence_dir: str) -> int:
             )
         if probe_seen:
             notes.append("legacy `CSI ? u` probe regressed: ADR 0075 removed it on purpose")
+
+        # ---- Assertion 1c: push ordering vs alternate screen (B277) --------------
+        # 现场根因：herdr 0.7.5 在 pane 进入备用屏（`ESC[?1049h`）时会清掉逐 pane
+        # 记录的 kitty 标志。push 若早于备用屏，代理退回 xterm modifyOtherKeys
+        # （Shift+Enter = `CSI 27;2;13~`），而 crossterm 0.28.1 不解析该序列 ⇒ 按键
+        # 被静默丢弃（症状：既不换行也不发送）。故 push **必须**晚于备用屏。
+        session.wait_for(lambda: ENTER_ALT_SCREEN in bytes(session.buf), timeout=8.0)
+        startup_order = bytes(session.buf)
+        alt_idx = startup_order.find(ENTER_ALT_SCREEN)
+        push_match = PUSH_RE.search(startup_order)
+        push_idx = push_match.start() if push_match else -1
+        report.add(
+            "a2.7_keyboard_enhancement_push_after_alternate_screen",
+            alt_idx >= 0 and push_idx > alt_idx,
+            (
+                f"alt_screen_idx={alt_idx} push_idx={push_idx} "
+                "(push must come AFTER ESC[?1049h: pty proxies drop kitty flags on "
+                "alt-screen entry, falling back to unparseable CSI 27;2;13~)"
+            ),
+        )
+        if alt_idx >= 0 and push_idx >= 0 and push_idx < alt_idx:
+            notes.append(
+                "keyboard enhancement pushed before EnterAlternateScreen: herdr-style "
+                "proxies drop it, Shift+Enter degrades to CSI 27;2;13~ (unparsed)"
+            )
 
         # ---- Assertion 1b: no capability query at all (zero stdin reads) --------
         # 品牌标探测曾用 stdio 能力查询（会阻塞读 stdin 并吞掉用户按键）。现在改为纯环境

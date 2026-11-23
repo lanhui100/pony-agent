@@ -1,23 +1,28 @@
 {
   "scenario": "shift-enter",
   "wave": 40,
-  "bin": "/home/dm/.local/bin/pony",
-  "bin_sha256": "212aaa1f954659af226cd202847738f3f3221e89a53a5cf44ff0f8978e78dcb8",
+  "bin": "/home/dm/pony-agent/target/debug/pony",
+  "bin_sha256": "1540bf8ee2591a3b6f7edf660c89f93e3908df86f457406d5de089ac5fafd431",
   "pty": {
     "cols": 120,
     "rows": 34,
     "term": "xterm-256color",
     "isolated_home": true
   },
-  "generated_at": "2026-11-08T10:48:26+0800",
+  "generated_at": "2026-11-23T18:08:35+0800",
   "exit_code": 0,
-  "pass": 6,
+  "pass": 7,
   "fail": 0,
   "assertions": [
     {
       "id": "a2.1_no_probe_and_unconditional_push_direct_tier",
       "ok": true,
       "detail": "push_seen=True push_flags=9 expected_flags=9(DISAMBIGUATE|REPORT_ALL_KEYS) raw_push=1b5b3e3975 probe_seen=False (must be False: ADR 0075 removed the CSI ? u probe)"
+    },
+    {
+      "id": "a2.7_keyboard_enhancement_push_after_alternate_screen",
+      "ok": true,
+      "detail": "alt_screen_idx=310 push_idx=366 (push must come AFTER ESC[?1049h: pty proxies drop kitty flags on alt-screen entry, falling back to unparseable CSI 27;2;13~)"
     },
     {
       "id": "a2.6_startup_sends_no_capability_query",
