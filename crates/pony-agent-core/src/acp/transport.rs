@@ -44,6 +44,14 @@ pub const ACP_REQUEST_TIMEOUT: Duration = Duration::from_millis(5000);
 /// 握手处被误判成 `acp_timeout` 而 fail-closed。握手只发生一次，放宽到 30s 不放大稳态开销。
 pub const ACP_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(30_000);
 
+/// 入站请求分发的 worker 数（B177 ADVISORY ③）。
+///
+/// 旧实现是**单线程串行** `for request in receiver`：一个 `terminal/wait_for_exit`
+/// （整轮预算最长 120s）会把后续所有入站请求压在队列里（复审实测 `terminal/output`
+/// 被压后 5.008s vs 对照 0.002s）。handler 约束是 `Send + Sync`、应答写 stdin 经
+/// `Mutex` 串行化，因此可以安全地并发处理——帧不会交错，应答按 `id` 匹配。
+pub const ACP_INBOUND_WORKERS: usize = 4;
+
 /// ACP 子进程**专属**扩展 env 白名单（B178 真机挂起根因）。
 ///
 /// 背景：`spawn` 复用 plugin_host 的 `apply_child_env`（MCP/插件共享白名单，F8a 单一真值），
@@ -343,35 +351,53 @@ impl AcpTransport {
         // `terminal/wait_for_exit` 的整轮预算可达 120s），绝不能内联在读线程上——否则会拖住
         // 后续所有入站帧的读取与响应匹配（长命令会连带把其它请求饿死）。
         let (request_sender, request_receiver) = mpsc::channel::<AcpInboundRequest>();
-        let dispatcher = std::thread::Builder::new()
-            .name("acp-inbound".to_string())
-            .spawn({
-                let stdin = Arc::clone(&stdin);
-                let handler = Arc::clone(&handler);
-                let stderr_tail = Arc::clone(&stderr_tail);
-                let fatal = Arc::clone(&fatal);
-                move || {
-                    for request in request_receiver {
-                        let outcome = respond_to_inbound_request(
-                            &stdin,
-                            &handler,
-                            request.id.clone(),
-                            &request.method,
-                            request.params.clone(),
-                        );
-                        if let Err(error) = outcome {
-                            // 应答写不出去 = agent 已不可写：记录真源错误码后停止分发（不重试）。
-                            push_bounded(
-                                &stderr_tail,
-                                format!("[acp] 入站请求应答写入失败：{error}"),
-                            );
-                            record_fatal(&fatal, error);
-                            break;
+        // B177 ADVISORY ③：从「单线程串行」改为**有界 worker 池**（见 `ACP_INBOUND_WORKERS`）。
+        // 取任务时短暂持锁（`recv` 立即返回），处理在锁外 ⇒ 一个慢 handler 不再挡住其它 worker 取活。
+        let request_receiver = Arc::new(Mutex::new(request_receiver));
+        let mut spawn_error = None;
+        for worker in 0..ACP_INBOUND_WORKERS {
+            let stdin = Arc::clone(&stdin);
+            let handler = Arc::clone(&handler);
+            let stderr_tail = Arc::clone(&stderr_tail);
+            let fatal = Arc::clone(&fatal);
+            let receiver = Arc::clone(&request_receiver);
+            let spawned = std::thread::Builder::new()
+                .name(format!("acp-inbound-{worker}"))
+                .spawn(move || loop {
+                    let request = {
+                        let guard = match receiver.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        match guard.recv() {
+                            Ok(request) => request,
+                            // 读线程已退出（sender 全 drop）：正常收尾。
+                            Err(_) => break,
                         }
+                    };
+                    let outcome = respond_to_inbound_request(
+                        &stdin,
+                        &handler,
+                        request.id.clone(),
+                        &request.method,
+                        request.params.clone(),
+                    );
+                    if let Err(error) = outcome {
+                        // 应答写不出去 = agent 已不可写：记录真源错误码后停止该 worker（不重试）。
+                        push_bounded(
+                            &stderr_tail,
+                            format!("[acp] 入站请求应答写入失败：{error}"),
+                        );
+                        record_fatal(&fatal, error);
+                        break;
                     }
-                }
-            });
-        if let Err(error) = dispatcher {
+                });
+            if let Err(error) = spawned {
+                spawn_error = Some(error);
+                break;
+            }
+        }
+        if let Some(error) = spawn_error {
             reap_child(child);
             return Err(AcpTransportError::Spawn(format!(
                 "启动入站请求分发线程失败：{error}。"
