@@ -12,9 +12,7 @@
 //! - 状态机层：`/settings` 的打开/选择/切换/关闭与按键吸收（`handle_settings_key`）；
 //! - 持久化层：`TuiPreferencesStore` 的默认值、缺失/损坏/字段缺失回落。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use crossterm::event::KeyCode;
 use pony_agent_core::agent::tui_preferences::{TuiPreferences, TuiPreferencesStore};

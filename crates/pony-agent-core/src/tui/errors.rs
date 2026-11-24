@@ -39,7 +39,7 @@ pub fn dsml_partial_tail_len(text: &str) -> Option<usize> {
 /// C4/C5（wave-interrupted-turn-resume）：展示侧走 [`display_dsml_protocol_text`] —— 除既有
 /// 折叠外，还丢弃行首就是协议语法的碎片行（`parameter name=…` 之类），并把连排占位符收敛为
 /// 一个。**持久化正文不得经本入口**（占位符会写回落库），落库侧走
-/// [`pony_agent_core::agent::session::interrupted_turn::persisted_assistant_text`]。
+/// [`crate::agent::session::interrupted_turn::persisted_assistant_text`]。
 #[allow(unused_variables)]
 pub fn sanitize_model_protocol_text(text: &str) -> (String, bool) {
     // 半截标记先截掉（流式 chunk 边界），再交给 provider 层同一纯函数做块级折叠；
@@ -48,7 +48,7 @@ pub fn sanitize_model_protocol_text(text: &str) -> (String, bool) {
         Some(len) => (&text[..text.len() - len], true),
         None => (text, false),
     };
-    let cleaned = pony_agent_core::agent::provider::display_dsml_protocol_text(body);
+    let cleaned = crate::agent::provider::display_dsml_protocol_text(body);
     (cleaned, incomplete)
 }
 
@@ -94,7 +94,7 @@ pub const ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW: &str =
 /// 恢复时间与冷却窗口同源（`retry::rate_limit_recovery_hint`，唯一解析点）；
 /// 解析不到时如实说明"恢复时间未知"，**不得**折叠为 `ERROR_SUMMARY_TRANSIENT`。
 pub fn rate_limited_error_summary(error: &str) -> String {
-    match pony_agent_core::agent::retry::rate_limit_recovery_hint(error) {
+    match crate::agent::retry::rate_limit_recovery_hint(error) {
         Some(hint) => format!("{ERROR_SUMMARY_RATE_LIMITED}，{hint}。"),
         None => ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW.to_string(),
     }
@@ -103,7 +103,7 @@ pub fn rate_limited_error_summary(error: &str) -> String {
 /// PA-172 §5（遗留 #6）：注入 `now` 的版本——恢复提示按**真实 now** 折算剩余窗口
 /// （`retry::rate_limit_recovery_hint_at`，唯一解析点；与冷却窗口同源）。
 pub fn rate_limited_error_summary_at(error: &str, now_unix_ms: u64) -> String {
-    match pony_agent_core::agent::retry::rate_limit_recovery_hint_at(error, now_unix_ms) {
+    match crate::agent::retry::rate_limit_recovery_hint_at(error, now_unix_ms) {
         Some(hint) => format!("{ERROR_SUMMARY_RATE_LIMITED}，{hint}。"),
         None => ERROR_SUMMARY_RATE_LIMITED_NO_WINDOW.to_string(),
     }
@@ -197,7 +197,7 @@ pub fn system_message_severity(content: &str) -> SystemMessageSeverity {
 pub fn goal_stop_severity_for_line(
     content: &str,
 ) -> Option<SystemMessageSeverity> {
-    use pony_agent_core::agent::goal::GoalRoundStopReason;
+    use crate::agent::goal::GoalRoundStopReason;
     let trimmed = content.trim();
     GoalRoundStopReason::all_variants()
         .into_iter()
@@ -212,9 +212,9 @@ pub fn goal_stop_severity_for_line(
 /// 之外的任何 error 词，实测被降级成 Info 灰字——**为可见性新增的消息反而最不醒目**。
 /// 领域枚举本身就是真值，无需再猜；这里只做一次纯翻译。
 pub fn severity_for_goal_stop(
-    severity: pony_agent_core::agent::goal::GoalStopSeverity,
+    severity: crate::agent::goal::GoalStopSeverity,
 ) -> SystemMessageSeverity {
-    use pony_agent_core::agent::goal::GoalStopSeverity;
+    use crate::agent::goal::GoalStopSeverity;
     match severity {
         GoalStopSeverity::Info => SystemMessageSeverity::Info,
         GoalStopSeverity::Warning => SystemMessageSeverity::Warning,
@@ -252,11 +252,11 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String {
     // L3-B BLOCKING：auth 只认**头部段**（`；响应正文` 之前）的词边界判据，禁止裸
     // `contains` 扫全文——`429 … 耗时=4031ms` / `… 耗时=401ms` / 正文含 "api key"
     // 都会被裸 contains 误判成凭据错误（真因是限流/配额）。
-    if pony_agent_core::agent::retry::is_auth_error(error) {
+    if crate::agent::retry::is_auth_error(error) {
         return ERROR_SUMMARY_AUTH.to_string();
     }
     if matches!(
-        pony_agent_core::agent::retry::classify_error_class(error),
+        crate::agent::retry::classify_error_class(error),
         "rate_limited" | "quota"
     ) {
         // PA-172 §5（遗留 #6）：`now` 是**真参数**——恢复提示按真实时刻折算剩余窗口
@@ -298,14 +298,14 @@ pub fn should_fold_error_detail(error: &str) -> bool {
 
 /// C5/C6：把中断 turn 的已落盘步骤投影为可续传检查点（向后兼容：空输入返回 None）。
 ///
-/// **不得在此复制实现**：真值源是 `pony_agent_core::agent::session::interrupted_turn_checkpoint_text`
+/// **不得在此复制实现**：真值源是 `crate::agent::session::interrupted_turn_checkpoint_text`
 /// （`session/store.rs`）。此处曾有一份逐字复制品，「改一处漏一处」的风险由 L2 收口
 /// （同一事实一个家）。保留本入口只为 C1–C8 契约测试的调用面稳定。
 pub fn interrupted_turn_checkpoint(
     prior_assistant_text: &str,
     tool_activities: &[String],
 ) -> Option<String> {
-    pony_agent_core::agent::session::interrupted_turn_checkpoint_text(
+    crate::agent::session::interrupted_turn_checkpoint_text(
         prior_assistant_text,
         tool_activities,
     )
@@ -343,7 +343,7 @@ const CHECKPOINT_MARKER: &str = "[中断轮次检查点]";
 ///
 /// 独立成函数是为了让「历史形状 → 是否补行」成为可机械断言的唯一判定点。
 pub fn resume_interrupted_status_line(
-    history: &[pony_agent_core::agent::session::TurnHistoryMessage],
+    history: &[crate::agent::session::TurnHistoryMessage],
 ) -> Option<&'static str> {
     history
         .last()
@@ -359,9 +359,9 @@ pub fn resume_interrupted_status_line(
 /// `None` ⇒ 这是模型真实产出，调用方按正文渲染。
 pub fn interrupted_record_status_line(
     content: &str,
-    kind: Option<pony_agent_core::agent::session::HistoryMessageKind>,
+    kind: Option<crate::agent::session::HistoryMessageKind>,
 ) -> Option<&'static str> {
-    use pony_agent_core::agent::session::HistoryMessageKind;
+    use crate::agent::session::HistoryMessageKind;
     match kind {
         Some(HistoryMessageKind::Cancelled) => Some(INTERRUPTED_CANCELLED_LINE),
         Some(HistoryMessageKind::Interrupted) => Some(INTERRUPTED_FAILED_LINE),
@@ -371,7 +371,7 @@ pub fn interrupted_record_status_line(
         Some(HistoryMessageKind::Degraded) => Some(DEGRADED_TURN_LINE),
         None => {
             let trimmed = content.trim();
-            if trimmed == pony_agent_core::agent::session::CANCELLED_TURN_SENTINEL {
+            if trimmed == crate::agent::session::CANCELLED_TURN_SENTINEL {
                 Some(INTERRUPTED_CANCELLED_LINE)
             } else if trimmed.starts_with(CHECKPOINT_MARKER) {
                 Some(INTERRUPTED_FAILED_LINE)
@@ -404,7 +404,7 @@ pub fn resume_from_checkpoint(completed_history: &str, checkpoint: Option<&str>)
 #[cfg(test)]
 mod interrupted_record_status_tests {
     use super::*;
-    use pony_agent_core::agent::session::HistoryMessageKind;
+    use crate::agent::session::HistoryMessageKind;
 
     const CHECKPOINT: &str = "[中断轮次检查点]\n已执行的工具步骤：\n- Run 探测";
 
@@ -443,7 +443,7 @@ mod interrupted_record_status_tests {
         );
         assert_eq!(
             interrupted_record_status_line(
-                pony_agent_core::agent::session::CANCELLED_TURN_SENTINEL,
+                crate::agent::session::CANCELLED_TURN_SENTINEL,
                 None
             ),
             Some(INTERRUPTED_CANCELLED_LINE)

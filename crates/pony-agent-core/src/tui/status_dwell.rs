@@ -285,8 +285,8 @@ impl UpstreamIdle {
 ///
 /// 为什么文案在这里而不是 provider 层：provider 只上报**事实**（阶段枚举），
 /// 用户可见措辞归展示层（同一事实一个家，避免库层被 UI 文案污染）。
-pub fn followup_phase_text(phase: &pony_agent_core::agent::retry::ProviderPhase) -> String {
-    use pony_agent_core::agent::retry::ProviderPhase;
+pub fn followup_phase_text(phase: &crate::agent::retry::ProviderPhase) -> String {
+    use crate::agent::retry::ProviderPhase;
     match phase {
         ProviderPhase::StreamFallback => "连接不稳定，重试中…".to_string(),
         ProviderPhase::SyncAttempt { attempt } => format!("连接不稳定，重试中（第 {attempt} 次）…"),
@@ -539,7 +539,7 @@ mod tests {
     ///（URL / elapsed 一旦进状态行，用户读到的就是噪音）。
     #[test]
     fn followup_phase_text_is_stable_and_leak_free() {
-        use pony_agent_core::agent::retry::ProviderPhase;
+        use crate::agent::retry::ProviderPhase;
 
         let stream = followup_phase_text(&ProviderPhase::StreamFallback);
         let sync = followup_phase_text(&ProviderPhase::SyncAttempt { attempt: 3 });

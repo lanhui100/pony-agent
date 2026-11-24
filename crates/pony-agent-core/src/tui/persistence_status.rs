@@ -12,8 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
-use pony_agent_core::agent::session::SessionStore;
-use pony_agent_core::agent::sqlite_session::default_sqlite_path;
+use crate::agent::session::SessionStore;
+use crate::agent::sqlite_session::default_sqlite_path;
 
 use super::PersistenceEvidence;
 
@@ -29,7 +29,7 @@ pub fn session_persistence_evidence(session_id: &str) -> PersistenceEvidence {
     // P1：退出路径同样不能整库装载（一次 `SessionStore::new()` = 日志 fold + 自愈 + 可能的
     // 整包回写）。这里只发一条只读 SELECT；失败才退回整库视图（慢但语义不变）。
     let db_path = default_sqlite_path();
-    let cheap = pony_agent_core::agent::session::load_session_meta_rows(&db_path)
+    let cheap = crate::agent::session::load_session_meta_rows(&db_path)
         .map(|rows| rows.iter().any(|row| row.conversation_id == session_id));
     let persisted = match cheap {
         Ok(persisted) => persisted,

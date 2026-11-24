@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod agent;
 pub mod cli;
+pub mod tui;
 
 /// 全局分配器：替代 glibc malloc。
 ///

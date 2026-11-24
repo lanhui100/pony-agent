@@ -7,10 +7,10 @@
 //! - 生命周期读失败：**保持面板** + 结构化日志 + 状态行提示（绝不静默收口）。
 
 use super::*;
-use pony_agent_core::agent::ask_persistence::{
+use crate::agent::ask_persistence::{
     open_ask_store, AskLifecycleState, AskPersistenceResult, AskPersistenceStore, PersistedAsk,
 };
-use pony_agent_core::agent::tool_runtime::PendingControlRequestKind;
+use crate::agent::tool_runtime::PendingControlRequestKind;
 use std::sync::Arc;
 
 fn temp_db_path(tag: &str) -> std::path::PathBuf {

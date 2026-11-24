@@ -6,7 +6,7 @@
 //! 没有 Draft 时说清现状、有 Draft 时真的把计划推进到 `executing`、批准后不再残留 Draft。
 
 use super::*;
-use pony_agent_core::agent::plan_state::PlanStore;
+use crate::agent::plan_state::PlanStore;
 use serde_json::json;
 
 /// 隔离进程级数据目录（`Once` 保证只做一次，且早于任何 control plane 构造）。

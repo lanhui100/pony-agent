@@ -1,9 +1,7 @@
 // TUI 鼠标文本选择与复制常规功能契约测试
 // 严格遵循 AAA 原则与零假测试规范
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use tui::{
     encode_osc52_copy, extract_selected_text, is_coord_selected, MouseSelectionState, TextCoord,

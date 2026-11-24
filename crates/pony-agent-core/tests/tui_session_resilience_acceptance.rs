@@ -10,9 +10,7 @@
 //! PTY 动态链路本环境未拉起真实 `pony` 进程，采用静态字节/退出计划状态机断言，
 //! 显式标注 `[RED DEGRADED: STATIC-ONLY]`，不谎称动态通过。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread;

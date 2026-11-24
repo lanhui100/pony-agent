@@ -8,7 +8,7 @@
 //! 3. Goal：没有打开抽屉时的同步点，只有轮末事件回写。
 
 use super::*;
-use pony_agent_core::agent::todo::{todo_write, TodoWriteArgs};
+use crate::agent::todo::{todo_write, TodoWriteArgs};
 
 /// 会话作用域的 todo 写入（真实存储，不做 mock；session 用测试专属名避免串扰）。
 fn write_todos(session: &str, items: Vec<(&str, StoreTodoStatus)>) {

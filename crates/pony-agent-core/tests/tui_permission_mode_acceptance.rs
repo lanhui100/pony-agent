@@ -7,9 +7,7 @@
 //! 4. 状态行右槽时分轮播（模型名称与权限模式按 3s 间隔平滑交替展示）；
 //! 5. build_turn_input 携带正确的 tool_authorization_mode 注入内核。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use pony_agent_core::agent::headless::PermissionMode;

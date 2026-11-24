@@ -8,9 +8,7 @@
 //! 范式沿用 `tests/tui_thinking_bottom_gap.rs`：`#[path = "../src/bin/tui.rs"] mod tui;`
 //! + ratatui `TestBackend` + `row_text` / `find_row` 辅助。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

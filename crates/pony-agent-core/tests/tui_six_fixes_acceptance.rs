@@ -4,9 +4,7 @@
 //! 手法与 `tui_render_layout.rs` 一致：把 `src/bin/tui.rs` 以模块方式编进测试进程，
 //! 直接驱动渲染与纯函数，断言**真实行为**而不是字符串常量。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pony_agent_core::agent::model_preferences::ModelPreferencesStore;
@@ -489,5 +487,3 @@ fn model_panel_ctrl_f_reanchors_selection_to_same_model() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
-
-

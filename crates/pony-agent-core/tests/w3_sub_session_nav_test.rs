@@ -9,9 +9,7 @@
 // 内联单测守实现细节，本文件守**对外契约**（文案逐字、渲染行位置与几何、作用域复位面、
 // 命令分发顺序），二者互为镜像。用 ratatui TestBackend 做真实渲染，bin 的 main 不会被调用。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
@@ -25,7 +23,7 @@ const CANVAS: Color = Color::Rgb(18, 16, 14);
 const SURFACE: Color = Color::Rgb(27, 25, 22);
 
 /// 契约 C14/C15 的静态真值：命令分发顺序（`/tasks` 分支必须先于花名册分支）。
-const TUI_SOURCE: &str = include_str!("../src/bin/tui.rs");
+const TUI_SOURCE: &str = include_str!("../src/tui.rs");
 
 // ---------------------------------------------------------------------------
 // 构造与取值工具

@@ -21,9 +21,7 @@
 //! ## 数据卫生
 //! 全部为纯函数 + `TestBackend` 内存渲染：不写磁盘、不读用户会话库、无后台线程。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

@@ -2,7 +2,7 @@
 //! 任务板 / 团队花名册 / Goal / Plan / 待处理控制请求的唯一投影真值源。
 
 use super::*;
-use pony_agent_core::agent::todo::{todo_list, TodoListArgs};
+use crate::agent::todo::{todo_list, TodoListArgs};
 
 /// 真实 todo 存储 → 任务看板投影。`id` 按存储顺序稳定生成，避免每帧抖动。
 /// W3：`/tasks` 已切到**真实 Team 任务看板**（`orchestration::team_task_list`）。
@@ -198,7 +198,7 @@ pub fn acp_delegates_from_runtime(host_session_id: &str) -> Vec<AcpDelegateRow> 
     if target.is_empty() {
         return Vec::new();
     }
-    pony_agent_core::acp::registry::active_delegates_for_session(target)
+    crate::acp::registry::active_delegates_for_session(target)
         .into_iter()
         .map(|delegate| AcpDelegateRow {
             delegate_id: delegate.delegate_id,

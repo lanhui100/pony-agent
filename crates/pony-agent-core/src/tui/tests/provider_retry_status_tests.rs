@@ -84,8 +84,8 @@ fn retry_notice_reaches_installed_observer() {
     let (tx, rx) = channel();
     let _observer = install_tui_retry_observer(tx);
 
-    pony_agent_core::agent::retry::notify_provider_retry(
-        &pony_agent_core::agent::retry::RetryNotice {
+    crate::agent::retry::notify_provider_retry(
+        &crate::agent::retry::RetryNotice {
             label: "decision".to_string(),
             scope: "decision",
             attempt: 3,
@@ -117,8 +117,8 @@ fn retry_observer_guard_detaches_on_drop() {
         let _observer = install_tui_retry_observer(tx);
     }
 
-    pony_agent_core::agent::retry::notify_provider_retry(
-        &pony_agent_core::agent::retry::RetryNotice {
+    crate::agent::retry::notify_provider_retry(
+        &crate::agent::retry::RetryNotice {
             label: "decision".to_string(),
             scope: "decision",
             attempt: 1,

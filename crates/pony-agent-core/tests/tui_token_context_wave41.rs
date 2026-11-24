@@ -3,9 +3,7 @@
 // 行位置：ADR 0078（implemented）起数值指标簇锚定 header 行（row 0）右槽，
 // 底面最后一行只剩右对齐模型身份；旧「最后一行 = cwd + 指标」判据已作废。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::runtime::TurnStreamEvent;
 use ratatui::backend::TestBackend;
@@ -233,4 +231,3 @@ fn a5_cache_hit_percentage_is_calculated_per_turn_and_clamped() {
         "缓存命中率绝不得超过 100%，实际：{header2}"
     );
 }
-

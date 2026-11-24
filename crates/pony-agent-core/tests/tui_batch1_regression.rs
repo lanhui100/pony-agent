@@ -16,9 +16,7 @@
 //! 铁律：每条用例都是真实断言（无 `#[ignore]`、无 skip、无「只运行不报错」）；本文件不修改任何
 //! 实现代码，实现侧不得反向修改本文件。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;

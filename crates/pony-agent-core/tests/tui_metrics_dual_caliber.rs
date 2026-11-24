@@ -9,9 +9,7 @@
 //!
 //! 取行口径：ADR 0078 起指标簇在 header(row 0)；底面最后一行只承载模型身份。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::metrics_snapshot::{build_turn_metrics_snapshot, TurnMetricsSnapshot};
 use pony_agent_core::agent::session::SessionUsageTotals;

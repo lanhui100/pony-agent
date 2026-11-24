@@ -44,7 +44,7 @@ fn splash_coverage_tables_match_declared_dims() {
     assert_eq!(splash_coverage::RICH_ROWS % 2, 0);
     assert_eq!(splash_coverage::COMPACT_ROWS % 2, 0);
 
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/tui/splash_coverage.rs");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tui/splash_coverage.rs");
     let source = std::fs::read_to_string(path).expect("读取覆盖率表源码");
     assert!(
         source.contains("icon-master-approved.png"),
@@ -196,7 +196,7 @@ fn splash_protocol_detection_is_env_only_and_fail_closed() {
 /// 说明文字互相命中。
 #[test]
 fn splash_probe_never_reads_stdin() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/tui.rs");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tui.rs");
     let source = std::fs::read_to_string(path).expect("读取 tui.rs 源码");
     let forbidden = ["from_query", "_stdio("].concat();
     assert!(
@@ -479,7 +479,7 @@ fn splash_protocol_override_keeps_halfblocks_bitmap() {
 /// 断言的是源码形态（`init_splash_image` 内不再出现按协议早退的分支）。
 #[test]
 fn splash_image_init_has_no_protocol_early_return() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/tui/splash.rs");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tui/splash.rs");
     let source = std::fs::read_to_string(path).expect("读取 splash.rs 源码");
     let start = source.find("pub fn init_splash_image").expect("必须存在 init_splash_image");
     let body = &source[start..];

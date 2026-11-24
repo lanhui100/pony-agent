@@ -8,8 +8,8 @@
 //! 本模块把「首轮终态 → 停止原因」收成**纯函数**（唯一判定点，可机械断言），
 //! 调用方只负责把结果交给 `report_goal_rounds_stopped`（可见性由既有通道承担）。
 
-use pony_agent_core::agent::control_plane::TurnStreamOutcome;
-use pony_agent_core::agent::goal::GoalRoundStopReason;
+use crate::agent::control_plane::TurnStreamOutcome;
+use crate::agent::goal::GoalRoundStopReason;
 
 /// 首轮终态 → 「不再进入自动续轮」的可见原因（`None` = 首轮成功，继续走续轮循环）。
 ///
@@ -92,7 +92,7 @@ mod tests {
         // 严重级必须由枚举给：旧关键词表把它判成 Info 灰字（B193 目的被反向实现）。
         assert_eq!(
             GoalRoundStopReason::FirstRoundNotSucceeded.severity(),
-            pony_agent_core::agent::goal::GoalStopSeverity::Error,
+            crate::agent::goal::GoalStopSeverity::Error,
             "首轮失败必须是 Error 级：{line}"
         );
         // 必须给出可执行动作，否则用户仍只能干等或乱试。

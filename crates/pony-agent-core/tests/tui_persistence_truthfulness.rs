@@ -13,9 +13,7 @@
 //! - `session_persistence_evidence`：真库真数据（XDG 沙箱），已建会话判 `Persisted`，
 //!   陌生 id 判 `NotPersisted`。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::session::SessionStore;
 use tui::persistence_status::session_persistence_evidence;

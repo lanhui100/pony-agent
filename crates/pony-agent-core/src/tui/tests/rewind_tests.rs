@@ -5,7 +5,7 @@
 
 use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use pony_agent_core::agent::control_plane::rewind_commands::{RewindMode, RewindPointView};
+use crate::agent::control_plane::rewind_commands::{RewindMode, RewindPointView};
 
 fn point(node_id: &str, turn_index: usize, user_message: &str, files_tracked: usize) -> RewindPointView {
     RewindPointView {

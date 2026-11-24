@@ -65,7 +65,7 @@ fn close_stale_pending_request_uses_approval_notice_for_approval_handle() {
 
 #[test]
 fn sync_pending_control_request_silently_closes_answered_ask_without_stale_notice() {
-    use pony_agent_core::agent::ask_persistence::{
+    use crate::agent::ask_persistence::{
         open_ask_store, AskLifecycleState, AskPersistenceStore, PersistedAsk,
     };
     use std::sync::Arc;
@@ -94,7 +94,7 @@ fn sync_pending_control_request_silently_closes_answered_ask_without_stale_notic
         run_id: Some("run-1".to_string()),
         turn_id: "turn-1".to_string(),
         call_id: "call-1".to_string(),
-        kind: pony_agent_core::agent::tool_runtime::PendingControlRequestKind::Interaction,
+        kind: crate::agent::tool_runtime::PendingControlRequestKind::Interaction,
         prompt: "测试问题？".to_string(),
         options: vec!["A".to_string(), "B".to_string()],
         state: AskLifecycleState::Answered,
@@ -104,7 +104,7 @@ fn sync_pending_control_request_silently_closes_answered_ask_without_stale_notic
     };
     store.upsert(&ask).expect("upsert answered ask");
 
-    let control_plane = pony_agent_core::agent::control_plane::HostControlPlaneBuilder::new()
+    let control_plane = crate::agent::control_plane::HostControlPlaneBuilder::new()
         .ask_store(Arc::clone(&store))
         .build();
 

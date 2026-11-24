@@ -280,8 +280,8 @@ fn a2_contrast_ratio_matches_wcag_and_theme_colors_are_readable() {
     // 否则拆模块会让本用例静默失去校验对象（只剩「找不到色值」的假红）。
     let mut tui_source = String::new();
     for relative in [
-        "crates/pony-agent-core/src/bin/tui.rs",
-        "crates/pony-agent-core/src/bin/tui/theme.rs",
+        "crates/pony-agent-core/src/tui.rs",
+        "crates/pony-agent-core/src/tui/theme.rs",
     ] {
         tui_source.push_str(
             &std::fs::read_to_string(repo_root().join(relative))

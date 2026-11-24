@@ -14,9 +14,7 @@
 //! 三处均为 `todo!()`；故 A1–A7 的红相是 **SUT panic**，A8–A10 的红相是**真实断言失败**
 //! （底部间距尚未实现），A11 是回归守卫（应保持绿）。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::runtime::TurnStreamEvent;
 use ratatui::backend::TestBackend;

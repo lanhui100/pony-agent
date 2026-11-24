@@ -10,13 +10,11 @@
 //! - 状态机层：`/settings` 面板自身对 `Char('o')` 是 no-op（证明只有前置全局分支能让它
 //!   在面板内生效），且快捷开关与面板行读写同一 `hide_process` 字段。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-const SOURCE: &str = include_str!("../src/bin/tui.rs");
+const SOURCE: &str = include_str!("../src/tui.rs");
 
 #[test]
 fn ctrl_o_predicate_only_matches_exact_control_o() {

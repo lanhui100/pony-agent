@@ -20,9 +20,7 @@
 //!
 //! 铁律：真实断言、无 `#[ignore]`/skip；对 `tools/**` 只读；临时目录隔离。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -52,7 +50,7 @@ fn env_lock() -> MutexGuard<'static, ()> {
 fn tui_source() -> String {
     std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/bin/tui.rs"
+        "/src/tui.rs"
     ))
     .expect("必须能读取 tui.rs")
 }

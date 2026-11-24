@@ -21,9 +21,7 @@
 //! 2) 会话存储用 `FileSessionBackend` 指向本测试二进制独占的临时目录；
 //! 3) 兜底把 `XDG_DATA_HOME` / `HOME` / `LOCALAPPDATA` 重定向到该沙箱，绝不读写生产数据。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -341,7 +339,7 @@ fn t1b_panel_command_opens_the_task_drawer_like_ctrl_t() {
     // 2026-11-22 契约修订（ADR `2026-11-22-tui-task-drawer-visibility`）：同步点由
     // `sync_tasks_from_store`（只同步团队看板）升级为 `projection::sync_drawer_sources`
     // （plan + todo + goal）。「先同步再开」这条不变量不变，只换同步函数的真值。
-    let source = include_str!("../src/bin/tui.rs");
+    let source = include_str!("../src/tui.rs");
     let branch = source
         .find("if known_command == Some(\"/panel\")")
         .expect("T1b: 分发点必须存在 `/panel` 分支");

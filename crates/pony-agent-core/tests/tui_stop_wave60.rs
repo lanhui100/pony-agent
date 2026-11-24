@@ -14,9 +14,7 @@
 //! —— 纯状态迁移，可测；本文件以 bin-as-module 方式 include `src/bin/tui.rs`（与既有
 //! `tests/tui_acceptance.rs` 同法），**不修改** `src/bin/tui.rs`。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use tui::{CtrlCAction, MessageRole, TuiState};
 

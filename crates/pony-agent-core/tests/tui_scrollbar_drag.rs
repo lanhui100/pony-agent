@@ -5,9 +5,7 @@
 //! - 命中层：`scrollbar_hit` 只认「本帧真画出来的列几何」，没轨道时恒 `None`；
 //! - 状态层：`apply_scrollbar_row` 的写入语义（拖到底恢复贴底跟随、拖到中间解除跟随）。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

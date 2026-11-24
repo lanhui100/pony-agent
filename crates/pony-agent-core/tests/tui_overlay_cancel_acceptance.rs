@@ -21,9 +21,7 @@
 //! 红相预期（当前实现）：O1、O2、J1、C9 以**断言失败**呈现；O3–O8 是兼容回归，不得伪造失败。
 //! 物理凭证：`tests/acceptance/receipts/l2at-tui-overlay-cancel/`（red.log 由验收脚本产出）。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::stop_sequence::{StopIdentity, StopSequenceState, STOP_SEQUENCE_MS};
 use ratatui::backend::TestBackend;
@@ -788,7 +786,9 @@ class Pty:
         import fcntl, struct, termios
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 34, 120, 0, 0))
         self.proc = subprocess.Popen([bin_path] + args, stdin=slave, stdout=slave,
-                                     stderr=slave, env=env, cwd=cwd, close_fds=True)
+                                     stderr=slave, env=env, cwd=cwd, close_fds=True,
+                                     start_new_session=True,
+                                     preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
         os.close(slave)
         self.master = master
         self.buf = bytearray()

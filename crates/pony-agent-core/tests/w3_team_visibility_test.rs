@@ -10,9 +10,7 @@
 //! 只读验证：不联网、不碰全局运行时/引擎、不修改生产代码。`tui.rs` 以既有
 //! `#[path = "../src/bin/tui.rs"] mod tui;` 模式作为测试二进制内的模块编译。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::orchestration::TeamTaskItem;
 

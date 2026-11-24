@@ -19,9 +19,7 @@
 //! 签名对齐说明：N5/N6/N7 的调用形状已与 exec-rust 落地签名核对一致，未做任何断言语义调整。
 //! 铁律：每条用例都有真实断言；无 `#[ignore]`/skip/「只运行不报错」；不修改任何实现代码。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use std::io;
 use std::panic::{self, AssertUnwindSafe};

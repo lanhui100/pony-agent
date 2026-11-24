@@ -11,9 +11,7 @@
 // 红相目标：Protocol 已落盘空桩 `stream_usage_event(...) { unimplemented!() }`，
 // 本文件必须「编译通过（Exit 0）+ 运行失败（unimplemented panic）」。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::runtime::TurnStreamEvent;
 use serde_json::json;
