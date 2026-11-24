@@ -3,6 +3,7 @@
 // 在 TUI 正在运行时抛 `Text file busy`，但 npm 链式命令掩盖了失败，安装静默无效（exit 0）。
 // 改为「同目录临时文件 + rename」原子替换：正在运行的进程继续持旧 inode，新进程拿到新二进制；
 // 装完校验大小，失败一律非零退出，并提示需要重启才生效。
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -83,6 +84,45 @@ function installOne(srcPath, destPath) {
   return holders;
 }
 
+/**
+ * B261 后半：读取已安装二进制的自报版本。
+ *
+ * 两 bin（`pony` / `ponycli`）同包发布，自更新后可能出现「一个更新了、另一个还是旧的」的静默漂移；
+ * 安装收尾处打印两者版本并在一不一致时告警，是把「漂移」从事后猜测变成安装时可见的判据。
+ *
+ * 宽容语义：旧版本 `ponycli` 不支持 `--version`（B261 前半才补上），探测失败只提示不失败——
+ * 安装本身已经成功，不能因为探测不了版本就把安装判红。
+ */
+function probeVersion(binPath) {
+  try {
+    const out = execFileSync(binPath, ["--version"], {
+      encoding: "utf8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    const line = out.trim().split("\n")[0].trim();
+    // 取行尾的版本号 token（`pony 0.1.203` / `ponycli 0.1.203`）
+    const token = line.split(/\s+/).pop();
+    return token && /\d/.test(token) ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+function reportInstalledVersions(bins, toDir) {
+  const probed = bins.map((bin) => ({ bin, version: probeVersion(path.join(toDir, bin)) }));
+  for (const { bin, version } of probed) {
+    if (version) console.log(`[install-cli] ${bin} ${version}`);
+    else console.warn(`[install-cli] ${bin}: 无法探测版本（该二进制不支持 --version）`);
+  }
+  const known = probed.filter((entry) => entry.version);
+  const distinct = [...new Set(known.map((entry) => entry.version))];
+  if (distinct.length > 1) {
+    const detail = known.map((entry) => `${entry.bin} ${entry.version}`).join(" ≠ ");
+    console.warn(`[install-cli] 警告：两 bin 版本漂移（${detail}）—— 请重跑 npm run cli:install 使两者同步。`);
+  }
+}
+
 function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -102,6 +142,7 @@ function main() {
       `[install-cli] ${bin}: 旧进程仍在运行（pid ${pids.join(", ")}），重启当前实例后新二进制才生效。`
     );
   }
+  reportInstalledVersions(opts.bins, opts.to);
 }
 
 try {
