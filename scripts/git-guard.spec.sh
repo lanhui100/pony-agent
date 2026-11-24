@@ -57,6 +57,17 @@ else
   ok "A 负样本：暂存构建产物被拦截"
 fi
 
+A2="$(new_repo precommit-extra)"
+mkdir -p "$A2/target-perf" "$A2/.venv"
+printf 'perf\n' > "$A2/target-perf/out.bin"
+printf 'venv\n' > "$A2/.venv/pyvenv.cfg"
+( cd "$A2" && git add -f target-perf/out.bin .venv/pyvenv.cfg )
+if ( cd "$A2" && node scripts/git-guard.mjs pre-commit ) >/dev/null 2>&1; then
+  fail "A2 负样本：暂存 target-perf / .venv 未被拦截"
+else
+  ok "A2 负样本：暂存 target-perf / .venv 被拦截"
+fi
+
 B="$(new_repo newline)"
 printf 'no trailing newline' > "$B/bad.md"
 ( cd "$B" && git add bad.md )
@@ -66,6 +77,14 @@ else
   ok "B 负样本：缺尾随换行被拦截"
 fi
 
+# B2：先暂存无尾随换行的文件，随后只在工作区修复（未 re-stage）→ 仍必须拦截暂存区脏字节
+printf 'fixed in working tree only\n' > "$B/bad.md"
+if ( cd "$B" && node scripts/git-guard.mjs pre-commit ) >/dev/null 2>&1; then
+  fail "B2 负样本：工作区已修但暂存区仍缺尾随换行未被拦截"
+else
+  ok "B2 负样本：只验暂存区 blob，工作区未暂存修复不绕过"
+fi
+
 C="$(new_repo clean)"
 printf 'clean file\n' > "$C/good.txt"
 ( cd "$C" && git add good.txt )
@@ -73,6 +92,14 @@ if ( cd "$C" && node scripts/git-guard.mjs pre-commit ) >/dev/null 2>&1; then
   ok "C 正样本：合法暂存内容放行"
 else
   fail "C 正样本：合法暂存内容被误拒"
+fi
+
+# C2：暂存合法文件后在工作区破坏尾随换行（未暂存）→ 不误拒已暂存的合法字节
+printf 'broken in working tree only' > "$C/good.txt"
+if ( cd "$C" && node scripts/git-guard.mjs pre-commit ) >/dev/null 2>&1; then
+  ok "C2 正样本：暂存区合法时不被工作区未暂存改动误拒"
+else
+  fail "C2 正样本：暂存区合法却因工作区内容被误拒"
 fi
 
 # ---------------------------------------------------------------
@@ -144,6 +171,31 @@ if printf 'refs/heads/main %s refs/heads/main %s\n' "$HEAD_SHA" "$ZERO" \
   ok "E 正样本：显式逃生门放行 main 直推（灾备路径）"
 else
   fail "E 正样本：逃生门生效失败（main 直推无法在灾备场景执行）"
+fi
+
+# 保护分支与已发布 tag 删除必须被拦截；普通特性分支删除允许放行
+if push_case "(delete)" "$ZERO" refs/heads/main "$HEAD_SHA"; then
+  fail "E2 负样本：删除 main 分支未被拦截"
+else
+  ok "E2 负样本：删除 main 分支被拦截"
+fi
+
+if push_case "(delete)" "$ZERO" refs/tags/v0.1.200 "$HEAD_SHA"; then
+  fail "E3 负样本：删除远端 tag 未被拦截"
+else
+  ok "E3 负样本：删除远端 tag 被拦截"
+fi
+
+if push_case "(delete)" "$ZERO" refs/heads/feat/done "$HEAD_SHA"; then
+  ok "E4 正样本：删除普通特性分支放行"
+else
+  fail "E4 正样本：删除普通特性分支被误拒"
+fi
+
+if push_case refs/tags/v0.1.200 "$HEAD_SHA" refs/tags/v0.1.200 "$ZERO"; then
+  ok "E5 正样本：新建发版 tag 推送放行"
+else
+  fail "E5 正样本：新建发版 tag 推送被误拒"
 fi
 
 if [ "$FAIL" -ne 0 ]; then
