@@ -2129,31 +2129,39 @@ pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnT
 ///   出网 `traceparent` 与宿主同 trace（该上下文 `exported = false`，永不作真实导出的父）。
 ///
 /// 任何情况下不 panic；非法父头 fail-closed 回落 root，绝不注入脏父上下文。
-pub fn begin_turn_trace_with_parent(
-    session_id: &str,
-    turn_id: &str,
-    sequence: u64,
-    parent_traceparent: Option<&str>,
+fn build_turn_trace_guard(
+    span: Option<opentelemetry_sdk::trace::Span>,
+    slot: Option<ActiveTurnSlot>,
+    trace_id: Option<String>,
+    turn_started_at: Option<std::time::Instant>,
 ) -> TurnTraceGuard {
-    let empty = TurnTraceGuard {
-        span: None,
-        slot: None,
+    TurnTraceGuard {
+        span,
+        slot,
         phase: None,
-        trace_id: None,
+        trace_id,
         turn_speed: None,
         turn_speed_basis: None,
         turn_cost: None,
         turn_duration_ms: None,
         turn_ttft_ms: None,
         turn_calls: None,
-        turn_started_at: None,
+        turn_started_at,
         turn_speed_recorded: false,
         turn_timing_recorded: false,
-    };
+    }
+}
+
+pub fn begin_turn_trace_with_parent(
+    session_id: &str,
+    turn_id: &str,
+    sequence: u64,
+    parent_traceparent: Option<&str>,
+) -> TurnTraceGuard {
     // 契约：session_id / turn_id 缺失（空串）⇒ **不创建** turn span。
     // 绝不用占位值伪造会话——那会在 Langfuse 侧造出不存在的 session，污染数据。
     if session_id.trim().is_empty() || turn_id.trim().is_empty() {
-        return empty;
+        return build_turn_trace_guard(None, None, None, None);
     }
     // W3 trace：合法父 traceparent ⇒ 该 turn 的 root span 挂到宿主 turn span 之下（同一 trace）；
     // 非法/缺失 ⇒ 空 Context（root trace，行为逐字不变）。
@@ -2188,31 +2196,25 @@ pub fn begin_turn_trace_with_parent(
                 &parent,
             );
             let span_context = span.span_context().clone();
-            let trace_id = sampled_trace_id(&mut span);
-            // 只有真实建立且被采样的 root span 才算「导出态」（B1/B1b）。
-            let exported = trace_id.is_some();
-            if let Some(trace_id) = trace_id.as_deref() {
-                // Wave-6：登记 turn 级导出态 trace_id，供跨上下文失败上报精确回查。
-                register_turn_exported_trace_id(turn_id, trace_id);
+            // TOCTOU 兜底：若 gate 并发关闭或 provider 被 shutdown，`GatedSampler`/SdkTracer
+            // 会产出 `SpanContext::NONE`（`!is_valid()`）；丢弃该 span 并回落本地降级上下文。
+            if span_context.is_valid() {
+                let trace_id = sampled_trace_id(&mut span);
+                // 只有真实建立且被采样的 root span 才算「导出态」（B1/B1b）。
+                let exported = trace_id.is_some();
+                if let Some(trace_id) = trace_id.as_deref() {
+                    // Wave-6：登记 turn 级导出态 trace_id，供跨上下文失败上报精确回查。
+                    register_turn_exported_trace_id(turn_id, trace_id);
+                }
+                let slot = register_active_turn(turn_id, session_id, span_context, exported);
+                return build_turn_trace_guard(
+                    Some(span),
+                    slot,
+                    trace_id,
+                    Some(std::time::Instant::now()),
+                );
             }
-            let slot = register_active_turn(turn_id, session_id, span_context, exported);
-
-            return TurnTraceGuard {
-                span: Some(span),
-                slot,
-                phase: None,
-                trace_id: None,
-                turn_speed: None,
-                turn_speed_basis: None,
-                turn_cost: None,
-                turn_duration_ms: None,
-                turn_ttft_ms: None,
-                turn_calls: None,
-                turn_started_at: Some(std::time::Instant::now()),
-                turn_speed_recorded: false,
-                turn_timing_recorded: false,
-            }
-            .with_trace_id(trace_id);
+            drop(span);
         }
     }
 
@@ -2226,21 +2228,7 @@ pub fn begin_turn_trace_with_parent(
     };
     let trace_id = span_context.trace_id().to_string();
     let slot = register_active_turn(turn_id, session_id, span_context, false);
-    TurnTraceGuard {
-        span: None,
-        slot,
-        phase: None,
-        trace_id: Some(trace_id),
-        turn_speed: None,
-        turn_speed_basis: None,
-        turn_cost: None,
-        turn_duration_ms: None,
-        turn_ttft_ms: None,
-        turn_calls: None,
-        turn_started_at: Some(std::time::Instant::now()),
-        turn_speed_recorded: false,
-        turn_timing_recorded: false,
-    }
+    build_turn_trace_guard(None, slot, Some(trace_id), Some(std::time::Instant::now()))
 }
 
 /// turn trace 守卫（`Drop` 时补 phase 属性并结束 span）。
@@ -2267,11 +2255,6 @@ pub struct TurnTraceGuard {
 }
 
 impl TurnTraceGuard {
-    fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
-        self.trace_id = trace_id;
-        self
-    }
-
     /// 记录 turn 综合生成速度（token/s）与**口径**（I10：速度与 basis 必须同源同帧）。
     ///
     /// `basis` 必须由公式出口（[`crate::agent::turn_flow::TurnSpeedTruth`]）给出，

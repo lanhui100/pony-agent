@@ -65,7 +65,25 @@ try {
     fs.chmodSync(dest, 0o755);
     const child = spawn(dest, ["30"], { stdio: "ignore" });
     running.push(child);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // 等待子进程完成 exec，确保 /proc/<pid>/exe 已指向 dest（消除固定 200ms 在高负载 runner 上的竞态）
+    const deadline = Date.now() + 2000;
+    let ready = false;
+    while (Date.now() < deadline && child.exitCode === null) {
+      try {
+        if (fs.readlinkSync(`/proc/${child.pid}/exe`) === dest) {
+          ready = true;
+          break;
+        }
+      } catch {
+        // 尚在 fork/exec 过渡或暂时不可读，继续轮询
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    check(
+      "P4 占位进程已就绪且 /proc/pid/exe 指向目标",
+      ready,
+      `pid=${child.pid} exitCode=${child.exitCode} dest=${dest}`
+    );
 
     fs.writeFileSync(path.join(from, "sleep-holder"), "replacement");
     const r4 = runInstall(from, to, ["sleep-holder"]);
