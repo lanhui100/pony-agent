@@ -79,7 +79,8 @@ fn d1_send_interrupt_drain_accept_name_style_targets() {
     })
     .expect("D1：interrupt 以 name 写法必须命中");
     assert!(interrupted.success);
-    assert_eq!(interrupted.new_status, TeammateStatus::Inactive);
+    // B1795535505312：中断是独立终态，与「正常收口」的 Inactive 可区分。
+    assert_eq!(interrupted.new_status, TeammateStatus::Interrupted);
 
     // 4) "Lead" 写法必须落进 lead 信箱（trace 中 verifier 的真实失败场景）。
     enqueue_message(SendMessageArgs {

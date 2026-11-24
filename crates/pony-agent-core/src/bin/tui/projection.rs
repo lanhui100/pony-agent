@@ -146,6 +146,7 @@ pub fn teammate_status_label(status: &TeammateStatus) -> String {
         TeammateStatus::Running => "running",
         TeammateStatus::Inactive => "inactive",
         TeammateStatus::Failed => "failed",
+        TeammateStatus::Interrupted => "interrupted",
     }
     .to_string()
 }
