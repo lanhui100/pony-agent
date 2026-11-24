@@ -62,11 +62,18 @@ pub struct WorkflowResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TeammateStatus {
+    /// 预留：异步创建（今天没有任何写入点，不得对外宣称已产生）。
     Provisioning,
+    /// 空闲：已登记且有待驱动消息（或刚派生尚未开始跑）。
     Active,
+    /// 有 turn 正在执行。
     Running,
+    /// 空闲：上一轮 turn 正常收口。
     Inactive,
+    /// 上一轮 turn 驱动返回错误（错误文本见 `TeammateMember::last_error`）。
     Failed,
+    /// 被 `interrupt_agent` 在下一 drain 边界前停下。
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +83,14 @@ pub struct TeammateMember {
     pub role: String,
     pub status: TeammateStatus,
     pub description: String,
+    /// 读时快照：是否有后台驱动线程正在跑该 target（真值源是 `DRIVING` 单飞标记）。
+    ///
+    /// 只由 `list_agents` 在返回前填充；成员表里恒为 `false`，不参与持久化语义。
+    #[serde(default)]
+    pub is_driving: bool,
+    /// 上一轮驱动失败的错误文本；成功收口或被重新驱动时清空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +110,13 @@ pub struct SpawnTeammateArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnTeammateResult {
+    /// 返回时**回读**的成员快照（不是登记快照）：驱动已派发则为 `running`，
+    /// 空 prompt / 引擎未接线则为 `active`，派生即失败的极端竞态可为 `inactive`。
     pub member: TeammateMember,
+    /// 初始 prompt 的派发阶段：`driving`（已派发后台驱动）/ `queued`（仅入队）/
+    /// `not_started`（空 prompt 或引擎未接线，未投递任何消息）/ `failed`（投递报错）。
+    #[serde(default)]
+    pub delivery_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +162,10 @@ pub struct SendMessageResult {
 pub const DELIVERY_STATE_QUEUED: &str = "queued";
 /// Wave-61 C10.2：已派发后台驱动。
 pub const DELIVERY_STATE_DRIVING: &str = "driving";
+/// 派生阶段未投递任何消息（空 prompt 或引擎未接线）：不得被读成"已经在跑"。
+pub const DELIVERY_STATE_NOT_STARTED: &str = "not_started";
+/// 派生阶段投递报错（成员已登记，但初始 prompt 没进收件箱）。
+pub const DELIVERY_STATE_FAILED: &str = "failed";
 
 /// Wave-61 C10.1：正在被驱动的 target 集合（进程级单飞标记）。
 ///
@@ -774,7 +799,9 @@ pub fn workflow(args: WorkflowArgs) -> Result<WorkflowResult, String> {
 /// 依赖「派生本身不往收件箱塞消息」这一可观测事实。模型可见的工具入口用
 /// [`spawn_teammate_in_workspace`]（登记 + 投递初始 prompt + 驱动）。
 pub fn spawn_teammate(args: SpawnTeammateArgs) -> Result<SpawnTeammateResult, String> {
-    let (result, _target, _prompt) = register_teammate(args, &TeamCaller::lead())?;
+    let (mut result, _target, _prompt) = register_teammate(args, &TeamCaller::lead())?;
+    // 纯登记不做任何投递：显式声明「初始 prompt 未派发」，不靠默认值猜。
+    result.delivery_state = DELIVERY_STATE_NOT_STARTED.to_string();
     Ok(result)
 }
 
@@ -843,15 +870,32 @@ pub fn spawn_teammate_in_workspace_with_provider_as(
 
     // Wave-61 C7：引擎在位时把初始 prompt 投递并驱动（复用 send_message 的入队 + 后台
     // drive 通路，不新造存储；无引擎时保持纯登记，行为与既有 `spawn_teammate` 一致）。
+    //
+    // B1795535505312：投递结果（`queued` / `driving`）必须回传模型，否则「派生成功」会被
+    // 读成「已经开始干活」——这正是原事故里 Lead 误判队友在跑的直接成因。
+    let mut result = result;
     if auto_drive && !initial_prompt.trim().is_empty() {
-        let _ = send_message_in_workspace(
+        match send_message_in_workspace(
             SendMessageArgs {
-                target,
+                target: target.clone(),
                 message: initial_prompt,
                 mode: Some(MessageDeliveryMode::Queue),
             },
             workspace_root,
-        );
+        ) {
+            Ok(sent) => result.delivery_state = sent.delivery_state,
+            Err(err) => {
+                // 成员已登记但初始 prompt 没进收件箱：如实标记，不伪造成已派发。
+                result.delivery_state = DELIVERY_STATE_FAILED.to_string();
+                set_teammate_error(&target, Some(err));
+            }
+        }
+    }
+
+    // 回读运行态：`result.member` 是登记快照（恒 `active`），模型据此无法判断驱动是否真的
+    // 起来了。这里在返回前用名册真值覆盖一次，`status` / `is_driving` / `last_error` 同源。
+    if let Some(snapshot) = teammate_snapshot(&target) {
+        result.member = snapshot;
     }
 
     Ok(result)
@@ -896,6 +940,8 @@ fn register_teammate(
         role: args.role.unwrap_or_else(|| "teammate".to_string()),
         status: TeammateStatus::Active,
         description: args.description,
+        is_driving: false,
+        last_error: None,
     };
 
     // 1. 在独立的作用域内先完成 TEAMMATES 登记，立即释放锁
@@ -911,6 +957,8 @@ fn register_teammate(
                     role: "lead".to_string(),
                     status: TeammateStatus::Running,
                     description: "Team Lead Orchestrator".to_string(),
+                is_driving: false,
+                last_error: None,
                 },
             );
             *lock = Some(map);
@@ -959,7 +1007,14 @@ fn register_teammate(
     set_teammate_session(&target, &teammate_session);
 
     bump_team_activity();
-    Ok((SpawnTeammateResult { member }, target, initial_prompt))
+    Ok((
+        SpawnTeammateResult {
+            member,
+            delivery_state: DELIVERY_STATE_NOT_STARTED.to_string(),
+        },
+        target,
+        initial_prompt,
+    ))
 }
 
 pub fn list_agents() -> Result<ListAgentsResult, String> {
@@ -974,14 +1029,20 @@ pub fn list_agents() -> Result<ListAgentsResult, String> {
                 role: "lead".to_string(),
                 status: TeammateStatus::Running,
                 description: "Team Lead Orchestrator".to_string(),
+            is_driving: false,
+            last_error: None,
             },
         );
         *lock = Some(map);
     }
-    let map = lock.as_ref().unwrap();
-    Ok(ListAgentsResult {
-        agents: map.values().cloned().collect(),
-    })
+    let mut agents: Vec<TeammateMember> = lock.as_ref().unwrap().values().cloned().collect();
+    // 锁已在此作用域结束后释放（下面 `drop`），避免与 `DRIVING` 形成嵌套。
+    drop(lock);
+    agents.sort_by(|left, right| left.target.cmp(&right.target));
+    for member in &mut agents {
+        member.is_driving = is_driving(&member.target);
+    }
+    Ok(ListAgentsResult { agents })
 }
 
 /// 支持排队 (Queue) 与插队 (Steer) 发送消息。
@@ -1078,14 +1139,22 @@ pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, Stri
             .get_mut(&args.target)
             .ok_or_else(|| format!("Teammate target not found: {}", args.target))?;
 
+        // 新消息一律把「无 turn 在跑」的成员拉回可驱动状态：`Inactive`（上一轮成功）、
+        // `Failed`（上一轮报错）、`Interrupted`（被中断）都允许重试；只有 `Running`
+        // 保持不动（在途 turn 由当前驱动的 drain 边界消费新消息）。
         match mode {
             MessageDeliveryMode::Steer => {
-                if member.status == TeammateStatus::Inactive || member.status == TeammateStatus::Active {
+                if member.status != TeammateStatus::Running
+                    && member.status != TeammateStatus::Provisioning
+                {
                     member.status = TeammateStatus::Running;
                 }
             }
             MessageDeliveryMode::Queue => {
-                if member.status == TeammateStatus::Inactive {
+                if member.status == TeammateStatus::Inactive
+                    || member.status == TeammateStatus::Failed
+                    || member.status == TeammateStatus::Interrupted
+                {
                     member.status = TeammateStatus::Active;
                 }
             }
@@ -1135,20 +1204,53 @@ pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, Stri
 
 /// 队友状态写入（独立作用域持锁，绝不与收件箱锁嵌套，避免锁序反转）。
 fn set_teammate_status(target: &str, status: TeammateStatus) {
+    update_teammate(target, |member| {
+        if member.status == status {
+            return false;
+        }
+        member.status = status;
+        true
+    });
+}
+
+/// 记录（或清空）上一轮驱动的失败文本；与状态写入同源、同一把锁。
+fn set_teammate_error(target: &str, error: Option<String>) {
+    update_teammate(target, |member| {
+        if member.last_error == error {
+            return false;
+        }
+        member.last_error = error;
+        true
+    });
+}
+
+/// 单点成员变更入口：`mutate` 返回 `true` 才算「有变化」，并统一 bump 团队活动版本
+/// （`wait_agent` 的边沿等待依赖它）。
+fn update_teammate(target: &str, mutate: impl FnOnce(&mut TeammateMember) -> bool) {
     let mut changed = false;
     if let Ok(mut lock) = TEAMMATES.lock() {
         if let Some(map) = lock.as_mut() {
             if let Some(member) = map.get_mut(target) {
-                if member.status != status {
-                    member.status = status;
-                    changed = true;
-                }
+                changed = mutate(member);
             }
         }
     }
     if changed {
         bump_team_activity();
     }
+}
+
+/// 成员读时快照：克隆成员表里的登记项，并按 `DRIVING` 单飞标记填充 `is_driving`。
+///
+/// 锁序：先取 `TEAMMATES` 克隆后**释放**，再取 `DRIVING` —— 与
+/// `interrupt_agent_as`「先 is_driving 再 TEAMMATES」的既有顺序一起保证永不嵌套。
+fn teammate_snapshot(target: &str) -> Option<TeammateMember> {
+    let mut member = TEAMMATES
+        .lock()
+        .ok()
+        .and_then(|lock| lock.as_ref().and_then(|map| map.get(target).cloned()))?;
+    member.is_driving = is_driving(target);
+    Some(member)
 }
 
 /// 打断正在运行的智能体（保留其信箱队列）
@@ -1185,8 +1287,9 @@ pub fn interrupt_agent_as(
             .get_mut(&args.target)
             .ok_or_else(|| format!("Teammate target not found: {}", args.target))?;
         let prev = member.status.clone();
-        member.status = TeammateStatus::Inactive;
-        (prev, TeammateStatus::Inactive)
+        // B1795535505312：中断是独立终态，不得与「正常收口」共用 `Inactive`。
+        member.status = TeammateStatus::Interrupted;
+        (prev, TeammateStatus::Interrupted)
     };
 
     if inflight_drive {
@@ -1671,7 +1774,7 @@ pub fn drive_teammate_turn_in(
     // 显式把成员状态收到 `Inactive`，绝不留在 `Running`（否则名单里会永久显示"运行中"）。
     // 若本检查点被挪到 drain 之后调用，则同样先 `requeue_messages` 再收口（见检查点 #2）。
     if take_interrupted(target) {
-        set_teammate_status(target, TeammateStatus::Inactive);
+        set_teammate_status(target, TeammateStatus::Interrupted);
         return Ok(None);
     }
 
@@ -1687,12 +1790,14 @@ pub fn drive_teammate_turn_in(
     // 不丢弃任何消息、也不跑一个"已被要求停下"的 turn。
     if take_interrupted(target) {
         requeue_messages(target, &result.messages);
-        set_teammate_status(target, TeammateStatus::Inactive);
+        set_teammate_status(target, TeammateStatus::Interrupted);
         return Ok(None);
     }
 
-    // 启动前置：成员置为 Running（对 `list_agents` 可见；C10.3 迁移序 Active → Running → Inactive）。
+    // 启动前置：成员置为 Running 并清掉上一轮失败文本（对 `list_agents` 可见；
+    // C10.3 迁移序 Active → Running → Inactive/Failed/Interrupted）。
     set_teammate_status(target, TeammateStatus::Running);
+    set_teammate_error(target, None);
 
     // 整合收件箱内的消息内容
     let mut combined_prompt = format!("You are teammate '{}'. Incoming messages:\n", target);
@@ -1738,7 +1843,10 @@ pub fn drive_teammate_turn_in(
                     // 说明：`prompt_too_large` 这类确定性失败会再次失败，直到调用方拆分消息；
                     // 这里不做静默丢弃，也不伪造成成功回执。
                     requeue_messages(target, &result.messages);
-                    set_teammate_status(target, TeammateStatus::Inactive);
+                    // B1795535505312：失败不再伪装成「空闲」——`Failed` + 错误文本让
+                    // Lead 能区分「跑完了」与「跑挂了」，且不丢原来的回滚/回执语义。
+                    set_teammate_status(target, TeammateStatus::Failed);
+                    set_teammate_error(target, Some(err.clone()));
                     if target != LEAD_TARGET {
                         let _ = send_message(SendMessageArgs {
                             target: LEAD_TARGET.to_string(),
@@ -1779,6 +1887,7 @@ pub fn drive_teammate_turn_in(
             TeammateStatus::Active
         },
     );
+    set_teammate_error(target, None);
 
     // 将产出的答复作为回执发送给 lead（经既有 TEAMMATE_INBOXES 投递，`drain_inbox` 可取）。
     if target != "lead" {
