@@ -396,6 +396,7 @@ fn g7c_unbound_handler_rejects_explicit_cwd() {
             );
         }
     }
+}
 
 /// G10（B177 ADVISORY ③④）：**慢入站请求不得饿死其它请求**。
 ///
