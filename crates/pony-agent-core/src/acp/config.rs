@@ -371,11 +371,28 @@ pub enum AcpMcpTransportSpec {
 /// - `mcp-config-v1` 只允许 stdio（schema `not:{required:[url]}`；出现 `url` 即被 loader 拒绝），
 ///   故 **inherit 只能产出 [`McpServer::Stdio`]**。
 ///
+/// # 明文与 headers 的两条硬事实（B177 ADVISORY ⑩）
+/// - **`${env:VAR}` 在加载期就被替换成明文**：转换后的 spec 里保存的是密钥**值**，不保留变量引用。
+///   本层不做二次屏蔽、也不知道哪个值敏感 —— 因此**任何把 spec 落盘 / 写日志 / 上报的调用方
+///   都必须自行脱敏**（现有实现只对 deny 表命中的键做 fail-closed，不覆盖其余明文）。
+/// - **显式条目的 `http` / `sse` `headers` 原样透传**给外部 agent：不清洗、不加 header 白名单、
+///   写日志时也不抹除。因此 headers 里不得放长期凭据；需要密钥时应在外部 agent 侧用它自己的
+///   配置去引用环境变量，而不是让 Pony 把明文塞进 headers。
+///
 /// # diagnostics 不得吞
 /// inherit 的每条 `McpConfigDiagnostic` 都以 `code` + `server` + `message` 记入 stderr
-/// （`[acp][config]` 前缀）；文件级致命诊断（`invalid_json` / `invalid_root` /
-/// `unsupported_schema_version` / `invalid_mcp_servers` 等，`server == None`）直接 fail-closed
-/// 报错，不静默降级为空列表。
+/// （`[acp][config]` 前缀）。**`server == None` 的文件级诊断并不一律致命**：
+/// 只有 `invalid_json` / `invalid_root` / `unsupported_schema_version` 会 fail-closed 报错，
+/// 其余（如 `invalid_mcp_servers`、`workspace_mcp_config_untrusted`）一律「忽略 + 记账」，
+/// 降级为空 server 列表继续执行。
+///
+/// 理由（实现处注释同步，见 `resolve_mcp_servers` 循环内）：`.mcp.json` 是随仓库分发的文件，
+/// 只要把它升级为致命，仓库里存在一份结构不合规的 `.mcp.json` 就会让**所有** `acp_delegate`
+/// 一起失败——这是"一份坏的第三方文件否决整条能力"的典型事故；而 `invalid_mcp_servers`
+/// 只是 `mcpServers` 不是对象的形状问题，属于可降级诊断。
+///
+/// 历史注记：本条文档曾把 `invalid_mcp_servers` 误列为致命（B177 ADVISORY ①），与实现不一致；
+/// 本次按实现真值改正，不改任何行为。
 ///
 /// # env 纪律
 /// - inherit：loader 已按 `is_denied_spec_env_key` fail-closed 禁用违规条目；本层再做一次键级

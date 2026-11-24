@@ -32,7 +32,6 @@
     "streamDebugTextCharsFlushed": 8,
     "timers": {
       "deferredPersistTimerId": null,
-      "streamFlushFrameId": null,
       "streamFlushTimerId": null,
       "traceTimelineThrottleTimerId": null,
       "submissionWatchdogTimerId": null

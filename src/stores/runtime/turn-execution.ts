@@ -274,12 +274,18 @@ export const turnExecutionActions = {
       return;
     }
 
-    if (this.streamFlushFrameId != null || this.streamFlushTimerId != null) {
+    if (this.streamFlushTimerId != null) {
       return;
     }
 
+    // B279：flush 定时器必须带会话归属守卫 —— 会话切换后旧会话的 setTimeout
+    // 不得把缓冲写进新会话（切走时虽已 cancel，仍保留运行时兜底）。
+    const ownerSessionId = this.sessionId;
     this.streamFlushTimerId = window.setTimeout(() => {
       this.streamFlushTimerId = null;
+      if (this.sessionId !== ownerSessionId || this.streamBufferTurnId !== turnId) {
+        return;
+      }
       this.flushBufferedStreamText(turnId);
     }, STREAM_FLUSH_INTERVAL_MS);
   },
@@ -326,21 +332,11 @@ export const turnExecutionActions = {
     this.streamBufferReasoning = "";
   },
   cancelStreamFlush(this: RuntimeStoreThis) {
-    if (this.streamFlushFrameId == null) {
-      if (this.streamFlushTimerId == null) {
-        return;
-      }
+    if (this.streamFlushTimerId == null) {
+      return;
     }
-
-    if (this.streamFlushFrameId != null) {
-      window.cancelAnimationFrame(this.streamFlushFrameId);
-      this.streamFlushFrameId = null;
-    }
-
-    if (this.streamFlushTimerId != null) {
-      window.clearTimeout(this.streamFlushTimerId);
-      this.streamFlushTimerId = null;
-    }
+    window.clearTimeout(this.streamFlushTimerId);
+    this.streamFlushTimerId = null;
   },
   startSubmissionWatchdog(this: RuntimeStoreThis, turnId: string) {
     this.clearSubmissionWatchdog();

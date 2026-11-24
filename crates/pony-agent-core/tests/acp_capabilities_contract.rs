@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pony_agent_core::acp::client::{AcpAgentClient, AcpClientCapabilities};
+use pony_agent_core::acp::client::{AcpAgentClient, AcpClientCapabilities, TerminalHandler};
 use pony_agent_core::acp::config::{AcpAgentSpec, AcpCapabilitiesHint};
 use pony_agent_core::acp::handlers::{ManagedTerminalHandler, WorkspaceFsHandler};
-use pony_agent_core::acp::protocol::ReadTextFileResponse;
+use pony_agent_core::acp::protocol::{CreateTerminalRequest, ReadTextFileResponse};
 use pony_agent_core::acp::session::{capabilities_for, AcpAgentSession};
 use pony_agent_core::agent::path_permission::{AuthorizeStore, PathAuthorizationScope, PathPurpose};
 use pony_agent_core::agent::process::ProcessManager;
@@ -356,6 +356,46 @@ fn workspace_fs_handler(root: &Path) -> Arc<WorkspaceFsHandler> {
 
 fn managed_terminal_handler() -> Arc<ManagedTerminalHandler> {
     Arc::new(ManagedTerminalHandler::new(Arc::new(ProcessManager::new())))
+}
+
+/// G7c（B177 ADVISORY ⑨）：**未绑定 workspace** 的 handler 不得接受自定义 cwd。
+///
+/// 复审实测：`ManagedTerminalHandler::new()`（`workspace_root = None`）在旧实现下会让
+/// `terminal/create` 带任意绝对 `cwd`（如 `/etc`）成功执行——等于把终端开到任意位置。生产路径
+/// 都走 `with_workspace_root`，但 `new()` 是公开构造口，必须自身 fail-closed。
+///
+/// 用例用 `std::env::temp_dir()` 而非写死 `/etc`：写死 unix 路径会在 Windows 上被更早的
+/// 「cwd 必须是绝对路径」判定拦下（`/etc` 在 Windows 非绝对），于是本用例断言的
+/// 「未绑定 workspace」理由永远到不了，门禁在 Windows 上变成假红。
+///
+/// 红相：若取消该兜底，本用例会拿到 `Ok`（终端真的被创建），第一条断言即红。
+#[test]
+fn g7c_unbound_handler_rejects_explicit_cwd() {
+    let handler = ManagedTerminalHandler::new(Arc::new(ProcessManager::new()));
+    // 平台无关的绝对路径：Windows 的 `/etc` 不是绝对路径，会在更早的绝对性判定处被拒。
+    let unbound_cwd = std::env::temp_dir();
+    let request = CreateTerminalRequest {
+        session_id: "sess-unbound".to_string(),
+        command: "sh".to_string(),
+        args: None,
+        env: None,
+        cwd: Some(unbound_cwd.to_string_lossy().into_owned()),
+        output_byte_limit: None,
+    };
+    match handler.create(&request) {
+        Ok(created) => panic!(
+            "G7c 违约：未绑定 workspace 时不得用自定义 cwd 创建终端，实际返回 terminalId={:?}",
+            created.terminal_id
+        ),
+        Err(error) => {
+            // `AcpHandlerError` 是 crate 内类型（未导出），用 Debug 形态断言归类与文案。
+            let text = format!("{error:?}");
+            assert!(
+                text.contains("Denied") && text.contains("未绑定 workspace"),
+                "G7c：应为 Denied 且理由说明「未绑定 workspace」，实际 `{text}`"
+            );
+        }
+    }
 }
 
 /// G4/C8：hint=true + 两个真实 handler ⇒ wire 声明 true（声明与装配一致；同一路径）。

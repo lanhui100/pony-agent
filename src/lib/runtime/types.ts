@@ -103,7 +103,6 @@ export type RuntimeState = {
   toolAuthorizationMode?: import("@/types/runtime").ToolAuthorizationMode;
   eventsReady: boolean;
   deferredPersistTimerId: number | null;
-  streamFlushFrameId: number | null;
   streamFlushTimerId: number | null;
   streamBufferTurnId: string | null;
   streamBufferText: string;

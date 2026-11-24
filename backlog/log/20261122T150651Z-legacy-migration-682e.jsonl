@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T150651Z-legacy-migration-682e","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-22T15:06:51.844Z"}
+{"kind":"annotate","at":"2026-11-22T15:06:51.970Z","id":"B163","description":"拆分：本批只做只读清单面（acp_list_agents + 前端 AcpAgentSpec 类型 + acp-api 封装 + 观测归属），PR-5a；acp_delegate_start / acp_delegate_cancel 依赖 turn 任务注册表与事件出口接线，留待 PR-5b。"}

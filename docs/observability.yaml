@@ -94,6 +94,12 @@
 #     （stderr 结构化行 + 有界环形缓冲），不上报。
 # (3) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
+# ACP P2 只读清单面（B163，`acp_list_agents` Tauri 命令）归属说明：
+# (1) 无新增出网/跨进程出口：命令只读本地清单文件（`<HOME>/.pony/acp-agents.json`，缺省回内置默认），
+#     不起子进程、不发网络请求；解析/校验失败按 fail-closed 显式返回错误文案。
+# (2) 无新增 tracing 落点：不新增 span / metric；issues 落点仍 `agent/ponysentry/client.rs`。
+# (3) metrics / logs 维持结构性 N-A（无 /metrics、无常驻监听地址）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
 # 上游重试真值面（ADR 2026-11-14-upstream-retry-count-and-status-surface，backlog:B154/B155）与
 # 其桌面端接线（ADR 2026-11-14-desktop-retry-progress-surface）归属说明：
 # (1) 库层：`agent/retry.rs` 新增线程局部观察者（`RetryNotice` / `install_retry_observer` /
@@ -1751,4 +1757,22 @@ note: >-
   (4) 行为门落在测试层：`crates/pony-agent-core/src/bin/tui/tests/composer_multiline_nav_tests.rs`
   （8 例：键位谓词矩阵、8 行上限、首/尾行边界、软折行与 CJK 列对齐、期望列不漂移、
   编辑清空期望列、空输入框不越界、`TuiState` 宽度接线）。
+  提交信息须带 [decl-change-approved]。
+
+  【归属登记（2026-11-23）｜TUI 正文可选宽松行距（ADR：.agents/notes/implemented/feature/2026-11-23-tui-relaxed-line-spacing.md；backlog: B1795405235359）】
+  一行结论：四维归属不变，metrics / logs 结构性 N-A —— 本次只改**本地 TUI 呈现层与显示偏好持久化**，
+  无新增对外接口、无网络 IO、无后台任务、无 LLM 调用、无新增环境变量或依赖。
+  (1) 变更面（全部本地）：`crates/pony-agent-core/src/bin/tui.rs`（`TuiState::relaxed_spacing`、
+  `toggle_relaxed_spacing`、`settings_rows` / `toggle_selected_setting` / `handle_settings_key` 分支、
+  `MessageRenderCtx::relaxed_spacing`、段落/标题块边界加厚与 `is_markdown_heading_line` 判定；
+  **同日修正**：插行面由「正文逐行插行」收窄为「块边界加厚」，`is_markdown_list_item_line` 已删除）、
+  `crates/pony-agent-core/src/agent/tui_preferences.rs`（新增 `relaxed_spacing` 字段，缺字段按 `false` 反序列化）。
+  (2) 无新增取证面：不新增日志事件、不新增 span / metric；偏好仍落本地 `tui-preferences.json`，
+  不改变既有落盘路径与文件位置。
+  (3) 四维归属不变：tracing / issues 仍 applicable（落点不变 `agent/otel/mod.rs`、
+  `agent/ponysentry/client.rs`）；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、
+  无 `/metrics`、Prometheus pull 模型不成立）。不新增 applicable 判定、不新增 enforcement_point。
+  (4) 行为门落在测试层：`crates/pony-agent-core/src/bin/tui/tests/relaxed_spacing_tests.rs`
+  （9 例：紧凑基线不变、宽松下正文行仍紧邻、连续正文两口径行数相同、段间距 2 行、
+  标题前后各 1 行、标题+源空行不叠成 3 行、代码块紧邻、连续列表项紧邻、`settings` 切换往返）；契约断言同步改写于 `tests/tui_process_fold_acceptance.rs`（A7/A8）。
   提交信息须带 [decl-change-approved]。

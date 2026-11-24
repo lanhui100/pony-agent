@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261123T041942Z-legacy-migration-1325","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-23T04:19:42.018Z"}
+{"kind":"annotate","at":"2026-11-23T04:19:42.081Z","id":"B249","description":"收口第二步：provider/tests.rs 3057→2772（外移 287 行到 tests_streaming_wire.rs）与 runtime/tests.rs 13913→13813（外移 C9 中断清理 103 行到 tests_interrupted_cleanup.rs）；size:check 由 4 条降至 2 条，剩 config.rs/process.rs 由 part1 分支处理，两者合入后应 0 条新增。core 全量 1665 passed 与拆分前同数。"}

@@ -168,9 +168,6 @@ export function createSessionRuntimeSnapshot(state: RuntimeState): SessionRuntim
 }
 
 export function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: SessionRuntimeSnapshot) {
-  if (state.streamFlushFrameId != null) {
-    window.cancelAnimationFrame(state.streamFlushFrameId);
-  }
   if (state.streamFlushTimerId != null) {
     window.clearTimeout(state.streamFlushTimerId);
   }
@@ -196,7 +193,6 @@ export function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: Ses
   state.isSubmitting = snapshot.isSubmitting;
   state.activeTurnId = snapshot.activeTurnId;
   state.activeRunId = snapshot.activeRunId;
-  state.streamFlushFrameId = null;
   state.streamFlushTimerId = null;
   state.latestExecutionCheckpoint = snapshot.latestExecutionCheckpoint ? { ...snapshot.latestExecutionCheckpoint } : null;
   state.latestGraphRunSubmissionPlan = snapshot.latestGraphRunSubmissionPlan
@@ -226,7 +222,6 @@ export function restoreSessionRuntimeSnapshot(state: RuntimeState, snapshot: Ses
   state.eventCursorByTurnId = Object.fromEntries(
     Object.entries(snapshot.eventCursorByTurnId ?? {}).map(([turnId, cursor]) => [turnId, { ...cursor }])
   );
-  state.streamFlushFrameId = null;
   state.streamBufferTurnId = null;
   state.streamBufferText = "";
   state.streamBufferReasoning = "";

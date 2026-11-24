@@ -1,5 +1,10 @@
 # runtime store 拆解事实图（Wave 1 真源）
 
+> **修订注记（2026-11-22，B279）**：D3 的 `streamFlushFrameId` 经证伪为死键
+> （全仓无 `requestAnimationFrame` 赋值点，只有 `cancelAnimationFrame` 读取），
+> 已随 B279 删除，state 键 84 → 83。本文件正文保持拆解前测绘原貌，只加此注记；
+> 残余清单见同目录 `contract-residuals.md` 的 R1 / R2。
+
 > 采信口径：Explorer 测绘 + Lead 抽验。抽验结论：state 键 **84**（`src/stores/runtime.ts:468-578`）、
 > getters **18**（12 个方法式 `phaseLabel(state)` + 6 个箭头式 `activeTraceId: (state) => ...`，:581-913）、
 > actions **96**（:914-6075）、真实消费方 **14** 个文件（`grep -rl useRuntimeStore src` 共 15 命中，含定义自身）。

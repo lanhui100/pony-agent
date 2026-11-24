@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T173327Z-legacy-migration-7f18","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-22T17:33:27.756Z"}
+{"kind":"annotate","at":"2026-11-22T17:33:27.820Z","id":"B249","description":"缺口已定位（ADR 2026-11-23-size-gate-ci-gap）：main 上 size:check 红 4 条（config.rs 3085/3078、process.rs start_inner 280/278、provider/tests.rs 3057 新增、runtime/tests.rs 13913/13902），而 CI verify 分步实现未含 size:check ⇒ 门在 CI 上空转。拆分：PR-6c-1 先抽取 4 条（不接受调基线）→ PR-6c-2 再把 size:check 接入 CI；需等 B139 等触碰 tests.rs 的 PR 合入后再动手。"}

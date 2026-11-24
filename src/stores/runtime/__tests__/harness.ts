@@ -437,7 +437,6 @@ export function runtimeSnapshot(rawStore: ReturnType<typeof useRuntimeStore>) {
       streamDebugTextCharsFlushed: store.streamDebugTextCharsFlushed,
       timers: {
         deferredPersistTimerId: timerState(store.deferredPersistTimerId),
-        streamFlushFrameId: timerState(store.streamFlushFrameId),
         streamFlushTimerId: timerState(store.streamFlushTimerId),
         traceTimelineThrottleTimerId: timerState(store.traceTimelineThrottleTimerId),
         submissionWatchdogTimerId: timerState(store.submissionWatchdogTimerId)

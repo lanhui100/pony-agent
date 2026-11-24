@@ -750,13 +750,15 @@ impl AcpAgentSession {
     /// B175 additive：装配 `fs/*` handler（热替换；保留既有 permission / terminal 槽位）。
     ///
     /// 只对**握手时已声明** fs 能力的会话有效：声明已在 `initialize` 固化，注入不追认新能力。
-    pub fn install_fs_handler(&self, handler: Arc<dyn FsHandler>) {
-        self.client.install_fs_handler(handler);
+    /// 返回 `true` = 装配成功；`false` = 被闸门拒绝（握手未声明 fs）。
+    pub fn install_fs_handler(&self, handler: Arc<dyn FsHandler>) -> bool {
+        self.client.install_fs_handler(handler)
     }
 
     /// B175 additive：装配 `terminal/*` handler（热替换；保留既有 permission / fs 槽位）。
-    pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) {
-        self.client.install_terminal_handler(handler);
+    /// 返回 `true` = 装配成功；`false` = 被闸门拒绝（握手未声明 terminal）。
+    pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) -> bool {
+        self.client.install_terminal_handler(handler)
     }
 
     /// B185：把 `session/list` 结果格式化为**冻结 JSONL 行**（`ponycli acp --list-sessions` 共用）。
@@ -850,6 +852,9 @@ impl AcpAgentSession {
     /// `ACP_REQUEST_TIMEOUT`（5000ms），真实 agent 的 >5s 一轮会被硬顶失败。
     pub fn set_turn_budget(&self, budget: Duration) {
         self.client.set_prompt_budget(budget);
+        // ADVISORY ⑧：terminal 侧 `wait_for_exit` 的等待预算必须与 prompt 预算同源，
+        // 否则调大轮次预算后长命令仍会被 120s 硬顶截断。
+        self.client.set_terminal_turn_budget(budget);
     }
 
     /// 设置宿主取消令牌（additive；写入既有 `cancellation` 槽位，`&self` 热替换）。
@@ -984,6 +989,22 @@ impl AcpAgentSession {
             .unwrap_or_default();
 
         match response {
+            // ── 契约登记（B169）：cancel-race 下 **Ok 优先**，取消不覆盖已到达的终态 ──
+            //
+            // 场景：调用方在 prompt 进行中置位取消令牌（`cancel_observed = true`），但 agent
+            // 在同一时刻已经发完 `session/prompt` 的终态响应（`stop_reason = EndTurn/MaxTokens/...`）。
+            // 此时这里**仍然按 agent 的终态归约**，不退化成 aborted。
+            //
+            // 为什么这样定：Ok 说明外部 agent 已经完成了这一轮，输出是完整可信的；若因为
+            // 本地取消信号把结果改写成 aborted，用户会看到「已取消」但正文已经产出并被丢弃，
+            // 且 `errors: [tool_cancelled]` 与真实情况不符。
+            //
+            // 谁来兜住「用户确实想停」这件事：取消信号在轮询里已经 `session/cancel` 发给 agent，
+            // 且宿主侧 dispatcher 负责停止链的最终裁决（`stop_turn` / 停止短语），不依赖这里改写
+            // 归约结果。也就是说：**这里只对「这一轮的事实」负责，不对「用户意图」做二次裁决**。
+            //
+            // 反向场景（取消已发但 agent 不回包 ⇒ 传输层 timeout/断链）仍归约 aborted + tool_cancelled，
+            // 见下方 `Err(error) if cancel_observed || self.cancellation_requested()` 分支。
             Ok(response) => self.outcome_result(
                 Self::reduce_stop_reason(response.stop_reason),
                 response.stop_reason,

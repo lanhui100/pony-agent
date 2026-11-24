@@ -52,16 +52,15 @@ pub fn is_archive_shortcut(
     modifiers == KeyModifiers::CONTROL && code == KeyCode::Char('x')
 }
 
-pub fn composer_enter_action(key: &crossterm::event::KeyEvent) -> ComposerEnterAction {
-    // Shift+Enter / Alt+Enter 是「换行」的显式语义；其余键（含裸 Enter）落到 Enter 分支的提交语义。
-    if key.code == KeyCode::Enter
-        && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT))
-    {
-        ComposerEnterAction::Newline
-    } else {
-        ComposerEnterAction::Submit
-    }
-}
+/// 是否「带修饰键的 Enter」＝换行语义（裸 Enter 才是提交）。
+///
+/// 口径（B277 统一）：`SHIFT` / `ALT` / `CONTROL` **任一**即换行。Shift+Enter 是对外
+/// 宣称键位；Alt+Enter 是传统终端兜底；Ctrl+Enter 在 kitty 协议下上报为
+/// `CSI 13;5u`，若落到提交语义会把用户「想换行」的手势直接发出去，故一并归为换行。
+/// 判定用 `intersects`（含 `Ctrl+Shift+Enter`），不看具体组合顺序。
+// Enter 语义与键盘增强标志的真值源已抽到 core 纯函数层（`agent::tui_enter_action`）；
+// 此处 glob 再导出，让 `tui::` 路径与内联本文件的测试二进制照旧解析。
+pub use pony_agent_core::agent::tui_enter_action::*;
 
 pub fn composer_control_action(key: &crossterm::event::KeyEvent) -> Option<ComposerControlAction> {
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -141,9 +140,9 @@ pub fn should_skip_while_streaming(key: &crossterm::event::KeyEvent) -> bool {
 /// C1–C4 纯函数裁决：按键 + 「输入框是否有正文」⇒ 处置。
 ///
 /// 口径（与契约 §1 逐条对齐）：
-/// - **Enter**（裸键 / 非 Shift/Alt）＝唯一可能「提交」的键：有正文 ⇒ `QueueSubmit`
+/// - **Enter**（裸键）＝唯一可能「提交」的键：有正文 ⇒ `QueueSubmit`
 ///   （流式中排队，绝不并发 spawn 第二个 turn）；无正文 ⇒ `Reject`（不入队空气泡）。
-/// - **Shift/Alt+Enter** ＝ 换行（编辑动作）⇒ `Forward`。
+/// - **Shift/Alt/Ctrl+Enter** ＝ 换行（编辑动作）⇒ `Forward`。
 /// - 其余按键（可打印字符、Backspace/Delete、方向键、Home/End、Tab 补全、
 ///   Ctrl+U/J/W/A/E 编辑快捷键、Ctrl+T/Ctrl+R 面板快捷键（模型面板另有 Ctrl+M 别名，
 ///   仅 kitty 协议终端上报为 `Char('m')`+CONTROL；其余终端降级为 Enter）、F2/F3、Esc）一律 `Forward`
@@ -155,8 +154,8 @@ pub fn streaming_key_disposition(
     if key.code != KeyCode::Enter {
         return StreamingKeyDisposition::Forward;
     }
-    if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT) {
-        // Shift+Enter / Alt+Enter = 换行（编辑语义，不是提交）。
+    if is_newline_enter(key) {
+        // Shift/Alt/Ctrl+Enter = 换行（编辑语义，不是提交）。
         return StreamingKeyDisposition::Forward;
     }
     if composer_has_text {
@@ -182,15 +181,7 @@ pub fn key_class_label(key: &crossterm::event::KeyEvent) -> String {
     }
 }
 
-/// wave-40 R2（契约冻结空桩）：终端支持键盘增强时返回要 push 的标志。
-pub fn keyboard_enhancement_flags(supported: bool) -> Option<KeyboardEnhancementFlags> {
-    // kitty 协议的 DISAMBIGUATE_ESCAPE_CODES：把 Shift+Enter 与裸 Enter 区分开。
-    if supported {
-        Some(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    } else {
-        None
-    }
-}
+
 
 /// Shift+Enter 换行依赖 kitty 键盘协议的 DISAMBIGUATE 标志。
 ///

@@ -1,12 +1,12 @@
 // runtime store 拆解契约（Wave 1 冻结面）。
 //
-// 真源：`.dev-team/runtime-split/fact-map.md`（84 键 / 18 getters / 97 actions）。
+// 真源：`.dev-team/runtime-split/fact-map.md`（83 键 / 18 getters / 97 actions）。
 // 本文件只声明类型，不含运行时代码；任何键、签名或归属变更都必须先改事实图并回写修订记录。
 //
 // 【state 形状单一真源】`RuntimeStoreState` 是 `RuntimeStateW59` 的等价迁出物，但它**不是**形状真源：
 // state 的形状真源 = `src/stores/runtime/state.ts` 的 `createInitialState()` 返回类型（即本文件的
 // `RuntimeStoreState`，由该函数显式标注）。两边若漂移，tsc 会在 `createInitialState` 的返回处报错，
-// 因此「逐字迁出的 84 键字面量」永远压过本文件的类型声明；修类型前先看 state.ts。
+// 因此「逐字迁出的 83 键字面量」永远压过本文件的类型声明；修类型前先看 state.ts。
 //
 // 归属速查：
 //   D1 会话目录与生命周期 → session-catalog.ts
@@ -118,7 +118,7 @@ export type TurnExecutionState = Pick<
   RuntimeStoreState,
   "phase" | "isSubmitting" | "activeTurnId" | "activeTurnStartedAtMs" | "activeRunId" |
   "activeStreamKind" | "retryProgress" | "browserPreviewRunToken" | "streamBufferTurnId" |
-  "streamBufferText" | "streamBufferReasoning" | "streamFlushFrameId" | "streamFlushTimerId" |
+  "streamBufferText" | "streamBufferReasoning" | "streamFlushTimerId" |
   "deferredPersistTimerId" | "submissionWatchdogTimerId" | "eventsReady" |
   "streamDebugDeltaCount" | "streamDebugFlushCount" | "streamDebugTextCharsReceived" |
   "streamDebugTextCharsFlushed"
@@ -158,7 +158,7 @@ export type CatalogState = Pick<
   "health" | "availableTools" | "capabilitySources" | "capabilities"
 >;
 
-/** 84 键自检：各域 State 切片并集必须恰好等于 store 状态键集（编译期断言）。 */
+/** 83 键自检：各域 State 切片并集必须恰好等于 store 状态键集（编译期断言）。 */
 export type RuntimeStoreStateKeys =
   keyof SessionCatalogState | keyof WorkspaceState | keyof TurnExecutionState | keyof MessagesState | keyof TelemetryState | keyof HistoryState | keyof QueueState | keyof CatalogState;
 
@@ -166,11 +166,11 @@ export type RuntimeStoreStateKeys =
 // （形如 `Type '"messages"' does not satisfy the constraint 'never'`），
 // 绝不打印巨型交叉类型 —— 否则一次失配就能让 vue-tsc 跑满超时。
 type _Nothing<T extends never> = T;
-/** 事实图 §1：84 键冻结断言 —— 双向零差集（缺一多一都会以键名报错）。 */
+/** 事实图 §1：83 键冻结断言 —— 双向零差集（缺一多一都会以键名报错）。 */
 export type StateKeysMissing = _Nothing<Exclude<FrozenStateKeys, RuntimeStoreStateKeys>>;
 export type StateKeysUnexpected = _Nothing<Exclude<RuntimeStoreStateKeys, FrozenStateKeys>>;
 
-/** 事实图 §1 的 84 键字面量清单。 */
+/** 事实图 §1 的 83 键字面量清单。 */
 export type FrozenStateKeys =
   "sessionId" | "sessionList" | "sessionOperation" | "sessionHydrating" |
   "deletingSessionSet" | "sessionSwitchToken" | "sessionError" | "sessionNotice" |
@@ -178,7 +178,7 @@ export type FrozenStateKeys =
   "workspaceListLoaded" | "sidebarOpInflightSet" | "activeWorkspaceId" | "sessionWorkspaceId" |
   "phase" | "isSubmitting" | "activeTurnId" | "activeTurnStartedAtMs" | "activeRunId" |
   "activeStreamKind" | "retryProgress" | "browserPreviewRunToken" | "streamBufferTurnId" |
-  "streamBufferText" | "streamBufferReasoning" | "streamFlushFrameId" | "streamFlushTimerId" |
+  "streamBufferText" | "streamBufferReasoning" | "streamFlushTimerId" |
   "deferredPersistTimerId" | "submissionWatchdogTimerId" | "eventsReady" |
   "streamDebugDeltaCount" | "streamDebugFlushCount" | "streamDebugTextCharsReceived" |
   "streamDebugTextCharsFlushed" | "messages" | "draftMessage" | "pendingAttachments" |
@@ -196,6 +196,30 @@ export type FrozenStateKeys =
   "toolAuthorizationMode" | "health" | "availableTools" | "capabilitySources" |
   "capabilities"
 ;
+
+// ---------------------------------------------------------------------------
+// 2.5 Pinia 内建成员契约（B278 裁决）
+// ---------------------------------------------------------------------------
+//
+// runtime store 是 Pinia options store，实现体与消费方天然可触达三个内建成员。
+// 它们不在 state/getters/actions 冻结清单内（属拆解暴露的契约裂缝），故在此显式登记：
+//
+// | 内建 | 裁决 | 允许用途 | 禁止 |
+// |---|---|---|---|
+// | `$patch` | 纳入契约（受控） | ① turn-events 监听器聚合体的批内原子写；② 测试 Arrange 造场景 | 生产代码新增散点调用；用它替代已有 action |
+// | `$reset` | 明令禁止 | 无 | 一律改走 `resetSessionRuntimeState()`：后者有清空面/保留面契约（队列、工作区树不清） |
+// | `$subscribe` | 明令禁止（生产） | 单测断言副作用 | 生产代码订阅 store 变更；观测一律走 action/getter，避免隐式订阅泄漏 |
+//
+// 机械守卫：`runtime-builtins-contract.spec.ts` 扫描 `src/**`，`$reset` / `$subscribe` 生产面零引用，
+// `$patch` 仅白名单文件出现。新增白名单须同步本段与 ADR。
+export type RuntimeStoreBuiltins = {
+  $patch(mutator: (state: RuntimeStoreState) => void): void;
+  $reset(): void;
+  $subscribe(
+    callback: (mutation: unknown, state: RuntimeStoreState) => void,
+    options?: { detached?: boolean }
+  ): () => void;
+};
 
 export interface SessionCatalogGetters {
   /** :600 */
@@ -642,7 +666,7 @@ export type ActionKeysUnexpected = _Nothing<Exclude<keyof RuntimeStoreActions, F
 type RuntimeStoreFacade = ReturnType<typeof useRuntimeStore>;
 type FacadeKeys = keyof RuntimeStoreFacade;
 
-/** 84 键在装配壳上齐全（spread 未丢 state 成员）。 */
+/** 83 键在装配壳上齐全（spread 未丢 state 成员）。 */
 export type FacadeStateKeysMissing = _Nothing<Exclude<FrozenStateKeys, FacadeKeys>>;
 /** 18 个 getter 在装配壳上齐全。 */
 export type FacadeGetterKeysMissing = _Nothing<Exclude<FrozenGetterKeys, FacadeKeys>>;

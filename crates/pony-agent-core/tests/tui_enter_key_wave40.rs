@@ -8,9 +8,8 @@
 // `keyboard_enhancement_flags` 空桩（`unimplemented!()`），本文件必须
 // 「编译通过（Exit 0）+ 运行失败（panic / 断言失败）」。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+// wave-40 解耦：直接引用 core::agent::tui_enter_action
+use pony_agent_core::agent::tui_enter_action as tui;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags};
 
@@ -34,14 +33,16 @@ fn a1_plain_enter_submits() {
 }
 
 // ---------------------------------------------------------------------------
-// A1-2：Shift / Alt / Ctrl+Shift + Enter → Newline（`Shift+Enter` 是用户缺陷主场景）
+// A1-2：Shift / Alt / Ctrl / Ctrl+Shift + Enter → Newline
+// （`Shift+Enter` 是对外宣称键位；`Ctrl+Enter` 为 kitty 协议下的兼容回退，B277）
 // ---------------------------------------------------------------------------
 #[test]
 fn a1_modified_enter_inserts_newline() {
     // Arrange
-    let cases: [(&str, KeyModifiers); 3] = [
+    let cases: [(&str, KeyModifiers); 4] = [
         ("Shift+Enter", KeyModifiers::SHIFT),
         ("Alt+Enter", KeyModifiers::ALT),
+        ("Ctrl+Enter", KeyModifiers::CONTROL),
         (
             "Ctrl+Shift+Enter",
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
@@ -56,7 +57,7 @@ fn a1_modified_enter_inserts_newline() {
         assert_eq!(
             action,
             tui::ComposerEnterAction::Newline,
-            "{label} 必须插入换行而不是提交（modifiers 含 SHIFT 或 ALT）"
+            "{label} 必须插入换行而不是提交（modifiers 含 SHIFT / ALT / CONTROL）"
         );
     }
 }

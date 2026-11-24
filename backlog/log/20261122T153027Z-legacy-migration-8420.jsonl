@@ -1,0 +1,3 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T153027Z-legacy-migration-8420","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-22T15:30:27.213Z"}
+{"kind":"annotate","at":"2026-11-22T15:30:27.285Z","id":"B139","description":"决策已定（ADR 2026-11-22-upstream-status-and-span-duration-evidence）：引入 UpstreamStatus(Option<u16>) 随错误上抛 + ProviderCallCacheRecord.upstream_status；实施拆 PR-3b（需改 provider 错误类型签名，不做正文正则加固）。"}
+{"kind":"annotate","at":"2026-11-22T15:30:27.355Z","id":"B135","description":"决策已定（同上 ADR）：llm.chat span 收尾按账本扣减 failed_attempt_ms+prelude_ms 并单列 llm.retry.wait_ms；无账本时属性缺省不回退 0；实施拆 PR-3c。"}

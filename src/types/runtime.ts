@@ -382,6 +382,9 @@ export type ProviderCallCacheRecord = {
   /** wave-54 契约 C4：上下文占用归一值（anthropic 系 = input + cache_read，
    *  其余协议 = input）；缺失表示无值，UI 显示 `—`。 */
   contextInputTokens?: number;
+  /** B139：上游 HTTP 响应状态码。**仅非 2xx** 时有值；缺失 = 本次调用没有失败。
+   *  用途：把配额抖动（429）样本从速率比较里筛掉，而不是靠错误正文猜。 */
+  upstreamStatus?: number | null;
 };
 
 export type BuildContextObservation = {

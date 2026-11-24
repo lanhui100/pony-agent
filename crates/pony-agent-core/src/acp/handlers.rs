@@ -156,7 +156,12 @@ impl FsHandler for WorkspaceFsHandler {
         request: &ReadTextFileRequest,
     ) -> Result<ReadTextFileResponse, AcpHandlerError> {
         let canonical = self.classify(&request.path, PathPurpose::Read)?;
-        let metadata = std::fs::metadata(&canonical).map_err(|error| {
+        // B177 ADVISORY ⑦：**只打开一次**。旧写法是 canonicalize → metadata(路径) → 最后
+        // read_slice 内部再 File::open(路径) 一次，三段之间路径可被替换（符号链接/换文件），
+        // 于是「被检查的那个文件」和「被读取的那个文件」可能不是同一个：`is_file` 与大小上限
+        // 判定的是旧版本，真正读出来的是新版本。改成拿到 fd 后用 `file.metadata()` 判定，
+        // 全部断言与读取都作用于同一个 inode。
+        let file = std::fs::File::open(&canonical).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 AcpHandlerError::NotFound(format!(
                     "文件不存在：{}。",
@@ -164,10 +169,16 @@ impl FsHandler for WorkspaceFsHandler {
                 ))
             } else {
                 AcpHandlerError::Internal(format!(
-                    "读取文件元数据失败（{}）：{error}。",
+                    "读取文件失败（{}）：{error}。",
                     self.describe_target(&canonical)
                 ))
             }
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            AcpHandlerError::Internal(format!(
+                "读取文件元数据失败（{}）：{error}。",
+                self.describe_target(&canonical)
+            ))
         })?;
         if !metadata.is_file() {
             return Err(AcpHandlerError::Denied(format!(
@@ -183,7 +194,7 @@ impl FsHandler for WorkspaceFsHandler {
                 metadata.len()
             )));
         }
-        read_slice(&canonical, request.line, request.limit, ACP_FS_READ_MAX_BYTES).map_err(
+        read_slice(file, request.line, request.limit, ACP_FS_READ_MAX_BYTES).map_err(
             |error| match error {
                 SliceReadError::Io(error) => AcpHandlerError::Internal(format!(
                     "读取文件失败（{}）：{error}。",
@@ -259,13 +270,14 @@ enum SliceReadError {
 /// 语义：既不因为文件整体很大而拒绝合法的分片请求，也不会把整文件读进内存；
 /// 返回内容逐字节保留原行（含行尾换行），不做行尾归一。
 fn read_slice(
-    path: &Path,
+    file: std::fs::File,
     line: Option<u32>,
     limit: Option<u32>,
     max_bytes: u64,
 ) -> Result<String, SliceReadError> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path).map_err(SliceReadError::Io)?;
+    // 调用方已经打开并校验过同一个 fd（见 `read_text_file` 的 ADVISORY ⑦ 注释）：
+    // 这里绝不再按路径重开，否则校验与读取又会被中间替换切开。
     let mut reader = std::io::BufReader::new(file);
     let skip = line.unwrap_or(1).max(1) as usize - 1;
     let take = limit.map(|value| value as usize).unwrap_or(usize::MAX);
@@ -274,7 +286,16 @@ fn read_slice(
     let mut collected = 0usize;
     loop {
         let mut line_buffer = String::new();
-        let read = reader.read_line(&mut line_buffer).map_err(SliceReadError::Io)?;
+        // 非 UTF-8 字节：`read_line` 以 `ErrorKind::InvalidData` 报错（不是 IO 失败）。
+        // 归到 `NotUtf8` 才能给出「拒绝以文本读取」的准确文案；否则用户会看到误导性的
+        // 「读取文件失败（…）：stream did not contain valid UTF-8」（B177 ADVISORY ⑥）。
+        let read = match reader.read_line(&mut line_buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(SliceReadError::NotUtf8)
+            }
+            Err(error) => return Err(SliceReadError::Io(error)),
+        };
         if read == 0 {
             break;
         }
@@ -291,9 +312,6 @@ fn read_slice(
         if collected >= take {
             break;
         }
-    }
-    if index == 0 && !selected.is_empty() {
-        return Err(SliceReadError::NotUtf8);
     }
     Ok(selected)
 }
@@ -405,6 +423,11 @@ pub struct ManagedTerminalHandler {
     workspace_root: Option<PathBuf>,
     /// wire `terminalId` → 受管句柄（opaque、不可跨会话伪造）。
     terminals: Mutex<HashMap<String, Arc<TerminalEntry>>>,
+    /// `wait_for_exit` 的整轮预算（B177 ADVISORY ⑧：可被宿主 turn 预算热替换）。
+    ///
+    /// 缺省 [`ACP_DEFAULT_TURN_BUDGET`]（120s）。旧实现把 120s 写死在 `wait_for_exit` 里，
+    /// 于是 `AcpAgentSession::set_turn_budget(300s)` 对长命令的等待毫无作用——预算被两处各说各话。
+    turn_budget: Mutex<Duration>,
 }
 
 impl ManagedTerminalHandler {
@@ -414,6 +437,7 @@ impl ManagedTerminalHandler {
             process_manager,
             workspace_root: None,
             terminals: Mutex::new(HashMap::new()),
+            turn_budget: Mutex::new(ACP_DEFAULT_TURN_BUDGET),
         }
     }
 
@@ -423,6 +447,7 @@ impl ManagedTerminalHandler {
             process_manager,
             workspace_root: Some(std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root)),
             terminals: Mutex::new(HashMap::new()),
+            turn_budget: Mutex::new(ACP_DEFAULT_TURN_BUDGET),
         }
     }
 
@@ -499,13 +524,26 @@ impl ManagedTerminalHandler {
                 canonical.display()
             )));
         }
-        if let Some(root) = self.workspace_root.as_ref() {
-            if !canonical.starts_with(root) {
-                return Err(AcpHandlerError::Denied(format!(
-                    "outside_workspace_write_denied: terminal/create 的 cwd `{}` 不在会话 workspace `{}` 内。",
-                    canonical.display(),
-                    root.display()
-                )));
+        match self.workspace_root.as_ref() {
+            Some(root) => {
+                if !canonical.starts_with(root) {
+                    return Err(AcpHandlerError::Denied(format!(
+                        "outside_workspace_write_denied: terminal/create 的 cwd `{}` 不在会话 workspace `{}` 内。",
+                        canonical.display(),
+                        root.display()
+                    )));
+                }
+            }
+            None => {
+                // B177 ADVISORY ⑨：未绑定 workspace 的 handler（`new()` 构造）若接受调用方指定的
+                // cwd，等于允许把终端开到任意位置（复审实测 `/etc` 可跑）。没有边界就不接受自定义
+                // cwd——只允许沿用进程默认目录。生产路径全部走 `with_workspace_root`，此处为兜底。
+                if explicit.is_some() {
+                    return Err(AcpHandlerError::Denied(
+                        "permission_denied: 当前 terminal handler 未绑定 workspace，terminal/create 不接受自定义 cwd。"
+                            .to_string(),
+                    ));
+                }
             }
         }
         Ok(Some(canonical.to_string_lossy().into_owned()))
@@ -624,7 +662,12 @@ impl TerminalHandler for ManagedTerminalHandler {
         let entry = self.entry(&request.session_id, &request.terminal_id)?;
         // B4：预算取 NFR 派生的整轮预算（不是传输层单请求 5s）；且入站分发已移出读线程
         // （transport 专用分发线程），这里的阻塞等待不再拖住其它入站帧的读取。
-        let deadline = Instant::now() + ACP_DEFAULT_TURN_BUDGET;
+        // ADVISORY ⑧：预算来自槽位（可被 `set_turn_budget` 热替换），不再写死常量。
+        let budget = match self.turn_budget.lock() {
+            Ok(budget) => *budget,
+            Err(_) => ACP_DEFAULT_TURN_BUDGET,
+        };
+        let deadline = Instant::now() + budget;
         loop {
             let (state, exit_code) = self.poll_into(&entry)?;
             if state == ProcessState::Exited {
@@ -637,7 +680,7 @@ impl TerminalHandler for ManagedTerminalHandler {
                 // 有界等待：不无限阻塞；超时明确报错（仍可 kill/release）。
                 return Err(AcpHandlerError::Internal(format!(
                     "terminal/wait_for_exit 超过 {:?} 仍未退出（terminalId 仍可 kill/release）。",
-                    ACP_DEFAULT_TURN_BUDGET
+                    budget
                 )));
             }
             std::thread::sleep(TERMINAL_POLL_INTERVAL);

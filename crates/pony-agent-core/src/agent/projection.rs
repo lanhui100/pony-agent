@@ -1319,6 +1319,8 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     attempts: *attempts,
                     failed_attempt_ms: *failed_attempt_ms,
                     prelude_ms: *prelude_ms,
+                    // B139：trace 重建路径不携带上游状态码 ⇒ 留空（与 context_input_tokens 同款：禁止臆造口径）。
+                    upstream_status: None,
                 });
                 // PA-094：per-turn ProviderCallCacheRecord 重建（design.md §5）。
                 // 重建字段集：request_kind、usage 四桶、cache_hit/cache_miss、
@@ -1352,6 +1354,8 @@ impl Projection<MetricsProjectionState> for MetricsProjectionState {
                     attempts: *attempts,
                     failed_attempt_ms: *failed_attempt_ms,
                     prelude_ms: *prelude_ms,
+                    // B139：trace 重建路径不携带上游状态码 ⇒ 留空（与 context_input_tokens 同款：禁止臆造口径）。
+                    upstream_status: None,
                 };
                 // addReplacing：同一 (turn_id, step) 原位覆盖（与 totals 替换语义一致）。
                 if let Some(index) = state.record_index.get(&(turn_id.clone(), *step)).copied() {

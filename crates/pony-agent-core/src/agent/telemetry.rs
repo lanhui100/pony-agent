@@ -107,6 +107,30 @@ pub enum ProviderLatencyKind {
     Unknown,
 }
 
+thread_local! {
+    /// B139：最近一次 **失败** 的 provider HTTP 状态码。
+    ///
+    /// 为什么不改 74 处 `Result<_, String>` 签名：provider 调用与 per-call 记录构建跑在同一
+    /// turn 线程上（与 `agent::retry` 的 RetryNotice 观察者同一模式），状态码作为「取走即清空」
+    /// 的旁路传递，既不动错误类型，也不会让两次 call 的记录串味。
+    static LAST_UPSTREAM_STATUS: std::cell::Cell<Option<u16>> = const { std::cell::Cell::new(None) };
+}
+
+/// 记录一次失败的 provider HTTP 响应状态码。
+///
+/// **唯一写入点**是 `provider::provider_status_error`（所有非 2xx 出口都经过它）；
+/// 任何其它地方直接写会让「状态码 ↔ 错误」的对应关系不可审计。
+pub fn record_upstream_status(status: u16) {
+    LAST_UPSTREAM_STATUS.with(|slot| slot.set(Some(status)));
+}
+
+/// 取走并清空最近的状态码（per-call 记录结算时调用一次）。
+///
+/// 「取走即清空」是刻意的：一次 call 的状态码不得泄漏给下一次 call 的记录。
+pub fn take_upstream_status() -> Option<u16> {
+    LAST_UPSTREAM_STATUS.with(|slot| slot.replace(None))
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCallCacheRecord {
@@ -150,6 +174,12 @@ pub struct ProviderCallCacheRecord {
     /// **仅重试时** `Some(>0)`，无重试 ⇒ `None` ⇒ 键缺席（禁止 0 占位冒充真值）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prelude_ms: Option<u64>,
+    /// B139：上游 HTTP 响应状态码。**仅非 2xx** 时 `Some`（成功调用不写 200，键缺席）。
+    ///
+    /// 用途：把「配额抖动期的 429」从速率样本里筛出去——正文匹配（`is_rate_limit_error`）
+    /// 只能给一个布尔，无法区分 429 / 503 / 业务配额耗尽。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_status: Option<u16>,
 }
 
 /// wave-acp-delegate C5.1：一次 provider 调用的**重试观测口径**——上面三个 additive 字段的
@@ -1076,6 +1106,34 @@ mod tests {
             step_state(&trace_return_active_without_tool()),
             "pending",
             "P5：进行中的无工具轨迹仍应 pending（后续还可能调工具）"
+        );
+    }
+}
+
+#[cfg(test)]
+mod upstream_status_tests {
+    use super::{record_upstream_status, take_upstream_status};
+
+    #[test]
+    fn recorded_status_is_read_back_exactly_once() {
+        assert_eq!(take_upstream_status(), None, "初始态不得凭空造出状态码");
+        record_upstream_status(429);
+        assert_eq!(take_upstream_status(), Some(429));
+        assert_eq!(
+            take_upstream_status(),
+            None,
+            "取走即清空：一次 call 的状态码不得泄漏给下一次 call"
+        );
+    }
+
+    #[test]
+    fn later_record_overwrites_earlier_one() {
+        record_upstream_status(503);
+        record_upstream_status(429);
+        assert_eq!(
+            take_upstream_status(),
+            Some(429),
+            "同一 call 内多次非 2xx 时，最后一次（真正上抛的那次）生效"
         );
     }
 }

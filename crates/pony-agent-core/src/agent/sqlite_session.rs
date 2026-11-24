@@ -5409,6 +5409,7 @@ mod tests {
             },
         ];
         trace.provider_call_records = vec![crate::agent::telemetry::ProviderCallCacheRecord {
+            upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
             request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
             provider_source: None,
             provider_mode: None,

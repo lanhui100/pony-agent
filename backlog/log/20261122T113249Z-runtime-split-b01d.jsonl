@@ -1,0 +1,4 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T113249Z-runtime-split-b01d","surface":"runtime-split","release":"v0.1.204","created_at":"2026-11-22T11:32:49.012Z"}
+{"kind":"start","at":"2026-11-22T11:33:12.477Z","id":"B279","owner":"pony-agent","paths":["src/stores/runtime/telemetry.ts","src/stores/runtime/orchestration.ts","src/stores/runtime/turn-execution.ts"],"session_id":"pony-agent"}
+{"kind":"start","at":"2026-11-22T11:33:19.054Z","id":"B278","owner":"pony-agent","paths":["src/stores/runtime/types.ts","src/stores/runtime/turn-events.ts"],"session_id":"pony-agent"}
+{"kind":"start","at":"2026-11-22T11:33:19.116Z","id":"B280","owner":"pony-agent","paths":[".dev-team/runtime-split/contract-residuals.md",".agents/notes/implemented/architecture/2026-11-22-runtime-store-contract-residuals.md"],"session_id":"pony-agent"}

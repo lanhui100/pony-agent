@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T160009Z-legacy-migration-6ed9","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-22T16:00:09.254Z"}
+{"kind":"annotate","at":"2026-11-22T16:00:09.356Z","id":"B135","description":"已实施（本 PR）：retry 增加 peek_provider_attempt_window / rebase_timing_to_pure_call（不取走账本）；LlmSpanGuard::record_call_timing 内部重基（6 处调用点零改动）；新增 llm.retry.wait_ms 属性（仅 >0）；turn 级累加同口径；无账本原样返回。"}
