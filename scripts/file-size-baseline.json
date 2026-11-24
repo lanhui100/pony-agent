@@ -15,18 +15,11 @@
       "value": 232
     },
     {
-      "path": "crates/pony-agent-core/src/agent/config.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 3078
-    },
-    {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 10785
+      "value": 10789
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
@@ -54,7 +47,7 @@
       "kind": "fn-lines",
       "name": "model_monitor_session_drilldown_preserves_failed_and_cancelled_terminal_evidence",
       "occurrence": 0,
-      "value": 271
+      "value": 273
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/query_commands.rs",
@@ -96,7 +89,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 4406
+      "value": 4427
     },
     {
       "path": "crates/pony-agent-core/src/agent/process.rs",
@@ -117,21 +110,21 @@
       "kind": "fn-lines",
       "name": "apply",
       "occurrence": 1,
-      "value": 378
+      "value": 374
     },
     {
       "path": "crates/pony-agent-core/src/agent/projection.rs",
       "kind": "fn-lines",
       "name": "apply",
       "occurrence": 2,
-      "value": 229
+      "value": 233
     },
     {
       "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6994
+      "value": 6907
     },
     {
       "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
@@ -152,7 +145,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 13902
+      "value": 13813
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
@@ -243,14 +236,14 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 5778
+      "value": 5777
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
       "kind": "fn-lines",
       "name": "append_turn_fallible_with_kind",
       "occurrence": 0,
-      "value": 205
+      "value": 204
     },
     {
       "path": "crates/pony-agent-core/src/agent/session/store.rs",
@@ -264,14 +257,14 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6469
+      "value": 6471
     },
     {
       "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 6334
+      "value": 6335
     },
     {
       "path": "crates/pony-agent-core/src/agent/sqlite_session.rs",
@@ -362,7 +355,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 3711
+      "value": 3713
     },
     {
       "path": "crates/pony-agent-core/src/bin/conformance.rs",

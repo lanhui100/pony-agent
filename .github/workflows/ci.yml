@@ -91,6 +91,14 @@ jobs:
       - name: 前端单元测试
         run: npm run test:unit
 
+      # 文件规模棘轮（B261 / 6c-2）：`npm run verify` 里本来就含 `size:check`，但 CI 的
+      # verify job 是拆开跑的（typecheck/test:unit/cargo check/clippy），于是这条门**从不在
+      # CI 上执行**——main 上曾长期带 4 条新增超限而无人发现。这里补上，口径与本地 verify 一致。
+      # 纯 node + git，秒级；基线 `scripts/file-size-baseline.json` 只许下调或随「几行级漂移」
+      # 显式重基线（`npm run size:check:update`，提交前必须 review diff）。
+      - name: 文件规模棘轮（≤3000 行/文件、≤200 行/函数、≤8 层嵌套）
+        run: npm run size:check
+
       - name: Rust 检查（shared 槽位，deny-warnings 与发版构建对齐）
         if: needs.changes.outputs.needs_rust == 'true'
         env:
