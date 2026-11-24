@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T152447Z-legacy-migration-013e","surface":"legacy-migration","release":"v0.1.204","created_at":"2026-11-22T15:24:47.661Z"}
+{"kind":"annotate","at":"2026-11-22T15:24:47.782Z","id":"B261","description":"拆分：本批只做 --version 进程级输出面（main 早拦 + 进程级测试 + ADR），PR-6a；'随 pony 自更新后两 bin 版本漂移的一致性提示' 属安装/更新路径（install-cli.mjs + 自更新），留待 PR-6b。"}

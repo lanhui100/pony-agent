@@ -2294,7 +2294,31 @@ fn validate_backfill_db(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `ponycli --version` / `-V` 的唯一输出行。
+///
+/// 版本真源是 workspace 的 `CARGO_PKG_VERSION`（与 `pony` 同一 workspace、同一 `Cargo.toml`），
+/// 与 `package.json` / `tauri.conf.json` / `.version.json` 的一致性由 `npm run version:check`
+/// 门禁机械保证——因此这里**不再**写任何版本字面量。
+pub fn version_banner() -> String {
+    format!("ponycli {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// B261：`--version` / `-V` 必须像维护与 ACP 子命令一样在常规解析之前拦截，
+/// 否则会被 `parse_cli_args` 当成非法参数并落到 Usage(2)，表现为「没有版本输出」。
+fn run_version_flag_if_requested() -> Option<i32> {
+    let first = std::env::args().nth(1)?;
+    if first != "--version" && first != "-V" {
+        return None;
+    }
+    println!("{}", version_banner());
+    Some(ExitCode::Success.code())
+}
+
 fn main() {
+    // `--version` 优先于其余一切：不装 observability、不解析参数、不读配置。
+    if let Some(code) = run_version_flag_if_requested() {
+        std::process::exit(code);
+    }
     // ADR 0099 维护子命令必须在常规参数解析之前拦截（否则会被当成非法参数）。
     if let Some(code) = run_maintenance_subcommand_if_requested() {
         std::process::exit(code);
@@ -2584,4 +2608,3 @@ fn emit_stdout_line(line: &str) {
     payload.push('\n');
     emit_stdout_bytes(payload.as_bytes());
 }
-
