@@ -122,21 +122,19 @@ const COVERED_ACTIONS = [
   "applyMessageStateDelta", "applyHistoryState", "enqueueMessage", "promoteToSteer", "removeQueuedMessage",
   "toggleQueueDeliveryMode", "setQueueDeliveryMode", "setToolAuthorizationMode", "dequeueNextMessage",
   "setDraftMessage", "setPendingAttachments", "clearPendingAttachments", "recallLastUserMessage",
-  "flushPendingTraceTimeline", "clearPendingTraceTimeline", "shouldProcessTurnEvent", "commitTurnEventCursor"
+  "flushPendingTraceTimeline", "clearPendingTraceTimeline", "shouldProcessTurnEvent", "commitTurnEventCursor",
+  // Wave 2a（B277）：等价测试见 `equivalence-wave2a.spec.ts`（宿主命令边界 + 状态转移）。
+  "fetchHealth", "fetchAvailableTools", "fetchCapabilitySources", "fetchCapabilities", "inspectCapability", "inspectCapabilitySource", "overrideGovernanceBlock", "fetchUsageGovernanceSummary", "stopTurn", "enterStoppingPhase", "setSessionNotice", "addPendingAttachments", "removePendingAttachment", "getAttachmentAssets",
+  // Wave 2b（B277）：等价测试见 `equivalence-wave2b.spec.ts`（D1 会话目录写 + D2 工作区注册表）。
+  "loadWorkspaces", "createNewWorkspace", "renameWorkspace", "deleteWorkspace",
+  "renameSession", "archiveSession", "unarchiveSession"
 ];
 
 /** 未覆盖 action + 结构性原因（不得省略：覆盖自评要与代码事实可机械对账）。 */
 const UNCOVERED_ACTIONS: Array<{ name: string; reason: string }> = [
-  { name: "loadWorkspaces", reason: "D2 工作区注册表需宿主 IPC（非 6 类场景）" },
-  { name: "createNewWorkspace", reason: "D2 注册表写操作（非 6 类场景）" },
-  { name: "renameWorkspace", reason: "D2 注册表写操作（非 6 类场景）" },
-  { name: "deleteWorkspace", reason: "D2 注册表写操作（非 6 类场景）" },
   { name: "activateWorkspace", reason: "D2 localStorage 激活态（非 6 类场景）" },
   { name: "normalizeActiveWorkspace", reason: "D2 激活态归一（需注册表投影）" },
   { name: "isSidebarOpInflight", reason: "D2/D1 侧边栏 inflight 守卫（需并发 UI 操作）" },
-  { name: "renameSession", reason: "D1 目录写操作（依赖会话目录）" },
-  { name: "archiveSession", reason: "D1 归档语义（进入全新会话的分支）" },
-  { name: "unarchiveSession", reason: "D1 归档语义" },
   { name: "deleteSession", reason: "D1 删除语义（会话目录 + 回落策略）" },
   { name: "createSession", reason: "D1 新建会话（UUID + 列表投影）" },
   { name: "enterFreshSession", reason: "D1 空白会话落点（UUID + 列表投影）" },
@@ -150,23 +148,9 @@ const UNCOVERED_ACTIONS: Array<{ name: string; reason: string }> = [
   { name: "updatePersistedBackgroundSession", reason: "后台会话轮事件（需先切走后持续收流）" },
   { name: "resolveTurnTraceTimeline", reason: "既有死代码：src 内无调用方（Wave-1 不清理）" },
   { name: "scheduleThrottledTraceTimeline", reason: "delta 未携带 traceTimeline（节流分支未触发）" },
-  { name: "addPendingAttachments", reason: "附件导入需 File/host import 边界" },
-  { name: "removePendingAttachment", reason: "附件 chip 交互（同上）" },
-  { name: "getAttachmentAssets", reason: "纯视图过滤，无 store 内部调用方" },
-  { name: "fetchHealth", reason: "D8 健康探针（启动面）" },
-  { name: "fetchAvailableTools", reason: "D8 能力目录（启动面）" },
-  { name: "fetchCapabilitySources", reason: "D8 能力目录（启动面）" },
-  { name: "fetchCapabilities", reason: "D8 能力目录（启动面）" },
-  { name: "inspectCapability", reason: "D8 能力目录细节（UI 面板驱动）" },
-  { name: "inspectCapabilitySource", reason: "D8 能力目录细节（UI 面板驱动）" },
-  { name: "overrideGovernanceBlock", reason: "用量治理（写 settings 持久化）" },
-  { name: "fetchUsageGovernanceSummary", reason: "用量治理（宿主 summary 通道）" },
   { name: "runBrowserPreviewTurn", reason: "浏览器预览兜底（无宿主分支）" },
   { name: "cancelBrowserPreviewTurn", reason: "浏览器预览兜底（无宿主分支）" },
-  { name: "stopTurn", reason: "停止链（宿主 stop_turn/stop_graph_run 控制面）" },
-  { name: "enterStoppingPhase", reason: "停止链（进行中态，随 stopTurn 覆盖）" },
   { name: "retryLastTurn", reason: "续跑入口（判定侧已由 failed + failedTurnRetry 覆盖）" },
-  { name: "setSessionNotice", reason: "斜杠命令中性反馈（getter info 分支已由快照覆盖）" }
 ];
 
 const EXPECTED_LISTENER_NAMES = [
@@ -215,8 +199,8 @@ describe("场景 6 · 并发与生命周期", () => {
     const uncoveredNames = UNCOVERED_ACTIONS.map((item) => item.name);
     expect([...COVERED_ACTIONS, ...uncoveredNames].sort()).toEqual([...ACTION_NAMES].sort());
     expect(COVERED_ACTIONS.filter((name) => uncoveredNames.includes(name))).toEqual([]);
-    expect(COVERED_ACTIONS).toHaveLength(57);
-    expect(uncoveredNames).toHaveLength(40);
+    expect(COVERED_ACTIONS).toHaveLength(78);
+    expect(uncoveredNames).toHaveLength(19);
     // 每个 action 名字确实可调用（类型面契约，非行为门禁）。
     for (const name of ACTION_NAMES) {
       expect(typeof record[name], `action ${name} 应可调用`).toBe("function");
