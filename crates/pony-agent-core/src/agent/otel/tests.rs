@@ -1291,6 +1291,7 @@ fn traceparent_parsing_yields_remote_parent_context() {
 /// 同一断言，因此天然对其它单测的门禁残留免疫。
 #[test]
 fn begin_turn_trace_with_parent_inherits_trace_id_locally() {
+    let _guard = test_lock();
     let parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
     let scope = begin_turn_trace_with_parent("sess-w3-parent", "turn-w3-parent", 0, Some(parent));

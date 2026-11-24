@@ -1214,6 +1214,14 @@ mod tests {
         };
         #[cfg(windows)]
         let pgid_alive = false; // Windows 走 Job Object（kill-on-close），无 POSIX 进程组。
+        // kill_internal 先写 status="killed" 并释放锁，再异步调用 release_promoted_entry
+        // 清理 ProcessManager 条目（至多 20×10ms 重试）；等待回收收口，不与 status 解锁时序耦合。
+        let release_started = Instant::now();
+        while manager.is_tracked(session_id, &handle)
+            && release_started.elapsed() < Duration::from_millis(500)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         eprintln!(
             "[b009] cancel → status={status} in {elapsed:?}; pgid={pgid} alive={pgid_alive}; tracked={}",
             manager.is_tracked(session_id, &handle)

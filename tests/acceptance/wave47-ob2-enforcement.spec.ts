@@ -145,7 +145,7 @@ describe.skipIf(!hasSkill || !hasPonygo)("ob2 变更级门禁与横切收口点�
       const epFile = path.join(tmpDir, "src/ep.ts");
       fs.writeFileSync(epFile, "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n", "utf-8");
 
-      const declContent = `service: test-svc\nkind: desktop\nreviewed_at: "2026-10-26"\ndimensions:\n  tracing:\n    applicable: false\n    reason: n/a\n  metrics:\n    applicable: false\n    reason: n/a\n  logs:\n    applicable: false\n    reason: n/a\n  issues:\n    applicable: false\n    reason: n/a\nenforcement_points:\n  test_ep:\n    path: src/ep.ts\n    guarantees: [timeout]\n    forbidden_in_other_files:\n      - pattern: "\\bforbidden_call\\b"\n`;
+      const declContent = `service: test-svc\nkind: desktop\nreviewed_at: "2026-10-26"\ndimensions:\n  tracing:\n    applicable: false\n    reason: n/a\n  metrics:\n    applicable: false\n    reason: n/a\n  logs:\n    applicable: false\n    reason: n/a\n  issues:\n    applicable: false\n    reason: n/a\nenforcement_points:\n  test_ep:\n    path: src/ep.ts\n    guarantees: [timeout]\n    forbidden_in_other_files:\n      - pattern: "\\bforbidden_call\\b"\n        hint: 只能在收口点实现\n`;
       fs.writeFileSync(path.join(tmpDir, "docs/observability.yaml"), declContent, "utf-8");
 
       execSync(`git add . && git commit -m "baseline [decl-change-approved]"`, { cwd: tmpDir, stdio: "ignore" });
@@ -184,7 +184,7 @@ describe.skipIf(!hasSkill || !hasPonygo)("ob2 变更级门禁与横切收口点�
       const epFile = path.join(tmpDir, "src/ep.ts");
       fs.writeFileSync(epFile, "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n", "utf-8");
 
-      const declContent = `service: test-svc\nkind: desktop\nreviewed_at: "2026-10-26"\ndimensions:\n  tracing:\n    applicable: false\n    reason: n/a\n  metrics:\n    applicable: false\n    reason: n/a\n  logs:\n    applicable: false\n    reason: n/a\n  issues:\n    applicable: false\n    reason: n/a\nenforcement_points:\n  test_ep:\n    path: src/ep.ts\n    guarantees: [timeout]\n    forbidden_in_other_files:\n      - pattern: "\\bforbidden_call\\b"\n`;
+      const declContent = `service: test-svc\nkind: desktop\nreviewed_at: "2026-10-26"\ndimensions:\n  tracing:\n    applicable: false\n    reason: n/a\n  metrics:\n    applicable: false\n    reason: n/a\n  logs:\n    applicable: false\n    reason: n/a\n  issues:\n    applicable: false\n    reason: n/a\nenforcement_points:\n  test_ep:\n    path: src/ep.ts\n    guarantees: [timeout]\n    forbidden_in_other_files:\n      - pattern: "\\bforbidden_call\\b"\n        hint: 只能在收口点实现\n`;
       fs.writeFileSync(path.join(tmpDir, "docs/observability.yaml"), declContent, "utf-8");
 
       execSync(`git add . && git commit -m "baseline [decl-change-approved]"`, { cwd: tmpDir, stdio: "ignore" });

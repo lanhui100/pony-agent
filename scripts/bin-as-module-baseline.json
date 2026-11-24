@@ -1,9 +1,8 @@
 {
   "version": 2,
-  "allowed_file_count": 50,
-  "allowed_total_imports": 50,
+  "allowed_file_count": 49,
+  "allowed_total_imports": 49,
   "allowed_files": {
-    "crates/pony-agent-core/tests/cli_acceptance.rs": 1,
     "crates/pony-agent-core/tests/interrupted_turn_resume_acceptance.rs": 1,
     "crates/pony-agent-core/tests/pa171_error_copy_adversarial.rs": 1,
     "crates/pony-agent-core/tests/pa171_error_copy_contract.rs": 1,

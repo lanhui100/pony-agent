@@ -6,6 +6,7 @@
 //! 的既有拦截行不改），以及共享的 stdout 收口 helper（`emit_stdout_line`：`models list` 也在用）。
 
 use super::*;
+use std::str::FromStr;
 
 // ───────────────────── B151/P2：ACP 宿主形态（`ponycli acp`） ─────────────────────
 
