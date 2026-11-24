@@ -50,21 +50,18 @@ import { shouldAcceptTurnEvent } from "@/lib/runtime/sessions";
 import { refreshForTurn as refreshPlanForTurn } from "@/stores/plan";
 import { refreshForTurn as refreshGoalForTurn } from "@/stores/goal";
 import type {
-  RuntimeStoreState,
+  RuntimeStoreBuiltins,
   RuntimeStoreThis,
   TurnEventRegistry,
   TurnEventsActions,
   TurnEventsGetters,
 } from "./types";
 /**
- * `registerTurnEventListeners` 的 `this` 口径：Pinia 内建 `$patch` 不在契约类型 `RuntimeStoreThis` 内
- * （types.ts 只冻结 state / getters / actions），而监听器聚合体里 6 处 `this.$patch(...)` 是既有实现，
- * 拆解前 `this` 是 Pinia store 实例。此处仅为该 action 补上 Pinia 内建成员的类型面；
- * 运行时 `this` 仍是同一 store 实例，零行为改动。
+ * `registerTurnEventListeners` 的 `this` 口径：监听器聚合体里 6 处 `this.$patch(...)` 是既有实现，
+ * 拆解前 `this` 是 Pinia store 实例。Pinia 内建成员的类型面统一由 `./types.ts` 的
+ * `RuntimeStoreBuiltins` 登记（B278 契约），此处只取所需成员，不再本地重复定义。
  */
-type TurnEventsThis = RuntimeStoreThis & {
-  $patch(mutator: (state: RuntimeStoreState) => void): void;
-};
+type TurnEventsThis = RuntimeStoreThis & Pick<RuntimeStoreBuiltins, "$patch">;
 
 // Wave-1 C6：turn 结束（turn:completed / graph 流结束）后刷新计划与目标面板。
 // - 同一 turnId 只刷新一次（事件去重/重放时避免重复拉取）；

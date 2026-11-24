@@ -6,7 +6,7 @@
  * 既有 23 条等价用例也只能证明「已搬部分的正确性」，不能证明「完整性」。
  *
  * 本文件补的是完整性判据（三个正交断言）：
- *   1. `Object.keys(store.$state)` == 84 键（逐项对账）；
+ *   1. `Object.keys(store.$state)` == 83 键（逐项对账）；
  *   2. 18 个 getter 在 store 上齐全，且「函数式 getter / 值式 getter」归属不漂移；
  *   3. store 上全部「函数型自有键」== 97 actions ∪ 2 个函数式 getter —— 漏搬（missing）
  *      与多出/重名（extra）分别以可读列表断言。
@@ -27,7 +27,7 @@ import type {
   RuntimeStoreState
 } from "@/stores/runtime/types";
 
-/** 事实图 §1 / types.ts `FrozenStateKeys`：84 个状态键。 */
+/** 事实图 §1 / types.ts `FrozenStateKeys`：83 个状态键。 */
 const STATE_KEY_NAMES = [
   "sessionId", "sessionList", "sessionOperation", "sessionHydrating", "deletingSessionSet",
   "sessionSwitchToken", "sessionError", "sessionNotice", "runningSessionMap", "completedSessionSet",
@@ -35,7 +35,7 @@ const STATE_KEY_NAMES = [
   "activeWorkspaceId", "sessionWorkspaceId", "phase", "isSubmitting", "activeTurnId",
   "activeTurnStartedAtMs", "activeRunId", "activeStreamKind", "retryProgress",
   "browserPreviewRunToken", "streamBufferTurnId", "streamBufferText", "streamBufferReasoning",
-  "streamFlushFrameId", "streamFlushTimerId", "deferredPersistTimerId", "submissionWatchdogTimerId",
+  "streamFlushTimerId", "deferredPersistTimerId", "submissionWatchdogTimerId",
   "eventsReady", "streamDebugDeltaCount", "streamDebugFlushCount", "streamDebugTextCharsReceived",
   "streamDebugTextCharsFlushed", "messages", "draftMessage", "pendingAttachments", "attachmentAssets",
   "sessionSummary", "error", "toolActivities", "traceSteps", "retrievedContext", "messageRevision",
@@ -112,7 +112,7 @@ function ownMemberNames(store: unknown): string[] {
   );
 }
 
-describe("契约门禁 · store 表面完整性（84 state / 18 getters / 97 actions）", () => {
+describe("契约门禁 · store 表面完整性（83 state / 18 getters / 97 actions）", () => {
   let store: ReturnType<typeof useRuntimeStore>;
   let record: StoreRecord;
 
@@ -123,7 +123,7 @@ describe("契约门禁 · store 表面完整性（84 state / 18 getters / 97 act
     record = store as unknown as StoreRecord;
   });
 
-  it("state：Object.keys(store.$state) 与 84 键冻结清单双向零差集", () => {
+  it("state：Object.keys(store.$state) 与 83 键冻结清单双向零差集", () => {
     const actual: string[] = Object.keys(store.$state).sort();
     // 显式放宽为 string[]：`satisfies` 元组的 `includes` 只接受字面量联合，此处需要按任意键名比对。
     const expected: string[] = [...STATE_KEY_NAMES].sort();
@@ -134,9 +134,9 @@ describe("契约门禁 · store 表面完整性（84 state / 18 getters / 97 act
     // 先断「缺失 / 多余」清单（失败信息直接给出键名），再断计数。
     expect(missing, `store.$state 缺少状态键：${JSON.stringify(missing)}`).toEqual([]);
     expect(extra, `store.$state 多出状态键：${JSON.stringify(extra)}`).toEqual([]);
-    expect(STATE_KEY_NAMES).toHaveLength(84);
-    expect(new Set(STATE_KEY_NAMES).size).toBe(84);
-    expect(actual).toHaveLength(84);
+    expect(STATE_KEY_NAMES).toHaveLength(83);
+    expect(new Set(STATE_KEY_NAMES).size).toBe(83);
+    expect(actual).toHaveLength(83);
   });
 
   it("getters：18 个 getter 齐全，且函数式/值式归属不漂移（多出即报）", () => {

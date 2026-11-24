@@ -241,6 +241,14 @@ export const orchestrationActions = {
         : []
     ).map((trace) => normalizeTurnTraceRecord(trace));
 
+    // B279：会话落点统一丢弃旧会话遗留的定时器与待投递节流帧。
+    // 只在 sessionId 真正变化时清理，避免同会话刷新打断在飞的流式 flush。
+    // 不触碰流式缓冲：目标会话的后台轮缓冲由 switchSession 的 bgTurn 恢复分支重建。
+    if (this.sessionId !== sessionId) {
+      this.cancelStreamFlush();
+      this.clearPendingTraceTimeline();
+    }
+
     this.sessionId = sessionId;
     this.error = null;
     this.clearSubmissionWatchdog();
@@ -302,7 +310,13 @@ export const orchestrationActions = {
     const lastTraceTimeline = this.turnTraceHistory[this.turnTraceHistory.length - 1]?.traceTimeline;
     this.publishTraceTimeline(createDefaultTraceTimeline());
     if (lastTraceTimeline?.length) {
+      // B279 同族守卫：rIC 空闲回调可能晚于下一次会话切换，必须校验归属，
+      // 否则旧会话的 timeline 深拷贝会覆盖新会话（PA-089 延迟恢复引入的竞态）。
+      const ownerSessionId = sessionId;
       runLowPriorityTurnWork(() => {
+        if (this.sessionId !== ownerSessionId) {
+          return;
+        }
         const restored = cloneTraceTimeline(lastTraceTimeline);
         if (restored.length) {
           this.publishTraceTimeline(restored);
@@ -739,6 +753,15 @@ export const orchestrationActions = {
       delete this.completedSessionSet[this.sessionId];
       delete this.failedSessionSet[this.sessionId];
     }
+
+    // B279：切走前先落定本会话的节流 timeline，再丢弃旧会话的定时器与流式缓冲——
+    // 否则 setTimeout 会在切换后把旧会话增量写进新会话（跨会话串台）。
+    // 运行中轮的缓冲已在上面的 runningSessionMap 登记里留存，可安全清空。
+    this.flushPendingTraceTimeline();
+    this.cancelStreamFlush();
+    this.streamBufferTurnId = null;
+    this.streamBufferText = "";
+    this.streamBufferReasoning = "";
 
     this.persistHistory();
     const previousSnapshot = createSessionRuntimeSnapshot(this);

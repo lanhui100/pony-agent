@@ -123,7 +123,6 @@ export function createInitialState(): RuntimeStoreState {
     toolAuthorizationMode: "workspace_write" as ToolAuthorizationMode,
     eventsReady: false,
     deferredPersistTimerId: null,
-    streamFlushFrameId: null,
     streamFlushTimerId: null,
     streamBufferTurnId: null,
     streamBufferText: "",
