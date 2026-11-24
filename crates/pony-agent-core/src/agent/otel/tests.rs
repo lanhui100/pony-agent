@@ -1301,15 +1301,22 @@ fn begin_turn_trace_with_parent_inherits_trace_id_locally() {
         current_traceparent()
     );
 
-    assert_eq!(
-        scope.trace_id().as_deref(),
-        Some("4bf92f3577b34da6a3ce929d0e0e4736"),
-        "W3 trace：队友 turn 的 trace id 必须与宿主父 trace 相同"
-    );
+    // 口径修正（ADR 2026-11-23-turn-trace-traceid-semantics）：`TurnTraceGuard::trace_id()`
+    // 的语义是**导出态** trace id —— 只有「真实 SDK span 且被采样」时才有值。未采样时为
+    // `None` 并不表示"没继承父 trace"；把它当成继承判据会在真实通路 + 未采样时假红
+    // （Windows CI 已连续三次偶发命中这一条）。
+    if let Some(exported_trace_id) = scope.trace_id() {
+        assert_eq!(
+            exported_trace_id.as_str(),
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "W3 trace：导出态 trace id 若存在，必须与宿主父 trace 相同"
+        );
+    }
+    // 继承关系的**主判据**：直接读活动 turn 的 span context（与是否采样无关）。
     assert_eq!(
         current_trace_id().as_deref(),
         Some("4bf92f3577b34da6a3ce929d0e0e4736"),
-        "W3 trace：活动 turn 的 trace id 必须继承父上下文"
+        "W3 trace：活动 turn 的 span context 必须继承父 trace id（与采样无关）"
     );
     assert_ne!(
         current_span_id().as_deref(),
