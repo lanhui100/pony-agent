@@ -11,9 +11,7 @@
 //!
 //! 渲染接缝沿用 `tests/tui_ask_panel_layout.rs`：`#[path] mod tui` + TestBackend。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::jobs::JobListItem;
 use ratatui::backend::TestBackend;

@@ -1,7 +1,7 @@
 //! 契约 C-6：`/goal` 斜杠命令的 TUI 接线。
 //!
 //! 分界线（与桌面端同口径）：**语法、状态机与回执文案的唯一真源在 Rust core**
-//! （`pony_agent_core::agent::goal_command`）；本模块只做两件事——
+//! （`crate::agent::goal_command`）；本模块只做两件事——
 //! ① 从输入框原文提取参数；② 把执行结果投递到 TUI（System 消息 + 状态行 + goal 横幅）。
 //! 命令不消耗模型轮次、不写会话历史语义，也不发起 turn。
 
@@ -37,7 +37,7 @@ pub fn handle_goal_command(state: &mut TuiState, input: &str) -> bool {
         return false;
     };
 
-    match pony_agent_core::agent::goal_command::execute_goal_command(&state.session_id, &args) {
+    match crate::agent::goal_command::execute_goal_command(&state.session_id, &args) {
         Ok(outcome) => {
             match outcome.goal {
                 Some(goal) => state.set_goal(tui_goal_from_goal(&goal)),

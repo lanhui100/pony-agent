@@ -697,7 +697,6 @@ TUI_SOURCE = os.path.normpath(
         "crates",
         "pony-agent-core",
         "src",
-        "bin",
         "tui.rs",
     )
 )

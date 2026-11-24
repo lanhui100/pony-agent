@@ -16,9 +16,7 @@
 //!
 //! 铁律：真实断言、无 `#[ignore]`/skip、不修改实现代码；不触碰真实 `~/.pony-agent`。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::config::{
     ProviderCapabilityPreset, ProviderConfigView, ProviderModelCapabilities, ProviderModelConfig,

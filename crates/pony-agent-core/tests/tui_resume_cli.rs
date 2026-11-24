@@ -9,9 +9,7 @@
 //!
 //! 铁律：每条用例都有真实断言；无 `#[ignore]`/skip；不改被测实现。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use tui::CliAction;
 

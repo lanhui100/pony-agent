@@ -14,9 +14,7 @@
 //!
 //! 本文件由 Test Agent（task-2）独占写域。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::metrics_snapshot::TurnMetricsSnapshot;
 use ratatui::backend::TestBackend;

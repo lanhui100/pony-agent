@@ -17,9 +17,7 @@
 //! `[[bin]]` 目标，只有以模块方式引入同一份真实源码才能在编译期断言其纯函数。
 //! 本文件只调纯函数，不渲染、不联网、不读全局 provider。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use tui::{
     user_facing_error_summary, ERROR_SUMMARY_AUTH, ERROR_SUMMARY_GENERIC, ERROR_SUMMARY_TRANSIENT,

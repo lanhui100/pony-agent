@@ -24,9 +24,7 @@
 //!
 //! 缺陷真值（红相必须复现）：`tui.rs:9058` 流式守卫 + `tui.rs:9491` paste 早退。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui::StreamingKeyDisposition;
@@ -1076,20 +1074,20 @@ fn a22_requeue_front_restores_fifo_and_never_stalls() {
 // ── A23 · L2-T ─ C25：派发/拒绝日志字段承载（纯函数 + 结构契约）───────────────
 
 /// bin 源码原文（结构契约断言用；这是**源码结构断言**，不是行为断言）。
-const TUI_SRC: &str = include_str!("../src/bin/tui.rs");
+const TUI_SRC: &str = include_str!("../src/tui.rs");
 
 /// `tui/input.rs` 源码原文：`99b3adce` 把输入层从 `tui.rs` 原地拆出，`key_class_label` 随之外移。
 /// 结构契约断言的扫描范围必须显式覆盖被拆出的模块文件，否则函数搬家后断言会静默失配；
 /// 读不到即 panic（fail-closed，模块再次搬家时用例立刻红，而不是去测一段空字符串）。
 fn tui_input_src() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/tui/input.rs");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui/input.rs");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("必须能读取 {}: {e}", path.display()))
 }
 
 /// `tui/status_bar.rs` 源码原文：底部状态行渲染已从 `tui.rs` 拆出到该模块；
 /// 结构契约断言的扫描范围必须显式覆盖，否则函数搬家后断言会静默失配。
 fn tui_status_bar_src() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/tui/status_bar.rs");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tui/status_bar.rs");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("必须能读取 {}: {e}", path.display()))
 }
 

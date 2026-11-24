@@ -16,9 +16,7 @@
 //! 工具名 + 结果哨兵串；native 家族 `tool_calls` / `role=tool` 成对闭合，非 native 家族由
 //! `Previous assistant reply:` 承载文本（可见步骤）携带，**禁止**只剩一条检查点句。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 #[path = "acceptance/adversarial/interrupted_turn_resume/mod.rs"]
 mod adversarial;

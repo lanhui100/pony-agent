@@ -25,9 +25,7 @@
 //! 铁律：真实断言；无 `#[ignore]`/skip；不联网（纯函数 + 构造错误文本）；不改既有 4 个
 //! `pa171_*` 冻结文件；不修改 `src/`。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::retry::{
     append_retry_after_marker, rate_limit_recovery_hint, rate_limit_window_ms, RETRY_AFTER_MARKER,

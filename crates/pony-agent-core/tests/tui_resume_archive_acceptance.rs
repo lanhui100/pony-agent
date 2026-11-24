@@ -33,9 +33,7 @@
 //! | T7 | `t7_archive_shortcut_key_matrix` |
 //! | T8 | `t8_available_commands_has_exactly_one_archive_entry` |
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

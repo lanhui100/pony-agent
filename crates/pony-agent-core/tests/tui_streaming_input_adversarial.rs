@@ -19,9 +19,7 @@
 //! - 并发只经 `std::thread::scope` + `Mutex` 的真实竞争，不做时序假设；
 //! - 断言全部落在不变量上（计数单调、长度守恒、每步恰好 −1、无重复派发）。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 /// 在 `&mut Vec<String>` 上执行唯一权威的 drain 原语（`drain_next_queued` 只接受 `&mut TuiState`）。
 ///

@@ -3,8 +3,8 @@
 //! 2. Agents 页签同时显示 teammate 名册与**活跃 ACP 委派**（`acp_delegate` 运行期可见）。
 
 use super::*;
-use pony_agent_core::acp::registry::{ActiveDelegateGuard, DelegateRegistration};
-use pony_agent_core::agent::jobs::{
+use crate::acp::registry::{ActiveDelegateGuard, DelegateRegistration};
+use crate::agent::jobs::{
     job_kill_scoped, job_start_scoped, JobKillArgs, JobStartArgs,
 };
 

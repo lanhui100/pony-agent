@@ -2,7 +2,7 @@
 """由官方母版生成 TUI 启动页品牌标的两份派生物（ADR 0098，取代 ADR 0085）。
 
 单一真值源：`src-tauri/icons/icon-master-approved.png`
-  ├─> `crates/pony-agent-core/src/bin/tui/splash_coverage.rs`（字符路径：覆盖率表 + 母版真色表）
+  ├─> `crates/pony-agent-core/src/tui/splash_coverage.rs`（字符路径：覆盖率表 + 母版真色表）
   └─> `crates/pony-agent-core/assets/splash-logo.png`（图形协议路径：位图）
 
 两条路径共用同一份几何与配色：形状来自母版标身的面积重采样，颜色直接取母版 RGB
@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 
 MASTER = "src-tauri/icons/icon-master-approved.png"
-OUT_COVERAGE = "crates/pony-agent-core/src/bin/tui/splash_coverage.rs"
+OUT_COVERAGE = "crates/pony-agent-core/src/tui/splash_coverage.rs"
 OUT_PNG = "crates/pony-agent-core/assets/splash-logo.png"
 
 # 画布底色，必须等于 `mod theme::CANVAS`：位图与周围字符格无缝衔接的前提。

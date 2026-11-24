@@ -12,9 +12,7 @@
 //! 红相预期：当前 `TuiState` 尚无 `note_stopping_key` ⇒ 编译期 `no method named` （函数不存在）。
 //! 该文件不使用 `#[ignore]`、不吞异常、不做空断言。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use tui::TuiState;
 

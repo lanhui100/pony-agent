@@ -474,7 +474,7 @@ fn b231_waiting_window_is_event_driven() {
 /// 只要兜底链路还在跑，底部就必须有进行中反馈——这是 B198 现场的直接回归。
 #[test]
 fn b198_phase_keeps_running_status_visible() {
-    use pony_agent_core::agent::retry::ProviderPhase;
+    use crate::agent::retry::ProviderPhase;
 
     let mut state = state_in(RuntimeMode::Ready);
     assert!(
@@ -498,7 +498,7 @@ fn b198_phase_keeps_running_status_visible() {
 /// 三阶段文案互不混淆，且「本地兜底」是可识别的降级收尾（不是正常生成）。
 #[test]
 fn b198_phase_texts_are_distinguishable() {
-    use pony_agent_core::agent::retry::ProviderPhase;
+    use crate::agent::retry::ProviderPhase;
 
     let mut state = state_in(RuntimeMode::Responding);
     state.note_provider_phase(ProviderPhase::StreamFallback);
@@ -521,7 +521,7 @@ fn b198_phase_texts_are_distinguishable() {
 /// 重试计数比阶段更精确 ⇒ 同时存在时以计数为准；二者生命周期同源，一起清空。
 #[test]
 fn b198_retry_outranks_phase_and_both_clear_together() {
-    use pony_agent_core::agent::retry::ProviderPhase;
+    use crate::agent::retry::ProviderPhase;
 
     let mut state = state_in(RuntimeMode::Responding);
     state.note_provider_retry(2, 5);

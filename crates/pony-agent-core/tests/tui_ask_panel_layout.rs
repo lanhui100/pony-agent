@@ -10,9 +10,7 @@
 //! 渲染接缝沿用 `tests/tui_overlay_cancel_acceptance.rs` 的同法：`#[path] mod tui` +
 //! ratatui `TestBackend`，断言落在字符缓冲上（黑盒，不碰私有状态）。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

@@ -1,8 +1,7 @@
 // L2-AT: 对抗破坏与极端边界注入测试 (PA-120)
 // 针对 TUI 进阶交互模块执行超长文本注入、越界索引容错、空候选项穿透、高频按键与恶意输入断言
 
-#[path = "../src/bin/tui.rs"]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

@@ -8,7 +8,7 @@
 //! 刷新是**拉取式**（与 `team-panel-live-polling` 同构），不新增事件通道、不改作业生命周期。
 
 use super::*;
-use pony_agent_core::agent::jobs::{job_list_scoped, JobListArgs, JobListItem};
+use crate::agent::jobs::{job_list_scoped, JobListArgs, JobListItem};
 
 /// 作业状态（wire 口径：`running` / `completed` / `failed` / `killed`）。
 ///

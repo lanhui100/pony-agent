@@ -19,9 +19,7 @@
 // 必须先 `pin_carousel_phase()` 钉住相位——否则 `status_carousel_started_at = None` 时相位取
 // 墙钟毫秒 % 周期，断言会随机红（模型相位 GHOST / 权限相位 MUTED）。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

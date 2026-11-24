@@ -1,8 +1,7 @@
 // L2-T: TUI 交互模块验收测试 (PA-120)
 // 覆盖：权限审批(Permission)、AskUser问答、Plan模式与交互、Task看板、Goal展示
 
-#[path = "../src/bin/tui.rs"]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

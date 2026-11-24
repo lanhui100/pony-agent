@@ -25,9 +25,7 @@
 //!
 //! 若后续有人移除 `provider_registry_path` 注入点，n11b 会编译失败——这正是期望的护栏信号。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use std::path::PathBuf;
 use std::sync::Arc;

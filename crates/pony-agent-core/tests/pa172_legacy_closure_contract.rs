@@ -21,9 +21,7 @@
 //! `GoalRoundStopReason::BudgetPersistFailed` / `UiEvent::GoalRoundsStopped { session_id }`
 //! 均不存在 ⇒ 编译红（E0425/E0432/E0599），属冻结签名锚点的合法红相。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

@@ -282,7 +282,7 @@ pub fn is_child_or_descendant(sender_pid: libc::pid_t) -> bool {
     if sender_pid == my_pid {
         return true;
     }
-    if pony_agent_core::agent::process::is_tracked_child_pid(sender_pid) {
+    if crate::agent::process::is_tracked_child_pid(sender_pid) {
         return true;
     }
     #[cfg(target_os = "linux")]

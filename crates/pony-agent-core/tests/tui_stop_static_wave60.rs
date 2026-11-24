@@ -12,7 +12,7 @@
 /// 被 C9 明令禁止的本地伪造终态文案。
 const FAKE_TERMINAL_MESSAGE: &str = "已中断本轮生成。";
 
-const TUI_SOURCE: &str = include_str!("../src/bin/tui.rs");
+const TUI_SOURCE: &str = include_str!("../src/tui.rs");
 
 /// C9（结构级）：按键处理不得再打印本地伪造的终态文案。
 #[test]

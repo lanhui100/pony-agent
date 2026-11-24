@@ -7,9 +7,7 @@
 // 本文件把 `src/bin/tui.rs` 以 bin-as-module 方式 include（与 tui_acceptance.rs 同模式），
 // 以便对 `build_turn_input` / `TuiState::default()` 做纯内存断言；bin 的 main 不会被调用，
 // 仅为消除 bin-as-module 固有的 dead_code 噪声而加最小 allow（不放宽任何断言）。
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use pony_agent_core::agent::workspace::{
     ensure_workspace_for_root, normalize_workspace_root, roots_match, validate_workspace_id,

@@ -87,12 +87,12 @@ pub fn render(f: &mut Frame, area: Rect, state: &TuiState) {
     let stopped = state
         .goal_rounds_stopped
         .as_ref()
-        .map(pony_agent_core::agent::goal::GoalRoundStopReason::severity)
+        .map(crate::agent::goal::GoalRoundStopReason::severity)
         .map(severity_for_goal_stop);
     let stop_text = state
         .goal_rounds_stopped
         .as_ref()
-        .map(pony_agent_core::agent::goal::GoalRoundStopReason::visible_line);
+        .map(crate::agent::goal::GoalRoundStopReason::visible_line);
     for text in render_lines(state) {
         if text.is_empty() {
             lines.push(blank());
@@ -128,7 +128,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &TuiState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pony_agent_core::agent::goal::GoalRoundStopReason;
+    use crate::agent::goal::GoalRoundStopReason;
 
     #[test]
     fn empty_state_guides_user_to_goal_command() {

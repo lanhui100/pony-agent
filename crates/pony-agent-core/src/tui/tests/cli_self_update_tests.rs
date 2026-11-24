@@ -135,7 +135,6 @@
         Json(String),
         Bytes(Vec<u8>),
         Redirect(String),
-        NotFound,
         /// 声明 `Content-Length` 大于实发字节数（截断注入）。
         Truncated { declared: usize, actual: Vec<u8> },
         /// 先发出响应头，随后停滞 `stall_ms`（超时注入；停滞发生在被测算语里，不是测试盲等）。
@@ -273,7 +272,7 @@
                 let _ = stream.flush();
                 std::thread::sleep(Duration::from_millis(*stall_ms));
             }
-            Some(Route::NotFound) | None => {
+            None => {
                 let _ = write!(
                     stream,
                     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -820,8 +819,8 @@
         )]);
         let _env = update_env(&mock, &install_path, "/manifest", 30);
 
-        let error = pony_agent_core::agent::updater::run_self_update(
-            &pony_agent_core::agent::updater::UpdateOptions::default(),
+        let error = crate::agent::updater::run_self_update(
+            &crate::agent::updater::UpdateOptions::default(),
         )
         .expect_err("body 截断必须失败");
 
@@ -858,7 +857,7 @@
         let asset_name = "pony-tui_0.1.184_test";
         let script = fake_binary_script("0.1.184", &install_path);
         // 清单声明 size = 128MiB + 1（无需真的造 128MB 流量）。
-        let oversized = pony_agent_core::agent::updater::MAX_ARTIFACT_BYTES + 1;
+        let oversized = crate::agent::updater::MAX_ARTIFACT_BYTES + 1;
         let manifest = manifest_json(
             "0.1.184",
             platform,
@@ -883,8 +882,8 @@
         // 捕获文件仍为空串），因此**在门禁命令下无法从 stdout 取 JSON**；改用与 CLI 完全同源的
         // `run_self_update` + `UpdateError::code()`（契约 C1 的真值方法），断言面等价且不依赖
         // `--nocapture`。
-        let api_error = pony_agent_core::agent::updater::run_self_update(
-            &pony_agent_core::agent::updater::UpdateOptions {
+        let api_error = crate::agent::updater::run_self_update(
+            &crate::agent::updater::UpdateOptions {
                 check: false,
                 force: false,
                 pin: None,
@@ -897,7 +896,7 @@
         assert!(
             matches!(
                 api_error,
-                pony_agent_core::agent::updater::UpdateError::TooLarge(_)
+                crate::agent::updater::UpdateError::TooLarge(_)
             ),
             "超限制品必须映射为 UpdateError::TooLarge，实际={api_error:?}"
         );
@@ -1084,7 +1083,7 @@
     /// 机器可读字段 `content_mismatch`（下游据此判定，而不是靠中文文案）。
     #[test]
     fn same_version_receipt_distinguishes_content_mismatch_from_up_to_date() {
-        use pony_agent_core::agent::updater::UpdateOutcome;
+        use crate::agent::updater::UpdateOutcome;
 
         let base = UpdateOutcome {
             previous_version: "0.1.158".to_string(),

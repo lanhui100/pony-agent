@@ -1,8 +1,6 @@
 // 渲染层回归测试：把 ui() 渲染进 TestBackend，对「布局不变量」做真实断言。
 // 仅当 TUI_SNAPSHOT=1 时额外把每格字符/颜色导出到 /tmp/tui-snap 供人工视觉审查（不影响断言）。
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};

@@ -9,9 +9,7 @@
 //! 断言的是**真实实现**里的计划与一次性消费语义，不是复制粘贴的副本。
 //! 铁律：每条用例都有真实断言；无 `#[ignore]`/skip；不修改被测实现。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use std::sync::{Mutex, MutexGuard};
 use tui::TerminalReentryStep;

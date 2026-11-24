@@ -79,7 +79,7 @@ pub const SPLASH_IMAGE_COLS: u16 = splash_coverage::RICH_COLS as u16;
 pub const SPLASH_IMAGE_ROWS: u16 = (splash_coverage::RICH_ROWS / 2) as u16;
 /// 品牌标位图（由 `scripts/generate-splash-logo.py` 生成，画布底色不透明，
 /// 用以完整覆盖其下方的字符画占位）。
-pub const SPLASH_LOGO_PNG: &[u8] = include_bytes!("../../../assets/splash-logo.png");
+pub const SPLASH_LOGO_PNG: &[u8] = include_bytes!("../../assets/splash-logo.png");
 
 /// 初始化页品牌标的位图路径：sixel / kitty / iTerm2 / halfblocks 四种协议都走同一张位图。
 /// halfblocks 是纯 Rust 的 24bit 前后景半块渲染，与 kitty/sixel 共享同一像素源，

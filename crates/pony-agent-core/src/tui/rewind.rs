@@ -16,7 +16,7 @@
 //! - 渲染只用 `ui()` 的面板原语，不碰消息区布局。
 
 use super::*;
-use pony_agent_core::agent::control_plane::rewind_commands::{
+use crate::agent::control_plane::rewind_commands::{
     RewindMode, RewindPointView, RewindPointsQuery, RewindSessionCommand,
 };
 

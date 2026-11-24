@@ -445,7 +445,7 @@ impl AgentRosterState {
 
 /// 一条**活跃 ACP 委派**的 TUI 视图行（`Agents` 页签的「ACP 委派」分区）。
 ///
-/// 数据源是 `pony_agent_core::acp::registry`（进程内活跃注册表，委派返回即注销）——
+/// 数据源是 `crate::acp::registry`（进程内活跃注册表，委派返回即注销）——
 /// 本结构只承载展示所需字段，不携带任何委派正文/输出。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpDelegateRow {

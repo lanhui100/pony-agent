@@ -12,8 +12,8 @@
 //! 2 锁 `apply_goal_rounds_stopped`（只写状态行与结构化原因，不写消息区）。
 
 use super::*;
-use pony_agent_core::agent::goal::GoalRoundStopReason;
-use pony_agent_core::agent::session::{HistoryMessageKind, TurnHistoryMessage};
+use crate::agent::goal::GoalRoundStopReason;
+use crate::agent::session::{HistoryMessageKind, TurnHistoryMessage};
 
 const CHECKPOINT: &str = "[中断轮次检查点]\n已执行的工具步骤：\n- Run 探测";
 

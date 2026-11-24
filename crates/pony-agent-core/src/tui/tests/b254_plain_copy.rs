@@ -37,7 +37,7 @@ fn assert_plain(label: &str, text: &str) {
 /// 重试期状态行（原「流式中断，转同步重试…」/「同步兜底第 N 次…」/「已切本地兜底摘要」）必须朴素。
 #[test]
 fn followup_phase_texts_are_plain() {
-    use pony_agent_core::agent::retry::ProviderPhase;
+    use crate::agent::retry::ProviderPhase;
 
     let phases = [
         ProviderPhase::StreamFallback,

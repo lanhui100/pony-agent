@@ -60,7 +60,7 @@ pub fn is_archive_shortcut(
 /// 判定用 `intersects`（含 `Ctrl+Shift+Enter`），不看具体组合顺序。
 // Enter 语义与键盘增强标志的真值源已抽到 core 纯函数层（`agent::tui_enter_action`）；
 // 此处 glob 再导出，让 `tui::` 路径与内联本文件的测试二进制照旧解析。
-pub use pony_agent_core::agent::tui_enter_action::*;
+pub use crate::agent::tui_enter_action::*;
 
 pub fn composer_control_action(key: &crossterm::event::KeyEvent) -> Option<ComposerControlAction> {
     if !key.modifiers.contains(KeyModifiers::CONTROL) {

@@ -1,9 +1,7 @@
 // TUI 鼠标文本选择与复制对抗与鲁棒性破坏测试
 // 严格遵循 AAA 原则与零假测试规范
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use std::time::{Duration, Instant};
 use tui::{

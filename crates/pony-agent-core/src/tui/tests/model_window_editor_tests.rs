@@ -153,7 +153,7 @@ fn open_leaves_buffer_blank_when_window_inherited_from_preset() {
     assert_eq!(edit.declared, None);
     assert_eq!(
         edit.effective,
-        Some(pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS)
+        Some(crate::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS)
     );
     assert!(edit.effective_label().ends_with("（预设）"));
 }
@@ -226,7 +226,7 @@ fn clearing_declaration_restores_preset_inheritance_on_disk() {
     assert_eq!(row.declared_context_window, None);
     assert_eq!(
         row.context_window_tokens,
-        Some(pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS)
+        Some(crate::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS)
     );
 }
 

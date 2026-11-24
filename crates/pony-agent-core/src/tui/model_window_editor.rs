@@ -22,8 +22,8 @@
 //! - 面板渲染只读 `state`（窗口与模态在列表构建时一次读盘），不在每帧访问文件系统。
 
 use super::*;
-use pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS;
-use pony_agent_core::agent::model_window::{
+use crate::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS;
+use crate::agent::model_window::{
     find_context_window, format_context_window, list_context_windows, parse_context_window_input,
     set_model_capabilities, ModelInputCapabilities, CONTEXT_WINDOW_PRESETS,
 };

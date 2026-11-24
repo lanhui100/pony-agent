@@ -221,7 +221,7 @@ fn fallback_is_sanitized(block: &str) -> bool {
 /// fallback 代码块做静态判据；附「已知良/已知劣」双样本判别力自检，避免空断言。
 #[test]
 fn a3_message_state_fallback_sanitizes_entry_content() {
-    let src = include_str!("../src/bin/tui.rs");
+    let src = include_str!("../src/tui.rs");
     let marker = "// 若 history 为空，再尝试 fallback 到 message_state";
     let start = src
         .find(marker)

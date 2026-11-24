@@ -10,7 +10,7 @@
   "platforms": {
     "linux": {
       "toolchain": "rustc 1.91.1 (ed61e7d7e 2025-11-07) (built from a source tarball) / clippy 0.1.91",
-      "generated_at": "2026-11-17T22:50:38.758Z",
+      "generated_at": "2026-11-24T15:44:04.923Z",
       "lints_sha256": "0a03b8cf4f934595f7083e327b27f9460e48c0c616f77b08e86afdfccb805913",
       "entries": [
         {
@@ -190,27 +190,27 @@
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 5
-        },
-        {
-          "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
+          "count": 4
+        },
+        {
+          "lint": "clippy::allow_attributes",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -390,27 +390,27 @@
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 5
-        },
-        {
-          "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
+          "count": 4
+        },
+        {
+          "lint": "clippy::allow_attributes_without_reason",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -840,92 +840,92 @@
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 116
+          "path": "crates/pony-agent-core/src/tui.rs",
+          "count": 114
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 4
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 10
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 9
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
-          "count": 6
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
+          "count": 5
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
-          "count": 13
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
+          "count": 11
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 3
         },
         {
@@ -1026,12 +1026,12 @@
         {
           "lint": "clippy::assigning_clones",
           "path": "crates/pony-agent-core/src/bin/cli.rs",
-          "count": 4
+          "count": 2
         },
         {
           "lint": "clippy::assigning_clones",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 15
+          "path": "crates/pony-agent-core/src/tui.rs",
+          "count": 14
         },
         {
           "lint": "clippy::bool_to_int_with_if",
@@ -1055,17 +1055,17 @@
         },
         {
           "lint": "clippy::bool_to_int_with_if",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::bool_to_int_with_if",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
           "lint": "clippy::borrow_as_ptr",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -1125,22 +1125,22 @@
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 4
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
@@ -1450,62 +1450,62 @@
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 19
+          "path": "crates/pony-agent-core/src/tui.rs",
+          "count": 17
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 3
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 2
         },
         {
@@ -1595,12 +1595,12 @@
         },
         {
           "lint": "clippy::cast_possible_wrap",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::cast_possible_wrap",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -1660,12 +1660,12 @@
         },
         {
           "lint": "clippy::cast_precision_loss",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_precision_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 2
         },
         {
@@ -1760,27 +1760,27 @@
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 40
+          "path": "crates/pony-agent-core/src/tui.rs",
+          "count": 39
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -1810,7 +1810,7 @@
         },
         {
           "lint": "clippy::clone_on_copy",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
@@ -1830,7 +1830,7 @@
         },
         {
           "lint": "clippy::clone_on_ref_ptr",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
@@ -1840,7 +1840,7 @@
         },
         {
           "lint": "clippy::collapsible_else_if",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -1885,17 +1885,12 @@
         },
         {
           "lint": "clippy::default_trait_access",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
           "lint": "clippy::derivable_impls",
           "path": "crates/pony-agent-core/src/agent/app_settings.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::derivable_impls",
-          "path": "crates/pony-agent-core/src/agent/config.rs",
           "count": 1
         },
         {
@@ -1980,7 +1975,7 @@
         },
         {
           "lint": "clippy::doc_lazy_continuation",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -2020,7 +2015,7 @@
         },
         {
           "lint": "clippy::empty_line_after_doc_comments",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -2100,17 +2095,17 @@
         },
         {
           "lint": "clippy::explicit_iter_loop",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
           "lint": "clippy::explicit_iter_loop",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "clippy::field_reassign_with_default",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -2360,42 +2355,42 @@
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 14
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 2
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
-          "count": 4
-        },
-        {
-          "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
-          "count": 6
-        },
-        {
-          "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
-          "count": 2
-        },
-        {
-          "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 3
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
+          "count": 6
+        },
+        {
+          "lint": "clippy::fn_params_excessive_bools",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::fn_params_excessive_bools",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::fn_params_excessive_bools",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::fn_params_excessive_bools",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 5
         },
         {
@@ -2415,11 +2410,6 @@
         },
         {
           "lint": "clippy::format_push_string",
-          "path": "crates/pony-agent-core/src/agent/provider/fallback_body.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::format_push_string",
           "path": "crates/pony-agent-core/src/agent/session/store.rs",
           "count": 1
         },
@@ -2430,12 +2420,12 @@
         },
         {
           "lint": "clippy::format_push_string",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::format_push_string",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
@@ -2460,12 +2450,12 @@
         },
         {
           "lint": "clippy::if_not_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 6
+          "path": "crates/pony-agent-core/src/tui.rs",
+          "count": 4
         },
         {
           "lint": "clippy::if_not_else",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
@@ -2485,7 +2475,7 @@
         },
         {
           "lint": "clippy::if_same_then_else",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
@@ -2515,7 +2505,7 @@
         },
         {
           "lint": "clippy::ignored_unit_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -2585,17 +2575,17 @@
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -2660,17 +2650,17 @@
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 4
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 2
         },
         {
@@ -2710,12 +2700,7 @@
         },
         {
           "lint": "clippy::large_enum_variant",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::let_and_return",
-          "path": "crates/pony-agent-core/src/agent/provider/mod.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -2740,7 +2725,7 @@
         },
         {
           "lint": "clippy::manual_clamp",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -2770,27 +2755,22 @@
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 2
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "clippy::manual_let_else",
           "path": "crates/pony-agent-core/src/acp/session.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::manual_let_else",
-          "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
           "count": 1
         },
         {
@@ -2855,7 +2835,7 @@
         },
         {
           "lint": "clippy::manual_let_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
@@ -2870,7 +2850,7 @@
         },
         {
           "lint": "clippy::manual_pattern_char_comparison",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -2951,7 +2931,7 @@
         {
           "lint": "clippy::map_unwrap_or",
           "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
-          "count": 8
+          "count": 7
         },
         {
           "lint": "clippy::map_unwrap_or",
@@ -3265,52 +3245,52 @@
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 17
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 4
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -3465,12 +3445,12 @@
         },
         {
           "lint": "clippy::match_same_arms",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
           "lint": "clippy::match_same_arms",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
@@ -3520,12 +3500,12 @@
         },
         {
           "lint": "clippy::multiple_unsafe_ops_per_block",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
           "lint": "clippy::multiple_unsafe_ops_per_block",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 3
         },
         {
@@ -3580,7 +3560,7 @@
         },
         {
           "lint": "clippy::needless_borrow",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
@@ -3625,12 +3605,12 @@
         },
         {
           "lint": "clippy::needless_continue",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_continue",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
@@ -3925,22 +3905,22 @@
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 10
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_range_loop",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 2
         },
         {
@@ -4025,7 +4005,7 @@
         },
         {
           "lint": "clippy::no_effect_underscore_binding",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
           "count": 1
         },
         {
@@ -4050,7 +4030,7 @@
         },
         {
           "lint": "clippy::option_option",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -4065,7 +4045,7 @@
         },
         {
           "lint": "clippy::ptr_as_ptr",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 4
         },
         {
@@ -4085,7 +4065,7 @@
         },
         {
           "lint": "clippy::question_mark",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -4265,12 +4245,12 @@
         },
         {
           "lint": "clippy::redundant_clone",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
           "lint": "clippy::redundant_clone",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
@@ -4295,12 +4275,7 @@
         },
         {
           "lint": "clippy::redundant_closure",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::redundant_closure_call",
-          "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -4535,27 +4510,27 @@
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 24
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 4
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
@@ -4680,7 +4655,7 @@
         },
         {
           "lint": "clippy::return_self_not_must_use",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 2
         },
         {
@@ -4735,7 +4710,7 @@
         },
         {
           "lint": "clippy::similar_names",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
@@ -4895,17 +4870,12 @@
         },
         {
           "lint": "clippy::single_match_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 9
         },
         {
           "lint": "clippy::string_add",
           "path": "crates/pony-agent-core/src/agent/projection.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::struct_excessive_bools",
-          "path": "crates/pony-agent-core/src/agent/config.rs",
           "count": 1
         },
         {
@@ -4925,7 +4895,7 @@
         },
         {
           "lint": "clippy::struct_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -5010,7 +4980,7 @@
         },
         {
           "lint": "clippy::trim_split_whitespace",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 2
         },
         {
@@ -5040,7 +5010,7 @@
         },
         {
           "lint": "clippy::trivially_copy_pass_by_ref",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
@@ -5056,7 +5026,7 @@
         {
           "lint": "clippy::type_complexity",
           "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
-          "count": 2
+          "count": 1
         },
         {
           "lint": "clippy::type_complexity",
@@ -5125,17 +5095,17 @@
         },
         {
           "lint": "clippy::undocumented_unsafe_blocks",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::undocumented_unsafe_blocks",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 2
         },
         {
           "lint": "clippy::undocumented_unsafe_blocks",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 7
         },
         {
@@ -5350,28 +5320,28 @@
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 31
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
-          "count": 4
+          "path": "crates/pony-agent-core/src/tui/text.rs",
+          "count": 1
         },
         {
           "lint": "clippy::unnecessary_cast",
@@ -5437,11 +5407,6 @@
           "lint": "clippy::unnecessary_map_or",
           "path": "crates/pony-agent-core/src/agent/session/store.rs",
           "count": 7
-        },
-        {
-          "lint": "clippy::unnecessary_map_or",
-          "path": "crates/pony-agent-core/src/bin/cli.rs",
-          "count": 1
         },
         {
           "lint": "clippy::unnecessary_semicolon",
@@ -5510,7 +5475,7 @@
         },
         {
           "lint": "clippy::unnecessary_wraps",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -5580,12 +5545,12 @@
         },
         {
           "lint": "clippy::unnested_or_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 11
         },
         {
           "lint": "clippy::unnested_or_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
@@ -5775,12 +5740,12 @@
         },
         {
           "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
           "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
@@ -5810,7 +5775,7 @@
         },
         {
           "lint": "clippy::used_underscore_binding",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -6095,112 +6060,112 @@
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/jobs_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/jobs_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/model_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/model_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 1
         },
         {
@@ -6220,47 +6185,47 @@
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 14
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
@@ -6296,7 +6261,7 @@
         {
           "lint": "missing_debug_implementations",
           "path": "crates/pony-agent-core/src/agent/config.rs",
-          "count": 7
+          "count": 5
         },
         {
           "lint": "missing_debug_implementations",
@@ -6550,12 +6515,12 @@
         },
         {
           "lint": "missing_debug_implementations",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
           "lint": "missing_debug_implementations",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 1
         },
         {
@@ -6630,68 +6595,63 @@
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 3
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/jobs_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/jobs_panel.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 3
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 10
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 8
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/splash_coverage.rs",
+          "path": "crates/pony-agent-core/src/tui/splash_coverage.rs",
           "count": 8
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
-        },
-        {
-          "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/theme.rs",
-          "count": 25
         }
       ]
     },
@@ -6882,27 +6842,27 @@
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 4
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -7087,27 +7047,27 @@
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 4
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -7522,87 +7482,87 @@
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 116
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 4
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 10
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 9
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 6
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 3
         },
         {
@@ -7707,7 +7667,7 @@
         },
         {
           "lint": "clippy::assigning_clones",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 15
         },
         {
@@ -7737,12 +7697,12 @@
         },
         {
           "lint": "clippy::bool_to_int_with_if",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::bool_to_int_with_if",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
@@ -7822,22 +7782,22 @@
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 4
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
@@ -8157,62 +8117,62 @@
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 19
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 3
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 2
         },
         {
@@ -8272,7 +8232,7 @@
         },
         {
           "lint": "clippy::cast_possible_wrap",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
@@ -8332,12 +8292,12 @@
         },
         {
           "lint": "clippy::cast_precision_loss",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_precision_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 2
         },
         {
@@ -8437,22 +8397,22 @@
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 40
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
@@ -8482,7 +8442,7 @@
         },
         {
           "lint": "clippy::clone_on_copy",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
@@ -8502,7 +8462,7 @@
         },
         {
           "lint": "clippy::clone_on_ref_ptr",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
@@ -8512,7 +8472,7 @@
         },
         {
           "lint": "clippy::collapsible_else_if",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -8557,7 +8517,7 @@
         },
         {
           "lint": "clippy::default_trait_access",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -8652,7 +8612,7 @@
         },
         {
           "lint": "clippy::doc_lazy_continuation",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -8692,7 +8652,7 @@
         },
         {
           "lint": "clippy::empty_line_after_doc_comments",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -8772,17 +8732,17 @@
         },
         {
           "lint": "clippy::explicit_iter_loop",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
           "lint": "clippy::explicit_iter_loop",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "clippy::field_reassign_with_default",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -9032,42 +8992,42 @@
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 14
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 2
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 4
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
           "count": 6
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 2
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 3
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 5
         },
         {
@@ -9102,12 +9062,12 @@
         },
         {
           "lint": "clippy::format_push_string",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::format_push_string",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
@@ -9132,12 +9092,12 @@
         },
         {
           "lint": "clippy::if_not_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
           "lint": "clippy::if_not_else",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
@@ -9157,7 +9117,7 @@
         },
         {
           "lint": "clippy::if_same_then_else",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
@@ -9182,7 +9142,7 @@
         },
         {
           "lint": "clippy::ignored_unit_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -9252,17 +9212,17 @@
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -9327,17 +9287,17 @@
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 4
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 2
         },
         {
@@ -9377,7 +9337,7 @@
         },
         {
           "lint": "clippy::large_enum_variant",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -9402,7 +9362,7 @@
         },
         {
           "lint": "clippy::manual_clamp",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -9432,17 +9392,17 @@
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 2
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
@@ -9517,7 +9477,7 @@
         },
         {
           "lint": "clippy::manual_let_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
@@ -9532,7 +9492,7 @@
         },
         {
           "lint": "clippy::manual_pattern_char_comparison",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -9917,52 +9877,52 @@
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 17
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 4
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -10117,12 +10077,12 @@
         },
         {
           "lint": "clippy::match_same_arms",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
           "lint": "clippy::match_same_arms",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
@@ -10162,7 +10122,7 @@
         },
         {
           "lint": "clippy::multiple_unsafe_ops_per_block",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -10217,7 +10177,7 @@
         },
         {
           "lint": "clippy::needless_borrow",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
@@ -10262,12 +10222,12 @@
         },
         {
           "lint": "clippy::needless_continue",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_continue",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
@@ -10562,22 +10522,22 @@
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 10
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_range_loop",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 2
         },
         {
@@ -10667,7 +10627,7 @@
         },
         {
           "lint": "clippy::no_effect_underscore_binding",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
           "count": 1
         },
         {
@@ -10692,7 +10652,7 @@
         },
         {
           "lint": "clippy::option_option",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -10732,7 +10692,7 @@
         },
         {
           "lint": "clippy::question_mark",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -10912,12 +10872,12 @@
         },
         {
           "lint": "clippy::redundant_clone",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
           "lint": "clippy::redundant_clone",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
@@ -10942,7 +10902,7 @@
         },
         {
           "lint": "clippy::redundant_closure",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -11182,27 +11142,27 @@
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 24
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 4
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
@@ -11332,7 +11292,7 @@
         },
         {
           "lint": "clippy::return_self_not_must_use",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 2
         },
         {
@@ -11382,7 +11342,7 @@
         },
         {
           "lint": "clippy::similar_names",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
@@ -11542,7 +11502,7 @@
         },
         {
           "lint": "clippy::single_match_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 9
         },
         {
@@ -11572,7 +11532,7 @@
         },
         {
           "lint": "clippy::struct_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -11657,7 +11617,7 @@
         },
         {
           "lint": "clippy::trim_split_whitespace",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 2
         },
         {
@@ -11687,7 +11647,7 @@
         },
         {
           "lint": "clippy::trivially_copy_pass_by_ref",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
@@ -11767,7 +11727,7 @@
         },
         {
           "lint": "clippy::undocumented_unsafe_blocks",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -11982,27 +11942,27 @@
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 31
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 4
         },
         {
@@ -12152,7 +12112,7 @@
         },
         {
           "lint": "clippy::unnecessary_wraps",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -12217,12 +12177,12 @@
         },
         {
           "lint": "clippy::unnested_or_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 11
         },
         {
           "lint": "clippy::unnested_or_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
@@ -12412,12 +12372,12 @@
         },
         {
           "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
           "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
@@ -12447,7 +12407,7 @@
         },
         {
           "lint": "clippy::used_underscore_binding",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -12732,112 +12692,112 @@
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/jobs_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/jobs_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/model_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/model_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 1
         },
         {
@@ -12857,47 +12817,47 @@
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 14
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
@@ -13187,12 +13147,12 @@
         },
         {
           "lint": "missing_debug_implementations",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
           "lint": "missing_debug_implementations",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 1
         },
         {
@@ -13267,67 +13227,67 @@
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 3
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/jobs_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/jobs_panel.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 3
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 10
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 8
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/splash_coverage.rs",
+          "path": "crates/pony-agent-core/src/tui/splash_coverage.rs",
           "count": 8
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/theme.rs",
+          "path": "crates/pony-agent-core/src/tui/theme.rs",
           "count": 25
         }
       ]
@@ -13519,27 +13479,27 @@
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 4
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -13724,27 +13684,27 @@
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 4
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -14174,92 +14134,92 @@
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 116
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 4
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 10
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 9
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 6
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 13
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 3
         },
         {
@@ -14364,7 +14324,7 @@
         },
         {
           "lint": "clippy::assigning_clones",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 15
         },
         {
@@ -14389,17 +14349,17 @@
         },
         {
           "lint": "clippy::bool_to_int_with_if",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::bool_to_int_with_if",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
           "lint": "clippy::borrow_as_ptr",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -14459,22 +14419,22 @@
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 4
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_lossless",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
@@ -14784,62 +14744,62 @@
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 19
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 3
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/status_dwell.rs",
+          "path": "crates/pony-agent-core/src/tui/status_dwell.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 2
         },
         {
@@ -14929,12 +14889,12 @@
         },
         {
           "lint": "clippy::cast_possible_wrap",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::cast_possible_wrap",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -14994,12 +14954,12 @@
         },
         {
           "lint": "clippy::cast_precision_loss",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_precision_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 2
         },
         {
@@ -15094,27 +15054,27 @@
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 40
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_sign_loss",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
@@ -15144,7 +15104,7 @@
         },
         {
           "lint": "clippy::clone_on_copy",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
@@ -15164,7 +15124,7 @@
         },
         {
           "lint": "clippy::clone_on_ref_ptr",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
@@ -15174,7 +15134,7 @@
         },
         {
           "lint": "clippy::collapsible_else_if",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -15219,7 +15179,7 @@
         },
         {
           "lint": "clippy::default_trait_access",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -15314,7 +15274,7 @@
         },
         {
           "lint": "clippy::doc_lazy_continuation",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -15354,7 +15314,7 @@
         },
         {
           "lint": "clippy::empty_line_after_doc_comments",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -15434,17 +15394,17 @@
         },
         {
           "lint": "clippy::explicit_iter_loop",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
           "lint": "clippy::explicit_iter_loop",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "clippy::field_reassign_with_default",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -15694,42 +15654,42 @@
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 14
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 2
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 4
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
           "count": 6
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 2
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 3
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 5
         },
         {
@@ -15764,12 +15724,12 @@
         },
         {
           "lint": "clippy::format_push_string",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::format_push_string",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
@@ -15794,12 +15754,12 @@
         },
         {
           "lint": "clippy::if_not_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
           "lint": "clippy::if_not_else",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
@@ -15819,7 +15779,7 @@
         },
         {
           "lint": "clippy::if_same_then_else",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
@@ -15849,7 +15809,7 @@
         },
         {
           "lint": "clippy::ignored_unit_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -15919,17 +15879,17 @@
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::inefficient_to_string",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -15994,17 +15954,17 @@
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 4
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 4
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 2
         },
         {
@@ -16044,7 +16004,7 @@
         },
         {
           "lint": "clippy::large_enum_variant",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -16074,7 +16034,7 @@
         },
         {
           "lint": "clippy::manual_clamp",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -16104,17 +16064,17 @@
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 2
         },
         {
           "lint": "clippy::manual_is_multiple_of",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
@@ -16189,7 +16149,7 @@
         },
         {
           "lint": "clippy::manual_let_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
@@ -16204,7 +16164,7 @@
         },
         {
           "lint": "clippy::manual_pattern_char_comparison",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -16599,52 +16559,52 @@
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 17
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 3
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 4
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 2
         },
         {
           "lint": "clippy::map_unwrap_or",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -16799,12 +16759,12 @@
         },
         {
           "lint": "clippy::match_same_arms",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
           "lint": "clippy::match_same_arms",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
@@ -16854,12 +16814,12 @@
         },
         {
           "lint": "clippy::multiple_unsafe_ops_per_block",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
           "lint": "clippy::multiple_unsafe_ops_per_block",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 3
         },
         {
@@ -16914,7 +16874,7 @@
         },
         {
           "lint": "clippy::needless_borrow",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
@@ -16959,12 +16919,12 @@
         },
         {
           "lint": "clippy::needless_continue",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_continue",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
@@ -17259,22 +17219,22 @@
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 10
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::needless_range_loop",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 2
         },
         {
@@ -17359,7 +17319,7 @@
         },
         {
           "lint": "clippy::no_effect_underscore_binding",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
           "count": 1
         },
         {
@@ -17384,7 +17344,7 @@
         },
         {
           "lint": "clippy::option_option",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
@@ -17399,7 +17359,7 @@
         },
         {
           "lint": "clippy::ptr_as_ptr",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 4
         },
         {
@@ -17419,7 +17379,7 @@
         },
         {
           "lint": "clippy::question_mark",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -17599,12 +17559,12 @@
         },
         {
           "lint": "clippy::redundant_clone",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
           "lint": "clippy::redundant_clone",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
@@ -17629,7 +17589,7 @@
         },
         {
           "lint": "clippy::redundant_closure",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -17869,27 +17829,27 @@
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 24
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 4
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
@@ -18014,7 +17974,7 @@
         },
         {
           "lint": "clippy::return_self_not_must_use",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 2
         },
         {
@@ -18069,7 +18029,7 @@
         },
         {
           "lint": "clippy::similar_names",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
@@ -18229,7 +18189,7 @@
         },
         {
           "lint": "clippy::single_match_else",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 9
         },
         {
@@ -18259,7 +18219,7 @@
         },
         {
           "lint": "clippy::struct_excessive_bools",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 2
         },
         {
@@ -18344,7 +18304,7 @@
         },
         {
           "lint": "clippy::trim_split_whitespace",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 2
         },
         {
@@ -18374,7 +18334,7 @@
         },
         {
           "lint": "clippy::trivially_copy_pass_by_ref",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
@@ -18459,17 +18419,17 @@
         },
         {
           "lint": "clippy::undocumented_unsafe_blocks",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 5
         },
         {
           "lint": "clippy::undocumented_unsafe_blocks",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 2
         },
         {
           "lint": "clippy::undocumented_unsafe_blocks",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 7
         },
         {
@@ -18684,27 +18644,27 @@
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 31
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 2
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 4
         },
         {
@@ -18844,7 +18804,7 @@
         },
         {
           "lint": "clippy::unnecessary_wraps",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -18914,12 +18874,12 @@
         },
         {
           "lint": "clippy::unnested_or_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 11
         },
         {
           "lint": "clippy::unnested_or_patterns",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 4
         },
         {
@@ -19109,12 +19069,12 @@
         },
         {
           "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 6
         },
         {
           "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
@@ -19144,7 +19104,7 @@
         },
         {
           "lint": "clippy::used_underscore_binding",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 1
         },
         {
@@ -19429,112 +19389,112 @@
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/errors.rs",
+          "path": "crates/pony-agent-core/src/tui/errors.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/input.rs",
+          "path": "crates/pony-agent-core/src/tui/input.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/jobs_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/jobs_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/markdown.rs",
+          "path": "crates/pony-agent-core/src/tui/markdown.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/model_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/model_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/projection.rs",
+          "path": "crates/pony-agent-core/src/tui/projection.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/queue.rs",
+          "path": "crates/pony-agent-core/src/tui/queue.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/selection.rs",
+          "path": "crates/pony-agent-core/src/tui/selection.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/splash.rs",
+          "path": "crates/pony-agent-core/src/tui/splash.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/terminal.rs",
+          "path": "crates/pony-agent-core/src/tui/terminal.rs",
           "count": 1
         },
         {
           "lint": "clippy::wildcard_imports",
-          "path": "crates/pony-agent-core/src/bin/tui/text.rs",
+          "path": "crates/pony-agent-core/src/tui/text.rs",
           "count": 1
         },
         {
@@ -19554,47 +19514,47 @@
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 14
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/ask_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/ask_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 1
         },
         {
           "lint": "elided_lifetimes_in_paths",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
@@ -19884,12 +19844,12 @@
         },
         {
           "lint": "missing_debug_implementations",
-          "path": "crates/pony-agent-core/src/bin/tui.rs",
+          "path": "crates/pony-agent-core/src/tui.rs",
           "count": 3
         },
         {
           "lint": "missing_debug_implementations",
-          "path": "crates/pony-agent-core/src/bin/tui/persistence_status.rs",
+          "path": "crates/pony-agent-core/src/tui/persistence_status.rs",
           "count": 1
         },
         {
@@ -19964,67 +19924,67 @@
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_command.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_command.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/goal_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/goal_panel.rs",
           "count": 3
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/jobs_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/jobs_panel.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/model_window_editor.rs",
+          "path": "crates/pony-agent-core/src/tui/model_window_editor.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/permission_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/permission_panel.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/queue_panel.rs",
+          "path": "crates/pony-agent-core/src/tui/queue_panel.rs",
           "count": 3
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/rewind.rs",
+          "path": "crates/pony-agent-core/src/tui/rewind.rs",
           "count": 10
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/shortcuts.rs",
+          "path": "crates/pony-agent-core/src/tui/shortcuts.rs",
           "count": 8
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/splash_coverage.rs",
+          "path": "crates/pony-agent-core/src/tui/splash_coverage.rs",
           "count": 8
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/status_bar.rs",
+          "path": "crates/pony-agent-core/src/tui/status_bar.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/table.rs",
+          "path": "crates/pony-agent-core/src/tui/table.rs",
           "count": 1
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/task_center.rs",
+          "path": "crates/pony-agent-core/src/tui/task_center.rs",
           "count": 1
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-agent-core/src/bin/tui/theme.rs",
+          "path": "crates/pony-agent-core/src/tui/theme.rs",
           "count": 25
         }
       ]

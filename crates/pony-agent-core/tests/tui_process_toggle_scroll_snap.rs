@@ -13,9 +13,7 @@
 //! 范式来源：`tests/tui_process_fold_acceptance.rs`（`#[path = "../src/bin/tui.rs"]`
 //! + `TestBackend` + `row_text`/`all_text`）。
 
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;

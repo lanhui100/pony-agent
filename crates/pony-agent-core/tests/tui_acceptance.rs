@@ -3,9 +3,7 @@
 // 这些 item 在真正的 bin 目标（`cargo check --bins`，同样受 `-D warnings` 约束）中已被完整校验，
 // 故此处仅对「bin-as-module 固有产物」加最小 allow；不使用 `#![allow(warnings)]`，
 // 也不放宽任何测试断言。
-#[path = "../src/bin/tui.rs"]
-#[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod tui;
+use pony_agent_core::tui;
 
 use tui::{MessageRole, TuiState};
 
