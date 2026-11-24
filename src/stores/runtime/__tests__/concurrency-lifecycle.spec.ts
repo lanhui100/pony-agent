@@ -124,21 +124,17 @@ const COVERED_ACTIONS = [
   "setDraftMessage", "setPendingAttachments", "clearPendingAttachments", "recallLastUserMessage",
   "flushPendingTraceTimeline", "clearPendingTraceTimeline", "shouldProcessTurnEvent", "commitTurnEventCursor",
   // Wave 2a（B277）：等价测试见 `equivalence-wave2a.spec.ts`（宿主命令边界 + 状态转移）。
-  "fetchHealth", "fetchAvailableTools", "fetchCapabilitySources", "fetchCapabilities", "inspectCapability", "inspectCapabilitySource", "overrideGovernanceBlock", "fetchUsageGovernanceSummary", "stopTurn", "enterStoppingPhase", "setSessionNotice", "addPendingAttachments", "removePendingAttachment", "getAttachmentAssets"
+  "fetchHealth", "fetchAvailableTools", "fetchCapabilitySources", "fetchCapabilities", "inspectCapability", "inspectCapabilitySource", "overrideGovernanceBlock", "fetchUsageGovernanceSummary", "stopTurn", "enterStoppingPhase", "setSessionNotice", "addPendingAttachments", "removePendingAttachment", "getAttachmentAssets",
+  // Wave 2b（B277）：等价测试见 `equivalence-wave2b.spec.ts`（D1 会话目录写 + D2 工作区注册表）。
+  "loadWorkspaces", "createNewWorkspace", "renameWorkspace", "deleteWorkspace",
+  "renameSession", "archiveSession", "unarchiveSession"
 ];
 
 /** 未覆盖 action + 结构性原因（不得省略：覆盖自评要与代码事实可机械对账）。 */
 const UNCOVERED_ACTIONS: Array<{ name: string; reason: string }> = [
-  { name: "loadWorkspaces", reason: "D2 工作区注册表需宿主 IPC（非 6 类场景）" },
-  { name: "createNewWorkspace", reason: "D2 注册表写操作（非 6 类场景）" },
-  { name: "renameWorkspace", reason: "D2 注册表写操作（非 6 类场景）" },
-  { name: "deleteWorkspace", reason: "D2 注册表写操作（非 6 类场景）" },
   { name: "activateWorkspace", reason: "D2 localStorage 激活态（非 6 类场景）" },
   { name: "normalizeActiveWorkspace", reason: "D2 激活态归一（需注册表投影）" },
   { name: "isSidebarOpInflight", reason: "D2/D1 侧边栏 inflight 守卫（需并发 UI 操作）" },
-  { name: "renameSession", reason: "D1 目录写操作（依赖会话目录）" },
-  { name: "archiveSession", reason: "D1 归档语义（进入全新会话的分支）" },
-  { name: "unarchiveSession", reason: "D1 归档语义" },
   { name: "deleteSession", reason: "D1 删除语义（会话目录 + 回落策略）" },
   { name: "createSession", reason: "D1 新建会话（UUID + 列表投影）" },
   { name: "enterFreshSession", reason: "D1 空白会话落点（UUID + 列表投影）" },
@@ -203,8 +199,8 @@ describe("场景 6 · 并发与生命周期", () => {
     const uncoveredNames = UNCOVERED_ACTIONS.map((item) => item.name);
     expect([...COVERED_ACTIONS, ...uncoveredNames].sort()).toEqual([...ACTION_NAMES].sort());
     expect(COVERED_ACTIONS.filter((name) => uncoveredNames.includes(name))).toEqual([]);
-    expect(COVERED_ACTIONS).toHaveLength(71);
-    expect(uncoveredNames).toHaveLength(26);
+    expect(COVERED_ACTIONS).toHaveLength(78);
+    expect(uncoveredNames).toHaveLength(19);
     // 每个 action 名字确实可调用（类型面契约，非行为门禁）。
     for (const name of ACTION_NAMES) {
       expect(typeof record[name], `action ${name} 应可调用`).toBe("function");
