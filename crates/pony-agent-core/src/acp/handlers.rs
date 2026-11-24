@@ -156,7 +156,12 @@ impl FsHandler for WorkspaceFsHandler {
         request: &ReadTextFileRequest,
     ) -> Result<ReadTextFileResponse, AcpHandlerError> {
         let canonical = self.classify(&request.path, PathPurpose::Read)?;
-        let metadata = std::fs::metadata(&canonical).map_err(|error| {
+        // B177 ADVISORY ⑦：**只打开一次**。旧写法是 canonicalize → metadata(路径) → 最后
+        // read_slice 内部再 File::open(路径) 一次，三段之间路径可被替换（符号链接/换文件），
+        // 于是「被检查的那个文件」和「被读取的那个文件」可能不是同一个：`is_file` 与大小上限
+        // 判定的是旧版本，真正读出来的是新版本。改成拿到 fd 后用 `file.metadata()` 判定，
+        // 全部断言与读取都作用于同一个 inode。
+        let file = std::fs::File::open(&canonical).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 AcpHandlerError::NotFound(format!(
                     "文件不存在：{}。",
@@ -164,10 +169,16 @@ impl FsHandler for WorkspaceFsHandler {
                 ))
             } else {
                 AcpHandlerError::Internal(format!(
-                    "读取文件元数据失败（{}）：{error}。",
+                    "读取文件失败（{}）：{error}。",
                     self.describe_target(&canonical)
                 ))
             }
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            AcpHandlerError::Internal(format!(
+                "读取文件元数据失败（{}）：{error}。",
+                self.describe_target(&canonical)
+            ))
         })?;
         if !metadata.is_file() {
             return Err(AcpHandlerError::Denied(format!(
@@ -183,7 +194,7 @@ impl FsHandler for WorkspaceFsHandler {
                 metadata.len()
             )));
         }
-        read_slice(&canonical, request.line, request.limit, ACP_FS_READ_MAX_BYTES).map_err(
+        read_slice(file, request.line, request.limit, ACP_FS_READ_MAX_BYTES).map_err(
             |error| match error {
                 SliceReadError::Io(error) => AcpHandlerError::Internal(format!(
                     "读取文件失败（{}）：{error}。",
@@ -259,13 +270,14 @@ enum SliceReadError {
 /// 语义：既不因为文件整体很大而拒绝合法的分片请求，也不会把整文件读进内存；
 /// 返回内容逐字节保留原行（含行尾换行），不做行尾归一。
 fn read_slice(
-    path: &Path,
+    file: std::fs::File,
     line: Option<u32>,
     limit: Option<u32>,
     max_bytes: u64,
 ) -> Result<String, SliceReadError> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path).map_err(SliceReadError::Io)?;
+    // 调用方已经打开并校验过同一个 fd（见 `read_text_file` 的 ADVISORY ⑦ 注释）：
+    // 这里绝不再按路径重开，否则校验与读取又会被中间替换切开。
     let mut reader = std::io::BufReader::new(file);
     let skip = line.unwrap_or(1).max(1) as usize - 1;
     let take = limit.map(|value| value as usize).unwrap_or(usize::MAX);
@@ -274,7 +286,16 @@ fn read_slice(
     let mut collected = 0usize;
     loop {
         let mut line_buffer = String::new();
-        let read = reader.read_line(&mut line_buffer).map_err(SliceReadError::Io)?;
+        // 非 UTF-8 字节：`read_line` 以 `ErrorKind::InvalidData` 报错（不是 IO 失败）。
+        // 归到 `NotUtf8` 才能给出「拒绝以文本读取」的准确文案；否则用户会看到误导性的
+        // 「读取文件失败（…）：stream did not contain valid UTF-8」（B177 ADVISORY ⑥）。
+        let read = match reader.read_line(&mut line_buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(SliceReadError::NotUtf8)
+            }
+            Err(error) => return Err(SliceReadError::Io(error)),
+        };
         if read == 0 {
             break;
         }
@@ -291,9 +312,6 @@ fn read_slice(
         if collected >= take {
             break;
         }
-    }
-    if index == 0 && !selected.is_empty() {
-        return Err(SliceReadError::NotUtf8);
     }
     Ok(selected)
 }
