@@ -51,8 +51,23 @@ pristine 快照」，**流式 1:1 臂从未加**（`continue_with_tool_result_st
    - `RetryMode::Always` 同样尊重窗口（否则「等到成功」变成「按 8s 封顶反复撞同一窗口」）。
 4. **`RETRY_AFTER_WINDOW_MAX_MS = 10min`**：单次等待封顶（**不是**预算上限）。
    上游可回任意秒数，不封顶等于把 wall-clock 交给上游。
-5. **循环体以「曲线 vs 窗口取较大者」为 sleep 依据**：`pending_window_ms` 只抬高、
-   从不压低既有曲线 ⇒ 无窗口时调度逐字等价（既有 `20s→40s`、`0.5/1/2/4/8` 契约零变更）。
+5. **循环体只消费 `decide` 的判决结果**（`pending_delay_ms`），不再自算延迟、也不再
+   自判预算——**判决点唯一**。无窗口时 `decide` 内部即 `compute_delay`，故既有
+   `20s→40s`（rate-limit）与 `0.5/1/2/4/8s`（普通）契约逐字不变。
+
+> **评审修正（同日）**：初版在循环体里另加了一处「窗口 > 剩余预算 ⇒ `return Err`」的
+> 早退，并把 sleep 写成自算的 `compute_delay(...).max(window)`。独立评审（Antigravity）
+> 判定为 blocker，复核成立，已改回上面的「单一判决点」：
+> - 早退位于 RL 预算切换与 `decide` **之前**，`RetryMode::Always` 根本到不了 `decide`
+>   的 Always 分支（「等到成功」被首跳枪毙）；
+> - 早退用切换前的短预算（默认 60s）判生死，抢跑了 rate-limit 臂的 90s 预算；
+> - 自算 sleep 未 `.min(remaining)`，`remaining=10s / window=5s / curve=20s` 时会睡 20s
+>   超过剩余预算，且丢弃了 `decide` 已算好的 `delay_ms`。
+>
+> 同时修正 `decide` 的 `attempt` 口径：该参数是 **1-based 的下一次尝试序号**
+> （`compute_delay(0)` 恒为 ZERO），初版传 0-based 旧值，把冻结的「首跳 500ms」
+> 打成 0ms——由既有用例 `http_525_enters_retry_loop_and_succeeds_on_second_attempt`
+> 与 `single_hop_report_success_after_timeout_retry` 抓红，已改为 `attempt + 1`。
 
 ## Alternatives considered
 
@@ -87,6 +102,16 @@ pristine 快照」，**流式 1:1 臂从未加**（`continue_with_tool_result_st
   断言 `retry_after=8` 时 slept ≥ 8s。
 - 窗口装不进预算 ⇒ 首跳收口：`followup_aborts_fast_when_retry_after_exceeds_budget`
   断言 slept = 0、attempts = 1。
+- `RetryMode::Always` 不得被预算早退枪毙：`followup_always_mode_waits_through_window_larger_than_budget`
+  断言预算 60s + 窗口 90s 时仍 sleep 90s 后成功（评审 blocker 的回归锁）。
+- 三个窗口用例均已做 **fail-first 验证**：临时禁用窗口消费后分别红在
+  `500 vs 8000`、`60000 vs 0`、`20000 vs 90000`（不是「删掉逻辑仍然绿」的假绿）。
+- **本条的适用范围（诚实收窄，评审 finding 3）**：真实 HTTP **429** 在 4 个 HTTP 出口
+  会先经 `enter_cooldown` 打上 `provider_cooldown_active` 标记，重试循环对带该标记的
+  错误**全 scope 立即 Abort**（冷却期 0 次 HTTP，PA-171 C3 冻结契约）——因此 429 走的是
+  「冷却登记 + 短路」，**不会**进入本条新增的窗口等待。本条真正生效的场景是
+  **503/5xx + `Retry-After`**，以及任何未触发冷却的可重试失败。429 的「短窗口是否值得
+  在预算内等待」属于冷却短路与窗口等待的边界设计，不在本条范围，另立待办。
 - **未在本条收口（登记后续）**：落盘转录（`provider_native_tool_result_message`）仍存
   未修剪原始输出，跨轮回放才修剪——「已膨胀会话」缺少一次性自愈入口；单请求体积
   也仍无硬上限（只有 token 预算）。这两项需要独立的请求体积闸门设计。

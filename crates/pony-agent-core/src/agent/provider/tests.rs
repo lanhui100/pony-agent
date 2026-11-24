@@ -2204,31 +2204,95 @@
     fn followup_backoff_honors_upstream_retry_after_window() {
         let sleeper = crate::agent::retry::FakeSleeper::new();
         let attempts = std::cell::Cell::new(0);
+        // fail-first 口径（review-fix）：第 1 跳返回带窗口的 503，第 2 跳**成功**。
+        // 这样 slept 只可能是「窗口」或「曲线」二选一——若无窗口逻辑，首跳退避是
+        // `compute_delay(1)` = 500ms 且第 2 跳即成功 ⇒ slept == 500，断言必红。
+        // （旧写法恒返回 Err，累计退避 47.5s ≥ 8s，删掉窗口逻辑仍然绿 ⇒ 假绿。）
         let result: Result<(), String> = retry_provider_scoped_with_sleeper(
             "followup_sync",
             ProviderRetryScope::Followup,
             || {
-                attempts.set(attempts.get() + 1);
-                Err(
-                    "provider 返回错误状态：503 Service Unavailable；耗时=120ms；\
-                     retry_after=8；响应正文：temporarily unavailable"
-                        .to_string(),
-                )
+                let next = attempts.get() + 1;
+                attempts.set(next);
+                if next == 1 {
+                    Err(
+                        "provider 返回错误状态：503 Service Unavailable；耗时=120ms；\
+                         retry_after=8；响应正文：temporarily unavailable"
+                            .to_string(),
+                    )
+                } else {
+                    Ok(())
+                }
             },
             &sleeper,
             None,
         );
 
-        assert!(result.is_err());
+        assert!(result.is_ok(), "第 2 跳成功，整条链路必须 Ok");
         let slept = sleeper
             .total_slept
             .load(std::sync::atomic::Ordering::Relaxed);
-        // 首跳 0s（curve_delay(0)=0，但窗口把第一次退避抬到 8s）。
-        assert!(
-            slept >= 8_000,
-            "上游窗口必须进入实际 sleep，实际 slept={slept}ms"
+        assert_eq!(
+            slept, 8_000,
+            "退避必须逐字等于上游窗口 8s（无窗口逻辑时为曲线 500ms）"
         );
-        assert!(attempts.get() >= 2, "窗口可等待时必须真的重试一次");
+        assert_eq!(attempts.get(), 2, "窗口可等待时必须恰好重试一次");
+    }
+
+    /// B1795488338167（review-fix）：`RetryMode::Always` 遇「窗口 > 预算」时**不得** Abort。
+    ///
+    /// 缺陷现场（评审 blocker）：循环体曾在 `decide` 之前自判「窗口 > 剩余预算 ⇒ Abort」，
+    /// 而该早退不看 `mode`，于是 `Always`（语义 = 等到成功/取消）在首跳就被枪毙，
+    /// `decide` 的 Always 分支永远到不了。本用例用预算 60s + 窗口 90s 直接压住该路径：
+    /// 窗口装不进预算，但 Always 仍须 Retry（sleep 90s 后第 2 跳成功）。
+    #[test]
+    fn followup_always_mode_waits_through_window_larger_than_budget() {
+        use crate::agent::retry::{BackoffConfig, JitterKind, RetryMode};
+
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let config = BackoffConfig {
+            initial_delay_ms: 20_000,
+            multiplier: 2.0,
+            max_delay_ms: 40_000,
+            max_retries: 2,
+            total_budget_ms: 60_000,
+            jitter_kind: JitterKind::None,
+        };
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper_and_config(
+            "followup_sync",
+            ProviderRetryScope::Followup,
+            config,
+            RetryMode::Always,
+            || {
+                let next = attempts.get() + 1;
+                attempts.set(next);
+                if next == 1 {
+                    Err(
+                        "provider 返回错误状态：503 Service Unavailable；耗时=80ms；\
+                         retry_after=90；响应正文：maintenance"
+                            .to_string(),
+                    )
+                } else {
+                    Ok(())
+                }
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Always 必须等到窗口到期后成功，实际={result:?}"
+        );
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            90_000,
+            "Always 档位的退避必须等于上游窗口 90s（预算 60s 不得把它截断成 Abort）"
+        );
+        assert_eq!(attempts.get(), 2, "Always 必须真的重试一次");
     }
 
     /// B1795488338167：窗口超出本次预算 ⇒ **快速失败**（0 次 sleep、1 次 attempt），

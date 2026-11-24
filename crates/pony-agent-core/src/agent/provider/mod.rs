@@ -5796,9 +5796,15 @@ where
     let mut slept_ms = 0_u64;
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let mut last_failure: Option<String> = None;
-    // B1795488338167：上一轮从错误文本解析出的上游恢复窗口（毫秒）。`Some` ⇒ 下一次
-    // 退避取「本地曲线 vs 上游窗口」的较大者；`None` ⇒ 逐字沿用本地曲线。
-    let mut pending_window_ms: Option<u64> = None;
+    // B1795488338167（review-fix）：上一轮 `decide` 给出的退避毫秒数。`Some` ⇒ 下一次
+    // sleep 逐字使用它；`None` ⇒ 沿用本地曲线（首跳/无判决路径）。
+    //
+    // 为什么是「判决结果」而不是「窗口」：循环此前自算 `compute_delay(...).max(window)`，
+    // 既与 `decide` 的 `Abort` / `min(remaining)` 判决脱节（可睡过剩余预算），又在
+    // `Always` 档位下绕过了「无视预算」的语义（早退在 `decide` 之前就 Abort）。
+    // 改为只消费 `decide` 的输出后判决点唯一；无窗口时 `decide` 内部即 `compute_delay`，
+    // 数值逐字不变。
+    let mut pending_delay_ms: Option<u64> = None;
     // 2026-11-14：一次「即将重试」的实时通知（宿主装了观察者才有消费者，否则 no-op）。
     let retry_notify = crate::agent::retry::RetryNotifier::new(label, scope_label);
 
@@ -5811,17 +5817,13 @@ where
                 let outcome = report(&budget, attempts_total, slept_ms, rl_active);
                 return (Err(terminal), outcome);
             }
-            // B1795488338167：上游声明的恢复窗口**抬高**本轮退避（曲线仍是下界，无窗口时
-            // 逐字等于既有调度）。此前循环只按 `compute_delay` 自算，`decide` 里消费的窗口
-            // 根本没有出口——上游说 90s 后恢复，仍按 0.5/1/2/4s 短退避硬撞。
-            let curve_delay = compute_delay(attempt, &active_config, 0.5);
-            let delay = match pending_window_ms.take() {
-                Some(window_ms) => Duration::from_millis(
-                    u64::try_from(curve_delay.as_millis())
-                        .unwrap_or(u64::MAX)
-                        .max(window_ms),
-                ),
-                None => curve_delay,
+            // B1795488338167（review-fix）：退避延迟**只**来自上一轮 `decide` 的判决
+            // （`pending_delay_ms`）。`decide` 已统一处理「窗口 > 预算 ⇒ Abort」、
+            // 「窗口 ≤ 预算 ⇒ max(曲线, 窗口).min(remaining)」与「Always 无视预算」，
+            // 循环不再自算，避免出现第二个判决点。
+            let delay = match pending_delay_ms.take() {
+                Some(delay_ms) => Duration::from_millis(delay_ms),
+                None => compute_delay(attempt, &active_config, 0.5),
             };
             if let Err(cancelled_err) = sleeper.sleep(delay, &cancelled) {
                 let _ = cancelled_err;
@@ -5890,24 +5892,12 @@ where
                 } else {
                     None
                 };
-                pending_window_ms = retry_after
-                    .as_ref()
-                    .and_then(crate::agent::retry::RetryAfter::window_ms)
-                    .filter(|window| *window > 0)
-                    .map(|window| window.min(crate::agent::retry::RETRY_AFTER_WINDOW_MAX_MS));
-                if let Some(window) = pending_window_ms {
-                    // 窗口超剩余预算 ⇒ 等不到，显式快速失败（由 provider 冷却/换手接管），
-                    // 不再按短退避把同一次失败重复 4 遍。
-                    let remaining = budget.total_budget_ms.saturating_sub(budget.elapsed_ms);
-                    if window > remaining {
-                        provider_log(format!(
-                            "{label}:attempt={attempts_total} upstream_retry_window={window}ms \
-                             exceeds_remaining_budget={remaining}ms scope={scope:?} abort"
-                        ));
-                        let outcome = report(&budget, attempts_total, slept_ms, rl_active);
-                        return (Err(last_error), outcome);
-                    }
-                }
+                // B1795488338167（review-fix）：这里**不再**自判「窗口 > 预算 ⇒ Abort」。
+                // 该判决已由下面两处 `decide`（RL 切换臂 / 常规臂）统一给出，且它们各自
+                // 使用**自己的**配置预算（RL 臂用 90s，而非切换前的 60s）与 `mode`
+                // （`Always` 无视预算）。此前在此处早退会三重破坏语义：① `Always` 档位
+                // 到不了 `decide` 的 Always 分支；② 用切换前预算判生死，抢跑 RL 预算；
+                // ③ 与 `decide` 形成两个判决点。
 
                 if use_rate_limit && !rl_active {
                     // 切换 RL 配置（一次性）：重建 budget 并结转 elapsed_ms（时间
@@ -5934,7 +5924,8 @@ where
                          decision={decision:?} scope={scope:?} switch=rate_limit"
                     ));
                     match decision {
-                        RetryDecision::Retry { .. } => {
+                        RetryDecision::Retry { delay_ms } => {
+                            pending_delay_ms = Some(delay_ms);
                             retry_notify.notify(attempts_total, &active_config, &err, attempt);
                             continue;
                         }
@@ -5946,10 +5937,14 @@ where
                 }
 
                 let active_policy = ProviderRetryPolicy::new(active_config).with_mode(mode);
+                // `decide` 的 `attempt` 是 **1-based 的下一次尝试序号**（`compute_delay(0)`
+                // 恒为 ZERO）。循环内 `attempt` 是 0-based 的「已用序号」，故此处 +1；
+                // 这样判决出的 `delay_ms` 与既有「首跳 500ms、随后 1/2/4/8s」曲线逐字一致
+                // （RL 臂显式把 `attempt` 置 1 后调用，同一口径）。
                 let decision = active_policy.decide(
                     &failure,
                     &budget,
-                    attempt,
+                    attempt.saturating_add(1),
                     retry_after.as_ref(),
                     StreamState::NoDelta,
                 );
@@ -5963,7 +5958,8 @@ where
                     scope
                 ));
                 match decision {
-                    RetryDecision::Retry { .. } => {
+                    RetryDecision::Retry { delay_ms } => {
+                        pending_delay_ms = Some(delay_ms);
                         retry_notify.notify(
                             attempts_total,
                             &active_config,
