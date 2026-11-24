@@ -82,6 +82,7 @@ use std::time::Instant;
 pub mod turn_runner;
 
 mod compaction_ops;
+mod overflow_rescue;
 mod title_ops;
 mod ingress_mediation;
 mod session_ops;

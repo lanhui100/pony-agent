@@ -7,8 +7,12 @@
 //! 2. 保留比例与尾部 turn 边界切分（`retain_ratio` 派生 token 预算；切点必为 user 消息）
 //! 3. 验证 Tool Call 与 Tool Result 不会被跨边界拆分截断（tool pairing 完整性）
 
-use pony_agent_core::agent::compression::{split_history_by_tokens, CompressionConfig};
+use pony_agent_core::agent::compression::{
+    compact_native_transcript, split_history_by_tokens, split_history_with_transcript,
+    trim_native_transcript_to_token_budget, CompressionConfig, ContextPressure,
+};
 use pony_agent_core::agent::session::TurnHistoryMessage;
+use serde_json::json;
 
 fn make_msg(role: &str, content: &str) -> TurnHistoryMessage {
     TurnHistoryMessage {
@@ -132,4 +136,131 @@ fn test_ac03_tool_pairing_integrity_across_compression_boundary() {
         !(compress_has_call_1 && keep_has_call_1),
         "Tool call and Tool result for call_1 must NOT be split across the compression boundary!"
     );
+}
+
+#[test]
+fn test_ac04_native_token_estimate_counts_reasoning_and_tool_calls() {
+    let base_msg = json!({
+        "role": "assistant",
+        "content": "ok"
+    });
+    let heavy_msg = json!({
+        "role": "assistant",
+        "content": "ok",
+        "reasoning_content": "r".repeat(4_000),
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "Edit", "arguments": "a".repeat(4_000) }
+        }]
+    });
+    let base_tokens = ContextPressure::from_layers(&[], &[base_msg]).transcript_tokens;
+    let heavy_tokens = ContextPressure::from_layers(&[], &[heavy_msg]).transcript_tokens;
+    assert!(
+        heavy_tokens >= base_tokens + 2_000,
+        "native token estimate must include reasoning_content and tool_calls: base={base_tokens}, heavy={heavy_tokens}"
+    );
+}
+
+#[test]
+fn test_ac05_split_with_transcript_compresses_heavy_tool_session() {
+    // 复现真实缺陷现场：文本 history 仅 ~200 tokens，但原生转录带有 ~16k tokens 的工具结果与思考链；
+    // 当 retain_tokens=4000 时，旧的 split_history_by_tokens 只看 history 会错误地返回空压缩段。
+    let mut history = Vec::new();
+    let mut transcript = Vec::new();
+    for i in 0..4 {
+        let user_prompt = format!("user turn {i}");
+        history.push(make_msg("user", &user_prompt));
+        history.push(make_msg("assistant", &format!("done {i}")));
+
+        transcript.push(json!({ "role": "user", "content": user_prompt }));
+        transcript.push(json!({
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "t".repeat(4_000),
+            "tool_calls": [{
+                "id": format!("call_{i}"),
+                "type": "function",
+                "function": { "name": "Run", "arguments": "{}" }
+            }]
+        }));
+        transcript.push(json!({
+            "role": "tool",
+            "tool_call_id": format!("call_{i}"),
+            "content": "o".repeat(12_000)
+        }));
+        transcript.push(json!({ "role": "assistant", "content": format!("done {i}") }));
+    }
+
+    let (old_compress, _) = split_history_by_tokens(&history, 4_000);
+    assert!(
+        old_compress.is_empty(),
+        "precondition: pure history is smaller than retain_tokens"
+    );
+
+    let (to_compress, to_keep) = split_history_with_transcript(&history, &transcript, 4_000);
+    assert!(
+        !to_compress.is_empty(),
+        "split_history_with_transcript must compress earlier turns when native transcript exceeds retain budget"
+    );
+    assert_eq!(to_keep.len(), 2, "must keep only the latest 1 user turn");
+    let kept_turns = to_keep.iter().filter(|m| m.role == "user").count();
+    let trimmed_transcript = compact_native_transcript(&transcript, kept_turns);
+    assert_eq!(trimmed_transcript.len(), 4);
+}
+
+#[test]
+fn test_ac06_trim_native_transcript_keeps_closed_roundtrips() {
+    let mut transcript = vec![json!({ "role": "user", "content": "single giant turn" })];
+    for i in 0..10 {
+        transcript.push(json!({
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "x".repeat(800),
+            "tool_calls": [{
+                "id": format!("call_{i}"),
+                "type": "function",
+                "function": { "name": "Run", "arguments": "{}" }
+            }]
+        }));
+        transcript.push(json!({
+            "role": "tool",
+            "tool_call_id": format!("call_{i}"),
+            "content": "y".repeat(2_000)
+        }));
+    }
+
+    let before = ContextPressure::from_layers(&[], &transcript).transcript_tokens;
+    let trimmed = trim_native_transcript_to_token_budget(&transcript, 2_500);
+    let after = ContextPressure::from_layers(&[], &trimmed).transcript_tokens;
+
+    assert!(after <= 2_500, "trimmed tokens={after} must respect budget");
+    assert!(after < before, "trimmed tokens must shrink");
+    assert_eq!(
+        trimmed.first().and_then(|v| v.get("role")).and_then(|v| v.as_str()),
+        Some("user"),
+        "user anchor must remain first"
+    );
+    // 验证最后保留的工具配对闭合（无孤儿 tool_call / tool）
+    let mut pending_call_ids: Vec<String> = Vec::new();
+    for msg in &trimmed {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role == "assistant" {
+            if let Some(calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                for call in calls {
+                    if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+                        pending_call_ids.push(id.to_string());
+                    }
+                }
+            }
+        } else if role == "tool" {
+            let call_id = msg.get("tool_call_id").and_then(|v| v.as_str()).unwrap();
+            let pos = pending_call_ids
+                .iter()
+                .position(|id| id == call_id)
+                .expect("every tool message must match a kept assistant tool_call");
+            pending_call_ids.remove(pos);
+        }
+    }
+    assert!(pending_call_ids.is_empty(), "all kept tool_calls must be closed: {pending_call_ids:?}");
 }
