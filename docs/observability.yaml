@@ -94,6 +94,12 @@
 #     （stderr 结构化行 + 有界环形缓冲），不上报。
 # (3) metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 /metrics、pull 模型不成立）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
+# ACP P2 只读清单面（B163，`acp_list_agents` Tauri 命令）归属说明：
+# (1) 无新增出网/跨进程出口：命令只读本地清单文件（`<HOME>/.pony/acp-agents.json`，缺省回内置默认），
+#     不起子进程、不发网络请求；解析/校验失败按 fail-closed 显式返回错误文案。
+# (2) 无新增 tracing 落点：不新增 span / metric；issues 落点仍 `agent/ponysentry/client.rs`。
+# (3) metrics / logs 维持结构性 N-A（无 /metrics、无常驻监听地址）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
 # 上游重试真值面（ADR 2026-11-14-upstream-retry-count-and-status-surface，backlog:B154/B155）与
 # 其桌面端接线（ADR 2026-11-14-desktop-retry-progress-surface）归属说明：
 # (1) 库层：`agent/retry.rs` 新增线程局部观察者（`RetryNotice` / `install_retry_observer` /
