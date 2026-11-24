@@ -645,6 +645,108 @@ impl<'a> ProviderStreamGuard<'a> {
 const COOLDOWN_DEFAULT_MS: u64 = 60_000;
 /// 冷却窗口硬上界（C3-P5）：覆盖 Kimi 5 小时窗口，同时防止异常头把 provider 永久冻结。
 const COOLDOWN_MAX_MS: u64 = 6 * 60 * 60 * 1_000;
+
+// ── B1795506800002：请求体字节闸门（传输物理防线，与 token 预算正交） ──────────────────
+
+/// 纯文本请求体硬上限（512 KiB）。
+///
+/// 存在理由：上下文装配只有 **token** 预算（`compression::estimate_text_tokens` = chars/4），
+/// 而边缘网关（EdgeOne / Cloudflare / Nginx）按**字节**直接 RST/413。两者口径不重叠：
+/// UTF-8 中文 3 字节/字、JSON 转义（`\"`/`\n`/`\uXXXX`）、大型 `tools` schema、base64 图像
+/// 与单轮多 hop 的 `accumulated_messages` 膨胀都不进 token 估算。缺陷现场（B1795488338107）
+/// 就是 300KB+ 请求在发出后被边缘 10~13ms RST，重试还会放大成防刷封禁。
+const MAX_REQUEST_BODY_BYTES: u64 = 512 * 1024;
+
+/// 含图请求体硬上限（10 MiB）：多模态 base64 天然是 MiB 量级。
+const MAX_MULTIMODAL_REQUEST_BODY_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 纯文本请求体软告警阈值（256 KiB）：只落结构化 warn，不拦截。
+const REQUEST_BODY_WARN_BYTES: u64 = 256 * 1024;
+
+/// 请求体是否含多模态图像块（决定用哪一档字节上限）。
+///
+/// 判据只用结构特征（`type` 取值 / `data:image/` 前缀），不做内容嗅探：本函数在 HTTP
+/// 出口热路径上，必须 O(n) 且无分配放大。
+fn request_body_has_images(body: &Value) -> bool {
+    fn has_image_block(value: &Value) -> bool {
+        match value {
+            Value::Array(items) => items.iter().any(has_image_block),
+            Value::Object(map) => {
+                if let Some(kind) = map.get("type").and_then(Value::as_str) {
+                    if matches!(kind, "image" | "image_url" | "input_image") {
+                        return true;
+                    }
+                }
+                if let Some(url) = map.get("url").and_then(Value::as_str) {
+                    if url.starts_with("data:image/") {
+                        return true;
+                    }
+                }
+                map.values().any(has_image_block)
+            }
+            Value::String(text) => text.starts_with("data:image/"),
+            _ => false,
+        }
+    }
+    has_image_block(body)
+}
+
+/// B1795506800002：序列化请求体并做**字节闸门**（0 HTTP Fail-Closed）。
+///
+/// 返回 `Ok(bytes)` = 放行（可直接 `.body(bytes)` 发出，与 `.json(body)` 逐字节等价）；
+/// 返回 `Err(message)` = 超硬上限，**一个网络包都不发**。
+///
+/// 超限动作的取舍（评审结论，已落 ADR）：
+/// - 错误文本含 `payload too large` ⇒ 经既有 `UPSTREAM_CONTEXT_OVERFLOW_HINTS` 自动归为
+///   `ErrorCode::UpstreamContextOverflow` → `FailureKind::RequiresRequestMutation`
+///   （`is_retryable() == false`）⇒ **0 次重试**，不会把同一超大包重放成边缘防刷风暴；
+/// - **不在 HTTP 出口静默裁剪**：HTTP 层已脱离会话语义，硬剪会破坏 prompt cache 前缀、
+///   破坏 `tool_call`/`tool_result` 闭合（Anthropic 400）或误删 `reasoning_content`
+///   （DeepSeek 400）。要自动救回应由上层捕获 `UpstreamContextOverflow` 后跑一轮受控压缩。
+fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec(body).map_err(|error| {
+        format!(
+            "serialize provider request body failed; payload too large? error={error}"
+        )
+    })?;
+    // `u64::try_from(usize)` 在 64 位平台恒成功；不用 `as` 以守住 clippy 的
+    // `as_conversions` 棘轮（该表禁止新增裸转换）。
+    let body_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let has_images = request_body_has_images(body);
+    let limit = if has_images {
+        MAX_MULTIMODAL_REQUEST_BODY_BYTES
+    } else {
+        MAX_REQUEST_BODY_BYTES
+    };
+    if body_bytes > limit {
+        crate::agent::otel::log::log_json_with_fields(
+            "warn",
+            "provider_request_body_too_large",
+            None,
+            &[
+                ("request_body_bytes", serde_json::json!(body_bytes)),
+                ("limit_bytes", serde_json::json!(limit)),
+                ("has_images", serde_json::json!(has_images)),
+            ],
+        );
+        return Err(format!(
+            "provider request body too large; payload too large: request_body_bytes={body_bytes} \
+             limit_bytes={limit} has_images={has_images}; 本次未发起请求"
+        ));
+    }
+    if body_bytes > REQUEST_BODY_WARN_BYTES && !has_images {
+        crate::agent::otel::log::log_json_with_fields(
+            "warn",
+            "provider_request_body_large",
+            None,
+            &[
+                ("request_body_bytes", serde_json::json!(body_bytes)),
+                ("warn_bytes", serde_json::json!(REQUEST_BODY_WARN_BYTES)),
+            ],
+        );
+    }
+    Ok(bytes)
+}
 /// 注册表条目容量硬上限（C3-P4）：过期即淘汰，超限按最早到期淘汰。
 const COOLDOWN_REGISTRY_CAPACITY: usize = 64;
 
@@ -1065,10 +1167,15 @@ impl ProviderManager {
             ],
         );
         // L3-B ADVISORY：短路错误打标 ⇒ 重试编排全 scope 立即 Abort（不 sleep、不再 HTTP）。
-        Err(crate::agent::retry::append_cooldown_active_marker(&format!(
-            "provider {} 处于限流冷却中（{class}），预计 {secs}s 后恢复；本次未发起请求；retry_after={secs}",
-            self.config.provider_name
-        )))
+        // B1795506800001：来源标记为 `short_circuit`（本轮 0 次 HTTP），与 HTTP 出口的
+        // `entered`（真的收到过响应并登记冷却）区分——短窗口 429 的「预算内等待」只对后者开放。
+        Err(crate::agent::retry::append_cooldown_marker(
+            &format!(
+                "provider {} 处于限流冷却中（{class}），预计 {secs}s 后恢复；本次未发起请求；retry_after={secs}",
+                self.config.provider_name
+            ),
+            crate::agent::retry::CooldownMarkerSource::ShortCircuit,
+        ))
     }
 
     /// PA-171 C3-P1/C3-P6：命中限流/配额才登记冷却（其余类别保留既有重试语义）。
@@ -1496,18 +1603,42 @@ impl ProviderManager {
         }
 
         let on_delta_cell = std::cell::RefCell::new(on_delta);
-        let result = retry_provider_timeout_with_policy("decision_stream", &self.policy, || {
-            let mut delta_sink = on_delta_cell.borrow_mut();
-            match self.config.protocol {
-                ProviderProtocol::OpenAiCompletions => self
-                    .send_openai_tool_decision_stream_request(guard, request, tools, &mut *delta_sink),
-                ProviderProtocol::OpenAiResponses => self
-                    .send_responses_tool_decision_stream_request(guard, request, tools, &mut *delta_sink),
-                ProviderProtocol::AnthropicMessages => {
-                    self.send_anthropic_tool_decision_request(request, tools)
+        // B1795488338107 评审 B1：与 followup 流式臂同构——已发出可见文本增量后禁止自动
+        // 重试（否则 attempt 1 的半截正文与 attempt 2 的输出会重复上屏，且污染首字延迟）。
+        let emitted_visible = std::cell::Cell::new(false);
+        let result = retry_provider_decision_stream_with_policy(
+            "decision_stream",
+            &self.policy,
+            || {
+                let mut delta_sink = on_delta_cell.borrow_mut();
+                let mut record_visible = |chunk: ProviderStreamChunk| {
+                    if matches!(chunk, ProviderStreamChunk::Text(_)) {
+                        emitted_visible.set(true);
+                    }
+                    delta_sink(chunk);
+                };
+                match self.config.protocol {
+                    ProviderProtocol::OpenAiCompletions => self
+                        .send_openai_tool_decision_stream_request(
+                            guard,
+                            request,
+                            tools,
+                            &mut record_visible,
+                        ),
+                    ProviderProtocol::OpenAiResponses => self
+                        .send_responses_tool_decision_stream_request(
+                            guard,
+                            request,
+                            tools,
+                            &mut record_visible,
+                        ),
+                    ProviderProtocol::AnthropicMessages => {
+                        self.send_anthropic_tool_decision_request(request, tools)
+                    }
                 }
-            }
-        });
+            },
+            &|| emitted_visible.get(),
+        );
 
         match result {
             Ok(decision) => {
@@ -1764,12 +1895,28 @@ impl ProviderManager {
                 // （上游按重复内容计费，边缘侧还会因请求体过大/高频重发直接 RST）。
                 // 故每次尝试前重置为进入本入口时的 pristine 快照：成功 = base + 恰好 1 次追加。
                 let base_messages = accumulated_messages.clone();
+                // B1795488338107 评审 B1（blocker）：`StreamState` 的「发出可见增量后禁止
+                // 自动重试」在生产流式循环里**从未被驱动**（`decide` 恒传 `NoDelta`），
+                // 而此处的 `no_more_retries_hint` 只查用户取消（`guard.cancel_requested()`，
+                // 生产路径 `without_cancel()` 恒 false）。于是 SSE 发出可见文本后遇可重试
+                // 传输错误（`unexpected eof` / `connection closed before message completed`）
+                // 仍会重试，并把 attempt 1 的半截增量与 attempt 2 的输出**重复上屏**。
+                // 这里把该信号真正接线：跨 attempt 累计（一旦发出即置位，不随重置清零）。
+                let emitted_visible = std::cell::Cell::new(false);
                 let stream_result = retry_provider_followup_stream_timeout_with_policy(
                     "followup_stream",
                     &self.policy,
                     || {
                         accumulated_messages.clone_from(&base_messages);
                         let mut delta_sink = on_delta_cell.borrow_mut();
+                        // 只把 `Text` 计入「可见增量」：`Reasoning` 与 `StreamStart` 按既有
+                        // `StreamState::may_auto_retry` 口径仍允许重试（不改变既有语义）。
+                        let mut record_visible = |chunk: ProviderStreamChunk| {
+                            if matches!(chunk, ProviderStreamChunk::Text(_)) {
+                                emitted_visible.set(true);
+                            }
+                            delta_sink(chunk);
+                        };
                         match self.config.protocol {
                             ProviderProtocol::OpenAiResponses => self
                                 .send_responses_tool_followup_stream_request(
@@ -1780,7 +1927,7 @@ impl ProviderManager {
                                     assistant_message,
                                     tool_call,
                                     tool_result,
-                                    &mut *delta_sink,
+                                    &mut record_visible,
                                 ),
                             _ => self.send_openai_tool_followup_stream_request(
                                 guard,
@@ -1790,11 +1937,11 @@ impl ProviderManager {
                                 assistant_message,
                                 tool_call,
                                 tool_result,
-                                &mut *delta_sink,
+                                &mut record_visible,
                             ),
                         }
                     },
-                    &|| guard.cancel_requested(),
+                    &|| guard.cancel_requested() || emitted_visible.get(),
                 );
                 // B254 C1/C4：流式是唯一通道。策略重试已耗尽时**原样上抛**真实错误，
                 // 不再回退同步 buffered 请求，也不再合成「本地兜底摘要」冒充模型输出。
@@ -2864,7 +3011,16 @@ impl ProviderManager {
         );
         // Wave-4 C3：outbound 级联注入 traceparent（无活跃 turn 时原样透传，零改动）。
         let request = crate::agent::otel::with_current_traceparent(request);
-        let response = block_on(async move { request.json(body).send().await }).map_err(|error| {
+        // B1795506800002：请求体字节闸门（0 HTTP Fail-Closed）。序列化一次并复用，
+        // 与 `.json(body)` 逐字节等价；超限则在此返回，不发任何网络包。
+        let request_body_bytes = serialize_request_body_with_size_gate(body)?;
+        let response = block_on(async move {
+            request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(request_body_bytes)
+                .send()
+                .await
+        }).map_err(|error| {
             format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
         })?;
 
@@ -2927,7 +3083,16 @@ impl ProviderManager {
         }
         // Wave-4 C3：outbound 级联注入 traceparent。
         let request = crate::agent::otel::with_current_traceparent(request);
-        let response = block_on(async move { request.json(body).send().await }).map_err(|error| {
+        // B1795506800002：请求体字节闸门（0 HTTP Fail-Closed）。序列化一次并复用，
+        // 与 `.json(body)` 逐字节等价；超限则在此返回，不发任何网络包。
+        let request_body_bytes = serialize_request_body_with_size_gate(body)?;
+        let response = block_on(async move {
+            request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(request_body_bytes)
+                .send()
+                .await
+        }).map_err(|error| {
             format_request_error("调用 provider 流式接口失败", &error, started_at.elapsed())
         })?;
 
@@ -3305,7 +3470,16 @@ impl ProviderManager {
         );
         // Wave-4 C3：outbound 级联注入 traceparent（无活跃 turn 时原样透传，零改动）。
         let request = crate::agent::otel::with_current_traceparent(request);
-        let response = block_on(async move { request.json(body).send().await })
+        // B1795506800002：请求体字节闸门（0 HTTP Fail-Closed）。序列化一次并复用，
+        // 与 `.json(body)` 逐字节等价；超限则在此返回，不发任何网络包。
+        let request_body_bytes = serialize_request_body_with_size_gate(body)?;
+        let response = block_on(async move {
+            request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(request_body_bytes)
+                .send()
+                .await
+        })
         .map_err(|error| {
             format_request_error("调用 provider 失败", &error, started_at.elapsed())
         })?;
@@ -3383,7 +3557,16 @@ impl ProviderManager {
         }
         // Wave-4 C3：outbound 级联注入 traceparent。
         let request = crate::agent::otel::with_current_traceparent(request);
-        let response = block_on(async move { request.json(body).send().await }).map_err(|error| {
+        // B1795506800002：请求体字节闸门（0 HTTP Fail-Closed）。序列化一次并复用，
+        // 与 `.json(body)` 逐字节等价；超限则在此返回，不发任何网络包。
+        let request_body_bytes = serialize_request_body_with_size_gate(body)?;
+        let response = block_on(async move {
+            request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(request_body_bytes)
+                .send()
+                .await
+        }).map_err(|error| {
             format_request_error("调用 provider 失败", &error, started_at.elapsed())
         })?;
 
@@ -5562,6 +5745,10 @@ where
 }
 
 /// PA-172 §2.1：策略驱动的 decision 作用域重试（`ProviderManager` 内部唯一入口）。
+///
+/// 生产路径已改为 [`retry_provider_decision_stream_with_policy`]（带可见增量守卫，
+/// B1795488338107 评审 B1）；本包装仅保留给既有单测的调度断言（无 hint 语义）。
+#[cfg(test)]
 fn retry_provider_timeout_with_policy<T, F>(
     label: &str,
     policy: &UpstreamPolicy,
@@ -5578,6 +5765,31 @@ where
         operation,
         &StdThreadSleeper,
         None,
+    )
+}
+
+/// B1795488338107 评审 B1：带 `no_more_retries_hint` 的 decision 流式重试包装。
+///
+/// 决策流式臂此前传 `None`（`decide_with_tools_stream_bounded`），意味着「已向调用方
+/// 发出可见文本增量」这一既成事实对重试循环不可见——断流后重试会把半截增量与新
+/// attempt 的输出重复上屏。与 followup 流式臂同一接线方式（不新增调度语义）。
+fn retry_provider_decision_stream_with_policy<T, F>(
+    label: &str,
+    policy: &UpstreamPolicy,
+    operation: F,
+    no_more_retries_hint: &dyn Fn() -> bool,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    retry_provider_scoped_with_sleeper_and_config(
+        label,
+        ProviderRetryScope::Decision,
+        policy.short_backoff_config(),
+        policy.retry_mode,
+        operation,
+        &StdThreadSleeper,
+        Some(no_more_retries_hint),
     )
 }
 
@@ -5805,6 +6017,9 @@ where
     // 改为只消费 `decide` 的输出后判决点唯一；无窗口时 `decide` 内部即 `compute_delay`，
     // 数值逐字不变。
     let mut pending_delay_ms: Option<u64> = None;
+    // B1795506800001：本跳内已消费的「短窗口 429 预算内等待」次数（上限
+    // `SHORT_429_MAX_WAITS`，防止无限等 429 把一跳拖成不可取消长阻塞）。
+    let mut short_429_waits = 0_u32;
     // 2026-11-14：一次「即将重试」的实时通知（宿主装了观察者才有消费者，否则 no-op）。
     let retry_notify = crate::agent::retry::RetryNotifier::new(label, scope_label);
 
@@ -5864,11 +6079,74 @@ where
                 let last_error = extract_provider_error_detail(&err);
                 last_failure = Some(err.clone());
                 let failure = policy.classify(&err);
-                // L3-B ADVISORY：该错误已把 provider 置入冷却（HTTP 出口/短路打标）⇒
-                // **全 scope** 立即 Abort：不 sleep、不再发 HTTP（冷却期 0 次 HTTP）。
-                if crate::agent::retry::is_cooldown_active_error(&err) {
+                // M3（评审复核）：`hint_blocking` = 调用方明确说「重试已无意义」（流式已
+                // 发出可见增量 / 用户取消）。旧实现不早退，仍会走下面的 `decide` 并写入
+                // 一条 `llm/retry` 事件与 `decision=Retry` 日志，随后才在下一轮顶部被
+                // `no_retry_hint` 拦下 —— 观测面上凭空多一次「真实发生的重试」。
+                // 在这里直接收口：判决点唯一，且 `llm/retry` 只报真会发生的重试。
+                if hint_blocking {
                     let outcome = report(&budget, attempts_total, slept_ms, rl_active);
                     return (Err(last_error), outcome);
+                }
+                // B1795506800001：**短窗口 429 的预算内等待**准入判定（唯一处）。
+                //
+                // 背景：真实 HTTP 429 在 4 个出口先 `enter_cooldown` 再打 `entered` 标记，
+                // 而重试编排对「已进入冷却」全 scope 立即 Abort（PA-171 C3 冻结契约：
+                // 冷却期 0 次 HTTP）。这条对分钟级窗口正确，但对「上游明确说 8s 后恢复」
+                // 是过度保守——多 hop 工具链跑到第 3 跳遇瞬时短限流，直接失败代价极高。
+                //
+                // 准入必须**同时**满足（任一不满足 ⇒ 维持既有冷却短路 Abort）：
+                //   ① Followup 作用域（Decision 要保持 <3s 快败以便换手，PA-171 C3-P2）；
+                //   ② 来源是 `entered`（真收到过响应），不是 `short_circuit`（本轮 0 次 HTTP）；
+                //   ③ 分类为 `rate_limited`（排除 quota：配额要等到下个计费窗口，不该等）；
+                //   ④ 有**显式** `Retry-After` 且 `0 < window <= SHORT_429_WAIT_MAX_MS`；
+                //   ⑤ `window + 抖动余量` 装得进剩余预算；⑥ 本跳等待次数未超上限。
+                //
+                // 等待语义：睡满「窗口 + 250ms」后下一次 attempt 时注册表的冷却**已自然
+                // 过期**，`ensure_not_cooling` 正常放行 ⇒ 全程不给冷却开后门，冷却期内
+                // 仍严格 0 次 HTTP。且**不切入** 20s→40s 的盲猜 RL 曲线（否则
+                // `Retry-After: 8` 会被 `window.max(20_000)` 强拉成 20s）。
+                let short_429_wait_ms = if scope == ProviderRetryScope::Followup
+                    && crate::agent::retry::cooldown_marker_source(&err)
+                        == Some(crate::agent::retry::CooldownMarkerSource::Entered)
+                    && crate::agent::retry::classify_error_class(&err) == "rate_limited"
+                    && short_429_waits < crate::agent::retry::SHORT_429_MAX_WAITS
+                {
+                    crate::agent::retry::parse_retry_after_marker(&err)
+                        .map(|secs| secs.saturating_mul(1_000))
+                        .filter(|window| {
+                            *window > 0 && *window <= crate::agent::retry::SHORT_429_WAIT_MAX_MS
+                        })
+                        .map(|window| {
+                            window + crate::agent::retry::COOLDOWN_EXPIRY_SLACK_MS
+                        })
+                        .filter(|wait| {
+                            *wait <= budget.total_budget_ms.saturating_sub(budget.elapsed_ms)
+                        })
+                } else {
+                    None
+                };
+                // L3-B ADVISORY：该错误已把 provider 置入冷却（HTTP 出口/短路打标）⇒
+                // **全 scope** 立即 Abort：不 sleep、不再发 HTTP（冷却期 0 次 HTTP）。
+                // 唯一例外是上面准入的「短窗口 429 预算内等待」（B1795506800001）。
+                if crate::agent::retry::is_cooldown_active_error(&err) && short_429_wait_ms.is_none()
+                {
+                    let outcome = report(&budget, attempts_total, slept_ms, rl_active);
+                    return (Err(last_error), outcome);
+                }
+                // B1795506800001：睡满短窗口（+抖动余量）后重试。判决点仍唯一——这里给出
+                // 的 `pending_delay_ms` 由循环统一消费与记账，且**不**触发 RL 曲线切换。
+                if let Some(wait_ms) = short_429_wait_ms {
+                    short_429_waits += 1;
+                    provider_log(format!(
+                        "{label}:attempt={attempts_total} cooldown_entered_short_window=true \
+                         short_429_wait_ms={wait_ms} waits_used={short_429_waits} \
+                         scope={scope:?} wait_then_retry"
+                    ));
+                    pending_delay_ms = Some(wait_ms);
+                    retry_notify.notify(attempts_total, &active_config, &err, wait_ms);
+                    attempt += 1;
+                    continue;
                 }
                 // PA-171 C3-P2：Decision（对话首跳）作用域首跳限流/配额即 Abort——
                 // 冷却已在 4 个 HTTP 出口登记，重试循环不得再 sleep（否则
@@ -5879,15 +6157,14 @@ where
                     let outcome = report(&budget, attempts_total, slept_ms, rl_active);
                     return (Err(last_error), outcome);
                 }
+                // 上面 `hint_blocking` 已早退 ⇒ 走到这里的失败都可继续调度，不再重复判它。
                 let use_rate_limit = scope == ProviderRetryScope::Followup
                     && failure.is_retryable()
-                    && is_rate_limit_error(&err)
-                    && !hint_blocking;
+                    && is_rate_limit_error(&err);
                 // B1795488338167：上游声明的恢复窗口（`Retry-After` 结构化后缀的唯一解析点
-                // 已在 HTTP 出口写好；这里是**调度侧**唯一消费点）。窗口只对「可重试且
-                // 非 hint 阻断」的失败生效——不可重试错误本就走 Abort，hint 阻断时也
-                // 不该再等。
-                let retry_after = if failure.is_retryable() && !hint_blocking {
+                // 已在 HTTP 出口写好；这里是**调度侧**唯一消费点）。窗口只对可重试失败生效
+                // ——不可重试错误本就走 Abort。
+                let retry_after = if failure.is_retryable() {
                     crate::agent::retry::retry_after_from_error(&err)
                 } else {
                     None
@@ -5926,7 +6203,7 @@ where
                     match decision {
                         RetryDecision::Retry { delay_ms } => {
                             pending_delay_ms = Some(delay_ms);
-                            retry_notify.notify(attempts_total, &active_config, &err, attempt);
+                            retry_notify.notify(attempts_total, &active_config, &err, delay_ms);
                             continue;
                         }
                         _ => {
@@ -5960,12 +6237,7 @@ where
                 match decision {
                     RetryDecision::Retry { delay_ms } => {
                         pending_delay_ms = Some(delay_ms);
-                        retry_notify.notify(
-                            attempts_total,
-                            &active_config,
-                            &err,
-                            attempt.saturating_add(1),
-                        );
+                        retry_notify.notify(attempts_total, &active_config, &err, delay_ms);
                         attempt += 1;
                     }
                     _ => {

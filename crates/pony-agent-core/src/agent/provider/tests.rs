@@ -2333,8 +2333,11 @@
     ///
     /// 缺陷现场：构造器每次尝试都把两条消息写回 `accumulated_messages`，流式臂此前
     /// 未做 pristine 重置 ⇒ 第 2 次尝试以「已含上次追加」的转录为 base 再追加一遍。
-    /// 本用例用回环 SSE 服务：第 1 次连接直接断开（触发退避重试），第 2 次正常返回，
-    /// 断言最终转录长度 = base + 2（恰好一次追加），而不是 base + 4。
+    /// 本用例用回环 SSE 服务：第 1 次连接返回 **503**（`UPSTREAM_SERVER_ERROR_HINTS` 在册的
+    /// 可重试 5xx，触发退避重试），第 2 次正常返回 200，断言最终转录长度 = base + 2
+    /// （恰好一次追加），而不是 base + 4。
+    ///
+    /// m2（评审复核）：注释旧写作「连接直接断开」，与代码实为 503 不符，已对齐。
     #[test]
     fn streaming_followup_retry_does_not_duplicate_accumulated_messages() {
         let rt = tokio::runtime::Runtime::new().expect("create Tokio runtime");
@@ -3042,3 +3045,415 @@
 
     #[path = "tests_streaming_wire.rs"]
     mod tests_streaming_wire;
+
+
+    /// B1（评审 blocker）：流式臂**已发出可见文本增量**后，重试必须被阻断。
+    ///
+    /// 缺陷现场：`decide` 恒传 `StreamState::NoDelta`，而流式臂的
+    /// `no_more_retries_hint` 只查用户取消（生产路径 `without_cancel()` 恒 false）
+    /// ⇒ SSE 发出半截正文后断流仍会重试，attempt 1 的增量与 attempt 2 的输出重复上屏。
+    ///
+    /// 本用例用纯函数面（不经 HTTP）锁住接线契约：`no_more_retries_hint` 一旦返回
+    /// true，重试循环必须**零 sleep、零重试**直接返回最后一次错误。
+    #[test]
+    fn stream_retry_hint_blocks_retry_after_visible_delta() {
+        // 端到端：回环 HTTP 服务**声明 Content-Length 远大于实发字节**，发出一条可见
+        // 文本增量后立刻断连 ⇒ reqwest 读 body 报 `error decoding response body`（在册
+        // 可重试传输错误）。此时 `emitted_visible` 已置位，重试必须被阻断：
+        // 若接线缺失，客户端会重连（accepted == 2）并把半截正文与新输出重复上屏。
+        let rt = tokio::runtime::Runtime::new().expect("create Tokio runtime");
+        let _guard = rt.enter();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind truncated sse server");
+        let address = listener.local_addr().expect("read mock address");
+        let accepted = Arc::new(Mutex::new(0_usize));
+        let accepted_for_thread = Arc::clone(&accepted);
+        let handle = thread::spawn(move || {
+            // 非阻塞 accept + 3s 截止：正常情况下只会收到 1 次连接（B1 阻断生效），
+            // 线程必须在用例结束前自行退出，否则 `join` 会把整个测试拖成挂起。
+            listener
+                .set_nonblocking(true)
+                .expect("set truncated sse server nonblocking");
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                        let mut buf = [0_u8; 4096];
+                        let mut consumed = Vec::new();
+                        loop {
+                            let read = match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(read) => read,
+                                Err(_) => break,
+                            };
+                            consumed.extend_from_slice(&buf[..read]);
+                            if consumed.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        *accepted_for_thread.lock().expect("lock accepted") += 1;
+                        // 声明 64KiB，实发一小段后关闭 ⇒ 早熟 EOF。
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 65536\r\nConnection: close\r\n\r\n",
+                        );
+                        let _ = stream.write_all(
+                            b"data: {\"choices\":[{\"delta\":{\"content\":\"half\"}}]}\r\n\r\n",
+                        );
+                        let _ = stream.flush();
+                        // 不写 [DONE]、不补足 Content-Length，直接关闭。
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+
+        let config = ResolvedProviderSelection {
+            requested_name: "b1795488338107-b1".to_string(),
+            provider_name: "b1795488338107-b1".to_string(),
+            protocol: ProviderProtocol::OpenAiCompletions,
+            base_url: format!("http://{address}/v1"),
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "B1795488338107_B1_API_KEY".to_string(),
+            api_key: Some("dummy".to_string()),
+            model: "b1795488338107-b1-model".to_string(),
+            temperature: 0.0,
+            max_output_tokens: 64,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                supports_tools: true,
+                supports_streaming: true,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::None,
+        };
+        let manager = ProviderManager::new(config).with_policy(
+            crate::agent::config::UpstreamPolicy {
+                decision_max_attempts: 4,
+                retry_budget_ms: 5_000,
+                ..Default::default()
+            },
+        );
+        let request = ProviderRequest {
+            model: "b1795488338107-b1-model".to_string(),
+            input: vec![ProviderMessage::user("继续总结工具结果")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.0,
+            max_output_tokens: 64,
+        };
+        let tool_call = ToolCall {
+            call_id: Some("call_b1795488338107_b1".to_string()),
+            name: "workspace.read_file".to_string(),
+            arguments: json!({ "path": "src/main.rs" }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "workspace.read_file".to_string(),
+            status: "ok".to_string(),
+            output: "fn main() {}".to_string(),
+            duration_ms: 3,
+        };
+
+        let mut accumulated: Vec<Value> = Vec::new();
+        let mut visible_chunks = 0_usize;
+        let result = manager.continue_with_tool_result_stream(
+            &request,
+            &[ToolDefinition {
+                name: "workspace.read_file",
+                description: "read file",
+                input_schema: json!({ "type": "object" }),
+            }],
+            &mut accumulated,
+            None,
+            &tool_call,
+            &tool_result,
+            |chunk| {
+                if matches!(chunk, ProviderStreamChunk::Text(_)) {
+                    visible_chunks += 1;
+                }
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "截断流必须上抛错误（不得伪装成功），实际={result:?}"
+        );
+        assert_eq!(
+            visible_chunks, 1,
+            "首跳必须真的发出过可见增量（否则本用例无证明力）"
+        );
+        assert_eq!(
+            *accepted.lock().expect("lock accepted"),
+            1,
+            "已发出可见增量后断流**不得重试**（重连会把半截正文与新输出重复上屏）"
+        );
+        let _ = handle.join();
+    }
+
+    /// B1 反向钉子：**未**发出可见增量时，同一可重试错误仍必须重试。
+    ///
+    /// 缺这一条时「把 hint 写成恒 true」也能让上一个用例变绿 —— 假绿。
+    #[test]
+
+
+    /// B1 反向钉子：**未**发出可见增量时，同一可重试错误仍必须重试。
+    ///
+    /// 缺这一条时「把 hint 写成恒 true」也能让上一个用例变绿 —— 假绿。
+    #[test]
+    fn stream_retry_hint_allows_retry_when_no_visible_delta() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0_u32);
+        let emitted_visible = std::cell::Cell::new(false);
+        let hint = || emitted_visible.get();
+
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper_and_config(
+            "followup_stream",
+            ProviderRetryScope::Followup,
+            crate::agent::retry::BackoffConfig {
+                initial_delay_ms: 10,
+                multiplier: 2.0,
+                max_delay_ms: 40,
+                max_retries: 3,
+                total_budget_ms: 5_000,
+                jitter_kind: crate::agent::retry::JitterKind::None,
+            },
+            crate::agent::retry::RetryMode::Normal,
+            || {
+                let next = attempts.get() + 1;
+                attempts.set(next);
+                if next == 1 {
+                    // 断流发生在**首包之前**（无任何可见增量）⇒ 允许重试。
+                    Err("error reading a body: unexpected eof".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            &sleeper,
+            Some(&hint),
+        );
+
+        assert!(result.is_ok(), "无可见增量时断流必须可重试，实际={result:?}");
+        assert_eq!(attempts.get(), 2, "恰好重试一次");
+    }
+
+    /// B1795506800002（评审建议 B）：请求体字节闸门 —— 纯文本超 512KiB 必须 0 HTTP 失败。
+    ///
+    /// token 估算（chars/4）覆盖不了 JSON 转义、大型 tools schema 与 base64，边缘网关按
+    /// 字节直接 RST/413；缺陷现场即 300KB+ 请求被 10~13ms 拒连。
+    #[test]
+
+
+    /// B1795506800002（评审建议 B）：请求体字节闸门 —— 纯文本超 512KiB 必须 0 HTTP 失败。
+    ///
+    /// token 估算（chars/4）覆盖不了 JSON 转义、大型 tools schema 与 base64，边缘网关按
+    /// 字节直接 RST/413；缺陷现场即 300KB+ 请求被 10~13ms 拒连。
+    #[test]
+    fn request_body_size_gate_rejects_oversized_plain_text() {
+        let oversized = "x".repeat(600 * 1024);
+        let body = json!({
+            "model": "m",
+            "messages": [{ "role": "user", "content": oversized }]
+        });
+        let error = serialize_request_body_with_size_gate(&body)
+            .expect_err("超 512KiB 纯文本请求体必须被拦下");
+        assert!(
+            error.contains("payload too large"),
+            "错误文本必须带 `payload too large`（经既有码表归 UpstreamContextOverflow ⇒ 不重试），实际={error}"
+        );
+        assert!(
+            error.contains("request_body_bytes="),
+            "错误文本必须带真实字节数以便复盘，实际={error}"
+        );
+    }
+
+    /// 字节闸门反向钉子：正常体积必须放行，且序列化结果与 `.json()` 逐字节等价。
+    #[test]
+
+
+    /// 字节闸门反向钉子：正常体积必须放行，且序列化结果与 `.json()` 逐字节等价。
+    #[test]
+    fn request_body_size_gate_passes_normal_body_with_identical_bytes() {
+        let body = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] });
+        let bytes = serialize_request_body_with_size_gate(&body).expect("正常体积必须放行");
+        assert_eq!(
+            bytes,
+            serde_json::to_vec(&body).expect("参考序列化"),
+            "闸门放行时不得改变请求体字节（否则会破坏 prompt cache 前缀）"
+        );
+    }
+
+    /// 含图请求走 10MiB 档：同样体积的纯文本会被拦，含图则放行（口径必须区分）。
+    #[test]
+
+
+    /// 含图请求走 10MiB 档：同样体积的纯文本会被拦，含图则放行（口径必须区分）。
+    #[test]
+    fn request_body_size_gate_uses_multimodal_limit_for_image_payloads() {
+        // 600KiB 纯文本超 512KiB 硬上限。
+        let text_only = json!({ "content": "x".repeat(600 * 1024) });
+        assert!(
+            serialize_request_body_with_size_gate(&text_only).is_err(),
+            "600KiB 纯文本必须超纯文本上限"
+        );
+
+        // 同体积 + 一个 image 块 ⇒ 走 10MiB 档，必须放行。
+        let with_image = json!({
+            "content": [
+                { "type": "text", "text": "x".repeat(600 * 1024) },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+            ]
+        });
+        assert!(
+            serialize_request_body_with_size_gate(&with_image).is_ok(),
+            "含图请求必须用 10MiB 档（多模态 base64 天然是 MiB 量级）"
+        );
+    }
+
+    /// B1795506800001（评审待决项 A 落地）：**短窗口 429** 在 Followup 作用域应在预算内
+    /// 等过冷却后重试，而不是一律短路。
+    ///
+    /// 准入条件（缺一即维持既有短路）：Followup + 来源 `entered` + `rate_limited` +
+    /// `0 < Retry-After <= 30s` + 装得进剩余预算 + 本跳等待次数未超上限。
+    #[test]
+
+
+    /// B1795506800001（评审待决项 A 落地）：**短窗口 429** 在 Followup 作用域应在预算内
+    /// 等过冷却后重试，而不是一律短路。
+    ///
+    /// 准入条件（缺一即维持既有短路）：Followup + 来源 `entered` + `rate_limited` +
+    /// `0 < Retry-After <= 30s` + 装得进剩余预算 + 本跳等待次数未超上限。
+    #[test]
+    fn followup_short_window_429_waits_then_retries() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0_u32);
+        // `entered` 标记 = 本轮确实收到过上游 429 响应并登记冷却。
+        let rate_limited = crate::agent::retry::append_cooldown_active_marker(
+            "provider 返回错误状态：429 Too Many Requests；retry_after=8；响应正文：slow down",
+        );
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report_config(
+                "followup_sync",
+                ProviderRetryScope::Followup,
+                crate::agent::retry::BackoffConfig {
+                    initial_delay_ms: 500,
+                    multiplier: 2.0,
+                    max_delay_ms: 8_000,
+                    max_retries: 3,
+                    total_budget_ms: 60_000,
+                    jitter_kind: crate::agent::retry::JitterKind::None,
+                },
+                crate::agent::retry::RetryMode::Normal,
+                || {
+                    let next = attempts.get() + 1;
+                    attempts.set(next);
+                    if next == 1 {
+                        Err(rate_limited.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+                &sleeper,
+                None,
+            );
+
+        assert!(
+            result.is_ok(),
+            "短窗口 429 必须等过冷却后重试成功，实际={result:?}"
+        );
+        assert_eq!(attempts.get(), 2, "恰好重试一次（受 SHORT_429_MAX_WAITS 约束）");
+        let slept = sleeper.total_slept.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            slept,
+            8_000 + crate::agent::retry::COOLDOWN_EXPIRY_SLACK_MS,
+            "必须睡满「上游窗口 + 抖动余量」再重试（窗口 8s + 250ms）"
+        );
+        assert_eq!(report.attempts_total, 2);
+    }
+
+    /// 反向钉子：**长**窗口 429（> 30s）不得等待 —— 交给冷却 + 换手。
+    ///
+    /// 缺这一条时「把所有 429 都放行等待」也能让上一个用例变绿，而分钟级窗口会让单跳
+    /// 不可取消阻塞，破坏 PA-171 C3 的「冷却期 0 次 HTTP」红线。
+    #[test]
+
+
+    /// 反向钉子：**长**窗口 429（> 30s）不得等待 —— 交给冷却 + 换手。
+    ///
+    /// 缺这一条时「把所有 429 都放行等待」也能让上一个用例变绿，而分钟级窗口会让单跳
+    /// 不可取消阻塞，破坏 PA-171 C3 的「冷却期 0 次 HTTP」红线。
+    #[test]
+    fn followup_long_window_429_still_short_circuits() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0_u32);
+        let rate_limited = crate::agent::retry::append_cooldown_active_marker(
+            "provider 返回错误状态：429 Too Many Requests；retry_after=90；响应正文：slow down",
+        );
+        let (result, report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report_config(
+                "followup_sync",
+                ProviderRetryScope::Followup,
+                crate::agent::retry::BackoffConfig::default(),
+                crate::agent::retry::RetryMode::Normal,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err(rate_limited.clone())
+                },
+                &sleeper,
+                None,
+            );
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1, "长窗口必须短路（不得 sleep 后重放）");
+        assert_eq!(
+            sleeper.total_slept.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "冷却期不得发生任何退避 sleep"
+        );
+        assert_eq!(report.attempts_total, 1);
+    }
+
+    /// 反向钉子：`short_circuit` 来源（本轮 0 次 HTTP）**不得**被短窗口放行。
+    ///
+    /// 若放行，冷却期内会反复排队重试，「冷却期 0 次 HTTP」契约被破坏。
+    #[test]
+
+
+    /// 反向钉子：`short_circuit` 来源（本轮 0 次 HTTP）**不得**被短窗口放行。
+    ///
+    /// 若放行，冷却期内会反复排队重试，「冷却期 0 次 HTTP」契约被破坏。
+    #[test]
+    fn followup_short_circuit_429_never_waits() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0_u32);
+        let short_circuit = crate::agent::retry::append_cooldown_marker(
+            "provider test 处于限流冷却中，预计 8s 后恢复；本次未发起请求；retry_after=8",
+            crate::agent::retry::CooldownMarkerSource::ShortCircuit,
+        );
+        let (result, _report): (Result<(), String>, SingleHopRetryReport) =
+            retry_provider_scoped_with_report_config(
+                "followup_sync",
+                ProviderRetryScope::Followup,
+                crate::agent::retry::BackoffConfig::default(),
+                crate::agent::retry::RetryMode::Normal,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Err(short_circuit.clone())
+                },
+                &sleeper,
+                None,
+            );
+
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.get(),
+            1,
+            "发送前短路（0 次 HTTP）必须保持立即 Abort，不得排队等待"
+        );
+        assert_eq!(
+            sleeper.total_slept.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
