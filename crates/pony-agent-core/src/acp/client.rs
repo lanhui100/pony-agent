@@ -606,7 +606,10 @@ impl AcpAgentClient {
     ///
     /// 只能替换**握手时已声明**的 fs 能力实现；未声明时注入不改变线上能力（capability 声明已在
     /// `initialize` 固化，不会追认）。
-    pub fn install_fs_handler(&self, handler: Arc<dyn FsHandler>) {
+    ///
+    /// 返回 `true` 表示装配成功；`false` 表示被闸门拒绝（握手未声明 `clientCapabilities.fs`）。
+    /// 旧签名返回 `()`，调用方无法区分「装上了」与「被悄悄拒了」（B177 ADVISORY ⑤）。
+    pub fn install_fs_handler(&self, handler: Arc<dyn FsHandler>) -> bool {
         let mut slots = self
             .handlers
             .lock()
@@ -618,13 +621,15 @@ impl AcpAgentClient {
                 "acp 拒绝装配 FsHandler：本会话 initialize 未声明 clientCapabilities.fs（fail-closed，不追认）",
                 None,
             );
-            return;
+            return false;
         }
         slots.fs = Some(handler);
+        true
     }
 
     /// B175 additive：仅热替换 `terminal/*` handler（保留既有 permission / fs 槽位）。
-    pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) {
+    /// 返回 `true` 表示装配成功；`false` 表示被闸门拒绝（未声明 `clientCapabilities.terminal`）。
+    pub fn install_terminal_handler(&self, handler: Arc<dyn TerminalHandler>) -> bool {
         let mut slots = self
             .handlers
             .lock()
@@ -635,9 +640,10 @@ impl AcpAgentClient {
                 "acp 拒绝装配 TerminalHandler：本会话 initialize 未声明 clientCapabilities.terminal（fail-closed，不追认）",
                 None,
             );
-            return;
+            return false;
         }
         slots.terminal = Some(handler);
+        true
     }
 
     /// 把整轮预算转发给已装配的 terminal handler（未装配则无事发生）。
