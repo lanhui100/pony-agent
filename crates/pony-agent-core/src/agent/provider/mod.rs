@@ -5252,6 +5252,8 @@ fn provider_status_error(
     body: &str,
     retry_after: Option<&str>,
 ) -> String {
+    // B139：状态码结构化留痕（唯一写入点）——per-call 记录据此把配额抖动样本筛出来。
+    crate::agent::telemetry::record_upstream_status(status.as_u16());
     let base = format!("provider 返回错误状态：{status}；耗时={elapsed_ms}ms；响应正文：{body}");
     match retry_after.and_then(parse_retry_after_header_seconds) {
         Some(secs) => crate::agent::retry::append_retry_after_marker(&base, secs),

@@ -28,6 +28,7 @@ use pony_agent_core::agent::turn_flow::{weighted_turn_speed, ProviderEventMeta, 
 /// `input + cache_read + cache_creation` 只能由上游写进该归一字段（I4）。
 fn record(input: u64, cache_hit: u64, output: u64, duration: u64) -> ProviderCallCacheRecord {
     ProviderCallCacheRecord {
+        upstream_status: None, // B139：测试桩无真实状态码 ⇒ 留空
         request_kind: ProviderRequestKind::InitialRequest,
         provider_source: Some("fixture-source".to_string()),
         provider_mode: Some("fixture-mode".to_string()),

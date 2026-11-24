@@ -2231,6 +2231,7 @@ mod tests {
         // per-call 粒度：携带 provider_call_records 时逐条发射（step 递增）。
         payload.provider_call_records = Some(vec![
             crate::agent::telemetry::ProviderCallCacheRecord {
+                upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
                 request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
                 provider_source: Some("deepseek".to_string()),
                 provider_mode: None,
@@ -2252,6 +2253,7 @@ mod tests {
                 prelude_ms: None,
             },
             crate::agent::telemetry::ProviderCallCacheRecord {
+                upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
                 request_kind: crate::agent::telemetry::ProviderRequestKind::ToolFollowup,
                 provider_source: Some("deepseek".to_string()),
                 provider_mode: None,

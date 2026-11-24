@@ -340,6 +340,7 @@ mod tests {
 
     fn record(input: Option<u64>, cache_hit: Option<u64>, output: Option<u64>) -> ProviderCallCacheRecord {
         ProviderCallCacheRecord {
+            upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
             request_kind: ProviderRequestKind::default(),
             input_tokens: input,
             cache_hit_input_tokens: cache_hit,

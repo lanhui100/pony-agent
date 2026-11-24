@@ -78,6 +78,7 @@ fn record(
     output_tokens: Option<u64>,
 ) -> ProviderCallCacheRecord {
     ProviderCallCacheRecord {
+        upstream_status: None, // B139：测试桩无真实状态码 ⇒ 留空
         request_kind: ProviderRequestKind::InitialRequest,
         provider_source: Some("f1-fixture-source".to_string()),
         provider_mode: Some("f1-fixture-mode".to_string()),

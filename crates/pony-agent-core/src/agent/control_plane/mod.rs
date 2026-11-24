@@ -4860,6 +4860,7 @@ mod tests {
                         capability_invocation: None,
                     }],
                     provider_call_records: vec![crate::agent::telemetry::ProviderCallCacheRecord {
+                        upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
                         request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
                         provider_source: Some("provider_decision".to_string()),
                         provider_mode: Some("live".to_string()),
@@ -4968,6 +4969,7 @@ mod tests {
                         capability_invocation: None,
                     }],
                     provider_call_records: vec![crate::agent::telemetry::ProviderCallCacheRecord {
+                        upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
                         request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
                         provider_source: Some("provider_stream".to_string()),
                         provider_mode: Some("live".to_string()),
@@ -8597,6 +8599,7 @@ mod tests {
                 first_token_latency_ms: Some(120),
                 turn_duration_ms: Some(800),
                 provider_call_records: vec![crate::agent::telemetry::ProviderCallCacheRecord {
+                    upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
                     request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
                     provider_source: Some("provider_decision".to_string()),
                     provider_mode: Some("live".to_string()),
@@ -8645,6 +8648,7 @@ mod tests {
                 first_token_latency_ms: Some(220),
                 turn_duration_ms: Some(1500),
                 provider_call_records: vec![crate::agent::telemetry::ProviderCallCacheRecord {
+                    upstream_status: None, // B139：非 2xx 才写值；此处无真实状态码 ⇒ 留空
                     request_kind: crate::agent::telemetry::ProviderRequestKind::InitialRequest,
                     provider_source: Some("provider_stream".to_string()),
                     provider_mode: Some("live".to_string()),

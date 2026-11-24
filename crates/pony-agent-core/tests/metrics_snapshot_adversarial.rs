@@ -22,6 +22,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 fn base_record() -> ProviderCallCacheRecord {
     ProviderCallCacheRecord {
+        upstream_status: None, // B139：测试桩无真实状态码 ⇒ 留空
         request_kind: ProviderRequestKind::InitialRequest,
         provider_source: Some("adversarial-source".to_string()),
         provider_mode: Some("adversarial-mode".to_string()),
