@@ -12,6 +12,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - run: bash .meta/gates/ci-verify.sh
       - run: bash .meta/gates/scratch-hygiene.sh && bash .meta/gates/scratch-hygiene.spec.sh
       - run: bash scripts/git-guard.spec.sh
@@ -20,3 +23,19 @@ jobs:
       - run: bash scripts/ci-scope.spec.sh
       - run: bash .meta/gates/backlog-gate.sh
       - run: bash .meta/gates/backlog-gate.spec.sh
+      # 零外部依赖的 Node/Bash 契约与构建治理自检（秒级快速阻断）
+      - run: |
+          npm run version:check
+          npm run secrets:check:all
+          npm run contract:bin-imports
+          npm run contract:bin-imports:selftest
+          npm run contract:check
+          npm run contract:cli
+          npm run ext:check
+          npm run size:check
+          npm run portable:ps1
+          npm run portable:ps1:selftest
+          npm run release:push:selftest
+          npm run install-cli:selftest
+          npm run artifacts:spec
+          bash scripts/cargo-lane.spec.sh

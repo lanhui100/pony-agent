@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const SLOT_TARGET_DIRS = Object.freeze({
   check: 'target-check',
   test: 'target-test',
+  release: 'target',
   'exact-a': 'target-test-exact-a',
   'exact-b': 'target-test-exact-b',
   'exact-c': 'target-test-exact-c'
@@ -69,11 +70,13 @@ export const LANE_SCRIPT_RELATIVE = path.join('scripts', 'cargo-lane.sh');
  * 把一次 cargo 调用包成 lane 调用：`bash scripts/cargo-lane.sh <cargo 子命令> <参数...>`。
  * 纯函数（不读环境、不执行进程），便于 parity 用例断言。
  */
-export function buildLaneInvocation(invocation, repoRoot = REPO_ROOT) {
+export function buildLaneInvocation(invocation, repoRoot = REPO_ROOT, options = {}) {
+  const { heavy = false } = options;
+  const lanePrefix = heavy ? ['--heavy'] : [];
   return {
     command: 'bash',
     cwd: invocation.cwd ?? repoRoot,
-    args: [path.join(repoRoot, LANE_SCRIPT_RELATIVE), ...invocation.args]
+    args: [path.join(repoRoot, LANE_SCRIPT_RELATIVE), ...lanePrefix, ...invocation.args]
   };
 }
 
@@ -112,9 +115,10 @@ export function main(argv) {
   }
 
   if (shouldUseLane()) {
-    invocation = buildLaneInvocation(invocation);
+    const heavy = slot === 'release' || cargoArgs.includes('--release');
+    invocation = buildLaneInvocation(invocation, REPO_ROOT, { heavy });
     if (process.env.PONY_BUILD_VERBOSE === '1') {
-      console.error('[rust-target] 经 scripts/cargo-lane.sh 执行（并发预算 + 负载熔断）');
+      console.error(`[rust-target] 经 scripts/cargo-lane.sh${heavy ? ' --heavy' : ''} 执行（并发预算 + 负载熔断）`);
     }
   }
 

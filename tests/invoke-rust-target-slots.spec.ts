@@ -33,7 +33,7 @@ describe('invoke-rust-target 槽位调用器', () => {
   });
 
 
-  it('五个 cargo 槽位都映射到各自的 target 目录', () => {
+  it('六个 cargo 槽位都映射到各自的 target 目录', () => {
     for (const [slot, targetDir] of Object.entries(SLOT_TARGET_DIRS)) {
       const invocation = buildCargoInvocation(slot, ['check'], '/repo');
       expect(invocation.args.slice(0, 5)).toEqual([
@@ -46,6 +46,7 @@ describe('invoke-rust-target 槽位调用器', () => {
       expect(invocation.cwd).toBe('/repo');
       expect(invocation.command).toBe('cargo');
     }
+    expect(SLOT_TARGET_DIRS.release).toBe('target');
   });
 
   it('额外 cargo 参数原序透传（不重排、不加引号）', () => {
@@ -69,7 +70,7 @@ describe('invoke-rust-target 槽位调用器', () => {
     }
   });
 
-  it('package.json 的 cargo:*.shared 脚本走 mjs 且槽位名合法', () => {
+  it('package.json 的 cargo:* 与 cli:build 脚本统一走 mjs 且无裸 cargo 绕过', () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
     const scripts = pkg.scripts as Record<string, string>;
     const expected: Record<string, string> = {
@@ -77,21 +78,36 @@ describe('invoke-rust-target 槽位调用器', () => {
       'cargo:test:shared': 'test test',
       'cargo:test:exact': 'exact-a test',
       'cargo:test:exact:b': 'exact-b test',
-      'cargo:test:exact:c': 'exact-c test'
+      'cargo:test:exact:c': 'exact-c test',
+      'cargo:check': 'check check',
+      'cargo:test': 'test test',
+      'cargo:test:lib': 'test test --lib',
+      'cargo:test:regression':
+        'test test --test session_regression --test provider_registry_regression --test tool_router_regression --test stop_registry_wave60',
+      'conformance:test': 'test test -p pony-agent-core --test conformance'
     };
     for (const [name, slotAndSubcommand] of Object.entries(expected)) {
       expect(scripts[name]).toBe(`node scripts/invoke-rust-target.mjs ${slotAndSubcommand}`);
       expect(scripts[name]).not.toMatch(/powershell|pwsh/i);
     }
+    expect(scripts['cli:build']).toBe(
+      'node scripts/invoke-rust-target.mjs release build --release -p pony-agent-core --bin pony --bin ponycli && node scripts/install-cli.mjs'
+    );
   });
 
-  it('包成 lane 调用时保留 cargo 参数原序，且不再直接 spawn cargo', () => {
+  it('包成 lane 调用时保留 cargo 参数原序，heavy 模式置于子命令之前', () => {
     const cargoInvocation = buildCargoInvocation('check', ['check', '--all-targets'], '/repo');
     const lane = buildLaneInvocation(cargoInvocation, '/repo');
     expect(lane.command).toBe('bash');
     expect(lane.args[0]).toBe(path.join('/repo', 'scripts', 'cargo-lane.sh'));
     expect(lane.args.slice(1)).toEqual(cargoInvocation.args);
     expect(lane.args).not.toContain('--target-dir=undefined');
+
+    const releaseInvocation = buildCargoInvocation('release', ['build', '--release'], '/repo');
+    const heavyLane = buildLaneInvocation(releaseInvocation, '/repo', { heavy: true });
+    expect(heavyLane.args[0]).toBe(path.join('/repo', 'scripts', 'cargo-lane.sh'));
+    expect(heavyLane.args[1]).toBe('--heavy');
+    expect(heavyLane.args.slice(2)).toEqual(releaseInvocation.args);
   });
 
   it('lane 启用判定：预算缺失/显式关闭/win32 默认都不上 lane', () => {
