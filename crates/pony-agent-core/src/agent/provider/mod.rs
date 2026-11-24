@@ -1757,10 +1757,18 @@ impl ProviderManager {
             ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
                 // 流式断流/超时等网络瞬态错误允许退避重试；仅在用户显式取消时提前放弃。
                 let on_delta_cell = std::cell::RefCell::new(on_delta);
+                // PA-174 F1 的**流式对偶**（B1795488338107）：与同步 1:1 臂同构——构造器在
+                // **每次尝试内**把「assistant + tool」写回 `accumulated_messages`
+                // （`openai_messages_with_tool_result`）。若重试沿用上次写回结果作 base，
+                // 每次尝试都会在转录尾部再追加一遍 ⇒ 2N 条重复往返、请求体积几何膨胀
+                // （上游按重复内容计费，边缘侧还会因请求体过大/高频重发直接 RST）。
+                // 故每次尝试前重置为进入本入口时的 pristine 快照：成功 = base + 恰好 1 次追加。
+                let base_messages = accumulated_messages.clone();
                 let stream_result = retry_provider_followup_stream_timeout_with_policy(
                     "followup_stream",
                     &self.policy,
                     || {
+                        accumulated_messages.clone_from(&base_messages);
                         let mut delta_sink = on_delta_cell.borrow_mut();
                         match self.config.protocol {
                             ProviderProtocol::OpenAiResponses => self
@@ -5786,6 +5794,9 @@ where
     let mut slept_ms = 0_u64;
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let mut last_failure: Option<String> = None;
+    // B1795488338167：上一轮从错误文本解析出的上游恢复窗口（毫秒）。`Some` ⇒ 下一次
+    // 退避取「本地曲线 vs 上游窗口」的较大者；`None` ⇒ 逐字沿用本地曲线。
+    let mut pending_window_ms: Option<u64> = None;
     // 2026-11-14：一次「即将重试」的实时通知（宿主装了观察者才有消费者，否则 no-op）。
     let retry_notify = crate::agent::retry::RetryNotifier::new(label, scope_label);
 
@@ -5798,7 +5809,18 @@ where
                 let outcome = report(&budget, attempts_total, slept_ms, rl_active);
                 return (Err(terminal), outcome);
             }
-            let delay = compute_delay(attempt, &active_config, 0.5);
+            // B1795488338167：上游声明的恢复窗口**抬高**本轮退避（曲线仍是下界，无窗口时
+            // 逐字等于既有调度）。此前循环只按 `compute_delay` 自算，`decide` 里消费的窗口
+            // 根本没有出口——上游说 90s 后恢复，仍按 0.5/1/2/4s 短退避硬撞。
+            let curve_delay = compute_delay(attempt, &active_config, 0.5);
+            let delay = match pending_window_ms.take() {
+                Some(window_ms) => Duration::from_millis(
+                    u64::try_from(curve_delay.as_millis())
+                        .unwrap_or(u64::MAX)
+                        .max(window_ms),
+                ),
+                None => curve_delay,
+            };
             if let Err(cancelled_err) = sleeper.sleep(delay, &cancelled) {
                 let _ = cancelled_err;
                 let outcome = report(&budget, attempts_total, slept_ms, rl_active);
@@ -5857,6 +5879,33 @@ where
                     && failure.is_retryable()
                     && is_rate_limit_error(&err)
                     && !hint_blocking;
+                // B1795488338167：上游声明的恢复窗口（`Retry-After` 结构化后缀的唯一解析点
+                // 已在 HTTP 出口写好；这里是**调度侧**唯一消费点）。窗口只对「可重试且
+                // 非 hint 阻断」的失败生效——不可重试错误本就走 Abort，hint 阻断时也
+                // 不该再等。
+                let retry_after = if failure.is_retryable() && !hint_blocking {
+                    crate::agent::retry::retry_after_from_error(&err)
+                } else {
+                    None
+                };
+                pending_window_ms = retry_after
+                    .as_ref()
+                    .and_then(crate::agent::retry::RetryAfter::window_ms)
+                    .filter(|window| *window > 0)
+                    .map(|window| window.min(crate::agent::retry::RETRY_AFTER_WINDOW_MAX_MS));
+                if let Some(window) = pending_window_ms {
+                    // 窗口超剩余预算 ⇒ 等不到，显式快速失败（由 provider 冷却/换手接管），
+                    // 不再按短退避把同一次失败重复 4 遍。
+                    let remaining = budget.total_budget_ms.saturating_sub(budget.elapsed_ms);
+                    if window > remaining {
+                        provider_log(format!(
+                            "{label}:attempt={attempts_total} upstream_retry_window={window}ms \
+                             exceeds_remaining_budget={remaining}ms scope={scope:?} abort"
+                        ));
+                        let outcome = report(&budget, attempts_total, slept_ms, rl_active);
+                        return (Err(last_error), outcome);
+                    }
+                }
 
                 if use_rate_limit && !rl_active {
                     // 切换 RL 配置（一次性）：重建 budget 并结转 elapsed_ms（时间
@@ -5871,8 +5920,13 @@ where
                     budget = carried;
                     attempt = 1;
                     let rl_policy = ProviderRetryPolicy::new(active_config).with_mode(mode);
-                    let decision =
-                        rl_policy.decide(&failure, &budget, attempt, None, StreamState::NoDelta);
+                    let decision = rl_policy.decide(
+                        &failure,
+                        &budget,
+                        attempt,
+                        retry_after.as_ref(),
+                        StreamState::NoDelta,
+                    );
                     provider_log(format!(
                         "{label}:attempt={attempts_total} failed class={failure:?} \
                          decision={decision:?} scope={scope:?} switch=rate_limit"
@@ -5890,8 +5944,13 @@ where
                 }
 
                 let active_policy = ProviderRetryPolicy::new(active_config).with_mode(mode);
-                let decision =
-                    active_policy.decide(&failure, &budget, attempt, None, StreamState::NoDelta);
+                let decision = active_policy.decide(
+                    &failure,
+                    &budget,
+                    attempt,
+                    retry_after.as_ref(),
+                    StreamState::NoDelta,
+                );
                 provider_log(format!(
                     "{}:attempt={}/{} failed class={:?} decision={:?} scope={:?}",
                     label,
