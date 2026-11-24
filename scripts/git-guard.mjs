@@ -30,16 +30,24 @@ const BLOCKED_PATH_PATTERNS = [
   /^src-tauri\/target-codex-[^/]+(?:\/|$)/,
   /^src-tauri\/target-test[^/]*(?:\/|$)/,
   /^src-tauri\/target-check-tests[^/]*(?:\/|$)/,
+  /^src-tauri\/target-perf(?:\/|$)/,
   /^target(?:\/|$)/,
   /^target-codex-[^/]+(?:\/|$)/,
   /^target-check[^/]*(?:\/|$)/,
   /^target-test[^/]*(?:\/|$)/,
+  /^target-perf(?:\/|$)/,
+  /^target-core-test(?:\/|$)/,
   /^coverage(?:\/|$)/,
   /^dist(?:\/|$)/,
   /^outputs(?:\/|$)/,
   /^playwright-report(?:\/|$)/,
   /^test-results(?:\/|$)/,
   /^tmp(?:\/|$)/,
+  /^\.scratch(?:\/|$)/,
+  /^\.?venv(?:\/|$)/,
+  /^node_modules(?:\/|$)/,
+  /^backlog\/\.locks(?:\/|$)/,
+  /^backlog\/\.state(?:\/|$)/,
   /^attachments(?:\/|$)/,
   /^sessions(?:\/|$)/
 ];
@@ -65,6 +73,7 @@ const COMMIT_TYPES = [
 
 function git(args, opts = {}) {
   return execFileSync("git", args, {
+    cwd: ROOT,
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
     ...opts
@@ -73,7 +82,10 @@ function git(args, opts = {}) {
 
 function repoRoot() {
   try {
-    return git(["rev-parse", "--show-toplevel"]).trim();
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"]
+    }).trim();
   } catch {
     return process.cwd();
   }
@@ -96,19 +108,35 @@ function stagedPaths() {
   }
 }
 
-function hasExactSingleTrailingNewline(absPath) {
-  const ext = path.extname(absPath).toLowerCase();
-  if (!TEXT_EXTENSIONS.has(ext)) return true;
-  let buf;
-  try {
-    buf = fs.readFileSync(absPath);
-  } catch {
-    return true;
-  }
-  if (buf.length === 0) return true;
+function hasExactSingleTrailingNewlineBuffer(buf) {
+  if (!buf || buf.length === 0) return true;
   if (buf[buf.length - 1] !== 0x0a) return false;
   if (buf.length >= 2 && buf[buf.length - 2] === 0x0a) return false;
   return true;
+}
+
+function readStagedEntry(relPosix) {
+  try {
+    const row = git(["ls-files", "-s", "--", relPosix]).trim();
+    if (!row) return null;
+    const match = row.match(/^(\d+)\s+([0-9a-f]+)\s+\d+\t/);
+    if (!match) return null;
+    const [, mode, oid] = match;
+    // 跳过符号链接（120000）与子模块 gitlink（160000）
+    if (mode === "120000" || mode === "160000") return { skip: true };
+    const size = Number(git(["cat-file", "-s", oid]).trim());
+    return { skip: false, oid, size: Number.isFinite(size) ? size : 0 };
+  } catch {
+    return null;
+  }
+}
+
+function readStagedBlob(oid) {
+  return execFileSync("git", ["cat-file", "blob", oid], {
+    cwd: ROOT,
+    stdio: ["pipe", "pipe", "pipe"],
+    maxBuffer: SIZE_LIMIT_BYTES + 1024
+  });
 }
 
 function runSecretsScanner(flag) {
@@ -123,50 +151,9 @@ function runSecretsScanner(flag) {
   }
 }
 
-function maybeAutoBump(paths) {
-  const bumpScript = path.join(ROOT, "scripts", "bump-version.ps1");
-  if (!fs.existsSync(bumpScript)) return;
-  const touchedCore = paths.some((p) => p.startsWith("crates/pony-agent-core/"));
-  const touchedTauri = paths.some((p) => p.startsWith("src-tauri/") || p.startsWith("src/"));
-  if (!touchedCore && !touchedTauri) return;
-
-  // 版本 bump 依赖 bump-version.ps1（PowerShell）。Linux/macOS 无 pwsh 时明确提示跳过，
-  // 而不是静默——静默跳过正是本轮要消灭的失败模式。
-  const pwsh = which("pwsh");
-  if (!pwsh) {
-    console.log(
-      "[pony-agent] NOTE: 未检测到 pwsh，跳过版本 auto-bump（提交层版本 bump 仅 Windows 侧生效）。"
-    );
-    return;
-  }
-  console.log("[pony-agent] Version auto-bump: detecting changed components...");
-  try {
-    execFileSync(pwsh, ["-NoProfile", "-File", bumpScript, "-AutoDetect", "-Stage"], {
-      stdio: "inherit",
-      cwd: ROOT
-    });
-  } catch (err) {
-    console.warn(`[pony-agent] Warning: version bump exited with code ${err.status ?? "?"}`);
-  }
-}
-
-function which(cmd) {
-  const dirs = (process.env.PATH || "").split(path.delimiter);
-  const exts = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
-  for (const dir of dirs) {
-    if (!dir) continue;
-    for (const ext of exts) {
-      const candidate = path.join(dir, cmd + ext);
-      try {
-        fs.accessSync(candidate, fs.constants.X_OK);
-        return candidate;
-      } catch {
-        /* keep looking */
-      }
-    }
-  }
-  return null;
-}
+// 注：版本 auto-bump（原 maybeAutoBump）已按 ADR 2026-11-24-git-flow-guard-hardening 移除：
+// 此前仅在 Windows（存在 pwsh）触发，导致双平台行为分裂且并发会话提交频繁制造四处同步版本文件冲突；
+// 现统一收敛在发版分支走 `npm run release` 一次完成（或手工 `npm run version:*`）。
 
 function guardPreCommit() {
   if (!runSecretsScanner("--staged")) return 1;
@@ -189,24 +176,26 @@ function guardPreCommit() {
       continue;
     }
 
-    const abs = path.join(ROOT, normalized);
-    let size = 0;
-    try {
-      const st = fs.statSync(abs);
-      if (!st.isFile()) continue;
-      size = st.size;
-    } catch {
-      continue;
-    }
+    // 校验暂存区实际将提交的 blob（而非工作区盘上可能已改动/未暂存的副本）
+    const entry = readStagedEntry(normalized);
+    if (!entry) continue;
+    if (entry.skip) continue;
 
-    if (size > SIZE_LIMIT_BYTES) {
-      const mb = (size / 1024 / 1024).toFixed(2);
+    if (entry.size > SIZE_LIMIT_BYTES) {
+      const mb = (entry.size / 1024 / 1024).toFixed(2);
       violations.push(`禁止提交超过 20MB 的文件: ${normalized} (${mb}MB)`);
       continue;
     }
 
-    if (!hasExactSingleTrailingNewline(abs)) {
-      violations.push(`文件必须以恰好一个换行符结尾: ${normalized}`);
+    if (TEXT_EXTENSIONS.has(ext)) {
+      try {
+        const buf = readStagedBlob(entry.oid);
+        if (!hasExactSingleTrailingNewlineBuffer(buf)) {
+          violations.push(`文件必须以恰好一个换行符结尾: ${normalized}`);
+        }
+      } catch {
+        // 超过 maxBuffer 已在上方拦截；其他读取异常不静默放大
+      }
     }
   }
 
@@ -223,7 +212,6 @@ function guardPreCommit() {
     return 1;
   }
 
-  maybeAutoBump(paths);
   return 0;
 }
 
@@ -240,8 +228,8 @@ function readPushRefs() {
     const parts = line.trim().split(/\s+/);
     if (parts.length !== 4) continue;
     const [localRef, localSha, remoteRef, remoteSha] = parts;
-    if (remoteRef === "(delete)" || /^0+$/.test(localSha)) continue;
-    rows.push({ localRef, localSha, remoteRef, remoteSha });
+    const isDelete = remoteRef === "(delete)" || localRef === "(delete)" || /^0+$/.test(localSha);
+    rows.push({ localRef, localSha, remoteRef, remoteSha, isDelete });
   }
   return rows;
 }
@@ -276,7 +264,17 @@ function guardPrePush() {
   const violations = [];
   const allowMainPush = process.env[ALLOW_PROTECTED_PUSH_ENV] === "1";
 
-  for (const { localRef, localSha, remoteRef, remoteSha } of refs) {
+  for (const { localSha, remoteRef, remoteSha, isDelete } of refs) {
+    if (isDelete) {
+      if (remoteRef === `refs/heads/${PROTECTED_BRANCH}` && !allowMainPush) {
+        violations.push(`禁止删除受保护分支 ${PROTECTED_BRANCH}。`);
+      } else if (remoteRef.startsWith("refs/tags/")) {
+        const tagName = remoteRef.replace(/^refs\/tags\//, "");
+        violations.push(`拒绝删除远端 tag: ${tagName}（已发布 tag 属不可变发布历史）。`);
+      }
+      continue;
+    }
+
     // 0) tag 推送：发版流程（`npm run release:push` → `git push origin v<version>`）就是推 tag，
     //    分支命名纪律（<类型>/<主题>）对它不适用——此前这里把 `refs/tags/v0.1.201` 当分支名判红，
     //    导致「Linux 上 tag 永远推不出去、发版断裂」。tag 只保留一条硬约束：不许改写远端已有 tag。

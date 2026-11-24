@@ -32,7 +32,7 @@
    - 桌面打开外部链接统一调用 `src/lib/open-external-url.ts`，Rust 后端强制执行 HTTPS 协议与严格 host 白名单（真值源：`src-tauri/src/platform.rs` 的 `ALLOWED_OPEN_HOSTS`，当前四项：`github.com`, `api.github.com`, `exa.ai`, `s3.local.ponyjob.top`），Windows 平台使用 `ShellExecuteW` 唤起默认浏览器，严禁使用命令拼接。白名单增删必须与本条文档同提交更新。
 3. **版本四处同步契约**：
    - `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`.version.json` 必须保持严格同步。
-   - 任何涉及版本的提交由 `scripts/check-version-sync.ps1` 校验。
+   - 任何涉及版本的提交由 `npm run version:check`（真源 `scripts/check-version-sync.mjs`，`scripts/check-version-sync.ps1` 为转派薄壳）校验。
 
 ---
 
@@ -58,7 +58,7 @@
 3. **`main` 只能经 PR 前进**：推特性分支 → 开 PR → CI `verify` 全绿 → **人工点 Merge**。本地 `pre-push`（`scripts/git-guard.mjs`）与远端 ruleset 双重拦截直推与历史改写；灾备确需直推时显式 `PONY_GUARD_ALLOW_MAIN_PUSH=1` 并在提交信息说明理由。
 4. **发版不改写主干**：`npm run release`（本地 bump + commit + tag）→ 走 PR 合并 → `npm run release:push`（只推 tag 触发发布）。普通 PR 用 **Squash**，发版 PR（`chore/release-v*`）用 **Merge commit**，否则 tag 会指向不在 `main` 历史上的提交。
 
-配套门禁：`npm run git:guard:selftest`（本地守卫正负样本自检，已接入 `npm run verify` 与 CI governance）、`gh api repos/lanhui100/pony-agent/branches/main/protection`（远端保护在册，非 404）。共享文件（四处同步版本文件）合并前须确认无并发写入；账本 v3 起按会话/发布面批次**各写各的** `backlog/log/<批次>.jsonl`（合并零冲突，不要再改他人的批次文件）；并发场景下版本 bump 收敛到发版 PR 一次完成。
+配套门禁：`npm run git:guard:selftest`（本地守卫正负样本自检，已接入 `npm run verify` 与 CI governance）、`npm run git:prune`（Squash 合并后的孤儿 worktree 安全清理巡检，`--apply` 执行删除）、`gh api repos/lanhui100/pony-agent/rules/branches/main`（远端 Repository Ruleset 在册且返回规则数组；注意旧 `branches/main/protection` 接口为 404）。共享文件（四处同步版本文件）合并前须确认无并发写入；账本 v3 起按会话/发布面批次**各写各的** `backlog/log/<批次>.jsonl`（合并零冲突，不要再改他人的批次文件）；并发场景下版本 bump 收敛到发版 PR（`npm run release`）一次完成。
 
 <!-- BEGIN constitution -->
 

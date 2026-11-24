@@ -35,6 +35,7 @@ jobs:
           npm run size:check
           npm run portable:ps1
           npm run portable:ps1:selftest
+          npm run git:prune:selftest
           npm run release:push:selftest
           npm run artifacts:spec
           bash scripts/cargo-lane.spec.sh

@@ -222,7 +222,8 @@ function ruleA(points, files) {
         if (file === point.path) continue; // 收口点自身是唯一合法实现
         if (isExempt(file)) continue;
         const abs = path.join(repoRoot, file);
-        if (!fs.existsSync(abs)) continue;
+        const stat = fs.statSync(abs, { throwIfNoEntry: false });
+        if (!stat || !stat.isFile()) continue;
         const content = fs.readFileSync(abs, "utf-8");
         content.split(/\r?\n/).forEach((line, idx) => {
           if (!regex.test(line)) return;

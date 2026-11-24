@@ -328,6 +328,7 @@ function applyEvent(state, event, batch) {
       row.leased_at = row.leased_at ?? at;
       row.heartbeat_at = at;
       row.updated_at = at;
+      row._start_batch = batch.batchId;
       break;
     }
     case 'release': {
@@ -603,6 +604,7 @@ export function leaseConsistency(paths, rows) {
   const problems = [];
   const notes = [];
   const tracking = isLeaseTrackingActive(paths);
+  const currentBatch = readCurrentBatchId(paths);
   for (const row of rows) {
     const lease = readLease(paths, row.id);
     if (row.status !== 'in_progress') {
@@ -618,7 +620,11 @@ export function leaseConsistency(paths, rows) {
       continue;
     }
     if (tracking) {
-      problems.push(`${row.id} 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
+      if (currentBatch && row._start_batch && row._start_batch !== currentBatch) {
+        notes.push(`${row.id} 由其他批次 (${row._start_batch}) 在其工作区启动，当前工作区无本地租约，跳过阻断`);
+      } else {
+        problems.push(`${row.id} 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
+      }
     } else {
       notes.push(`${row.id} in_progress 无本地租约目录（干净克隆/CI 常态：租约不入仓，跳过锁文件校验）`);
     }

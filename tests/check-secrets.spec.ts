@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import {
   checkBlockedFilename,
   isSafeFilename,
   SECRET_RULES,
+  resolvePrePushRange,
   runChecks
 } from "../scripts/check-secrets.mjs";
 
@@ -768,6 +770,66 @@ MIIEowIBAAKCAQEA0Y1+xyz...
         if (found.length > 0) offenders.push(`${entry.name}:${found[0].line}`);
       }
       expect(offenders).toEqual([]);
+    });
+  });
+
+  describe("pre-push 新分支无 upstream 回归（修复仅对比 HEAD 漏扫未推提交）", () => {
+    let tempRoot = "";
+
+    beforeAll(() => {
+      tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "secrets-prepush-"));
+      const run = (args: string[], cwd: string) =>
+        execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+      const originDir = path.join(tempRoot, "origin.git");
+      const workDir = path.join(tempRoot, "repo");
+      fs.mkdirSync(originDir, { recursive: true });
+      run(["init", "--bare"], originDir);
+      run(["clone", originDir, workDir], tempRoot);
+      run(["config", "user.email", "spec@example.com"], workDir);
+      run(["config", "user.name", "spec"], workDir);
+      run(["config", "commit.gpgsign", "false"], workDir);
+      run(["checkout", "-B", "main"], workDir);
+      fs.writeFileSync(path.join(workDir, "README.md"), "init\n", "utf8");
+      run(["add", "README.md"], workDir);
+      run(["commit", "-m", "chore: init"], workDir);
+      run(["push", "-u", "origin", "main"], workDir);
+
+      // 切出无 upstream 的新分支（显式 --no-track），并在新 commit 中写入真实形态密钥（工作区干净）
+      run(["checkout", "-b", "feat/new-leak", "--no-track", "origin/main"], workDir);
+      const realLikeToken = "sk-proj-abcde1234567890abcdef1234567890";
+      fs.writeFileSync(path.join(workDir, "leak.ts"), `export const k = "${realLikeToken}";\n`, "utf8");
+      run(["add", "leak.ts"], workDir);
+      run(["commit", "-m", "feat: add leak"], workDir);
+
+      // 再建一个干净新分支（无 upstream，也无敏感信息）
+      run(["checkout", "-b", "feat/clean-branch", "--no-track", "origin/main"], workDir);
+      fs.writeFileSync(path.join(workDir, "ok.ts"), "export const ok = 1;\n", "utf8");
+      run(["add", "ok.ts"], workDir);
+      run(["commit", "-m", "feat: clean"], workDir);
+    });
+
+    afterAll(() => {
+      if (tempRoot) fs.rmSync(tempRoot, { recursive: true, force: true });
+    });
+
+    it("无 upstream 新分支应回退到 merge-base(origin/main) 并捕获已提交未推送的密钥", () => {
+      const workDir = path.join(tempRoot, "repo");
+      execFileSync("git", ["checkout", "feat/new-leak"], { cwd: workDir, stdio: "ignore" });
+      const range = resolvePrePushRange(workDir);
+      expect(range).toMatch(/^[0-9a-f]{40}\.\.HEAD$/);
+
+      const hits = runChecks({ mode: "pre-push", cwd: workDir });
+      expect(hits.length).toBe(1);
+      expect(hits[0].filename).toBe("leak.ts");
+      expect(hits[0].rule).toContain("LLM API Token");
+    });
+
+    it("干净新分支无 upstream 时应返回 0 违规", () => {
+      const workDir = path.join(tempRoot, "repo");
+      execFileSync("git", ["checkout", "feat/clean-branch"], { cwd: workDir, stdio: "ignore" });
+      const hits = runChecks({ mode: "pre-push", cwd: workDir });
+      expect(hits).toEqual([]);
     });
   });
 });

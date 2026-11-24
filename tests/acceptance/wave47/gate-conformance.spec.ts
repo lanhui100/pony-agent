@@ -141,6 +141,20 @@ describe.skipIf(!skillAvailable)("wave47 双引擎一致性（gate.mjs vs audit-
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("C5: 未跟踪目录符号链接不触发 EISDIR → 两引擎均放行（exit 0）", () => {
+    const dir = makeFixture();
+    const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), "wave47-symlink-target-"));
+    try {
+      fs.symlinkSync(targetDir, path.join(dir, "node_modules"));
+      const { authoritative, repoGate } = runBoth(dir);
+      expect(authoritative.code).toBe(0);
+      expect(repoGate.code).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**
@@ -183,29 +197,37 @@ describe("wave47 D1 声明批准语义（仓库内引擎）", () => {
     }
   }
 
-  it("D1-a: 唯一一次声明改动未批准 → 拦截", () => {
-    const dir = fixtureWithBase();
-    try {
-      commitDecl(dir, "docs: unapproved");
-      expect(runGate(dir).code).toBe(2);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  // B248：各用例均含多次真实 git 子进程；Windows runner 首次/高负载下 git 调用可能 >5s（CI 实测 D1-b/D1-c 超时）。
+  // 显式统一给 30s 预算（不改变断言口径，只放宽执行时限）。
+  it(
+    "D1-a: 唯一一次声明改动未批准 → 拦截",
+    () => {
+      const dir = fixtureWithBase();
+      try {
+        commitDecl(dir, "docs: unapproved");
+        expect(runGate(dir).code).toBe(2);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
-  it("D1-b: 早期历史改动未批准、最后一次已批准 → 放行（不因历史全红）", () => {
-    const dir = fixtureWithBase();
-    try {
-      commitDecl(dir, "docs: legacy unapproved");
-      commitDecl(dir, "docs: approved [decl-change-approved]");
-      expect(runGate(dir).code).toBe(0);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it(
+    "D1-b: 早期历史改动未批准、最后一次已批准 → 放行（不因历史全红）",
+    () => {
+      const dir = fixtureWithBase();
+      try {
+        commitDecl(dir, "docs: legacy unapproved");
+        commitDecl(dir, "docs: approved [decl-change-approved]");
+        expect(runGate(dir).code).toBe(0);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
-  // B248：该用例含多次真实 git 子进程；Windows runner 首次 git 调用可能 >5s（CI 实测超时）。
-  // 显式给 30s 预算（不改变断言口径，只放宽执行时限）。
   it(
     "D1-c: 先批准再追加未批准改动 → 拦截（不可搭便车）",
     () => {
