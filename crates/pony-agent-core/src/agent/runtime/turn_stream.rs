@@ -1778,7 +1778,7 @@ impl AgentRuntime {
         let ask_injection = injection_lease
             .as_ref()
             .map(|lease| lease.injection.clone());
-        let prepared = match self.prepare_turn(&input, true, ask_injection.as_ref()) {
+        let mut prepared = match self.prepare_turn(&input, true, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
                 // wave-64 R1（BLOCKING，terminal-once）：`prepare_turn` 内含 auto-compaction 等
@@ -1811,7 +1811,7 @@ impl AgentRuntime {
             prepared.provider.model(),
             preview_text(&prepared.user_message, 120)
         ));
-        let prepared_provider_meta = provider_event_meta(&prepared.provider);
+        let mut prepared_provider_meta = provider_event_meta(&prepared.provider);
         let start_trace_steps = self.telemetry_builder.start_trace_steps();
         self.mark_stream_calling_model_checkpoint(
             control,
@@ -2017,7 +2017,9 @@ impl AgentRuntime {
         let initial_decision_retry = Rc::new(Cell::new(ProviderCallRetryMeta::single_attempt()));
         let initial_decision_retry_for_stream = Rc::clone(&initial_decision_retry);
         let initial_decision_retry_for_sync = Rc::clone(&initial_decision_retry);
-        let stream_initial_decision = || -> Result<
+        let stream_initial_decision = |current_prepared: &PreparedTurn,
+                                       current_provider_meta: &ProviderEventMeta|
+         -> Result<
             (
                 ProviderDecision,
                 Option<u64>,
@@ -2038,11 +2040,11 @@ impl AgentRuntime {
                 Some("calling_model"),
                 None,
                 None,
-                Some(&prepared_provider_meta),
+                Some(current_provider_meta),
                 None,
                 None,
                 None,
-                Some(prepared.build_context_observation.clone()),
+                Some(current_prepared.build_context_observation.clone()),
                 None,
                 None,
                 None,
@@ -2091,9 +2093,9 @@ impl AgentRuntime {
             );
             let streamed_assistant_text_for_delta = Rc::clone(&streamed_assistant_text);
             let decision = provider_decision_stream_guarded_with_mode(
-                &prepared.provider,
-                &prepared.planning_request,
-                &prepared.tools,
+                &current_prepared.provider,
+                &current_prepared.planning_request,
+                &current_prepared.tools,
                 &stream_guard,
                 move |delta| {
                     let flush_delta = |text: Option<String>, reasoning_content: Option<String>| {
@@ -2259,7 +2261,9 @@ impl AgentRuntime {
             ))
         };
         let pending_model_call_fail_turn_for_sync = Rc::clone(&pending_model_call_fail_turn);
-        let decide_sync = || -> Result<
+        let decide_sync = |current_prepared: &PreparedTurn,
+                           current_provider_meta: &ProviderEventMeta|
+         -> Result<
             (
                 ProviderDecision,
                 Option<u64>,
@@ -2280,11 +2284,11 @@ impl AgentRuntime {
                 Some("calling_model"),
                 None,
                 None,
-                Some(&prepared_provider_meta),
+                Some(current_provider_meta),
                 None,
                 None,
                 None,
-                Some(prepared.build_context_observation.clone()),
+                Some(current_prepared.build_context_observation.clone()),
                 None,
                 None,
                 None,
@@ -2310,9 +2314,9 @@ impl AgentRuntime {
             // （429/525 1.9–8.0s + 退避）当成生成时间，速度被系统性压低。
             let started_at = crate::agent::retry::begin_provider_attempt_window();
             let decision = provider_decision_with_mode(
-                &prepared.provider,
-                &prepared.planning_request,
-                &prepared.tools,
+                &current_prepared.provider,
+                &current_prepared.planning_request,
+                &current_prepared.tools,
                 crate::agent::turn_flow::LlmRequestMode::Initial,
             )?;
             let pure_call_window =
@@ -2328,7 +2332,9 @@ impl AgentRuntime {
                 ProviderLatencyKind::BufferedResponse,
             ))
         };
-        let planned = (|| -> Result<
+        let run_initial_once = |current_prepared: &PreparedTurn,
+                                current_provider_meta: &ProviderEventMeta|
+         -> Result<
             (
                 ProviderDecision,
                 Option<u64>,
@@ -2338,103 +2344,68 @@ impl AgentRuntime {
             ),
             String,
         > {
-            if prepared.provider.requires_provider_native_tool_flow() {
-                // 与 plan_turn 一致：native tool flow 下必须由 provider 生成决策，
-                // 保证 follow-up 回传的 assistant 消息带完整 reasoning_content。
-                if supports_true_streaming_decision {
-                    stream_initial_decision().or_else(|error| {
-                        // wave-64 R2：用户已请求停止 ⇒ **不得**再降级为同步决策（那会把取消
-                        // 吞成不可中断的阻塞调用，或让后续错误被误判为真实失败）。直接按
-                        // 取消收口并返回（取消码本身不参与本判定，故非取消错误的 fallback
-                        // 语义逐字不变 —— 契约 §2 R2 / C4）。
-                        if self.should_cancel_turn(control, &turn_id) {
-                            // wave-64 A4：取消收口前留一条**结构化**日志（含 turn_id 与原始 error），
-                            // 避免"有停止位即取消"把根因彻底丢弃（不得新增 eprintln 面）。
-                            super::turn_control::log_stop_short_circuit(
-                                &turn_id,
-                                &error,
-                                "native_tool_flow",
-                            );
-                            self.cancel_stream_turn_for_stop(
-                                sink,
-                                control,
-                                &turn_id,
-                                &input,
-                                &prepared.display_message,
-                                &prepared_provider_meta,
-                                self.telemetry_builder.failed_trace_before_tool(),
-                                Vec::new(),
-                                None,
-                                &turn_started_at,
-                                Some(prepared.build_context_observation.clone()),
-                                streamed_assistant_text.borrow().as_str(),
-                                Vec::new());
-                            return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
-                        }
-                        // 仅诊断：不改变控制流（失败仍然 fallback 到同步决策），
-                        // 只是不再像过去的 `|_|` 那样把根因吞掉。Windows CI 上真实
-                        // 原因（连接级 `client error (SendRequest)`）曾被完全掩盖，
-                        // 只在下游留下 "expected value at line 1 column 1"。
-                        eprintln!(
-                            "[pony-agent] 流式决策失败，fallback 到同步决策 \
-                             (scope=native_tool_flow): session={} turn={turn_id_for_stream} \
-                             error={error}",
-                            stream_session_id.as_deref().unwrap_or("-"),
-                        );
-                        decide_sync()
-                    })
-                } else {
-                    decide_sync()
+            let stream_with_sync_fallback = |scope: &str| {
+                if !supports_true_streaming_decision {
+                    return decide_sync(current_prepared, current_provider_meta);
                 }
+                stream_initial_decision(current_prepared, current_provider_meta).or_else(|error| {
+                    if self.should_cancel_turn(control, &turn_id) {
+                        super::turn_control::log_stop_short_circuit(&turn_id, &error, scope);
+                        self.cancel_stream_turn_for_stop(
+                            sink,
+                            control,
+                            &turn_id,
+                            &input,
+                            &current_prepared.display_message,
+                            current_provider_meta,
+                            self.telemetry_builder.failed_trace_before_tool(),
+                            Vec::new(),
+                            None,
+                            &turn_started_at,
+                            Some(current_prepared.build_context_observation.clone()),
+                            streamed_assistant_text.borrow().as_str(),
+                            Vec::new(),
+                        );
+                        return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
+                    }
+                    if super::overflow_rescue::is_context_overflow_error(&error) {
+                        return Err(error);
+                    }
+                    eprintln!(
+                        "[pony-agent] 流式决策失败，fallback 到同步决策 (scope={scope}): session={} turn={turn_id_for_stream} error={error}",
+                        stream_session_id.as_deref().unwrap_or("-"),
+                    );
+                    decide_sync(current_prepared, current_provider_meta)
+                })
+            };
+            if current_prepared.provider.requires_provider_native_tool_flow() {
+                stream_with_sync_fallback("native_tool_flow")
             } else {
-                match preflight_decision {
+                match preflight_decision.clone() {
                     Some(decision) => {
                         Ok((decision, None, None, None, ProviderLatencyKind::Unknown))
                     }
-                    None => {
-                        if supports_true_streaming_decision {
-                            stream_initial_decision().or_else(|error| {
-                                // wave-64 R2：同 native_tool_flow 分支 —— 用户已请求停止时
-                                // 不再 fallback，直接按取消收口（见上方判据说明）。
-                                if self.should_cancel_turn(control, &turn_id) {
-                                    // wave-64 A4：同 native_tool_flow 分支的结构化留痕。
-                                    super::turn_control::log_stop_short_circuit(
-                                        &turn_id,
-                                        &error,
-                                        "no_preflight_decision",
-                                    );
-                                    self.cancel_stream_turn_for_stop(
-                                        sink,
-                                        control,
-                                        &turn_id,
-                                        &input,
-                                        &prepared.display_message,
-                                        &prepared_provider_meta,
-                                        self.telemetry_builder.failed_trace_before_tool(),
-                                        Vec::new(),
-                                        None,
-                                        &turn_started_at,
-                                        Some(prepared.build_context_observation.clone()),
-                                        streamed_assistant_text.borrow().as_str(),
-                                        Vec::new());
-                                    return Err(STREAM_CANCELLED_HANDLED_SENTINEL.to_string());
-                                }
-                                // 同 1855 处：仅记录根因，控制流不变（失败即 fallback）。
-                                eprintln!(
-                                    "[pony-agent] 流式决策失败，fallback 到同步决策 \
-                                     (scope=no_preflight_decision): session={} turn={turn_id_for_stream} \
-                                     error={error}",
-                                    stream_session_id.as_deref().unwrap_or("-"),
-                                );
-                                decide_sync()
-                            })
-                        } else {
-                            decide_sync()
-                        }
-                    }
+                    None => stream_with_sync_fallback("no_preflight_decision"),
                 }
             }
-        })();
+        };
+        let planned = match run_initial_once(&prepared, &prepared_provider_meta) {
+            Err(error)
+                if !self.should_cancel_turn(control, &turn_id)
+                    && super::overflow_rescue::is_context_overflow_error(&error) =>
+            {
+                self.rescue_prepared_after_overflow(
+                    &input,
+                    super::overflow_rescue::EmptyInputMode::RejectEmpty,
+                    ask_injection.as_ref(),
+                    &mut prepared,
+                    &mut prepared_provider_meta,
+                    error,
+                )
+                .and_then(|()| run_initial_once(&prepared, &prepared_provider_meta))
+            }
+            other => other,
+        };
         let (
             mut first_decision,
             initial_decision_duration_ms,

@@ -214,23 +214,69 @@ pub fn split_history_by_tokens(
     history: &[TurnHistoryMessage],
     retain_tokens: usize,
 ) -> (Vec<TurnHistoryMessage>, Vec<TurnHistoryMessage>) {
-    match retained_window_start(history, retain_tokens) {
+    split_history_with_transcript(history, &[], retain_tokens)
+}
+
+/// 将历史与原生转录一起按 **token 预算** 拆分为「可压缩部分」与「保留原始部分」。
+///
+/// 原生工具流会话的主要体积落在 `provider_native_transcript`（工具调用 + 思考链），
+/// 文本 `history` 往往只有数千 token；切分只看 `history` 会让重工具会话长期返回
+/// `history_too_short` 而无法触发压缩。当 `transcript` 非空时，保留最近 `k` 轮的代价
+/// 取 `max(history_tail_tokens, transcript_tail_tokens)`，与 `compact_native_transcript`
+/// 保持同一轮次边界口径。
+pub fn split_history_with_transcript(
+    history: &[TurnHistoryMessage],
+    transcript: &[Value],
+    retain_tokens: usize,
+) -> (Vec<TurnHistoryMessage>, Vec<TurnHistoryMessage>) {
+    match retained_window_start_with_transcript(history, transcript, retain_tokens) {
         Some(index) if index > 0 => (history[..index].to_vec(), history[index..].to_vec()),
         _ => (Vec::new(), history.to_vec()),
     }
 }
 
+/// 估算原生转录末尾 `keep_user_turns` 轮的 token 占用（按 `role == "user"` 切轮）。
+fn transcript_tail_tokens_for_turns(transcript: &[Value], keep_user_turns: usize) -> usize {
+    if transcript.is_empty() || keep_user_turns == 0 {
+        return 0;
+    }
+    let mut seen = 0usize;
+    let mut start = 0usize;
+    for (index, message) in transcript.iter().enumerate().rev() {
+        if message.get("role").and_then(Value::as_str) == Some("user") {
+            seen += 1;
+            if seen == keep_user_turns {
+                start = index;
+                break;
+            }
+        }
+    }
+    if seen < keep_user_turns {
+        start = 0;
+    }
+    estimate_native_transcript_tokens(&transcript[start..])
+}
+
 /// 保留窗口的起始下标（必为 user 消息；`None` 表示无从切分）。
-fn retained_window_start(history: &[TurnHistoryMessage], retain_tokens: usize) -> Option<usize> {
+fn retained_window_start_with_transcript(
+    history: &[TurnHistoryMessage],
+    transcript: &[Value],
+    retain_tokens: usize,
+) -> Option<usize> {
     if history.is_empty() {
         return None;
     }
-    let mut accumulated = 0usize; // 当前候选窗口里「index 之后」的 token 数
+    let mut accumulated_history = 0usize; // 当前候选窗口里「index 之后」的 history token 数
+    let mut user_turns_kept = 0usize;
     let mut best: Option<usize> = None;
     for index in (0..history.len()).rev() {
         let tokens = estimate_turn_message_tokens(&history[index]);
         if history[index].role == "user" {
-            let window_tokens = accumulated + tokens;
+            user_turns_kept += 1;
+            let history_window_tokens = accumulated_history + tokens;
+            let transcript_window_tokens =
+                transcript_tail_tokens_for_turns(transcript, user_turns_kept);
+            let window_tokens = history_window_tokens.max(transcript_window_tokens);
             match best {
                 None => {
                     // 最后一轮：无条件保留整轮（超预算也不切）。
@@ -243,7 +289,7 @@ fn retained_window_start(history: &[TurnHistoryMessage], retain_tokens: usize) -
                 Some(_) => break,
             }
         }
-        accumulated += tokens;
+        accumulated_history += tokens;
     }
     best
 }
@@ -367,7 +413,17 @@ pub fn apply_compression(
     summary_message: TurnHistoryMessage,
     retain_tokens: usize,
 ) -> CompressionResult {
-    let (to_compress, to_keep) = split_history_by_tokens(&history, retain_tokens);
+    apply_compression_with_transcript(history, &[], summary_message, retain_tokens)
+}
+
+/// 与 `split_history_with_transcript` 同源的应用入口：保证计划切分与回写切分使用同一口径。
+pub fn apply_compression_with_transcript(
+    history: Vec<TurnHistoryMessage>,
+    transcript: &[Value],
+    summary_message: TurnHistoryMessage,
+    retain_tokens: usize,
+) -> CompressionResult {
+    let (to_compress, to_keep) = split_history_with_transcript(&history, transcript, retain_tokens);
     let compressed_count = to_compress.len();
     let kept_count = to_keep.len();
     let retained_user_turns = retained_user_turns(&to_keep);
@@ -389,6 +445,86 @@ pub fn apply_compression(
         compressed_count,
         kept_count,
         retained_user_turns,
+    }
+}
+
+/// 溢出自救兜底：在保持「user 锚点 + 已闭合工具往返」前提下，把原生转录压到目标 token 预算内。
+///
+/// 适用场景：当整段上下文仅剩最后一轮（`history_too_short`）或摘要调用自身不可用时，
+/// 先就地修剪超长 tool 输出，再从最近一轮 `user` 锚点之后按完整 `[assistant(tool_calls), tool...]`
+/// 原子单元从旧到新丢弃，保留最近闭合的工具步骤，绝不产生孤儿 `tool` 或缺 `tool_result`。
+pub fn trim_native_transcript_to_token_budget(transcript: &[Value], max_tokens: usize) -> Vec<Value> {
+    if transcript.is_empty() {
+        return Vec::new();
+    }
+    let mut working = transcript.to_vec();
+    crate::agent::tool_pruner::prune_native_messages_in_place(&mut working);
+    if estimate_native_transcript_tokens(&working) <= max_tokens {
+        return working;
+    }
+
+    let anchor_idx = working
+        .iter()
+        .rposition(|msg| msg.get("role").and_then(Value::as_str) == Some("user"));
+    let (anchor, tail) = match anchor_idx {
+        Some(idx) => (Some(working[idx].clone()), &working[idx + 1..]),
+        None => (None, working.as_slice()),
+    };
+
+    // 将 tail 切成协议不可拆分的原子单元（带 tool_calls 的 assistant 必须与后续连续 tool 同进同退）。
+    let mut units: Vec<Vec<Value>> = Vec::new();
+    let mut i = 0usize;
+    while i < tail.len() {
+        let has_tool_calls = tail[i].get("role").and_then(Value::as_str) == Some("assistant")
+            && tail[i]
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+        if has_tool_calls {
+            let mut end = i + 1;
+            while end < tail.len()
+                && tail[end].get("role").and_then(Value::as_str) == Some("tool")
+            {
+                end += 1;
+            }
+            units.push(tail[i..end].to_vec());
+            i = end;
+        } else if tail[i].get("role").and_then(Value::as_str) == Some("tool") {
+            // 孤儿 tool 消息丢弃，不进入自救结果。
+            i += 1;
+        } else {
+            units.push(vec![tail[i].clone()]);
+            i += 1;
+        }
+    }
+
+    let anchor_tokens = anchor
+        .as_ref()
+        .map_or(0, estimate_native_message_tokens);
+    let mut remaining = max_tokens.saturating_sub(anchor_tokens);
+    let mut kept_units: Vec<Vec<Value>> = Vec::new();
+    for unit in units.into_iter().rev() {
+        let unit_tokens = estimate_native_transcript_tokens(&unit);
+        if unit_tokens <= remaining {
+            remaining -= unit_tokens;
+            kept_units.push(unit);
+        } else {
+            break;
+        }
+    }
+    kept_units.reverse();
+
+    let mut result = Vec::new();
+    if let Some(user_msg) = anchor {
+        result.push(user_msg);
+    }
+    for unit in kept_units {
+        result.extend(unit);
+    }
+    if crate::agent::tool_pruner::needs_tool_roundtrip_repair(&result) {
+        crate::agent::tool_pruner::recover_incomplete_tool_roundtrips(&result)
+    } else {
+        result
     }
 }
 
@@ -421,9 +557,14 @@ pub(crate) fn estimate_text_tokens(text: &str) -> usize {
 ///
 /// 家在本模块：压缩阈值与组装预算必须用同一个估算，否则「按 A 口径判定要压缩、
 /// 按 B 口径算完仍超预算」会无限往返压缩。
+///
+/// 除 `content` 外同时计入 `reasoning_content` / `reasoning` / `tool_calls` / `tool_call_id`，
+/// 避免 DeepSeek 等推理+重工具会话因只算正文而系统性低估体积。
 pub(crate) fn estimate_native_message_tokens(message: &Value) -> usize {
+    let overhead = 4;
+    let extra = estimate_native_message_extra_tokens(message);
     if let Some(content) = message.get("content").and_then(Value::as_str) {
-        return 4 + estimate_text_tokens(content);
+        return overhead + estimate_text_tokens(content) + extra;
     }
 
     if let Some(content) = message.get("content").and_then(Value::as_array) {
@@ -431,10 +572,32 @@ pub(crate) fn estimate_native_message_tokens(message: &Value) -> usize {
             .iter()
             .map(estimate_native_content_block_tokens)
             .sum::<usize>();
-        return 4 + content_tokens;
+        return overhead + content_tokens + extra;
     }
 
-    4 + estimate_text_tokens(&message.to_string())
+    overhead + estimate_text_tokens(&message.to_string()) + extra
+}
+
+/// 除 `content` 之外会进请求体的字段（`reasoning_content` / `tool_calls` / `tool_call_id`）。
+///
+/// 只在字段**存在**时计入，故对不含这些字段的历史消息零影响（既有预算断言不变）。
+fn estimate_native_message_extra_tokens(message: &Value) -> usize {
+    let mut extra = 0;
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(text) = message.get(key).and_then(Value::as_str) {
+            extra += estimate_text_tokens(text);
+        }
+    }
+    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+        extra += calls
+            .iter()
+            .map(|call| estimate_text_tokens(&call.to_string()))
+            .sum::<usize>();
+    }
+    if let Some(call_id) = message.get("tool_call_id").and_then(Value::as_str) {
+        extra += estimate_text_tokens(call_id);
+    }
+    extra
 }
 
 /// 多模态内容块：图片按固定价（256 token）计，文本按字符数估。

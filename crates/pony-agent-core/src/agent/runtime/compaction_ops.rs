@@ -9,9 +9,10 @@
 // - **空摘要**（审查 F3）：摘要为空/仅空白一律 `Err`，绝不用空摘要替换历史报成功。
 use super::*;
 use crate::agent::compression::{
-    apply_compression, build_compression_system_prompt, build_summary_prefix, build_summary_suffix,
-    compact_native_transcript, estimate_history_tokens, retain_tokens_for, should_compress_pressure,
-    split_history_by_tokens, wrap_summary_to_message, CompressionConfig, ContextPressure,
+    apply_compression_with_transcript, build_compression_system_prompt, build_summary_prefix,
+    build_summary_suffix, compact_native_transcript, estimate_history_tokens,
+    estimate_native_transcript_tokens, retain_tokens_for, should_compress_pressure,
+    split_history_with_transcript, wrap_summary_to_message, CompressionConfig, ContextPressure,
 };
 use crate::agent::provider::ProviderStreamGuard;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -101,6 +102,12 @@ impl AgentRuntime {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum CompactionMode {
+    CheckThreshold,
+    Forced,
+}
+
 /// 手动压缩的唯一实现（契约 C-1；控制面 `HostControlPlane::compact_session` 由这里进入）。
 ///
 /// 三段式：短读快照 → 无锁摘要 → 短写回写。控制面只在解析 provider 时持 `runtime` 读锁，
@@ -111,20 +118,40 @@ pub(crate) fn compact_session_with_sessions(
     session_id: &str,
     force: bool,
 ) -> Result<ManualCompactionOutcome, String> {
+    let mode = if force {
+        CompactionMode::Forced
+    } else {
+        CompactionMode::CheckThreshold
+    };
+    compact_session_with_retain_override(sessions, provider, session_id, mode, None)
+}
+
+/// 压缩共享实现：支持常规自动/手动压缩（`retain_override = None`）以及溢出自救时的
+/// 收紧保留预算（`retain_override = Some(tokens)`）。
+pub(super) fn compact_session_with_retain_override(
+    sessions: &Arc<RwLock<SessionStore>>,
+    provider: ProviderManager,
+    session_id: &str,
+    mode: CompactionMode,
+    retain_override: Option<usize>,
+) -> Result<ManualCompactionOutcome, String> {
     let config = CompressionConfig::default();
 
     // 1) 短读锁：取**两条记忆载体**（文本历史 + 原生 transcript）的快照后立刻释放。
     let base = read_session_snapshot(sessions, session_id);
     let base_history = base.history.clone();
     let base_transcript = base.provider_native_transcript.clone();
-    let before_tokens = estimate_history_tokens(&base_history);
+    let before_tokens = estimate_history_tokens(&base_history)
+        .max(estimate_native_transcript_tokens(&base_transcript));
     let pressure = ContextPressure::from_layers(&base_history, &base_transcript)
         .with_measured_input_tokens(
             crate::agent::session::last_context_input_tokens(&base).map(|tokens| tokens as usize),
         );
 
     // 2) 非强制模式下未达水位：不改写历史，且**零 LLM 调用**。
-    if !force && !should_compress_pressure(pressure, &provider, &config) {
+    if matches!(mode, CompactionMode::CheckThreshold)
+        && !should_compress_pressure(pressure, &provider, &config)
+    {
         return Ok(ManualCompactionOutcome::untouched(
             "below_threshold",
             before_tokens,
@@ -132,12 +159,14 @@ pub(crate) fn compact_session_with_sessions(
         ));
     }
 
-    // 3) 按 **token 预算**（而非轮数）切分；没有可压缩区间时同样不改写历史
-    //    （也**零 LLM 调用**）。provider 未声明窗口时退回「当前体积 × retain_ratio」——
-    //    手动 `/compact` 在没有窗口元数据时仍必须可压缩，否则该入口对这类 provider 失效。
-    let retain_tokens = retain_tokens_for(&provider, &config)
-        .unwrap_or_else(|| (before_tokens as f64 * config.retain_ratio) as usize);
-    let (to_compress, to_keep) = split_history_by_tokens(&base_history, retain_tokens);
+    // 3) 按 **token 预算**（同时计入 `provider_native_transcript` 体积）切分；没有可压缩区间时
+    //    同样不改写历史（也**零 LLM 调用**）。provider 未声明窗口时退回「当前体积 × retain_ratio」。
+    let retain_tokens = retain_override.unwrap_or_else(|| {
+        retain_tokens_for(&provider, &config)
+            .unwrap_or_else(|| (before_tokens as f64 * config.retain_ratio) as usize)
+    });
+    let (to_compress, to_keep) =
+        split_history_with_transcript(&base_history, &base_transcript, retain_tokens);
     if to_compress.is_empty() {
         return Ok(ManualCompactionOutcome::untouched(
             "history_too_short",
@@ -172,7 +201,12 @@ pub(crate) fn compact_session_with_sessions(
         &current.provider_native_transcript,
         "transcript",
     )?;
-    let result = apply_compression(base_history, summary_message, retain_tokens);
+    let result = apply_compression_with_transcript(
+        base_history,
+        &base_transcript,
+        summary_message,
+        retain_tokens,
+    );
     if result.compressed_count == 0 {
         // 防御：切分结果为空时不得谎报已压缩。
         return Ok(ManualCompactionOutcome::untouched(
@@ -191,7 +225,9 @@ pub(crate) fn compact_session_with_sessions(
     // transcript，只改 history 等于没压缩（下一请求照旧把全部工具往返发上去）。
     let mut new_transcript = compact_native_transcript(&base_transcript, retained_user_turns);
     new_transcript.extend(appended_transcript);
-    let after_tokens = estimate_history_tokens(&new_history);
+    let transcript_after_len = new_transcript.len();
+    let after_tokens =
+        estimate_history_tokens(&new_history).max(estimate_native_transcript_tokens(&new_transcript));
     store.commit_compaction(Some(session_id), new_history, new_transcript, summary_for_log);
     drop(store);
 
@@ -204,7 +240,7 @@ pub(crate) fn compact_session_with_sessions(
         before_tokens,
         after_tokens,
         base_transcript.len(),
-        compact_native_transcript(&base_transcript, retained_user_turns).len(),
+        transcript_after_len,
     ));
 
     Ok(ManualCompactionOutcome {
@@ -221,7 +257,7 @@ pub(crate) fn compact_session_with_sessions(
 ///
 /// 返回整份快照而不是只返回 `history`：压缩必须同时判定/裁剪 `provider_native_transcript`
 /// 与读取上一请求的真实 input token，三者都只在快照上才拿得到。
-fn read_session_snapshot(
+pub(super) fn read_session_snapshot(
     sessions: &Arc<RwLock<SessionStore>>,
     session_id: &str,
 ) -> crate::agent::session::SessionSnapshot {
@@ -325,7 +361,7 @@ fn summary_body(wrapped_content: &str) -> String {
 ///
 /// - 基线未被改写（`current` 与 `base` 逐条相等）⇒ 返回新增尾部，回写时原样保留；
 /// - 基线被改写（分支切换 / 清空 / 重写）⇒ 返回 `Err`，放弃写入而不是覆盖丢数据。
-fn concurrent_suffix<T: PartialEq + Clone>(
+pub(super) fn concurrent_suffix<T: PartialEq + Clone>(
     base: &[T],
     current: &[T],
     label: &str,
