@@ -1,0 +1,36 @@
+#[path = "../support/env_lock.rs"]
+mod env_lock;
+
+mod cost_protocol_parity;
+mod f1_speed_observability;
+mod f2_retry_window_purity;
+mod f3_stream_throttle_isolation;
+mod metrics_snapshot_adversarial;
+mod metrics_snapshot_contract;
+mod observability_reporting_fixes_test;
+mod observability_reporting_wave53_test;
+mod otel_llm_payload_test;
+mod otel_request_transport_test;
+mod otel_resource_env_test;
+mod otel_resource_turn_status_test;
+mod otel_tool_payload_test;
+mod otel_trace_adversarial;
+mod otel_trace_migration_test;
+mod otel_traceparent_test;
+mod otel_turn_failure_reason_test;
+mod otel_user_id_acceptance_test;
+mod ponysentry_credential_gate;
+mod ponysentry_credential_gate_adversarial;
+mod ponysentry_issue_resilience_test;
+mod ponysentry_manual_upload_test;
+mod ponysentry_telemetry_test;
+mod turn_trace_degraded_fields_test;
+mod upload_trace_receipt_test;
+mod wave47_ob2_wire_traceparent;
+mod wave48_otel_export_diagnostics;
+mod wave49_observability_gaps;
+mod wave4_4_acceptance;
+mod wave4_observability_chain_test;
+mod wave54_metric_truth;
+mod wave5_cost_test;
+mod wave6_observability_polish_test;

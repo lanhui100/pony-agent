@@ -365,49 +365,49 @@
       "value": 286
     },
     {
-      "path": "crates/pony-agent-core/tests/acp_delegate_adversarial.rs",
+      "path": "crates/pony-agent-core/tests/acp_suite/acp_delegate_adversarial.rs",
       "kind": "fn-lines",
       "name": "at_03b_concurrent_delegations_do_not_cross_session_events",
       "occurrence": 0,
       "value": 216
     },
     {
-      "path": "crates/pony-agent-core/tests/observability_reporting_fixes_test.rs",
+      "path": "crates/pony-agent-core/tests/observability_suite/observability_reporting_fixes_test.rs",
       "kind": "fn-depth",
       "name": "decode_spans",
       "occurrence": 0,
       "value": 10
     },
     {
-      "path": "crates/pony-agent-core/tests/observability_reporting_wave53_test.rs",
+      "path": "crates/pony-agent-core/tests/observability_suite/observability_reporting_wave53_test.rs",
       "kind": "fn-depth",
       "name": "decode_spans",
       "occurrence": 0,
       "value": 10
     },
     {
-      "path": "crates/pony-agent-core/tests/otel_user_id_acceptance_test.rs",
+      "path": "crates/pony-agent-core/tests/observability_suite/otel_user_id_acceptance_test.rs",
       "kind": "fn-depth",
       "name": "spawn_otlp_sink",
       "occurrence": 0,
       "value": 10
     },
     {
-      "path": "crates/pony-agent-core/tests/wave48_otel_export_diagnostics.rs",
+      "path": "crates/pony-agent-core/tests/observability_suite/wave48_otel_export_diagnostics.rs",
       "kind": "fn-depth",
       "name": "spawn_otlp_sink",
       "occurrence": 0,
       "value": 11
     },
     {
-      "path": "crates/pony-agent-core/tests/wave49_observability_gaps.rs",
+      "path": "crates/pony-agent-core/tests/observability_suite/wave49_observability_gaps.rs",
       "kind": "fn-depth",
       "name": "spawn_otlp_sink",
       "occurrence": 0,
       "value": 11
     },
     {
-      "path": "crates/pony-agent-core/tests/wave54_metric_truth.rs",
+      "path": "crates/pony-agent-core/tests/observability_suite/wave54_metric_truth.rs",
       "kind": "fn-depth",
       "name": "decode_spans",
       "occurrence": 0,
