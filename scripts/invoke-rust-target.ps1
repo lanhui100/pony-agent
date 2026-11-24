@@ -1,4 +1,4 @@
-# invoke-rust-target.ps1 —— 历史 Windows 入口，现已收敛为 **Node 单真源薄壳**。
+﻿# invoke-rust-target.ps1 —— 历史 Windows 入口，现已收敛为 **Node 单真源薄壳**。
 #
 # 为什么删掉原生实现：本文件与 scripts/invoke-rust-target.mjs 是同一套槽位映射 + cargo 调用，
 # 两份实现必然漂移——本轮实测的漂移后果就是「.mjs 已吃并发预算与全局 flock，.ps1 仍在裸调 cargo」
@@ -9,7 +9,7 @@
 
 param(
   [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet("check", "test", "exact-a", "exact-b", "exact-c")]
+  [ValidateSet("check", "test", "release", "exact-a", "exact-b", "exact-c")]
   [string]$Slot,
 
   [Parameter(ValueFromRemainingArguments = $true)]

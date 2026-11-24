@@ -25,9 +25,11 @@ jobs:
         with:
           toolchain: "1.91.1"
           components: clippy
+          cache: false
 
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v0-rust-check
           workspaces: . -> target-check
 
       - name: 生成 pony-agent-core 分册（首建，允许存量）

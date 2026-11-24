@@ -197,10 +197,46 @@ elif [ -n "$ACCEL_SKIP_NOTE" ]; then
   echo "[cargo-lane] 加速通道：$ACCEL_SKIP_NOTE"
 fi
 
+# ── 测试执行期硬超时（防死循环/内存泄漏拖死主机）───────────────────────────
+# 仅在 Cargo 主子命令为 `test` 时注入：避免 `-- test_filter` 或 `build` 被误杀；
+# `timeout` 置于 `flock`/mkdir 锁**内部**，防止等锁排队耗时扣减测试预算。
+# 默认 600s（兼顾全量单测冷链接 + 慢回归）；可用 PONY_TEST_TIMEOUT=0 / none 关闭。
+detect_cargo_subcommand() {
+  local expect_value=0 arg
+  for arg in "$@"; do
+    if [ "$expect_value" -eq 1 ]; then
+      expect_value=0
+      continue
+    fi
+    case "$arg" in
+      --) break ;;
+      +*) continue ;;
+      --manifest-path|--target-dir|--color|--config|-C|-Z|-p|--package)
+        expect_value=1
+        continue
+        ;;
+      -*) continue ;;
+      *)
+        printf '%s\n' "$arg"
+        return 0
+        ;;
+    esac
+  done
+}
+
+TEST_TIMEOUT_CMD=()
+CARGO_SUBCMD="$(detect_cargo_subcommand "$@")"
+if [ "$CARGO_SUBCMD" = "test" ]; then
+  TEST_TIMEOUT="${PONY_TEST_TIMEOUT:-600s}"
+  if [ "$TEST_TIMEOUT" != "0" ] && [ "$TEST_TIMEOUT" != "none" ] && command -v timeout >/dev/null 2>&1; then
+    TEST_TIMEOUT_CMD=(timeout --signal=TERM --kill-after=15s "$TEST_TIMEOUT")
+  fi
+fi
+
 if [ "$LOCK_IMPL" = "flock" ]; then
-  CMD=(flock "$LOCK" nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
+  CMD=(flock "$LOCK" "${TEST_TIMEOUT_CMD[@]}" nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
 else
-  CMD=(nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
+  CMD=("${TEST_TIMEOUT_CMD[@]}" nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then

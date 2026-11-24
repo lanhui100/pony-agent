@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# 同一 PR 新提交到达时取消陈旧在跑 CI（push 到 main 永不取消）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # 最小令牌：CI 只读代码，不发布产物
 permissions:
   contents: read
@@ -58,15 +63,23 @@ jobs:
         if: needs.changes.outputs.needs_rust == 'true'
         with:
           # B245：与 rust-toolchain.toml 同值，clippy 门基线按该工具链生成；显式写死避免 action 默认取 latest。
+          # 禁用内置 rust-cache：下文显式按 check/test 槽位分别缓存，避免重复上传下载。
           toolchain: "1.91.1"
           components: clippy
+          cache: false
 
-      # 缓存必须对齐 AGENT.md 的 target 槽位约定：cargo 操作走
-      # cargo:check:shared → --target-dir target-check，而非默认 ./target
+      # 缓存必须对齐 AGENT.md 的 target 槽位约定：check 与 test 分别设 prefix-key 隔离缓存
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.outputs.needs_rust == 'true'
         with:
+          prefix-key: v0-rust-check
           workspaces: . -> target-check
+
+      - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.needs_rust == 'true'
+        with:
+          prefix-key: v0-rust-test
+          workspaces: . -> target-test
 
       # L3 穷举层的第一块基石：以下检查不可被 --no-verify 绕过
       - name: 决策记录校验（L1 同款 + 穷举）
@@ -85,11 +98,19 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      - name: 类型检查
-        run: npm run typecheck
+      - name: 类型检查与前端构建（产出 dist/ 供后续 Tauri 集成与回归复用）
+        run: npm run build
 
       - name: 前端单元测试
         run: npm run test:unit
+
+      - name: 前后端及 CLI 契约与扩展点一致性
+        run: |
+          npm run contract:check
+          npm run contract:cli
+          npm run ext:check
+          npm run contract:bin-imports
+          npm run contract:bin-imports:selftest
 
       # 文件规模棘轮（B261 / 6c-2）：`npm run verify` 里本来就含 `size:check`，但 CI 的
       # verify job 是拆开跑的（typecheck/test:unit/cargo check/clippy），于是这条门**从不在
@@ -109,10 +130,6 @@ jobs:
       # 「.meta/lints 表的新增债是否为零」，存量在 scripts/clippy-baseline.json 的
       # platforms.win32 分册冻结（该分册由 lint-baseline-bootstrap 工作流在 Windows runner
       # 生成，禁止套用 Linux 口径：cfg(windows) 让违例集合不同）。
-      - name: Rust 组件（clippy，幂等）
-        if: needs.changes.outputs.needs_rust == 'true'
-        run: rustup component add clippy
-
       - name: Clippy 棘轮门 + 门自检（Windows 分册；存量冻结，新增/恶化即红）
         if: needs.changes.outputs.needs_rust == 'true'
         run: |
@@ -137,26 +154,45 @@ jobs:
         if: needs.changes.outputs.needs_rust == 'true'
         run: npm run cargo:test:shared -- --package=pony-agent-core --no-fail-fast
 
+      - name: Tauri 宿主回归测试（session/provider/tool_router/stop_registry）
+        if: needs.changes.outputs.needs_rust == 'true'
+        run: npm run cargo:test:regression -- --no-fail-fast
+
   core-platform-check:
     needs: changes
     if: needs.changes.outputs.needs_rust == 'true'
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           # B245：与 rust-toolchain.toml 同值，clippy 门基线按该工具链生成；显式写死避免 action 默认取 latest。
           toolchain: "1.91.1"
           components: clippy
+          cache: false
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v0-rust-check
           workspaces: . -> target-check
-      - name: Linux native dependencies
+      - uses: Swatinem/rust-cache@v2
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libssl-dev pkg-config
+        with:
+          prefix-key: v0-rust-test
+          workspaces: . -> target-test
+      - name: Linux 系统依赖（core + tauri 2 合并单次安装）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev libssl-dev pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
       - name: Core 非 Windows cfg 编译检查（deny-warnings 与发版构建对齐）
         env:
           RUSTFLAGS: -D warnings
@@ -170,24 +206,11 @@ jobs:
       # 落在平台门控文件里），因此 Linux/macOS/Windows 各用各的分册（B244 起三分册齐备）。
       # 门自持 lint 级别（脚本内清空 RUSTFLAGS 并注入 -W/-A），否则 -D warnings 会把可数的 warning
       # 变成 error，棘轮失去记账面。表/阈值被改动但未重基线时 exit 2（口径漂移 fail-closed）。
-      - name: Rust 组件（clippy，幂等）
-        if: runner.os != 'Windows'
-        run: rustup component add clippy
-
       - name: Clippy 棘轮门 + 门自检（各平台分册；存量冻结，新增/恶化即红）
         if: runner.os != 'Windows'
         run: |
           npm run rust:lint:selftest
           npm run rust:lint
-
-      # src-tauri 扫的是 Tauri 2 宿主（glib/gtk/webkit/soup/appindicator 的 -sys crate 需要
-      # 开发头文件才会编译）；core 的 clippy 门不需要这些包，故只在第二份基线这一步前装。
-      - name: src-tauri 系统依赖（Linux；tauri 2）
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev
 
       - name: Clippy 棘轮门（src-tauri 分册；第二份基线，B244 扩面）
         if: runner.os != 'Windows'
@@ -196,11 +219,11 @@ jobs:
         if: runner.os == 'Linux'
         env:
           RUSTFLAGS: -D warnings
-        run: cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test --package=pony-agent-core --lib
+        run: node scripts/invoke-rust-target.mjs test test --package=pony-agent-core --lib
 
       # PTY 族 4 例在 Windows 上已被 #[cfg_attr(windows, ignore)] 平台 gating（Windows 无
       # PTY 驱动，缺口 B067）⇒ 若 Linux 侧没有执行点，gating 直接等于「覆盖消失」。
       # 故在 ubuntu 分支补一个真实执行点。本步骤只挂 Linux：macOS 分支未覆盖，是待办而非已覆盖。
       - name: Core Linux 集成：PTY 族（Windows 上已平台 gating）
         if: runner.os == 'Linux'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --target-dir target-test --package=pony-agent-core --test tui_startup_input_guard --test tui_overlay_cancel_acceptance
+        run: node scripts/invoke-rust-target.mjs test test --package=pony-agent-core --test tui_startup_input_guard --test tui_overlay_cancel_acceptance

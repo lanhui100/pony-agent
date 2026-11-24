@@ -65,11 +65,27 @@ else
   FAIL=1
 fi
 
-# P5：契约声明（build-budget.json）自身合法。
-if python3 "$HOME/.agents/skills/dev-team/scripts/dev-build-budget-lint.py" "$REPO_ROOT/.dev-team/build-budget.json" >/dev/null 2>&1; then
-  printf 'PASS P5 build-budget.json 形状合法\n'
+# P5：契约声明（build-budget.json）自身合法（CI runner 无本地 skill 时退回字段校验，不假红）。
+BUDGET_LINT="$HOME/.agents/skills/dev-team/scripts/dev-build-budget-lint.py"
+if [ -f "$BUDGET_LINT" ]; then
+  if python3 "$BUDGET_LINT" "$REPO_ROOT/.dev-team/build-budget.json" >/dev/null 2>&1; then
+    printf 'PASS P5 build-budget.json 形状合法\n'
+  else
+    printf 'FAIL P5 build-budget.json 未通过 dev-build-budget-lint.py\n'
+    FAIL=1
+  fi
+elif python3 - "$REPO_ROOT/.dev-team/build-budget.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1], encoding="utf-8"))
+assert isinstance(c["max_jobs_per_lane"], int) and c["max_jobs_per_lane"] >= 1
+assert isinstance(c["serialize_lock_path"], str) and c["serialize_lock_path"].strip()
+assert isinstance(c["heavy_nice"], int)
+assert isinstance(c["load_ceiling_factor"], (int, float)) and c["load_ceiling_factor"] > 0
+PY
+then
+  printf 'PASS P5 build-budget.json 必填字段校验通过（无本地 dev-team skill，使用内置校验）\n'
 else
-  printf 'FAIL P5 build-budget.json 未通过 dev-build-budget-lint.py\n'
+  printf 'FAIL P5 build-budget.json 必填字段校验失败\n'
   FAIL=1
 fi
 
@@ -146,6 +162,22 @@ else
   printf 'FAIL P16 非法锁实现未 fail-closed（exit %s，输出：%s）\n' "$code" "$out"
   FAIL=1
 fi
+
+# P17：test 主子命令注入 timeout 且置于 flock 内部（等锁耗时不计入测试预算），默认 600s
+out=$(PONY_BUILD_LOCK_IMPL=flock bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
+assert_contains "P17 test 超时置于 flock 内部且默认 600s" "$out" "flock /tmp/pony-agent-build.lock timeout --signal=TERM --kill-after=15s 600s nice -n 5"
+
+# P18：非 test 主子命令（即使含 `test` 过滤词参数）不得误注入超时
+out=$(bash "$LANE" --dry-run build --bin pony -- test 2>&1)
+assert_not_contains "P18 非 test 子命令不误注超时" "$out" "timeout"
+
+# P19：PONY_TEST_TIMEOUT=0 允许关闭超时
+out=$(PONY_TEST_TIMEOUT=0 bash "$LANE" --dry-run test 2>&1)
+assert_not_contains "P19 PONY_TEST_TIMEOUT=0 允许关闭超时" "$out" "timeout"
+
+# P20：PONY_TEST_TIMEOUT 支持显式覆盖
+out=$(PONY_TEST_TIMEOUT=90s bash "$LANE" --dry-run test -p pony-agent-core 2>&1)
+assert_contains "P20 支持自定义 PONY_TEST_TIMEOUT" "$out" "timeout --signal=TERM --kill-after=15s 90s"
 
 if [ "$FAIL" -ne 0 ]; then
   echo "cargo-lane.spec: FAILED"
