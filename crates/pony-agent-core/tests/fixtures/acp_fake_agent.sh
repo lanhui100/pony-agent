@@ -493,6 +493,37 @@ while IFS= read -r line; do
                     ;;
             esac
             ;;
+        probe_terminal_interleave)
+            m=$(method_of "$line")
+            id=$(id_of "$line")
+            case "$m" in
+                initialize)
+                    printf '%s\n' "$line" >> "$arg"
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+                session/new)
+                    [ -n "$id" ] && respond_session_new "$id" "acp-sess-1"
+                    ;;
+                session/prompt)
+                    prompt_id="$id"
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9401,\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"acp-sess-1\",\"command\":\"sh\",\"args\":[\"-c\",\"sleep $arg3; echo done\"]}}"
+                    IFS= read -r answer && printf '%s\n' "$answer" >> "$arg2"
+                    tid=$(printf '%s' "$answer" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
+                    # 先发一个**慢**请求（wait_for_exit，长命令），紧接着发一个**快**请求（output），
+                    # 且**不等待**慢请求的应答——只有分发真正并发时，快请求的应答才会先落盘。
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9402,\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"acp-sess-1\",\"terminalId\":\"$tid\"}}"
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9404,\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"acp-sess-1\",\"terminalId\":\"$tid\"}}"
+                    IFS= read -r a1 && printf '%s\n' "$a1" >> "$arg2"
+                    IFS= read -r a2 && printf '%s\n' "$a2" >> "$arg2"
+                    emit "{\"jsonrpc\":\"2.0\",\"id\":9405,\"method\":\"terminal/release\",\"params\":{\"sessionId\":\"acp-sess-1\",\"terminalId\":\"$tid\"}}"
+                    IFS= read -r answer && printf '%s\n' "$answer" >> "$arg2"
+                    [ -n "$prompt_id" ] && respond_stop "$prompt_id" end_turn
+                    ;;
+                *)
+                    [ -n "$id" ] && respond_initialize "$id"
+                    ;;
+            esac
+            ;;
         probe_terminal_long)
             m=$(method_of "$line")
             id=$(id_of "$line")
