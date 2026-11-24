@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T175249Z-runtime-split-7b08","surface":"runtime-split","release":"v0.1.204","created_at":"2026-11-22T17:52:49.351Z"}
+{"kind":"annotate","at":"2026-11-22T17:52:49.561Z","id":"B277","description":"Wave 2b 已落：新增 equivalence-wave2b.spec.ts（16 用例 / 7 条 action：D2 工作区 4 + D1 会话目录 3），COVERED 71→78、UNCOVERED 26→19，97 条全集与不相交断言保持。余 19 条含激活态/删除分叉/浏览器预览/死代码登记。"}
