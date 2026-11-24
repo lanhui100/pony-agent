@@ -361,19 +361,25 @@ fn managed_terminal_handler() -> Arc<ManagedTerminalHandler> {
 /// G7c（B177 ADVISORY ⑨）：**未绑定 workspace** 的 handler 不得接受自定义 cwd。
 ///
 /// 复审实测：`ManagedTerminalHandler::new()`（`workspace_root = None`）在旧实现下会让
-/// `terminal/create` 带 `cwd: "/etc"` 成功执行——等于把终端开到任意位置。生产路径都走
-/// `with_workspace_root`，但 `new()` 是公开构造口，必须自身 fail-closed。
+/// `terminal/create` 带任意绝对 `cwd`（如 `/etc`）成功执行——等于把终端开到任意位置。生产路径
+/// 都走 `with_workspace_root`，但 `new()` 是公开构造口，必须自身 fail-closed。
+///
+/// 用例用 `std::env::temp_dir()` 而非写死 `/etc`：写死 unix 路径会在 Windows 上被更早的
+/// 「cwd 必须是绝对路径」判定拦下（`/etc` 在 Windows 非绝对），于是本用例断言的
+/// 「未绑定 workspace」理由永远到不了，门禁在 Windows 上变成假红。
 ///
 /// 红相：若取消该兜底，本用例会拿到 `Ok`（终端真的被创建），第一条断言即红。
 #[test]
 fn g7c_unbound_handler_rejects_explicit_cwd() {
     let handler = ManagedTerminalHandler::new(Arc::new(ProcessManager::new()));
+    // 平台无关的绝对路径：Windows 的 `/etc` 不是绝对路径，会在更早的绝对性判定处被拒。
+    let unbound_cwd = std::env::temp_dir();
     let request = CreateTerminalRequest {
         session_id: "sess-unbound".to_string(),
         command: "sh".to_string(),
         args: None,
         env: None,
-        cwd: Some("/etc".to_string()),
+        cwd: Some(unbound_cwd.to_string_lossy().into_owned()),
         output_byte_limit: None,
     };
     match handler.create(&request) {
