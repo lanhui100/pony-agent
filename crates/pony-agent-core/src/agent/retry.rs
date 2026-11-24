@@ -373,6 +373,19 @@ pub(crate) const UPSTREAM_CONTEXT_OVERFLOW_HINTS: &[&str] = &[
     "max_tokens",
     "payload too large",
 ];
+/// 明确指向「上下文/请求体过大」且不与普通参数校验错（如无效 `max_tokens`）混淆的词表；
+/// 用于在 400/413 报文里优先识别可压缩自救的 `UpstreamContextOverflow`。
+pub(crate) const UPSTREAM_EXPLICIT_OVERFLOW_HINTS: &[&str] = &[
+    "context too large",
+    "context_length",
+    "maximum context length",
+    "payload too large",
+    "request entity too large",
+    "prompt is too long",
+    "too many tokens",
+    "exceed context limit",
+    "context window",
+];
 pub(crate) const UPSTREAM_AUTH_HINTS: &[&str] = &["401", "403"];
 /// PA-171 C3-S1：`classify_error_class` 的 auth 措辞补充（与 `UPSTREAM_AUTH_HINTS` 同一
 /// 注册表出口；仅供审计/文案分类消费，不改 `classify` 的重试结论）。
@@ -639,9 +652,17 @@ pub(crate) fn upstream_code_for_hints(lower: &str) -> Option<ErrorCode> {
         if hints_match(lower, UPSTREAM_AUTH_HINTS) {
             return Some(ErrorCode::UpstreamAuth);
         }
+        // 上游真实上下文/载荷溢出通常带 HTTP 400 或 413：先识别明确溢出词，
+        // 避免被 400/413 吞成不可变的 UpstreamBadRequest（裸 400/413 与 max_tokens
+        // 参数错误仍保留在 UpstreamBadRequest）。
+        if hints_match(lower, UPSTREAM_EXPLICIT_OVERFLOW_HINTS) {
+            return Some(ErrorCode::UpstreamContextOverflow);
+        }
         return Some(ErrorCode::UpstreamBadRequest);
     }
-    if hints_match(lower, UPSTREAM_CONTEXT_OVERFLOW_HINTS) {
+    if hints_match(lower, UPSTREAM_CONTEXT_OVERFLOW_HINTS)
+        || hints_match(lower, UPSTREAM_EXPLICIT_OVERFLOW_HINTS)
+    {
         return Some(ErrorCode::UpstreamContextOverflow);
     }
     // ④′ 传输层标志置于**所有状态码判据之后**（ADR-0086）：报文同时含真实 4xx 时
@@ -2462,6 +2483,29 @@ mod tests {
         );
         // type=decode（SSE 解析）不属于传输阶段，不得被误升为可重试
         assert_eq!(upstream_code_for_hints("type=decode；sse 解析失败"), None);
+    }
+
+    #[test]
+    fn http_400_and_413_with_overflow_hints_map_to_context_overflow() {
+        use crate::agent::error_code::ErrorCode::*;
+        let ctx_400 = "provider 返回错误状态：400 Bad Request；响应正文：{\"error\":{\"message\":\"This model's maximum context length is 128000 tokens.\",\"code\":\"context_length_exceeded\"}}";
+        assert_eq!(upstream_code_for_hints(&ctx_400.to_ascii_lowercase()), Some(UpstreamContextOverflow));
+        assert!(ProviderRetryPolicy::new(BackoffConfig::default())
+            .classify(ctx_400)
+            .requires_request_mutation());
+
+        let payload_413 = "provider 返回错误状态：413 Payload Too Large；响应正文：request entity too large";
+        assert_eq!(
+            upstream_code_for_hints(&payload_413.to_ascii_lowercase()),
+            Some(UpstreamContextOverflow)
+        );
+
+        // 参数校验类的 400 max_tokens 不得误判为上下文溢出
+        let bad_max_tokens = "provider 返回错误状态：400；响应正文：invalid value for max_tokens";
+        assert_eq!(
+            upstream_code_for_hints(&bad_max_tokens.to_ascii_lowercase()),
+            Some(UpstreamBadRequest)
+        );
     }
 
     #[test]

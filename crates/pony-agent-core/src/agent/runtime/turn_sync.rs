@@ -739,7 +739,7 @@ impl AgentRuntime {
             }
         }
 
-        let prepared = match self.prepare_turn(&input, false, ask_injection.as_ref()) {
+        let mut prepared = match self.prepare_turn(&input, false, ask_injection.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
                 otel_turn_scope.set_phase("failed");
@@ -761,7 +761,7 @@ impl AgentRuntime {
             prepared.provider.model(),
             preview_text(&prepared.user_message, 120)
         ));
-        let provider_meta = provider_event_meta(&prepared.provider);
+        let mut provider_meta = provider_event_meta(&prepared.provider);
         // PA-095：同步入口事件化——prepare 成功即发射 turn:started（payload.text
         // 携带用户消息 → 触发 user/message；build_context_observation → 触发
         // context/observation 外置）。事件持久化走全局注册表，NoopSink 不做推送。
@@ -800,7 +800,7 @@ impl AgentRuntime {
             return result;
         }
 
-        let planned = match self.plan_turn(&prepared) {
+        let planned = match self.plan_turn_with_overflow_rescue(&input, super::overflow_rescue::EmptyInputMode::AllowEmpty, ask_injection.as_ref(), &mut prepared, &mut provider_meta) {
             Ok(planned) => planned,
             Err(error) => {
                 let envelope = self.emit_sync_turn_failed(
