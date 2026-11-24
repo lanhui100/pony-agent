@@ -506,13 +506,26 @@ impl ManagedTerminalHandler {
                 canonical.display()
             )));
         }
-        if let Some(root) = self.workspace_root.as_ref() {
-            if !canonical.starts_with(root) {
-                return Err(AcpHandlerError::Denied(format!(
-                    "outside_workspace_write_denied: terminal/create 的 cwd `{}` 不在会话 workspace `{}` 内。",
-                    canonical.display(),
-                    root.display()
-                )));
+        match self.workspace_root.as_ref() {
+            Some(root) => {
+                if !canonical.starts_with(root) {
+                    return Err(AcpHandlerError::Denied(format!(
+                        "outside_workspace_write_denied: terminal/create 的 cwd `{}` 不在会话 workspace `{}` 内。",
+                        canonical.display(),
+                        root.display()
+                    )));
+                }
+            }
+            None => {
+                // B177 ADVISORY ⑨：未绑定 workspace 的 handler（`new()` 构造）若接受调用方指定的
+                // cwd，等于允许把终端开到任意位置（复审实测 `/etc` 可跑）。没有边界就不接受自定义
+                // cwd——只允许沿用进程默认目录。生产路径全部走 `with_workspace_root`，此处为兜底。
+                if explicit.is_some() {
+                    return Err(AcpHandlerError::Denied(
+                        "permission_denied: 当前 terminal handler 未绑定 workspace，terminal/create 不接受自定义 cwd。"
+                            .to_string(),
+                    ));
+                }
             }
         }
         Ok(Some(canonical.to_string_lossy().into_owned()))
