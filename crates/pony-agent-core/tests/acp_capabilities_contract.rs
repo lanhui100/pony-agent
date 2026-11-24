@@ -420,7 +420,7 @@ fn g10_slow_inbound_request_does_not_starve_others() {
             "3",
         ],
     );
-    let mut session = match AcpAgentSession::spawn_with_mcp_and_handlers(
+    let session = match AcpAgentSession::spawn_with_mcp_and_handlers(
         &spec,
         &cwd,
         Vec::new(),
