@@ -357,6 +357,10 @@ impl ToolRouter {
         // 可选 wait_ms：把内核真边沿等待暴露给模型（工具名不变，避免工具面清单漂移）。
         // 等待期间任一团队边沿（成员状态 / 消息入队出队 / 任务流转）都会醒来；
         // 无活跃同伴时内核立即返回 no_progress，不会阻塞。
+        //
+        // B1795535505312：等待结果必须回传。此前 `Ok(_) => {}` 丢弃 `WaitAgentResult`，
+        // 模型无法区分「等到了边沿」与「超时了」，只能把超时当进展继续猜。
+        let mut wait: Option<WaitAgentResult> = None;
         if let Some(wait_ms) = call
             .arguments
             .get("wait_ms")
@@ -368,7 +372,7 @@ impl ToolRouter {
                 },
                 &crate::agent::orchestration::TeamCaller::from_session(context.session_id.as_deref()),
             ) {
-                Ok(_) => {}
+                Ok(result) => wait = Some(result),
                 Err(err) => return error_result(TOOL_LIST_AGENTS, "list_agents_failed", err, None),
             }
         }
@@ -381,6 +385,9 @@ impl ToolRouter {
                     "ok": true,
                     "tool": TOOL_LIST_AGENTS,
                     "result": res,
+                    // `wait` 仅在调用方给了 `wait_ms` 时出现：`timed_out` / `no_progress`
+                    // 是「这次等待发生了什么」的唯一可判读凭据。
+                    "wait": wait,
                 })),
                 duration_ms: 0,
             },
