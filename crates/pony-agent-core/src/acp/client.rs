@@ -121,6 +121,12 @@ pub trait TerminalHandler: Send + Sync {
     fn kill(&self, request: &KillTerminalRequest) -> Result<(), AcpHandlerError>;
 
     fn release(&self, request: &ReleaseTerminalRequest) -> Result<(), AcpHandlerError>;
+
+    /// 设置 `wait_for_exit` 的整轮预算（additive，**默认空实现**）。
+    ///
+    /// 只有需要与宿主 turn 预算联动的实现（如 `ManagedTerminalHandler`）才覆盖它；
+    /// 默认不做事，因此对既有实现与测试替身零影响（B177 ADVISORY ⑧）。
+    fn set_turn_budget(&self, _budget: std::time::Duration) {}
 }
 
 /// 反向请求处理器的可热替换槽位。
@@ -632,6 +638,23 @@ impl AcpAgentClient {
             return;
         }
         slots.terminal = Some(handler);
+    }
+
+    /// 把整轮预算转发给已装配的 terminal handler（未装配则无事发生）。
+    ///
+    /// 与 [`Self::set_prompt_budget`] 配对使用：prompt 的 deadline 与
+    /// `terminal/wait_for_exit` 的等待预算必须同源，否则"调大了轮次预算但长命令仍被 120s 截断"
+    /// 这类错位会一直存在（B177 ADVISORY ⑧）。
+    pub fn set_terminal_turn_budget(&self, budget: std::time::Duration) {
+        // 用 match 而非 `unwrap_or_else(|p| p.into_inner())`：后者会新增一条
+        // `clippy::redundant_closure_for_method_calls`（棘轮门按新增计数判红）。
+        let slots = match self.handlers.lock() {
+            Ok(slots) => slots,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(terminal) = slots.terminal.as_ref() {
+            terminal.set_turn_budget(budget);
+        }
     }
 
     /// B179：`session/list`（分页参数原样透传；`nextCursor` 缺省 ⇒ `None`）。
