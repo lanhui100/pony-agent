@@ -850,6 +850,9 @@ impl AcpAgentSession {
     /// `ACP_REQUEST_TIMEOUT`（5000ms），真实 agent 的 >5s 一轮会被硬顶失败。
     pub fn set_turn_budget(&self, budget: Duration) {
         self.client.set_prompt_budget(budget);
+        // ADVISORY ⑧：terminal 侧 `wait_for_exit` 的等待预算必须与 prompt 预算同源，
+        // 否则调大轮次预算后长命令仍会被 120s 硬顶截断。
+        self.client.set_terminal_turn_budget(budget);
     }
 
     /// 设置宿主取消令牌（additive；写入既有 `cancellation` 槽位，`&self` 热替换）。

@@ -405,6 +405,11 @@ pub struct ManagedTerminalHandler {
     workspace_root: Option<PathBuf>,
     /// wire `terminalId` → 受管句柄（opaque、不可跨会话伪造）。
     terminals: Mutex<HashMap<String, Arc<TerminalEntry>>>,
+    /// `wait_for_exit` 的整轮预算（B177 ADVISORY ⑧：可被宿主 turn 预算热替换）。
+    ///
+    /// 缺省 [`ACP_DEFAULT_TURN_BUDGET`]（120s）。旧实现把 120s 写死在 `wait_for_exit` 里，
+    /// 于是 `AcpAgentSession::set_turn_budget(300s)` 对长命令的等待毫无作用——预算被两处各说各话。
+    turn_budget: Mutex<Duration>,
 }
 
 impl ManagedTerminalHandler {
@@ -414,6 +419,7 @@ impl ManagedTerminalHandler {
             process_manager,
             workspace_root: None,
             terminals: Mutex::new(HashMap::new()),
+            turn_budget: Mutex::new(ACP_DEFAULT_TURN_BUDGET),
         }
     }
 
@@ -423,6 +429,7 @@ impl ManagedTerminalHandler {
             process_manager,
             workspace_root: Some(std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root)),
             terminals: Mutex::new(HashMap::new()),
+            turn_budget: Mutex::new(ACP_DEFAULT_TURN_BUDGET),
         }
     }
 
@@ -624,7 +631,12 @@ impl TerminalHandler for ManagedTerminalHandler {
         let entry = self.entry(&request.session_id, &request.terminal_id)?;
         // B4：预算取 NFR 派生的整轮预算（不是传输层单请求 5s）；且入站分发已移出读线程
         // （transport 专用分发线程），这里的阻塞等待不再拖住其它入站帧的读取。
-        let deadline = Instant::now() + ACP_DEFAULT_TURN_BUDGET;
+        // ADVISORY ⑧：预算来自槽位（可被 `set_turn_budget` 热替换），不再写死常量。
+        let budget = match self.turn_budget.lock() {
+            Ok(budget) => *budget,
+            Err(_) => ACP_DEFAULT_TURN_BUDGET,
+        };
+        let deadline = Instant::now() + budget;
         loop {
             let (state, exit_code) = self.poll_into(&entry)?;
             if state == ProcessState::Exited {
@@ -637,7 +649,7 @@ impl TerminalHandler for ManagedTerminalHandler {
                 // 有界等待：不无限阻塞；超时明确报错（仍可 kill/release）。
                 return Err(AcpHandlerError::Internal(format!(
                     "terminal/wait_for_exit 超过 {:?} 仍未退出（terminalId 仍可 kill/release）。",
-                    ACP_DEFAULT_TURN_BUDGET
+                    budget
                 )));
             }
             std::thread::sleep(TERMINAL_POLL_INTERVAL);
