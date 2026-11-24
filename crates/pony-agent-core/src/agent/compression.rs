@@ -421,9 +421,17 @@ pub(crate) fn estimate_text_tokens(text: &str) -> usize {
 ///
 /// 家在本模块：压缩阈值与组装预算必须用同一个估算，否则「按 A 口径判定要压缩、
 /// 按 B 口径算完仍超预算」会无限往返压缩。
+///
+/// B1795506800002（评审 finding）：旧实现只算 `content`，**完全漏计**同一条消息里的
+/// `reasoning_content`（DeepSeek 等推理模型的思考正文，可达正文同量级）与 `tool_calls`
+/// （工具名 + 完整参数 JSON，一个 patch 类调用就上万字符）。漏算让预算裁剪与压缩阈值
+/// 系统性低估，是「token 预算看着没超、实际请求体已 300KB+」的成因之一。
 pub(crate) fn estimate_native_message_tokens(message: &Value) -> usize {
+    // 单条消息的固定开销（role / 分隔符 / 结构字段）。
+    let overhead = 4;
+    let extra = estimate_native_message_extra_tokens(message);
     if let Some(content) = message.get("content").and_then(Value::as_str) {
-        return 4 + estimate_text_tokens(content);
+        return overhead + estimate_text_tokens(content) + extra;
     }
 
     if let Some(content) = message.get("content").and_then(Value::as_array) {
@@ -431,10 +439,32 @@ pub(crate) fn estimate_native_message_tokens(message: &Value) -> usize {
             .iter()
             .map(estimate_native_content_block_tokens)
             .sum::<usize>();
-        return 4 + content_tokens;
+        return overhead + content_tokens + extra;
     }
 
-    4 + estimate_text_tokens(&message.to_string())
+    overhead + estimate_text_tokens(&message.to_string()) + extra
+}
+
+/// 除 `content` 之外会进请求体的字段（`reasoning_content` / `tool_calls` / `tool_call_id`）。
+///
+/// 只在字段**存在**时计入，故对不含这些字段的历史消息零影响（既有预算断言不变）。
+fn estimate_native_message_extra_tokens(message: &Value) -> usize {
+    let mut extra = 0;
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(text) = message.get(key).and_then(Value::as_str) {
+            extra += estimate_text_tokens(text);
+        }
+    }
+    if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+        extra += calls
+            .iter()
+            .map(|call| estimate_text_tokens(&call.to_string()))
+            .sum::<usize>();
+    }
+    if let Some(call_id) = message.get("tool_call_id").and_then(Value::as_str) {
+        extra += estimate_text_tokens(call_id);
+    }
+    extra
 }
 
 /// 多模态内容块：图片按固定价（256 token）计，文本按字符数估。
@@ -749,6 +779,59 @@ Some trailing text"#;
         let tokens = estimate_native_transcript_tokens(&transcript);
         // 四条消息各至少 4 token 底盘 ⇒ 必大于 16。
         assert!(tokens > 16, "工具往返必须计入 transcript 压力: {tokens}");
+    }
+
+    /// B1795506800002：`reasoning_content` 与 `tool_calls` 必须计入同一条消息的估算。
+    ///
+    /// 缺陷现场：旧实现只算 `content`，而 DeepSeek 等推理模型的思考正文可达正文同量级、
+    /// 一个 patch 类工具调用的参数 JSON 上万字符 —— 漏算让预算裁剪与压缩阈值系统性低估，
+    /// 是「token 预算看着没超、实际请求体已 300KB+」的成因之一。
+    #[test]
+    fn test_estimate_native_message_tokens_counts_reasoning_and_tool_calls() {
+        let content_only = serde_json::json!({
+            "role": "assistant",
+            "content": "x".repeat(4_000),
+        });
+        let base = estimate_native_message_tokens(&content_only);
+
+        // 同 content + 4k 字符思考正文 ⇒ 至少多 1000 token（chars/4 口径）。
+        let with_reasoning = serde_json::json!({
+            "role": "assistant",
+            "content": "x".repeat(4_000),
+            "reasoning_content": "r".repeat(4_000),
+        });
+        let with_reasoning_tokens = estimate_native_message_tokens(&with_reasoning);
+        assert!(
+            with_reasoning_tokens >= base + 1_000,
+            "reasoning_content 必须计入估算：base={base} with_reasoning={with_reasoning_tokens}"
+        );
+
+        // 同 content + 一个参数 JSON 很大的工具调用 ⇒ 必须显著抬高。
+        let with_tool_calls = serde_json::json!({
+            "role": "assistant",
+            "content": "x".repeat(4_000),
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "workspace.write_file",
+                    "arguments": serde_json::json!({ "content": "y".repeat(4_000) }).to_string(),
+                }
+            }],
+        });
+        let with_tool_calls_tokens = estimate_native_message_tokens(&with_tool_calls);
+        assert!(
+            with_tool_calls_tokens >= base + 1_000,
+            "tool_calls 参数 JSON 必须计入估算：base={base} with_tool_calls={with_tool_calls_tokens}"
+        );
+
+        // 无这些字段的消息估算必须逐字不变（既有预算断言不得漂移）。
+        let plain = serde_json::json!({ "role": "user", "content": "hello world" });
+        assert_eq!(
+            estimate_native_message_tokens(&plain),
+            4 + estimate_text_tokens("hello world"),
+            "不含 reasoning/tool_calls 的消息必须保持原口径"
+        );
     }
 
     #[test]
