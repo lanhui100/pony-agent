@@ -141,6 +141,20 @@ describe.skipIf(!skillAvailable)("wave47 双引擎一致性（gate.mjs vs audit-
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("C5: 未跟踪目录符号链接不触发 EISDIR → 两引擎均放行（exit 0）", () => {
+    const dir = makeFixture();
+    const targetDir = fs.mkdtempSync(path.join(os.tmpdir(), "wave47-symlink-target-"));
+    try {
+      fs.symlinkSync(targetDir, path.join(dir, "node_modules"));
+      const { authoritative, repoGate } = runBoth(dir);
+      expect(authoritative.code).toBe(0);
+      expect(repoGate.code).toBe(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

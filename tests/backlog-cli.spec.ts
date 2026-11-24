@@ -240,6 +240,29 @@ describe('v3 状态机与租约', () => {
     expect(lintAll(paths).problems.join('\n')).toMatch(/缺少租约锁文件/);
   });
 
+  it('v3 多 worktree：本批次启锁时，不因其他已合入批次的 in_progress 缺锁而误拦', () => {
+    seedV3();
+    seedBatch('20261122T000000Z-other-1111', [
+      {
+        kind: 'record',
+        at: '2026-11-22T00:00:01.000Z',
+        task: baseTask({ id: 'B1795000000001' })
+      },
+      {
+        kind: 'start',
+        at: '2026-11-22T00:00:02.000Z',
+        id: 'B1795000000001',
+        owner: 'other-session',
+        paths: ['src/other.ts']
+      }
+    ]);
+    const { row } = recordTask(paths, { category: 'Task', title: 'mine', fingerprint: 'f-mine', surface: 'git-flow' });
+    startTask(paths, { id: row.id, owner: 'session-A', touchedPaths: ['scripts/git-guard.mjs'], surface: 'git-flow' });
+    const res = lintAll(paths);
+    expect(res.ok).toBe(true);
+    expect(res.notes.join('\n')).toMatch(/B1795000000001.*其他批次/);
+  });
+
   it('干净克隆（无 .locks 目录）下 in_progress 只提示不阻断', () => {
     seedV3();
     seedBatch(BATCH, [

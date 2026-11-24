@@ -43,8 +43,9 @@ gh pr create --fill
 # 5) 收口
 git -C ~/pony-agent switch main && git -C ~/pony-agent pull --ff-only
 git -C ~/pony-agent branch -d feat/B999-my-change
-# 并发 worktree 才需要：
+# 并发 worktree 才需要（主干 Squash 合并后建议先 dry-run 巡检再 --apply）：
 # git -C ~/pony-agent worktree remove ~/pony-agent-worktrees/B999-other
+# npm run git:prune && npm run git:prune:apply
 ```
 
 ## 被钩子拦下时怎么判断
@@ -75,11 +76,11 @@ npm run release:push                 # 只推已存在的 tag（不代替 bump�
 
 ## 并发下的共享文件
 
-- `backlog/tasks.jsonl`：用 `node scripts/backlog.mjs record/start/resolve`，不要手改；任务级租约只保护同一 ID，账本追加仍靠「record 后立即提交」兜底。
-- 版本四处同步（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json` / `.version.json`）：`pre-commit` 的 auto-bump 只在 Windows（有 pwsh）生效；并发会话下把版本 bump 收敛到发版 PR 一次完成，避免每个会话各 bump 一次。
+- `backlog/log/<批次>.jsonl`（v3 批次日志）：用 `node scripts/backlog.mjs record/start/resolve` 写入本会话独占批次文件，不要修改他人批次文件（旧 `backlog/tasks.jsonl` 已退役）。
+- 版本四处同步（`package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json` / `.version.json`）：`pre-commit` 已移除 Windows 专属 auto-bump（ADR `2026-11-24-git-flow-guard-hardening`），所有平台统一把版本 bump 收敛到发版 PR（`npm run release`）一次完成。
 
 ## 不覆盖的边界
 
 - 语义冲突（两人改同一函数的不同行为）机械门禁看不见，靠 review 与 PR 模板自查栏。
 - 远端 ruleset 是最终权威；本地钩子只做快速失败，`--no-verify` 绕过后仍会被远端拒绝。
-- 强制改写他人分支、删远端分支不在自动拦截范围，属人工纪律。
+- 强制改写他人分支、删普通远端特性分支不在自动拦截范围，属人工纪律；删除 `main` 与远端 tag 已被 `pre-push` 本地拦截。

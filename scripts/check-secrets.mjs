@@ -11,10 +11,11 @@
  * 3. 工作区或全库扫描 (scan): `node scripts/check-secrets.mjs --all`
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 // wave-18 C4（r4）：裸 64-hex 规则的模块级辅助（非导出）。
 // R3′：一切与 match 无关的上下文判定按「行」记忆化一次（键为 lineNumber），
@@ -284,18 +285,58 @@ export function scanTextContent(content, filename = "") {
   return violations;
 }
 
-function getStagedFiles() {
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+function gitExec(args, cwd = process.cwd()) {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 16 * 1024 * 1024
+  });
+}
+
+export function resolvePrePushRange(cwd = process.cwd()) {
   try {
-    const out = execSync("git diff --cached --name-only --diff-filter=ACMR", { encoding: "utf8" });
+    const upstream = gitExec(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd).trim();
+    if (upstream) {
+      gitExec(["rev-parse", "--verify", "--quiet", `${upstream}^{commit}`], cwd);
+      return `${upstream}..HEAD`;
+    }
+  } catch {
+    // 无 upstream 跟踪分支（首次推送新分支常见情况），回退到与主干的 merge-base
+  }
+
+  for (const baseRef of ["origin/main", "main", "origin/master", "master"]) {
+    try {
+      gitExec(["rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`], cwd);
+      const mergeBase = gitExec(["merge-base", "HEAD", baseRef], cwd).trim();
+      if (mergeBase) return `${mergeBase}..HEAD`;
+    } catch {
+      // 继续尝试下一个候选基准
+    }
+  }
+
+  try {
+    gitExec(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], cwd);
+    return `${EMPTY_TREE_SHA}..HEAD`;
+  } catch {
+    return "HEAD";
+  }
+}
+
+function getStagedFiles(cwd = process.cwd()) {
+  try {
+    const out = gitExec(["diff", "--cached", "--name-only", "--diff-filter=ACMR"], cwd);
     return out.split("\n").map(s => s.trim()).filter(Boolean);
   } catch {
     return [];
   }
 }
 
-function getStagedDiff(filepath) {
+function getStagedDiff(filepath, cwd = process.cwd()) {
   try {
-    return execSync(`git diff --cached -U0 -- "${filepath}"`, { encoding: "utf8" });
+    return gitExec(["diff", "--cached", "-U0", "--", filepath], cwd);
   } catch {
     return "";
   }
@@ -312,11 +353,11 @@ function getAddedLinesFromDiff(diffText) {
   return added.join("\n");
 }
 
-export function runChecks({ mode = "staged", targetRange = null, files = null } = {}) {
+export function runChecks({ mode = "staged", targetRange = null, files = null, cwd = process.cwd() } = {}) {
   const violations = [];
 
   if (mode === "staged") {
-    const stagedFiles = files || getStagedFiles();
+    const stagedFiles = files || getStagedFiles(cwd);
     for (const file of stagedFiles) {
       // 生成收据路径豁免（见 isExemptGeneratedReceipt 注释）
       if (isExemptGeneratedReceipt(file)) continue;
@@ -326,16 +367,16 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
         continue;
       }
 
-      const diffText = getStagedDiff(file);
+      const diffText = getStagedDiff(file, cwd);
       const addedContent = getAddedLinesFromDiff(diffText);
       const findings = scanTextContent(addedContent, file);
       violations.push(...findings);
     }
   } else if (mode === "pre-push") {
-    const range = targetRange || "HEAD";
+    const range = targetRange || resolvePrePushRange(cwd);
     let changedFiles = [];
     try {
-      const out = execSync(`git diff --name-only --diff-filter=ACMR ${range}`, { encoding: "utf8" });
+      const out = gitExec(["diff", "--name-only", "--diff-filter=ACMR", range], cwd);
       changedFiles = out.split("\n").map(s => s.trim()).filter(Boolean);
     } catch {
       changedFiles = [];
@@ -351,7 +392,7 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
       }
 
       try {
-        const diffText = execSync(`git diff -U0 ${range} -- "${file}"`, { encoding: "utf8" });
+        const diffText = gitExec(["diff", "-U0", range, "--", file], cwd);
         const addedContent = getAddedLinesFromDiff(diffText);
         const findings = scanTextContent(addedContent, file);
         violations.push(...findings);
@@ -360,7 +401,7 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
   } else if (mode === "all") {
     let trackedFiles = [];
     try {
-      const out = execSync("git ls-files", { encoding: "utf8" });
+      const out = gitExec(["ls-files"], cwd);
       trackedFiles = out.split("\n").map(s => s.trim()).filter(Boolean);
     } catch {
       trackedFiles = [];
@@ -377,14 +418,15 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
 
       // 仅检查小于 1MB 且存在的文件，避免扫描超大二进制或资源文件
       try {
-        if (!fs.existsSync(file)) continue;
-        const stat = fs.statSync(file);
+        const fullPath = path.resolve(cwd, file);
+        if (!fs.existsSync(fullPath)) continue;
+        const stat = fs.statSync(fullPath);
         if (stat.size > 1024 * 1024) continue;
         const ext = path.extname(file).toLowerCase();
         const binaryExts = [".png", ".jpg", ".jpeg", ".ico", ".gif", ".webp", ".zip", ".tar", ".gz", ".exe", ".dll", ".dylib", ".so", ".sqlite", ".db"];
         if (binaryExts.includes(ext)) continue;
 
-        const content = fs.readFileSync(file, "utf8");
+        const content = fs.readFileSync(fullPath, "utf8");
         const findings = scanTextContent(content, file);
         violations.push(...findings);
       } catch {}
@@ -395,8 +437,15 @@ export function runChecks({ mode = "staged", targetRange = null, files = null } 
 }
 
 // 仅在直接执行时调用
-const isDirectExecution = process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(decodeURI(new URL(import.meta.url).pathname));
+let isDirectExecution = false;
+if (process.argv[1]) {
+  try {
+    isDirectExecution =
+      fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    isDirectExecution = false;
+  }
+}
 
 if (isDirectExecution) {
   const args = process.argv.slice(2);
@@ -409,12 +458,7 @@ if (isDirectExecution) {
     if (args.length > idx + 1 && !args[idx + 1].startsWith("--")) {
       targetRange = args[idx + 1];
     } else {
-      try {
-        const upstream = execSync("git rev-parse --abbrev-ref @{upstream}", { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] }).trim();
-        targetRange = `${upstream}..HEAD`;
-      } catch {
-        targetRange = "HEAD";
-      }
+      targetRange = resolvePrePushRange(process.cwd());
     }
   } else if (args.includes("--all")) {
     mode = "all";

@@ -39,7 +39,7 @@ repo 模板文件与 `ponygo` 内 heredoc 双写，EOL 归一后逐字节一致�
 - 实现：`scripts/git-guard.mjs` —— Node 单实现，三平台一致生效。
 - 退役：`scripts/git-guard.ps1` 已删。它被 `if command -v pwsh` 包住，Linux/macOS 上整段静默跳过（缺陷记录见 `docs/audit/engineering-quality-audit-2026-11-01.md:122`）。
 - 挂载：`.githooks/{pre-commit,pre-push,commit-msg}`（`core.hooksPath=.githooks`）。
-- 自检：`bash scripts/git-guard.spec.sh`（= `npm run git:guard:selftest`，11 条正负样本断言；隔离在 mktemp 临时仓库内，不触碰真实 `.git`）。
+- 自检：`bash scripts/git-guard.spec.sh`（= `npm run git:guard:selftest`，含正负样本断言；隔离在 mktemp 临时仓库内，不触碰真实 `.git`）。
 - 接线：`npm run verify` 首段 + `.github/workflows/ponygo-governance.yml` 的 `governance` job。
 - 决策真源：`.agents/notes/implemented/process/2026-11-18-multi-session-git-contract.md`。
 

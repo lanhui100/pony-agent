@@ -75,7 +75,7 @@ function pushTagOnly() {
       `[release:push] 拒绝执行：本地不存在 tag ${tagName}。`,
       "  --push 只推已存在的 tag，不会替代 bump（这样误触也不会在 main 上留下脏 commit/tag）。",
       "  完整发版流程：",
-      "    1. git switch -c chore/release-v<version> main",
+      "    1. git switch -c chore/release-v<version> origin/main",
       "    2. npm run release                              # 本地 bump + commit + tag",
       "    3. git push -u origin <branch> && gh pr create",
       "    4. 人工用 merge commit（不要 squash）合并，保证 tag 指向 main 历史",
