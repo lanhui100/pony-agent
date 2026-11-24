@@ -1,0 +1,2 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261122T220553Z-runtime-split-1ec3","surface":"runtime-split","release":"v0.1.204","created_at":"2026-11-22T22:05:54.329Z"}
+{"kind":"annotate","at":"2026-11-22T22:06:31.589Z","id":"B277","description":"Wave 2d 已落：equivalence-wave2d.spec.ts（6 用例 / 3 条 action：rollbackToTurnBoundary、rollbackToInitialState、loadRetrievedContextState），COVERED 83→86、UNCOVERED 14→11。findCheckpointTurnIdByNodeId 刻意留未覆盖（getter 由五路历史分支字段派生，裸 seed 造不出合法数据），随 Wave 2e 历史分支主题一起做。"}
