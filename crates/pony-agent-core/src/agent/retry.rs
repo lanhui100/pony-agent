@@ -272,6 +272,13 @@ pub struct RetryAfter {
     pub seconds: Option<u64>,
 }
 
+/// B1795488338167：上游恢复窗口的**单次等待封顶**（10 分钟）。
+///
+/// 上游可回任意秒数（含异常头），不封顶等于把取消通道之外的 wall-clock 交给上游；
+/// 10min 覆盖分钟级 TPM/5h 窗口的常见子集，同时保证单次 sleep 不会把一轮拖到不可控。
+/// 注意这是**等待**上限，不是预算上限：窗口本身超过剩余预算时直接快速失败（见 `decide`）。
+pub const RETRY_AFTER_WINDOW_MAX_MS: u64 = 10 * 60 * 1_000;
+
 impl RetryAfter {
     pub fn parse(header_value: &str) -> Self {
         if let Ok(secs) = header_value.trim().parse::<u64>() {
@@ -292,6 +299,24 @@ impl RetryAfter {
         }
         Some(backoff_delay_ms.max(ra_ms).min(remaining_budget_ms))
     }
+
+    /// B1795488338167：上游声明的恢复窗口（毫秒）。`Some(0)` = 上游明确说「立刻可重试」。
+    pub fn window_ms(&self) -> Option<u64> {
+        self.seconds.map(|secs| secs.saturating_mul(1_000))
+    }
+}
+
+/// B1795488338167：从错误文本提取上游声明的恢复窗口（`Retry-After` 结构化后缀的
+/// **唯一**解析点 [`parse_retry_after_marker`] 的调度侧包装）。
+///
+/// 存在的理由：HTTP 出口早已把 `Retry-After` 折叠成 `retry_after=` 后缀，但重试调度
+/// 三处 `decide` 调用**恒传 `None`**，导致退避曲线与上游窗口完全脱钩——上游说 90s
+/// 后恢复，调度仍按 0.5/1/2/4s 短退避硬撞（必然再失败），或按固定 20s→40s 长退避
+/// 白睡两轮。本函数是让调度侧看见窗口的最小接缝（不新增关键词表、不改错误文案）。
+pub fn retry_after_from_error(err: &str) -> Option<RetryAfter> {
+    parse_retry_after_marker(err).map(|seconds| RetryAfter {
+        seconds: Some(seconds),
+    })
 }
 
 /// Stage2（task-5 R1/R2.4/R3.1）：关键词表收编为注册表单一来源。
@@ -787,13 +812,17 @@ impl ProviderRetryPolicy {
         // P1-4：`Always` 档位无视「次数上限 + 预算耗尽」两个闸门（dsh `always` 语义），
         // 流安全与不可重试错误已在上面两道判据拦下。退避仍按既有曲线封顶（max_delay_ms），
         // 退避 sleep 本身仍受调用方 deadline（`DeadlineSleeper`）截断 ⇒ 不新增无界等待面。
+        //
+        // B1795488338167：上游声明的恢复窗口（`Retry-After`）在此**优先于**本地曲线——
+        // `always` 的本意是「等到成功」，按 8s 封顶去撞 90s 窗口只是把同一次失败重复多遍。
         if self.mode == RetryMode::Always {
             let base_delay = compute_delay(attempt, &self.config, 0.5);
-            return RetryDecision::Retry {
-                delay_ms: u64::try_from(base_delay.as_millis())
-                    .unwrap_or(u64::MAX)
-                    .min(self.config.max_delay_ms),
+            let base_delay_ms = u64::try_from(base_delay.as_millis()).unwrap_or(u64::MAX);
+            let delay_ms = match retry_after.and_then(RetryAfter::window_ms) {
+                Some(window) if window > 0 => window.min(RETRY_AFTER_WINDOW_MAX_MS),
+                _ => base_delay_ms.min(self.config.max_delay_ms),
             };
+            return RetryDecision::Retry { delay_ms };
         }
         if budget.is_exhausted() {
             return RetryDecision::Escalate {
@@ -801,18 +830,31 @@ impl ProviderRetryPolicy {
             };
         }
         let base_delay = compute_delay(attempt, &self.config, 0.5);
-        let delay = if let Some(ra) = retry_after {
-            let remaining = self
-                .config
-                .total_budget_ms
-                .saturating_sub(budget.elapsed_ms);
-            ra.effective_delay(base_delay.as_millis() as u64, remaining)
-                .unwrap_or(base_delay.as_millis() as u64)
-        } else {
-            base_delay.as_millis() as u64
-        };
+        let base_delay_ms = u64::try_from(base_delay.as_millis()).unwrap_or(u64::MAX);
+        let remaining = self
+            .config
+            .total_budget_ms
+            .saturating_sub(budget.elapsed_ms);
+        // B1795488338167：窗口 > 剩余预算 ⇒ **快速失败**。旧行为是 `effective_delay`
+        // 返回 `None` 后回落短退避（0.5/1/2/4s），必然再撞同一窗口；把「等不到」显式
+        // 说清楚，由 provider 冷却（`enter_cooldown` 已按同一窗口登记）与换手接管。
+        if let Some(window) = retry_after.and_then(RetryAfter::window_ms) {
+            if window > 0 {
+                let window = window.min(RETRY_AFTER_WINDOW_MAX_MS);
+                if window > remaining {
+                    return RetryDecision::Abort {
+                        reason: format!(
+                            "upstream retry window {window}ms exceeds remaining retry budget {remaining}ms"
+                        ),
+                    };
+                }
+                return RetryDecision::Retry {
+                    delay_ms: window.max(base_delay_ms).min(remaining),
+                };
+            }
+        }
         RetryDecision::Retry {
-            delay_ms: delay.min(self.config.max_delay_ms),
+            delay_ms: base_delay_ms.min(self.config.max_delay_ms),
         }
     }
 

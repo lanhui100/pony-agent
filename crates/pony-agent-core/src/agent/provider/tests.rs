@@ -2198,6 +2198,214 @@
         );
     }
 
+    /// B1795488338167：上游声明的恢复窗口必须作用于**实际 sleep**，而不是只写进日志。
+    /// 口径：错误文本带 `retry_after=8`（8s）时，followup 退避 sleep 至少 8s（曲线 0.5s 被抬高）。
+    #[test]
+    fn followup_backoff_honors_upstream_retry_after_window() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "followup_sync",
+            ProviderRetryScope::Followup,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(
+                    "provider 返回错误状态：503 Service Unavailable；耗时=120ms；\
+                     retry_after=8；响应正文：temporarily unavailable"
+                        .to_string(),
+                )
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(result.is_err());
+        let slept = sleeper
+            .total_slept
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // 首跳 0s（curve_delay(0)=0，但窗口把第一次退避抬到 8s）。
+        assert!(
+            slept >= 8_000,
+            "上游窗口必须进入实际 sleep，实际 slept={slept}ms"
+        );
+        assert!(attempts.get() >= 2, "窗口可等待时必须真的重试一次");
+    }
+
+    /// B1795488338167：窗口超出本次预算 ⇒ **快速失败**（0 次 sleep、1 次 attempt），
+    /// 不再用 0.5/1/2/4s 短退避把同一次失败重放 4 遍。
+    #[test]
+    fn followup_aborts_fast_when_retry_after_exceeds_budget() {
+        let sleeper = crate::agent::retry::FakeSleeper::new();
+        let attempts = std::cell::Cell::new(0);
+        let result: Result<(), String> = retry_provider_scoped_with_sleeper(
+            "followup_sync",
+            ProviderRetryScope::Followup,
+            || {
+                attempts.set(attempts.get() + 1);
+                // 窗口 3600s ≫ 默认预算 60s。标记必须在**头部段**（`；响应正文` 之前），
+                // 正文段里的同名 token 按 L3-B 约定不参与解析。
+                Err(
+                    "provider 返回错误状态：429 Too Many Requests；耗时=90ms；\
+                     retry_after=3600；响应正文：quota window exhausted"
+                        .to_string(),
+                )
+            },
+            &sleeper,
+            None,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            sleeper
+                .total_slept
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "窗口装不进预算时不得 sleep（等不到就别白等）"
+        );
+        assert_eq!(attempts.get(), 1, "窗口超预算必须首跳即收口");
+    }
+
+    /// B1795488338107：流式 1:1 followup 的**重试**不得把「assistant + tool」重复追加。
+    ///
+    /// 缺陷现场：构造器每次尝试都把两条消息写回 `accumulated_messages`，流式臂此前
+    /// 未做 pristine 重置 ⇒ 第 2 次尝试以「已含上次追加」的转录为 base 再追加一遍。
+    /// 本用例用回环 SSE 服务：第 1 次连接直接断开（触发退避重试），第 2 次正常返回，
+    /// 断言最终转录长度 = base + 2（恰好一次追加），而不是 base + 4。
+    #[test]
+    fn streaming_followup_retry_does_not_duplicate_accumulated_messages() {
+        let rt = tokio::runtime::Runtime::new().expect("create Tokio runtime");
+        let _guard = rt.enter();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock sse server");
+        let address = listener.local_addr().expect("read mock address");
+        let accepted = Arc::new(Mutex::new(0_usize));
+        let accepted_for_thread = Arc::clone(&accepted);
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0_u8; 4096];
+                let mut consumed = Vec::new();
+                loop {
+                    let read = match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(read) => read,
+                        Err(_) => break,
+                    };
+                    consumed.extend_from_slice(&buf[..read]);
+                    if consumed.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let mut count = accepted_for_thread.lock().expect("lock accepted");
+                *count += 1;
+                let attempt = *count;
+                drop(count);
+                if attempt == 1 {
+                    // 首跳：返回 503（`UPSTREAM_SERVER_ERROR_HINTS` 在册的可重试 5xx），
+                    // 触发策略退避重试。注意 500 **不在**该码表内（判 NonRetryable）。
+                    let body = "{\"error\":{\"message\":\"upstream exploded\"}}";
+                    let response = format!(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                    continue;
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                );
+                let _ = stream.write_all(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\r\n\r\n",
+                );
+                let _ = stream.write_all(b"data: [DONE]\r\n\r\n");
+                let _ = stream.flush();
+            }
+        });
+
+        let config = ResolvedProviderSelection {
+            requested_name: "b1795488338107".to_string(),
+            provider_name: "b1795488338107".to_string(),
+            protocol: ProviderProtocol::OpenAiCompletions,
+            base_url: format!("http://{address}/v1"),
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "B1795488338107_API_KEY".to_string(),
+            api_key: Some("dummy".to_string()),
+            model: "b1795488338107-model".to_string(),
+            temperature: 0.0,
+            max_output_tokens: 64,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                supports_tools: true,
+                supports_streaming: true,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::None,
+        };
+        let manager = ProviderManager::new(config).with_policy(
+            crate::agent::config::UpstreamPolicy {
+                decision_max_attempts: 3,
+                retry_budget_ms: 5_000,
+                ..Default::default()
+            },
+        );
+        let request = ProviderRequest {
+            model: "b1795488338107-model".to_string(),
+            input: vec![ProviderMessage::user("继续总结工具结果")],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: ProviderRequestObservation::default(),
+            temperature: 0.0,
+            max_output_tokens: 64,
+        };
+        let tool_call = ToolCall {
+            call_id: Some("call_b1795488338107".to_string()),
+            name: "workspace.read_file".to_string(),
+            arguments: json!({ "path": "src/main.rs" }),
+            plan: None,
+        };
+        let tool_result = ToolResult {
+            tool_name: "workspace.read_file".to_string(),
+            status: "ok".to_string(),
+            output: "fn main() {}".to_string(),
+            duration_ms: 3,
+        };
+
+        let mut accumulated: Vec<Value> = Vec::new();
+        let response = manager
+            .continue_with_tool_result_stream(
+                &request,
+                &[ToolDefinition {
+                    name: "workspace.read_file",
+                    description: "read file",
+                    input_schema: json!({ "type": "object" }),
+                }],
+                &mut accumulated,
+                None,
+                &tool_call,
+                &tool_result,
+                |_| {},
+            )
+            .expect("第 2 次尝试必须成功");
+        assert_eq!(response.output_text, "done");
+        assert_eq!(
+            *accepted.lock().expect("lock accepted"),
+            2,
+            "用例必须真的走到重试（否则断言无证明力）"
+        );
+        // base = 请求自带 1 条 user 消息；每次尝试追加恰好 2 条。
+        assert_eq!(
+            accumulated.len(),
+            3,
+            "流式重试不得重复追加 assistant+tool（几何膨胀根因），实际转录={}",
+            accumulated.len()
+        );
+        let _ = handle.join();
+    }
+
     /// PA-100 code-review B P1-2：流式增量已发出后，重试必须在 sleep 前放弃，
     /// 且不得切换 RL 长退避（否则白睡 60s 后仍必然失败）。
     #[test]
