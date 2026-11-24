@@ -1313,6 +1313,53 @@ pub fn take_provider_attempt_window() -> Option<ProviderAttemptWindow> {
     ATTEMPT_WINDOW.with(|slot| slot.borrow_mut().take().map(|state| state.snapshot()))
 }
 
+/// 窥视本线程当前调用的账本（**不取走**）。
+///
+/// B135：`take_provider_attempt_window` 是一次性台账——per-call 记录构建已取走它，
+/// 之后到来的 `llm.chat` span 记账就只剩外层（含重试等待）耗时。本函数提供只读视图，
+/// 让「记录构建」与「span 记账」共享同一份窗口，而不改变任一方的取走语义。
+pub fn peek_provider_attempt_window() -> Option<ProviderAttemptWindow> {
+    ATTEMPT_WINDOW.with(|slot| slot.borrow().as_ref().map(AttemptWindowState::snapshot))
+}
+
+/// 重基后的耗时三元组（B135）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RebasedTiming {
+    /// 只覆盖最后一次成功 attempt 的耗时；无账本/无成功 attempt ⇒ 原样返回。
+    pub duration_ms: Option<u64>,
+    /// 同样重基后的首包延迟。
+    pub first_token_ms: Option<u64>,
+    /// 被排除掉的重试等待（失败 attempt 自身耗时 + 退避 sleep）。
+    /// **无重试 ⇒ `None`**（键缺席，禁止 0 占位冒充真值）。
+    pub retry_wait_ms: Option<u64>,
+}
+
+/// 把外层（含重试等待）耗时重基到「最后一次成功 attempt」的纯窗口。
+///
+/// 语义与 `take_pure_call_window` 一致，但**不消费账本**；供 `llm.chat` span 侧使用。
+pub fn rebase_timing_to_pure_call(
+    duration_ms: Option<u64>,
+    first_token_ms: Option<u64>,
+) -> RebasedTiming {
+    let Some(window) = peek_provider_attempt_window() else {
+        return RebasedTiming {
+            duration_ms,
+            first_token_ms,
+            retry_wait_ms: None,
+        };
+    };
+    let rebased_duration = duration_ms.map(|outer| window.rebase_duration_ms(outer));
+    let retry_wait_ms = match (duration_ms, rebased_duration) {
+        (Some(outer), Some(pure)) if pure < outer => Some(outer - pure),
+        _ => None,
+    };
+    RebasedTiming {
+        duration_ms: rebased_duration,
+        first_token_ms: window.rebase_first_token_ms(first_token_ms),
+        retry_wait_ms,
+    }
+}
+
 /// 记一次**失败** attempt（供重试循环调用；未开启账本 ⇒ 静默 no-op）。
 pub fn note_provider_attempt_failed(elapsed_ms: u64) {
     ATTEMPT_WINDOW.with(|slot| {
@@ -1687,6 +1734,49 @@ pub fn take_pure_call_window(
         log_pure_call_window(outer_duration_ms, outer_first_token_ms, &pure);
     }
     pure
+}
+
+#[cfg(test)]
+mod rebased_timing_tests {
+    use super::{
+        begin_provider_attempt_window, note_provider_attempt_failed, note_provider_attempt_succeeded,
+        peek_provider_attempt_window, rebase_timing_to_pure_call, take_provider_attempt_window,
+    };
+
+    #[test]
+    fn rebase_excludes_retry_wait_and_peek_does_not_consume() {
+        let _ = take_provider_attempt_window(); // 清掉上一测试可能残留的账本
+        let base = begin_provider_attempt_window();
+        note_provider_attempt_failed(500);
+        note_provider_attempt_succeeded(base, 2_000);
+
+        let timing = rebase_timing_to_pure_call(Some(2_600), Some(500));
+        assert_eq!(timing.duration_ms, Some(2_000), "只保留成功 attempt 的耗时");
+        assert_eq!(timing.retry_wait_ms, Some(600), "外层 2600 - 纯 2000 = 等待 600");
+        assert_eq!(timing.first_token_ms, Some(500), "成功 attempt 起点即账本起点 ⇒ ttft 不漂移");
+
+        assert!(
+            peek_provider_attempt_window().is_some(),
+            "peek 不得消费账本：per-call 记录构建还要用同一份窗口"
+        );
+
+        let _ = take_provider_attempt_window();
+        let after_take = rebase_timing_to_pure_call(Some(2_600), None);
+        assert_eq!(after_take.duration_ms, Some(2_600), "无账本 ⇒ 原样返回，不伪造");
+        assert_eq!(after_take.retry_wait_ms, None, "无账本 ⇒ 不产出等待键");
+    }
+
+    #[test]
+    fn no_retry_produces_no_wait_key() {
+        let _ = take_provider_attempt_window();
+        let base = begin_provider_attempt_window();
+        note_provider_attempt_succeeded(base, 1_200);
+
+        let timing = rebase_timing_to_pure_call(Some(1_200), None);
+        assert_eq!(timing.duration_ms, Some(1_200));
+        assert_eq!(timing.retry_wait_ms, None, "无重试 ⇒ 键缺席（禁止 0 占位）");
+        let _ = take_provider_attempt_window();
+    }
 }
 
 /// 重试窗口的结构化留痕（一行一条调用；无重试不写，避免常态噪声）。
