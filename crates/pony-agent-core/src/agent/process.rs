@@ -2896,11 +2896,29 @@ mod tests {
 
         // 受管范围形态：组长 `sh` 在前台 `wait`，孙进程 `trap "" TERM; exec sleep` —— **吞掉
         // SIGTERM**，因此 rung-1 清不空范围，探测结论必须是非空。
+        // 通过临时就绪标记确保孙进程已执行完 `trap "" TERM` 再发 SIGTERM，避免 CI 高负载下
+        // fork 后尚未装好信号处理器即被击杀的竞态。
+        struct ReadyFileGuard(std::path::PathBuf);
+        impl Drop for ReadyFileGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        static READY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ready_seq = READY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ready_guard = ReadyFileGuard(std::env::temp_dir().join(format!(
+            "pony-b206-ready-{}-{ready_seq}.flag",
+            std::process::id()
+        )));
+        let _ = std::fs::remove_file(&ready_guard.0);
         let (program, arguments) = (
             "sh".to_string(),
             vec![
                 "-c".to_string(),
-                "/bin/bash -c 'trap \"\" TERM; exec /bin/sleep 60' &\nwait\n".to_string(),
+                "/bin/bash -c 'trap \"\" TERM; : > \"$1\"; exec /bin/sleep 60' _ \"$1\" &\nwait\n"
+                    .to_string(),
+                "_".to_string(),
+                ready_guard.0.to_string_lossy().into_owned(),
             ],
         );
         let session = "session-b206-zero-deadline";
@@ -2909,16 +2927,17 @@ mod tests {
             .pid_of(session, &handle)
             .expect("pid_of must resolve the leader pid") as i32;
 
-        // 反空跑前置：组内必须先出现组长 + 孙进程两个成员（否则「非空」结论没有意义）。
+        // 反空跑前置：组内必须先出现组长 + 孙进程两个成员，且孙进程已完成 trap 安装。
         let setup_deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let members = scan_range_members(pgid).unwrap_or_default();
-            if members.len() >= 2 {
+            if members.len() >= 2 && ready_guard.0.exists() {
                 break;
             }
             assert!(
                 Instant::now() < setup_deadline,
-                "B206: 前置失败 —— 受管组未在 5s 内出现 ≥2 个成员（pgid={pgid}，实际 {members:?}）"
+                "B206: 前置失败 —— 受管组未在 5s 内出现 ≥2 个成员并完成 trap 就绪（pgid={pgid}，实际 {members:?}，ready={}）",
+                ready_guard.0.exists()
             );
             std::thread::sleep(QUIESCE_POLL_INTERVAL);
         }

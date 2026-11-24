@@ -91,11 +91,14 @@ fn at2_concurrent_repeated_recovery_is_deterministic_and_never_duplicates() {
     // Arrange
     //
     // 确定性防抖（AMEND-3 根因定位）：请求组装依赖**进程级**门控
-    // `agent::context::agent_team_policy_enabled()`（OnceLock，见 context.rs:461），它可能被
-    // 同进程其它用例的 bootstrap 在运行期间懒初始化 ⇒ "先算参考序列、后跑线程"会因为参考
-    // 序列看到旧门控值而误判不确定。这里先做一次 warm-up 强制懒初始化落地，再算参考序列；
-    // 同时把 env 沙箱提前锁定（避免 HOME/XDG 变化影响装载路径）。种子/迭代数/Barrier 语义不变。
+    // `agent::context::agent_team_policy_enabled()`（间接读取 `SUBAGENT_ENGINE` `OnceLock`），
+    // 同进程其它 `tui::tests` 用例在构建 `HostControlPlaneBuilder` 时会并发首次写入该 `OnceLock`，
+    // 导致"先算参考序列、后跑线程"之间门控由 false 翻为 true。这里在读取参考序列前先确保
+    // `SUBAGENT_ENGINE` 已定型（内存空引擎、幂等首写者胜），同时锁定 env 沙箱。种子/迭代数/Barrier 语义不变。
     isolate_process_data_dir();
+    let _ = pony_agent_core::agent::subagent_runtime::set_subagent_engine(Arc::new(
+        pony_agent_core::agent::subagent_runtime::HostTurnEngine::new(),
+    ));
     let _warmup = recovery_body(0, 0);
     let gate_before = pony_agent_core::agent::context::agent_team_policy_enabled();
 
