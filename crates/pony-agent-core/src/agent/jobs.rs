@@ -619,6 +619,14 @@ pub fn job_start_scoped(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
+    // B1795571360795：队友会话起的后台作业同样带角色 git 身份，否则 `git commit` 的 author
+    // 恒为宿主配置，`git log` 无法区分 Lead 与队友产出。宿主/未知会话 ⇒ 空表，行为不变。
+    for (key, value) in
+        crate::agent::teammate_identity::git_identity_env_for_session(owner)
+    {
+        command.env(key, value);
+    }
+
     // Windows 弹窗修复：控制台子进程不得弹出可见控制台窗口（与 Run/ProcessManager 一致）。
     #[cfg(windows)]
     crate::agent::process::hide_console_window(&mut command);
