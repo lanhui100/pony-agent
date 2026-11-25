@@ -39,8 +39,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+// B165：此前收紧为私有模块，ACP 侧无法复用 Job Object（只能 `child.kill()` 杀直接子进程）。
+// 现放开到 crate 级：`agent::process` 仍是唯一创建/绑定点，其他模块经窄封装
+// （如 `acp::process_tree`）调用，不复制 Job 生命周期语义。
 #[cfg(windows)]
-mod windows_job;
+pub(crate) mod windows_job;
 #[cfg(windows)]
 use windows_job::Job;
 
@@ -180,7 +183,10 @@ fn failed_start_cleanup(child: &mut Child, job: &Job, cause: String) -> String {
 /// `new_api_surface: ntdll!NtResumeProcess`（wave-9 P2-1，Lead 已授权）
 /// [VERIFY DEGRADED: WINDOWS-ONLY] 本机 Linux x86_64 无 Windows target，此分支不参与类型
 /// 检查与执行。
-fn resume_process(process: std::os::windows::io::RawHandle) -> Result<(), String> {
+///
+/// B165：可见性提升到 crate 级，供 `acp::process_tree` 复用（ACP 侧同样以
+/// `CREATE_SUSPENDED` 启动、纳管成功后再恢复），避免第二份 ntdll FFI。
+pub(crate) fn resume_process(process: std::os::windows::io::RawHandle) -> Result<(), String> {
     use windows_sys::Win32::Foundation::HANDLE;
     #[link(name = "ntdll")]
     extern "system" {

@@ -208,6 +208,55 @@ pub fn spawn_graph_run_stream(
     })
 }
 
+/// ACP 委派事件名（B163）。与 `goal://*` 同族：领域前缀 + 事实名，前端常量必须与此同源。
+pub const ACP_DELEGATE_EVENT: &str = "acp://delegate";
+
+/// `acp://delegate` 的线缆负载。
+///
+/// 为什么包一层而不是直接透传 `TurnStreamEvent`：委派期间的事件名与回合内事件名同形
+/// （`turn:delta` / `turn:tool`），不带归属就无法区分"这帧属于哪次委派"——直接复用
+/// [`TauriTurnEventSink`] 会让 ACP 子活动混进当前回合的时间线。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpDelegateEventPayload {
+    /// 宿主侧分配的委派 id（`acp_delegate_start` 的入参，取消时复用同一个）。
+    pub delegation_id: String,
+    /// 核心层事件名（`turn:delta` / `turn:tool` …，与 TUI 投射同一套词表）。
+    pub name: String,
+    pub payload: TurnStreamEvent,
+}
+
+/// ACP 委派事件出口（B163）：桌面侧第二个 `app.emit` 落点，只负责"带归属地转发"。
+///
+/// 边界：这里不做任何归约/过滤——事件是否该发、叫什么名字，全由核心层
+/// （`acp::host` → `AcpAgentSession::prompt`）决定；本结构只是把 `AppHandle` 变成
+/// `TurnEventSink`，保证 Tauri 层不出现 ACP 协议逻辑。
+pub struct TauriAcpDelegateSink {
+    app: AppHandle,
+    delegation_id: String,
+}
+
+impl TauriAcpDelegateSink {
+    pub fn new(app: AppHandle, delegation_id: String) -> Self {
+        Self { app, delegation_id }
+    }
+}
+
+impl TurnEventSink for TauriAcpDelegateSink {
+    fn emit(&self, name: &str, payload: TurnStreamEvent) {
+        let event = AcpDelegateEventPayload {
+            delegation_id: self.delegation_id.clone(),
+            name: name.to_string(),
+            payload,
+        };
+        if let Err(e) = self.app.emit(ACP_DELEGATE_EVENT, event) {
+            eprintln!(
+                "[pony-agent] acp delegate emit failed (name={ACP_DELEGATE_EVENT}): {e}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

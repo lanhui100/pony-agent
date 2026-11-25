@@ -131,7 +131,8 @@ use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 use url::Url;
-use self::exec::error_result;
+// B163：`acp::host` 也复用该构造器，故从模块内可见升级为 crate 级再导出（错误 JSON 只有一份形状）。
+pub(crate) use self::exec::error_result;
 use self::web::FailClosedResolver;
 
 

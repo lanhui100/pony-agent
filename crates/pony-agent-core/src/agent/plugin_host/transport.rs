@@ -11,7 +11,7 @@
 //!
 //! 平台局限（ADR 0067 已知局限）：Windows 无进程组，[`PluginTransport::terminate`] 只 kill
 //! 直接子进程，孙进程为"尽力回收"；彻底回收需要 Job Object（`agent/process/windows_job.rs`
-//! 的可见性为 `pub(super)`，提升可见性属契约变更，不在本批范围）。
+//! 的可见性已放开到 crate 级（B165），但插件传输层接线未在本批范围）。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};

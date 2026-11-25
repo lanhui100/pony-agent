@@ -16,6 +16,10 @@ pub mod config;
 /// wave-acp-delegate C1：ACP 子活动 → 父 turn 事件归集（W1 签名骨架，实现归 W2a）。
 pub(crate) mod delegate_events;
 pub mod handlers;
+/// ACP 宿主桥（B163）：Tauri 命令 / 前端用的薄入口（list / run / cancel）。
+pub mod host;
+/// ACP agent 子进程树回收（B165）：Windows 用 Job Object 纳管孙进程。
+pub(crate) mod process_tree;
 pub mod protocol;
 /// 活跃 ACP 委派注册表（进程内只读可见面；见模块文档）。
 pub mod registry;

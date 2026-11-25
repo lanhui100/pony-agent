@@ -52,7 +52,8 @@
 //! # 平台局限
 //!
 //! Windows 无进程组：终止只能杀直接子进程，插件派生的孙进程为"尽力回收"（彻底回收需 Job
-//! Object，见 `agent/process/windows_job.rs`，其可见性收紧为 `pub(super)`，不在本批改动）。
+//! Object，见 `agent/process/windows_job.rs`；其可见性已放开到 crate 级（B165），但插件传输层
+//! 接线不在本批范围）。
 
 pub mod capability;
 pub mod manifest;

@@ -5,8 +5,8 @@
 //! - 入站：reader 线程按「`id`+`method` = 请求 / `method` 无 `id` = 通知 / `id` 无 `method` = 响应」
 //!   三路分流，请求交给 [`AcpInboundRequestHandler`] 应答（无 handler ⇒ fail-closed 回错误，
 //!   绝不默认放行权限请求），通知交给 [`AcpNotificationHandler`]（未注入 ⇒ 丢弃 + stderr 诊断）；
-//! - 进程：env 白名单 + Unix 独立进程组 + stderr 环形缓冲（尾部 32 行，崩溃诊断用），
-//!   模式对齐 `agent/plugin_host/transport.rs`。
+//! - 进程：env 白名单 + Unix 独立进程组 + Windows Job Object 子进程树纳管（B165）+
+//!   stderr 环形缓冲（尾部 32 行，崩溃诊断用），模式对齐 `agent/plugin_host/transport.rs`。
 //!
 //! 失败语义（禁吞异常）：所有外部进程异常都映射到 [`AcpTransportError`] 的 8 个 `acp_*` 错误码
 //! （§3.2.9），不 panic、不重试、不静默丢弃；连续非法 JSON 行达
@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::acp::config::AcpAgentSpec;
+use crate::acp::process_tree::ProcessTree;
 use crate::acp::protocol::method as acp_method;
 use crate::acp::protocol::{RequestPermissionOutcome, RequestPermissionResponse};
 use crate::agent::plugin_host::capability::{
@@ -213,6 +214,9 @@ impl AcpTransportError {
 /// 一个已 spawn 的 ACP agent 子进程 + stdio JSON-RPC 通道。
 pub struct AcpTransport {
     child: Child,
+    /// B165：子进程树纳管（Windows = Job Object；其他平台为占位，语义由 `process_group(0)`
+    /// + 进程组 SIGKILL 承担）。`close()`/`Drop` 先终止整棵树，再回收直接子进程。
+    tree: ProcessTree,
     /// `Option` 便于 `close()` 时 take 并关闭（EOF 让 agent 自行退出）。
     ///
     /// `Arc` 是为了让 reader 线程也能写应答（入站请求必须回写 result/error）：进程是唯一的
@@ -292,6 +296,17 @@ impl AcpTransport {
             use std::os::unix::process::CommandExt;
             process.process_group(0);
         }
+        // Windows（B165）：以 CREATE_SUSPENDED 创建，纳管（Job 绑定 + 成员校验）成功后再恢复，
+        // 收敛 `spawn → 纳管` 的逃逸窗口；同时带 CREATE_NO_WINDOW（控制台子进程不弹窗，
+        // 与 `agent::process` 同口径——`creation_flags` 是覆盖语义，两个 flag 必须一起给）。
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            process.creation_flags(
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+            );
+        }
         // 隔离面唯一入口（F8a）：所有 env 来源最终经 `apply_child_env` 的白名单/拒绝键收口，
         // provider key、`SSH_AUTH_SOCK`、`LD_*` 等一律不外泄。
         //
@@ -318,17 +333,28 @@ impl AcpTransport {
         let mut child = process.spawn().map_err(|error| {
             AcpTransportError::Spawn(format!("启动 ACP agent `{}` 失败：{error}。", spec.command))
         })?;
+        // B165：spawn 后**立刻**纳管整棵树（Windows = Job Object 绑定 + 成员校验），
+        // 失败即 fail-closed（回滚已 spawn 的子进程），绝不降级为"只杀直接子进程"。
+        let tree = match ProcessTree::contain(&child) {
+            Ok(tree) => tree,
+            Err(error) => {
+                reap_child(child);
+                return Err(AcpTransportError::Spawn(format!(
+                    "纳管 ACP agent 子进程树失败（{error}）；已回滚子进程。"
+                )));
+            }
+        };
 
         let Some(stdin) = child.stdin.take() else {
-            reap_child(child);
+            reap_child_and_tree(child, tree);
             return Err(AcpTransportError::Spawn("无法获取 agent stdin。".into()));
         };
         let Some(stdout) = child.stdout.take() else {
-            reap_child(child);
+            reap_child_and_tree(child, tree);
             return Err(AcpTransportError::Spawn("无法获取 agent stdout。".into()));
         };
         let Some(stderr) = child.stderr.take() else {
-            reap_child(child);
+            reap_child_and_tree(child, tree);
             return Err(AcpTransportError::Spawn("无法获取 agent stderr。".into()));
         };
 
@@ -372,7 +398,7 @@ impl AcpTransport {
                 }
             });
         if let Err(error) = dispatcher {
-            reap_child(child);
+            reap_child_and_tree(child, tree);
             return Err(AcpTransportError::Spawn(format!(
                 "启动入站请求分发线程失败：{error}。"
             )));
@@ -401,7 +427,7 @@ impl AcpTransport {
         let reader = match reader {
             Ok(handle) => handle,
             Err(error) => {
-                reap_child(child);
+                reap_child_and_tree(child, tree);
                 return Err(AcpTransportError::Spawn(format!(
                     "启动 stdout 读线程失败：{error}。"
                 )));
@@ -422,7 +448,7 @@ impl AcpTransport {
             });
         if let Err(error) = stderr_reader {
             // 读线程已就绪但诊断通道起不来：按启动失败处理，同步回收子进程（不泄漏）。
-            reap_child(child);
+            reap_child_and_tree(child, tree);
             let _ = reader.join();
             return Err(AcpTransportError::Spawn(format!(
                 "启动 stderr 读线程失败：{error}。"
@@ -431,6 +457,7 @@ impl AcpTransport {
 
         Ok(Self {
             child,
+            tree,
             stdin,
             inbound: Mutex::new(receiver),
             handler,
@@ -584,12 +611,16 @@ impl AcpTransport {
 
     /// 关闭并回收子进程（幂等）。
     ///
-    /// 顺序：关 stdin → 宽限 [`SPAWN_REAP_GRACE`] → Unix 进程组 SIGKILL → `kill()` + `wait()`。
+    /// 顺序：关 stdin → 宽限 [`SPAWN_REAP_GRACE`] → **整棵进程树终止**（Unix 进程组 SIGKILL /
+    /// Windows Job Object `TerminateJobObject`）→ `kill()` + `wait()` → 释放纳管句柄。
     pub fn close(&mut self) {
         {
-            let Ok(mut terminated) = self.terminated.lock() else {
-                return;
-            };
+            // 中毒不 panic 也不早退：中毒只说明此前有线程在持锁时 panic，
+            // “已终止”位本身仍可读——跳过终止会把子进程与孙进程留成孤儿。
+            let mut terminated = self
+                .terminated
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if *terminated {
                 return;
             }
@@ -606,23 +637,33 @@ impl AcpTransport {
         let grace_deadline = Instant::now() + SPAWN_REAP_GRACE;
         while Instant::now() < grace_deadline {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                // 直接子进程已退出（`try_wait` 已回收），但 agent 可能留下孙进程：
+                // 仍必须终止整棵树并释放纳管句柄，不能只 return（否则 Windows 上残留孙进程
+                // 要等到 `Drop` 才被 kill-on-close 兜住，Unix 上则完全不回收）。
+                Ok(Some(_)) => {
+                    self.terminate_tree();
+                    return;
+                }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 // 观察失败不折叠为「已退出」：继续走 SIGKILL 兜底（禁止静默放行）。
                 Err(_) => break,
             }
         }
 
-        #[cfg(unix)]
-        {
-            let pid = self.child.id() as i32;
-            // safety: 进程组由本模块以 process_group(0) 创建，pgid == 子进程 pid。
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
-        }
+        self.terminate_tree();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+
+    /// 终止整棵进程树并释放纳管句柄（幂等）。
+    ///
+    /// 顺序：Unix 先对进程组 SIGKILL（覆盖孙进程）→ Windows 终止 Job → 释放 Job 句柄
+    /// （kill-on-close 兜底）。直接子进程可能已先退出，本方法仍须执行。
+    fn terminate_tree(&mut self) {
+        #[cfg(unix)]
+        kill_process_group(self.child.id());
+        self.tree.terminate();
+        self.tree.close();
     }
 
     /// 已记录的 fail-closed 原因（只读快照，不清空：会话级失败不可恢复）。
@@ -706,6 +747,35 @@ fn apply_acp_child_env_extras(command: &mut Command) {
 fn reap_child(mut child: Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// 启动失败时回收**已纳管**的子进程树：先终止整棵树并释放纳管句柄，再回收直接子进程。
+///
+/// 顺序理由（B165 评审阻断项②）：`TerminateJobObject` 若失败，kill-on-close 兜底只在句柄
+/// 关闭后生效——先 `wait()` 会让兜底推迟到孙进程自然结束，故必须先 terminate + close。
+fn reap_child_and_tree(mut child: Child, mut tree: ProcessTree) {
+    #[cfg(unix)]
+    kill_process_group(child.id());
+    tree.terminate();
+    tree.close();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// 对进程组发 SIGKILL（`pgid == pid`，由 `spawn` 的 `process_group(0)` 建立）。
+///
+/// pid 域在 Linux/macOS 上远小于 `i32::MAX`（Linux `pid_max` 上限 4194304）；
+/// 越界在物理上不可达，此时**宁可不发信号**也不用 `as` 静默截断——截断后的 `-pid`
+/// 可能指向别的进程组（杀错进程比少杀一个严格更糟）。
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    // safety: 进程组由本模块以 process_group(0) 创建，pgid == 子进程 pid。
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
 }
 
 /// 写一行 JSON-RPC 报文（整行一次写出，两条写路径共用同一把 stdin 锁）。

@@ -76,7 +76,9 @@ Pony 以 **ACP Client** 身份接入外部 agent，分三层落地（真源
     session 层 permission handler 注入。
   - `B162`：`session/update` 在 prompt 返回后按序 flush（`TurnEventSink` 非 `Send+Sync`），
     零丢帧但非实时，委派期间 UI 无实时 `turn:delta`。
-  - `B163`：Tauri 三命令与前端 `src/types/acp.ts`（方案中标注为可选）未做。
+  - `B163`：Tauri 三命令与前端 `src/types/acp.ts`（方案中标注为可选）——**已于 2026-11-25 交付**
+    （见 `2026-11-25-acp-p2-host-surface-and-process-tree.md`：`acp::host` 薄桥 +
+    `acp_list_agents` / `acp_delegate_start` / `acp_delegate_cancel` + `src/types/acp.ts`）。
 - **Fix-round 决策（Gate-1/Gate-2 对抗审查后追加，2026-11-14）**：
   ① **单轮预算单一真源** = `acp/mod.rs:30 ACP_DEFAULT_TURN_BUDGET`（120s），CLI `--timeout-secs`、
   工具入口缺省、`ToolExecutionPolicy` 默认三处引用同一常量（此前三处各自 5s/120s，导致

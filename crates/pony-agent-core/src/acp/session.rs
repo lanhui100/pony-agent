@@ -887,7 +887,9 @@ impl AcpAgentSession {
     /// - 取消：同一 `recv_timeout` 循环按 `turn_cancel_poll_ms`(≤100ms) 轮询令牌；触发即
     ///   `session/cancel`，仍须 < 预算返回 `aborted` + `tool_cancelled`（不改变取消语义）。
     /// - 归约口径：`ok` / `truncated` 仍为成功；`refused` → error `acp_agent_refused`；
-    ///   `cancelled` → aborted `tool_cancelled`（与 B162 前逐字段一致）。
+    ///   `cancelled` → aborted `tool_cancelled`（与 B162 前逐字段一致）；**取消事实优先于
+    ///   stopReason**——已触发取消的轮次即使 agent 回 `end_turn`/`max_tokens` 也归约
+    ///   aborted `tool_cancelled`（B169 cancel-race）。
     pub fn prompt(&self, blocks: Vec<ContentBlock>, sink: &dyn TurnEventSink) -> ToolResult {
         let started = Instant::now();
         // §3.2.1 串行闸：同一 session 的并发 prompt 必须排队（不并发打同一 session）。
@@ -987,13 +989,31 @@ impl AcpAgentSession {
             .unwrap_or_default();
 
         match response {
-            Ok(response) => self.outcome_result(
-                Self::reduce_stop_reason(response.stop_reason),
-                response.stop_reason,
-                &updates,
-                &warnings,
-                started,
-            ),
+            // B169：agent 在收到 `session/cancel` 后仍可能以成功 stopReason 收尾（cancel-race：
+            // 取消失败地"晚到"）。归约必须以**取消事实**为准，不得因 agent 回了 `end_turn`
+            // 就把已取消的轮次展示成成功。命中即按 aborted + `tool_cancelled` 归约
+            // （与 `Err` 分支同一口径），并留一条诊断说明取消与成功收尾同时出现。
+            Ok(response) => {
+                let outcome = Self::reduce_stop_reason(response.stop_reason);
+                if !matches!(outcome, AcpTurnOutcome::Cancelled)
+                    && (cancel_observed || self.cancellation_requested())
+                {
+                    log_json_with_fields(
+                        "warn",
+                        "acp 取消已触发但 agent 以成功 stopReason 收尾，按 aborted 归约",
+                        None,
+                        &[("stop_reason", json!(response.stop_reason))],
+                    );
+                    return self.outcome_result(
+                        AcpTurnOutcome::Cancelled,
+                        StopReason::Cancelled,
+                        &updates,
+                        &warnings,
+                        started,
+                    );
+                }
+                self.outcome_result(outcome, response.stop_reason, &updates, &warnings, started)
+            }
             // 取消已触发但 agent 不配合（根本没回包 ⇒ 传输层 timeout/断链）：归因优先于传输层
             // 错误分类，必须归约 aborted + tool_cancelled，不得退化成 acp_timeout。
             Err(error) if cancel_observed || self.cancellation_requested() => {
