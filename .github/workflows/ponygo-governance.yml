@@ -11,7 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # fetch-depth: 0 是「非执行者测试证据门」的硬前提：该门按 `--base <PR base sha>` 取提交范围，
+      # 浅克隆（默认 depth=1）里没有 base 提交对象 ⇒ 门 fail-closed exit 2，首跑即红（PR #94 实测）。
+      # 不靠门内 `git fetch` 自愈：门禁不应有网络副作用。
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
