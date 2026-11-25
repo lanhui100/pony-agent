@@ -84,7 +84,7 @@ export type AcpSessionView = {
 };
 
 /**
- * `acp://delegate` 事件的负载（后端 `TauriAcpDelegateEventPayload`）。
+ * `acp://delegate` 事件的负载（后端 `AcpDelegateEventPayload`）。
  *
  * `name` 沿用回合事件词表（`turn:delta` / `turn:tool` …）：委派期间的事件名与回合内同形，
  * 因此必须靠 `delegationId` 归属，不能直接塞进当前回合时间线。

@@ -1451,7 +1451,7 @@ struct AcpDelegateOutcome {
 async fn acp_list_agents() -> Result<Vec<AcpAgentSummary>, String> {
     let agents = BlockingHelper::spawn(pony_agent_core::acp::host::list_agents)
         .await?
-        .map_err(|error| format!("{}: {error}", error.code()))?;
+        .map_err(|error| error.to_string())?;
     Ok(agents)
 }
 

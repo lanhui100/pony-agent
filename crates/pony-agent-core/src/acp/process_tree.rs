@@ -58,6 +58,9 @@ impl ProcessTree {
             }
             // 纳管成功后才恢复执行；恢复失败必须 fail-closed（绝不留一个永不推进的进程）。
             if let Err(error) = crate::agent::process::resume_process(handle) {
+                // 与 `agent::process` 的启动失败清理同口径：先显式终止整棵树，再关句柄
+                // （kill-on-close 只作兜底，不作为唯一回收手段）。
+                let _ = job.terminate(1);
                 job.close();
                 return Err(error);
             }
