@@ -71,6 +71,14 @@ pub fn prompt_non_tool_tokens() -> &'static [&'static str] {
         "TokenManager",
         // 团队策略段里 list_agents 的可选入参名（`wait_ms`），是字段不是工具。
         "wait_ms",
+        // 团队策略段里 TeammateMember 的读时快照字段名，是字段不是工具。
+        "is_driving",
+        // 团队策略段里 TeammateMember 的上轮失败文本字段名，是字段不是工具。
+        "last_error",
+        // 团队策略段里 SpawnTeammateResult 的派发阶段字段名，是字段不是工具。
+        "delivery_state",
+        // 团队策略段里 delivery_state 的取值（未投递任何消息），是枚举值不是工具。
+        "not_started",
     ]
 }
 

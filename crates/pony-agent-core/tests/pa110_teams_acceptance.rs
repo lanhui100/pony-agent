@@ -240,7 +240,8 @@ fn test_ac05_message_queuing_and_steering() {
         reason: Some("Manual user interrupt".to_string()),
     }).unwrap();
     assert!(int_res.success);
-    assert_eq!(int_res.new_status, TeammateStatus::Inactive);
+    // B1795535505312：中断是独立终态，与「正常收口」的 Inactive 可区分。
+    assert_eq!(int_res.new_status, TeammateStatus::Interrupted);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

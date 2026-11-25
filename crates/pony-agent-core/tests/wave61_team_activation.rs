@@ -636,7 +636,7 @@ fn c7b_single_flight_per_target() {
 }
 
 /// C7c（C10 失败补偿）：引擎返回 `subagent_busy` 时，消息必须原序回滚入队（不丢），
-/// 成员回到 `Inactive`，lead 收件箱收到含真实错误码的回执且绝无成功回执。
+/// 成员落到 `Failed`（并带 `last_error` 文本），lead 收件箱收到含真实错误码的回执且绝无成功回执。
 #[test]
 fn c7c_requeue_on_engine_error() {
     let outcome = run_v13_child("c7c");
@@ -679,7 +679,7 @@ fn c7d_inflight_message_not_stranded() {
 
 /// C7e（C7.4 回归）：空闲态 `interrupt_agent` 留下的一次性中断标记**不得吞掉后续驱动**。
 ///
-/// 时序：spawn（不 send，保持空闲）→ `interrupt_agent`（置 Inactive + 打 stale 标记）→
+/// 时序：spawn（不 send，保持空闲）→ `interrupt_agent`（置 Interrupted + 打 stale 标记）→
 /// `send_message("c7e-alpha")`（必须真实驱动一次）。全部等待使用只读观测
 /// （`inbox_pending_len` + `list_agents`），禁止破坏性 drain 轮询、禁止 sleep 掩盖。
 /// 断言 (a) 引擎调用次数 == 1；(b) prompt 含 `c7e-alpha`；(c) 最终 `Inactive` 且 `pending == 0`；
@@ -970,6 +970,13 @@ fn spawn_inert_teammate(engine: Arc<ScenarioEngine>, tag: &str) -> (Arc<Scenario
         TeammateStatus::Active,
         "C7 前置失败：空 prompt 派生后成员必须处于 Active（未被自动驱动）"
     );
+    // B1795535505312：空 prompt 派生不得声称「已开始跑」——回执必须显式区分派发阶段。
+    assert_eq!(
+        spawned.delivery_state,
+        orchestration::DELIVERY_STATE_NOT_STARTED,
+        "C7 前置失败：空 prompt 派生必须回执 delivery_state=not_started（实际 {:?}）",
+        spawned.delivery_state
+    );
     (engine, spawned.member.target)
 }
 
@@ -1222,13 +1229,32 @@ fn run_c7c_body() {
     })
     .expect("C7c 前置失败：send_message 必须成功");
 
-    // 等待收口：驱动失败后成员必须回到 Inactive。
+    // 等待收口：驱动失败后成员必须落到 Failed（B1795535505312：失败不得伪装成 Inactive，
+    // 否则 Lead 无法区分「跑完了」与「跑挂了」）。
     assert!(
         wait_until(Duration::from_secs(5), || {
-            teammate_status_of(&target) == Some(TeammateStatus::Inactive)
+            teammate_status_of(&target) == Some(TeammateStatus::Failed)
         }),
-        "C7c 失败：引擎失败后 5s 内成员未回到 Inactive（实际 {:?}）",
+        "C7c 失败：引擎失败后 5s 内成员未落到 Failed（实际 {:?}）",
         teammate_status_of(&target)
+    );
+    let failed_member = orchestration::list_agents()
+        .expect("C7c 失败：花名册必须可读")
+        .agents
+        .into_iter()
+        .find(|member| member.target == target)
+        .expect("C7c 失败：成员必须在册");
+    assert!(
+        failed_member
+            .last_error
+            .as_deref()
+            .is_some_and(|text| text.contains("subagent_busy")),
+        "C7c 失败：Failed 状态必须带可判读的错误文本（实际 {:?}）",
+        failed_member.last_error
+    );
+    assert!(
+        !failed_member.is_driving,
+        "C7c 失败：驱动已收口却仍标记 is_driving=true"
     );
     assert_eq!(
         engine.calls.load(Ordering::SeqCst),
@@ -1416,8 +1442,8 @@ fn run_c7e_body() {
     assert!(interrupted.success, "C7e 前置失败：interrupt 未生效");
     assert_eq!(
         interrupted.new_status,
-        TeammateStatus::Inactive,
-        "C7e 前置失败：interrupt 后必须为 Inactive"
+        TeammateStatus::Interrupted,
+        "C7e 前置失败：interrupt 后必须为 Interrupted（与正常收口可区分）"
     );
     assert_eq!(
         engine.calls.load(Ordering::SeqCst),

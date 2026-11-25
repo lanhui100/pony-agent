@@ -72,6 +72,7 @@ pub mod sse_adapter;
 pub mod stop_escalation;
 pub mod stop_sequence;
 pub mod telemetry;
+pub mod teammate_identity;
 pub mod terminal;
 pub mod todo;
 pub mod tool_runtime;
