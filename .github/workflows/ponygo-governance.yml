@@ -39,3 +39,14 @@ jobs:
           npm run release:push:selftest
           npm run artifacts:spec
           bash scripts/cargo-lane.spec.sh
+
+      # dev-team 就绪纪律的机械看守（backlog:B1795571368443）：SKILL 的「测试证据须由非执行者
+      # 产生」过去只是流程约束，执行者自跑 exit 0 即可放行。本步判「dev-team 批次改动了代码面时，
+      # 提交信息里必须有一条产出者 ≠ 代码作者的 `Test-Evidence:` trailer」。正负样本与门禁本体
+      # 同批执行（spec 在临时仓库里跑，不读真实工作区）。
+      - name: 非执行者测试证据门（dev-team 批次）
+        run: |
+          bash scripts/check-independent-test-evidence.spec.sh
+          node scripts/check-independent-test-evidence.mjs \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.sha }}"

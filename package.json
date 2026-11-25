@@ -69,7 +69,7 @@
     "test:tauri:smoke": "node scripts/tauri-smoke.js",
     "secrets:check": "node scripts/check-secrets.mjs --staged",
     "secrets:check:all": "node scripts/check-secrets.mjs --all",
-    "verify": "npm run version:check && npm run git:guard:selftest && npm run git:prune:selftest && npm run release:push:selftest && npm run install-cli:selftest && npm run adr:check && npm run secrets:check:all && npm run backlog:gate && npm run test:unit && npm run build && npm run contract:check && npm run contract:cli && npm run contract:bin-imports && npm run contract:bin-imports:selftest && npm run size:check && npm run rust:lint:selftest && npm run rust:lint && npm run rust:lint:tauri && npm run portable:ps1 && npm run portable:ps1:selftest && npm run cargo:check:shared && npm run ext:check",
+    "verify": "npm run version:check && npm run git:guard:selftest && npm run git:prune:selftest && npm run release:push:selftest && npm run install-cli:selftest && npm run adr:check && npm run secrets:check:all && npm run backlog:gate && npm run contract:test-evidence:selftest && npm run test:unit && npm run build && npm run contract:check && npm run contract:cli && npm run contract:bin-imports && npm run contract:bin-imports:selftest && npm run size:check && npm run rust:lint:selftest && npm run rust:lint && npm run rust:lint:tauri && npm run portable:ps1 && npm run portable:ps1:selftest && npm run cargo:check:shared && npm run ext:check",
     "preview": "vite preview",
     "preview:e2e": "vite preview --host 127.0.0.1 --port 4175",
     "tauri": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri",
@@ -98,7 +98,11 @@
     "clean:targets": "bash scripts/clean-targets.sh",
     "rust:lint:tauri": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json",
     "rust:lint:tauri:json": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json --json",
-    "rust:lint:tauri:update": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json --update-baseline"
+    "rust:lint:tauri:update": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json --update-baseline",
+    "contract:bin-imports": "node scripts/check-bin-test-imports.mjs",
+    "contract:bin-imports:selftest": "node scripts/check-bin-test-imports.spec.mjs",
+    "contract:test-evidence": "node scripts/check-independent-test-evidence.mjs",
+    "contract:test-evidence:selftest": "bash scripts/check-independent-test-evidence.spec.sh"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",

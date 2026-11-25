@@ -109,12 +109,7 @@ impl ToolRouter {
                 return error_result(TOOL_WORKSPACE_RUN_COMMAND, &code, message, None);
             }
         };
-        let sandbox_request = SandboxRequest {
-            workspace_root: execution_root.display().to_string(),
-            allow_network: false,
-            environment_allowlist: Vec::new(),
-            isolate_environment: true,
-        };
+        let sandbox_request = run_sandbox_request(&execution_root, context.session_id.as_deref());
         let backend: &dyn SandboxBackend = match &self.sandbox_backend {
             Some(backend) => backend.as_ref(),
             None => &NoSandboxBackend,
@@ -1079,6 +1074,23 @@ pub(super) fn poll_run_child(
         })
     } else {
         Ok(RunPollOutcome::Running)
+    }
+}
+
+/// 装配 `Run` 的沙箱请求（design Decision 7 / PA-076）。
+///
+/// B1795571360795：队友会话的子进程要带角色 git 身份（`GIT_AUTHOR_*` / `GIT_COMMITTER_*`），
+/// 否则 `git commit` 的 author 恒为宿主配置，`git log` 分不出 Lead 与队友产出。身份唯一真源是
+/// `teammate_identity::git_identity_allowlist_for_session`（宿主/未知会话 ⇒ 空表，行为不变）。
+/// 抽成模块级函数是为了让 `run_command` 不因这条注释与调用而越过文件规模基线。
+fn run_sandbox_request(execution_root: &Path, session_id: Option<&str>) -> SandboxRequest {
+    SandboxRequest {
+        workspace_root: execution_root.display().to_string(),
+        allow_network: false,
+        environment_allowlist: crate::agent::teammate_identity::git_identity_allowlist_for_session(
+            session_id,
+        ),
+        isolate_environment: true,
     }
 }
 
