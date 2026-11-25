@@ -2099,6 +2099,11 @@ impl TuiState {
         // todo 快照同属会话作用域：`todo_write` 按 session_id 分区存储，切会话后必须重同步。
         self.todos_state = None;
         self.goal_state = None;
+        // 后台作业快照、摘要计数与节流时间戳同属会话作用域：切会话后立即清零，
+        // 防止 500ms 节流窗口内状态条与 Jobs 页签继续渲染上一会话的作业。
+        self.jobs_state = None;
+        self.task_glance = TaskGlance::default();
+        self.last_glance_sync = None;
         // 抽屉是会话作用域的瞬时视图：切走后旧会话的任务视图不得挂在头上。
         self.task_center = None;
         // PA-172 §8 B2（遗留 #10）：续轮停止原因同属会话作用域 —— 不清会让新会话的横幅
@@ -3401,6 +3406,9 @@ impl TuiState {
         self.tool_activity.reset();
         self.status_dwell.reset();
         self.upstream_idle.reset();
+        self.jobs_state = None;
+        self.task_glance = TaskGlance::default();
+        self.last_glance_sync = None;
     }
 }
 

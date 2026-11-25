@@ -120,3 +120,208 @@ fn jobs_tab_is_scoped_to_current_session() {
         Some(owner),
     );
 }
+
+#[cfg(windows)]
+fn long_sleep_args() -> (String, Vec<String>) {
+    (
+        "cmd".to_string(),
+        vec!["/C".to_string(), "ping -n 6 127.0.0.1 >nul".to_string()],
+    )
+}
+
+#[cfg(not(windows))]
+fn long_sleep_args() -> (String, Vec<String>) {
+    ("sleep".to_string(), vec!["5".to_string()])
+}
+
+/// 进程级无归属作业（`owner = None`）与空白 `session_id` 不得串入具体会话的 Jobs 页签；
+/// 同时内部无作用域直调 `job_list` 仍可看到无归属作业。
+#[test]
+fn jobs_tab_hides_unowned_jobs_and_blank_session_caller() {
+    use crate::agent::jobs::{job_kill, job_list, JobListArgs};
+
+    let owner = "b269-jobs-strict-owner";
+    let other = "b269-jobs-strict-other";
+    let (cmd, args) = long_sleep_args();
+
+    let unowned = job_start_scoped(
+        JobStartArgs {
+            command: cmd.clone(),
+            args: Some(args.clone()),
+            cwd: None,
+            timeout_ms: None,
+        },
+        None,
+        None,
+    )
+    .expect("无归属测试后台作业必须能启动");
+
+    let owned = job_start_scoped(
+        JobStartArgs {
+            command: cmd,
+            args: Some(args),
+            cwd: None,
+            timeout_ms: None,
+        },
+        None,
+        Some(owner),
+    )
+    .expect("归属测试后台作业必须能启动");
+
+    let mut state = drawer_state_on(task_center::TaskCenterTab::Jobs);
+
+    // 1) owner 会话：只见自己归属的作业，不见无归属作业。
+    state.session_id = owner.to_string();
+    jobs_panel::sync_jobs_from_registry(&mut state);
+    let view = state.jobs_state.as_ref().expect("同步后必须有作业快照");
+    assert!(
+        view.jobs.iter().any(|job| job.id == owned.job_id),
+        "owner 会话必须看到自己的后台任务：{view:?}"
+    );
+    assert!(
+        !view.jobs.iter().any(|job| job.id == unowned.job_id),
+        "无归属作业（owner=None）不得串入具体会话的 Jobs 页签：{view:?}"
+    );
+
+    // 2) 其他会话：既不见 owner 作业，也不见无归属作业。
+    state.session_id = other.to_string();
+    jobs_panel::sync_jobs_from_registry(&mut state);
+    let view = state.jobs_state.as_ref().expect("同步后必须有作业快照");
+    assert!(
+        !view.jobs.iter().any(|job| job.id == owned.job_id || job.id == unowned.job_id),
+        "其他会话不得看到归属他人的或无归属的作业：{view:?}"
+    );
+
+    // 3) 空白 session_id：fail-closed 返回空列表。
+    state.session_id = "   ".to_string();
+    jobs_panel::sync_jobs_from_registry(&mut state);
+    let view = state.jobs_state.as_ref().expect("同步后必须有作业快照");
+    assert!(
+        view.jobs.is_empty(),
+        "空白 session_id 必须 fail-closed 返回空列表：{view:?}"
+    );
+
+    // 4) 内部无作用域直调 `job_list`：仍保留全量语义（可见无归属作业）。
+    let unscoped = job_list(JobListArgs {}).expect("job_list 必须成功");
+    assert!(
+        unscoped.jobs.iter().any(|job| job.job_id == unowned.job_id),
+        "无作用域 job_list 仍应能看到无归属作业"
+    );
+
+    let _ = job_kill(JobKillArgs {
+        job_id: unowned.job_id,
+        reason: Some("test cleanup".to_string()),
+    });
+    let _ = job_kill_scoped(
+        JobKillArgs {
+            job_id: owned.job_id,
+            reason: Some("test cleanup".to_string()),
+        },
+        Some(owner),
+    );
+}
+
+/// 切换会话（`reset_session_scope` / `clear_messages`）必须清掉旧会话的 `jobs_state` /
+/// `task_glance` / `last_glance_sync`，且打开抽屉 `sync_drawer_sources` 时立即同步新会话 jobs。
+#[test]
+fn reset_session_scope_clears_jobs_state_and_drawer_sync_refreshes_jobs() {
+    let session_a = "jobs-reset-session-a";
+    let session_b = "jobs-reset-session-b";
+    let (cmd, args) = long_sleep_args();
+
+    let job_a = job_start_scoped(
+        JobStartArgs {
+            command: cmd.clone(),
+            args: Some(args.clone()),
+            cwd: None,
+            timeout_ms: None,
+        },
+        None,
+        Some(session_a),
+    )
+    .expect("会话 A 测试作业必须启动");
+    let job_b = job_start_scoped(
+        JobStartArgs {
+            command: cmd,
+            args: Some(args),
+            cwd: None,
+            timeout_ms: None,
+        },
+        None,
+        Some(session_b),
+    )
+    .expect("会话 B 测试作业必须启动");
+
+    let mut state = drawer_state_on(task_center::TaskCenterTab::Jobs);
+    state.session_id = session_a.to_string();
+    jobs_panel::sync_jobs_from_registry(&mut state);
+    state.task_glance.agents_running = 2;
+    state.last_glance_sync = Some(std::time::Instant::now());
+    assert!(
+        state
+            .jobs_state
+            .as_ref()
+            .is_some_and(|view| view.jobs.iter().any(|job| job.id == job_a.job_id)),
+        "前置条件：会话 A 快照必须包含 job_a"
+    );
+
+    // 切到会话 B 并复位作用域：旧快照与节流锚点必须全部清空。
+    state.session_id = session_b.to_string();
+    state.reset_session_scope();
+    assert!(state.jobs_state.is_none(), "reset_session_scope 必须清空 jobs_state");
+    assert_eq!(
+        state.task_glance,
+        TaskGlance::default(),
+        "reset_session_scope 必须清空 task_glance"
+    );
+    assert!(
+        state.last_glance_sync.is_none(),
+        "reset_session_scope 必须清空 last_glance_sync"
+    );
+
+    // 立刻打开抽屉触发 sync_drawer_sources：必须马上只看到会话 B 的作业，不含会话 A。
+    let control_plane = HostControlPlane::new();
+    projection::sync_drawer_sources(&mut state, &control_plane);
+    let view = state
+        .jobs_state
+        .as_ref()
+        .expect("sync_drawer_sources 必须同步填充 jobs_state");
+    assert!(
+        view.jobs.iter().any(|job| job.id == job_b.job_id),
+        "sync_drawer_sources 必须立即呈现会话 B 的作业：{view:?}"
+    );
+    assert!(
+        !view.jobs.iter().any(|job| job.id == job_a.job_id),
+        "sync_drawer_sources 后不得残留会话 A 的作业：{view:?}"
+    );
+
+    // 另一换会话入口 clear_messages 也必须清空 jobs_state / task_glance / last_glance_sync。
+    state.task_glance.team_open = 1;
+    state.last_glance_sync = Some(std::time::Instant::now());
+    state.clear_messages();
+    assert!(state.jobs_state.is_none(), "clear_messages 必须清空 jobs_state");
+    assert_eq!(
+        state.task_glance,
+        TaskGlance::default(),
+        "clear_messages 必须清空 task_glance"
+    );
+    assert!(
+        state.last_glance_sync.is_none(),
+        "clear_messages 必须清空 last_glance_sync"
+    );
+
+    let _ = job_kill_scoped(
+        JobKillArgs {
+            job_id: job_a.job_id,
+            reason: Some("test cleanup".to_string()),
+        },
+        Some(session_a),
+    );
+    let _ = job_kill_scoped(
+        JobKillArgs {
+            job_id: job_b.job_id,
+            reason: Some("test cleanup".to_string()),
+        },
+        Some(session_b),
+    );
+}
