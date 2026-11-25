@@ -24,9 +24,10 @@ describe("listAcpAgents", () => {
         label: "opencode",
         command: "opencode",
         args: ["acp"],
-        env: [],
-        capabilitiesHint: { fs: false, terminal: false },
-        inheritProxyEnv: true
+        defaultCwd: null,
+        builtin: true,
+        envKeys: [],
+        capabilities: { fs: false, terminal: false }
       }
     ];
     tauriMocks.mockSafeInvoke.mockResolvedValueOnce(agents);

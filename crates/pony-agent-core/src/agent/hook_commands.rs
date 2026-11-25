@@ -638,8 +638,8 @@ fn read_all(pipe: Option<impl std::io::Read>) -> Vec<u8> {
 /// 已退出、管道已 EOF，直接 `join()` 不会阻塞，保持原样以便完整取回输出。
 ///
 /// 已知遗留（本轮不修）：Windows 上孙进程（如残留的 `ping.exe`）可能继续运行至自然结束。
-/// 彻底回收需要 Job Object，而 `agent/process/windows_job.rs` 的可见性收紧为 `pub(super)`，
-/// 提升可见性属于契约变更，不在本轮范围内。
+/// 彻底回收需要 Job Object，`agent/process/windows_job.rs` 的可见性已放开到 crate 级（B165），
+/// 但本钩子命令路径尚未接线，属后续范围。
 fn join_reader_until(
     handle: std::thread::JoinHandle<Vec<u8>>,
     deadline: Instant,

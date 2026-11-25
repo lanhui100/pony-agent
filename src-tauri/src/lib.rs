@@ -8,7 +8,6 @@ pub mod turn_task_registry;
 
 use crate::blocking_helper::BlockingHelper;
 use crate::turn_task_registry::TurnTaskRegistry;
-use pony_agent_core::acp::config::AcpAgentSpec;
 use agent::app_settings::{AppSettings, AppSettingsStore};
 use agent::capability_bridge::{CapabilitySourceView, CapabilityView, McpSourceSnapshot, SkillDescriptor};
 use agent::config::{ProviderRegistryStore, ProviderRegistryView};
@@ -41,9 +40,11 @@ use agent::graph::GraphRunCheckpoint;
 use agent::runtime::{ManualCompactionOutcome, TurnInput, TurnResult};
 use agent::session::SessionOverview;
 use agent::tools::{builtin_turn_tool_contract_views, ToolDefinitionContractView};
+use pony_agent_core::acp::host::{AcpAgentSummary, DelegateRequest};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
 
 /// 退出 flush 的幂等短路位（C5.3）：`ExitRequested` 与 `Exit` 共享，避免预算叠加。
@@ -792,20 +793,6 @@ async fn list_sessions(app: AppHandle) -> Result<Vec<SessionOverview>, String> {
     BlockingHelper::spawn(move || app.state::<HostControlPlane>().list_sessions()).await
 }
 
-/// ACP P2（B163）：外部 agent 清单（只读面）。
-///
-/// 语义与 `ponycli acp --list` 一致：清单文件缺省 ⇒ 内置默认两条；解析/校验失败 ⇒
-/// 显式错误（fail-closed，绝不伪造清单）。`AcpAgentSpec` 以 camelCase 序列化，
-/// 前端 `src/types/acp.ts` 的 `AcpAgentSpec` 与之逐字段对齐。
-#[tauri::command]
-async fn acp_list_agents() -> Result<Vec<AcpAgentSpec>, String> {
-    BlockingHelper::spawn(|| {
-        pony_agent_core::acp::config::load_agents()
-            .map_err(|error| format!("{}: {error}", error.code()))
-    })
-    .await?
-}
-
 /// Trace tab 一键上传：手动上报指定会话的持久化 trace 至 PonySentry。
 ///
 /// P1-3：返回**结构化回执**（`{ turns, traceIds, failures }`，camelCase），前端据此给出
@@ -1439,6 +1426,85 @@ fn flush_otel_on_exit(stage: &str) {
     }
 }
 
+// ── ACP 宿主面（B163）───────────────────────────────────────────────────────────────
+//
+// 薄封装纪律（`docs/architecture/acp-client-integration.md` §4 P2 收口要求）：ACP 的清单解析、
+// 会话建立、prompt 归约与取消全部在 `pony_agent_core::acp::host`；本层只负责
+// ① 参数透传 ② 装配事件出口（`TauriAcpDelegateSink`）③ 错误字符串化。这里**不得**出现
+// JSON-RPC、进程管理或状态机——那会让 Tauri 层变成第二个协议实现。
+
+/// `acp_delegate_start` 的返回（camelCase；前端 `AcpDelegateOutcome` 一一对应）。
+///
+/// `output` 保持 `acp_delegate` 工具面的 JSON 原文（`ok` / `error.code` / `stopReason` 同源），
+/// 前端不需要第二套错误码判定。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpDelegateOutcome {
+    delegation_id: String,
+    status: String,
+    output: String,
+    duration_ms: u64,
+}
+
+/// 列出可用的外部 ACP agent（用户清单 → 内置默认）。
+#[tauri::command]
+async fn acp_list_agents() -> Result<Vec<AcpAgentSummary>, String> {
+    let agents = BlockingHelper::spawn(pony_agent_core::acp::host::list_agents)
+        .await?
+        .map_err(|error| format!("{}: {error}", error.code()))?;
+    Ok(agents)
+}
+
+/// 发起一次宿主侧 ACP 委派（**阻塞到本轮结束**，故走阻塞池，不占 IPC 线程）。
+///
+/// 取消：`delegation_id` 由调用方（前端）分配；委派运行期间可并发调用
+/// [`acp_delegate_cancel`] 翻取消令牌。终态按 ADR `2026-11-23-acp-cancel-race-ok-precedence`
+/// 的 **Ok 优先** 口径：取消命中且 agent 未产出终态 ⇒ `aborted` / `tool_cancelled`；
+/// agent 已同步回 `Ok` 终态 ⇒ 保留该终态。
+#[tauri::command]
+async fn acp_delegate_start(
+    app: AppHandle,
+    delegation_id: String,
+    agent: String,
+    prompt: String,
+    cwd: Option<String>,
+    timeout_ms: Option<u64>,
+    session_id: Option<String>,
+) -> Result<AcpDelegateOutcome, String> {
+    let sink = Arc::new(tauri_adapter::TauriAcpDelegateSink::new(
+        app,
+        delegation_id.clone(),
+    ));
+    let request = DelegateRequest {
+        delegation_id: delegation_id.clone(),
+        agent,
+        prompt,
+        cwd,
+        timeout_ms,
+        host_session_id: session_id,
+    };
+    let result = BlockingHelper::spawn(move || {
+        pony_agent_core::acp::host::run_delegation(request, sink.as_ref())
+    })
+    .await?;
+    Ok(AcpDelegateOutcome {
+        delegation_id,
+        status: result.status,
+        output: result.output,
+        duration_ms: result.duration_ms,
+    })
+}
+
+/// 取消一次进行中的 ACP 委派：返回是否命中某个活跃委派（幂等，只发信号不等终局）。
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令参数由 JSON 反序列化，必须 DeserializeOwned（&str 不成立），故收 String 后只借用"
+)]
+#[tauri::command]
+fn acp_delegate_cancel(delegation_id: String) -> bool {
+    pony_agent_core::acp::host::cancel_delegation(&delegation_id)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -1607,7 +1673,9 @@ pub fn run() {
             set_service_api_key,
             open_url,
             ponysentry_capture,
-            acp_list_agents
+            acp_list_agents,
+            acp_delegate_start,
+            acp_delegate_cancel
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

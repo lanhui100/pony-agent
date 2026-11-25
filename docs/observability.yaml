@@ -99,6 +99,17 @@
 #     不起子进程、不发网络请求；解析/校验失败按 fail-closed 显式返回错误文案。
 # (2) 无新增 tracing 落点：不新增 span / metric；issues 落点仍 `agent/ponysentry/client.rs`。
 # (3) metrics / logs 维持结构性 N-A（无 /metrics、无常驻监听地址）。
+# ACP 宿主面（B163，ADR 2026-11-25-acp-p2-host-surface-and-process-tree）追加归属说明：
+# (1) 新增**桌面 IPC 面**：`acp_list_agents` / `acp_delegate_start` / `acp_delegate_cancel` 三命令
+#     （`src-tauri/src/lib.rs`）+ 本地窗口事件 `acp://delegate`（`src-tauri/src/tauri_adapter.rs`）。
+#     委派本体是既有的「子进程 stdio JSON-RPC」出口（契约不变，见上段 ACP 归属）；本卡**不新增**
+#     网络出口、不新增 exporter、不新增 LLM 调用。
+# (2) 后台面：`acp::host::run_delegation` 由 Tauri 经 `BlockingHelper::spawn` 放到阻塞池执行
+#     （不新建常驻线程、无定时器）；事件出口只经既有 `app.emit` 与既有结构化日志行。
+#     tracing 落点仍是 `agent/otel/mod.rs`（宿主面委派不在 tool.call span 内 ⇒ 本卡**不**新造
+#     `acp.session` span，避免第二份 span 构造点）；issues 落点仍是 `agent/ponysentry/client.rs`。
+# (3) metrics / logs 维持结构性 N-A（同上：无常驻监听地址、无 /metrics）；`acp://delegate` 是
+#     窗口事件，不是遥测出口，不参与四维归属。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
 # 上游重试真值面（ADR 2026-11-14-upstream-retry-count-and-status-surface，backlog:B154/B155）与
 # 其桌面端接线（ADR 2026-11-14-desktop-retry-progress-surface）归属说明：

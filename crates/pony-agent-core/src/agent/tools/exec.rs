@@ -244,7 +244,7 @@ pub(super) fn job_tool_error(tool_name: &str, fallback_code: &str, error: String
     error_result(tool_name, fallback_code, error, None)
 }
 
-pub(super) fn error_result(tool_name: &str, code: &str, message: String, hint: Option<String>) -> ToolResult {
+pub(crate) fn error_result(tool_name: &str, code: &str, message: String, hint: Option<String>) -> ToolResult {
     ToolResult {
         tool_name: tool_name.to_string(),
         status: "error".to_string(),

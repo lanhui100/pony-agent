@@ -266,6 +266,23 @@ pub fn builtin_agent_specs() -> Vec<AcpAgentSpec> {
         .collect()
 }
 
+/// 是否为内置默认项（id + 启动命令 + 参数三者都与 [`BUILTIN_AGENTS`] 一致才算）。
+///
+/// 单一真源：`ponycli acp --list` 与 Tauri `acp_list_agents`（B163）共用本判定，
+/// 避免"两个宿主面各自比一遍"造成口径漂移。
+pub fn is_builtin_agent(spec: &AcpAgentSpec) -> bool {
+    BUILTIN_AGENTS.iter().any(|builtin| {
+        builtin.id == spec.id
+            && builtin.command == spec.command
+            && builtin.args.len() == spec.args.len()
+            && builtin
+                .args
+                .iter()
+                .zip(spec.args.iter())
+                .all(|(left, right)| *left == right.as_str())
+    })
+}
+
 /// 按 id 解析一条规格（先用户清单，后内置默认）。
 pub fn resolve_agent(id: &str) -> Result<AcpAgentSpec, AcpConfigError> {
     let agents = load_agents()?;

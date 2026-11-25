@@ -385,7 +385,7 @@ fn acp_list_agents() -> i32 {
         }
     };
     for agent in agents {
-        let builtin = acp_is_builtin(&agent);
+        let builtin = pony_agent_core::acp::config::is_builtin_agent(&agent);
         let line = serde_json::json!({
             "id": agent.id,
             "label": agent.label,
@@ -402,22 +402,6 @@ fn acp_list_agents() -> i32 {
         }
     }
     ExitCode::Success.code()
-}
-
-/// 是否为内置默认项（id + 启动命令 + 参数三者都与 `BUILTIN_AGENTS` 一致才算）。
-fn acp_is_builtin(spec: &pony_agent_core::acp::config::AcpAgentSpec) -> bool {
-    pony_agent_core::acp::config::BUILTIN_AGENTS
-        .iter()
-        .any(|builtin| {
-            builtin.id == spec.id
-                && builtin.command == spec.command
-                && builtin.args.len() == spec.args.len()
-                && builtin
-                    .args
-                    .iter()
-                    .zip(spec.args.iter())
-                    .all(|(left, right)| *left == right.as_str())
-        })
 }
 
 /// 工作目录：缺省当前目录；必须绝对路径 + 存在 + 是目录（canonicalize 后交给 ACP）。

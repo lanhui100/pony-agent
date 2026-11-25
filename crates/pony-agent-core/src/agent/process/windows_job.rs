@@ -27,7 +27,7 @@ pub(crate) struct FailureInjection {
 }
 
 #[derive(Debug)]
-pub(super) struct Job {
+pub(crate) struct Job {
     // OwnedHandle supplies Send/Sync and closes exactly once. The mutex prevents close racing
     // a native operation; Option permits shutdown's kill-on-close fallback despite retained Arcs.
     handle: Mutex<Option<OwnedHandle>>,
@@ -36,7 +36,20 @@ pub(super) struct Job {
 }
 
 impl Job {
-    pub(super) fn create(#[cfg(test)] failure: Option<FailureInjection>) -> Result<Self, String> {
+    /// 生产调用面的创建入口：把 `#[cfg(test)]` 的故障注入参数封装在这里，
+    /// 让 crate 内其它模块（如 `acp::process_tree`）不必重复写 cfg 分支。
+    pub(crate) fn create_default() -> Result<Self, String> {
+        #[cfg(test)]
+        {
+            Self::create(None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::create()
+        }
+    }
+
+    pub(crate) fn create(#[cfg(test)] failure: Option<FailureInjection>) -> Result<Self, String> {
         #[cfg(test)]
         let failure = failure.unwrap_or_default();
         #[cfg(test)]
@@ -89,7 +102,7 @@ impl Job {
         Ok(())
     }
 
-    pub(super) fn assign_and_verify(&self, process: RawHandle) -> Result<(), String> {
+    pub(crate) fn assign_and_verify(&self, process: RawHandle) -> Result<(), String> {
         #[cfg(test)]
         if self.failure.lock().unwrap().assign {
             return Err("job assign injected failure".to_string());
@@ -113,7 +126,7 @@ impl Job {
         Ok(())
     }
 
-    pub(super) fn terminate(&self, exit_code: u32) -> Result<(), String> {
+    pub(crate) fn terminate(&self, exit_code: u32) -> Result<(), String> {
         let guard = self.handle.lock().expect("job handle poisoned");
         // A previous shutdown may have closed this Job while another operation held the entry.
         let Some(handle) = guard.as_ref() else {
@@ -131,7 +144,7 @@ impl Job {
 
     /// Close now, not just when the last ManagedProcess Arc drops. Kill-on-close remains the
     /// fallback if explicit termination fails during failed-start cleanup or session shutdown.
-    pub(super) fn close(&self) {
+    pub(crate) fn close(&self) {
         drop(self.handle.lock().expect("job handle poisoned").take());
     }
 
