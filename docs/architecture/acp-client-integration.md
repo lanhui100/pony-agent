@@ -1,6 +1,6 @@
 # Pony 接入外部 ACP Agent 的实现方案（Pony as ACP Client）
 
-> 状态：P0（协议层）/ P1（会话驱动 + `acp_delegate`）/ P2-CLI（`ponycli acp`）已交付；P2 可选面（Tauri 命令 / 前端类型）见 `backlog:B163`
+> 状态：P0（协议层）/ P1（会话驱动 + `acp_delegate`）/ P2-CLI（`ponycli acp`）/ P2-宿主面（Tauri 三命令 + `src/types/acp.ts`，`backlog:B163` 2026-11-25 交付）已交付
 > 核对日期：2026-11-14（原调研 2026-11-13）
 > 协议真源：agentclientprotocol.com `protocol/v1`（Stable，`protocolVersion` 为整数 `1`）
 >
@@ -201,8 +201,10 @@ Pony 模型通过工具 `acp_delegate` 把一段任务交给外部 ACP agent，c
 | 文件 | 动作 | 要点 |
 |---|---|---|
 | `crates/pony-agent-core/src/bin/cli.rs` | 改 | `SubCommand` 加 `Acp`；`parse_cli_args` 识别 `acp`（在 `run_maintenance_subcommand_if_requested` 之后、常规解析之前拦截，照 `sessions`/`config` 的既有做法）；新增 `run_acp_client_mode()`：连外部 agent，REPL 交互，事件走 `JsonlSink`/`SseSink` |
-| `src-tauri/src/lib.rs` | 改（可选 P2） | 新增 `acp_list_agents` / `acp_delegate_start` / `acp_delegate_cancel` 命令 + `invoke_handler` 注册 |
-| `src/types/provider.ts` 或新建 `src/types/acp.ts` | 新增（可选 P2） | 前端 `AcpAgentSpec` / `AcpSessionView` 类型 |
+| `crates/pony-agent-core/src/acp/host.rs` | 新增（B163） | 宿主桥：`list_agents` / `run_delegation` / `cancel_delegation`（唯一宿主编排点；结果复用工具面 `ToolResult`/`error_result`） |
+| `src-tauri/src/lib.rs` | 改（B163） | `acp_list_agents` / `acp_delegate_start` / `acp_delegate_cancel` 三命令 + `invoke_handler` 注册（只透传，协议逻辑留在核心） |
+| `src-tauri/src/tauri_adapter.rs` | 改（B163） | `TauriAcpDelegateSink` + `acp://delegate` 事件（负载带 `delegationId` 归属） |
+| `src/types/acp.ts` | 新增（B163） | 前端 `AcpAgentSpec` / `AcpAgentSummary` / `AcpDelegateOutcome` / `AcpSessionView` / `AcpDelegateEvent` |
 
 ### 清理（与 P0 同批，避免死代码继续腐化）
 
@@ -242,8 +244,14 @@ Pony 模型通过工具 `acp_delegate` 把一段任务交给外部 ACP agent，c
 - 遗留债：transport 内联 permission 无 dispatcher 注入点（`B161`）；update 在 prompt 返回后 flush、非实时（`B162`）。
 - 门禁：`npm test`、`npm run verify`、`acp_client_contract.rs` 全绿。
 
-**阶段 P2（宿主形态）** — `backlog:B151` ✅（CLI 面）；可选面（Tauri 命令 / 前端类型）→ `backlog:B163`
+**阶段 P2（宿主形态）** — `backlog:B151` ✅（CLI 面）；可选面（Tauri 命令 / 前端类型）`backlog:B163` ✅（2026-11-25）
 - 验收：`ponycli acp --list`、`ponycli acp --agent <id> -p <text> --output-format jsonl` 可用（`tests/acp_host_surface.rs` 5 条）；`--resume` 对 `loadSession=false`（含未实现 `session/load`）显式 `acp_unavailable`，不静默当新会话。
+- 宿主面（B163）：`acp_list_agents` / `acp_delegate_start` / `acp_delegate_cancel` 三命令注册进
+  `invoke_handler`，协议编排全在 `crates/pony-agent-core/src/acp/host.rs`（Tauri 层只透传 +
+  事件出口 `acp://delegate`）；前端类型 `src/types/acp.ts`。委派期间事件带 `delegationId`
+  归属，不混入当前回合时间线；**不声明** `fs` / `terminal` 能力（权限请求 fail-closed `cancelled`）。
+- 门禁：`src-tauri/tests/tauri_command_surface.rs`（声明集合 ⊇ 注册集合）、`acp::host` 单元测试。
+- cancel-race 的归约优先级见 `architecture/2026-11-23-acp-cancel-race-ok-precedence.md`（Ok 优先，本批未改动）。
 
 **明确不做（本方案边界）**
 - 不改 `ProviderProtocol` / `ProviderClient`（外部 agent 不是 provider）。
