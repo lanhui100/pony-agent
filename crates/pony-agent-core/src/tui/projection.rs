@@ -123,9 +123,14 @@ pub fn sync_drawer_live_sources(state: &mut TuiState, control_plane: &HostContro
     sync_plan_from_store(state, control_plane);
 }
 
-/// 打开/切换抽屉时的**全量**同步点：live 数据源 + goal（含 fail-closed 清空语义）。
+/// 打开/切换抽屉时的**全量**同步点：live 数据源 + jobs + goal（含 fail-closed 清空语义）。
+///
+/// `jobs_panel::sync_jobs_from_registry` 放在这里而非 [`sync_drawer_live_sources`]，
+/// 因为 `status_bar::sync_task_glance` 在 500ms 周期内已先行刷新 jobs，避免同一节流周期内
+/// 对作业子进程做两次 `try_wait`/`poll`。
 pub fn sync_drawer_sources(state: &mut TuiState, control_plane: &HostControlPlane) {
     sync_drawer_live_sources(state, control_plane);
+    jobs_panel::sync_jobs_from_registry(state);
     hydrate_goal_state(state, &state.session_id.clone());
 }
 

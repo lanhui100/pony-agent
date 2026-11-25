@@ -50,6 +50,29 @@ fn ensure_owned(job: &JobSession, caller: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// 作业归属会话 id 归一化：`trim()` 后为空一律视为「无归属」（`None`）。
+fn normalize_job_owner(owner: Option<&str>) -> Option<String> {
+    owner
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// 列表接口（`job_list_scoped`）的会话可见性判定：
+/// - `caller == None`（内部/单测无作用域直调 `job_list`）⇒ 返回全部作业；
+/// - `caller == Some(raw)` ⇒ 先 `trim()`，空串 fail-closed 不可见，否则严格只返回
+///   `job.owner == Some(target)`（`owner = None` 的无归属作业不再暴露给具体会话）。
+fn is_visible_to_list_caller(job: &JobSession, caller: Option<&str>) -> bool {
+    let Some(raw) = caller else {
+        return true;
+    };
+    let target = raw.trim();
+    if target.is_empty() {
+        return false;
+    }
+    job.owner.as_deref() == Some(target)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobStartArgs {
     pub command: String,
@@ -751,7 +774,7 @@ pub fn job_start_scoped(
         stdout_truncated: AtomicBool::new(false),
         stderr_truncated: AtomicBool::new(false),
         released: AtomicBool::new(false),
-        owner: owner.map(str::to_string),
+        owner: normalize_job_owner(owner),
         cleanup_script: None,
         cancel: None,
         kind: JobKind::Owned,
@@ -831,7 +854,7 @@ pub fn register_promoted(
         stdout_truncated: AtomicBool::new(stdout_truncated),
         stderr_truncated: AtomicBool::new(stderr_truncated),
         released: AtomicBool::new(false),
-        owner: owner.map(str::to_string),
+        owner: normalize_job_owner(owner),
         cleanup_script,
         cancel: cancel.clone(),
         kind: JobKind::Promoted {
@@ -971,14 +994,16 @@ pub fn job_list(_args: JobListArgs) -> Result<JobListResult, String> {
     job_list_scoped(_args, None)
 }
 
-/// 带调用方归属的 `job_list`（工具路径用）：非 owner 的作业被**过滤掉**（不暴露存在性）。
+/// 带调用方归属的 `job_list`（工具路径与 TUI Jobs 页签共用）：
+/// - `caller = Some(session)`：严格只保留 `owner == Some(session)` 的作业（无归属或空白 caller 不暴露）；
+/// - `caller = None`：内部无作用域直调（`job_list`），返回全部作业。
 pub fn job_list_scoped(_args: JobListArgs, caller: Option<&str>) -> Result<JobListResult, String> {
     let sessions = registry().lock().unwrap().list();
     let jobs = sessions
         .into_iter()
-        // 契约 B012：非 owner 的作业**直接过滤掉**（列表接口泄露存在性同样算泄露），
+        // 契约 B012：非本会话归属的作业**直接过滤掉**（列表接口泄露存在性同样算泄露），
         // 而不是返回错误 —— 错误会让调用方区分「不存在」与「存在但无权」。
-        .filter(|session| ensure_owned(session, caller).is_ok())
+        .filter(|session| is_visible_to_list_caller(session, caller))
         .map(|session| {
             let (status, _) = session.update_status();
             JobListItem {
