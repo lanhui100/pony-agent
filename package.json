@@ -1,6 +1,6 @@
 {
   "name": "pony-agent",
-  "version": "0.1.205",
+  "version": "0.1.206",
   "private": true,
   "type": "module",
   "scripts": {
@@ -99,8 +99,6 @@
     "rust:lint:tauri": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json",
     "rust:lint:tauri:json": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json --json",
     "rust:lint:tauri:update": "node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json --update-baseline",
-    "contract:bin-imports": "node scripts/check-bin-test-imports.mjs",
-    "contract:bin-imports:selftest": "node scripts/check-bin-test-imports.spec.mjs",
     "contract:test-evidence": "node scripts/check-independent-test-evidence.mjs",
     "contract:test-evidence:selftest": "bash scripts/check-independent-test-evidence.spec.sh"
   },
