@@ -132,12 +132,14 @@ const COVERED_ACTIONS = [
   "activateWorkspace", "normalizeActiveWorkspace", "isSidebarOpInflight",
   "scheduleThrottledTraceTimeline", "retryLastTurn",
   // Wave 2d（B277）：轮次撤回 / 初始态回滚 / 检索上下文，见 `equivalence-wave2d.spec.ts`。
-  "rollbackToTurnBoundary", "rollbackToInitialState", "loadRetrievedContextState"
+  "rollbackToTurnBoundary", "rollbackToInitialState", "loadRetrievedContextState",
+  // Wave 2e（B277）：trace 时间线解析 / 节点反查轮次 / 浏览器预览轮与取消，见 `equivalence-wave2e.spec.ts`。
+  "resolveTurnTraceTimeline", "findCheckpointTurnIdByNodeId",
+  "runBrowserPreviewTurn", "cancelBrowserPreviewTurn"
 ];
 
 /** 未覆盖 action + 结构性原因（不得省略：覆盖自评要与代码事实可机械对账）。 */
 const UNCOVERED_ACTIONS: Array<{ name: string; reason: string }> = [
-  { name: "findCheckpointTurnIdByNodeId", reason: "由 historyNodes/historyBranches/activeBranchId 派生，夹具需完整分支图（裸 seed 造不出）" },
   { name: "deleteSession", reason: "D1 删除语义（会话目录 + 回落策略）" },
   { name: "createSession", reason: "D1 新建会话（UUID + 列表投影）" },
   { name: "enterFreshSession", reason: "D1 空白会话落点（UUID + 列表投影）" },
@@ -145,9 +147,6 @@ const UNCOVERED_ACTIONS: Array<{ name: string; reason: string }> = [
   { name: "restoreBranchHead", reason: "D1 恢复 branch head（需宿主历史写能力）" },
   { name: "resolveDerivedSessionRun", reason: "宿主 run 派生（同上）" },
   { name: "updatePersistedBackgroundSession", reason: "后台会话轮事件（需先切走后持续收流）" },
-  { name: "resolveTurnTraceTimeline", reason: "既有死代码：src 内无调用方（Wave-1 不清理）" },
-  { name: "runBrowserPreviewTurn", reason: "浏览器预览兜底（无宿主分支）" },
-  { name: "cancelBrowserPreviewTurn", reason: "浏览器预览兜底（无宿主分支）" },
 ];
 
 const EXPECTED_LISTENER_NAMES = [
@@ -196,8 +195,8 @@ describe("场景 6 · 并发与生命周期", () => {
     const uncoveredNames = UNCOVERED_ACTIONS.map((item) => item.name);
     expect([...COVERED_ACTIONS, ...uncoveredNames].sort()).toEqual([...ACTION_NAMES].sort());
     expect(COVERED_ACTIONS.filter((name) => uncoveredNames.includes(name))).toEqual([]);
-    expect(COVERED_ACTIONS).toHaveLength(86);
-    expect(uncoveredNames).toHaveLength(11);
+    expect(COVERED_ACTIONS).toHaveLength(90);
+    expect(uncoveredNames).toHaveLength(7);
     // 每个 action 名字确实可调用（类型面契约，非行为门禁）。
     for (const name of ACTION_NAMES) {
       expect(typeof record[name], `action ${name} 应可调用`).toBe("function");
