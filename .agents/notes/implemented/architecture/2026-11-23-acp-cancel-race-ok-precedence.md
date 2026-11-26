@@ -27,20 +27,32 @@ B169 登记的就是这条隐性契约。
 
 ## Verification
 
-- 既有 `acp_delegate_p0p2_contract.rs::c0_4c_cancelled_stop_reason_unchanged` 仍覆盖
-  「agent 回 cancelled ⇒ status=aborted + tool_cancelled」这条反向契约。
-- 本轮**未新增** cancel-race 正例测试，原因见下；本 ADR 属于"契约显性化"而非行为变更，
-  生产代码零改动（仅注释）。
+- 反向契约：`acp_delegate_p0p2_contract.rs::c0_4c_cancelled_stop_reason_unchanged` 覆盖
+  「agent 回 cancelled ⇒ status=aborted + tool_cancelled」。
+- **正例契约（B169 补收口，2026-11-25）**：`acp_p1_blockers.rs::b169_cancel_race_keeps_ok_terminal_state`
+  覆盖「取消已观察 + agent 回 Ok ⇒ 仍按 Ok 归约」。
+- 生产代码零改动（本 ADR 是契约显性化，非行为变更）。
 
-## 为什么本轮不加 cancel-race 的自动化测试
+## cancel-race 正例怎么做到确定性（而不是靠 sleep 抢跑）
 
-现有 ACP 夹具的 fake agent 只支持 `flow end_turn|max_tokens|refusal|cancelled`，**产不出**
-「取消已置位 + agent 同时回 Ok」这个竞态。要测它必须给 fake agent 新增 `flow cancel_race_ok`
-并在两侧严格同步时序（谁先谁后决定结果），这类"抢跑型"测试在 CI 上是新的 flaky 源。
+原方案被否的理由是「现有夹具产不出该竞态，只能靠两侧抢跑」。补收口时改掉了夹具的因果方向，
+问题因此消失：
 
-按本仓既有判据（ADR 关于假红的口径）：**宁可把契约写清楚 + 留可查的注释，也不引入一条
-靠时序运气过关的测试**。后续若要加，应做成「夹具显式回放两次事件顺序」的确定性用例，
-而不是靠 sleep 抢跑。
+夹具新增 `cancel_race_ok <markerFile> <sessionId>` 模式——prompt 期间先发一条
+`agent_message_chunk`（正文 `race-ok-body`），然后**阻塞读 stdin 等 `session/cancel`**，
+收到之后才回 `{"stopReason":"end_turn"}`。
+
+于是两条事件的先后由**因果**而非时钟决定：
+
+- 宿主不发 `session/cancel` ⇒ agent 永不回包 ⇒ 用例等满预算后失败（不会静默通过）；
+- 宿主发了 `session/cancel` ⇒ 终态 Ok **必然**在其后到达 ⇒ `cancel_observed == true`
+  与 `Ok(response)` 同时成立，竞态窗口被稳定命中。
+
+用例同时断言反相对照（agent 侧 `<marker>.cancel` 证据存在），因此「本用例确实覆盖了竞态」
+本身也是可机械验收的——夹具若退化成不回 cancel，用例会以「反相对照失败」判红，而不是假绿。
+
+**鉴别力已实测**：把 `Ok` 分支临时改成 `Ok(_) if cancel_observed => Cancelled` 后，
+该用例立刻失败并报出 `B169 违约：cancel-race 下终态 Ok 必须按 Ok 归约`；恢复实现后复绿。
 
 ## Alternatives considered
 

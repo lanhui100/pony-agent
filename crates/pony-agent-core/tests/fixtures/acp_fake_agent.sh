@@ -76,6 +76,13 @@
 #   cancel_hold <markerFile> <sessionId>
 #                                  prompt 期间写 marker 文件并挂起，收到 session/cancel 通知后
 #                                  才回 {"stopReason":"cancelled"}（P1-5 取消链路）
+#   cancel_race_ok <markerFile> <sessionId>
+#                                  B169 cancel-race 正例夹具：prompt 期间先发一条
+#                                  agent_message_chunk，然后**等待 session/cancel**；收到后才回
+#                                  {"stopReason":"end_turn"}（Ok 终态）。时序由因果保证——
+#                                  宿主只有在真发出 session/cancel 之后才可能收到 Ok，
+#                                  因此该用例可确定性断言「取消已观察 + 终态 Ok ⇒ 仍按 Ok 归约」，
+#                                  不靠 sleep 抢跑。
 #
 # 仅依赖 POSIX sh + sed + sleep；不读环境变量（参数全部走 argv，避免宿主 env 白名单影响）。
 set -u
@@ -644,7 +651,7 @@ while IFS= read -r line; do
                     ;;
             esac
             ;;
-        flow|updates|permission_prompt|cancel_hold|slow_prompt|slow_cancel)
+        flow|updates|permission_prompt|cancel_hold|cancel_race_ok|slow_prompt|slow_cancel)
             m=$(method_of "$line")
             id=$(id_of "$line")
             case "$mode" in
@@ -692,6 +699,23 @@ while IFS= read -r line; do
                                 if [ "$nm" = "session/cancel" ]; then
                                     printf '%s\n' "$next" >> "$arg.cancel"
                                     [ -n "$prompt_id" ] && respond_stop "$prompt_id" cancelled
+                                    break
+                                fi
+                            done
+                            ;;
+                        cancel_race_ok)
+                            # B169：先产出一段正文（证明 Ok 归约必须带回正文），再等取消。
+                            emit "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$session_id\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"race-ok-body\"}}}}"
+                            printf '%s\n' "$id" >> "$arg"
+                            prompt_id="$id"
+                            while IFS= read -r next; do
+                                [ -z "$next" ] && continue
+                                nm=$(method_of "$next")
+                                if [ "$nm" = "session/cancel" ]; then
+                                    # 证据面：取消确实先于终态到达（否则本用例没有覆盖竞态）。
+                                    printf '%s\n' "$next" >> "$arg.cancel"
+                                    # Ok 终态：agent 这一轮事实上已完成。
+                                    [ -n "$prompt_id" ] && respond_stop "$prompt_id" end_turn
                                     break
                                 fi
                             done
