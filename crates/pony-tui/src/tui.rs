@@ -39,8 +39,9 @@ use pony_agent_core::agent::goal_lease::{
     new_goal_round_loop_lease_registry, GoalRoundLoopLease, GoalRoundLoopLeaseRegistry,
 };
 use pony_agent_core::agent::orchestration::{
-    inbox_pending_len, is_driving, list_agents, team_task_list, teammate_session_id, TeamTaskItem,
-    TeammateStatus,
+    inbox_pending_len, is_driving, list_agents, list_agents_for_session,
+    list_subagent_runs_for_session, team_task_list, team_task_list_for_session,
+    teammate_session_id, TeamTaskItem, TeammateMember, TeammateStatus,
 };
 use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::todo::{TodoItem, TodoStatus as StoreTodoStatus};
@@ -595,8 +596,9 @@ pub use self::jobs_panel::{JobStatus, JobsViewState};
 pub use self::status_bar::{status_line as status_bar_line, task_summary, TaskGlance};
 #[allow(unused_imports)]
 pub use self::task_center::{
-    content_lines as task_center_lines, height as task_center_height,
-    scroll_by as task_center_scroll, TaskCenterState, TaskCenterTab,
+    agent_picks, content_lines as task_center_lines, height as task_center_height,
+    move_selection, scroll_by as task_center_scroll, selectable_count, selection_line_offset,
+    AgentPick, TaskCenterState, TaskCenterTab,
 };
 #[path = "tui/goal_panel.rs"]
 mod goal_panel;
@@ -1665,6 +1667,8 @@ pub struct TuiState {
     pub jobs_state: Option<JobsViewState>,
     /// 底部任务抽屉（`None` = 关闭）。非模态：不改 `mode`，正文与输入框照常工作。
     pub task_center: Option<TaskCenterState>,
+    /// 最近一帧抽屉的实际高度（行焦点滚动可见性判定用；`None` = 本帧未渲染抽屉）。
+    pub last_drawer_height: Option<u16>,
     /// PA-171 C1-T4：本会话最近一次「goal 续轮停止」的结构化原因（`None` = 未停止）。
     ///
     /// 与 `status_text`（瞬时文案）互补：状态行会被下一轮进度短语覆盖，本字段是
@@ -1706,6 +1710,11 @@ pub struct TuiState {
     ///
     /// 与会话绑定：只装当前宿主会话发起的委派（注册表见 `pony_agent_core::acp::registry`）。
     pub acp_delegates: Vec<AcpDelegateRow>,
+    /// **子智能体运行**快照（Agents 页签的「子智能体」分区；空 = 本会话没有子代理运行）。
+    ///
+    /// 与会话绑定：只装本宿主会话发起的运行（注册表见
+    /// `crate::agent::orchestration::list_subagent_runs_for_session`）。
+    pub subagent_runs: Vec<SubagentViewRow>,
     /// W3：进入 teammate 子会话前保存的主会话 id（`r` 返回用；`None` = 当前不在队友会话）。
     pub return_session_id: Option<String>,
     /// W3b：当前所处的子智能体会话身份（`None` = **主会话**；`Some` = 输入框下方显示身份徽标）。
@@ -1825,6 +1834,7 @@ impl Default for TuiState {
             last_glance_sync: None,
             jobs_state: None,
             task_center: None,
+            last_drawer_height: None,
             goal_rounds_stopped: None,
             pending_request: None,
             mode_stack: Vec::new(),
@@ -1837,6 +1847,7 @@ impl Default for TuiState {
             resume_instruction: None,
             agent_roster_state: None,
             acp_delegates: Vec::new(),
+            subagent_runs: Vec::new(),
             return_session_id: None,
             sub_session: None,
             splash_image: None,
@@ -2149,6 +2160,8 @@ impl TuiState {
         self.agent_roster_state = None;
         // ACP 委派快照同属会话作用域：切走后旧会话的在跑委派不得挂到新会话页签上。
         self.acp_delegates = Vec::new();
+        // 子智能体运行快照同属会话作用域（同上）。
+        self.subagent_runs = Vec::new();
         self.return_session_id = None;
         self.sub_session = None;
         // 会话作用域复位 ⇒ 布局缓存必须失效（/clear 与 /resume 共用本方法）。
@@ -2938,10 +2951,14 @@ impl TuiState {
     }
 
     /// W3：刷新 `/agents` 花名册快照（每次打开/按 R 重读真实运行时）。
+    ///
+    /// 会话隔离：名册、ACP 委派与子代理运行都按**宿主会话**过滤（进入子会话后仍看主会话的团队视图）。
     pub fn refresh_agent_roster(&mut self) {
-        self.agent_roster_state = Some(agent_roster_state_from_runtime());
-        // ACP 委派与队友名册同一刷新时机：抽屉 Agents 页签两段内容同帧一致。
-        self.acp_delegates = acp_delegates_from_runtime(&self.session_id);
+        let host = effective_host_session_id(self).to_string();
+        self.agent_roster_state = Some(agent_roster_state_for_session(&host));
+        // ACP 委派与队友名册同一刷新时机：抽屉 Agents 页签各段内容同帧一致。
+        self.acp_delegates = acp_delegates_from_runtime(&host);
+        self.subagent_runs = subagent_runs_from_runtime(&host);
     }
 
     /// W3：`/agents` 切换（面板内再按 `/agents` 等价于关闭）。
@@ -4288,6 +4305,12 @@ const RAIL: usize = 2;
 /// 修订 R5（2026-11-06 用户实测）：1 行偏挤 ⇒ 2 行。所有几何推导（`chat_h` 的扣除、Ask 覆盖层
 /// 的下缘补偿、`show_banner` 的阈值补偿）都必须继续引用本常量，禁止在别处写死 1/2。
 pub const CHAT_BOTTOM_GAP: u16 = 2;
+
+/// 任务抽屉下缘与输入框色带之间的**固定呼吸行**（CANVAS 空白）。
+///
+/// 抽屉内容最后一行直接贴住输入区顶部时会与输入框视觉粘连（读起来像输入框的标题）；
+/// 恒留 1 行空白后，抽屉与 Composer 是两个清晰的视觉层。
+pub const DRAWER_INPUT_GAP: u16 = 1;
 
 /// 极简字形集：只用三种标记，避免图标噪音。
 const GLYPH_RUNNING: &str = "◦";
@@ -6571,20 +6594,32 @@ pub fn ui(f: &mut Frame, state: &mut TuiState) {
     let inline_bottom = bottom_top;
     // 抽屉锚点：关闭时**不扣**打断层高度（否则 Ask/Queue 会经由 chat_rect 改变消息几何，
     // 破坏契约 C8 与既有 O2 用例）；只有抽屉真的打开时才叠到打断层之上。
+    //
+    // 抽屉与输入框色带之间恒定留 `DRAWER_INPUT_GAP` 行 CANVAS 空白：抽屉内容行直接贴住
+    // 输入框顶部色带时，最后一行与输入区视觉粘连、读起来像输入框的标题（2026-11-25 UX 反馈）。
     let drawer_bottom = if state.task_center.is_some() {
-        inline_bottom.saturating_sub(blocker_h)
+        inline_bottom
+            .saturating_sub(blocker_h)
+            .saturating_sub(DRAWER_INPUT_GAP)
+            .max(chat_top)
     } else {
         inline_bottom
     };
-    // 任务抽屉：高度按内容自适应、上限为可用正文区的 2/3。抽屉参与底部几何，
+    // 任务抽屉：高度按内容自适应（折行后行数）、上限为可用正文区的 2/3。抽屉参与底部几何，
     // 正文区随之缩短 ⇒ 最新消息始终在抽屉上方可见（无需滚动锚点补偿）。
-    let drawer_h = task_center::height(state, drawer_bottom.saturating_sub(chat_top));
+    let drawer_h = task_center::height_for_width(
+        state,
+        drawer_bottom.saturating_sub(chat_top),
+        usize::from(content.width),
+    );
     let drawer_rect = Rect {
         x: content.x,
         y: drawer_bottom.saturating_sub(drawer_h),
         width: content.width,
         height: drawer_h,
     };
+    // 行焦点滚动可见性判定需要「最近一帧抽屉真实高度」；关闭时清空，避免陈旧值参与折算。
+    state.last_drawer_height = if drawer_h > 0 { Some(drawer_h) } else { None };
     let chat_bottom = drawer_rect.y;
     // 契约 C8（`.dev-team/contract-matrix-thinking-bottom-gap.md`）：消息区下缘与
     // Composer 色带之间恒定保留 `CHAT_BOTTOM_GAP` 行空白（抽屉在场时即与抽屉之间）。
@@ -9156,14 +9191,37 @@ fn session_is_loadable(
         .any(|session| session.conversation_id == session_id)
 }
 
-/// W3b：真实运行时 → 可切换子会话候选（复用花名册快照 + 宿主可加载判据）。
+/// W3b：真实运行时 → 可切换子会话候选（teammate 名册 + 本会话的 subagent 运行）。
+///
+/// 两类都可进入：teammate 子会话与 `subagent-*` 会话的真实历史都写在宿主 `SessionStore`
+/// （`HostTurnEngine` 注入了 `shared_sessions`），因此「可加载 ⇒ 能进入」判据对两者同一口径。
 fn sub_session_candidates_from_runtime(
+    state: &TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
 ) -> Vec<SubSessionCandidate> {
-    let roster = agent_roster_state_from_runtime();
-    sub_session_candidates(&roster.entries, |session_id| {
+    let host = effective_host_session_id(state).to_string();
+    let roster = agent_roster_state_for_session(&host);
+    let mut candidates = sub_session_candidates(&roster.entries, |session_id| {
         session_is_loadable(control_plane, session_id)
-    })
+    });
+    // Subagent：`target` 用会话 id（全局唯一）、`name` 用中文描述、`role` 用 `subagent`。
+    for run in subagent_runs_from_runtime(&host) {
+        if !session_is_loadable(control_plane, &run.session_id) {
+            continue;
+        }
+        let name = if run.description.trim().is_empty() {
+            "子智能体".to_string()
+        } else {
+            run.description.trim().to_string()
+        };
+        candidates.push(SubSessionCandidate {
+            target: run.session_id.clone(),
+            name,
+            role: "subagent".to_string(),
+            session_id: run.session_id,
+        });
+    }
+    candidates
 }
 
 /// PA-172 §8 B3 + 跨会话隔离：某会话是否有**在飞轮次线程**。
@@ -9642,7 +9700,7 @@ fn enter_teammate_session(
     if sub_session_switch_blocked(state, turn_loop_in_flight) {
         return;
     }
-    let candidates = sub_session_candidates_from_runtime(control_plane);
+    let candidates = sub_session_candidates_from_runtime(state, control_plane);
     let Some(index) = candidates
         .iter()
         .position(|candidate| candidate.target == target)
@@ -9662,6 +9720,161 @@ fn enter_teammate_session(
     enter_sub_session_at(state, control_plane, &candidates, index, goal_cancel);
 }
 
+/// W3b：进入选中的**子智能体**子会话（抽屉 Agents 页签的 `Enter`）。
+///
+/// 与 teammate 进入路径同构（候选定位 → 保存返回目标 → 切会话 → 作用域复位 → hydrate），
+/// 只是候选来源换成 `subagent-*` 会话；不可加载时给出可读提示并**留在抽屉**。
+fn enter_subagent_session(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    session_id: &str,
+    goal_cancel: &GoalRoundCancelToken,
+    turn_loop_in_flight: &TurnLoopInFlightRegistry,
+) {
+    if sub_session_switch_blocked(state, turn_loop_in_flight) {
+        return;
+    }
+    let candidates = sub_session_candidates_from_runtime(state, control_plane);
+    let Some(index) = candidates
+        .iter()
+        .position(|candidate| candidate.session_id == session_id)
+    else {
+        sub_session_notice(
+            state,
+            &format!("该子智能体会话暂不可由宿主会话存储加载（{session_id}），无法进入"),
+        );
+        return;
+    };
+    enter_sub_session_at(state, control_plane, &candidates, index, goal_cancel);
+}
+
+/// 抽屉 `Jobs` 页签：终止选中的运行中作业（决策 1A 的 `x` / `Delete` / `Ctrl+K`）。
+///
+/// 只对**运行中**的作业生效（已完成/失败/被杀的作业 kill 只会得到「已结束」的噪声）。
+/// 终止后立即重刷快照并写一次性提示，避免用户看不到结果。
+fn kill_selected_job(state: &mut TuiState) {
+    let Some(center) = state.task_center.as_ref() else {
+        return;
+    };
+    let selected = center.selected_index;
+    let Some(view) = state.jobs_state.as_ref() else {
+        return;
+    };
+    let Some(job) = view.jobs.get(selected) else {
+        return;
+    };
+    if !job.status.is_running() {
+        sub_session_notice(state, "选中的后台任务已结束，无需终止");
+        return;
+    }
+    let job_id = job.id.clone();
+    let label = job.primary_text();
+    let args = pony_agent_core::agent::jobs::JobKillArgs {
+        job_id,
+        reason: Some("用户从 TUI 抽屉终止".to_string()),
+    };
+    // 契约 B012：kill 与 list 同一归属口径（当前会话），不跨会话终止他人作业。
+    match pony_agent_core::agent::jobs::job_kill_scoped(args, Some(state.session_id.as_str())) {
+        Ok(result) if result.killed => {
+            sub_session_notice(state, &format!("已终止后台任务：{label}"));
+        }
+        Ok(_) => sub_session_notice(state, &format!("后台任务已结束，无需终止：{label}")),
+        Err(error) => sub_session_notice(state, &format!("终止后台任务失败: {error}")),
+    }
+    jobs_panel::sync_jobs_from_registry(state);
+}
+
+/// 决策 2A：`/tasks` 与 `/agents` 的单一入口 —— 抽屉已开且就在目标页签则关闭，否则同步数据源后打开该页签。
+///
+/// 同步顺序是契约（`slash_commands_acceptance.rs` 的 `/panel` 用例用 `include_str!` 断言
+/// `projection::sync_drawer_sources` 早于抽屉开关）：先刷全量数据源，再决定开/关。
+fn open_or_toggle_task_center_tab(
+    state: &mut TuiState,
+    control_plane: &HostControlPlane,
+    tab: TaskCenterTab,
+) {
+    let already_on_tab = state
+        .task_center
+        .as_ref()
+        .is_some_and(|center| center.tab == tab);
+    if already_on_tab {
+        state.close_task_center();
+        return;
+    }
+    projection::sync_drawer_sources(state, control_plane);
+    state.refresh_agent_roster();
+    state.task_center = Some(TaskCenterState::open_tab(tab));
+}
+
+/// 抽屉当前是否在 `Jobs` 页签。
+fn task_center_tab_is_jobs(state: &TuiState) -> bool {    state
+        .task_center
+        .as_ref()
+        .is_some_and(|center| center.tab == TaskCenterTab::Jobs)
+}
+
+/// 抽屉当前是否在 `Agents` 页签。
+fn task_center_tab_is_agents(state: &TuiState) -> bool {
+    state
+        .task_center
+        .as_ref()
+        .is_some_and(|center| center.tab == TaskCenterTab::Agents)
+}
+
+/// 抽屉行焦点移动后，把选中行滚进可见区（否则 `↓` 越过可视底部后用户看不到焦点在哪）。
+fn reveal_task_center_selection(state: &mut TuiState) {
+    let width = state.last_chat_rect.map_or(
+        task_center::DEFAULT_CONTENT_WIDTH,
+        |rect| usize::from(rect.width),
+    );
+    let Some(offset) = task_center::selection_line_offset(state, width) else {
+        return;
+    };
+    // 可见内容行数 = 最近一帧抽屉高度 - 固定开销（发丝线 + 页签 + 呼吸行）。
+    let visible = state
+        .last_drawer_height
+        .map_or(0, usize::from)
+        .saturating_sub(3)
+        .max(1);
+    let Some(center) = state.task_center.as_mut() else {
+        return;
+    };
+    if offset < center.scroll {
+        center.scroll = offset;
+    } else if offset + 1 > center.scroll + visible {
+        center.scroll = offset + 1 - visible;
+    }
+}
+
+/// 决策 1A：`Enter` 进入 Agents 页签选中的会话（Teammate 或 Subagent）。
+fn enter_selected_agent_session(
+    state: &mut TuiState,
+    control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
+    goal_cancel: &GoalRoundCancelToken,
+    turn_loop_in_flight: &TurnLoopInFlightRegistry,
+) {
+    let selected = state
+        .task_center
+        .as_ref()
+        .map_or(0, |center| center.selected_index);
+    let Some(pick) = task_center::agent_picks(state).get(selected).cloned() else {
+        return;
+    };
+    // 切换被拦（本轮在飞）时保持抽屉打开并给出提示；成功则先关抽屉，避免挡住新会话正文。
+    if sub_session_switch_blocked(state, turn_loop_in_flight) {
+        return;
+    }
+    state.close_task_center();
+    match pick {
+        AgentPick::Teammate { target, .. } => {
+            enter_teammate_session(state, control_plane, &target, goal_cancel, turn_loop_in_flight);
+        }
+        AgentPick::Subagent { session_id } => {
+            enter_subagent_session(state, control_plane, &session_id, goal_cancel, turn_loop_in_flight);
+        }
+    }
+}
+
 /// W3b：Ctrl+←/→ —— 在当前子智能体之间循环切换（保留最初的主会话返回目标）。
 ///
 /// 无候选 / 只有一个候选时给出可读提示而不动会话（避免"按了没反应"）。
@@ -9675,7 +9888,7 @@ fn switch_sub_session(
     if sub_session_switch_blocked(state, turn_loop_in_flight) {
         return;
     }
-    let candidates = sub_session_candidates_from_runtime(control_plane);
+    let candidates = sub_session_candidates_from_runtime(state, control_plane);
     if candidates.is_empty() {
         sub_session_notice(state, "没有可切换的子智能体会话");
         return;
@@ -11602,9 +11815,16 @@ fn tui_event_loop(
                     // 1b. 任务抽屉是**非模态**覆盖层：←→/Tab 切页签、↑↓/PgUp/PgDn 滚动、Esc 关闭优先归抽屉，
                     //     其余按键照常落进 Composer（用户可在抽屉开着时继续输入）。
                     //     `←→` 只认**裸方向键**：带 Ctrl 的 `Ctrl+←/→` 是子会话切换（W3b），不得被抽屉吞掉。
+                    //
+                    //     决策 1A（空输入优先）：当**输入框为空**且当前页签有可选行（Agents / Jobs）时，
+                    //     `↑↓` 移动行焦点、`Enter`（Agents）进入会话、`x`/`Delete`（Jobs）终止作业；
+                    //     输入框有字符或页签不可选时，`↑↓` 仍滚动抽屉、`Enter`/`x` 正常打字。
                     if state.task_center.is_some() {
                         let bare_arrow = !key.modifiers.contains(KeyModifiers::CONTROL)
                             && !key.modifiers.contains(KeyModifiers::ALT);
+                        let has_selectable = task_center::selectable_count(&state) > 0;
+                        let input_empty = state.input_buffer.is_empty();
+                        let list_focus = has_selectable && input_empty;
                         match key.code {
                             KeyCode::Esc => {
                                 state.close_task_center();
@@ -11639,6 +11859,18 @@ fn tui_event_loop(
                                 dirty = true;
                                 continue;
                             }
+                            KeyCode::Up if list_focus => {
+                                task_center::move_selection(&mut state, -1);
+                                reveal_task_center_selection(&mut state);
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::Down if list_focus => {
+                                task_center::move_selection(&mut state, 1);
+                                reveal_task_center_selection(&mut state);
+                                dirty = true;
+                                continue;
+                            }
                             KeyCode::Up => {
                                 task_center::scroll_by(&mut state, -1);
                                 dirty = true;
@@ -11658,6 +11890,31 @@ fn tui_event_loop(
                                 task_center::scroll_by(&mut state, 10);
                                 dirty = true;
                                 continue;
+                            }
+                            // 决策 1A：Jobs 页签下 `Ctrl+K` 不受输入框内容限制（明确的终止手势）。
+                            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if task_center_tab_is_jobs(&state) {
+                                    kill_selected_job(&mut state);
+                                    dirty = true;
+                                    continue;
+                                }
+                            }
+                            KeyCode::Enter if list_focus && task_center_tab_is_agents(&state) => {
+                                enter_selected_agent_session(
+                                    &mut state,
+                                    &control_plane,
+                                    &goal_round_cancel,
+                                    &turn_loop_in_flight,
+                                );
+                                dirty = true;
+                                continue;
+                            }
+                            KeyCode::Char('x') | KeyCode::Delete if list_focus => {
+                                if task_center_tab_is_jobs(&state) {
+                                    kill_selected_job(&mut state);
+                                    dirty = true;
+                                    continue;
+                                }
                             }
                             _ => {}
                         }
@@ -12204,16 +12461,25 @@ fn tui_event_loop(
                                     continue;
                                 }
                                 if known_command == Some("/tasks") {
-                                    // W3：真实 Team 共享看板（team_task_list）。
-                                    sync_tasks_from_store(&mut state);
-                                    state.toggle_task_board();
+                                    // 决策 2A：`/tasks` 直接打开 Ctrl+T 抽屉并切到 Tasks 页签
+                                    // （单一真值源；`InteractionMode::TaskBoard` 分支保留作兼容兜底）。
+                                    open_or_toggle_task_center_tab(
+                                        &mut state,
+                                        &control_plane,
+                                        TaskCenterTab::Tasks,
+                                    );
                                     continue;
                                 }
                                 // W3b：`/agents` 与其别名 `/teams` 完全等价（同一判定，不写两份字面量）。
                                 if matches!(known_command, Some(cmd) if is_agent_roster_command(cmd))
                                 {
-                                    // W3：真实名册快照（list_agents / 收件箱 / 驱动态 / 会话）。
-                                    state.toggle_agent_roster();
+                                    // 决策 2A：`/agents` 打开抽屉 Agents 页签
+                                    // （`InteractionMode::AgentRoster` 分支保留作兼容兜底）。
+                                    open_or_toggle_task_center_tab(
+                                        &mut state,
+                                        &control_plane,
+                                        TaskCenterTab::Agents,
+                                    );
                                     continue;
                                 }
                                 if known_command == Some("/clear") {

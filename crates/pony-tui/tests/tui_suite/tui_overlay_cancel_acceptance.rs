@@ -882,6 +882,7 @@ def main():
     env.update({
         "XDG_CONFIG_HOME": os.path.join(iso, "xdg-config"),
         "XDG_DATA_HOME": os.path.join(iso, "xdg-data"),
+        "PONY_AGENT_DATA_DIR": os.path.join(iso, "xdg-data"),
         "XDG_CACHE_HOME": os.path.join(iso, "xdg-cache"),
         "HOME": os.path.join(iso, "home"),
         "PONY_TUI_RUNTIME_LOG": runtime_log,

@@ -276,6 +276,12 @@ pub struct PlanState {
     pub is_active_plan_mode: bool,
     pub selected_step_index: usize,
     pub awaiting_approval: bool,
+    /// 计划是否已终态（`completed` / `aborted`）。
+    ///
+    /// 用途：底栏左槽只在「还有活的计划」时出现（终态计划常驻会谎称还在推进）；
+    /// 抽屉 Plan 页签仍可回看（追加弱化的「· 已结束」标注）。
+    #[serde(default)]
+    pub is_terminal: bool,
 }
 
 impl PlanState {
@@ -288,6 +294,7 @@ impl PlanState {
             is_active_plan_mode: false,
             selected_step_index: 0,
             awaiting_approval: false,
+            is_terminal: false,
         }
     }
 
@@ -455,6 +462,42 @@ pub struct AcpDelegateRow {
     pub host_session_id: Option<String>,
     pub cwd: String,
     pub started_at_ms: u64,
+    /// 面向用户的中文描述（`acp_delegate` 的 `description`）；`None` ⇒ 渲染回退 `cwd` 末段。
+    pub description: Option<String>,
+}
+
+/// 一条**子智能体运行**的 TUI 视图行（`Agents` 页签的「子智能体」分区）。
+///
+/// 数据源是 `crate::agent::orchestration` 的进程内运行注册表；只承载展示字段，
+/// 不携带任何子会话正文。`session_id` 是真实子会话 id（可在 `SessionStore` 中加载 ⇒ 可进入）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentViewRow {
+    pub session_id: String,
+    pub description: String,
+    pub status: pony_agent_core::agent::orchestration::SubagentRunStatus,
+    pub started_at_ms: u64,
+    pub error: Option<String>,
+}
+
+impl SubagentViewRow {
+    /// 是否仍在运行（状态条与页签计数的唯一判据）。
+    pub fn is_running(&self) -> bool {
+        self.status.is_running()
+    }
+
+    /// 是否失败（需关注）。
+    pub fn needs_attention(&self) -> bool {
+        self.status.needs_attention()
+    }
+
+    /// 行首状态符号（与任务看板同一套视觉语法：`●` 运行 / `✔` 完成 / `✘` 失败）。
+    pub fn glyph(&self) -> &'static str {
+        match self.status {
+            pony_agent_core::agent::orchestration::SubagentRunStatus::Running => "●",
+            pony_agent_core::agent::orchestration::SubagentRunStatus::Completed => "✔",
+            pony_agent_core::agent::orchestration::SubagentRunStatus::Failed => "✘",
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

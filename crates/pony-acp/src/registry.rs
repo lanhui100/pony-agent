@@ -31,6 +31,8 @@ pub struct ActiveDelegate {
     pub cwd: String,
     /// 登记时刻（Unix 毫秒）。
     pub started_at_ms: u64,
+    /// 面向用户的中文描述（`acp_delegate` 的 `description` 参数）；`None` = 未提供。
+    pub description: Option<String>,
 }
 
 /// 登记入参：`delegate_id` / `started_at_ms` 由注册表生成，调用方不得自行编造。
@@ -62,8 +64,18 @@ pub struct ActiveDelegateGuard {
 }
 
 impl ActiveDelegateGuard {
-    /// 登记一条活跃委派并返回自动注销 guard。
+    /// 登记一条活跃委派并返回自动注销 guard（不带面向用户的描述）。
     pub fn register(registration: DelegateRegistration) -> Self {
+        Self::register_with_description(registration, None)
+    }
+
+    /// 登记一条活跃委派并附带面向用户的中文描述（`acp_delegate` 的 `description`）。
+    ///
+    /// 与 [`Self::register`] 同一实现，只多透传一个只读展示字段；描述为空按「无描述」处理。
+    pub fn register_with_description(
+        registration: DelegateRegistration,
+        description: Option<String>,
+    ) -> Self {
         let delegate_id = NEXT_DELEGATE_ID.fetch_add(1, Ordering::Relaxed);
         let entry = ActiveDelegate {
             delegate_id,
@@ -80,6 +92,9 @@ impl ActiveDelegateGuard {
                 // 超出 u64 的时间戳在物理上不可达，`unwrap_or(MAX)` 只作定理外的兜底。
                 .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0),
+            description: description
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty()),
         };
         registry_guard()
             .get_or_insert_with(BTreeMap::new)

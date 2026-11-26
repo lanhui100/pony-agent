@@ -26,8 +26,20 @@ pub(super) const PROMOTE_KILL_AFTER_GRACE_MS: u64 = 1_000;
 
 pub(super) const TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 2;
 
+/// 面向用户的中文描述（schema 已强制模型提供）：promote 成后台作业时透传，
+/// 让 TUI Jobs 页签展示「这段命令在干什么」而不是原始 shell 文本。空串/纯空白按「无描述」。
+fn job_description_from_arguments(arguments: &Value) -> Option<String> {
+    arguments
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
 impl ToolRouter {
     pub(super) fn run_command(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
+        let job_description = job_description_from_arguments(&call.arguments);
         let Some(command) = call.arguments.get("command").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_RUN_COMMAND,
@@ -428,25 +440,27 @@ impl ToolRouter {
                 let disarm = self.process_manager.disarm_kill_after(&session_id, &handle);
                 match disarm {
                     Ok(()) => {
-                        match register_promoted(
-                            self.process_manager.clone(),
-                            session_id.clone(),
-                            handle.clone(),
-                            command.to_string(),
-                            &stdout,
-                            &stderr,
+                        match register_promoted_with_description(PromotedJobSpec {
+                            manager: self.process_manager.clone(),
+                            session_id: session_id.clone(),
+                            handle: handle.clone(),
+                            command_line: command.to_string(),
+                            first_stdout: stdout.clone(),
+                            first_stderr: stderr.clone(),
                             stdout_truncated,
                             stderr_truncated,
                             // B009：把 turn 取消令牌交给 promoted job，使 Stop 仍能终止它
                             // （前台 Run 的 watcher 会随本次返回被 drop）。
-                            cancellation.clone(),
+                            cancel: cancellation,
                             // B012：promoted 作业同样记归属会话。
-                            context.session_id.as_deref(),
+                            owner: context.session_id.clone(),
                             // B013：把仍在被读取的临时批处理脚本移交 job 生命周期清理。
                             // POSIX 下 `batch_script_path` 天然为 None；Windows 下是
                             // `<ws>/.tmp/pony-agent-run-{session_id}.cmd`（spawn 前写入）。
-                            batch_script_path.clone(),
-                        ) {
+                            cleanup_script: batch_script_path.clone(),
+                            // 面向用户的中文描述：TUI Jobs 页签优先展示它而不是原始命令。
+                            description: job_description,
+                        }) {
                             Ok(job_id) => {
                                 // 红线：promote 路径不得 kill / cancel / 删除批处理脚本，
                                 // 也不进入 cleanupError 逻辑 —— 进程继续由 job 生命周期管辖。

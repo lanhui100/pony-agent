@@ -438,6 +438,7 @@ fn red_job_cwd_none_must_default_to_session_workspace_root() {
             args: Some(platform_shell_exec(platform_print_cwd())),
             cwd: None,
             timeout_ms: Some(10_000),
+            description: None,
         },
         Some(ws.as_path()),
     )
@@ -478,6 +479,7 @@ fn red_job_cwd_outside_session_workspace_must_be_rejected() {
         args: Some(platform_shell_exec("exit 0")),
         cwd: Some(outside.display().to_string()),
         timeout_ms: Some(10_000),
+        description: None,
     });
     match attempt {
         Err(_) => {}
@@ -597,6 +599,7 @@ fn patch4_job_some_ws_none_cwd_must_default_to_ws() {
             args: Some(platform_shell_exec(platform_print_cwd())),
             cwd: None,
             timeout_ms: Some(10_000),
+            description: None,
         },
         Some(ws.as_path()),
     )
@@ -635,6 +638,7 @@ fn patch4_job_some_ws_cross_boundary_cwd_must_be_rejected() {
             args: Some(platform_shell_exec("exit 0")),
             cwd: Some(outside.display().to_string()),
             timeout_ms: Some(10_000),
+            description: None,
         },
         Some(ws.as_path()),
     );
@@ -759,6 +763,7 @@ fn patch4_none_branch_must_not_create_default_dir_as_side_effect() {
         args: Some(platform_shell_exec("exit 0")),
         cwd: None,
         timeout_ms: Some(10_000),
+        description: None,
     });
     assert!(
         !def.exists(),

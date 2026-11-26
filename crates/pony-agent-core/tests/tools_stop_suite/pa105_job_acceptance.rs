@@ -74,6 +74,7 @@ fn test_ac01_job_start_non_blocking() {
         args: Some(command_args),
         cwd: None,
         timeout_ms: Some(10000),
+        description: None,
     };
 
     let start_time = std::time::Instant::now();
@@ -124,6 +125,7 @@ fn test_ac02_job_output_incremental_and_wait() {
         args: Some(command_args),
         cwd: None,
         timeout_ms: Some(5000),
+        description: None,
     };
 
     let start_res: JobStartResult = job_start(args).expect("job_start should succeed");
@@ -163,6 +165,7 @@ fn test_ac03_job_kill_and_cleanup() {
         args: Some(command_args),
         cwd: None,
         timeout_ms: Some(15000),
+        description: None,
     };
 
     let start_res: JobStartResult = job_start(args).expect("job_start should succeed");
@@ -194,6 +197,7 @@ fn test_ac04_job_list() {
         args: Some(command_args),
         cwd: None,
         timeout_ms: Some(5000),
+        description: None,
     };
 
     let start_res: JobStartResult = job_start(args).expect("job_start should succeed");
@@ -224,6 +228,7 @@ fn test_ac05_job_path_security() {
         args: None,
         cwd: Some(malicious_cwd.to_string()),
         timeout_ms: Some(1000),
+        description: None,
     };
 
     let result = job_start(args);

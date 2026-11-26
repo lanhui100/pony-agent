@@ -83,6 +83,7 @@ fn job(status: &str) -> JobListItem {
         pid: 4242,
         started_at: 0,
         kind: "owned".to_string(),
+        description: None,
     }
 }
 
@@ -100,7 +101,9 @@ fn summary_is_absent_when_nothing_is_running() {
 }
 
 #[test]
-fn summary_lists_goal_plan_team_agents_jobs_in_order() {
+fn summary_lists_goal_plan_tasks_agents_jobs_in_order() {
+    // 决策 3A：左槽采用「语义图标 + 极简中文短词」，顺序
+    // 目标 → 计划 → 任务 → 智能体 → 后台。
     let mut state = TuiState::default();
     state.set_goal(goal(3, Some(5), GoalPhase::Active));
     state.plan_state = Some(plan_with(2, 5));
@@ -110,15 +113,15 @@ fn summary_lists_goal_plan_team_agents_jobs_in_order() {
     state.jobs_state = Some(JobsViewState::from_items(vec![job("running")]));
 
     let summary = tui::task_summary(&state).expect("摘要必须存在");
-    let positions = ["goal", "plan", "团队", "队友", "后台任务"]
+    let positions = ["◎ 目标", "▤ 计划", "☑ 任务", "⚡ 智能体", "⚙ 后台"]
         .map(|needle| summary.find(needle).unwrap_or_else(|| panic!("缺少 {needle} 段：{summary:?}")));
     assert!(
         positions.windows(2).all(|pair| pair[0] < pair[1]),
-        "摘要段顺序必须是 goal → plan → 团队 → 队友 → 后台任务，实际 {summary:?}"
+        "摘要段顺序必须是 目标 → 计划 → 任务 → 智能体 → 后台，实际 {summary:?}"
     );
-    assert!(summary.contains("轮3/5"), "goal 段必须带轮次：{summary:?}");
-    assert!(summary.contains("2/5"), "plan 段必须带完成比：{summary:?}");
-    assert!(summary.contains("⛔1"), "团队段必须标阻塞数：{summary:?}");
+    assert!(summary.contains("3/5"), "目标段必须带轮次：{summary:?}");
+    assert!(summary.contains("2/5"), "计划段必须带完成比：{summary:?}");
+    assert!(summary.contains("⛔1"), "任务段必须标阻塞数：{summary:?}");
 }
 
 #[test]
@@ -271,6 +274,7 @@ fn jobs_tab_renders_an_actionable_empty_state() {
     let center = TaskCenterState {
         tab: TaskCenterTab::Jobs,
         scroll: 0,
+        selected_index: 0,
     };
     state.task_center = Some(center);
     let lines = tui::task_center_lines(&state);
@@ -328,4 +332,64 @@ fn permission_approval_renders_inline_without_hiding_latest_message() {
         !flat.contains("权限审批请求"),
         "居中弹窗标题必须消失（改为底部内联）：{text:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 5. 2026-11-25 重构：抽屉与输入框间距、真实渲染下的长文本折行
+// ---------------------------------------------------------------------------
+
+/// 抽屉下缘与输入框色带之间必须恒定留 `DRAWER_INPUT_GAP` 行空白（CANVAS 呼吸）。
+#[test]
+fn drawer_keeps_breathing_row_above_composer() {
+    let mut state = TuiState::default();
+    state.task_center = Some(TaskCenterState::new());
+    let buf = render(&mut state, 110, 30);
+
+    // 找到抽屉页签行与输入框提示符行，断言两者之间至少隔 2 行（抽屉内容末行 + 1 行空白）。
+    let rows: Vec<String> = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
+    let tab_row = rows
+        .iter()
+        .position(|row| row.contains("Goal") && row.contains("Jobs"))
+        .expect("页签栏必须渲染");
+    let composer_row = rows
+        .iter()
+        .rposition(|row| row.contains('›') || row.contains('>'))
+        .expect("输入框提示符必须渲染");
+    assert!(
+        composer_row > tab_row,
+        "输入框必须在抽屉之下：tab={tab_row} composer={composer_row}"
+    );
+    assert!(
+        composer_row.saturating_sub(tab_row) >= 3,
+        "抽屉（发丝线+页签+内容）与输入框之间必须留有间距：tab={tab_row} composer={composer_row}"
+    );
+}
+
+/// 真实渲染下长目标必须折行显示（旧实现整行渲染 ⇒ 右侧被终端裁掉）。
+#[test]
+fn long_goal_objective_is_wrapped_in_real_render() {
+    let mut state = TuiState::default();
+    state.task_center = Some(TaskCenterState::new());
+    let tail_sentinel = "结尾哨兵Z";
+    let objective = format!(
+        "把底部任务抽屉里的目标正文完整显示出来，不能因为终端宽度不足而在右侧被硬截断掉后半段内容{tail_sentinel}"
+    );
+    state.set_goal(TuiGoal {
+        id: "goal-long".to_string(),
+        objective,
+        phase: GoalPhase::Active,
+        activation: GoalActivation::Armed,
+        round_count: 1,
+        max_rounds: Some(5),
+        revision: 1,
+    });
+
+    for width in [60u16, 80, 110] {
+        let buf = render(&mut state, width, 30);
+        let flat: String = all_text(&buf).chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            flat.contains(tail_sentinel),
+            "宽度 {width} 下目标正文结尾必须可见（折行而非截断）：{flat}"
+        );
+    }
 }

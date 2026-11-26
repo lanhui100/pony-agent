@@ -255,13 +255,14 @@ impl pony_tools::tools::OrchestrationToolBridge for CoreOrchestrationBridge {
         // 可见性面（2026-11-22）：把本次委派登记进**活跃 ACP 注册表**，宿主 TUI 的 Agents 页签
         // 因此能看到「现在有哪些 ACP 子智能体在跑」。guard 覆盖 spawn 之后的全部收口路径
         // （成功/错误/取消/panic），Drop 即注销；注册表只做只读快照，不参与委派裁决。
-        let _active_delegate = crate::acp::registry::ActiveDelegateGuard::register(
+        let _active_delegate = crate::acp::registry::ActiveDelegateGuard::register_with_description(
             crate::acp::registry::DelegateRegistration {
                 agent_id: spec.id.clone(),
                 acp_session_id: session.session_id().to_string(),
                 host_session_id: context.session_id.clone(),
                 cwd: cwd.display().to_string(),
             },
+            args.description.clone(),
         );
         crate::agent::otel::log::log_json_with_fields(
             "info",
@@ -348,16 +349,27 @@ impl pony_tools::tools::OrchestrationToolBridge for CoreOrchestrationBridge {
                 context.provider_selection.as_ref(),
                 &crate::agent::orchestration::TeamCaller::from_session(context.session_id.as_deref()),
             ) {
-                Ok(res) => ToolResult {
-                    tool_name: TOOL_SPAWN_TEAMMATE.to_string(),
-                    status: "ok".to_string(),
-                    output: json_string(json!({
-                        "ok": true,
-                        "tool": TOOL_SPAWN_TEAMMATE,
-                        "result": res,
-                    })),
-                    duration_ms: 0,
-                },
+                Ok(res) => {
+                    // 会话隔离：登记该队友归属的宿主会话，TUI Agents 页签据此只显示本会话的队友。
+                    if let Some(host) =
+                        crate::agent::orchestration::host_session_for_caller(context.session_id.as_deref())
+                    {
+                        crate::agent::orchestration::set_teammate_host_session(
+                            &res.member.target,
+                            &host,
+                        );
+                    }
+                    ToolResult {
+                        tool_name: TOOL_SPAWN_TEAMMATE.to_string(),
+                        status: "ok".to_string(),
+                        output: json_string(json!({
+                            "ok": true,
+                            "tool": TOOL_SPAWN_TEAMMATE,
+                            "result": res,
+                        })),
+                        duration_ms: 0,
+                    }
+                }
                 Err(err) => error_result(TOOL_SPAWN_TEAMMATE, "spawn_failed", err, None),
             },
             Err(err) => error_result(
@@ -563,16 +575,28 @@ impl pony_tools::tools::OrchestrationToolBridge for CoreOrchestrationBridge {
                 args,
                 &crate::agent::orchestration::TeamCaller::from_session(context.session_id.as_deref()),
             ) {
-                Ok(res) => ToolResult {
-                    tool_name: TOOL_TEAM_TASK_CREATE.to_string(),
-                    status: "ok".to_string(),
-                    output: json_string(json!({
-                        "ok": true,
-                        "tool": TOOL_TEAM_TASK_CREATE,
-                        "result": res,
-                    })),
-                    duration_ms: 0,
-                },
+                Ok(res) => {
+                    // 会话隔离：队友（`team-*` 会话）创建的任务反查回宿主会话，否则团队任务会与
+                    // 主会话失联（TUI Tasks 页签按宿主会话过滤）。
+                    if let Some(host) =
+                        crate::agent::orchestration::host_session_for_caller(context.session_id.as_deref())
+                    {
+                        crate::agent::orchestration::set_team_task_host_session(
+                            &res.task_id,
+                            &host,
+                        );
+                    }
+                    ToolResult {
+                        tool_name: TOOL_TEAM_TASK_CREATE.to_string(),
+                        status: "ok".to_string(),
+                        output: json_string(json!({
+                            "ok": true,
+                            "tool": TOOL_TEAM_TASK_CREATE,
+                            "result": res,
+                        })),
+                        duration_ms: 0,
+                    }
+                }
                 Err(err) => error_result(TOOL_TEAM_TASK_CREATE, "task_create_failed", err, None),
             },
             Err(err) => error_result(
@@ -689,6 +713,9 @@ struct AcpDelegateArgs {
     cwd: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    /// 面向用户的中文描述（schema 已强制模型提供）：TUI Agents 页签优先展示它。
+    #[serde(default)]
+    description: Option<String>,
 }
 
 /// 委派 cwd 解析：显式 `cwd` > 清单 `default_cwd` > 会话 workspace root；一律 canonicalize。
