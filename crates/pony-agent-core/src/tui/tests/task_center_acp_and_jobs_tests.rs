@@ -44,8 +44,12 @@ fn agents_tab_lists_active_acp_delegate_for_current_session() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        joined.contains("ACP 委派 1 · 运行中"),
+        joined.contains("ACP 委派 · 外部进程"),
         "Agents 页签必须有 ACP 委派分区：{joined}"
+    );
+    assert!(
+        !joined.contains("running"),
+        "Agents 页签不得出现英文状态词（改用语义图标）：{joined}"
     );
     assert!(joined.contains("opencode"), "必须显示外部 agent 标识：{joined}");
 
@@ -86,6 +90,7 @@ fn jobs_tab_is_scoped_to_current_session() {
             args: Some(vec!["5".to_string()]),
             cwd: None,
             timeout_ms: None,
+            description: None,
         },
         None,
         Some(owner),
@@ -121,6 +126,190 @@ fn jobs_tab_is_scoped_to_current_session() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 2026-11-25：Agents 分区准确性（伪成员 lead / 子代理 / 纯图标）与 Jobs kill
+// ---------------------------------------------------------------------------
+
+/// 伪成员 `lead` 不得出现在抽屉 Agents 页签（它就是宿主主会话）。
+#[test]
+fn agents_tab_hides_lead_pseudo_member() {
+    let mut state = drawer_state_on(task_center::TaskCenterTab::Agents);
+    state.agent_roster_state = Some(AgentRosterState::new(vec![
+        AgentRosterEntry {
+            target: "lead".to_string(),
+            name: "Lead".to_string(),
+            role: "lead".to_string(),
+            status: "running".to_string(),
+            pending_inbox: 0,
+            driving: true,
+            session_id: None,
+        },
+        AgentRosterEntry {
+            target: "worker-1".to_string(),
+            name: "Ada".to_string(),
+            role: "executor".to_string(),
+            status: "inactive".to_string(),
+            pending_inbox: 0,
+            driving: false,
+            session_id: Some("sess-worker-1".to_string()),
+        },
+    ]));
+    let joined = task_center::content_lines(&state)
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("Ada"), "队友必须可见：{joined}");
+    assert!(!joined.contains("Lead"), "伪成员 lead 不得上屏：{joined}");
+    assert!(
+        !joined.contains("running") && !joined.contains("inactive"),
+        "不得出现英文状态词（改用语义图标）：{joined}"
+    );
+    assert_eq!(
+        task_center::selectable_count(&state),
+        1,
+        "只有具备会话的队友才可进入"
+    );
+}
+
+/// 子智能体分区必须展示本会话的 subagent 运行记录，且可被选为进入目标。
+#[test]
+fn agents_tab_lists_subagent_runs_and_allows_entering() {
+    let mut state = drawer_state_on(task_center::TaskCenterTab::Agents);
+    state.subagent_runs = vec![SubagentViewRow {
+        session_id: "subagent-abc".to_string(),
+        description: "梳理调用链".to_string(),
+        status: crate::agent::orchestration::SubagentRunStatus::Completed,
+        started_at_ms: 0,
+        error: None,
+    }];
+    let joined = task_center::content_lines(&state)
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("子智能体"), "必须有子智能体分区：{joined}");
+    assert!(joined.contains("梳理调用链"), "必须展示中文描述：{joined}");
+
+    let picks = task_center::agent_picks(&state);
+    assert_eq!(picks.len(), 1, "子代理必须可被选中：{picks:?}");
+    assert_eq!(
+        picks[0],
+        task_center::AgentPick::Subagent {
+            session_id: "subagent-abc".to_string()
+        }
+    );
+    assert_eq!(task_center::selectable_count(&state), 1);
+}
+
+/// ACP 委派标注「外部进程 · 不可切入」，且不进入可选序列。
+#[test]
+fn acp_delegate_is_marked_external_and_not_selectable() {
+    let mut state = drawer_state_on(task_center::TaskCenterTab::Agents);
+    state.acp_delegates = vec![AcpDelegateRow {
+        delegate_id: 7,
+        agent_id: "opencode".to_string(),
+        acp_session_id: "acp-1".to_string(),
+        host_session_id: Some("host".to_string()),
+        cwd: "/tmp/project".to_string(),
+        started_at_ms: 0,
+        description: Some("重构工具链".to_string()),
+    }];
+    let joined = task_center::content_lines(&state)
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("重构工具链"), "优先展示中文描述：{joined}");
+    assert!(
+        joined.contains("外部进程") && joined.contains("不可切入"),
+        "必须标注外部进程不可切入：{joined}"
+    );
+    assert_eq!(
+        task_center::selectable_count(&state),
+        0,
+        "ACP 委派不可被选中进入"
+    );
+}
+
+/// 无描述时 ACP 行回退 cwd 末段目录名。
+#[test]
+fn acp_delegate_falls_back_to_cwd_segment() {
+    let mut state = drawer_state_on(task_center::TaskCenterTab::Agents);
+    state.acp_delegates = vec![AcpDelegateRow {
+        delegate_id: 8,
+        agent_id: "antigravity".to_string(),
+        acp_session_id: "acp-2".to_string(),
+        host_session_id: Some("host".to_string()),
+        cwd: "/home/dm/projects/pony".to_string(),
+        started_at_ms: 0,
+        description: None,
+    }];
+    let joined = task_center::content_lines(&state)
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("pony"), "无描述时回退 cwd 末段：{joined}");
+    assert!(!joined.contains("/home/dm"), "不得展示完整路径：{joined}");
+}
+
+/// Jobs 页签：优先中文描述，且不得出现 pid / owned / promoted / 英文状态词。
+#[test]
+fn jobs_tab_prefers_description_and_hides_internal_fields() {
+    let mut state = drawer_state_on(task_center::TaskCenterTab::Jobs);
+    state.jobs_state = Some(jobs_panel::JobsViewState {
+        jobs: vec![jobs_panel::JobViewRow {
+            id: "job-desc".to_string(),
+            command: "npm run build -- --watch --mode development".to_string(),
+            description: Some("构建前端产物".to_string()),
+            status: jobs_panel::JobStatus::Running,
+            started_at: 0,
+        }],
+    });
+    let joined = task_center::content_lines(&state)
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("构建前端产物"), "必须优先展示中文描述：{joined}");
+    for forbidden in ["pid", "owned", "promoted", "running"] {
+        assert!(
+            !joined.contains(forbidden),
+            "不得展示内部字段 {forbidden:?}：{joined}"
+        );
+    }
+    assert!(
+        !joined.contains("npm run build"),
+        "有描述时不得再摊原始命令：{joined}"
+    );
+}
+
+/// Jobs 页签：无描述时回退精简命令，并在运行中显示底部终止提示。
+#[test]
+fn jobs_tab_falls_back_to_compact_command_and_shows_kill_hint() {
+    let mut state = drawer_state_on(task_center::TaskCenterTab::Jobs);
+    state.jobs_state = Some(jobs_panel::JobsViewState {
+        jobs: vec![jobs_panel::JobViewRow {
+            id: "job-cmd".to_string(),
+            command: "cargo   test\n  --all".to_string(),
+            description: None,
+            status: jobs_panel::JobStatus::Running,
+            started_at: 0,
+        }],
+    });
+    let joined = task_center::content_lines(&state)
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("cargo test --all"), "命令必须单行化：{joined}");
+    assert!(
+        joined.contains("x / Ctrl+K 终止后台任务"),
+        "有运行中作业时必须给终止提示：{joined}"
+    );
+}
+
 #[cfg(windows)]
 fn long_sleep_args() -> (String, Vec<String>) {
     (
@@ -150,6 +339,7 @@ fn jobs_tab_hides_unowned_jobs_and_blank_session_caller() {
             args: Some(args.clone()),
             cwd: None,
             timeout_ms: None,
+            description: Some("无归属测试任务".to_string()),
         },
         None,
         None,
@@ -162,6 +352,7 @@ fn jobs_tab_hides_unowned_jobs_and_blank_session_caller() {
             args: Some(args),
             cwd: None,
             timeout_ms: None,
+            description: Some("当前会话专属任务".to_string()),
         },
         None,
         Some(owner),
@@ -235,6 +426,7 @@ fn reset_session_scope_clears_jobs_state_and_drawer_sync_refreshes_jobs() {
             args: Some(args.clone()),
             cwd: None,
             timeout_ms: None,
+            description: Some("会话A后台任务".to_string()),
         },
         None,
         Some(session_a),
@@ -246,6 +438,7 @@ fn reset_session_scope_clears_jobs_state_and_drawer_sync_refreshes_jobs() {
             args: Some(args),
             cwd: None,
             timeout_ms: None,
+            description: Some("会话B后台任务".to_string()),
         },
         None,
         Some(session_b),

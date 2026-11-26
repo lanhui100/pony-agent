@@ -84,3 +84,9 @@ TUI 里与「任务」有关的信息原本分散在六个互不相干的入口�
 - 后续增补：抽屉缺斜杠入口（只能 `Ctrl+T`）与页签黏内容两处可发现性/版式问题，见
   `.agents/notes/implemented/feature/2026-11-19-tui-task-drawer-panel-entry.md`
   （新增 `/panel` 与 1 行呼吸区；页签集合、高度上限与「不遮最新消息」几何不变）。
+- 后续增补（2026-11-25）：抽屉的**统一折行**、与输入框的 `DRAWER_INPUT_GAP` 间距、5 页签面向用户
+  分层、Agents 页签的队友/子代理/ACP 准确性与会话隔离、Jobs 页签的 `description` 透传与终止入口，
+  以及底栏左槽改为「语义图标 + 极简中文短词」，见
+  `.agents/notes/implemented/feature/2026-11-25-tui-drawer-ux-and-subagent-visibility.md`。
+  本文描述的状态条三段布局、「不遮最新消息」几何与 `CHAT_BOTTOM_GAP` 契约**不变**；
+  左槽段落的措辞与可见性口径以新条为准（本文第 27 行的 `goal 轮3/5 …` 为当时实况，保留作史）。
