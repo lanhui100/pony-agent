@@ -280,24 +280,27 @@ const COOLDOWN_DEFAULT_MS: u64 = 60_000;
 /// 冷却窗口硬上界（C3-P5）：覆盖 Kimi 5 小时窗口，同时防止异常头把 provider 永久冻结。
 const COOLDOWN_MAX_MS: u64 = 6 * 60 * 60 * 1_000;
 
-// ── B1795506800002：请求体字节闸门（传输物理防线，与 token 预算正交） ──────────────────
+// ── 请求体字节闸门（传输物理防线，与 token 预算正交） ──────────────────────────────────
 
-/// 纯文本请求体硬上限（512 KiB）。
+/// 请求体硬上限（128 MiB）：对齐 ponyllm 网关自身上限，**不再按纯文本/含图分档**。
 ///
-/// 存在理由：上下文装配只有 **token** 预算（`compression::estimate_text_tokens` = chars/4），
-/// 而边缘网关（EdgeOne / Cloudflare / Nginx）按**字节**直接 RST/413。两者口径不重叠：
-/// UTF-8 中文 3 字节/字、JSON 转义（`\"`/`\n`/`\uXXXX`）、大型 `tools` schema、base64 图像
-/// 与单轮多 hop 的 `accumulated_messages` 膨胀都不进 token 估算。缺陷现场（B1795488338107）
-/// 就是 300KB+ 请求在发出后被边缘 10~13ms RST，重试还会放大成防刷封禁。
-const MAX_REQUEST_BODY_BYTES: u64 = 512 * 1024;
+/// 历史教训（B1795506800002 → 本次修订）：曾按「纯文本 512 KiB / 含图 10 MiB」分档拦截，
+/// 但 1M 窗口在 80% 压缩线（80 万 token）折算 chars/4 ≈ 320 万字符，中文 3 字节/字符即
+/// 近 10 MB 合法请求体；512 KiB 只有窗口的约 5%，等于把 1M 模型阉割成 5 万 token 可用，
+/// 且请求在本地就被判死、永远走不到压缩路径。见
+/// `.agents/notes/implemented/bug-fix/2026-11-24-native-compaction-split-and-overflow-rescue.md`
+/// 的 Decision 1（明确「不在客户端设 512 KiB 类小体积硬拦截」）。
+///
+/// 保留闸门的唯一理由：序列化异常（例如容器体积爆炸）要 0 HTTP 失败，而不是把畸形容器
+/// 重放成边缘防刷风暴。判据必须**高于**任何真实合法请求，故取网关量级。
+const MAX_REQUEST_BODY_BYTES: u64 = 128 * 1024 * 1024;
 
-/// 含图请求体硬上限（10 MiB）：多模态 base64 天然是 MiB 量级。
-const MAX_MULTIMODAL_REQUEST_BODY_BYTES: u64 = 10 * 1024 * 1024;
+/// 请求体软告警阈值（32 MiB）：只落结构化 warn，不拦截。
+///
+/// 取值依据：1M 窗口满水位文本请求体在数 MB~十余 MB 量级，32 MiB 之上才值得复盘。
+const REQUEST_BODY_WARN_BYTES: u64 = 32 * 1024 * 1024;
 
-/// 纯文本请求体软告警阈值（256 KiB）：只落结构化 warn，不拦截。
-const REQUEST_BODY_WARN_BYTES: u64 = 256 * 1024;
-
-/// 请求体是否含多模态图像块（决定用哪一档字节上限）。
+/// 请求体是否含多模态图像块（只用于日志字段，**不参与上限选择**）。
 ///
 /// 判据只用结构特征（`type` 取值 / `data:image/` 前缀），不做内容嗅探：本函数在 HTTP
 /// 出口热路径上，必须 O(n) 且无分配放大。
@@ -325,7 +328,7 @@ fn request_body_has_images(body: &Value) -> bool {
     has_image_block(body)
 }
 
-/// B1795506800002：序列化请求体并做**字节闸门**（0 HTTP Fail-Closed）。
+/// 序列化请求体并做**字节闸门**（0 HTTP Fail-Closed）。
 ///
 /// 返回 `Ok(bytes)` = 放行（可直接 `.body(bytes)` 发出，与 `.json(body)` 逐字节等价）；
 /// 返回 `Err(message)` = 超硬上限，**一个网络包都不发**。
@@ -338,6 +341,12 @@ fn request_body_has_images(body: &Value) -> bool {
 ///   破坏 `tool_call`/`tool_result` 闭合（Anthropic 400）或误删 `reasoning_content`
 ///   （DeepSeek 400）。要自动救回应由上层捕获 `UpstreamContextOverflow` 后跑一轮受控压缩。
 fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String> {
+    serialize_request_body_with_size_gate_limit(body, MAX_REQUEST_BODY_BYTES)
+}
+
+/// 闸门本体（上限可注入）：生产恒用 [`MAX_REQUEST_BODY_BYTES`]，单测用小上限验证拦截路径
+/// 而不必真的造 128 MiB 请求体（避免测试用 129 MB 内存换取一次断言）。
+fn serialize_request_body_with_size_gate_limit(body: &Value, limit: u64) -> Result<Vec<u8>, String> {
     let bytes = serde_json::to_vec(body).map_err(|error| {
         format!(
             "serialize provider request body failed; payload too large? error={error}"
@@ -347,11 +356,6 @@ fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String
     // `as_conversions` 棘轮（该表禁止新增裸转换）。
     let body_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let has_images = request_body_has_images(body);
-    let limit = if has_images {
-        MAX_MULTIMODAL_REQUEST_BODY_BYTES
-    } else {
-        MAX_REQUEST_BODY_BYTES
-    };
     if body_bytes > limit {
         pony_observability::otel::log::log_json_with_fields(
             "warn",
@@ -368,7 +372,7 @@ fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String
              limit_bytes={limit} has_images={has_images}; 本次未发起请求"
         ));
     }
-    if body_bytes > REQUEST_BODY_WARN_BYTES && !has_images {
+    if body_bytes > REQUEST_BODY_WARN_BYTES {
         pony_observability::otel::log::log_json_with_fields(
             "warn",
             "provider_request_body_large",
@@ -376,6 +380,7 @@ fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String
             &[
                 ("request_body_bytes", serde_json::json!(body_bytes)),
                 ("warn_bytes", serde_json::json!(REQUEST_BODY_WARN_BYTES)),
+                ("has_images", serde_json::json!(has_images)),
             ],
         );
     }
@@ -1751,6 +1756,83 @@ impl ProviderManager {
         };
         // 耗尽时退回最后一次尝试的**原始**错误（含状态码/耗时/正文）。
         outcome.map_err(|degraded| last_provider_error.unwrap_or(degraded))
+    }
+
+    /// 基于已更新的 `request` 与当前 turn 前置已闭合工具批次重建干净的 `accumulated_messages`
+    /// （供 ToolFollowup 溢出自救重装配上下文后重发当前批使用）。
+    pub fn rebuild_followup_messages_for_batches(
+        &self,
+        request: &ProviderRequest,
+        batches: &[(Option<Value>, Vec<ToolCall>, Vec<ToolResult>)],
+    ) -> Result<Vec<Value>, String> {
+        let mut acc: Vec<Value> = Vec::new();
+        for (assistant_message, calls, results) in batches {
+            if calls.len() != results.len() {
+                return Err(format!(
+                    "tool_calls/tool_results length mismatch: calls={} results={}",
+                    calls.len(),
+                    results.len()
+                ));
+            }
+            if calls.is_empty() {
+                continue;
+            }
+            if calls.len() == 1 {
+                match self.config.protocol {
+                    ProviderProtocol::OpenAiCompletions => {
+                        let messages = normalize_openai_messages(openai_messages_with_tool_result(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            &calls[0],
+                            &results[0],
+                        ));
+                        acc = messages;
+                    }
+                    ProviderProtocol::OpenAiResponses => {
+                        let messages = openai_messages_with_tool_result(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            &calls[0],
+                            &results[0],
+                        );
+                        acc = messages;
+                    }
+                    ProviderProtocol::AnthropicMessages => {
+                        let _ = anthropic_messages_with_tool_result(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            &calls[0],
+                            &results[0],
+                        );
+                    }
+                }
+            } else {
+                match self.config.protocol {
+                    ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
+                        let _ = openai_followup_messages_for_tool_results(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            calls,
+                            results,
+                        )?;
+                    }
+                    ProviderProtocol::AnthropicMessages => {
+                        let _ = anthropic_followup_messages_for_tool_results(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            calls,
+                            results,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(acc)
     }
 
     /// D2：批量工具结果 followup（流式入口）。分派顺序与同步入口逐字一致。

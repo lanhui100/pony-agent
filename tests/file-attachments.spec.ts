@@ -6,6 +6,7 @@ import {
   buildImportRelativePath,
   bytesToDataUrl,
   IMPORT_RELATIVE_DIR,
+  MAX_TURN_IMAGES,
   mimeFromExtension,
   normalizeExtension,
   resolveAttachmentRoute,
@@ -260,19 +261,32 @@ describe("runtime store addPendingAttachments", () => {
     expect(store.pendingAttachments).toHaveLength(1);
   });
 
-  it("enforces the image count cap at 3", async () => {
+  it("allows more than 3 images and enforces the image count cap at MAX_TURN_IMAGES", async () => {
     const store = useRuntimeStore();
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 5; index += 1) {
       const file = new File([png], `pic-${index}.png`, { type: "image/png" });
       const { errors } = await store.addPendingAttachments([file]);
       expect(errors).toEqual([]);
     }
-    const fourth = new File([png], "pic-3.png", { type: "image/png" });
-    const { added, errors } = await store.addPendingAttachments([fourth]);
+    expect(store.pendingAttachments.filter((a) => a.route === "image")).toHaveLength(5);
+
+    store.pendingAttachments = Array.from({ length: MAX_TURN_IMAGES }, (_, index) =>
+      pendingAttachment({
+        id: `cap-${index}`,
+        name: `cap-${index}.png`,
+        route: "image",
+        mimeType: "image/png",
+        status: "ok"
+      })
+    );
+    const extra = new File([png], "pic-extra.png", { type: "image/png" });
+    const { added, errors } = await store.addPendingAttachments([extra]);
     expect(added).toBe(0);
-    expect(errors[0]).toContain("最多添加");
-    expect(store.pendingAttachments.filter((a) => a.route === "image")).toHaveLength(3);
+    expect(errors[0]).toContain(`最多添加 ${MAX_TURN_IMAGES} 张图片`);
+    expect(store.pendingAttachments.filter((a) => a.route === "image")).toHaveLength(
+      MAX_TURN_IMAGES
+    );
   });
 
   it("rejects binary documents in browser mode", async () => {

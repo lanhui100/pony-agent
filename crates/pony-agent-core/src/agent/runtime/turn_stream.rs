@@ -61,13 +61,14 @@ impl AgentRuntime {
         control: &ExecutionControlRegistry,
         turn_id: &str,
         input: &TurnInput,
+        ask_injection: Option<&GraphAskResumeInjection>,
         injection_lease: Option<&AskInjectionLease>,
         user_message: &str,
         display_message: &str,
         provider: &ProviderManager,
         provider_meta: &ProviderEventMeta,
         tools: &[ToolDefinition],
-        planning_request: &ProviderRequest,
+        mut planning_request: ProviderRequest,
         first_decision: &ProviderDecision,
         tool_calls: Vec<ToolCall>,
         initial_hook_trace_records: Vec<HookTraceRecord>,
@@ -76,7 +77,8 @@ impl AgentRuntime {
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
         governed_context: Option<&DispatchContext>,
     ) {
-        let context_observation = build_context_observation(planning_request, tools);
+        let mut active_provider_meta = provider_meta.clone();
+        let mut context_observation = build_context_observation(&planning_request, tools);
         let mut hop_records = Vec::new();
         let mut tool_activities = Vec::new();
         // D3b：本 hop 待执行的**整批**调用（批内顺序执行；批长 1 即既有单调用语义）。
@@ -97,6 +99,8 @@ impl AgentRuntime {
         let mut same_signatures = SameSignatureTracker::new();
         let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
+        let mut prior_batches: Vec<(Option<Value>, Vec<ToolCall>, Vec<ToolResult>)> = Vec::new();
+        let mut followup_overflow_rescued = false;
         // B017：本轮**已产出**的 assistant 正文累积器。每进入一次 hop 循环就把该 hop 的 assistant
         // 正文追加进来（`current_assistant_output_text` 只在新 hop 响应到达时更新，故不会重复计入）。
         // 用途：失败终态（hook 失败 / 熔断闸）把它交给 `emit_stream_failed`，避免 trace
@@ -860,175 +864,120 @@ impl AgentRuntime {
             }
 
             let delta_turn_id = turn_id.to_string();
-            let first_token_latency_for_emit = Rc::clone(&first_token_latency);
-            let turn_started_at_for_latency = *turn_started_at;
             let supports_true_streaming_followup = provider.supports_true_streaming_followup();
-            let provider_call_first_token_latency = Rc::new(Cell::new(None));
-            let provider_call_first_token_latency_for_emit =
-                Rc::clone(&provider_call_first_token_latency);
-            let reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
-            let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
-            // F3：客户端节流的读线程侧载体——旧实现是 `last_emit` + 内联 sleep，
-            // 现在是时间窗聚合器（见 `StreamDeltaCoalescer`）：窗口内合并、窗口外上屏，
-            // **读线程不再睡眠**（睡眠 = 停读 socket = TCP 背压）。
-            let delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
-            let delta_coalescer_for_emit = Rc::clone(&delta_coalescer);
-            let delta_turn_id_for_emit = delta_turn_id.clone();
-            // PA-095 #4 修复：followup delta 闭包此前 session_id 传 None——事件以
-            // 空 session 缓冲且永不 flush（生产事件流丢失全部 followup chunk）。
-            let delta_session_id_for_emit = input.session_id.clone();
-            // F2（重试窗口纯净）：同上——账本起点即 per-call 计时起点，重试/退避在
-            // `provider_followup_stream_with_calls` 内部（followup 作用域还会切 20s/40s
-            // 限流退避），不共源就会被算进 dur。
-            let provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
             // PA-095 #4：本次 followup call 的 hop 索引（Copy 捕获进 delta 闭包）。
             let followup_step = completed_hops as u32;
-            let response = match provider_followup_stream_with_calls(
-                provider,
-                planning_request,
-                tools,
-                &mut accumulated_messages,
-                current_assistant_message.as_ref(),
-                &executed_calls,
-                &executed_results,
-                move |delta| {
-                    // ADR 0055 P0-2 / Task-2 修复：首包时点信号（StreamStart）不承载内容，
-                    // 也**不参与** UI 首字延迟口径，但对于 provider call 本身，StreamStart 标志着首包
-                    // 已经到达。即使本次 call 是纯工具调用（无 Text/Reasoning 增量），也必须在提前返回前
-                    // 记录 provider_call_first_token_latency，避免 TTFT 丢失。
-                    if matches!(delta, ProviderStreamChunk::StreamStart) {
-                        if supports_true_streaming_followup
-                            && provider_call_first_token_latency_for_emit.get().is_none()
-                        {
-                            let value = provider_call_started_at.elapsed().as_millis() as u64;
-                            provider_call_first_token_latency_for_emit.set(Some(value));
-                        }
-                        return;
-                    }
-                    let flush_delta = |text: Option<String>,
-                                       reasoning_content: Option<String>,
-                                       latency: Option<u64>| {
-                        emit_stream_event_with_step(
-                            sink,
-                            "turn:delta",
-                            delta_turn_id_for_emit.clone(),
-                            "delta",
-                            Some("calling_model"),
-                            text,
-                            reasoning_content,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            latency,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            delta_session_id_for_emit.clone(),
-                            Some(followup_step),
-                        );
-                    };
-                    if supports_true_streaming_followup
-                        && provider_call_first_token_latency_for_emit.get().is_none()
-                    {
-                        let value = provider_call_started_at.elapsed().as_millis() as u64;
-                        provider_call_first_token_latency_for_emit.set(Some(value));
-                    }
-                    let latency = if supports_true_streaming_followup
-                        && first_token_latency_for_emit.get().is_none()
-                    {
-                        let value = turn_started_at_for_latency.elapsed().as_millis() as u64;
-                        first_token_latency_for_emit.set(Some(value));
-                        Some(value)
-                    } else {
-                        None
-                    };
-
-                    match delta {
-                        ProviderStreamChunk::StreamStart => {
-                            // ADR 0055 P0-2：首包时点信号，无内容（已在闭包入口提前返回，此臂仅为穷尽性）。
-                        }
-                        ProviderStreamChunk::Text(text) => {
-                            if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush()
-                            {
-                                delta_coalescer_for_emit.borrow_mut().push(
-                                    None,
-                                    Some(reasoning),
-                                    latency,
-                                );
+            let mut provider_call_first_token_latency = Rc::new(Cell::new(None));
+            let mut reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
+            let mut delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
+            let mut provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
+            let current_assistant_ref = current_assistant_message.as_ref();
+            let context_obs_snapshot = context_observation.clone();
+            let followup_outcome = self.run_stream_tool_followup_with_rescue(
+                control, turn_id, input, ask_injection, &prior_batches, provider,
+                &mut planning_request, &mut active_provider_meta, &mut context_observation,
+                tools, &mut accumulated_messages, &mut followup_overflow_rescued,
+                |req, acc| {
+                    let first_token_latency_for_emit = Rc::clone(&first_token_latency);
+                    let turn_started_at_for_latency = *turn_started_at;
+                    provider_call_first_token_latency = Rc::new(Cell::new(None));
+                    let provider_call_first_token_latency_for_emit = Rc::clone(&provider_call_first_token_latency);
+                    reasoning_batcher = Rc::new(RefCell::new(StreamReasoningBatcher::default()));
+                    let reasoning_batcher_for_emit = Rc::clone(&reasoning_batcher);
+                    delta_coalescer = Rc::new(RefCell::new(StreamDeltaCoalescer::new()));
+                    let delta_coalescer_for_emit = Rc::clone(&delta_coalescer);
+                    let delta_turn_id_for_emit = delta_turn_id.clone();
+                    let delta_session_id_for_emit = input.session_id.clone();
+                    let followup_emitted_visible = Rc::new(Cell::new(false));
+                    let followup_emitted_visible_for_emit = Rc::clone(&followup_emitted_visible);
+                    provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
+                    let result = provider_followup_stream_with_calls(
+                        provider, req, tools, acc, current_assistant_ref,
+                        &executed_calls, &executed_results,
+                        move |delta| {
+                            if matches!(delta, ProviderStreamChunk::StreamStart) {
+                                if supports_true_streaming_followup
+                                    && provider_call_first_token_latency_for_emit.get().is_none()
+                                {
+                                    provider_call_first_token_latency_for_emit
+                                        .set(Some(provider_call_started_at.elapsed().as_millis() as u64));
+                                }
+                                return;
                             }
-                            delta_coalescer_for_emit
-                                .borrow_mut()
-                                .push(Some(text), None, latency);
-                        }
-                        ProviderStreamChunk::Reasoning(reasoning) => {
-                            if let Some(buffered_reasoning) =
-                                reasoning_batcher_for_emit.borrow_mut().push(reasoning)
-                            {
-                                delta_coalescer_for_emit.borrow_mut().push(
-                                    None,
-                                    Some(buffered_reasoning),
-                                    latency,
+                            let flush_delta = |text: Option<String>, reasoning_content: Option<String>, latency: Option<u64>| {
+                                if text.as_deref().is_some_and(|t| !t.is_empty()) {
+                                    followup_emitted_visible_for_emit.set(true);
+                                }
+                                emit_stream_event_with_step(
+                                    sink, "turn:delta", delta_turn_id_for_emit.clone(), "delta",
+                                    Some("calling_model"), text, reasoning_content, None, None, None, None,
+                                    None, None, None, None, None, None, latency, None, None, None, None,
+                                    None, None, None, delta_session_id_for_emit.clone(), Some(followup_step),
                                 );
+                            };
+                            if supports_true_streaming_followup
+                                && provider_call_first_token_latency_for_emit.get().is_none()
+                            {
+                                provider_call_first_token_latency_for_emit
+                                    .set(Some(provider_call_started_at.elapsed().as_millis() as u64));
                             }
-                        }
-                    }
-                    // F3（I1/I3）：这里只做一次时间戳比较；窗口内的内容留在 pending，
-                    // 不 sleep、不等客户端消费。`sink.emit` 是**内联**调用——其契约是
-                    // 非阻塞投递（慢 sink 会串进读循环，属已知限制，见文件头）。
-                    let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
-                    let due = delta_coalescer_for_emit.borrow_mut().take_if_due(now);
-                    if let Some(batch) = due {
-                        for frame in batch.into_frames().into_iter().flatten() {
-                            flush_delta(frame.text, frame.reasoning, frame.latency_ms);
-                        }
-                    }
-                },
-                crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
-            ) {
-                Ok(response) => response,
-                Err(error) => {
-                    // wave-64 R2 / A2（可达性说明）：本通道（工具结果后续轮）**没有**取消观测面 ——
-                    // `provider_followup_stream_with_mode` 内部使用 `ProviderStreamGuard::without_cancel()`
-                    // （见 `provider/mod.rs` 的 `continue_with_tool_result_stream`），故此处永远不会
-                    // 收到 `provider_stream_cancelled` 取消码，不存在"取消码 ⇒ cancelled"的分流。
-                    // 用户停止在本通道的表现是：随后命中循环头/回读检查点的 `should_cancel_turn`
-                    // 分支（in-band 取消），或 C5 宽限监督先行收口；两者都经 terminal-once 闸门，
-                    // 确保至多一条终态。
-                    self.fail_stream_turn_gated_dispatch(
-                        sink,
-                        control,
-                        input.session_id.as_deref(),
-                        turn_id,
-                        display_message,
-                        Some(provider_meta),
-                        Some(context_observation.clone()),
-                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                        tool_activities.clone(),
-                        provider_call_records.clone(),
-                        hook_trace_records.clone(),
-                        first_token_latency.get(),
-                        Some(turn_started_at.elapsed().as_millis() as u64),
-                        completed_hops,
-                        error,
-                        // B017：失败前已产出的正文（熔断 / hook 失败主路径必须保留）。
-                        Some(accumulated_turn_text.clone()),
-                        native_transcript_for_failed_turn(
-                            provider.protocol(),
-                            user_message,
-                            &hop_records,
-                        ),
+                            let latency = if supports_true_streaming_followup && first_token_latency_for_emit.get().is_none() {
+                                let value = turn_started_at_for_latency.elapsed().as_millis() as u64;
+                                first_token_latency_for_emit.set(Some(value));
+                                Some(value)
+                            } else {
+                                None
+                            };
+                            match delta {
+                                ProviderStreamChunk::StreamStart => {}
+                                ProviderStreamChunk::Text(text) => {
+                                    if let Some(reasoning) = reasoning_batcher_for_emit.borrow_mut().flush() {
+                                        delta_coalescer_for_emit.borrow_mut().push(None, Some(reasoning), latency);
+                                    }
+                                    delta_coalescer_for_emit.borrow_mut().push(Some(text), None, latency);
+                                }
+                                ProviderStreamChunk::Reasoning(reasoning) => {
+                                    if let Some(buffered_reasoning) = reasoning_batcher_for_emit.borrow_mut().push(reasoning) {
+                                        delta_coalescer_for_emit.borrow_mut().push(None, Some(buffered_reasoning), latency);
+                                    }
+                                }
+                            }
+                            let now = turn_started_at_for_latency.elapsed().as_millis() as u64;
+                            if let Some(batch) = delta_coalescer_for_emit.borrow_mut().take_if_due(now) {
+                                for frame in batch.into_frames().into_iter().flatten() {
+                                    flush_delta(frame.text, frame.reasoning, frame.latency_ms);
+                                }
+                            }
+                        },
+                        crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
                     );
+                    (result, followup_emitted_visible.get())
+                },
+            );
+            let response = match followup_outcome {
+                Ok(response) => response,
+                Err((error, tagged)) => {
+                    let duration_ms = u64::try_from(turn_started_at.elapsed().as_millis()).ok();
+                    let transcript = native_transcript_for_failed_turn(provider.protocol(), user_message, &hop_records);
+                    if tagged {
+                        self.fail_stream_turn_gated_dispatch_tagged(
+                            sink, control, input.session_id.as_deref(), turn_id, display_message,
+                            Some(provider_meta), Some(context_obs_snapshot),
+                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                            tool_activities.clone(), provider_call_records.clone(), hook_trace_records.clone(),
+                            first_token_latency.get(), duration_ms, completed_hops, error,
+                            Some(accumulated_turn_text.clone()), transcript, "provider_followup_failed",
+                        );
+                    } else {
+                        self.fail_stream_turn_gated_dispatch(
+                            sink, control, input.session_id.as_deref(), turn_id, display_message,
+                            Some(provider_meta), Some(context_obs_snapshot),
+                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                            tool_activities.clone(), provider_call_records.clone(), hook_trace_records.clone(),
+                            first_token_latency.get(), duration_ms, completed_hops, error,
+                            Some(accumulated_turn_text.clone()), transcript,
+                        );
+                    }
                     return;
                 }
             };
@@ -1045,7 +994,7 @@ impl AgentRuntime {
                 &delta_turn_id,
                 input.session_id.clone(),
                 followup_step,
-                turn_started_at_for_latency.elapsed().as_millis() as u64,
+                turn_started_at.elapsed().as_millis() as u64,
             );
             let mut response = response;
             // F2：本次 followup 调用的 dur/ttft 收敛到「最后一次成功 attempt」。
@@ -1238,7 +1187,7 @@ impl AgentRuntime {
                     let recovery = recover_tool_followup_completion_stream(
                         sink,
                         provider,
-                        planning_request,
+                        &planning_request,
                         &mut accumulated_messages,
                         &hop_records,
                         &next_tool_call,
@@ -1296,7 +1245,7 @@ impl AgentRuntime {
                         let recovery = recover_tool_followup_completion_stream(
                             sink,
                             provider,
-                            planning_request,
+                            &planning_request,
                             &mut accumulated_messages,
                             &hop_records,
                             &next_tool_call,
@@ -1323,6 +1272,11 @@ impl AgentRuntime {
                         );
                         response = recovery.response;
                     } else {
+                        prior_batches.push((
+                            current_assistant_message.clone(),
+                            executed_calls.clone(),
+                            executed_results.clone(),
+                        ));
                         current_assistant_message = response.assistant_message.clone();
                         current_assistant_output_text = response.output_text.clone();
                         current_assistant_reasoning = response.reasoning_content.clone();
@@ -2917,13 +2871,14 @@ impl AgentRuntime {
                 control,
                 &turn_id,
                 &input,
+                ask_injection.as_ref(),
                 injection_lease.as_ref(),
                 &user_message,
                 &display_message,
                 &provider,
                 &provider_meta,
                 &tools,
-                &planning_request,
+                planning_request,
                 &first_decision,
                 tool_calls,
                 planner_hook_trace_records.clone(),

@@ -683,6 +683,12 @@ impl AgentRuntime {
                 .load_recent_images(input.session_id.as_deref(), recall_limit);
         }
 
+        let images = if images.is_empty() {
+            images
+        } else {
+            super::image_normalization::normalize_turn_images(images)
+        };
+
         validate_turn_images(&images)?;
         Ok(images)
     }
