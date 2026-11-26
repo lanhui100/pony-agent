@@ -3810,9 +3810,7 @@ fn decision_blank_tool_call(arguments: serde_json::Value) -> serde_json::Value {
 /// 2. `None` ⇒ 事件 text 逐字仍是 `This turn failed.`（历史冻结断言的兼容锁）。
 #[test]
 fn fail_stream_turn_with_hook_dispatch_forwards_partial_text() {
-    let runtime = AgentRuntimeBuilder::desktop()
-        .session_store(SessionStore::memory_only())
-        .build();
+    let runtime = AgentRuntimeBuilder::desktop().session_store(SessionStore::memory_only()).build();
     let control = crate::agent::execution_control::ExecutionControlRegistry::new();
 
     // ① Some(正文)
@@ -3976,9 +3974,7 @@ fn provider_decision_tool_calls_matches_single_tool_call() {
 
 #[test]
 fn start_turn_stream_uses_sink_for_empty_input_failure() {
-    let mut runtime = AgentRuntimeBuilder::desktop()
-        .session_store(SessionStore::memory_only())
-        .build();
+    let mut runtime = AgentRuntimeBuilder::desktop().session_store(SessionStore::memory_only()).build();
     let sink = RecordingTurnEventSink::new();
 
     runtime.start_turn_stream(
@@ -4019,9 +4015,7 @@ fn start_turn_stream_uses_sink_for_empty_input_failure() {
 fn runtime_default_tool_executor_routes_read_tools_through_governed_dispatcher() {
     // PA-076 runtime switch: the default engine is `build_governed_executor`, so a real
     // read tool call executed by the runtime must succeed through the governed dispatcher.
-    let runtime = AgentRuntimeBuilder::desktop()
-        .session_store(SessionStore::memory_only())
-        .build();
+    let runtime = AgentRuntimeBuilder::desktop().session_store(SessionStore::memory_only()).build();
     let (result, _record, _traces) = runtime.execute_registered_tool_call(&ToolCall {
         call_id: Some("call-gov-list".to_string()),
         name: "List".to_string(),
@@ -4051,10 +4045,7 @@ fn runtime_default_tool_executor_fails_closed_for_run_without_sandbox() {
         None,
         Some(Arc::new(NoSandboxBackend) as Arc<dyn SandboxBackend>),
     );
-    let runtime = AgentRuntimeBuilder::desktop()
-        .session_store(SessionStore::memory_only())
-        .tool_executor(Box::new(executor))
-        .build();
+    let runtime = AgentRuntimeBuilder::desktop().session_store(SessionStore::memory_only()).tool_executor(Box::new(executor)).build();
     let (result, _record, _traces) = runtime.execute_registered_tool_call(&ToolCall {
         call_id: Some("call-gov-run".to_string()),
         name: "Run".to_string(),

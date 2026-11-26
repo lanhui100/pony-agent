@@ -4414,6 +4414,8 @@ mod tests {
         (HostControlPlane::with_runtime(runtime), server, rt_guard)
     }
 
+    fn in_memory_ask_store() -> Arc<dyn crate::agent::ask_persistence::AskPersistenceStore> { Arc::from(crate::agent::ask_persistence::open_in_memory_ask_store().expect("in-memory ask store must open")) }
+
     fn temp_sessions_path() -> std::path::PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4432,11 +4434,7 @@ mod tests {
     fn import_attachment_resolves_workspace_via_registry() {
         // PA-078×PA-079：workspace_id 经注册表解析目标 root；未注册 id → 明确错误。
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::with_runtime(
-            AgentRuntimeBuilder::new()
-                .session_store(SessionStore::memory_only())
-                .build(),
-        );
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         // 未注册 workspace → 明确错误
         let err = control_plane
@@ -9988,14 +9986,7 @@ mod tests {
             Arc::new(FakeClock::new(1_000)),
         ));
         let _cp_lock = control_plane_test_lock();
-        let ask_store: Arc<dyn crate::agent::ask_persistence::AskPersistenceStore> = Arc::from(
-            crate::agent::ask_persistence::open_in_memory_ask_store()
-                .expect("in-memory ask store must open"),
-        );
-        let control_plane = HostControlPlaneBuilder::new().runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build())
-            .ask_store(ask_store)
-            .ask_dispatcher(Arc::clone(&dispatcher))
-            .build();
+        let control_plane = HostControlPlaneBuilder::new().runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build()).ask_store(in_memory_ask_store()).ask_dispatcher(Arc::clone(&dispatcher)).build();
 
         let context = DispatchContext {
             session_id: Some("session-1".to_string()),
@@ -10200,15 +10191,7 @@ mod tests {
             ),
         );
         let _cp_lock = control_plane_test_lock();
-        let ask_store: Arc<dyn crate::agent::ask_persistence::AskPersistenceStore> = Arc::from(
-            crate::agent::ask_persistence::open_in_memory_ask_store()
-                .expect("in-memory ask store must open"),
-        );
-        let control_plane = HostControlPlaneBuilder::new().runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build())
-            .ask_store(ask_store)
-            .ask_dispatcher(Arc::clone(&dispatcher))
-            .graph_run_store(graph_store)
-            .build();
+        let control_plane = HostControlPlaneBuilder::new().runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build()).ask_store(in_memory_ask_store()).ask_dispatcher(Arc::clone(&dispatcher)).graph_run_store(graph_store).build();
 
         let context = DispatchContext {
             session_id: Some("session-1".to_string()),
