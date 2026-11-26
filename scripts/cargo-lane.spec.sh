@@ -193,11 +193,27 @@ assert_not_contains "P22 PONY_TEST_THREADS=0 允许关闭" "$out" "RUST_TEST_THR
 
 # P23：Linux 且 user-systemd 可用时默认注入 cgroup v2 资源边界
 if [ "$(uname -s 2>/dev/null)" = "Linux" ] && command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  expected_mem_high="8G"
+  expected_mem_max="10G"
+  if [ -r /proc/meminfo ]; then
+    mem_avail_kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)
+    case "$mem_avail_kb" in
+      ''|*[!0-9]*) ;;
+      *)
+        if [ "$mem_avail_kb" -lt 15728640 ]; then
+          cap_max_gb=$(awk -v kb="$mem_avail_kb" 'BEGIN { g = int((kb * 0.65) / 1048576); if (g < 4) g = 4; if (g > 10) g = 10; print g }')
+          cap_high_gb=$(awk -v kb="$mem_avail_kb" -v m="$cap_max_gb" 'BEGIN { g = int((kb * 0.50) / 1048576); if (g < 3) g = 3; if (g >= m) g = m - 1; print g }')
+          expected_mem_max="${cap_max_gb}G"
+          expected_mem_high="${cap_high_gb}G"
+        fi
+        ;;
+    esac
+  fi
   out=$(bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
   assert_contains "P23 默认启用 systemd-run scope" "$out" "systemd-run --user --scope --quiet --unit=pony-cargo-lane-"
   assert_contains "P23 默认 CPUQuota=600%" "$out" "CPUQuota=600%"
-  assert_contains "P23 默认 MemoryHigh=8G" "$out" "MemoryHigh=8G"
-  assert_contains "P23 默认 MemoryMax=10G" "$out" "MemoryMax=10G"
+  assert_contains "P23 默认 MemoryHigh=${expected_mem_high}" "$out" "MemoryHigh=${expected_mem_high}"
+  assert_contains "P23 默认 MemoryMax=${expected_mem_max}" "$out" "MemoryMax=${expected_mem_max}"
 else
   printf 'SKIP P23 当前环境无 user-systemd\n'
 fi
