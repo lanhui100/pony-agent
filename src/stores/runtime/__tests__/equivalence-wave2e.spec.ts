@@ -148,8 +148,8 @@ describe("D5 · 轮次 trace 时间线解析（resolveTurnTraceTimeline）", () 
     resolved[0]!.label = "被改";
     resolved.push({ id: "z", kind: "call_model", label: "额外", state: "active", sequence: 9 });
 
-    expect(store.turnTraceHistory[0]!.traceTimeline).toHaveLength(1);
-    expect(store.turnTraceHistory[0]!.traceTimeline[0]!.label).toBe("原值");
+    expect(store.turnTraceHistory[0]?.traceTimeline).toHaveLength(1);
+    expect(store.turnTraceHistory[0]?.traceTimeline?.[0]?.label).toBe("原值");
   });
 });
 
