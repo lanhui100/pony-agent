@@ -483,6 +483,17 @@ impl FrontendDiagnosticsStore {
     }
 }
 
+fn resolve_frontend_diagnostics_sqlite_path(override_dir: Option<PathBuf>) -> PathBuf {
+    override_dir
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .or_else(dirs::data_local_dir)
+        .or_else(dirs::home_dir)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("PonyAgent")
+        .join("frontend-diagnostics.db")
+}
+
 pub fn default_frontend_diagnostics_sqlite_path() -> PathBuf {
     #[cfg(test)]
     {
@@ -500,12 +511,7 @@ pub fn default_frontend_diagnostics_sqlite_path() -> PathBuf {
 
     #[cfg(not(test))]
     {
-        dirs::data_local_dir()
-            .or_else(dirs::home_dir)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("PonyAgent")
-            .join("frontend-diagnostics.db")
+        resolve_frontend_diagnostics_sqlite_path(pony_protocol::sqlite_paths::data_dir_override())
     }
 }
 
@@ -671,5 +677,18 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_frontend_diagnostics_sqlite_path_prefers_non_empty_override() {
+        let custom = PathBuf::from("/tmp/pony-diag-override");
+        assert_eq!(
+            resolve_frontend_diagnostics_sqlite_path(Some(custom.clone())),
+            custom.join("PonyAgent").join("frontend-diagnostics.db")
+        );
+
+        let fallback = resolve_frontend_diagnostics_sqlite_path(Some(PathBuf::new()));
+        assert!(fallback.ends_with(PathBuf::from("PonyAgent").join("frontend-diagnostics.db")));
+        assert_ne!(fallback, PathBuf::from("PonyAgent").join("frontend-diagnostics.db"));
     }
 }

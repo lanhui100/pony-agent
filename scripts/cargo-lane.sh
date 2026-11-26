@@ -24,16 +24,18 @@
 #   mold：默认 auto，Linux 下探测到 mold 且支持 `mold -run` 时自动包装 cargo（零 RUSTFLAGS 变动，
 #         不使既有缓存失效）；PONY_BUILD_FAST_LINK=0 可关闭，=1 强制要求。
 #
-# 防卡死护栏（B1795589917594）：
-#   cgroup：Linux 下默认 auto，探测 systemd-run --user --scope 并设置 CPUQuota=600%、MemoryHigh=14G、MemoryMax=18G
-#           （若 cgroup v2 委托了 io 控制器再附带 IOWeight=50）；无 user-systemd 时安全降级，显式 PONY_BUILD_CGROUP=1 时 fail-closed。
+# 防卡死护栏（B1795589917594 + 2026-11-26 根治加固）：
+#   cgroup：Linux 下默认 auto，探测 systemd-run --user --scope（固定 --unit 便于整树回收）并设置
+#           CPUQuota=600%、MemoryHigh=8G、MemoryMax=10G（若 MemAvailable < 15G 则自动按余量下调封顶；
+#           若 cgroup v2 委托了 io 控制器再附带 IOWeight=50）；无 user-systemd 时安全降级，显式 PONY_BUILD_CGROUP=1 时 fail-closed。
 #   ionice：默认 auto，可用时注入 ionice -c 3（空闲级磁盘 IO），PONY_BUILD_IONICE=0 可关闭。
-#   test  ：test/nextest 主子命令默认注入 timeout(600s, 置于 flock 内部) + RUST_TEST_THREADS=4（PONY_TEST_THREADS=0 可关闭）。
+#   test  ：test/nextest 主子命令默认注入 timeout(600s, 置于 flock 内部) + RUST_TEST_THREADS=4（PONY_TEST_THREADS=0 可关闭）
+#           + 自动隔离 PONY_AGENT_DATA_DIR（防集成测试误读真实 sessions.db；PONY_TEST_ISOLATE_DATA_DIR=0 可关闭）。
 #
 # 环境覆盖（排障用，不改变默认预算）：
 #   PONY_BUILD_JOBS / PONY_BUILD_LOCK / PONY_BUILD_NICE / PONY_BUILD_LOAD_FACTOR
 #   PONY_BUILD_CGROUP / PONY_BUILD_CPU_QUOTA / PONY_BUILD_MEM_HIGH / PONY_BUILD_MEM_MAX / PONY_BUILD_IO_WEIGHT
-#   PONY_BUILD_IONICE / PONY_TEST_THREADS / PONY_TEST_TIMEOUT / PONY_TEST_ULIMIT_KB
+#   PONY_BUILD_IONICE / PONY_TEST_THREADS / PONY_TEST_TIMEOUT / PONY_TEST_ULIMIT_KB / PONY_TEST_ISOLATE_DATA_DIR
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -289,15 +291,39 @@ case "$WANT_CGROUP" in
   *) echo "[cargo-lane] 用法错误：PONY_BUILD_CGROUP 只接受 auto|on|1|off|0，收到 $WANT_CGROUP" >&2; exit 2 ;;
 esac
 
+clamp_default_mem_limits() {
+  local mem_avail_kb cap_max_gb cap_high_gb
+  [ -r /proc/meminfo ] || return 0
+  mem_avail_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+  case "$mem_avail_kb" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  # 共享机器余量低于 15GiB 时按可用内存折算上限，防止单个 lane scope 拖垮全机引发 Page Thrashing
+  if [ "$mem_avail_kb" -lt 15728640 ]; then
+    cap_max_gb="$(awk -v kb="$mem_avail_kb" 'BEGIN { g = int((kb * 0.65) / 1048576); if (g < 4) g = 4; if (g > 10) g = 10; print g }')"
+    cap_high_gb="$(awk -v kb="$mem_avail_kb" -v m="$cap_max_gb" 'BEGIN { g = int((kb * 0.50) / 1048576); if (g < 3) g = 3; if (g >= m) g = m - 1; print g }')"
+    if [ -z "${PONY_BUILD_MEM_MAX:-}" ]; then
+      MEM_MAX="${cap_max_gb}G"
+    fi
+    if [ -z "${PONY_BUILD_MEM_HIGH:-}" ]; then
+      MEM_HIGH="${cap_high_gb}G"
+    fi
+  fi
+}
+
 CGROUP_CMD=()
+SCOPE_UNIT=""
 if [ "$WANT_CGROUP" != "0" ] && [ "$WANT_CGROUP" != "off" ]; then
   if [ "$(uname -s 2>/dev/null || echo unknown)" = "Linux" ] \
      && command -v systemd-run >/dev/null 2>&1 \
      && command -v systemctl >/dev/null 2>&1 \
      && systemctl --user show-environment >/dev/null 2>&1; then
     CPU_QUOTA="${PONY_BUILD_CPU_QUOTA:-600%}"
-    MEM_HIGH="${PONY_BUILD_MEM_HIGH:-14G}"
-    MEM_MAX="${PONY_BUILD_MEM_MAX:-18G}"
+    MEM_HIGH="${PONY_BUILD_MEM_HIGH:-8G}"
+    MEM_MAX="${PONY_BUILD_MEM_MAX:-10G}"
+    if [ -z "${PONY_BUILD_MEM_HIGH:-}" ] || [ -z "${PONY_BUILD_MEM_MAX:-}" ]; then
+      clamp_default_mem_limits
+    fi
     IO_WEIGHT="${PONY_BUILD_IO_WEIGHT:-}"
     if [ -z "$IO_WEIGHT" ]; then
       CTRL_FILE="/sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers"
@@ -325,7 +351,9 @@ if [ "$WANT_CGROUP" != "0" ] && [ "$WANT_CGROUP" != "off" ]; then
       CGROUP_DESC+=("IOWeight=$IO_WEIGHT")
     fi
 
-    CGROUP_CMD=(systemd-run --user --scope --quiet "${CGROUP_PROPS[@]}" --)
+    SCOPE_UNIT="pony-cargo-lane-$$"
+    CGROUP_PROPS+=(-p "TimeoutStopSec=5s")
+    CGROUP_CMD=(systemd-run --user --scope --quiet "--unit=$SCOPE_UNIT" "${CGROUP_PROPS[@]}" --)
     GUARD_NOTES+=("cgroup($(IFS=,; echo "${CGROUP_DESC[*]:-default}"))")
   elif [ "$WANT_CGROUP" = "on" ] || [ "$WANT_CGROUP" = "1" ]; then
     echo "[cargo-lane] fail-closed：显式要求 cgroup（PONY_BUILD_CGROUP=$WANT_CGROUP），但当前环境不支持 systemd-run --user --scope" >&2
@@ -389,6 +417,24 @@ if [ "$is_test" -eq 1 ]; then
     ULIMIT_CMD=(bash -c 'ulimit -v "$1" && shift && exec "$@"' _ "$PONY_TEST_ULIMIT_KB")
     GUARD_NOTES+=("ulimit-v=${PONY_TEST_ULIMIT_KB}KB")
   fi
+
+  WANT_ISOLATE_DATA_DIR="${PONY_TEST_ISOLATE_DATA_DIR:-auto}"
+  case "$WANT_ISOLATE_DATA_DIR" in
+    auto|1|on|0|off) ;;
+    *) echo "[cargo-lane] 用法错误：PONY_TEST_ISOLATE_DATA_DIR 只接受 auto|on|1|off|0，收到 $WANT_ISOLATE_DATA_DIR" >&2; exit 2 ;;
+  esac
+  if [ "$WANT_ISOLATE_DATA_DIR" != "0" ] && [ "$WANT_ISOLATE_DATA_DIR" != "off" ]; then
+    if [ -n "${PONY_AGENT_DATA_DIR:-}" ]; then
+      GUARD_NOTES+=("data-dir(external)")
+    elif [ "$DRY_RUN" -eq 1 ]; then
+      TEST_ENV+=("PONY_AGENT_DATA_DIR=${TMPDIR:-/tmp}/pony-test-data-dry-run")
+      GUARD_NOTES+=("data-dir(isolated)")
+    else
+      AUTO_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pony-test-data.XXXXXX")"
+      TEST_ENV+=("PONY_AGENT_DATA_DIR=$AUTO_DATA_DIR")
+      GUARD_NOTES+=("data-dir(isolated)")
+    fi
+  fi
 fi
 
 if [ "${#GUARD_NOTES[@]}" -gt 0 ]; then
@@ -410,10 +456,6 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf 'mkdir-lock %s.d ; %s\n' "$LOCK" "$(printf '%s' "${CMD[*]}" | sed 's/  */ /g')"
   fi
   exit 0
-fi
-
-if [ "$LOCK_IMPL" = "flock" ]; then
-  exec "${CMD[@]}"
 fi
 
 # ── mkdir 锁路径（无 flock 平台）────────────────────────────────────────
@@ -444,8 +486,45 @@ release_mkdir_lock() {
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 
-acquire_mkdir_lock
-trap 'release_mkdir_lock' EXIT INT TERM
-"${CMD[@]}"
+CMD_PID=""
+LANE_SIGNALLED=0
+cleanup_lane() {
+  if [ -n "${CMD_PID:-}" ] && kill -0 "$CMD_PID" 2>/dev/null; then
+    pkill -TERM -P "$CMD_PID" 2>/dev/null || true
+    kill -TERM "$CMD_PID" 2>/dev/null || true
+  fi
+  if [ -n "${SCOPE_UNIT:-}" ] && command -v systemctl >/dev/null 2>&1; then
+    if [ "$LANE_SIGNALLED" -eq 1 ]; then
+      systemctl --user kill --signal=TERM "$SCOPE_UNIT" >/dev/null 2>&1 || true
+      sleep 0.2
+      systemctl --user kill --signal=KILL "$SCOPE_UNIT" >/dev/null 2>&1 || true
+    fi
+    systemctl --user stop "$SCOPE_UNIT" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${CMD_PID:-}" ] && kill -0 "$CMD_PID" 2>/dev/null; then
+    pkill -KILL -P "$CMD_PID" 2>/dev/null || true
+    kill -KILL "$CMD_PID" 2>/dev/null || true
+  fi
+  if [ -n "${AUTO_DATA_DIR:-}" ] && [ -d "$AUTO_DATA_DIR" ]; then
+    rm -rf "$AUTO_DATA_DIR"
+  fi
+  if [ "$LOCK_IMPL" != "flock" ]; then
+    release_mkdir_lock
+  fi
+}
+
+if [ "$LOCK_IMPL" != "flock" ]; then
+  acquire_mkdir_lock
+fi
+
+trap 'cleanup_lane' EXIT
+trap 'LANE_SIGNALLED=1; exit 130' INT
+trap 'LANE_SIGNALLED=1; exit 143' TERM
+
+# 后台等待使外层收到 SIGTERM/SIGINT 时立即唤醒 trap 并整树回收 scope，避免子进程逃逸成孤儿
+"${CMD[@]}" &
+CMD_PID=$!
+wait "$CMD_PID"
 rc=$?
+CMD_PID=""
 exit "$rc"

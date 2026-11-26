@@ -134,6 +134,28 @@ export function buildLayerSteps(layer, extraArgs = [], hasNextest = Boolean(reso
   }
 }
 
+/**
+ * 为非 l0 测试层级注入隔离的 `PONY_AGENT_DATA_DIR`（若调用方尚未设置），
+ * 即使通过 `PONY_BUILD_LANE=0` 绕过 cargo-lane.sh 也绝不触碰真实用户 sessions.db。
+ */
+export function prepareLayerEnv(baseEnv, layer, options = {}) {
+  const { dryRun = false, createTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pony-test-layer-data-')) } = options;
+  const env = { ...baseEnv };
+  const localBin = path.join(os.homedir(), '.local', 'bin');
+  if (fs.existsSync(localBin) && !(env.PATH || '').split(path.delimiter).includes(localBin)) {
+    env.PATH = `${localBin}${path.delimiter}${env.PATH || ''}`;
+  }
+  if (!process.stderr.isTTY && !env.NEXTEST_SHOW_PROGRESS) {
+    env.NEXTEST_SHOW_PROGRESS = 'none';
+  }
+  let autoDataDir = null;
+  if (layer !== 'l0' && !env.PONY_AGENT_DATA_DIR && !dryRun) {
+    autoDataDir = createTempDir();
+    env.PONY_AGENT_DATA_DIR = autoDataDir;
+  }
+  return { env, autoDataDir };
+}
+
 export function main(argv) {
   const dryRun = argv.includes('--dry-run');
   const sepIdx = argv.indexOf('--');
@@ -164,36 +186,35 @@ export function main(argv) {
     console.error(`[test-layer] layer=${layer} nextest=未安装（自动降级为 cargo test）`);
   }
 
-  const env = { ...process.env };
-  const localBin = path.join(os.homedir(), '.local', 'bin');
-  if (fs.existsSync(localBin) && !(env.PATH || '').split(path.delimiter).includes(localBin)) {
-    env.PATH = `${localBin}${path.delimiter}${env.PATH || ''}`;
-  }
-  if (!process.stderr.isTTY && !env.NEXTEST_SHOW_PROGRESS) {
-    env.NEXTEST_SHOW_PROGRESS = 'none';
-  }
+  const { env, autoDataDir } = prepareLayerEnv(process.env, layer, { dryRun });
 
-  for (const step of steps) {
-    const rendered = [step.command, ...step.args].join(' ');
-    if (dryRun) {
-      console.log(rendered);
-      continue;
+  try {
+    for (const step of steps) {
+      const rendered = [step.command, ...step.args].join(' ');
+      if (dryRun) {
+        console.log(rendered);
+        continue;
+      }
+      console.error(`[test-layer] 执行: ${rendered}`);
+      const res = spawnSync(step.command, step.args, {
+        cwd: REPO_ROOT,
+        env,
+        stdio: 'inherit'
+      });
+      if (res.error) {
+        console.error(`[test-layer] 执行失败: ${res.error.message}`);
+        return 1;
+      }
+      if (res.status !== 0) {
+        return res.status ?? 1;
+      }
     }
-    console.error(`[test-layer] 执行: ${rendered}`);
-    const res = spawnSync(step.command, step.args, {
-      cwd: REPO_ROOT,
-      env,
-      stdio: 'inherit'
-    });
-    if (res.error) {
-      console.error(`[test-layer] 执行失败: ${res.error.message}`);
-      return 1;
-    }
-    if (res.status !== 0) {
-      return res.status ?? 1;
+    return 0;
+  } finally {
+    if (autoDataDir) {
+      fs.rmSync(autoDataDir, { recursive: true, force: true });
     }
   }
-  return 0;
 }
 
 function isDirectInvocation() {

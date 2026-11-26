@@ -121,7 +121,7 @@ fi
 # P10：加速通道缺失即跳过——不得因为没装 sccache/mold 改变命令形状。
 # 本用例显式关掉 sccache（PONY_BUILD_SCCACHE=0）、mold（PONY_BUILD_FAST_LINK=0）与默认测试线程限流来**模拟**基线命令形状：
 # 本机装了 sccache 时不加这个开关，用例会因为「注入生效」而失败——那不是回归，是环境变了。
-out=$(PONY_BUILD_SCCACHE=0 PONY_BUILD_FAST_LINK=0 PONY_TEST_THREADS=0 bash "$LANE" --dry-run test 2>&1)
+out=$(PONY_BUILD_SCCACHE=0 PONY_BUILD_FAST_LINK=0 PONY_TEST_THREADS=0 PONY_TEST_ISOLATE_DATA_DIR=0 bash "$LANE" --dry-run test 2>&1)
 assert_contains "P10 无加速工具时命令形状不变" "$out" "env CARGO_BUILD_JOBS=$BUDGET_JOBS cargo test"
 
 # P11：sccache 与增量编译硬互斥——强制开启时必须同时压 CARGO_INCREMENTAL=0，
@@ -194,10 +194,10 @@ assert_not_contains "P22 PONY_TEST_THREADS=0 允许关闭" "$out" "RUST_TEST_THR
 # P23：Linux 且 user-systemd 可用时默认注入 cgroup v2 资源边界
 if [ "$(uname -s 2>/dev/null)" = "Linux" ] && command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   out=$(bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
-  assert_contains "P23 默认启用 systemd-run scope" "$out" "systemd-run --user --scope --quiet"
+  assert_contains "P23 默认启用 systemd-run scope" "$out" "systemd-run --user --scope --quiet --unit=pony-cargo-lane-"
   assert_contains "P23 默认 CPUQuota=600%" "$out" "CPUQuota=600%"
-  assert_contains "P23 默认 MemoryHigh=14G" "$out" "MemoryHigh=14G"
-  assert_contains "P23 默认 MemoryMax=18G" "$out" "MemoryMax=18G"
+  assert_contains "P23 默认 MemoryHigh=8G" "$out" "MemoryHigh=8G"
+  assert_contains "P23 默认 MemoryMax=10G" "$out" "MemoryMax=10G"
 else
   printf 'SKIP P23 当前环境无 user-systemd\n'
 fi
@@ -255,6 +255,24 @@ fi
 out=$(bash "$LANE" --dry-run nextest run --profile quick -p pony-agent-core --lib 2>&1)
 assert_contains "P29 nextest 注入 timeout 护栏" "$out" "timeout --signal=TERM --kill-after=15s 600s"
 assert_contains "P29 nextest 注入 RUST_TEST_THREADS=4" "$out" "RUST_TEST_THREADS=4"
+
+# P30：test/nextest 默认注入隔离 PONY_AGENT_DATA_DIR；非 test 不注入；外部覆盖不改写；=0 允许关闭；非法值 fail-closed
+out=$(env -u PONY_AGENT_DATA_DIR bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
+assert_contains "P30 test 默认注入隔离 PONY_AGENT_DATA_DIR" "$out" "PONY_AGENT_DATA_DIR="
+out=$(env -u PONY_AGENT_DATA_DIR bash "$LANE" --dry-run build --bin pony -- test 2>&1)
+assert_not_contains "P30 build 不误注 PONY_AGENT_DATA_DIR" "$out" "PONY_AGENT_DATA_DIR="
+out=$(PONY_AGENT_DATA_DIR=/tmp/custom-pony-data bash "$LANE" --dry-run test 2>&1)
+assert_contains "P30 尊重外部 PONY_AGENT_DATA_DIR（护栏标识 external）" "$out" "data-dir(external)"
+assert_not_contains "P30 外部已设时不覆盖为自动临时目录" "$out" "pony-test-data-dry-run"
+out=$(env -u PONY_AGENT_DATA_DIR PONY_TEST_ISOLATE_DATA_DIR=0 bash "$LANE" --dry-run test 2>&1)
+assert_not_contains "P30 PONY_TEST_ISOLATE_DATA_DIR=0 允许关闭" "$out" "PONY_AGENT_DATA_DIR="
+out=$(PONY_TEST_ISOLATE_DATA_DIR=bogus bash "$LANE" --dry-run test 2>&1); code=$?
+if [ "$code" -eq 2 ] && printf '%s' "$out" | grep -qF "只接受 auto|on|1|off|0"; then
+  printf 'PASS P30 非法 PONY_TEST_ISOLATE_DATA_DIR fail-closed（exit 2）\n'
+else
+  printf 'FAIL P30 非法 PONY_TEST_ISOLATE_DATA_DIR 未 fail-closed（exit %s，输出：%s）\n' "$code" "$out"
+  FAIL=1
+fi
 
 if [ "$FAIL" -ne 0 ]; then
   echo "cargo-lane.spec: FAILED"

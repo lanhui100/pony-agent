@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildLayerSteps, buildRustTestStep, main } from "./run-test-layer.mjs";
+import { buildLayerSteps, buildRustTestStep, main, prepareLayerEnv } from "./run-test-layer.mjs";
 
 // 1. nextest 未安装时自动剥离 --profile / -E 并降级为 cargo test
 {
@@ -69,6 +69,33 @@ import { buildLayerSteps, buildRustTestStep, main } from "./run-test-layer.mjs";
 {
   const code = main(["bogus-layer"]);
   assert.equal(code, 1);
+}
+
+// 5. 非 l0 层级自动注入 PONY_AGENT_DATA_DIR，不覆盖外部值，l0 与 dryRun 不新建目录
+{
+  const prepared = prepareLayerEnv({}, "l1", {
+    dryRun: false,
+    createTempDir: () => "/tmp/mock-isolated-data",
+  });
+  assert.equal(prepared.autoDataDir, "/tmp/mock-isolated-data");
+  assert.equal(prepared.env.PONY_AGENT_DATA_DIR, "/tmp/mock-isolated-data");
+
+  const preserved = prepareLayerEnv({ PONY_AGENT_DATA_DIR: "/tmp/user-dir" }, "l3", {
+    dryRun: false,
+    createTempDir: () => {
+      throw new Error("should not allocate temp dir when already set");
+    },
+  });
+  assert.equal(preserved.autoDataDir, null);
+  assert.equal(preserved.env.PONY_AGENT_DATA_DIR, "/tmp/user-dir");
+
+  const l0Env = prepareLayerEnv({}, "l0", {
+    dryRun: false,
+    createTempDir: () => {
+      throw new Error("should not allocate temp dir for l0");
+    },
+  });
+  assert.equal(l0Env.autoDataDir, null);
 }
 
 console.log("run-test-layer.spec: PASS");
