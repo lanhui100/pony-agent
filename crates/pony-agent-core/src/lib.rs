@@ -1,7 +1,5 @@
-pub mod acp;
+pub use pony_acp as acp;
 pub mod agent;
-pub mod cli;
-pub mod tui;
 
 /// 全局分配器：替代 glibc malloc。
 ///
@@ -9,5 +7,6 @@ pub mod tui;
 /// arena 以 mmap 大块增长，跨线程 free 的内存无法归还 OS；实测单进程膨胀到 8.5GB
 /// （628 个匿名 VMA、大量整段 128MB），4 个会话耗尽 30GB 内存 + 32GB swap。
 /// mimalloc 用线程本地堆并按阈值主动 purge，会话空闲后能把内存还给系统。
+#[cfg(not(test))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

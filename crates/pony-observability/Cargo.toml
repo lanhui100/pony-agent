@@ -1,0 +1,26 @@
+[package]
+name = "pony-observability"
+version = "0.1.178"
+edition = "2021"
+
+[lib]
+name = "pony_observability"
+
+[dependencies]
+pony-protocol = { path = "../pony-protocol" }
+tracing = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "charset", "stream"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+sha2 = "0.10"
+url = "2"
+regex = "1"
+futures-util = "0.3"
+dirs = "6"
+opentelemetry = { version = "=0.30.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.30.0", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "=0.30.0", default-features = false, features = ["http-proto", "reqwest-client", "trace"] }

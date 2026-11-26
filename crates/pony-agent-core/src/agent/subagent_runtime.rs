@@ -180,6 +180,7 @@ static SUBAGENT_ENGINE: OnceLock<Arc<dyn SubagentTurnEngine>> = OnceLock::new();
 
 /// 注册全局子代理引擎；重复注册返回 Err。
 pub fn set_subagent_engine(eng: Arc<dyn SubagentTurnEngine>) -> Result<(), String> {
+    crate::agent::ensure_runtime_bridges();
     SUBAGENT_ENGINE.set(eng).map_err(|_| {
         "subagent engine already set".to_string()
     })
@@ -844,7 +845,7 @@ mod tests {
         // ③ 两级都缺失 ⇒ 按 root 在已注册 workspace 中反查；共享 store 缺失时保持 None。
         assert_eq!(bare.resolve_child_workspace_id(None, None, root), None);
 
-        let mut store = crate::agent::session::SessionStore::new();
+        let mut store = crate::agent::session::SessionStore::memory_only();
         let workspace = store
             .create_workspace("subagent-test", root.to_str().expect("utf-8 root"))
             .expect("workspace 注册必须成功");

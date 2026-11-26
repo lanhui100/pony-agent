@@ -469,8 +469,24 @@ export function buildCargoCommand({ repoRoot, packageName, allTargets, flags, li
   };
 }
 
+function withCargoBinOnPath(baseEnv = process.env) {
+  const home = baseEnv.HOME || process.env.HOME;
+  if (!home || process.platform === "win32") return baseEnv;
+  const cargoBin = path.join(home, ".cargo", "bin");
+  if (!fs.existsSync(cargoBin)) return baseEnv;
+  const parts = (baseEnv.PATH || "").split(path.delimiter).filter(Boolean);
+  if (parts.includes(cargoBin)) return baseEnv;
+  const localBinIdx = parts.indexOf("/usr/local/bin");
+  if (localBinIdx >= 0) {
+    parts.splice(localBinIdx, 0, cargoBin);
+  } else {
+    parts.push(cargoBin);
+  }
+  return { ...baseEnv, PATH: parts.join(path.delimiter) };
+}
+
 function childEnv(clippyConfDir) {
-  const env = { ...process.env, CLIPPY_CONF_DIR: clippyConfDir, CARGO_TERM_COLOR: "never" };
+  const env = { ...withCargoBinOnPath(process.env), CLIPPY_CONF_DIR: clippyConfDir, CARGO_TERM_COLOR: "never" };
   // 门自持 lint 级别：继承 -D warnings 会把可数的 warning 变 error（clippy 以 101 退出），
   // 棘轮失去"记账"面。RUSTFLAGS 的严格性由既有 cargo:check:shared 步骤承担。
   delete env.RUSTFLAGS;
@@ -479,8 +495,9 @@ function childEnv(clippyConfDir) {
 }
 
 function readToolchainVersions() {
+  const env = withCargoBinOnPath(process.env);
   const run = (command, args) => {
-    const result = spawnSync(command, args, { encoding: "utf8" });
+    const result = spawnSync(command, args, { encoding: "utf8", env });
     return result.status === 0 ? String(result.stdout).trim() : "unknown";
   };
   return { rustc: run("rustc", ["--version"]), clippy: run("cargo", ["clippy", "--version"]) };

@@ -1,0 +1,1002 @@
+use crate::constants::default_session_title;
+use crate::hooks::{HistoryStateHookEvidence, HookTraceRecord, PersistedEffectEvidence};
+use crate::provider_types::BuildContextObservation;
+use crate::telemetry::{ProviderCallCacheRecord, TurnToolActivity, TurnTraceStep};
+use crate::workspace_types::{DEFAULT_WORKSPACE_ID, WorkspaceRecord};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceMigrationState {
+    #[default]
+    LegacyBlob,
+    DualWrite,
+    TraceTableAuthoritative,
+}
+
+
+pub const DEFAULT_SESSION_ID: &str = "local-dev-session";
+pub const DEFAULT_SESSION_SUMMARY: &str = "Pony Agent 本地开发会话";
+/// trace 历史保留条数（**观测数据**，不参与上下文组装）。
+///
+/// 与上下文体积无关，保持历史值不变：调大只会让 trace 表变胖。
+pub const DEFAULT_HISTORY_LIMIT: usize = 24;
+/// 会话历史的**紧急上限**（条消息）。
+///
+/// 正常会话永不触达：上下文体积由压缩（token 预算）治理，而不是每轮丢掉最老消息。
+/// 曾经的 24 条硬截断是**隐式滑窗**——每轮整体前移一条，provider 前缀缓存每轮全灭
+/// （ADR 0007 的一等指标）。这里保留一个足够大、只在病态增长时兜底的上限。
+///
+/// `crate` 可见：投影侧（`agent/projection.rs`）与上下文组装侧必须与写路径同口径，
+/// 否则「写进去 400 条、读回来只剩 24 条」又是一条隐式滑窗。
+pub const HISTORY_EMERGENCY_LIMIT: usize = 400;
+pub const DEFAULT_SESSION_TITLE: &str = "\u{65B0}\u{5BF9}\u{8BDD}";
+pub const TITLE_MAX_CHARS: usize = 28;
+pub const DEFAULT_ATTACHMENT_RECLAIM_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+pub const DEFAULT_HISTORY_BRANCH_ID: &str = "branch-main";
+
+pub type AttachmentAssetMap = HashMap<String, AttachmentAsset>;
+pub type SessionAttachmentIndex = HashMap<String, Vec<String>>;
+
+/// ADR 0099 阶段 0：会话状态版本号（session 级 CAS 的期望版本载体）。
+///
+/// 语义：每个会话一个单调递增 `u64`。写入方以自己读到的版本作为**期望版本**提交，
+/// 版本不匹配 ⇒ 拒绝写入并返回 [`CommitOutcome::StaleVersion`]
+/// （契约：`.dev-team/contracts/stage0-write-model.md` 不变量 I2）。
+///
+/// 物理位置裁决（阶段 0 契约，理由见该文档 §2）：版本以 **`PersistedStore` 侧表**
+/// [`SessionVersionMap`] 承载，**不**加到 [`SessionState`] —— 后者有 15+ 处结构体字面量
+/// 构造点（`store.rs` / `sqlite_session.rs` / `tests.rs`），加字段会同时污染会话 blob
+/// 的序列化面；版本属于**存储层元数据**，不是会话内容。
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(transparent)]
+pub struct SessionVersion(pub u64);
+
+/// 会话版本侧表：`session_id -> SessionVersion`。
+///
+/// 阶段 0 实作任务（Executor）在 `PersistedStore` 上引入字段
+/// `pub versions: SessionVersionMap`（`#[serde(default)]`），
+/// 由 [`SessionBackend::commit_boundary`] 读取其期望版本。
+pub type SessionVersionMap = HashMap<String, SessionVersion>;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryNodeKind {
+    #[default]
+    TurnCommitted,
+    TurnCancelled,
+    RunPaused,
+    Checkpoint,
+    ManualSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageStatus {
+    #[default]
+    Done,
+    Error,
+}
+
+
+/// 会话标题的来源（「扩 title 来源字段」）。
+///
+/// 三条来源互斥、按优先级排列：
+/// - [`TitleSource::User`]：用户显式改名（`title_override`，优先级最高，永不被动覆盖）；
+/// - [`TitleSource::Ai`]：模型基于对话生成的标题（`ai_title`）；
+/// - [`TitleSource::Derived`]：默认来源——首条真实用户消息截断派生。
+///
+/// 投影侧（会话列表 / 快照头部）恒经 [`SessionState::effective_title`] 取值，
+/// 本枚举只描述「这条标题是谁定的」，不参与标题文本的拼装。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    #[default]
+    Derived,
+    Ai,
+    User,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryCursorMode {
+    #[default]
+    Live,
+    Historical,
+    HistoricalDirty,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceRefKind {
+    #[default]
+    None,
+    GitCommit,
+    PatchSet,
+    HostSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryCheckoutMode {
+    #[default]
+    TranscriptOnly,
+    TranscriptAndWorkspace,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryCheckoutStatus {
+    #[default]
+    NotRequested,
+    Applied,
+    DegradedToTranscriptOnly,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRef {
+    #[serde(default)]
+    pub kind: WorkspaceRefKind,
+    pub locator: Option<String>,
+    #[serde(default)]
+    pub rollback_capable: bool,
+}
+
+/// 轻量 trace 引用（PA-088）：持久化层用引用替代节点内嵌的完整 trace。
+/// `None`（字段缺失）= legacy/旧数据（可用内嵌 trace 兜底）；
+/// `Some([])` = authoritative 且确实无 trace（禁止兜底）；
+/// `Some(v)` = 有序引用（materialize 时按此顺序组装）。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnTraceRef {
+    pub turn_id: String,
+    pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryNode {
+    pub node_id: String,
+    pub session_id: String,
+    pub parent_node_id: Option<String>,
+    pub branch_id: String,
+    pub forked_from_node_id: Option<String>,
+    #[serde(default)]
+    pub kind: HistoryNodeKind,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub workspace_ref: WorkspaceRef,
+    pub summary: String,
+    pub title: String,
+    #[serde(default)]
+    pub history: Vec<TurnHistoryMessage>,
+    #[serde(default)]
+    pub provider_native_transcript: Vec<Value>,
+    #[serde(default)]
+    pub turn_trace_history: Vec<TurnTraceRecord>,
+    /// PA-088：节点归属的 turn（前端 checkpoint/回滚依赖，替代从 trace 末条推导）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// PA-088：持久化时生成的轻量 trace 引用（节点不再内嵌完整 trace）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_trace_refs: Option<Vec<TurnTraceRef>>,
+    /// PA-093：节点覆盖的事件区间（引用化）。`None` = legacy（内嵌快照兜底）；
+    /// `Some((start, end))` = 该节点状态可由事件流 seq [start, end] 折叠重建
+    /// （新节点不再内嵌 history/transcript/trace 快照，checkout 时水位回退）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_seq_range: Option<(u64, u64)>,
+    #[serde(default)]
+    pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
+    #[serde(default)]
+    pub memory_write_evidence: Vec<PersistedEffectEvidence>,
+    #[serde(default)]
+    pub memory_write_hook_trace_records: Vec<HookTraceRecord>,
+    #[serde(default)]
+    pub turn_count: usize,
+    pub last_referenced_file: Option<String>,
+    #[serde(default)]
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryBranch {
+    pub branch_id: String,
+    pub session_id: String,
+    pub base_node_id: Option<String>,
+    pub head_node_id: Option<String>,
+    pub forked_from_branch_id: Option<String>,
+    pub forked_from_node_id: Option<String>,
+    pub label: String,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryCursor {
+    #[serde(default)]
+    pub session_id: String,
+    pub visible_node_id: Option<String>,
+    pub active_branch_id: Option<String>,
+    pub branch_head_node_id: Option<String>,
+    pub workspace_node_id: Option<String>,
+    #[serde(default)]
+    pub cursor_version: u64,
+    /// PA-093：当前事件水位（已落盘事件总数，seq 0-based）。与 cursor_version
+    /// 并存：cursor_version 保持旧语义（前端兼容），event_watermark 供前端
+    /// 展示/后续水位校验（wire 新增字段，旧客户端不传则跳过校验）。
+    #[serde(default)]
+    pub event_watermark: u64,
+    #[serde(default)]
+    pub mode: HistoryCursorMode,
+    #[serde(default)]
+    pub checkout_mode: HistoryCheckoutMode,
+    #[serde(default)]
+    pub checkout_status: HistoryCheckoutStatus,
+}
+
+/// 取消回合的哨兵句（PA-118）：后端把它作为取消轮的消息文本落库，历史分类
+/// （`classify_turn_node_kind`）、TUI 与桌面端展示清洗都以它为准——**唯一真源**。
+///
+/// 改这句话等于改一条线上协议：历史里已有的旧句不会跟着变，因此读取方必须仍然
+/// 认得旧句（见 `stripCancelledTurnSentinel` / `interrupted_record_status_line`）。
+pub const CANCELLED_TURN_SENTINEL: &str = "用户终止，发送消息可继续。";
+
+/// 历史行「载体种类」：区分**模型真实产出**与**运行时合成的中断记录**。
+///
+/// 为什么需要它：中断/失败轮没有任何 `assistant/message`，历史里必须补一条 assistant 行
+/// 才能让下一轮模型知道「做过什么、停在哪」。但这条行不是模型说的话，它同时被信息流
+/// （人读）消费——一份字符串服务两个诉求必然有一方受损。因此把「这是合成记录」变成
+/// **结构化事实**（本枚举），展示层据此渲染一行状态条，读写语义不变。
+///
+/// 旧会话无该字段（`None`）⇒ 消费者按 `content` 回退既有判定（标记嗅探），零迁移。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryMessageKind {
+    /// 用户主动终止：`content` = 已渲染正文 + 已执行步骤清单。
+    Cancelled,
+    /// 上游失败 / 崩溃收口：`content` 形态同上，错误细节由 trace 承载。
+    Interrupted,
+    /// B217：本轮**真的失败**（上游报错等）收口——与 [`Self::Interrupted`]（进程中断）分离，
+    /// 历史与状态条据此给出不同的一句人话，不把失败读成「被中断」。
+    Error,
+    /// B274：provider 本地兜底收尾（**跑完了、降级交付**）——与 [`Self::Interrupted`] 分离。
+    ///
+    /// 此前降级轮被硬写成 `Interrupted`，展示层据此渲染「上一轮已中断」，用户把「降级成功」
+    /// 读成「没跑完」，续跑判断被带偏。降级是「已交付但质量打折」，与「失败/中断」是三种
+    /// 不同的续跑决策，必须在历史行种类上分开。
+    Degraded,
+}
+
+impl<'de> Deserialize<'de> for HistoryMessageKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = String::deserialize(deserializer)?;
+        Ok(match wire.as_str() {
+            "cancelled" => Self::Cancelled,
+            "error" => Self::Error,
+            "degraded" => Self::Degraded,
+            // `"interrupted"` 与**未知 wire 值**同桶，故不单列分支（`match_same_arms` 会判红）：
+            // fail-soft 读与 `TurnEndReason` 同口径 —— `Interrupted` 是最保守的「非正常收口」
+            // 桶，展示层据此给出一行状态，绝不让整条历史因一个新枚举值而反序列化失败。
+            _ => Self::Interrupted,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnHistoryMessage {
+    /// 行角色白名单：`user` / `assistant` / [`crate::constants::HOST_HISTORY_ROLE`]（B235：
+    /// 宿主续轮，不占 user 槽）。旧日志只有前两种，缺省回放逐字不变（additive）。
+    pub role: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentReference>,
+
+    // PA-059: 新增元数据字段（均为 Option，向后兼容）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<MessageStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    /// 合成记录种类（见 [`HistoryMessageKind`]）。`None` = 模型真实产出或旧会话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<HistoryMessageKind>,
+}
+
+impl TurnHistoryMessage {
+    /// 稳定消息标识符，所有消费者（桌面/TUI/CLI/HTTP）可用。
+    /// 格式："{turn_id}-{role}"，turn_id 缺失时 fallback "unknown-{role}"。
+    /// 注意：方法不参与序列化，仅内存投影。
+    pub fn stable_id(&self) -> String {
+        format!(
+            "{}-{}",
+            self.turn_id.as_deref().unwrap_or("unknown"),
+            self.role
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentReference {
+    pub id: String,
+    #[serde(default)]
+    pub asset_id: String,
+    pub name: Option<String>,
+    pub mime_type: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub created_at_ms: u64,
+}
+
+pub type SessionAttachment = AttachmentReference;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentLifecycleStatus {
+    #[default]
+    Active,
+    MissingPayload,
+    Expired,
+    Reclaimable,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentAsset {
+    pub id: String,
+    pub session_id: String,
+    pub name: Option<String>,
+    pub mime_type: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub status: AttachmentLifecycleStatus,
+    #[serde(default)]
+    pub reference_count: usize,
+    pub last_referenced_at_ms: Option<u64>,
+    pub expires_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentAssetQuery {
+    pub session_id: Option<String>,
+    pub mime_type: Option<String>,
+    pub name_contains: Option<String>,
+    pub created_after_ms: Option<u64>,
+    pub created_before_ms: Option<u64>,
+    #[serde(default)]
+    pub statuses: Vec<AttachmentLifecycleStatus>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentCleanupRequest {
+    pub session_id: Option<String>,
+    pub expire_before_ms: Option<u64>,
+    #[serde(default)]
+    pub include_reclaimable: bool,
+    #[serde(default)]
+    pub include_expired: bool,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentCleanupResult {
+    pub removed_asset_ids: Vec<String>,
+    pub removed_file_count: usize,
+    pub removed_catalog_count: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LongTermMemoryRecord {
+    pub kind: String,
+    pub content: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionState {
+    pub conversation_id: String,
+    #[serde(default = "default_session_title")]
+    pub title: String,
+    pub summary: String,
+    pub history: Vec<TurnHistoryMessage>,
+    #[serde(default)]
+    pub provider_native_transcript: Vec<Value>,
+    #[serde(default)]
+    pub turn_trace_history: Vec<TurnTraceRecord>,
+    #[serde(default)]
+    pub trace_migration_state: TraceMigrationState,
+    /// PA-088：当前可见分支的顶层 trace 引用（WriteSeparate+Authoritative 持久化用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_trace_refs: Option<Vec<TurnTraceRef>>,
+    #[serde(default)]
+    pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
+    #[serde(default)]
+    pub memory_write_evidence: Vec<PersistedEffectEvidence>,
+    #[serde(default)]
+    pub memory_write_hook_trace_records: Vec<HookTraceRecord>,
+    #[serde(default)]
+    pub history_state_evidence: Vec<HistoryStateHookEvidence>,
+    pub turn_count: usize,
+    pub last_referenced_file: Option<String>,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+    #[serde(default)]
+    pub history_nodes: Vec<HistoryNode>,
+    #[serde(default)]
+    pub history_branches: Vec<HistoryBranch>,
+    #[serde(default)]
+    pub history_cursor: HistoryCursor,
+    /// PA-093：会话事件水位（已落盘事件总数；turn 终态 flush 后由控制平面更新）。
+    /// commit_history_node_from_live_state 以之为引用化区间的起点。
+    #[serde(default)]
+    pub event_watermark: u64,
+    /// PA-093：最近一次节点提交时的水位（引用化区间起点；commit 时记录，
+    /// finalize 时与 event_watermark 形成区间 [last_commit_watermark, new - 1]）。
+    #[serde(default)]
+    pub last_commit_watermark: u64,
+    /// Workspace 归属（PA-079）：None → 投影为默认 workspace。serde default 兼容旧数据。
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// 用户显式标题（侧边栏三级树）：存在时所有投影点位经 `effective_title()`
+    /// 取本字段；refresh 的两个派生分支随之跳过 title 赋值——`title` 字段就此
+    /// 冻结于改名时点的派生值（节点冻结处会局部重算派生值，见 sync_latest_history_node）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_override: Option<String>,
+    /// 归档标记（注册表级隐藏语义随会话持久化）：分组面据此全量隐藏，日志与
+    /// 数据不动；清标志即可恢复原账户位（恢复 UI 另立迭代）。serde default 兼容旧数据。
+    #[serde(default)]
+    pub archived: bool,
+    /// AI 生成的会话标题（模型出品）。与首条消息截断的派生标题（`title`）和用户显式
+    /// 改名（`title_override`）三线并存：优先级 override > ai_title > title。
+    /// 有值时 `refresh_session_metadata` 冻结派生标题重算，避免每轮被首条消息覆盖。
+    /// serde default 兼容旧数据（旧会话恒 `None` ⇒ 来源仍为派生）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_title: Option<String>,
+}
+
+impl SessionState {
+    /// 单一标题投影点：`title_override`（用户改名）> `ai_title`（模型生成）> `title`（派生）。
+    /// 所有面向用户的顶层标题字段（list_sessions 行、snapshot 头部——含
+    /// 选中历史节点分支）必须经此取值，禁止直读 `.title` 或 `node.title`。
+    pub fn effective_title(&self) -> &str {
+        if let Some(overridden) = self.title_override.as_deref() {
+            return overridden;
+        }
+        if let Some(ai) = self.ai_title.as_deref() {
+            return ai;
+        }
+        self.title.as_str()
+    }
+
+    /// 当前生效标题的来源（与 [`Self::effective_title`] 同源判定，供列表/面板展示来源徽标）。
+    pub fn title_source(&self) -> TitleSource {
+        if self.title_override.is_some() {
+            TitleSource::User
+        } else if self.ai_title.is_some() {
+            TitleSource::Ai
+        } else {
+            TitleSource::Derived
+        }
+    }
+}
+/// Runtime environment information captured at session snapshot build time.
+/// Injected into the model context so the agent understands its execution environment.
+///
+/// Fields are collected without spawning subprocesses — reads env vars,
+/// filesystem state (.git/HEAD), and compile-time constants only.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentInfo {
+    /// Absolute working directory path.
+    pub cwd: String,
+    /// Platform identifier (e.g. "windows", "linux", "macos").
+    pub platform: String,
+    /// Shell executable name or path, if detectable.
+    pub shell: Option<String>,
+    /// Operating system version string, if available.
+    pub os_version: Option<String>,
+    /// Current date in ISO 8601 format (YYYY-MM-DD).
+    pub current_date: String,
+    /// Timezone abbreviation (e.g. "CST", "UTC").
+    pub timezone: Option<String>,
+    /// Whether the working directory is inside a git repository.
+    pub is_git_repo: bool,
+    /// Current git branch name, if detectable.
+    pub git_branch: Option<String>,
+}
+
+/// Collects environment information at the current point in time.
+/// Non-blocking: reads env vars, filesystem, and compile-time constants only.
+pub fn collect_env_info() -> EnvironmentInfo {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let now = chrono::Local::now();
+    let is_git_repo = {
+        let git_dir = Path::new(&cwd).join(".git");
+        git_dir.is_dir() || git_dir.is_file()
+    };
+    let git_branch = if is_git_repo {
+        read_git_branch(&cwd)
+    } else {
+        None
+    };
+
+    EnvironmentInfo {
+        cwd,
+        platform: std::env::consts::OS.to_string(),
+        shell: std::env::var("SHELL")
+            .ok()
+            .or_else(|| std::env::var("ComSpec").ok()),
+        os_version: None,
+        current_date: now.format("%Y-%m-%d").to_string(),
+        timezone: Some(now.format("%Z").to_string()),
+        is_git_repo,
+        git_branch,
+    }
+}
+
+/// Collects environment information scoped to a specific workspace root.
+/// `cwd` 被固定为 `root`（会话实际执行目录），`is_git_repo`/`git_branch` 也基于 `root` 判定
+/// 而非进程工作目录；其余字段（platform/shell/date/timezone）与 [`collect_env_info`] 一致。
+/// 供 env note 使用，避免"进程启动目录(AppData) ≠ 会话工作区"的误导。
+///
+/// 已知语义（PA-114 workspace-cwd 第二轮 W3/R1-3）：git 判定为 workspace root 浅查——
+/// 仅检查 `root/.git`，不向上寻仓；仓库子目录作为 workspace 时 env note 显示
+/// not a git repo 属已知语义（与 DSH SessionHeader.cwd 粒度对齐）。
+pub fn collect_env_info_for_workspace(root: &Path) -> EnvironmentInfo {
+    let mut info = collect_env_info();
+    let cwd = root.display().to_string();
+    let is_git_repo = {
+        let git_dir = root.join(".git");
+        git_dir.is_dir() || git_dir.is_file()
+    };
+    info.cwd = cwd;
+    info.is_git_repo = is_git_repo;
+    info.git_branch = if is_git_repo {
+        read_git_branch(&info.cwd)
+    } else {
+        None
+    };
+    info
+}
+
+/// R1 纯函数（E1-E3 可测）：解析"会话应在 env note 中展示的工作目录"。死 id 归一——未知/
+/// 已注销的显式 workspace_id 不 panic、不回退到进程 cwd，而是与"无 id"一致走默认解析。
+/// 解析链：
+/// 1. `session_workspace_id` 为显式非空且已注册 → 该记录 `root_path`；
+/// 2. 其余（无 id / 未知 id 死引用）→ 默认注册项（`DEFAULT_WORKSPACE_ID`）的 `root_path`;
+/// 3. → `default_root`（`compute_default_workspace_root()` 的系统 dirs 解析结果）；
+/// 4. → `fallback_cwd`（进程 cwd，瞬时兜底；由调用方决定如何兜底）。
+pub fn session_workspace_cwd(
+    workspaces: &[WorkspaceRecord],
+    session_workspace_id: Option<&str>,
+    default_root: Option<&str>,
+    fallback_cwd: String,
+) -> String {
+    let explicit_id = session_workspace_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(id) = explicit_id {
+        if let Some(record) = workspaces.iter().find(|record| record.id == id) {
+            return record.root_path.clone();
+        }
+        // 未知/死 id：落入默认解析。
+    }
+    if let Some(record) = workspaces
+        .iter()
+        .find(|record| record.id == DEFAULT_WORKSPACE_ID)
+    {
+        return record.root_path.clone();
+    }
+    if let Some(root) = default_root {
+        return root.to_string();
+    }
+    fallback_cwd
+}
+
+/// Reads git branch name from `.git/HEAD` without spawning a git process.
+fn read_git_branch(workspace_root: &str) -> Option<String> {
+    let head_path = Path::new(workspace_root).join(".git").join("HEAD");
+    let content = fs::read_to_string(head_path).ok()?;
+    let trimmed = content.trim();
+    // "ref: refs/heads/main" → "main"
+    if let Some(ref_path) = trimmed.strip_prefix("ref: refs/heads/") {
+        Some(ref_path.trim().to_string())
+    } else {
+        // Detached HEAD — use commit hash prefix
+        Some(trimmed.chars().take(7).collect())
+    }
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSnapshot {
+    pub conversation_id: String,
+    pub title: String,
+    pub summary: String,
+    pub history: Vec<TurnHistoryMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_assets: Vec<AttachmentAsset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_native_transcript: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turn_trace_history: Vec<TurnTraceRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub long_term_memory_entries: Vec<LongTermMemoryRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_write_evidence: Vec<PersistedEffectEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_write_hook_trace_records: Vec<HookTraceRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_state_evidence: Vec<HistoryStateHookEvidence>,
+    pub history_state_audit_summary: HistoryStateAuditSummary,
+    pub run_control_audit_summary: RunControlAuditSummary,
+    pub turn_count: usize,
+    pub last_referenced_file: Option<String>,
+    pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_nodes: Vec<HistoryNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_branches: Vec<HistoryBranch>,
+    #[serde(default)]
+    pub history_cursor: HistoryCursor,
+    pub resolved_node_id: Option<String>,
+    pub latest_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_info: Option<EnvironmentInfo>,
+    /// Workspace 归属投影（PA-079）：None → 默认 workspace。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryStateAuditActionSummary {
+    pub status: String,
+    pub source_family: String,
+    pub command_kind: Option<String>,
+    pub boundary: Option<String>,
+    pub result_kind: Option<String>,
+    pub summary: String,
+    pub elapsed_ms: Option<u64>,
+    pub blocked: bool,
+    pub degraded: bool,
+    pub evidence_id: Option<String>,
+    pub observed_at_ms: Option<u64>,
+    pub requested_node_id: Option<String>,
+    pub requested_branch_id: Option<String>,
+    pub resolved_node_id: Option<String>,
+    pub resolved_branch_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryStateAuditCurrentContext {
+    pub mode: String,
+    pub visible_node_id: Option<String>,
+    pub active_branch_id: Option<String>,
+    pub branch_head_node_id: Option<String>,
+    pub workspace_node_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryStateAuditSummary {
+    pub action: HistoryStateAuditActionSummary,
+    pub current_context: HistoryStateAuditCurrentContext,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunControlAuditActionSummary {
+    pub status: String,
+    pub source_family: String,
+    pub command_kind: Option<String>,
+    pub boundary: Option<String>,
+    pub result_kind: Option<String>,
+    pub summary: String,
+    pub target_summary: String,
+    pub elapsed_ms: Option<u64>,
+    pub blocked: bool,
+    pub degraded: bool,
+    pub evidence_id: Option<String>,
+    pub observed_at_ms: Option<u64>,
+    pub run_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub checkpoint_turn_id: Option<String>,
+    pub checkpoint_kind: Option<String>,
+    pub recovery_mode: Option<String>,
+    pub projected_command: Option<String>,
+    pub degradation_reason: Option<String>,
+    pub request_summary: Option<String>,
+    pub start_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunControlAuditCurrentContext {
+    pub phase: String,
+    pub checkpoint_status: String,
+    pub active_run_id: Option<String>,
+    pub checkpoint_kind: Option<String>,
+    pub checkpoint_recovery_mode: Option<String>,
+    pub submission_plan_command: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunControlAuditSummary {
+    pub action_evidence_summary: RunControlAuditActionSummary,
+    pub current_context_projection: RunControlAuditCurrentContext,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionOverview {
+    pub conversation_id: String,
+    pub title: String,
+    pub summary: String,
+    pub turn_count: usize,
+    pub last_referenced_file: Option<String>,
+    pub updated_at_ms: u64,
+    /// Workspace 归属投影（PA-079）：None → 默认 workspace。
+    pub workspace_id: Option<String>,
+    /// 归档标记投影（侧边栏三级树）：分组面前端据此过滤；后端不过滤，
+    /// 为后续恢复入口保留数据面。
+    pub archived: bool,
+    /// 该会话是否只由宿主续轮提示构成（无任何真实用户轮）。`/resume` 等
+    /// 以「用户会话」为语义的入口据此过滤，避免把续轮碎片当历史会话。
+    #[serde(default)]
+    pub continuation_only: bool,
+    /// 生效标题的来源（派生 / AI / 用户改名）：列表与面板据此显示来源徽标。
+    #[serde(default)]
+    pub title_source: TitleSource,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceTimelineEntry {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub state: String,
+    pub sequence: u64,
+    pub provider_requested_name: Option<String>,
+    pub provider_name: Option<String>,
+    pub provider_protocol: Option<String>,
+    pub provider_model: Option<String>,
+    pub provider_source: Option<String>,
+    pub provider_mode: Option<String>,
+    pub build_context_observation: Option<BuildContextObservation>,
+    /// PA-094：大字段外置引用（`bco:<turn_id>:<seq>`）。事件折叠重建的
+    /// build_context 条目只带引用（全量 payload 按需加载）；legacy 内嵌数据
+    /// 保留 `build_context_observation` 读取兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_context_observation_ref: Option<String>,
+    #[serde(default)]
+    pub tool_activities: Vec<TurnToolActivity>,
+    pub text: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub fallback_reason: Option<String>,
+    pub error: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub first_token_latency_ms: Option<u64>,
+    pub turn_duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnTraceRecord {
+    pub turn_id: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    /// Wave-4.1 A6：本 turn 的**导出态** OTel trace_id（32 位小写十六进制，camelCase 下发
+    /// `traceId`）。语义：仅当本轮真实创建并被采样了 root span 时为 `Some`；
+    /// 门禁关闭/未采样/本地降级上下文一律 `None`（前端据此决定是否展示「跳转链路」入口）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// Wave-5 K2：本轮成本（USD，camelCase 下发 `costUsd`）；未知模型/缺 usage ⇒ 键缺席。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub event_type: Option<String>,
+    #[serde(default)]
+    pub event_version: Option<String>,
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    #[serde(default)]
+    pub emitted_at_ms: Option<u64>,
+    pub title: String,
+    pub phase: String,
+    #[serde(default)]
+    pub trace_steps: Vec<TurnTraceStep>,
+    #[serde(default)]
+    pub trace_timeline: Vec<TraceTimelineEntry>,
+    #[serde(default)]
+    pub tool_activities: Vec<TurnToolActivity>,
+    #[serde(default)]
+    pub provider_call_records: Vec<ProviderCallCacheRecord>,
+    #[serde(default)]
+    pub hook_trace_records: Vec<HookTraceRecord>,
+    pub provider_requested_name: Option<String>,
+    pub provider_name: Option<String>,
+    pub provider_protocol: Option<String>,
+    pub provider_model: Option<String>,
+    pub provider_source: Option<String>,
+    pub provider_mode: Option<String>,
+    pub build_context_observation: Option<BuildContextObservation>,
+    /// PA-094：大字段外置引用（`bco:<turn_id>:<seq>`）。新数据走引用（事件折叠
+    /// 产物），legacy 内嵌数据保留 `build_context_observation` 读取兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_context_observation_ref: Option<String>,
+    pub session_summary: Option<String>,
+    pub fallback_reason: Option<String>,
+    pub error: Option<String>,
+    /// PA-171 C4：失败归类（camelCase `errorClass`；取值 `timeout|rate_limited|quota|network|auth|
+    /// bad_request|other`，唯一来源 [`classify_error_class`]）。
+    ///
+    /// additive：`None` ⇒ 键缺席（旧读取端不读即行为不变）；失败轮恒有值，是审计机的落盘判据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub cache_hit_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub first_token_latency_ms: Option<u64>,
+    pub turn_duration_ms: Option<u64>,
+    /// wave-54 C3：本轮 usage 来源（`provider` | `estimated_chars`）；缺失不输出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_origin: Option<String>,
+    /// wave-54 C4：本轮上下文输入口径（末次调用，协议归一）；缺失不输出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub input_text: Option<String>,
+    #[serde(default)]
+    pub output_text: Option<String>,
+    /// C1（P1-2 收尾）：本轮是否**降级**（有工具失败但轮次仍 completed）。
+    ///
+    /// 与 OTel 根 span 的 `agent.turn.degraded` **同源同口径**（`tool_failures > 0 && phase ==
+    /// "completed"`）。序列化按**值**过滤：`None`/`Some(false)` 都不写键（避免给 UI 制造噪音）。
+    #[serde(default, skip_serializing_if = "degraded_flag_is_absent")]
+    pub degraded: Option<bool>,
+    /// C1：本轮工具失败次数（来自 OTel `agent.turn.tool_failures` 同一计数器）。
+    ///
+    /// 序列化按**值**过滤：`None`/`Some(0)` 都不写键（`0` 不是「信息」，只是噪音）。
+    #[serde(default, skip_serializing_if = "tool_failure_count_is_absent")]
+    pub tool_failures: Option<usize>,
+    /// B219：本轮是否走了 **provider 本地兜底**收尾（`fallback_reason` 非空 ⇒ `Some(true)`）。
+    ///
+    /// 与上面的 `degraded`（**工具失败**语义）严格分离：两者不同源，禁止互相复用——混用会
+    /// 让 UI 把「工具零星失败但正常完成」错标成 provider 降级。
+    /// additive：`None` ⇒ 键缺席（旧轮次没有该事实，不得伪造成 `false`）；camelCase `providerFallback`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_fallback: Option<bool>,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+/// C1：`degraded` 的序列化过滤 —— 仅 `Some(true)` 才写键。
+fn degraded_flag_is_absent(value: &Option<bool>) -> bool {
+    !matches!(value, Some(true))
+}
+
+/// C1：`tool_failures` 的序列化过滤 —— 仅 `Some(n)` 且 `n > 0` 才写键。
+fn tool_failure_count_is_absent(value: &Option<usize>) -> bool {
+    !matches!(value, Some(count) if *count > 0)
+}
+
+impl TurnTraceRecord {
+    /// wave-54 C3/C4：由 per-call 记录派生轮级 `usage_origin` / `context_input_tokens`。
+    ///
+    /// 语义（wave-54 §5.2 契约）：
+    /// - `usage_origin`：**任一** per-call 为 `estimated_chars` ⇒ 轮级 `estimated_chars`
+    ///   （只要有一个估算值，整轮数字就必须可辨识）；**全部**为 `provider` ⇒ `provider`；
+    ///   混合了未知（`None`）且无估算值，或全无记录 ⇒ `None`（「未知」保持未知）。
+    /// - `context_input_tokens`：取**末次调用**口径（UI「输入」位同源）。
+    /// - 只填补空缺（`None`），**不覆盖**调用方已显式写入的值；
+    /// - 由 store 的写入/恢复路径统一调用，保证 live 产物与折叠产物同口径。
+    pub fn derive_usage_provenance_from_calls(&mut self) {
+        if self.provider_call_records.is_empty() {
+            return;
+        }
+        if self.usage_origin.is_none() {
+            let any_estimated = self
+                .provider_call_records
+                .iter()
+                .any(|record| record.usage_origin.as_deref() == Some("estimated_chars"));
+            let all_provider = self
+                .provider_call_records
+                .iter()
+                .all(|record| record.usage_origin.as_deref() == Some("provider"));
+            self.usage_origin = if any_estimated {
+                Some("estimated_chars".to_string())
+            } else if all_provider {
+                Some("provider".to_string())
+            } else {
+                None
+            };
+        }
+        if self.context_input_tokens.is_none() {
+            self.context_input_tokens = self
+                .provider_call_records
+                .last()
+                .and_then(|record| record.context_input_tokens);
+        }
+    }
+}
+
+/// 会话与持久化层结构化错误枚举。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionError {
+    BackendFailure(String),
+    EventStreamDegraded(String),
+    SessionNotFound(String),
+    StaleVersion { expected: u64, actual: u64 },
+    StorageCorruption(String),
+    InvalidOperation(String),
+    /// ADR 0107 §5 P1：同一会话正被另一个进程写（会话日志单写者冲突）。
+    ///
+    /// 这是**会话级**拒绝：本进程仍可继续写其它会话，用户应看到"该会话在别处被占用"。
+    SessionWriterBusy { session_id: String },
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BackendFailure(msg) => write!(f, "Backend persistence failure: {msg}"),
+            Self::EventStreamDegraded(msg) => write!(f, "Event stream degraded: {msg}"),
+            Self::SessionNotFound(id) => write!(f, "Session not found: {id}"),
+            Self::StaleVersion { expected, actual } => {
+                write!(f, "Stale session version: expected {expected}, actual {actual}")
+            }
+            Self::StorageCorruption(msg) => write!(f, "Storage corruption: {msg}"),
+            Self::InvalidOperation(msg) => write!(f, "Invalid operation: {msg}"),
+            Self::SessionWriterBusy { session_id } => write!(
+                f,
+                "session_writer_busy: session `{session_id}` is being written by another process"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}

@@ -330,7 +330,7 @@ fn at1_blackhole_endpoint_swallows_export_failure_within_bounded_time() {
 /// 避免「扫了个空文件」式的假通过。
 #[test]
 fn at1_export_failure_has_warn_json_degradation_callsite() {
-    let module_dir = format!("{}/src/agent/otel", env!("CARGO_MANIFEST_DIR"));
+    let module_dir = format!("{}/../pony-observability/src/otel", env!("CARGO_MANIFEST_DIR"));
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&module_dir)
         .unwrap_or_else(|err| panic!("AT-1：otel 模块目录必须可读（{module_dir}）：{err}"))
         .filter_map(|entry| entry.ok())

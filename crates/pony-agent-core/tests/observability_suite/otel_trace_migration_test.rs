@@ -727,7 +727,7 @@ fn crate_source(relative_to_crate_root: &str) -> String {
 
 #[test]
 fn ot7_retired_ponysentry_trace_symbols_have_zero_hits() {
-    let source = crate_source("src/agent/ponysentry/mod.rs");
+    let source = crate_source("../pony-observability/src/ponysentry/mod.rs");
 
     // 防假绿：证据源必须是真实、非空且含保留面锚点的文件（否则 0 命中毫无意义）。
     // D6 退役后本文件从 ~18KB 合法收缩到 ~2.2KB（13 个符号整段删除），原 4096 字节阈值
@@ -758,7 +758,7 @@ fn ot7_retired_ponysentry_trace_symbols_have_zero_hits() {
 
 #[test]
 fn ot7_issue_reporting_keep_surface_still_exists() {
-    let ponysentry = crate_source("src/agent/ponysentry/mod.rs");
+    let ponysentry = crate_source("../pony-observability/src/ponysentry/mod.rs");
     let missing: Vec<&str> = KEPT_PONYSENTRY_SYMBOLS
         .iter()
         .copied()
@@ -1098,6 +1098,7 @@ fn find_core_gate_api() -> (String, String) {
     let root = repo_root();
     let mut files: Vec<PathBuf> = Vec::new();
     collect_rust_files(&root.join(CORE_AGENT_SRC_RELATIVE), &mut files);
+    collect_rust_files(&root.join("crates/pony-observability/src"), &mut files);
     assert!(
         files.len() > 20,
         "OT-8d 核心源码扫描面过小（{} 个 .rs），静态断言不可信",

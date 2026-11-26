@@ -94,9 +94,9 @@ function main() {
     return;
   }
 
-  const tools = read(`${SRC}/tools/contract.rs`);
-  const runtime = read(`${SRC}/tool_runtime.rs`);
-  const hooks = read(`${SRC}/hooks.rs`);
+  const tools = read('crates/pony-protocol/src/tool_contract/contract.rs');
+  const runtime = read('crates/pony-tools/src/tool_runtime.rs');
+  const hooks = read('crates/pony-protocol/src/hooks.rs');
 
   const sources = enumVariants(tools, 'ToolDescriptorSource');
   const hookPoints = enumVariants(hooks, 'TurnHookPoint');
@@ -109,8 +109,8 @@ function main() {
     return [name, schema.version];
   });
 
-  const pluginHost = `${SRC}/plugin_host/mod.rs`;
-  const acpModule = 'crates/pony-agent-core/src/acp/mod.rs';
+  const pluginHost = 'crates/pony-tools/src/plugin_host/mod.rs';
+  const acpModule = 'crates/pony-acp/src/lib.rs';
   const mcpConfigLoader = sourceContains(SRC, 'mcpServers');
 
   const rows = [
@@ -138,7 +138,7 @@ function main() {
       how: '写 `SKILL.md`（frontmatter）',
       contract: 'pony-skill-manifest-v1',
       carrier: '`workspace_hotloader.rs`',
-      status: exists(`${SRC}/workspace_hotloader.rs`) ? '载体已存在（`workspace_hotloader.rs`）' : '载体未落地',
+      status: exists('crates/pony-tools/src/workspace_hotloader.rs') ? '载体已存在（`workspace_hotloader.rs`）' : '载体未落地',
     },
     {
       point: 'Hook',
@@ -146,7 +146,7 @@ function main() {
       how: '写 `.pony/hooks.json`（`command` 或 `argv` 形态）',
       contract: 'agent-hooks-v1',
       carrier: '`hook_commands.rs`',
-      status: exists(`${SRC}/hook_commands.rs`) ? '载体已存在（`hook_commands.rs`）' : '载体未落地',
+      status: exists('crates/pony-tools/src/hook_commands.rs') ? '载体已存在（`hook_commands.rs`）' : '载体未落地',
     },
     {
       point: 'Plugin',

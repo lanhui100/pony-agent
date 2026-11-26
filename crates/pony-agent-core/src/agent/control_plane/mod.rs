@@ -4432,7 +4432,11 @@ mod tests {
     fn import_attachment_resolves_workspace_via_registry() {
         // PA-078×PA-079：workspace_id 经注册表解析目标 root；未注册 id → 明确错误。
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::with_runtime(AgentRuntime::new());
+        let control_plane = HostControlPlane::with_runtime(
+            AgentRuntimeBuilder::new()
+                .session_store(SessionStore::memory_only())
+                .build(),
+        );
 
         // 未注册 workspace → 明确错误
         let err = control_plane
@@ -4645,7 +4649,7 @@ mod tests {
     #[test]
     fn session_snapshot_queries_flow_through_control_plane() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         let snapshot = control_plane.load_session_snapshot(SessionSnapshotQuery {
             session_id: Some("alpha".to_string()),
@@ -4716,7 +4720,7 @@ mod tests {
     #[test]
     fn session_runtime_view_reads_runtime_generated_hook_traces_and_metrics() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
         {
             let mut runtime = control_plane
                 .runtime
@@ -4816,7 +4820,7 @@ mod tests {
     #[test]
     fn model_monitor_session_drilldown_preserves_failed_and_cancelled_terminal_evidence() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
         {
             let mut runtime = control_plane
                 .runtime
@@ -5239,7 +5243,7 @@ mod tests {
     #[test]
     fn stop_turn_and_checkpoint_queries_share_same_registry_surface() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         // wave-64 terminal-once 之后：`start_turn_stream` 是**同步跑完整轮**的入口，用它造的
         // 全空白 message turn 会在 prepare 阶段就被判失败并置终态，于是随后 `stop_turn` 必然
@@ -6392,7 +6396,7 @@ mod tests {
     #[test]
     fn submission_plan_starts_fresh_run_when_recovery_contract_requires_replay() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
         control_plane.execution_control.register_turn(
             "turn-replay-plan",
             Some("replay-plan-session"),
@@ -9250,7 +9254,7 @@ mod tests {
     #[test]
     fn list_capabilities_exposes_builtin_tools_through_unified_registry() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         let sources = control_plane.list_capability_sources();
         assert!(sources
@@ -9270,7 +9274,7 @@ mod tests {
     #[test]
     fn apply_mcp_source_snapshot_updates_read_plane_and_runtime_registry() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         let snapshot = crate::agent::capability_bridge::McpSourceSnapshot {
             source: crate::agent::capability_bridge::CapabilitySourceView {
@@ -9360,7 +9364,7 @@ mod tests {
     #[test]
     fn apply_mcp_source_snapshot_replaces_stale_capabilities_for_same_source() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         let old_snapshot = crate::agent::capability_bridge::McpSourceSnapshot {
             source: crate::agent::capability_bridge::CapabilitySourceView {
@@ -9485,7 +9489,7 @@ mod tests {
     #[test]
     fn apply_mcp_source_snapshot_keeps_unreachable_source_visible_without_capabilities() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         control_plane
             .apply_mcp_source_snapshot(ApplyMcpSourceSnapshotCommand {
@@ -9531,7 +9535,7 @@ mod tests {
     #[test]
     fn apply_skill_source_snapshot_updates_read_plane_and_runtime_registry() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         control_plane
             .apply_mcp_source_snapshot(ApplyMcpSourceSnapshotCommand {
@@ -9656,7 +9660,7 @@ mod tests {
     #[test]
     fn skill_source_ingress_hooks_can_block_snapshot_apply_without_persisting_source() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
         {
             let mut runtime = control_plane
                 .runtime
@@ -9702,7 +9706,7 @@ mod tests {
     #[test]
     fn apply_skill_source_snapshot_replaces_stale_skills_for_same_source() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         control_plane
             .apply_mcp_source_snapshot(ApplyMcpSourceSnapshotCommand {
@@ -9822,7 +9826,7 @@ mod tests {
     #[test]
     fn inspect_capability_returns_normalized_builtin_capability_view() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
 
         let capability = control_plane
             .inspect_capability(CapabilityInspectionQuery {
@@ -9984,7 +9988,12 @@ mod tests {
             Arc::new(FakeClock::new(1_000)),
         ));
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlaneBuilder::new()
+        let ask_store: Arc<dyn crate::agent::ask_persistence::AskPersistenceStore> = Arc::from(
+            crate::agent::ask_persistence::open_in_memory_ask_store()
+                .expect("in-memory ask store must open"),
+        );
+        let control_plane = HostControlPlaneBuilder::new().runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build())
+            .ask_store(ask_store)
             .ask_dispatcher(Arc::clone(&dispatcher))
             .build();
 
@@ -10100,7 +10109,7 @@ mod tests {
     #[test]
     fn plan_control_plane_surface_creates_reads_mutates_and_lists() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlaneBuilder::new().build();
+        let control_plane = HostControlPlaneBuilder::new().runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build()).build();
 
         let created = control_plane
             .plan_create(
@@ -10191,7 +10200,12 @@ mod tests {
             ),
         );
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlaneBuilder::new()
+        let ask_store: Arc<dyn crate::agent::ask_persistence::AskPersistenceStore> = Arc::from(
+            crate::agent::ask_persistence::open_in_memory_ask_store()
+                .expect("in-memory ask store must open"),
+        );
+        let control_plane = HostControlPlaneBuilder::new().runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build())
+            .ask_store(ask_store)
             .ask_dispatcher(Arc::clone(&dispatcher))
             .graph_run_store(graph_store)
             .build();
@@ -10572,6 +10586,8 @@ mod tests {
 
     #[test]
     fn test_wave1_auto_continue_bounded_by_goal_and_limit() {
+        let _lock = crate::agent::goal::test_support::lock();
+        let _store = crate::agent::goal::test_support::TempGoalStore::install("auto-continue");
         let rt_guard = crate::agent::runtime_helper::TestRuntimeGuard::new();
         let session_id = "test-session-auto-continue";
 
@@ -10748,7 +10764,7 @@ mod wave65_r2_approval_tests {
     /// R2（F2）：审批取消面必须拒绝 Ask 请求（fail-closed，且不得消费该请求）。
     #[test]
     fn cancel_approval_request_rejects_interaction_request() {
-        let control_plane = HostControlPlane::new();
+        let control_plane = HostControlPlane::with_runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build());
         let now_ms = control_plane.ask_dispatcher.clock().now_ms();
         let record = PersistedAsk {
             request_id: "ask-r2-000000000001".to_string(),

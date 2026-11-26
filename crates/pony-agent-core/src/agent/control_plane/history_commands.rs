@@ -707,7 +707,10 @@ mod b130_tests {
     fn deleting_session_clears_goal_sidecar_entry() {
         let _lock = crate::agent::goal::test_support::lock();
         let store = TempGoalStore::install("delete-success");
-        let control_plane = HostControlPlane::new();
+        let runtime = crate::agent::runtime::AgentRuntimeBuilder::new()
+            .session_store(crate::agent::session::SessionStore::memory_only())
+            .build();
+        let control_plane = HostControlPlane::with_runtime(runtime);
         let session = "b130-delete-success";
         let goal_id = create_session_goal(session);
         assert!(goal_of(session).is_some(), "前置：目标已创建");
@@ -748,7 +751,10 @@ mod b130_tests {
     fn goal_clear_failure_does_not_block_session_delete() {
         let _lock = crate::agent::goal::test_support::lock();
         let store = TempGoalStore::install("fail-soft");
-        let control_plane = HostControlPlane::new();
+        let runtime = crate::agent::runtime::AgentRuntimeBuilder::new()
+            .session_store(crate::agent::session::SessionStore::memory_only())
+            .build();
+        let control_plane = HostControlPlane::with_runtime(runtime);
         let session = "b130-delete-fail-soft";
         create_session_goal(session);
 

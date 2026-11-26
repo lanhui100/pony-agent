@@ -2,7 +2,7 @@
 # //! acceptance: /models remote model-catalog fetch (L2-T) — frozen suite
 # //! ticket: l2at-tui-models | verify-only, DO NOT MODIFY during fixes
 # //!
-# //! Contract under test (crates/pony-agent-core/src/bin/tui.rs):
+# //! Contract under test (crates/pony-tui/src/tui.rs):
 # //!   /models when the selected provider's models array is empty must fetch
 # //!   {base_url}/models (OpenAI-compatible) and list every returned model id;
 # //!   on success persist the ids into providers.json models array.
@@ -20,7 +20,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 RECEIPTS="$HERE/receipts/l2at-tui-models"
 mkdir -p "$RECEIPTS"
-SRC="$REPO/crates/pony-agent-core/src/bin/tui.rs"
+SRC="$REPO/crates/pony-tui/src/tui.rs"
 
 PONY=""
 newer_than_src() { # $1 binary — true if mtime (ns) strictly newer than tui.rs

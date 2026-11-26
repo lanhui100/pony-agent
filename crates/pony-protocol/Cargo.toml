@@ -1,0 +1,18 @@
+[package]
+name = "pony-protocol"
+version = "0.1.178"
+edition = "2021"
+
+[lib]
+name = "pony_protocol"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+dirs = "6"
+sha2 = "0.10"
+url = "2"
+tracing = "0.1"
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "sync"] }

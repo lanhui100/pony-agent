@@ -11,7 +11,7 @@ use pony_agent_core::agent::session::interrupted_turn::{
     persisted_assistant_text, ClosedToolStep, PendingToolCall,
 };
 
-use crate::{
+use super::super::{
     assert_roundtrips_closed, closed, interrupted_history, native_provider, request_body, snapshot_of,
     DELIVERED_TEXT, INTERRUPTED_USER, NEXT_USER,
 };

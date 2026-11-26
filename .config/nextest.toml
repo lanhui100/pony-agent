@@ -1,0 +1,68 @@
+# cargo-nextest 分层与重资源并发控制配置（ADR 2026-11-25-build-test-layering-and-workspace-crate-split）
+
+[test-groups.heavy-pty]
+max-threads = 2
+
+[test-groups.heavy-e2e]
+max-threads = 2
+
+[profile.default]
+test-threads = 4
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+status-level = "pass"
+final-status-level = "slow"
+failure-output = "immediate-final"
+
+[[profile.default.overrides]]
+filter = 'test(/run_turn_and_start_turn_stream_produce_equivalent_event_sequences/)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(/tui_startup_input_guard|tui_overlay_cancel|tui_terminal_restore|tui_signal_reentry|tools_stop_suite|tui_suite|tui_audit_/)'
+test-group = "heavy-pty"
+
+[[profile.default.overrides]]
+filter = 'binary(/acp_|_e2e/)'
+test-group = "heavy-e2e"
+
+[profile.quick]
+test-threads = 4
+fail-fast = true
+slow-timeout = { period = "30s", terminate-after = 4 }
+status-level = "fail"
+final-status-level = "slow"
+failure-output = "immediate-final"
+
+[[profile.quick.overrides]]
+filter = 'test(/run_turn_and_start_turn_stream_produce_equivalent_event_sequences/)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.quick.overrides]]
+filter = 'binary(/tui_startup_input_guard|tui_overlay_cancel|tui_terminal_restore|tui_signal_reentry|tools_stop_suite|tui_suite|tui_audit_/)'
+test-group = "heavy-pty"
+
+[[profile.quick.overrides]]
+filter = 'binary(/acp_|_e2e/)'
+test-group = "heavy-e2e"
+
+[profile.ci]
+test-threads = 4
+retries = 0
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 3 }
+status-level = "fail"
+final-status-level = "slow"
+failure-output = "immediate-final"
+
+[[profile.ci.overrides]]
+filter = 'test(/run_turn_and_start_turn_stream_produce_equivalent_event_sequences/)'
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'binary(/tui_startup_input_guard|tui_overlay_cancel|tui_terminal_restore|tui_signal_reentry|tools_stop_suite|tui_suite|tui_audit_/)'
+test-group = "heavy-pty"
+
+[[profile.ci.overrides]]
+filter = 'binary(/acp_|_e2e/)'
+test-group = "heavy-e2e"

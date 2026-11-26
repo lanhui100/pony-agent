@@ -84,7 +84,7 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 # 1. 二进制：优先 target/debug/pony；不存在或旧于 tui.rs → 构建并落盘 stdout/EXIT
 # ---------------------------------------------------------------------------
-TUI_SRC="$REPO/crates/pony-agent-core/src/bin/tui.rs"
+TUI_SRC="$REPO/crates/pony-tui/src/tui.rs"
 BIN="$REPO/target/debug/pony"
 NEED_BUILD=0
 if [ ! -x "$BIN" ]; then

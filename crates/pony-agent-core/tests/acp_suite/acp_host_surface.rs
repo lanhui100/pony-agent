@@ -6,7 +6,7 @@
 //!              [--workspace <dir>] [--timeout-secs <n>] [--resume <session-id>]`
 //!
 //! 黑盒纪律：
-//! - 走**真实二进制** `env!("CARGO_BIN_EXE_ponycli")`（与 `session_bundle_export_import.rs` 同惯例）；
+//! - 走**真实二进制** `pony_test_support::ponycli_bin()`（与 `session_bundle_export_import.rs` 同惯例）；
 //! - 配置发现只走冻结契约：`$XDG_CONFIG_HOME/pony-agent/acp-agents.json`（`acp/config.rs:128`），
 //!   同时隔离 HOME / XDG_DATA_HOME / XDG_STATE_HOME / XDG_CACHE_HOME，避免污染真实用户配置；
 //! - 每个子进程都有看门狗（`request_timeout_ms * 2`，NFR 派生）：挂起即失败，而非让测试套件卡死；
@@ -78,7 +78,7 @@ impl IsolatedCli {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ponycli"));
+        let mut command = Command::new(pony_test_support::ponycli_bin());
         command
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.config_dir())

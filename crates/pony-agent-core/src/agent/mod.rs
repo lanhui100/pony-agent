@@ -1,92 +1,126 @@
-pub mod app_settings;
-pub mod ask_control;
-pub mod ask_persistence;
-pub mod attachment_import;
-pub mod budget;
-pub mod capability_bridge;
-pub mod child_dispatch;
-pub mod compression;
-pub mod config;
+pub use pony_tools::app_settings;
+pub use pony_tools::ask_control;
+pub use pony_storage::ask_persistence;
+pub use pony_tools::attachment_import;
+pub use pony_protocol::budget;
+pub use pony_tools::capability_bridge;
+pub use pony_tools::child_dispatch;
+pub use pony_provider::compression;
+pub use pony_provider::config;
 pub mod context;
-pub mod system_prompt_template;
+pub use pony_tools::system_prompt_template;
 pub(crate) mod turn_prompt_content;
 pub(crate) mod context_window;
 pub mod control_plane;
-pub mod cost;
-pub mod dispatcher;
-pub mod dispatcher_composites;
-pub mod document_conversion;
-pub mod error_code;
-pub mod event_bus;
-pub mod execution_control;
-pub mod frontend_diagnostics;
-pub mod git_search;
-pub mod goal;
-pub mod goal_command;
-pub mod goal_lease;
-pub mod goal_wrapup;
+pub use pony_protocol::cost;
+pub use pony_tools::dispatcher;
+pub use pony_tools::dispatcher_composites;
+pub use pony_tools::document_conversion;
+pub use pony_protocol::error_code;
+pub use pony_protocol::event_bus;
+pub use pony_tools::execution_control;
+pub use pony_observability::frontend_diagnostics;
+pub use pony_tools::git_search;
+pub use pony_storage::goal;
+pub use pony_storage::goal_command;
+pub use pony_storage::goal_lease;
+pub use pony_storage::goal_wrapup;
 pub mod graph;
-pub mod governed_executor;
+pub use pony_tools::governed_executor;
 pub mod headless;
-pub mod hook_commands;
-pub mod hooks;
-pub mod image_artifact;
-pub mod input;
-pub mod instruction_touch;
-pub mod jobs;
-pub mod lsp;
-pub mod parallel_tools;
-pub mod patch;
+pub use pony_tools::hook_commands;
+pub use pony_protocol::hooks;
+pub use pony_tools::image_artifact;
+pub use pony_protocol::input;
+pub use pony_tools::instruction_touch;
+pub mod jobs {
+    pub use pony_tools::jobs::*;
+
+    pub fn job_start(args: pony_tools::jobs::JobStartArgs) -> Result<pony_tools::jobs::JobStartResult, String> {
+        crate::agent::ensure_runtime_bridges();
+        pony_tools::jobs::job_start(args)
+    }
+
+    pub fn job_start_scoped(
+        args: pony_tools::jobs::JobStartArgs,
+        default_cwd: Option<&std::path::Path>,
+        owner_session: Option<&str>,
+    ) -> Result<pony_tools::jobs::JobStartResult, String> {
+        crate::agent::ensure_runtime_bridges();
+        pony_tools::jobs::job_start_scoped(args, default_cwd, owner_session)
+    }
+}
+pub use pony_tools::lsp;
+pub use pony_tools::parallel_tools;
+pub use pony_tools::patch;
 pub mod pipeline;
-pub mod mcp_client;
-pub mod mcp_config;
-pub mod mcp_resources;
-pub mod metrics_snapshot;
-pub mod model_preferences;
-pub mod model_window;
+pub use pony_tools::mcp_client;
+pub use pony_tools::mcp_config;
+pub use pony_tools::mcp_resources;
+pub use pony_protocol::metrics_snapshot;
+pub use pony_protocol::model_preferences;
+pub use pony_provider::model_window;
 pub mod orchestration;
-pub mod otel;
+pub use pony_observability::otel;
 pub mod planner;
-pub mod plugin_host;
-pub mod plan_state;
-pub mod ponysentry;
-pub mod path_permission;
-pub mod present;
-pub mod process;
-pub mod projection;
-pub mod provider;
+pub use pony_tools::plugin_host;
+pub use pony_tools::plan_state;
+pub use pony_observability::ponysentry;
+pub use pony_tools::path_permission;
+pub use pony_protocol::present;
+pub use pony_tools::process;
+pub use pony_storage::projection;
+pub use pony_provider::provider;
 pub mod recovery;
-pub mod retry;
-pub mod retry_projection;
+pub use pony_provider::retry;
+pub use pony_storage::retry_projection;
 pub mod runtime;
-pub mod runtime_helper;
-pub mod sandbox;
-pub mod search;
-pub mod secret_store;
-pub mod session;
-pub mod skill_body;
-pub mod sqlite_session;
-pub mod spill;
+pub use pony_protocol::runtime_helper;
+pub use pony_tools::sandbox;
+pub use pony_tools::search;
+pub use pony_provider::secret_store;
+pub use pony_storage::session;
+pub use pony_tools::skill_body;
+pub use pony_storage::sqlite_session;
+pub use pony_protocol::spill;
 pub mod subagent_runtime;
 pub mod sse_adapter;
-pub mod stop_escalation;
-pub mod stop_sequence;
-pub mod telemetry;
+pub use pony_tools::stop_escalation;
+pub use pony_protocol::stop_sequence;
+pub use pony_protocol::telemetry;
 pub mod teammate_identity;
-pub mod terminal;
-pub mod todo;
-pub mod tool_runtime;
-pub mod tool_pruner;
-pub mod tool_search_elevation;
+pub use pony_tools::terminal;
+pub use pony_protocol::todo;
+pub use pony_tools::tool_runtime;
+pub use pony_protocol::tool_pruner;
+pub use pony_tools::tool_search_elevation;
 pub mod tools;
-pub mod trace_persistence;
+pub use pony_storage::trace_persistence;
 pub mod tui_preferences;
-pub mod turn_event;
+pub use pony_protocol::turn_event;
 pub mod turn_flow;
 pub mod updater;
-pub mod usage_governance;
-pub mod usage_ledger;
-pub mod web_access;
-pub mod workspace;
-pub mod workspace_hotloader;
-pub mod tui_enter_action;
+pub use pony_storage::usage_governance;
+pub use pony_observability::usage_ledger;
+pub use pony_tools::web_access;
+pub use pony_tools::workspace;
+pub use pony_tools::workspace_hotloader;
+pub(crate) mod tools_orchestration;
+
+pub(crate) fn ensure_runtime_bridges() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        pony_protocol::turn_flow_registry::register_external_turn_event_emitter(
+            turn_flow::emit_external_turn_event,
+        );
+        pony_protocol::host_hooks::register_teammate_git_env_provider(
+            teammate_identity::git_identity_env_for_session,
+        );
+        pony_protocol::host_hooks::register_subagent_wired_probe(|| {
+            subagent_runtime::subagent_engine().is_some()
+        });
+        pony_tools::tools::register_orchestration_bridge(std::sync::Arc::new(
+            tools_orchestration::CoreOrchestrationBridge,
+        ));
+    });
+}

@@ -84,6 +84,19 @@ assert_scope() {
   esac
 }
 
+# assert_flag <用例名> <base> <head> <字段名> <期望值>
+assert_flag() {
+  local name="$1" base="$2" head="$3" key="$4" want="$5"
+  local out got
+  out="$(cd "$REPO" && node "$CI_SCOPE" --base "$base" --head "$head" 2>&1)"
+  got="$(printf '%s\n' "$out" | sed -n "s/^${key}=//p")"
+  if [ "$got" != "$want" ]; then
+    fail "$name：${key} 期望 ${want}，实测 ${got:-<空>}"
+  else
+    ok "$name（${key}=${got}）"
+  fi
+}
+
 # ---------- 负样本：纯文档/账本改动必须跳过 Rust ----------
 HEAD_DOCS="$(commit_case docs-only docs/architecture/guide.md)"
 assert_scope "A 文档树改动跳过 Rust" "$BASE_SHA" false docs-only "$HEAD_DOCS"
@@ -117,6 +130,28 @@ assert_scope "I 前端源码触发 Rust（含 typecheck 之外的编译面）" "
 # ---------- fail-safe 分支 ----------
 assert_scope "J base 不可解析时回落全量" "0000000000000000000000000000000000000000" true no-base
 assert_scope "K 空 diff 视为无需 Rust" "$BASE_SHA" false empty-diff "$BASE_SHA"
+
+# ---------- B1795615060519 细粒度 crate / 前端分流 ----------
+HEAD_TUI="$(commit_case tui-only crates/pony-tui/src/tui.rs)"
+assert_flag "L1 仅改 pony-tui -> needs_tui=true" "$BASE_SHA" "$HEAD_TUI" needs_tui true
+assert_flag "L2 仅改 pony-tui -> needs_core=false" "$BASE_SHA" "$HEAD_TUI" needs_core false
+assert_flag "L3 仅改 pony-tui -> needs_cli=false" "$BASE_SHA" "$HEAD_TUI" needs_cli false
+assert_flag "L4 仅改 pony-tui -> needs_frontend=false" "$BASE_SHA" "$HEAD_TUI" needs_frontend false
+
+HEAD_CLI="$(commit_case cli-only crates/pony-cli/src/main.rs)"
+assert_flag "M1 仅改 pony-cli -> needs_cli=true" "$BASE_SHA" "$HEAD_CLI" needs_cli true
+assert_flag "M2 仅改 pony-cli -> needs_tui=false" "$BASE_SHA" "$HEAD_CLI" needs_tui false
+assert_flag "M3 仅改 pony-cli -> needs_core=false" "$BASE_SHA" "$HEAD_CLI" needs_core false
+
+HEAD_PROTO="$(commit_case proto-only crates/pony-protocol/src/lib.rs)"
+assert_flag "N1 底层 pony-protocol 传递触发 needs_core=true" "$BASE_SHA" "$HEAD_PROTO" needs_core true
+assert_flag "N2 底层 pony-protocol 传递触发 needs_tui=true" "$BASE_SHA" "$HEAD_PROTO" needs_tui true
+assert_flag "N3 底层 pony-protocol 传递触发 needs_cli=true" "$BASE_SHA" "$HEAD_PROTO" needs_cli true
+assert_flag "N4 底层 pony-protocol 传递触发 needs_tauri=true" "$BASE_SHA" "$HEAD_PROTO" needs_tauri true
+assert_flag "N5 底层 pony-protocol 不触发 needs_frontend" "$BASE_SHA" "$HEAD_PROTO" needs_frontend false
+
+assert_flag "O no-base fail-safe -> needs_tui=true" "0000000000000000000000000000000000000000" HEAD needs_tui true
+assert_flag "P docs-only -> needs_frontend=false" "$BASE_SHA" "$HEAD_DOCS" needs_frontend false
 
 if [ "$FAIL" -ne 0 ]; then
   echo "ci-scope.spec: 有断言失败" >&2

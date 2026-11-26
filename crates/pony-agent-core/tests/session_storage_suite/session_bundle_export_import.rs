@@ -610,7 +610,7 @@ fn duplicate_import_is_refused_then_force_backs_up_the_old_copy() {
     assert!(matches!(error, BundleError::TargetExists { .. }));
 
     // CLI 端到端：同一条路径同样给 EXIT=3（证明 CLI 接线与退出码契约一致）。
-    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_ponycli"))
+    let cli = std::process::Command::new(pony_test_support::ponycli_bin())
         .arg("sessions")
         .arg("import")
         .arg(&bundle)
@@ -797,7 +797,7 @@ fn cli_round_trip_and_attachment_degradation_is_exit_code_4() {
     let bundle = fixture.root.join("bundle-dir");
 
     // CLI export（目录形态）。
-    let export = std::process::Command::new(env!("CARGO_BIN_EXE_ponycli"))
+    let export = std::process::Command::new(pony_test_support::ponycli_bin())
         .arg("sessions")
         .arg("export")
         .arg(SESSION_ID)
@@ -841,7 +841,7 @@ fn cli_round_trip_and_attachment_degradation_is_exit_code_4() {
 
     // CLI import：事件成功 + 附件降级 ⇒ EXIT=4（不是 0，也不是 2），且逐条报告。
     let target_app = fixture.app_dir("target");
-    let import = std::process::Command::new(env!("CARGO_BIN_EXE_ponycli"))
+    let import = std::process::Command::new(pony_test_support::ponycli_bin())
         .arg("sessions")
         .arg("import")
         .arg(&bundle)

@@ -6,68 +6,40 @@ edition = "2021"
 [lib]
 name = "pony_agent_core"
 
-[[bin]]
-name = "pony"
-path = "src/bin/tui.rs"
-
-[[bin]]
-name = "ponycli"
-path = "src/bin/cli.rs"
-
 [dependencies]
 # 全局分配器：见 src/lib.rs 的 #[global_allocator] 说明（glibc arena 碎片导致长驻
 # 多线程会话内存不归还，实测单进程峰值 8.5GB）。
+pony-protocol = { path = "../pony-protocol" }
+pony-observability = { path = "../pony-observability" }
+pony-provider = { path = "../pony-provider" }
+pony-storage = { path = "../pony-storage" }
+pony-tools = { path = "../pony-tools" }
+pony-acp = { path = "../pony-acp" }
 mimalloc = { version = "0.1", default-features = false }
 tracing = "0.1"
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
-# TUI 初始化页品牌标：终端图形协议（sixel / kitty / iTerm2）渲染真实位图；
-# 终端不支持时由 ratatui-image 回退 halfblocks，我们在调用侧进一步回退到自绘字符画。
-ratatui-image = { version = "8.1", default-features = false, features = ["crossterm"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
-anydoc = "=0.1.6"
 base64 = "0.22"
 dirs = "6"
-encoding_rs = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "charset", "stream"] }
 futures-util = "0.3"
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-globset = "0.4"
-ignore = "0.4"
 regex = "1"
 url = "2"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 sha2 = "0.10"
-# Wave43：Agent Trace 上报（OTLP/HTTP protobuf）。三件套版本必须锁步一致，
-# 版本依据 .dev-team/wave43-dep-probe.md（隔离 crate 实编译 Exit 0）。
-# 注：http-proto 会经 opentelemetry-proto/gen-tonic-messages 连带引入 tonic（仅 codegen，
-# 无 gRPC 传输层），属已知可接受代价。
-opentelemetry = { version = "=0.30.0", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "=0.30.0", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "=0.30.0", default-features = false, features = ["http-proto", "reqwest-client", "trace"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[target.'cfg(windows)'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
-winreg = "0.56.0"
+[target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["linux-native-sync-persistent"] }
 
 [features]
 default = []
-test-support = []
 
 [dev-dependencies]
-pony-agent-core = { path = ".", features = ["test-support"] }
+pony-test-support = { path = "../pony-test-support" }
+rusqlite = { version = "0.31", features = ["bundled"] }
 zip = "8.6"

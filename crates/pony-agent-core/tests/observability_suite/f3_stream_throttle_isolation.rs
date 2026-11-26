@@ -382,7 +382,7 @@ fn wait_until(deadline: Duration, predicate: impl Fn() -> bool) -> bool {
 const SSE_READ_PATH_SOURCES: [&str; 3] = [
     "src/agent/runtime/turn_stream.rs",
     "src/agent/runtime/tool_recovery.rs",
-    "src/agent/provider/openai_sse.rs",
+    "../pony-provider/src/provider/openai_sse.rs",
 ];
 
 /// 去掉行内 `//` 注释后的代码行（注释里写「旧实现曾 sleep」不算违规；

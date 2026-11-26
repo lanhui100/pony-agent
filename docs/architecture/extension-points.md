@@ -8,7 +8,7 @@
 
 | 扩展点 | 层 | 扩展方式 | 契约 | 载体 | 当前状态（由文件事实推导） |
 |---|---|---|---|---|---|
-| 内建工具 | L1 编译期接缝 | 改 Rust：实现 handler + 注册 descriptor | `pony-tool-descriptor-v1` | `governed_executor.rs` | 载体已存在（`governed_executor.rs`） |
+| 内建工具 | L1 编译期接缝 | 改 Rust：实现 handler + 注册 descriptor | `pony-tool-descriptor-v1` | `governed_executor.rs` | 载体未落地 |
 | MCP server | L2 进程外插件 | 写 MCP server + `.mcp.json`（v1 只 stdio） | `mcp-config-v1 + pony-tool-descriptor-v1` | `mcp_client.rs` | 客户端已存在（`mcp_client.rs`）；配置面关键词 `mcpServers` 已命中 |
 | Skill | L1 编译期接缝 | 写 `SKILL.md`（frontmatter） | `pony-skill-manifest-v1` | `workspace_hotloader.rs` | 载体已存在（`workspace_hotloader.rs`） |
 | Hook | L1 编译期接缝 | 写 `.pony/hooks.json`（`command` 或 `argv` 形态） | `agent-hooks-v1` | `hook_commands.rs` | 载体已存在（`hook_commands.rs`） |

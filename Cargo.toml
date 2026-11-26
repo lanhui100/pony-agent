@@ -1,6 +1,15 @@
 [workspace]
 members = [
+    "crates/pony-protocol",
+    "crates/pony-observability",
+    "crates/pony-provider",
+    "crates/pony-storage",
+    "crates/pony-tools",
+    "crates/pony-acp",
     "crates/pony-agent-core",
+    "crates/pony-cli",
+    "crates/pony-test-support",
+    "crates/pony-tui",
     "src-tauri",
 ]
 resolver = "2"
@@ -9,4 +18,3 @@ resolver = "2"
 opt-level = 3
 lto = "thin"
 codegen-units = 16
-

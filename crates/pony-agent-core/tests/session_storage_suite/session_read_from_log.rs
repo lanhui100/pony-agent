@@ -723,13 +723,20 @@ fn fifty_logged_sessions_load_within_budget_and_degrade_keeps_the_index_complete
 /// 任何第三处出现都会被这条守卫打红——包括未来某次「顺手用索引视图兜底」的改动。
 #[test]
 fn runtime_paths_never_read_the_index_only_view() {
-    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let crates_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates parent dir")
+        .to_path_buf();
+    let scan_roots = [
+        crates_root.join("pony-agent-core").join("src"),
+        crates_root.join("pony-storage").join("src"),
+    ];
     // 只看**调用点**（`.load_index_store(`），避免把 doc/日志字面量算成调用方。
     let needle = ".load_index_store(";
     let mut offenders: Vec<String> = Vec::new();
     let mut files_with_usage: Vec<String> = Vec::new();
     let mut fold_call_lines = 0usize;
-    let mut stack = vec![src_root.clone()];
+    let mut stack: Vec<std::path::PathBuf> = scan_roots.to_vec();
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir).expect("read src dir");
         for entry in entries {
@@ -743,8 +750,8 @@ fn runtime_paths_never_read_the_index_only_view() {
             }
             let text = std::fs::read_to_string(&path).expect("read source file");
             let relative = path
-                .strip_prefix(&src_root)
-                .expect("strip src prefix")
+                .strip_prefix(&crates_root)
+                .expect("strip crates prefix")
                 .to_string_lossy()
                 .replace('\\', "/");
             let mut used = false;
@@ -754,9 +761,9 @@ fn runtime_paths_never_read_the_index_only_view() {
                     continue;
                 }
                 used = true;
-                let allowed =
-                    relative == "agent/sqlite_session.rs" || relative == "agent/session/fold.rs";
-                if relative == "agent/session/fold.rs" {
+                let allowed = relative == "pony-storage/src/sqlite_session.rs"
+                    || relative == "pony-storage/src/session/fold.rs";
+                if relative == "pony-storage/src/session/fold.rs" {
                     fold_call_lines += 1;
                 }
                 if !allowed {
@@ -777,8 +784,8 @@ fn runtime_paths_never_read_the_index_only_view() {
     assert_eq!(
         files_with_usage,
         vec![
-            "agent/session/fold.rs".to_string(),
-            "agent/sqlite_session.rs".to_string()
+            "pony-storage/src/session/fold.rs".to_string(),
+            "pony-storage/src/sqlite_session.rs".to_string()
         ],
         "`load_index_store` 的出现文件集合变化了——请先确认新调用方属于「诊断/比对」口径"
     );
@@ -787,17 +794,16 @@ fn runtime_paths_never_read_the_index_only_view() {
         "fold.rs 里只允许 `rebuild_index_at_root` 一处使用它（双读比对基准）"
     );
     // 定义必须仍在，且外部用法只有调用点（防止有人把它改名成「看起来像索引」的东西）。
-    let sqlite_session_src = std::fs::read_to_string(src_root.join("agent/sqlite_session.rs"))
-        .expect("read sqlite_session.rs");
+    let sqlite_session_src =
+        std::fs::read_to_string(crates_root.join("pony-storage/src/sqlite_session.rs"))
+            .expect("read sqlite_session.rs");
     assert!(
         sqlite_session_src.contains("pub fn load_index_store"),
         "索引原样视图必须保持显式命名（`load_index_store`）"
     );
     // 运行时读路径必须真的是 load_store（不是「看起来像」）。
-    let sqlite_session = std::fs::read_to_string(src_root.join("agent/sqlite_session.rs"))
-        .expect("read sqlite_session.rs");
     assert!(
-        sqlite_session.contains("merge_log_truth_into_sessions"),
+        sqlite_session_src.contains("merge_log_truth_into_sessions"),
         "`load_store` 必须叠加日志真源合并（ADR 0099 阶段 2-B）"
     );
 }

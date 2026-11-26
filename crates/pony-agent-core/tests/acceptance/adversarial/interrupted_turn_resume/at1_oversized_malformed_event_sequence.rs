@@ -10,7 +10,7 @@ use pony_agent_core::agent::session::interrupted_turn::{
     ClosedToolStep, PendingToolCall, INTERRUPTED_RESULT_SECTION_HEADER,
 };
 
-use crate::{assert_roundtrips_closed, closed, role_of, DELIVERED_TEXT, INTERRUPTED_USER};
+use super::super::{assert_roundtrips_closed, closed, role_of, DELIVERED_TEXT, INTERRUPTED_USER};
 
 const BIG_STEP_COUNT: usize = 500;
 const BIG_RESULT_CHARS: usize = 4_000;
