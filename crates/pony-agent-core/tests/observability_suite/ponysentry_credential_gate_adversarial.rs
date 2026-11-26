@@ -69,7 +69,7 @@ fn wave18_leak_sites_contain_no_bare_64_hex_literal() {
     let sites = [
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/agent/ponysentry/config.rs"
+            "/../pony-observability/src/ponysentry/config.rs"
         ),
         // F1：前端第三处泄漏点（src/lib/telemetry.ts）
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../src/lib/telemetry.ts"),

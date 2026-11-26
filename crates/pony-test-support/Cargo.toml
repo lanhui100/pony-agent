@@ -1,0 +1,8 @@
+[package]
+name = "pony-test-support"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pony-storage = { path = "../pony-storage" }

@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn rescue_trims_single_giant_turn_native_transcript() {
         let _guard = TestRuntimeGuard::new();
-        let sessions = Arc::new(RwLock::new(SessionStore::new()));
+        let sessions = Arc::new(RwLock::new(SessionStore::memory_only()));
         let sid = "rescue-single-turn";
         let mut transcript = vec![json!({ "role": "user", "content": "start giant task" })];
         for i in 0..12 {
@@ -431,7 +431,7 @@ mod tests {
 
         let base_url = format!("http://{addr}/v1");
         let runtime = AgentRuntimeBuilder::new()
-            .session_store(SessionStore::new())
+            .session_store(SessionStore::memory_only())
             .provider_resolver(Box::new(DummyResolver(make_selection(base_url))))
             .tool_executor(Box::new(NoopExecutor))
             .build();

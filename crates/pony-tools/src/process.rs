@@ -1,0 +1,2985 @@
+//! Session-scoped process lifecycle manager (PA-076 phase 5, tasks 5.3-5.4).
+//!
+//! `ProcessManager` is the production `ProcessBackend`: it starts processes and hands back an
+//! opaque, high-entropy handle that is bound to the requesting session. Every later operation
+//! (`poll`, `write_stdin`, `kill`) must present the same session id that created the process;
+//! cross-session handle use is rejected and stale handles fail closed.
+//!
+//! Lifecycle:
+//! - `start` spawns the child with piped stdin/stdout/stderr and two detached drain threads that
+//!   continuously read each stream into a bounded buffer. Draining never blocks the child on a
+//!   full pipe; when a stream produces more than the fixed cap, the oldest bytes are dropped and
+//!   the stream is permanently marked truncated with a dropped-bytes counter.
+//! - `poll` reports `Running` or `Exited` (with exit code) plus the output accumulated since the
+//!   last poll. Buffers are cleared on read. After the process exits, its entry is retained so the
+//!   final state can be reported; the entry is only removed by `kill` (idempotent cleanup) or by
+//!   the session-scoped `shutdown`.
+//! - `write_stdin` writes to the child's stdin and is rejected once the process has exited.
+//! - `kill` terminates the child (`child.kill()` plus a bounded best-effort reap), `cancel` is a
+//!   documented alias for the same operation, `kill_after` arms a background timer, and
+//!   `shutdown(session_id)` terminates and removes every process owned by a session.
+//!
+//! Windows lifecycle containment (PA-077): each process is assigned to a private non-inheritable
+//! Job Object before its handle is published. Explicit kill/shutdown and final Job owner drop kill
+//! contained descendants, including when the direct child already exited. Assignment is fail-closed,
+//! but spawn-before-assignment has a scheduling window; this is not a sandbox/security boundary.
+//! `SandboxBackend` remains separate, and non-Windows behavior is direct-child lifecycle only.
+
+use crate::tool_runtime::{
+    ProcessBackend, ProcessPollResult, ProcessStartRequest, ProcessState, SandboxRequest,
+};
+use std::collections::BTreeMap;
+use std::io::{self, Read, Write};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(all(windows, test))]
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// B165：此前收紧为私有模块，ACP 侧无法复用 Job Object（只能 `child.kill()` 杀直接子进程）。
+// 现放开到 crate 级：`agent::process` 仍是唯一创建/绑定点，其他模块经窄封装
+// （如 `acp::process_tree`）调用，不复制 Job 生命周期语义。
+#[cfg(windows)]
+pub mod windows_job;
+#[cfg(windows)]
+use windows_job::Job;
+
+// B207：托管范围 owner 抽象（signal / 静默等待 / 成员数 / 清理正交分离）。
+// 默认 `RangeOwnership::Pid` ⇒ 本模块的既有语义（B206 唯一终止路径）**零行为变更**；
+// 新行为只在 `ProcessManager::with_range_ownership(RangeOwnership::SystemdScope)` 时启用。
+#[path = "process_range.rs"]
+pub mod process_range;
+pub use process_range::RangeOwnership;
+#[cfg(not(windows))]
+use process_range::{RangeOwner, RangeQuiescence};
+
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+
+/// Unix: 跟踪当前运行中的活跃子进程 PID，防止子进程向宿主发送信号（如误执行 kill）时导致宿主意外退出。
+#[cfg(unix)]
+pub static TRACKED_CHILD_PIDS: [AtomicI32; 128] =
+    [const { AtomicI32::new(0) }; 128];
+
+#[cfg(unix)]
+pub fn register_active_child_pid(pid: u32) {
+    let pid_i32 = i32::try_from(pid).unwrap_or(0);
+    for slot in &TRACKED_CHILD_PIDS {
+        if slot
+            .compare_exchange(0, pid_i32, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn unregister_active_child_pid(pid: u32) {
+    let pid_i32 = i32::try_from(pid).unwrap_or(0);
+    for slot in &TRACKED_CHILD_PIDS {
+        if slot
+            .compare_exchange(pid_i32, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            break;
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn is_tracked_child_pid(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    TRACKED_CHILD_PIDS
+        .iter()
+        .any(|slot| slot.load(Ordering::SeqCst) == pid)
+}
+
+/// Windows: 让 GUI 宿主（Tauri 无控制台）派生的控制台子进程（cmd/powershell/git 等）
+/// 不弹出可见控制台窗口。父进程无控制台时，Windows 默认会为控制台子进程分配一个新的
+/// 控制台窗口（用户可见的"闪窗/弹 PowerShell 窗口"）；`CREATE_NO_WINDOW` 抑制该窗口。
+/// 子进程 stderr/stdout 已走管道，去掉窗口不影响输出采集。
+#[cfg(windows)]
+pub fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+}
+
+/// Default per-stream output cap (64 KiB).
+const DEFAULT_BUFFER_CAP: usize = 64 * 1024;
+/// How long `poll` waits for drain threads to flush after the child has exited.
+const DRAIN_SETTLE_MAX: Duration = Duration::from_millis(500);
+/// Best-effort reap budget after `kill` (30 × 10 ms = 300 ms).
+const KILL_REAP_ATTEMPTS: u32 = 30;
+const KILL_REAP_INTERVAL: Duration = Duration::from_millis(10);
+/// B206：范围静默轮询间隔 —— 每一轮都**重新探测**（不是「睡到自以为干净」）。
+/// 只在 Linux 的 cgroup 静默路径使用；非 Linux 构建保留常量（跨平台同一份限额定义）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const QUIESCE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// B206 / C2：终止限额（公开可注入）。
+///
+/// 默认值就是契约默认值：`term_grace = 250ms`、`quiesce_deadline = 5s`（自**首次信号**起算）。
+/// 生产路径一律走默认值；只有验收/单测为了构造**确定性**结论（例如 `Duration::ZERO` 让
+/// 「死线耗尽 ⇒ `Err`」在不依赖时机的前提下必然发生）才注入更小的值。
+///
+/// **禁止**为了换绿灯把默认值改小后回填 —— 默认值本身就是契约条款（C2 判据）。
+///
+/// `quiesce_deadline == Duration::ZERO` 的语义（实现必须遵守）：信号发出后**不再等待**，
+/// 只在信号发出后立刻做一次探测；范围非空即 `Err`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminationLimits {
+    /// `SIGTERM` 之后、升级到 `SIGKILL` 之前的宽限期。
+    pub term_grace: Duration,
+    /// 自首次信号起算的总死线；耗尽仍未证明范围为空 ⇒ `Err`（fail loud）。
+    pub quiesce_deadline: Duration,
+}
+
+impl TerminationLimits {
+    /// 契约默认 `term_grace`（C2）。
+    pub const DEFAULT_TERM_GRACE: Duration = Duration::from_millis(250);
+    /// 契约默认 `quiesce_deadline`（C2）。
+    pub const DEFAULT_QUIESCE_DEADLINE: Duration = Duration::from_secs(5);
+}
+
+impl Default for TerminationLimits {
+    fn default() -> Self {
+        Self {
+            term_grace: Self::DEFAULT_TERM_GRACE,
+            quiesce_deadline: Self::DEFAULT_QUIESCE_DEADLINE,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn failed_start_cleanup(child: &mut Child, job: &Job, cause: String) -> String {
+    let mut errors = Vec::new();
+    if let Err(error) = job.terminate(1) {
+        errors.push(format!("Job termination: {error}"));
+    }
+    // Close immediately as a kill-on-close fallback even if another owner is retained.
+    job.close();
+    if let Err(error) = kill_and_reap(child, "bounded child cleanup") {
+        errors.push(error);
+    }
+    if errors.is_empty() {
+        cause
+    } else {
+        format!("{cause}; cleanup failed: {}", errors.join("; "))
+    }
+}
+
+#[cfg(windows)]
+/// P2-1：`CREATE_SUSPENDED` 下 `std::process::Child` 只暴露进程句柄，拿不到子进程主线程
+/// 句柄，因此用 ntdll 的 `NtResumeProcess` 按进程句柄恢复整个进程。非 0 NTSTATUS 一律
+/// 视为失败，由调用方 fail-closed 清理（terminate + reap + close），绝不允许子进程停留在
+/// suspended 状态。
+///
+/// `new_api_surface: ntdll!NtResumeProcess`（wave-9 P2-1，Lead 已授权）
+/// [VERIFY DEGRADED: WINDOWS-ONLY] 本机 Linux x86_64 无 Windows target，此分支不参与类型
+/// 检查与执行。
+///
+/// B165：可见性提升到 crate 级，供 `acp::process_tree` 复用（ACP 侧同样以
+/// `CREATE_SUSPENDED` 启动、纳管成功后再恢复），避免第二份 ntdll FFI。
+pub fn resume_process(process: std::os::windows::io::RawHandle) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::HANDLE;
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtResumeProcess(process_handle: HANDLE) -> i32;
+    }
+    // SAFETY: `process` is the live process handle of the suspended child owned by the caller.
+    let status = unsafe { NtResumeProcess(process as HANDLE) };
+    if status < 0 {
+        return Err(format!(
+            "NtResumeProcess failed: NTSTATUS=0x{:08X}",
+            status as u32
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+/// Kill a child and synchronously reap it within the bounded cleanup budget.
+///
+/// A failed `kill` is tolerated only when `try_wait` proves that the child had already exited;
+/// otherwise every failure is returned with the operation context so callers cannot silently leak a
+/// native process.
+fn kill_and_reap(child: &mut Child, context: &str) -> Result<(), String> {
+    let kill_error = child.kill().err();
+    let mut last_wait_error = None;
+    for _ in 0..KILL_REAP_ATTEMPTS {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(error) => {
+                last_wait_error = Some(error);
+                break;
+            }
+        }
+        std::thread::sleep(KILL_REAP_INTERVAL);
+    }
+
+    let mut details = Vec::new();
+    if let Some(error) = kill_error {
+        details.push(format!("kill failed: {error}"));
+    }
+    if let Some(error) = last_wait_error {
+        details.push(format!("wait failed: {error}"));
+    } else {
+        details.push(format!(
+            "child did not exit within {:?}",
+            KILL_REAP_ATTEMPTS * KILL_REAP_INTERVAL
+        ));
+    }
+    Err(format!("{context}; {}", details.join("; ")))
+}
+
+// ── B206：POSIX 范围静默判据（FENCE / PROBE-A / PROBE-B / LADDER）────────────────────────────
+//
+// C1-U（唯一终止路径）：这些判据原语**只允许**被 `terminate_range_path` 使用。任何第二处
+// 「发信号」或「做空证明」的实现都会让 `kill` 与 `shutdown` 重新分叉成两套严格度（U1/U2/U4）。
+
+/// 一次范围探测的结论：PROBE-A（`kill(-pgid,0)`）与 PROBE-B（`/proc` 扫描）取 **OR**。
+#[cfg(not(windows))]
+#[derive(Debug)]
+struct RangeProbe {
+    /// `true` = 范围**已证明为空**（PROBE-A 给 `ESRCH`，或 PROBE-B 给出空列表）。
+    empty: bool,
+    /// 仍存活的成员 pid（升序去重；僵尸不计）。**空列表 ≠ 范围为空**，除非 `empty`。
+    members: Vec<i32>,
+    /// 证据字段（契约 §5.1 `probe=`）：`kill0-esrch` / `proc-empty` / `proc-members` /
+    /// `kill0-alive` / `kill0-eperm` / `unavailable`。
+    source: &'static str,
+}
+
+/// B206 / FENCE：读 `/proc/<pid>/stat` 字段 22（`starttime`，boot 后 jiffies）。
+///
+/// `comm` 可含空格与括号，故以**最后一个** `)` 为界；其后从整体字段 3（state）起算，
+/// 因此字段 22 == 该切片里的第 20 项（下标 19）。
+#[cfg(not(windows))]
+fn read_start_time(pid: i32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let tail = &stat[stat.rfind(')')? + 1..];
+    tail.split_whitespace().nth(19)?.parse::<u64>().ok()
+}
+
+/// B206 / PROBE-B：扫描 `/proc`，返回 `pgrp == pgid` 且**非僵尸**的成员 pid（升序去重）。
+///
+/// `None` = `/proc` 不可读（探针**不可用 ≠ 范围为空**，见契约 §6.2 降级要求）。
+/// 僵尸（`state == 'Z'`）已无 CPU/内存占用、只等收尸，计入会造成「杀干净却判失败」的假红相。
+#[cfg(not(windows))]
+fn scan_range_members(pgid: i32) -> Option<Vec<i32>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    let mut members = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            // 进程在扫描途中消失：它已不构成存活成员。
+            continue;
+        };
+        let Some(paren) = stat.rfind(')') else {
+            continue;
+        };
+        let mut fields = stat[paren + 1..].split_whitespace();
+        let Some(state) = fields.next().and_then(|value| value.chars().next()) else {
+            continue;
+        };
+        let Some(_ppid) = fields.next() else {
+            continue;
+        };
+        let Some(pgrp) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        if pgrp == pgid && state != 'Z' {
+            members.push(pid);
+        }
+    }
+    members.sort_unstable();
+    members.dedup();
+    Some(members)
+}
+
+/// B206 / PROBE-A + PROBE-B：两条判据取 **OR**，任一给出「空」即视为已证明为空。
+///
+/// 两者都拿不到「空」结论时**不可证明** —— 按契约 §6.2 必须走 `Err`，不得当成空。
+#[cfg(not(windows))]
+fn probe_range(pgid: i32) -> RangeProbe {
+    // SAFETY：`kill(-pgid, 0)` 只做存在性/权限检查，不投递信号、不读写任何内存。
+    let rc = unsafe { libc::kill(-pgid, 0) };
+    let errno = if rc == 0 {
+        0
+    } else {
+        io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    };
+    if rc != 0 && errno == libc::ESRCH {
+        // PROBE-A 成立：组内已无任何成员（含僵尸）。
+        return RangeProbe {
+            empty: true,
+            members: Vec::new(),
+            source: "kill0-esrch",
+        };
+    }
+    match scan_range_members(pgid) {
+        Some(members) if members.is_empty() => RangeProbe {
+            empty: true,
+            members: Vec::new(),
+            source: "proc-empty",
+        },
+        Some(members) => RangeProbe {
+            empty: false,
+            members,
+            source: "proc-members",
+        },
+        // PROBE-B 不可用 ⇒ 降级为 PROBE-A only（必须有 `probe=` 证据，不得静默当成空）。
+        None => {
+            let source = match (rc, errno) {
+                (0, _) => "kill0-alive",
+                (_, libc::EPERM) | (_, libc::EACCES) => "kill0-eperm",
+                _ => "unavailable",
+            };
+            RangeProbe {
+                empty: false,
+                members: Vec::new(),
+                source,
+            }
+        }
+    }
+}
+
+/// B206 / C5：start-time 身份栅栏结论。
+#[cfg(not(windows))]
+#[derive(Debug)]
+enum FenceVerdict {
+    /// 身份成立（`reaped = true` 表示组长已由本管理器的 `wait()` 收尸）。
+    Ok { reaped: bool },
+    /// 身份不匹配：**不发任何信号**，按「我方范围已消失」处理。
+    Stale { recorded: u64, observed: Option<u64> },
+}
+
+/// B206 / C5：发信号与探测**之前**的身份比对（FENCE），防 PID 复用误杀。
+#[cfg(not(windows))]
+fn fence_verdict(pgid: i32, recorded_start: u64, leader_reaped: bool) -> FenceVerdict {
+    match read_start_time(pgid) {
+        Some(observed) if observed == recorded_start => FenceVerdict::Ok { reaped: false },
+        Some(observed) => FenceVerdict::Stale {
+            recorded: recorded_start,
+            observed: Some(observed),
+        },
+        // B206：组长已被本管理器的 `wait()` 收尸 ⇒ `/proc/<pid>` 必然消失。此时「该 pid 是否仍是
+        // 我的进程」已由内核 wait 语义直接证明（同一 pid 在 wait 之前不可被复用），故栅栏通过；
+        // 否则「组长正常 exit 0 + 孙进程仍在组内」这一事故形态将永远拿不到收组权，等于回退 B205。
+        // 残余风险只剩「收尸后 leader pid 被复用成新的组长」：它的代价是 pid 计数器绕回一整圈，
+        // 且只要旧组仍有成员，内核就不会把该 pgroup 号分配给别的组；一旦真的复用，读到的
+        // starttime 必然不同 ⇒ 命中的是上面的 `Stale` 分支（不发信号）。
+        None if leader_reaped => FenceVerdict::Ok { reaped: true },
+        // 组长未被我方收尸却已从 `/proc` 消失：不可能由我方造成 ⇒ 按身份失效处理（安全侧）。
+        None => FenceVerdict::Stale {
+            recorded: recorded_start,
+            observed: None,
+        },
+    }
+}
+
+/// B206：向受管范围（进程组）投递一个信号。只发信号，不探测、不等待。
+#[cfg(not(windows))]
+fn signal_range(pgid: i32, signal: i32) {
+    // SAFETY：`killpg` 只投递信号，不读写任何内存；`pgid` 来自本管理器 spawn 的子进程
+    // （`process_group(0)` 保证 pgid == pid），组已空时返回 ESRCH 且无任何副作用。
+    unsafe {
+        let _ = libc::killpg(pgid, signal);
+    }
+}
+
+/// B206 / LADDER：条件轮询直到范围为空或到达死线，返回**最后一次**探测结论。
+///
+/// 死线已过期（含 `Duration::ZERO` 的「不再等待」语义）时**只探测一次**即返回 ——
+/// 这正是 ZERO 死线要求的行为：信号发出后立刻探测，非空即由调用方转 `Err`。
+#[cfg(not(windows))]
+fn wait_range_empty(pgid: i32, deadline: Instant) -> RangeProbe {
+    loop {
+        let probe = probe_range(pgid);
+        if probe.empty || Instant::now() >= deadline {
+            return probe;
+        }
+        std::thread::sleep(QUIESCE_POLL_INTERVAL);
+    }
+}
+
+/// B206：有界回收直系子进程（**不**持锁等待：每轮单独取锁，绝不阻塞 `poll`）。
+#[cfg(not(windows))]
+fn reap_direct_child(entry: &Arc<ManagedProcess>) {
+    for _ in 0..KILL_REAP_ATTEMPTS {
+        let attempt = {
+            let mut child = entry.child.lock().expect("process child poisoned");
+            child.try_wait()
+        };
+        match attempt {
+            Ok(Some(status)) => {
+                let exit_code = status.code().unwrap_or(-1);
+                *entry.state.lock().expect("process state poisoned") =
+                    ExitState::Exited { exit_code };
+                return;
+            }
+            Ok(None) => std::thread::sleep(KILL_REAP_INTERVAL),
+            Err(_) => return,
+        }
+    }
+}
+
+/// B206 / C1-U：**唯一**终止路径。完成条件 = 「范围已证明为空」。
+///
+/// 五个入口（`kill` / `kill_if_exists` / `cancel` / `kill_after` / `shutdown(_checked)`）全部
+/// 汇聚到这里；PROBE / FENCE / LADDER 只允许出现在本函数内（U2）。
+///
+/// 顺序固定：FENCE（身份）→ PROBE（快路径）→ `SIGTERM` → `term_grace` → `SIGKILL` →
+/// `quiesce_deadline` → 仍未空则 `Err`（fail loud，绝不谎报静止）。
+///
+/// 锁纪律：只在 O(1) 取数与单次 `try_wait` 期间持 `state`/`child`，任何等待都在锁外
+/// （否则 `poll` 会被最长 5s 的死线阻塞）。
+#[cfg(not(windows))]
+fn terminate_range_path(
+    limits: &TerminationLimits,
+    handle: &str,
+    entry: &Arc<ManagedProcess>,
+    ownership: RangeOwnership,
+) -> Result<(), String> {
+    // ① 组长身份与当前状态：锁内只做 O(1) 取数 + 一次非阻塞 `try_wait`，随后立即释放两把锁。
+    let (pgid, leader_reaped) = {
+        let mut state = entry.state.lock().expect("process state poisoned");
+        let mut child = entry.child.lock().expect("process child poisoned");
+        if matches!(*state, ExitState::Running) {
+            if let Ok(Some(status)) = child.try_wait() {
+                *state = ExitState::Exited {
+                    exit_code: status.code().unwrap_or(-1),
+                };
+            }
+        }
+        // B206：`Child::id()` 是 spawn 时缓存的 pid，即使子进程已被 `wait()` 回收仍然有效 ——
+        // 这是「组长已退出仍能取到 pgid 收组」的前提（B205 成果不回退的依据）。
+        (child.id() as i32, matches!(*state, ExitState::Exited { .. }))
+    };
+
+    // ② FENCE：先于任何信号、先于任何探测（C5）。
+    match fence_verdict(pgid, entry.start_time_jiffies, leader_reaped) {
+        FenceVerdict::Stale { recorded, observed } => {
+            let observed = observed
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "ENOENT".to_string());
+            tracing::warn!(
+                target: "pony_core",
+                code = "B206-fence-stale",
+                pgid,
+                handle,
+                recorded_start = recorded,
+                observed_start = %observed,
+                "B206: fence-stale pgid={pgid} handle={handle} recorded_start={recorded} observed_start={observed} — 身份不匹配，未发送任何信号，视为范围已消失"
+            );
+            // 不发信号；「我方范围的消失」已由身份判据证明 ⇒ 允许调用方移除条目。
+            return Ok(());
+        }
+        FenceVerdict::Ok { reaped: true } => {
+            tracing::debug!(
+                target: "pony_core",
+                code = "B206-fence-reaped",
+                pgid,
+                handle,
+                "B206: fence=reaped —— 组长已由本管理器的 wait() 收尸，身份由内核 wait 语义证明"
+            );
+        }
+        FenceVerdict::Ok { reaped: false } => {}
+    }
+
+    // ③ 快路径：组长退出时组可能已经空了 —— 先看一眼，不为空则继续走阶梯。
+    // B207：该快路径与最终探测都是 **pgid 语义**（PROBE-A/B），只在 `Pid` owner 下有效；
+    // `SystemdScope` 的“空”必须由 cgroup 侧证明，故整段跳过、交给 owner 判定（不混口径）。
+    let is_pid_owner = matches!(ownership, RangeOwnership::Pid);
+    if is_pid_owner {
+        let initial = probe_range(pgid);
+        if initial.empty {
+            let _ = reap_direct_child(entry);
+            drop(entry.stdin.lock().expect("process stdin poisoned").take());
+            tracing::debug!(
+                target: "pony_core",
+                code = "B206-range-quiescent",
+                pgid,
+                handle,
+                probe = initial.source,
+                "B206: 范围在发出任何信号前已证明为空"
+            );
+            return Ok(());
+        }
+    }
+
+    // ④ LADDER：首枪必须是 SIGTERM（C2 rung-1）。
+    // B207：投递与静默判定统一经 `RangeOwner` 分派 —— `PidRangeOwner` 直接复用上面的
+    // B206 原语（单一口径，不复制第二份逻辑）；`SystemdScopeOwner` 走 cgroup 语义。
+    #[cfg(not(windows))]
+    let scope_unit = entry.scope_unit.as_deref();
+    let owner = process_range::owner_for(ownership, pgid, scope_unit);
+    let first_signal_at = Instant::now();
+    let mut ladder: Vec<&'static str> = Vec::with_capacity(2);
+    owner.signal(libc::SIGTERM);
+    ladder.push("TERM");
+    let mut probe = probe_via_owner(owner.as_ref(), first_signal_at + limits.term_grace);
+    if !probe.empty {
+        owner.signal(libc::SIGKILL);
+        ladder.push("KILL");
+        probe = probe_via_owner(owner.as_ref(), first_signal_at + limits.quiesce_deadline);
+    }
+
+    // ⑤ 回收直系子进程（有界、锁外），再做最后一次探测作为完成证据。
+    reap_direct_child(entry);
+    drop(entry.stdin.lock().expect("process stdin poisoned").take());
+    // B207：非 Pid owner 的最终证据必须来自 owner（pgid 探针对逃逸者无权威性）。
+    let final_probe = if is_pid_owner {
+        probe_range(pgid)
+    } else {
+        probe_via_owner(owner.as_ref(), Instant::now())
+    };
+    let elapsed_ms = first_signal_at.elapsed().as_millis();
+    let ladder_text = format!("[{}]", ladder.join(","));
+    if final_probe.empty {
+        if !is_pid_owner {
+            owner.cleanup();
+        }
+        tracing::info!(
+            target: "pony_core",
+            code = "B206-range-quiescent",
+            pgid,
+            handle,
+            probe = final_probe.source,
+            ladder = %ladder_text,
+            elapsed_ms,
+            "B206: 范围已证明为空（完成条件是「空」，不是「信号已发送」）"
+        );
+        return Ok(());
+    }
+    let members = if final_probe.members.is_empty() {
+        probe.members
+    } else {
+        final_probe.members
+    };
+    // B207：非 Pid owner 把 cgroup 成员数一并回显（拿不到 = `None`，绝不补 0 假装可查）。
+    let tasks_note = if is_pid_owner {
+        String::new()
+    } else {
+        format!(" tasks={:?}", owner.inspect_task_count())
+    };
+    let outcome = Err(format!(
+        "B206: range-not-quiescent pgid={pgid} handle={handle} members={members:?} ladder={ladder_text} elapsed_ms={elapsed_ms} deadline_ms={} probe={}{tasks_note} fence=ok — 信号阶梯已耗尽但范围仍未证明为空，绝不谎报静止",
+        limits.quiesce_deadline.as_millis(),
+        final_probe.source,
+    ));
+    if !is_pid_owner {
+        owner.cleanup();
+    }
+    outcome
+}
+
+/// B207：把 owner 的 [`RangeQuiescence`] 映射回 B206 的 `RangeProbe` 口径（**单一证据格式**）；
+/// `Unavailable` ⇒ `empty = false`（阶梯耗尽后由调用方转 `Err`，契约 §6.2 保守路径）。
+#[cfg(not(windows))]
+fn probe_via_owner(owner: &dyn RangeOwner, deadline: Instant) -> RangeProbe {
+    let (empty, members, source) = match owner.wait_quiescent(deadline) {
+        RangeQuiescence::Empty { source } => (true, Vec::new(), source),
+        RangeQuiescence::NotEmpty { members, source } => (false, members, source),
+        RangeQuiescence::Unavailable { source } => (false, Vec::new(), source),
+    };
+    RangeProbe { empty, members, source }
+}
+
+/// Minimal environment a sandboxed child is allowed to inherit even after `env_clear()`, so it can
+/// still spawn commands / resolve system paths without leaking provider keys, session secrets, or
+/// ambient proxy vars (design Decision 7, phase-4..7 review P1-3).
+const ESSENTIAL_ENV_VARS: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "ComSpec",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOME",
+    "LANG",
+    "TZ",
+];
+
+/// Bounded output buffer with truncation evidence.
+///
+/// Drain threads push bytes here; `poll` drains it. When the buffer exceeds its cap the oldest
+/// bytes are dropped and the stream is permanently marked truncated, with a cumulative
+/// dropped-bytes counter for observability. Memory stays bounded by `cap` at all times.
+#[derive(Debug)]
+struct BoundedBuffer {
+    cap: usize,
+    data: Vec<u8>,
+    dropped: u64,
+    truncated: bool,
+}
+
+impl BoundedBuffer {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            data: Vec::with_capacity(cap.min(8192)),
+            dropped: 0,
+            truncated: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.data.extend_from_slice(bytes);
+        if self.data.len() > self.cap {
+            let excess = self.data.len() - self.cap;
+            self.data.drain(..excess);
+            self.dropped += excess as u64;
+            self.truncated = true;
+        }
+    }
+
+    /// Take the accumulated bytes (decoded to UTF-8 text) and clear the buffer. The
+    /// truncated flag and dropped-bytes counter are cumulative over the process lifetime.
+    fn drain(&mut self) -> (String, bool, u64) {
+        let text = decode_process_output(&self.data);
+        self.data.clear();
+        (text, self.truncated, self.dropped)
+    }
+
+    fn dropped_bytes(&self) -> u64 {
+        self.dropped
+    }
+}
+
+/// 解码子进程输出字节为 UTF-8 文本。
+/// - 优先严格 UTF-8：现代工具与批处理链路（`chcp 65001` + 可见控制台）输出 UTF-8，
+///   此分支逐字节直通，对现有行为零改动。
+/// - Windows 无控制台（`CREATE_NO_WINDOW`）下，控制台程序（PowerShell 5.1、cmd 等）的
+///   中文输出会退化为系统 ANSI/OEM 代码页（如 zh-CN 的 GBK）；UTF-8 校验失败时按代码页
+///   转码，避免出现 U+FFFD 乱码——保证"隐藏弹窗"修复不引入中文输出回归。
+pub fn decode_process_output(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(valid) => valid.to_string(),
+        Err(_) => {
+            #[cfg(windows)]
+            {
+                transcode_from_windows_code_page(bytes)
+                    .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
+            }
+            #[cfg(not(windows))]
+            {
+                String::from_utf8_lossy(bytes).into_owned()
+            }
+        }
+    }
+}
+
+/// Windows: 按系统 ANSI 代码页（zh-CN 为 GBK）转码，失败时再试 OEM 代码页。两个代码页
+/// 均转码失败返回 `None`（调用方回退 lossy UTF-8）。
+#[cfg(windows)]
+fn transcode_from_windows_code_page(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{
+        MultiByteToWideChar, CP_ACP, CP_OEMCP, MB_ERR_INVALID_CHARS,
+    };
+    for code_page in [CP_ACP, CP_OEMCP] {
+        // SAFETY: 输入/输出缓冲区均有效且大小由 Windows 先导调用确定；MB_ERR_INVALID_CHARS
+        // 使非法序列返回 0 而非静默替换，循环随之结束，不会越界写。windows-sys 0.61 中
+        // PCSTR 为 *const u8，bytes.as_ptr() 原生匹配，无需（也不可）转 i8。
+        let wide_len = unsafe {
+            MultiByteToWideChar(
+                code_page,
+                MB_ERR_INVALID_CHARS,
+                bytes.as_ptr(),
+                bytes.len() as i32,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if wide_len <= 0 {
+            continue;
+        }
+        let mut wide = vec![0u16; wide_len as usize];
+        let written = unsafe {
+            MultiByteToWideChar(
+                code_page,
+                MB_ERR_INVALID_CHARS,
+                bytes.as_ptr(),
+                bytes.len() as i32,
+                wide.as_mut_ptr(),
+                wide_len,
+            )
+        };
+        if written <= 0 {
+            continue;
+        }
+        wide.truncate(written as usize);
+        return Some(String::from_utf16_lossy(&wide));
+    }
+    None
+}
+
+/// Reads a child stream until EOF and feeds a bounded buffer. Runs on its own thread so a child
+/// that floods a pipe is never blocked; when the pipe closes the `done` flag is set so `poll`
+/// knows the final output has been drained.
+fn drain_pipe<R: Read>(mut reader: R, buffer: Arc<Mutex<BoundedBuffer>>, done: Arc<AtomicBool>) {
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break, // EOF
+            Ok(n) => buffer
+                .lock()
+                .expect("drain buffer poisoned")
+                .push(&chunk[..n]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break, // pipe closed/broken: nothing more will arrive
+        }
+    }
+    done.store(true, Ordering::Release);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitState {
+    Running,
+    Exited { exit_code: i32 },
+}
+
+struct ManagedProcess {
+    session_id: String,
+    description: String,
+    /// 契约 v4 / B005：`kill_after` 安全网的一次性撤防开关。Run 到期被 promote 成后台 job 后
+    /// 置 `true`，定时器线程醒来先查此标志，已撤防则不再 kill（进程交 job 生命周期管辖）。
+    kill_after_disarmed: AtomicBool,
+    /// 契约 v6 / CT-P7a：本次退出是否由 `kill_after` 安全网造成。Run 的 poll 循环据此把
+    /// 「被安全网 SIGKILL」与「自然退出」区分开，避免把真超时误报成 `non_zero_exit(-1)`。
+    kill_after_fired: AtomicBool,
+    /// B206 / C5：spawn 时记录的组长 start-time（`/proc/<pid>/stat` 字段 22），用于终止前的
+    /// 身份栅栏（防 PID 复用误杀）。读不到即 spawn 失败，不允许「记不住就跳过栅栏」。
+    #[cfg(not(windows))]
+    start_time_jiffies: u64,
+    /// B207b：该进程所属的 systemd scope unit 名（只有 `RangeOwnership::SystemdScope` 才有；
+    /// `Pid` 路径恒 `None`）。终止期据此构造 `SystemdScopeOwner`，按 cgroup 整组投递/判静默。
+    #[cfg(not(windows))]
+    scope_unit: Option<String>,
+    child: Mutex<Child>,
+    state: Mutex<ExitState>,
+    stdin: Mutex<Option<ChildStdin>>,
+    stdout: Arc<Mutex<BoundedBuffer>>,
+    stderr: Arc<Mutex<BoundedBuffer>>,
+    stdout_done: Arc<AtomicBool>,
+    stderr_done: Arc<AtomicBool>,
+    #[cfg(windows)]
+    job: Job,
+}
+
+#[cfg(unix)]
+impl Drop for ManagedProcess {
+    fn drop(&mut self) {
+        if let Ok(child) = self.child.lock() {
+            unregister_active_child_pid(child.id());
+        }
+    }
+}
+
+struct Inner {
+    processes: Mutex<BTreeMap<String, Arc<ManagedProcess>>>,
+    seq: AtomicU64,
+    stdout_cap: usize,
+    stderr_cap: usize,
+    /// B206：终止限额（默认 250ms / 5s）。生产不得改小；测试注入只在构造期生效。
+    #[cfg_attr(windows, allow(dead_code))]
+    limits: TerminationLimits,
+    /// B207：托管范围 owner。默认 [`RangeOwnership::Pid`]（= B206 语义，零行为变更）；
+    /// [`RangeOwnership::SystemdScope`] 必须显式 opt-in（见 `with_range_ownership`）。
+    #[cfg_attr(windows, allow(dead_code))]
+    range_ownership: RangeOwnership,
+    #[cfg(all(windows, test))]
+    job_failure: Mutex<Option<windows_job::FailureInjection>>,
+    #[cfg(all(windows, test))]
+    child_observers: Mutex<BTreeMap<u32, OwnedHandle>>,
+    #[cfg(all(windows, test))]
+    wait_before_assign: AtomicBool,
+    #[cfg(all(windows, test))]
+    missing_pipe: Mutex<Option<&'static str>>,
+}
+
+/// Session-scoped `ProcessBackend` implementation. Clones share the same process table via an
+/// `Arc`, and the type is `Send + Sync` so the runtime can hold it behind an `Arc<dyn
+/// ProcessBackend>`.
+#[derive(Clone)]
+pub struct ProcessManager {
+    inner: Arc<Inner>,
+}
+
+/// `start` 的可选 cwd 校验：必须指向一个已存在目录（端口不做 workspace 边界判定）。
+fn require_existing_dir(cwd: &str) -> Result<&std::path::Path, String> {
+    let path = std::path::Path::new(cwd);
+    if path.is_dir() {
+        Ok(path)
+    } else {
+        Err(format!("cwd `{cwd}` is not an existing directory"))
+    }
+}
+
+/// Design Decision 7：沙箱子进程的最小环境（`env_clear` + 必需变量 + 显式 allowlist）。
+///
+/// 隔离子进程不得继承 provider key、会话密钥或宿主代理变量；空 allowlist 仍然隔离
+/// （只保留 `ESSENTIAL_ENV_VARS`）。从 `start_inner` 抽出以控制该函数规模（行为逐字不变）。
+fn apply_sandbox_environment(command: &mut Command, sandbox: &SandboxRequest) {
+    if !sandbox.isolate_environment {
+        return;
+    }
+    command.env_clear();
+    for key in ESSENTIAL_ENV_VARS {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+    for entry in &sandbox.environment_allowlist {
+        if let Some((key, value)) = entry.split_once('=') {
+            command.env(key, value);
+        } else if let Ok(value) = std::env::var(entry) {
+            command.env(entry, value);
+        }
+    }
+}
+
+/// B207b：按 owner 类型构造 spawn 用的 [`Command`]，并返回「是否应处于 systemd scope 中」。
+///
+/// - [`RangeOwnership::Pid`]（默认）⇒ `Command::new(program).args(args)`：与 B207 之前**逐字相同**，
+///   零行为变更（B205/B206 的 12 条冻结测试全部走这条分支）。
+/// - [`RangeOwnership::SystemdScope`] ⇒ `systemd-run --user --scope --quiet --collect
+///   --expand-environment=no -- <program> <args…>`：目标进程成为临时 scope 的成员，
+///   cgroup 成员资格在组长退出后依然存在（这是 pgid 拿不到的保证）。
+///
+/// **不回退重放**：`systemd-run` 启动失败时由调用方的 `.spawn()` 直接冒泡成 spawn `Err`，
+/// 绝不静默改用 `Pid` 重跑 —— 无法证明目标没执行过，重放可能重复副作用（DSH 硬规矩）。
+fn spawn_command(ownership: RangeOwnership, request: &ProcessStartRequest) -> (Command, bool) {
+    match ownership {
+        RangeOwnership::SystemdScope => {
+            let mut command = Command::new(process_range::systemd_run_bin());
+            let argv = process_range::scope_wrapped_argv(&request.program, &request.arguments);
+            command.args(&argv);
+            (command, true)
+        }
+        RangeOwnership::Pid => {
+            let mut command = Command::new(&request.program);
+            command.args(&request.arguments);
+            (command, false)
+        }
+    }
+}
+
+/// B207b / Design Decision 7：装配待 spawn 的命令（scope 包装 + 管道 + cwd + 平台隔离 +
+/// 沙箱最小环境），返回 `(command, wants_scope)`。
+///
+/// 从 `ProcessManager::start_inner` 抽出：装配细节与「spawn 之后如何纳管」是两件事，
+/// 且 `start_inner` 已触函数规模基线（`npm run size:check`）。
+///
+/// **不回退重放**：`systemd-run` 启动失败时由调用方的 `.spawn()` 直接冒泡，绝不静默改用
+/// `Pid` 重跑（见 [`spawn_command`]）。
+fn configured_command(
+    ownership: RangeOwnership,
+    request: &ProcessStartRequest,
+) -> Result<(Command, bool), String> {
+    // B207b：**只有**显式 opt-in `SystemdScope` 才把目标进程包进 `systemd-run --user --scope …`
+    // （cgroup 成员资格在组长退出后依然存在，pgid 可被复用而 cgroup 不会）。
+    // 默认 `Pid` 走第一条分支 ⇒ 零行为变更。`wants_scope` 只在 unix 分支被消费（Windows 走
+    // Job Object）；两条路径都要编译过。
+    #[cfg_attr(windows, allow(unused_variables))]
+    let (mut command, wants_scope) = spawn_command(ownership, request);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // B175 ADVISORY①：可选子进程工作目录（`None` = 既有行为不变）。
+    if let Some(cwd) = request
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        command.current_dir(require_existing_dir(cwd)?);
+    }
+    // Windows 弹窗修复：控制台子进程（cmd/powershell）不得弹出可见控制台窗口。
+    #[cfg(windows)]
+    hide_console_window(&mut command);
+    // B009：POSIX 上让子进程自成进程组长（pgid == pid）。否则 `terminate` 只能杀直接子进程，
+    // shell 被杀后它派生的孙进程（`sleep 5` 之类）会变孤儿（PPID=1）继续跑。
+    // Windows 侧维持 Job Object（kill-on-close）语义，不做改动。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    // P2-1：以 CREATE_SUSPENDED 创建子进程，使 Job 纳管严格先于子进程执行，收敛
+    // spawn→assign 逃逸窗口。`creation_flags` 是覆盖语义，故此处必须同时带上
+    // CREATE_NO_WINDOW（与上一行等价）；主线程在 assign_and_verify 成功后恢复。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+        );
+    }
+    // Design Decision 7：沙箱子进程只带最小环境（见 `apply_sandbox_environment`）。
+    apply_sandbox_environment(&mut command, &request.sandbox);
+    Ok((command, wants_scope))
+}
+
+impl ProcessManager {
+    /// A manager with the default 64 KiB per-stream output caps.
+    pub fn new() -> Self {
+        Self::with_buffer_caps(DEFAULT_BUFFER_CAP, DEFAULT_BUFFER_CAP)
+    }
+
+    /// A manager with explicit per-stream output caps (useful for truncation tests).
+    pub fn with_buffer_caps(stdout_cap: usize, stderr_cap: usize) -> Self {
+        Self::build(stdout_cap, stderr_cap, TerminationLimits::default())
+    }
+
+    /// B206：带自定义终止限额的构造器（公开可注入，契约 C2 要求）。
+    ///
+    /// 生产路径一律使用 [`TerminationLimits::default`]；测试用它注入确定性的限额
+    /// （例如两个 `Duration::ZERO`：信号发出后不再等待、只探测一次 ⇒ 探测那一刻仍非空即 `Err`）。
+    pub fn with_limits(limits: TerminationLimits) -> Self {
+        Self::build(DEFAULT_BUFFER_CAP, DEFAULT_BUFFER_CAP, limits)
+    }
+
+    /// B207：显式选择托管范围 owner（**opt-in**；默认构造一律 [`RangeOwnership::Pid`]）。
+    ///
+    /// 请求 [`RangeOwnership::SystemdScope`] 时先做**一次性**探测（`OnceLock` 缓存，进程内只探一次）：
+    /// 探测失败 ⇒ 一次 `tracing::warn!`（`code = "B207-range-owner-degraded"`，正文含降级原因原文
+    /// 与「escaped descendants 不再有保证」）并**降级回 `Pid`**。禁止静默降级；既有公开签名、
+    /// `kill` / `kill_if_exists` / `cancel` / `kill_after` / `shutdown(_checked)` 语义均不变。
+    pub fn with_range_ownership(ownership: RangeOwnership) -> Self {
+        let effective = process_range::resolve_range_ownership(ownership);
+        Self::build_with_ownership(
+            DEFAULT_BUFFER_CAP,
+            DEFAULT_BUFFER_CAP,
+            TerminationLimits::default(),
+            effective,
+        )
+    }
+
+    /// B207：读取本实例生效的托管范围 owner（供上层观测/断言；不参与终止语义）。
+    pub fn range_ownership(&self) -> RangeOwnership {
+        self.inner.range_ownership
+    }
+
+    /// B206：读取本实例生效的终止限额（供上层观测/断言，不参与语义）。
+    pub fn termination_limits(&self) -> TerminationLimits {
+        self.inner.limits
+    }
+
+    fn build(stdout_cap: usize, stderr_cap: usize, limits: TerminationLimits) -> Self {
+        Self::build_with_ownership(stdout_cap, stderr_cap, limits, RangeOwnership::Pid)
+    }
+
+    /// B207：唯一的 `Inner` 组装点（`range_ownership` 只在构造期决定，运行期不可变）。
+    fn build_with_ownership(
+        stdout_cap: usize,
+        stderr_cap: usize,
+        limits: TerminationLimits,
+        range_ownership: RangeOwnership,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                processes: Mutex::new(BTreeMap::new()),
+                seq: AtomicU64::new(0),
+                stdout_cap,
+                stderr_cap,
+                limits,
+                range_ownership,
+                #[cfg(all(windows, test))]
+                job_failure: Mutex::new(None),
+                #[cfg(all(windows, test))]
+                child_observers: Mutex::new(BTreeMap::new()),
+                #[cfg(all(windows, test))]
+                wait_before_assign: AtomicBool::new(false),
+                #[cfg(all(windows, test))]
+                missing_pipe: Mutex::new(None),
+            }),
+        }
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn set_job_failure(&self, failure: Option<windows_job::FailureInjection>) {
+        *self.inner.job_failure.lock().unwrap() = failure;
+    }
+
+    /// Terminate a process owned by `session_id` and (if it had already exited) clean its entry
+    /// up. For a running process the entry is retained so the final state remains pollable;
+    /// calling `kill` again after the process has exited removes the entry (idempotent, safe).
+    pub fn kill(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        self.kill_inner(session_id, handle, false)
+    }
+
+    /// Idempotent kill variant: if the process handle has already been cleaned up or does not exist,
+    /// returns Ok(()) instead of returning an `unknown process handle` error.
+    pub fn kill_if_exists(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        self.kill_inner(session_id, handle, true)
+    }
+
+    /// wave-9 P1-1 存活探针（平台无关，禁止 cfg 门控）：该 `(session_id, handle)` 是否仍被本
+    /// 管理器追踪。未知 handle 与跨 session 句柄一律返回 false（fail-closed），供 `run_command`
+    /// 超时清理后的存活判定使用。
+    pub fn is_tracked(&self, session_id: &str, handle: &str) -> bool {
+        self.lookup(session_id, handle).is_ok()
+    }
+
+    fn kill_inner(&self, session_id: &str, handle: &str, idempotent_missing: bool) -> Result<(), String> {
+        let entry = match self.lookup(session_id, handle) {
+            Ok(entry) => entry,
+            Err(e) => {
+                if idempotent_missing && e.contains("unknown process handle") {
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
+        let already_exited = matches!(
+            *entry.state.lock().expect("process state poisoned"),
+            ExitState::Exited { .. }
+        );
+        // B206 / C1-U：无论组长是否已退出，都汇聚到**同一条**终止路径（`terminate`）。
+        // 该路径自己完成 FENCE + LADDER + 「范围为空证明」；这里不得再自带发信号或自带 `Ok`。
+        // 失败一律上抛（fail loud）—— 条目**保留**，以便后续补刀（C3）。
+        self.terminate(handle, &entry)?;
+        if already_exited {
+            // B206 / C3：只有「范围已证明为空」（`terminate` 返回 `Ok`）才移除条目。
+            // 直系子进程已 Exited 但范围非空时绝不能走到这里 —— 那时 `terminate` 已经 `Err`。
+            drop(entry.stdin.lock().expect("process stdin poisoned").take());
+            self.inner
+                .processes
+                .lock()
+                .expect("process map poisoned")
+                .remove(handle);
+        }
+        Ok(())
+    }
+
+    /// Cancellation alias for `kill` (used for session shutdown / run cancellation).
+    pub fn cancel(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        self.kill(session_id, handle)
+    }
+
+    /// Arm a background timer that kills `handle` after `duration`. Used to implement
+    /// timeouts/cancellation for runs that outlive their budget.
+    ///
+    /// 契约 v4 / B005：定时器醒来先查 `kill_after_disarmed`；已撤防（见
+    /// [`ProcessManager::disarm_kill_after`]）则放弃 kill，进程交给后台 job 生命周期管辖。
+    pub fn kill_after(&self, session_id: &str, handle: &str, duration: Duration) {
+        let this = self.clone();
+        let session_id = session_id.to_string();
+        let handle = handle.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(duration);
+            if this.is_kill_after_disarmed(&session_id, &handle) {
+                return;
+            }
+            // 先留证再杀：Run 侧 poll 到 Exited 时据此判定「这是超时被杀，不是自然退出」。
+            this.mark_kill_after_fired(&session_id, &handle);
+            if let Err(error) = this.kill_if_exists(&session_id, &handle) {
+                tracing::error!(target: "pony_core", error = %error, "[process] kill_after cleanup failed for `{handle}`");
+            }
+        });
+    }
+
+    /// 撤防该 handle 的 `kill_after` 安全网（幂等）。未知/已回收的 handle 返回 `Err`，
+    /// 由调用方决定是否回落既有清理路径（Run 的 promote 分支据此 fail-safe）。
+    pub fn disarm_kill_after(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        let entry = self.lookup(session_id, handle)?;
+        entry
+            .kill_after_disarmed
+            .store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// 测试专用：读取受管进程的 pid（用于进程组存活探针，生产代码不依赖 pid）。
+    #[cfg(test)]
+    pub fn pid_of(&self, session_id: &str, handle: &str) -> Result<u32, String> {
+        let entry = self.lookup(session_id, handle)?;
+        let pid = entry.child.lock().expect("process child poisoned").id();
+        Ok(pid)
+    }
+
+    /// 该 handle 的进程是否是被 `kill_after` 安全网终止的（未跟踪/已回收 ⇒ false）。
+    ///
+    /// Run 的 poll 循环用它在「看到 Exited」时区分自然退出与超时击杀：安全网击杀必须仍按
+    /// 超时结果返回，否则 `sleep 5` + 300ms 这类真超时会被误报成 `non_zero_exit(-1)`。
+    pub fn was_killed_by_kill_after(&self, session_id: &str, handle: &str) -> bool {
+        match self.lookup(session_id, handle) {
+            Ok(entry) => entry.kill_after_fired.load(Ordering::SeqCst),
+            Err(_) => false,
+        }
+    }
+
+    /// 定时器线程在真正 kill 之前置位「安全网已开火」。
+    fn mark_kill_after_fired(&self, session_id: &str, handle: &str) {
+        if let Ok(entry) = self.lookup(session_id, handle) {
+            entry.kill_after_fired.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// 定时器线程使用的撤防探针：handle 已消失（进程/条目均回收）时视为无需 kill。
+    fn is_kill_after_disarmed(&self, session_id: &str, handle: &str) -> bool {
+        match self.lookup(session_id, handle) {
+            Ok(entry) => entry.kill_after_disarmed.load(Ordering::SeqCst),
+            Err(_) => true,
+        }
+    }
+
+    /// Terminate and remove every process owned by `session_id`. Returns the number of processes
+    /// shut down. Processes owned by other sessions are untouched.
+    ///
+    /// B206 / S-3（加法式 fail-loud）：签名保持不变，内部委托 [`ProcessManager::shutdown_checked`]。
+    /// **返回值只统计「范围已证明为空」的条目**；未静默条目保留在册并走结构化日志
+    /// `[B206][shutdown-not-quiescent]`（需要失败信号的调用方请改用 `shutdown_checked`）。
+    pub fn shutdown(&self, session_id: &str) -> usize {
+        let (proven, not_quiescent) = self.shutdown_inner(session_id);
+        for failure in &not_quiescent {
+            eprintln!("[B206][shutdown-not-quiescent] {failure}");
+        }
+        proven
+    }
+
+    /// B206 / C1：`shutdown` 的 fail-loud 版本。
+    ///
+    /// 只有**范围已证明为空**的条目计入返回值；任一条目未静默即 `Err`，消息按契约 §5 逐条给出
+    /// （含 `handle` / `pgid` / 仍存活 `members` / 已用信号 `ladder`），多条以 `; ` 分隔。
+    pub fn shutdown_checked(&self, session_id: &str) -> Result<usize, String> {
+        let (proven, not_quiescent) = self.shutdown_inner(session_id);
+        if not_quiescent.is_empty() {
+            Ok(proven)
+        } else {
+            Err(not_quiescent.join("; "))
+        }
+    }
+
+    /// B206：`shutdown` 与 `shutdown_checked` 的共用实现 —— 逐条走**唯一**终止路径，
+    /// 只移除（并计数）已证明为空的条目；未静默条目保留以支持后续补刀（C3）。
+    fn shutdown_inner(&self, session_id: &str) -> (usize, Vec<String>) {
+        let entries: Vec<(String, Arc<ManagedProcess>)> = {
+            let map = self.inner.processes.lock().expect("process map poisoned");
+            map.iter()
+                .filter(|(_, entry)| entry.session_id == session_id)
+                .map(|(handle, entry)| (handle.clone(), Arc::clone(entry)))
+                .collect()
+        };
+        let mut proven = 0usize;
+        let mut not_quiescent = Vec::new();
+        for (handle, entry) in entries {
+            match self.terminate(&handle, &entry) {
+                Ok(()) => {
+                    #[cfg(windows)]
+                    entry.job.close();
+                    self.inner
+                        .processes
+                        .lock()
+                        .expect("process map poisoned")
+                        .remove(&handle);
+                    proven += 1;
+                }
+                // B206 / C3：未证明为空 ⇒ **不**移除、**不**计数（绝不谎报静止）。
+                Err(error) => not_quiescent.push(error),
+            }
+        }
+        (proven, not_quiescent)
+    }
+
+    /// Cumulative dropped-bytes evidence per stream `(stdout_dropped, stderr_dropped)` for a
+    /// handle. The `ProcessPollResult` contract carries only the boolean truncation flags; the
+    /// counters are the underlying evidence those flags derive from.
+    pub fn drain_stats(&self, session_id: &str, handle: &str) -> Result<(u64, u64), String> {
+        let entry = self.lookup(session_id, handle)?;
+        let stdout_dropped = entry
+            .stdout
+            .lock()
+            .expect("stdout buffer poisoned")
+            .dropped_bytes();
+        let stderr_dropped = entry
+            .stderr
+            .lock()
+            .expect("stderr buffer poisoned")
+            .dropped_bytes();
+        Ok((stdout_dropped, stderr_dropped))
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn query_job_limits(&self, session_id: &str, handle: &str) -> Result<u32, String> {
+        let entry = self.lookup(session_id, handle)?;
+        entry.job.query_limit_flags()
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn is_child_in_job(&self, session_id: &str, handle: &str) -> Result<bool, String> {
+        let entry = self.lookup(session_id, handle)?;
+        let raw = entry.child.lock().unwrap().as_raw_handle();
+        entry.job.is_process_in_job(raw)
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn set_job_failure_for_handle(
+        &self,
+        session_id: &str,
+        handle: &str,
+        failure: windows_job::FailureInjection,
+    ) -> Result<(), String> {
+        let entry = self.lookup(session_id, handle)?;
+        entry.job.set_failure(failure);
+        Ok(())
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn set_wait_before_assign(&self, enabled: bool) {
+        self.inner
+            .wait_before_assign
+            .store(enabled, Ordering::Release);
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn set_missing_pipe(&self, pipe: Option<&'static str>) {
+        *self.inner.missing_pipe.lock().unwrap() = pipe;
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn failed_start_observer_pids(&self) -> Vec<u32> {
+        self.inner
+            .child_observers
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn observer_waits_for_exit(
+        &self,
+        pid: u32,
+        timeout_ms: u32,
+    ) -> Result<bool, String> {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        let observers = self.inner.child_observers.lock().unwrap();
+        let handle = observers
+            .get(&pid)
+            .ok_or_else(|| format!("no child observer for pid {pid}"))?;
+        let result = unsafe { WaitForSingleObject(handle.as_raw_handle(), timeout_ms) };
+        Ok(result == WAIT_OBJECT_0)
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn remove_child_observer(&self, pid: u32) {
+        self.inner.child_observers.lock().unwrap().remove(&pid);
+    }
+
+    #[cfg(all(windows, test))]
+    pub fn query_job_handle_flags(
+        &self,
+        session_id: &str,
+        handle: &str,
+    ) -> Result<u32, String> {
+        let entry = self.lookup(session_id, handle)?;
+        entry.job.handle_flags()
+    }
+
+    #[cfg(test)]
+    pub fn tracked_count(&self) -> usize {
+        self.inner.processes.lock().unwrap().len()
+    }
+
+    // ── internals ─────────────────────────────────────────────────────────────────────────────
+
+    fn start_inner(&self, request: &ProcessStartRequest) -> Result<String, String> {
+        ensure_program_present(request)?;
+        // B207b：spawn 侧接线（scope 包装 + 管道 / cwd / 平台隔离 / 沙箱环境）收在
+        // `configured_command` 一处：装配细节与「spawn 之后如何纳管」是两件事。
+        // `wants_scope` 只在 unix 分支被消费（Windows 走 Job Object），非 Windows 构建必须显式 allow
+        // —— 发版构建带 `RUSTFLAGS=-D warnings`，缺这行会让 Windows 打包在 deny-warnings 上失败。
+        #[cfg_attr(windows, allow(unused_variables))]
+        let (mut command, wants_scope) = configured_command(self.inner.range_ownership, request)?;
+        #[cfg(windows)]
+        let job = {
+            #[cfg(test)]
+            let failure = *self.inner.job_failure.lock().unwrap();
+            #[cfg(test)]
+            let res = Job::create(failure);
+            #[cfg(not(test))]
+            let res = Job::create();
+            res.map_err(|error| format!("failed to initialize job object: {error}"))?
+        };
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("spawn failed for `{}`: {error}", request.program))?;
+
+        #[cfg(all(windows, test))]
+        {
+            use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            let mut duplicated = std::ptr::null_mut();
+            let current = unsafe { GetCurrentProcess() };
+            if unsafe {
+                DuplicateHandle(
+                    current,
+                    child.as_raw_handle(),
+                    current,
+                    &mut duplicated,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
+            {
+                let error = io::Error::last_os_error();
+                let cleanup = kill_and_reap(&mut child, "observer duplicate failure cleanup");
+                job.close();
+                return Err(format!(
+                    "DuplicateHandle child observer failed: {error}; cleanup={cleanup:?}"
+                ));
+            }
+            // SAFETY: DuplicateHandle returned a new exclusively owned process handle.
+            let observer = unsafe { OwnedHandle::from_raw_handle(duplicated) };
+            self.inner
+                .child_observers
+                .lock()
+                .unwrap()
+                .insert(child.id(), observer);
+            if self.inner.wait_before_assign.load(Ordering::Acquire) {
+                // P2-1 测试钩子：该钩子刻意复现「子进程在纳管前自然退出」的旧窗口，因此必须
+                // 先恢复 CREATE_SUSPENDED 的子进程，否则它永远不会退出（钩子本身即模拟逃逸窗口）。
+                if let Err(error) = resume_process(child.as_raw_handle()) {
+                    let cleanup = kill_and_reap(&mut child, "wait-before-assign resume cleanup");
+                    job.close();
+                    return Err(format!(
+                        "wait-before-assign resume failed: {error}; cleanup={cleanup:?}"
+                    ));
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(KILL_REAP_INTERVAL)
+                        }
+                        result => {
+                            let cleanup = kill_and_reap(&mut child, "wait-before-assign cleanup");
+                            job.close();
+                            return Err(format!(
+                                "wait-before-assign failed: {result:?}; cleanup={cleanup:?}"
+                            ));
+                        }
+                    }
+                }
+                // Injection occurs only after a native wait has proved that this exact child exited.
+                job.set_failure(windows_job::FailureInjection {
+                    assign: true,
+                    ..Default::default()
+                });
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            let raw_handle = child.as_raw_handle();
+            if let Err(error) = job.assign_and_verify(raw_handle) {
+                return Err(failed_start_cleanup(
+                    &mut child,
+                    &job,
+                    format!("job assignment failed for `{}`: {error}", request.program),
+                ));
+            }
+            // P2-1：纳管成功后才恢复主线程。恢复失败必须 fail-closed —— 绝不允许子进程
+            // 停留在 suspended 状态（否则调用方会拿到一个永不推进的句柄）。
+            if let Err(error) = resume_process(raw_handle) {
+                return Err(failed_start_cleanup(
+                    &mut child,
+                    &job,
+                    format!(
+                        "failed to resume suspended child for `{}`: {error}",
+                        request.program
+                    ),
+                ));
+            }
+        }
+
+        // Move the pipe endpoints into drain threads. The child itself stays in the manager so
+        // `poll` can reap and `kill` can terminate it.
+        #[cfg(all(windows, test))]
+        if *self.inner.missing_pipe.lock().unwrap() == Some("stdout") {
+            let _ = child.stdout.take();
+        }
+        let stdout_pipe = match child.stdout.take() {
+            Some(pipe) => pipe,
+            None => {
+                #[cfg(windows)]
+                let job_error = {
+                    let terminate = job.terminate(1).err();
+                    let reap = kill_and_reap(
+                        &mut child,
+                        "failed to clean up child after stdout pipe failure",
+                    )
+                    .err();
+                    job.close();
+                    let mut errors = Vec::new();
+                    if let Some(error) = terminate {
+                        errors.push(format!("Job termination: {error}"));
+                    }
+                    if let Some(error) = reap {
+                        errors.push(format!("child cleanup: {error}"));
+                    }
+                    (!errors.is_empty()).then(|| errors.join("; "))
+                };
+                #[cfg(not(windows))]
+                let job_error: Option<String> = None;
+                return Err(match job_error {
+                    Some(cleanup) => format!("stdout pipe unavailable; cleanup failed: {cleanup}"),
+                    None => "stdout pipe unavailable".to_string(),
+                });
+            }
+        };
+        #[cfg(all(windows, test))]
+        if *self.inner.missing_pipe.lock().unwrap() == Some("stderr") {
+            let _ = child.stderr.take();
+        }
+        let stderr_pipe = match child.stderr.take() {
+            Some(pipe) => pipe,
+            None => {
+                #[cfg(windows)]
+                let job_error = {
+                    let terminate = job.terminate(1).err();
+                    let reap = kill_and_reap(
+                        &mut child,
+                        "failed to clean up child after stderr pipe failure",
+                    )
+                    .err();
+                    job.close();
+                    let mut errors = Vec::new();
+                    if let Some(error) = terminate {
+                        errors.push(format!("Job termination: {error}"));
+                    }
+                    if let Some(error) = reap {
+                        errors.push(format!("child cleanup: {error}"));
+                    }
+                    (!errors.is_empty()).then(|| errors.join("; "))
+                };
+                #[cfg(not(windows))]
+                let job_error: Option<String> = None;
+                return Err(match job_error {
+                    Some(cleanup) => format!("stderr pipe unavailable; cleanup failed: {cleanup}"),
+                    None => "stderr pipe unavailable".to_string(),
+                });
+            }
+        };
+        let stdin_pipe = child.stdin.take();
+
+        // B206 / C5：spawn 后**立刻**记录组长 start-time，作为终止前的身份栅栏依据。
+        // 读不到 ⇒ fail closed（返回 Err），且先把已 spawn 的子进程收掉，绝不泄漏。
+        #[cfg(not(windows))]
+        let start_time_jiffies = match read_start_time(child.id() as i32) {
+            Some(value) => value,
+            None => {
+                signal_range(child.id() as i32, libc::SIGKILL);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "B206: failed to record start-time identity for `{}` (pid {}); spawn rejected (fail closed)",
+                    request.program,
+                    child.id()
+                ));
+            }
+        };
+
+        let stdout = Arc::new(Mutex::new(BoundedBuffer::new(self.inner.stdout_cap)));
+        let stderr = Arc::new(Mutex::new(BoundedBuffer::new(self.inner.stderr_cap)));
+        let stdout_done = Arc::new(AtomicBool::new(false));
+        let stderr_done = Arc::new(AtomicBool::new(false));
+
+        {
+            let buffer = Arc::clone(&stdout);
+            let done = Arc::clone(&stdout_done);
+            std::thread::spawn(move || drain_pipe(stdout_pipe, buffer, done));
+        }
+        {
+            let buffer = Arc::clone(&stderr);
+            let done = Arc::clone(&stderr_done);
+            std::thread::spawn(move || drain_pipe(stderr_pipe, buffer, done));
+        }
+
+        // B207b：`systemd-run` 的 argv 里**没有** `--unit`（契约要求 argv 逐字透传），
+        // 因此 unit 名由 systemd 生成，必须从 `/proc/<pid>/cgroup` 事后解析。
+        // 解析不到 ⇒ 立刻收掉子进程并返回 spawn `Err`：**禁止**静默改用 `Pid` 重跑
+        // （无法证明目标没执行过，重放可能重复副作用），也禁止记一个假 unit 名去骗终止期。
+        #[cfg(not(windows))]
+        let scope_unit = if wants_scope {
+            match std::fs::read_to_string(format!("/proc/{}/cgroup", child.id()))
+                .ok()
+                .and_then(|contents| process_range::parse_scope_unit_from_cgroup(&contents))
+            {
+                Some(unit) => Some(unit),
+                None => {
+                    signal_range(child.id() as i32, libc::SIGKILL);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "B207: systemd-run spawn 成功但无法从 /proc/{}/cgroup 解析 scope unit 名；已收掉子进程并拒绝交付（禁止回退 Pid 重放，fail loud）",
+                        child.id()
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+        #[cfg(all(windows, test))]
+        let child_pid = child.id();
+        #[cfg(unix)]
+        register_active_child_pid(child.id());
+        let handle = self.next_handle(child.id());
+        let entry = Arc::new(ManagedProcess {
+            session_id: request.session_id.clone(),
+            description: describe_command(&request.program, &request.arguments),
+            kill_after_disarmed: AtomicBool::new(false),
+            kill_after_fired: AtomicBool::new(false),
+            #[cfg(not(windows))]
+            start_time_jiffies,
+            #[cfg(not(windows))]
+            scope_unit,
+            child: Mutex::new(child),
+            state: Mutex::new(ExitState::Running),
+            stdin: Mutex::new(stdin_pipe),
+            stdout,
+            stderr,
+            stdout_done,
+            stderr_done,
+            #[cfg(windows)]
+            job,
+        });
+        self.inner
+            .processes
+            .lock()
+            .expect("process map poisoned")
+            .insert(handle.clone(), entry);
+        #[cfg(all(windows, test))]
+        self.inner
+            .child_observers
+            .lock()
+            .unwrap()
+            .remove(&child_pid);
+        Ok(handle)
+    }
+
+    fn poll_inner(&self, session_id: &str, handle: &str) -> Result<ProcessPollResult, String> {
+        let entry = self.lookup(session_id, handle)?;
+        let mut state = entry.state.lock().expect("process state poisoned");
+        if matches!(*state, ExitState::Running) {
+            let mut child = entry.child.lock().expect("process child poisoned");
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    #[cfg(unix)]
+                    unregister_active_child_pid(child.id());
+                    *state = ExitState::Exited {
+                        exit_code: status.code().unwrap_or(-1),
+                    };
+                    // Close stdin so a child blocked on input observes EOF after its work is done.
+                    drop(entry.stdin.lock().expect("process stdin poisoned").take());
+                }
+                Ok(None) => {}
+                Err(error) => return Err(format!("poll failed for `{handle}`: {error}")),
+            }
+        }
+        let exited = matches!(*state, ExitState::Exited { .. });
+        let exit_code = match *state {
+            ExitState::Exited { exit_code } => Some(exit_code),
+            ExitState::Running => None,
+        };
+        drop(state);
+
+        if exited {
+            self.wait_for_drain(&entry);
+        }
+
+        let (stdout, stdout_truncated, _stdout_dropped) =
+            entry.stdout.lock().expect("stdout buffer poisoned").drain();
+        let (stderr, stderr_truncated, _stderr_dropped) =
+            entry.stderr.lock().expect("stderr buffer poisoned").drain();
+        Ok(ProcessPollResult {
+            state: if exited {
+                ProcessState::Exited
+            } else {
+                ProcessState::Running
+            },
+            exit_code,
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+        })
+    }
+
+    fn write_stdin_inner(
+        &self,
+        session_id: &str,
+        handle: &str,
+        input: &[u8],
+    ) -> Result<(), String> {
+        let entry = self.lookup(session_id, handle)?;
+        let state = entry.state.lock().expect("process state poisoned");
+        if matches!(*state, ExitState::Exited { .. }) {
+            return Err(format!("process `{handle}` has exited; cannot write stdin"));
+        }
+        drop(state);
+        let mut stdin_guard = entry.stdin.lock().expect("process stdin poisoned");
+        let stdin = stdin_guard
+            .as_mut()
+            .ok_or_else(|| format!("process `{handle}` has no stdin pipe"))?;
+        stdin
+            .write_all(input)
+            .map_err(|error| format!("stdin write failed for `{handle}`: {error}"))
+    }
+
+    /// Close the child's stdin pipe: `take()` drops the `ChildStdin` handle so the child sees
+    /// EOF on stdin. Run never writes stdin; under `CREATE_NO_WINDOW` (no console) a console
+    /// program such as Windows PowerShell 5.1 blocks forever waiting for interactive input on
+    /// that pipe, so Run closes stdin right after spawn to break the wait. Errors when there is
+    /// already no pipe to close; idempotency tolerance is left to the caller.
+    pub fn close_stdin(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        let entry = self.lookup(session_id, handle)?;
+        let mut stdin_guard = entry.stdin.lock().expect("process stdin poisoned");
+        let stdin = stdin_guard.take();
+        if stdin.is_none() {
+            return Err(format!("process `{handle}` has no stdin pipe"));
+        }
+        drop(stdin);
+        Ok(())
+    }
+
+    /// Kill and best-effort reap a process. The entry is retained so a subsequent `poll` can
+    /// report the final `Exited` state; entry removal is handled by `kill` (idempotent cleanup)
+    /// and `shutdown`.
+    ///
+    /// B206 / C6：Windows 语义**不变** —— `TerminateJobObject(1)` 成功 + kill-on-close 兜底即视为
+    /// 「范围为空」的等价判据；POSIX 的 PROBE/FENCE 不得进入本分支。
+    #[cfg(windows)]
+    fn terminate(&self, _handle: &str, entry: &Arc<ManagedProcess>) -> Result<(), String> {
+        #[cfg(windows)]
+        let job_terminate_res = entry.job.terminate(1);
+
+        let mut state = entry.state.lock().expect("process state poisoned");
+        if matches!(*state, ExitState::Exited { .. }) {
+            #[cfg(windows)]
+            if let Err(error) = job_terminate_res {
+                entry.job.close();
+                return Err(error);
+            }
+            // P2-1：成功路径同样释放 Job 句柄，避免句柄滞留到 Arc drop。
+            #[cfg(windows)]
+            entry.job.close();
+            return Ok(());
+        }
+        {
+            let mut child = entry.child.lock().expect("process child poisoned");
+            // B206 / C1-U：POSIX 侧的「收组 + 空证明」已统一到唯一终止路径
+            // （`terminate_range_path`），本函数只服务 Windows，故此处不再保留
+            // 第二份 `killpg` 实现（旧 B009 分支已迁出，语义由 LADDER 覆盖）。
+            #[cfg(windows)]
+            let reap_result = kill_and_reap(&mut child, "failed to terminate managed child");
+            if let Ok(Some(status)) = child.try_wait() {
+                *state = ExitState::Exited {
+                    exit_code: status.code().unwrap_or(-1),
+                };
+            }
+            if let Err(error) = reap_result {
+                drop(entry.stdin.lock().expect("process stdin poisoned").take());
+                #[cfg(windows)]
+                if let Err(job_error) = job_terminate_res {
+                    entry.job.close();
+                    return Err(format!("{error}; job termination failed: {job_error}"));
+                }
+                return Err(error);
+            }
+        }
+        drop(entry.stdin.lock().expect("process stdin poisoned").take());
+        #[cfg(windows)]
+        if let Err(error) = job_terminate_res {
+            entry.job.close();
+            return Err(error);
+        }
+        // P2-1：成功路径同样释放 Job 句柄，避免句柄滞留到 Arc drop。
+        #[cfg(windows)]
+        entry.job.close();
+        Ok(())
+    }
+
+    /// B206 / C1-U：POSIX 侧的**唯一**终止路径 —— 完成条件 = 「范围已证明为空」。
+    ///
+    /// `kill` / `kill_if_exists` / `cancel` / `kill_after` / `shutdown(_checked)` 全部经由
+    /// [`terminate_range_path`]（FENCE + LADDER + PROBE 只在那里出现），因此「kill 严格、
+    /// shutdown 宽松」的双口径在本平台上不存在。
+    #[cfg(not(windows))]
+    fn terminate(&self, handle: &str, entry: &Arc<ManagedProcess>) -> Result<(), String> {
+        terminate_range_path(
+            &self.inner.limits,
+            handle,
+            entry,
+            self.inner.range_ownership,
+        )
+    }
+
+    /// After the child has exited, wait briefly for the drain threads to flush so the final
+    /// output is captured rather than raced over.
+    fn wait_for_drain(&self, entry: &ManagedProcess) {
+        let deadline = Instant::now() + DRAIN_SETTLE_MAX;
+        while Instant::now() < deadline {
+            if entry.stdout_done.load(Ordering::Acquire)
+                && entry.stderr_done.load(Ordering::Acquire)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Resolve a handle under a session. Unknown handles and cross-session handle use fail
+    /// closed.
+    fn lookup(&self, session_id: &str, handle: &str) -> Result<Arc<ManagedProcess>, String> {
+        let entry = self
+            .inner
+            .processes
+            .lock()
+            .expect("process map poisoned")
+            .get(handle)
+            .cloned()
+            .ok_or_else(|| format!("unknown process handle `{handle}`"))?;
+        if entry.session_id != session_id {
+            return Err(format!(
+                "process handle `{handle}` (`{}`) belongs to session `{}`, not `{session_id}`; cross-session handle use is rejected",
+                entry.description, entry.session_id
+            ));
+        }
+        Ok(entry)
+    }
+
+    /// High-entropy opaque handle: wall-clock nanoseconds + child pid + monotonic counter.
+    fn next_handle(&self, child_pid: u32) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0);
+        let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
+        format!("proc-{nanos:016x}-{child_pid:08x}-{seq:06x}")
+    }
+}
+
+impl Drop for Inner {
+    /// B206：最后一个 owner 消失时收组 —— 有界、不 panic、不无限阻塞。
+    ///
+    /// 为什么落在 `Inner` 而不是 `ProcessManager`：`ProcessManager` 是 `Clone`，对它实现 `Drop`
+    /// 会在**每一个克隆**析构时收组，等于随手丢一个克隆就把别的调用方正在用的进程杀掉；
+    /// `Inner` 由 `Arc` 共享，其 `Drop` 恰好等价于「最后一个 owner 消失」这一正确时机。
+    ///
+    /// 收组动作**复用唯一终止路径**（PROBE/FENCE/LADDER 不在此处复制，满足 U2），并且只作用于
+    /// **仍在册**的条目 —— 这正是 C3「不提前 remove」的前置价值。
+    fn drop(&mut self) {
+        #[cfg(not(windows))]
+        let limits = self.limits;
+        #[cfg(not(windows))]
+        let range_ownership = self.range_ownership;
+        // 先取快照，避免在 Drop 内持有进程表锁做任何等待。
+        let entries: Vec<(String, Arc<ManagedProcess>)> = match self.processes.lock() {
+            Ok(map) => map
+                .iter()
+                .map(|(handle, entry)| (handle.clone(), Arc::clone(entry)))
+                .collect(),
+            // 锁被毒化：Drop 不得 panic，也不得假装收组成功（直接放弃表内条目）。
+            Err(_) => return,
+        };
+        // Windows 分支只用 `entry`（Job Object），`handle` 仅非 Windows 的 terminate_range_path 使用。
+        #[cfg_attr(windows, allow(unused_variables))]
+        for (handle, entry) in entries {
+            #[cfg(windows)]
+            {
+                let _ = entry.job.terminate(1);
+                entry.job.close();
+            }
+            #[cfg(not(windows))]
+            {
+                // 有界：最长 `term_grace + quiesce_deadline`，失败只记日志，绝不 panic。
+                if let Err(error) = terminate_range_path(&limits, &handle, &entry, range_ownership) {
+                    tracing::warn!(
+                        target: "pony_core",
+                        code = "B206-drop-not-quiescent",
+                        handle,
+                        error = %error,
+                        "B206: Drop 收组未能证明范围为空（进程已随 owner 消失，残留需外部接管）"
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl Default for ProcessManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProcessBackend for ProcessManager {
+    fn start(&self, request: &ProcessStartRequest) -> Result<String, String> {
+        self.start_inner(request)
+    }
+
+    fn poll(&self, session_id: &str, handle: &str) -> Result<ProcessPollResult, String> {
+        self.poll_inner(session_id, handle)
+    }
+
+    fn write_stdin(&self, session_id: &str, handle: &str, input: &[u8]) -> Result<(), String> {
+        self.write_stdin_inner(session_id, handle, input)
+    }
+
+    fn kill(&self, session_id: &str, handle: &str) -> Result<(), String> {
+        self.kill(session_id, handle)
+    }
+}
+
+fn describe_command(program: &str, arguments: &[String]) -> String {
+    let mut parts = vec![program.to_string()];
+    parts.extend(arguments.iter().cloned());
+    parts.join(" ")
+}
+
+/// 空 `program` 属于调用方 bug（不是上游错误）：在进入 spawn 之前就拒绝，
+/// 避免不同平台对空串 spawn 给出不一致的行为。
+fn ensure_program_present(request: &ProcessStartRequest) -> Result<(), String> {
+    if request.program.trim().is_empty() {
+        return Err("program must not be empty".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool_runtime::SandboxRequest;
+
+    #[test]
+    fn test_kill_if_exists_idempotent_on_missing_handle() {
+        let manager = ProcessManager::new();
+        // 普通 kill 在 handle 不存在时返回错误
+        assert!(manager.kill("session-a", "proc-nonexistent").is_err());
+        // kill_if_exists 在 handle 不存在时幂等安全返回 Ok(())
+        assert!(manager.kill_if_exists("session-a", "proc-nonexistent").is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_tracked_child_pids_lifecycle() {
+        assert!(!is_tracked_child_pid(999999));
+        register_active_child_pid(999999);
+        assert!(is_tracked_child_pid(999999));
+        unregister_active_child_pid(999999);
+        assert!(!is_tracked_child_pid(999999));
+    }
+
+    /// wave-9 task-5：`is_tracked` 存活探针（平台无关）与 `tracked_count` 的物理收据。
+    /// P1-1 的超时清理会无条件二次调用幂等清理，二次调用后条目必须已从 tracked 表移除，
+    /// 这正是 task-7 `run_command_timeout_leaves_no_process_entry` 依赖的不变量。
+    #[test]
+    fn kill_if_exists_removes_tracked_entry_and_is_tracked_fails_closed() {
+        let manager = ProcessManager::new();
+        let session = "session-tracked-count";
+        let (program, arguments) = echo_command();
+        let handle = start(&manager, session, &program, arguments);
+
+        assert_eq!(
+            manager.tracked_count(),
+            1,
+            "start 必须发布恰好一个 tracked 条目"
+        );
+        assert!(manager.is_tracked(session, &handle), "已发布句柄必须被追踪");
+        assert!(
+            !manager.is_tracked("session-other", &handle),
+            "跨 session 句柄必须 fail-closed 返回 false"
+        );
+        assert!(
+            !manager.is_tracked(session, "proc-nonexistent"),
+            "未知 handle 必须 fail-closed 返回 false"
+        );
+
+        manager
+            .kill_if_exists(session, &handle)
+            .expect("first kill_if_exists");
+        // 超时清理的第二次幂等调用：终止并移除条目。
+        manager
+            .kill_if_exists(session, &handle)
+            .expect("second kill_if_exists");
+        assert_eq!(
+            manager.tracked_count(),
+            0,
+            "幂等清理完成后 tracked 表不得残留条目"
+        );
+        assert!(
+            !manager.is_tracked(session, &handle),
+            "已释放句柄不得仍被追踪"
+        );
+    }
+
+    #[test]
+    fn decode_process_output_utf8_passthrough_and_never_panics() {
+        // 严格 UTF-8 直通（现有行为零改动），非法字节不得 panic
+        // （Windows 走系统代码页转码，非 Windows 走 lossy 回退）。
+        assert_eq!(decode_process_output(b"hello"), "hello");
+        assert_eq!(decode_process_output("中文输出".as_bytes()), "中文输出");
+        let _ = decode_process_output(b"\x81\x40\x82\x60");
+        let _ = decode_process_output(b"ascii \xFF\xFE tail");
+    }
+
+    fn sandbox() -> SandboxRequest {
+        SandboxRequest {
+            workspace_root: ".".to_string(),
+            allow_network: false,
+            environment_allowlist: Vec::new(),
+            isolate_environment: false,
+        }
+    }
+
+    fn start(
+        manager: &ProcessManager,
+        session_id: &str,
+        program: &str,
+        arguments: Vec<String>,
+    ) -> String {
+        manager
+            .start(&ProcessStartRequest {
+                session_id: session_id.to_string(),
+                program: program.to_string(),
+                arguments,
+                cwd: None,
+                sandbox: sandbox(),
+            })
+            .expect("start should succeed")
+    }
+
+    #[test]
+    fn sandboxed_child_with_allowlist_does_not_inherit_parent_secrets() {
+        // Parent-side secret that must NOT reach a sandboxed child (design Decision 7,
+        // phase-4..7 review P1-3). `cmd /c set` prints the child's environment.
+        std::env::set_var("PA076_SENTINEL_SECRET", "should-not-leak");
+        let manager = ProcessManager::new();
+        let session = "session-min-env";
+        let (program, arguments) = if cfg!(windows) {
+            ("cmd".to_string(), vec!["/c".to_string(), "set".to_string()])
+        } else {
+            ("sh".to_string(), vec!["-c".to_string(), "env".to_string()])
+        };
+        let handle = manager
+            .start(&ProcessStartRequest {
+                session_id: session.to_string(),
+                program,
+                arguments,
+                cwd: None,
+                sandbox: SandboxRequest {
+                    workspace_root: ".".to_string(),
+                    allow_network: false,
+                    environment_allowlist: vec!["PA076_ALLOWED=allowlist-value".to_string()],
+                    isolate_environment: true,
+                },
+            })
+            .expect("start");
+        let stdout = poll_until_exited(&manager, session, &handle).stdout;
+        std::env::remove_var("PA076_SENTINEL_SECRET");
+        assert!(
+            stdout.contains("PA076_ALLOWED=allowlist-value"),
+            "allowlisted variable must be present in the minimal child env"
+        );
+        assert!(
+            !stdout.contains("PA076_SENTINEL_SECRET"),
+            "parent secret must not leak into a sandboxed child env"
+        );
+    }
+
+    #[test]
+    fn sandboxed_child_with_isolate_flag_and_empty_allowlist_does_not_inherit_parent_secrets() {
+        // Phase-5 review P1-1: `isolate_environment: true` with an *empty* allowlist must still
+        // produce a minimal child env (`env_clear` + essential vars), not inherit the full parent
+        // environment. `cmd /c set` prints the child's environment.
+        std::env::set_var("PA_SANDBOX_LEAK_SENTINEL", "should-not-leak");
+        let manager = ProcessManager::new();
+        let session = "session-isolate-min";
+        let (program, arguments) = if cfg!(windows) {
+            ("cmd".to_string(), vec!["/c".to_string(), "set".to_string()])
+        } else {
+            ("sh".to_string(), vec!["-c".to_string(), "env".to_string()])
+        };
+        let handle = manager
+            .start(&ProcessStartRequest {
+                session_id: session.to_string(),
+                program,
+                arguments,
+                cwd: None,
+                sandbox: SandboxRequest {
+                    workspace_root: ".".to_string(),
+                    allow_network: false,
+                    environment_allowlist: Vec::new(),
+                    isolate_environment: true,
+                },
+            })
+            .expect("start");
+        let stdout = poll_until_exited(&manager, session, &handle).stdout;
+        std::env::remove_var("PA_SANDBOX_LEAK_SENTINEL");
+        assert!(
+            !stdout.contains("PA_SANDBOX_LEAK_SENTINEL"),
+            "parent sentinel must not leak into an isolate_environment child env"
+        );
+        assert!(
+            stdout.contains("PATH"),
+            "essential PATH must be present in the isolate_environment minimal child env"
+        );
+    }
+
+    /// Poll until the process reports `Exited` or a deadline passes, accumulating output across
+    /// polls. The backend clears buffers on read, so a caller draining to completion must
+    /// accumulate the per-poll chunks (this is exactly what the `Run` migration will do).
+    fn poll_until_exited(
+        manager: &ProcessManager,
+        session_id: &str,
+        handle: &str,
+    ) -> ProcessPollResult {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut last = manager
+            .poll(session_id, handle)
+            .expect("poll should succeed");
+        let mut stdout = last.stdout.clone();
+        let mut stderr = last.stderr.clone();
+        let mut stdout_truncated = last.stdout_truncated;
+        let mut stderr_truncated = last.stderr_truncated;
+        while last.state == ProcessState::Running && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            last = manager
+                .poll(session_id, handle)
+                .expect("poll should succeed");
+            stdout.push_str(&last.stdout);
+            stderr.push_str(&last.stderr);
+            stdout_truncated |= last.stdout_truncated;
+            stderr_truncated |= last.stderr_truncated;
+        }
+        ProcessPollResult {
+            state: last.state,
+            exit_code: last.exit_code,
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+        }
+    }
+
+    #[cfg(windows)]
+    fn echo_command() -> (String, Vec<String>) {
+        (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), "echo hello-process-manager".to_string()],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn echo_command() -> (String, Vec<String>) {
+        (
+            "sh".to_string(),
+            vec!["-lc".to_string(), "echo hello-process-manager".to_string()],
+        )
+    }
+
+    #[cfg(windows)]
+    fn long_running_command() -> (String, Vec<String>) {
+        (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), "ping -n 5 127.0.0.1".to_string()],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn long_running_command() -> (String, Vec<String>) {
+        (
+            "sh".to_string(),
+            vec!["-lc".to_string(), "sleep 30".to_string()],
+        )
+    }
+
+    #[cfg(windows)]
+    fn large_output_command() -> (String, Vec<String>) {
+        // A single burst well over the 1 KiB test cap. A slow trickle of many small lines would
+        // be drained by `poll` (which clears the buffer) before the cap is ever exceeded at once,
+        // so truncation must be triggered by one large push, independent of poll timing.
+        (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), format!("echo {}", "x".repeat(4096))],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn large_output_command() -> (String, Vec<String>) {
+        (
+            "sh".to_string(),
+            vec!["-lc".to_string(), "printf '%4096s' ''; echo".to_string()],
+        )
+    }
+
+    #[cfg(windows)]
+    fn stdin_echo_command() -> (String, Vec<String>) {
+        // `set /p` reads one line from stdin and exits without needing stdin EOF (unlike
+        // PowerShell, which blocks on EOF when its stdin pipe is kept open). `call echo %%x%%`
+        // echoes the captured value back.
+        (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), "set /p x=&&call echo %%x%%".to_string()],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn stdin_echo_command() -> (String, Vec<String>) {
+        (
+            "sh".to_string(),
+            vec![
+                "-lc".to_string(),
+                "read line; echo \"got:$line\"".to_string(),
+            ],
+        )
+    }
+
+    #[test]
+    fn handles_are_opaque_and_unique() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = echo_command();
+        let first = start(&manager, "session-uniq", &program, arguments.clone());
+        let second = start(&manager, "session-uniq", &program, arguments);
+        assert_ne!(first, second, "handles must be unique");
+        assert!(
+            !first.contains("session"),
+            "handle must be opaque, got {first}"
+        );
+    }
+
+    #[test]
+    fn short_lived_command_polls_to_exited_with_output() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = echo_command();
+        let handle = start(&manager, "session-short", &program, arguments);
+        let result = poll_until_exited(&manager, "session-short", &handle);
+        assert_eq!(result.state, ProcessState::Exited);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            result.stdout.contains("hello-process-manager"),
+            "stdout was {:?}",
+            result.stdout
+        );
+    }
+
+    #[test]
+    fn long_lived_reports_running_then_kill_reaches_exited() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = long_running_command();
+        let handle = start(&manager, "session-long", &program, arguments);
+
+        let first = manager
+            .poll("session-long", &handle)
+            .expect("first poll should succeed");
+        assert_eq!(first.state, ProcessState::Running);
+
+        manager
+            .kill("session-long", &handle)
+            .expect("kill running process should succeed");
+
+        let after_kill = poll_until_exited(&manager, "session-long", &handle);
+        assert_eq!(after_kill.state, ProcessState::Exited);
+        assert!(
+            after_kill.exit_code.is_some(),
+            "killed process has an exit code"
+        );
+
+        // A second kill is safe/ignored and cleans the entry up; the stale handle fails closed.
+        assert!(manager.kill("session-long", &handle).is_ok());
+        assert!(
+            manager.poll("session-long", &handle).is_err(),
+            "stale handle must fail closed"
+        );
+    }
+
+    #[test]
+    fn unknown_handle_is_rejected() {
+        let manager = ProcessManager::new();
+        assert!(manager.poll("session-a", "proc-nonexistent").is_err());
+        assert!(manager
+            .write_stdin("session-a", "proc-nonexistent", b"x")
+            .is_err());
+        assert!(manager.kill("session-a", "proc-nonexistent").is_err());
+    }
+
+    #[test]
+    fn cross_session_handle_use_is_rejected() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = long_running_command();
+        let handle = start(&manager, "session-a", &program, arguments);
+
+        assert!(manager.poll("session-b", &handle).is_err());
+        assert!(manager.write_stdin("session-b", &handle, b"x").is_err());
+        assert!(manager.kill("session-b", &handle).is_err());
+
+        // The owner session still works.
+        let result = manager
+            .poll("session-a", &handle)
+            .expect("owner poll should succeed");
+        assert_eq!(result.state, ProcessState::Running);
+
+        manager
+            .kill("session-a", &handle)
+            .expect("owner kill should succeed");
+        let _ = poll_until_exited(&manager, "session-a", &handle);
+        assert!(manager.kill("session-a", &handle).is_ok());
+    }
+
+    #[test]
+    fn large_output_is_truncated_with_evidence() {
+        let manager = ProcessManager::with_buffer_caps(1024, 1024);
+        let (program, arguments) = large_output_command();
+        let handle = start(&manager, "session-big", &program, arguments);
+
+        let mut result = poll_until_exited(&manager, "session-big", &handle);
+        // Drain settle: after the child exits, the drain threads may still be flushing, so the
+        // truncation flag can lag the `Exited` state under load. Keep polling briefly until the
+        // sticky truncation evidence appears (timing-sensitive test; closeout hardening).
+        for _ in 0..40 {
+            if result.stdout_truncated {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            let polled = manager.poll("session-big", &handle).expect("poll");
+            result.stdout_truncated |= polled.stdout_truncated;
+            result.stderr_truncated |= polled.stderr_truncated;
+        }
+        assert_eq!(result.state, ProcessState::Exited);
+        assert!(
+            result.stdout_truncated,
+            "output larger than the buffer cap must be marked truncated"
+        );
+        let (stdout_dropped, _stderr_dropped) = manager
+            .drain_stats("session-big", &handle)
+            .expect("drain stats should be available");
+        assert!(stdout_dropped > 0, "dropped-bytes counter must be > 0");
+        assert!(manager.kill("session-big", &handle).is_ok());
+    }
+
+    #[test]
+    fn write_stdin_feeds_child_and_poll_sees_echoed_input() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = stdin_echo_command();
+        let handle = start(&manager, "session-stdin", &program, arguments);
+
+        manager
+            .write_stdin("session-stdin", &handle, b"hello-from-test\n")
+            .expect("write_stdin should succeed");
+
+        let result = poll_until_exited(&manager, "session-stdin", &handle);
+        assert_eq!(result.state, ProcessState::Exited);
+        assert!(
+            result.stdout.contains("hello-from-test"),
+            "child must echo the input, stdout was {:?}",
+            result.stdout
+        );
+    }
+
+    #[test]
+    fn write_stdin_after_exit_is_rejected() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = echo_command();
+        let handle = start(&manager, "session-ws", &program, arguments);
+        let result = poll_until_exited(&manager, "session-ws", &handle);
+        assert_eq!(result.state, ProcessState::Exited);
+        assert!(manager.write_stdin("session-ws", &handle, b"x").is_err());
+    }
+
+    #[test]
+    fn cancel_terminates_a_running_process() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = long_running_command();
+        let handle = start(&manager, "session-cancel", &program, arguments);
+        let first = manager
+            .poll("session-cancel", &handle)
+            .expect("poll before cancel");
+        assert_eq!(first.state, ProcessState::Running);
+
+        manager
+            .cancel("session-cancel", &handle)
+            .expect("cancel should succeed");
+        let result = poll_until_exited(&manager, "session-cancel", &handle);
+        assert_eq!(result.state, ProcessState::Exited);
+        assert!(manager.kill("session-cancel", &handle).is_ok());
+    }
+
+    #[test]
+    fn kill_after_timer_terminates_a_running_process() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = long_running_command();
+        let handle = start(&manager, "session-timer", &program, arguments);
+        manager.kill_after("session-timer", &handle, Duration::from_millis(300));
+        let result = poll_until_exited(&manager, "session-timer", &handle);
+        assert_eq!(result.state, ProcessState::Exited);
+        assert!(manager.kill("session-timer", &handle).is_ok());
+    }
+
+    #[test]
+    fn shutdown_kills_every_process_owned_by_the_session() {
+        let manager = ProcessManager::new();
+        let (program, arguments) = long_running_command();
+        let h1 = start(&manager, "session-shut", &program, arguments.clone());
+        let h2 = start(&manager, "session-shut", &program, arguments.clone());
+        let h3 = start(&manager, "session-other", &program, arguments);
+
+        assert_eq!(manager.shutdown("session-shut"), 2);
+
+        assert!(
+            manager.poll("session-shut", &h1).is_err(),
+            "shutdown must remove owned handles"
+        );
+        assert!(
+            manager.poll("session-shut", &h2).is_err(),
+            "shutdown must remove owned handles"
+        );
+
+        // Processes owned by another session are untouched.
+        let other = manager
+            .poll("session-other", &h3)
+            .expect("other session process must still be tracked");
+        assert_eq!(other.state, ProcessState::Running);
+
+        manager
+            .kill("session-other", &h3)
+            .expect("clean up the remaining process");
+        let _ = poll_until_exited(&manager, "session-other", &h3);
+        assert!(manager.kill("session-other", &h3).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_process() {
+        let mode = match std::env::var("PONY_AGENT_TEST_HELPER") {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        match mode.as_str() {
+            "descendant" => {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+            "parent" => {
+                println!("PARENT_READY");
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).unwrap();
+                if line.trim() == "spawn" {
+                    let descendant = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "process::tests::helper_process",
+                            "--nocapture",
+                        ])
+                        .env("PONY_AGENT_TEST_HELPER", "descendant")
+                        .spawn()
+                        .unwrap();
+                    println!("DESCENDANT_PID:{}", descendant.id());
+                    std::io::stdout().flush().unwrap();
+                    std::thread::sleep(Duration::from_secs(60));
+                }
+            }
+            "parent_exit_early" => {
+                println!("PARENT_READY");
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).unwrap();
+                if line.trim() == "spawn" {
+                    let descendant = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "process::tests::helper_process",
+                            "--nocapture",
+                        ])
+                        .env("PONY_AGENT_TEST_HELPER", "descendant")
+                        .spawn()
+                        .unwrap();
+                    println!("DESCENDANT_PID:{}", descendant.id());
+                    std::io::stdout().flush().unwrap();
+                    std::process::exit(0);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(windows)]
+    struct NativeProcessHandle(windows_sys::Win32::Foundation::HANDLE);
+
+    #[cfg(windows)]
+    impl NativeProcessHandle {
+        fn open_synchronize(pid: u32) -> Result<Self, String> {
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::System::Threading::OpenProcess;
+            const SYNCHRONIZE: u32 = 0x0010_0000;
+            let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return Err(format!("OpenProcess for pid {pid} failed"));
+            }
+            Ok(Self(handle))
+        }
+
+        fn wait_for_exit(&self, timeout_ms: u32) -> bool {
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+            let res = unsafe { WaitForSingleObject(self.0, timeout_ms) };
+            res == WAIT_OBJECT_0
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for NativeProcessHandle {
+        fn drop(&mut self) {
+            use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+            if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn spawn_helper_and_get_descendant(
+        manager: &ProcessManager,
+        session: &str,
+        helper_mode: &str,
+    ) -> (String, u32) {
+        let handle = manager
+            .start(&ProcessStartRequest {
+                session_id: session.to_string(),
+                program: std::env::current_exe()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                arguments: vec![
+                    "--exact".to_string(),
+                    "process::tests::helper_process".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                cwd: None,
+                sandbox: SandboxRequest {
+                    workspace_root: ".".to_string(),
+                    allow_network: false,
+                    environment_allowlist: vec![format!("PONY_AGENT_TEST_HELPER={helper_mode}")],
+                    isolate_environment: true,
+                },
+            })
+            .expect("start helper");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut output = String::new();
+        while !output.contains("PARENT_READY") && Instant::now() < deadline {
+            if let Ok(poll) = manager.poll(session, &handle) {
+                output.push_str(&poll.stdout);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            output.contains("PARENT_READY"),
+            "helper failed to become ready: {output}"
+        );
+
+        manager
+            .write_stdin(session, &handle, b"spawn\n")
+            .expect("write spawn to stdin");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut descendant_pid = None;
+        while descendant_pid.is_none() && Instant::now() < deadline {
+            if let Ok(poll) = manager.poll(session, &handle) {
+                output.push_str(&poll.stdout);
+            }
+            if let Some(pos) = output.find("DESCENDANT_PID:") {
+                let rest = &output[pos + "DESCENDANT_PID:".len()..];
+                if let Some(end) = rest.find('\n') {
+                    let pid_str = rest[..end].trim();
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        descendant_pid = Some(pid);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid = descendant_pid.expect("helper failed to report descendant pid");
+        (handle, pid)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_kills_descendant_on_explicit_kill() {
+        let manager = ProcessManager::new();
+        let session = "session-kill-descendant";
+        let (handle, pid) = spawn_helper_and_get_descendant(&manager, session, "parent");
+        let native = NativeProcessHandle::open_synchronize(pid).expect("open native handle");
+
+        assert!(
+            !native.wait_for_exit(0),
+            "descendant should initially be running"
+        );
+
+        manager.kill(session, &handle).expect("kill parent");
+
+        assert!(
+            native.wait_for_exit(5000),
+            "descendant should have been terminated by Job Object"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_kills_descendant_when_parent_exits_then_kill_is_called() {
+        let manager = ProcessManager::new();
+        let session = "session-parent-exited-kill";
+        let (handle, pid) = spawn_helper_and_get_descendant(&manager, session, "parent_exit_early");
+        let native = NativeProcessHandle::open_synchronize(pid).expect("open native handle");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if manager.poll(session, &handle).unwrap().state == ProcessState::Exited {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert_eq!(
+            manager.poll(session, &handle).unwrap().state,
+            ProcessState::Exited
+        );
+        assert!(
+            !native.wait_for_exit(0),
+            "descendant must survive before explicit kill"
+        );
+        manager
+            .kill(session, &handle)
+            .expect("kill retained exited record");
+        assert!(
+            native.wait_for_exit(5000),
+            "explicit kill must terminate the Job tree"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_parent_exits_then_shutdown_kills_descendant() {
+        let manager = ProcessManager::new();
+        let session = "session-parent-exited-first";
+        let (handle, pid) = spawn_helper_and_get_descendant(&manager, session, "parent_exit_early");
+        let native = NativeProcessHandle::open_synchronize(pid).expect("open native handle");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut parent_exited = false;
+        while Instant::now() < deadline {
+            if let Ok(poll) = manager.poll(session, &handle) {
+                if poll.state == ProcessState::Exited {
+                    parent_exited = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert!(parent_exited, "parent process should have exited early");
+
+        assert!(
+            !native.wait_for_exit(0),
+            "descendant should still be alive after parent exits"
+        );
+
+        assert_eq!(manager.shutdown(session), 1);
+
+        assert!(
+            native.wait_for_exit(5000),
+            "descendant should have been terminated upon shutdown"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_kills_descendant_on_last_owner_drop() {
+        let manager = ProcessManager::new();
+        let clone = manager.clone();
+        let session = "session-drop-descendant";
+        let (_handle, pid) = spawn_helper_and_get_descendant(&manager, session, "parent");
+        let native = NativeProcessHandle::open_synchronize(pid).expect("open native handle");
+
+        drop(manager);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !native.wait_for_exit(0),
+            "descendant must survive while clone still exists"
+        );
+
+        drop(clone);
+        assert!(
+            native.wait_for_exit(5000),
+            "descendant should be killed when final manager owner is dropped"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_object_limit_flags_and_membership_verified() {
+        use windows_sys::Win32::System::JobObjects::{
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+        let manager = ProcessManager::new();
+        let session = "session-limits";
+        let (program, arguments) = echo_command();
+        let handle = start(&manager, session, &program, arguments);
+
+        let flags = manager
+            .query_job_limits(session, &handle)
+            .expect("query limits");
+        assert_ne!(
+            flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            0,
+            "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE must be set"
+        );
+        assert_eq!(
+            flags & JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+            0,
+            "JOB_OBJECT_LIMIT_BREAKAWAY_OK must NOT be set"
+        );
+        assert_eq!(
+            flags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+            0,
+            "JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK must NOT be set"
+        );
+
+        let is_member = manager
+            .is_child_in_job(session, &handle)
+            .expect("membership check");
+        assert!(is_member, "spawned child must be verified as job member");
+
+        use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
+        let handle_flags = manager
+            .query_job_handle_flags(session, &handle)
+            .expect("query Job handle flags");
+        assert_eq!(
+            handle_flags & HANDLE_FLAG_INHERIT,
+            0,
+            "Job handle must be non-inheritable"
+        );
+
+        let _ = manager.kill(session, &handle);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_failure_injection_cleans_up_and_publishes_no_handle() {
+        use super::windows_job::FailureInjection;
+        let manager = ProcessManager::new();
+        let session = "session-inj";
+        let (program, arguments) = echo_command();
+
+        manager.set_job_failure(Some(FailureInjection {
+            create: true,
+            ..Default::default()
+        }));
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: program.clone(),
+            arguments: arguments.clone(),
+            cwd: None,
+            sandbox: sandbox(),
+        });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job create injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+
+        manager.set_job_failure(Some(FailureInjection {
+            configure: true,
+            ..Default::default()
+        }));
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: program.clone(),
+            arguments: arguments.clone(),
+            cwd: None,
+            sandbox: sandbox(),
+        });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job configure injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+
+        manager.set_job_failure(Some(FailureInjection {
+            assign: true,
+            ..Default::default()
+        }));
+        let (long_program, long_arguments) = long_running_command();
+        let before = manager.failed_start_observer_pids();
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: long_program.clone(),
+            arguments: long_arguments.clone(),
+            cwd: None,
+            sandbox: sandbox(),
+        });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job assign injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+        let assign_pid = manager
+            .failed_start_observer_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .expect("assign failure must retain an observer for the spawned child");
+        assert!(manager.observer_waits_for_exit(assign_pid, 5_000).unwrap());
+        manager.remove_child_observer(assign_pid);
+
+        manager.set_job_failure(Some(FailureInjection {
+            verify: true,
+            ..Default::default()
+        }));
+        let before = manager.failed_start_observer_pids();
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: long_program.clone(),
+            arguments: long_arguments.clone(),
+            cwd: None,
+            sandbox: sandbox(),
+        });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job verify injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+        let verify_pid = manager
+            .failed_start_observer_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .expect("verify failure must retain an observer for the spawned child");
+        assert!(manager.observer_waits_for_exit(verify_pid, 5_000).unwrap());
+        manager.remove_child_observer(verify_pid);
+
+        // A native wait proves this child exited before the injected assignment failure. The
+        // start transaction still fails closed and publishes no opaque handle.
+        manager.set_job_failure(None);
+        manager.set_wait_before_assign(true);
+        let before = manager.failed_start_observer_pids();
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: echo_command().0,
+            arguments: echo_command().1,
+            cwd: None,
+            sandbox: sandbox(),
+        });
+        manager.set_wait_before_assign(false);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("job assign injected failure"));
+        assert_eq!(manager.tracked_count(), 0);
+        let exited_pid = manager
+            .failed_start_observer_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .expect("early-exit failure must retain an observer for the spawned child");
+        assert!(manager.observer_waits_for_exit(exited_pid, 0).unwrap());
+        manager.remove_child_observer(exited_pid);
+
+        manager.set_missing_pipe(Some("stdout"));
+        let before = manager.failed_start_observer_pids();
+        let res = manager.start(&ProcessStartRequest {
+            session_id: session.to_string(),
+            program: long_program.clone(),
+            arguments: long_arguments.clone(),
+            cwd: None,
+            sandbox: sandbox(),
+        });
+        manager.set_missing_pipe(None);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("stdout pipe unavailable"));
+        let pipe_pid = manager
+            .failed_start_observer_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .expect("pipe failure must retain an observer for the spawned child");
+        assert!(manager.observer_waits_for_exit(pipe_pid, 5_000).unwrap());
+        manager.remove_child_observer(pipe_pid);
+
+        // 5. Injected terminate failure is surfaced by kill()
+        manager.set_job_failure(None);
+        let (prog, args) = long_running_command();
+        let handle = start(&manager, session, &prog, args);
+        manager
+            .set_job_failure_for_handle(
+                session,
+                &handle,
+                FailureInjection {
+                    terminate: true,
+                    ..Default::default()
+                },
+            )
+            .expect("set job failure on handle");
+
+        let kill_res = manager.kill(session, &handle);
+        assert!(kill_res.is_err());
+        assert!(kill_res
+            .unwrap_err()
+            .contains("job terminate injected failure"));
+
+        // Clean up: clear failure injection on handle and terminate successfully
+        manager
+            .set_job_failure_for_handle(session, &handle, FailureInjection::default())
+            .expect("clear job failure on handle");
+        let clean_res = manager.kill(session, &handle);
+        assert!(clean_res.is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_fast_exit_command_succeeds_naturally() {
+        let manager = ProcessManager::new();
+        let session = "session-fast-cmd";
+        let handle = start(
+            &manager,
+            session,
+            "cmd",
+            vec!["/c".to_string(), "echo fast".to_string()],
+        );
+        let res = poll_until_exited(&manager, session, &handle);
+        assert_eq!(res.state, ProcessState::Exited);
+        assert_eq!(res.exit_code, Some(0));
+        assert!(res.stdout.contains("fast"));
+    }
+
+    // ── B206 自检（非验收裁决；验收红相由 tests/range_quiescence_test.rs 冻结）──────────────
+
+    /// B206 自检（**非**验收裁决）：公开可注入限额 + `quiesce_deadline == ZERO` 的语义。
+    ///
+    /// ZERO 语义 =「信号发出后**不再等待**，只做一次探测；非空即 `Err`」。本自检锁住其中
+    /// **可确定性观测**的一半：死线已过期时轮询原语只探测一次、立刻返回**非空**结论
+    /// （对一个吞掉 SIGTERM 的组），从而证明实现没有把「不再等待」实现成「默认认为已空」。
+    ///
+    /// 为什么不断言端到端的 `Err`：`Err` 要求 `SIGKILL` 之后范围**仍非空**，那需要一个连
+    /// `SIGKILL` 都杀不掉的成员（D 状态 / 特权构造）。本机实测：`killpg(SIGKILL)` 之后第一次
+    /// `/proc` 扫描时非僵尸成员数就已归零（投递窗口 < 一次扫描，本自检初版 3/3 实测拿到 `Ok`），
+    /// 因此端到端 `Err` 在本机不可确定性构造；写死该断言只会得到 flaky 用例（假红/假绿），
+    /// 违反「零假测试」。端到端红相归 test-agent 冻结（契约 §7 亦登记为待冻结）。
+    #[cfg(unix)]
+    #[test]
+    fn b206_zero_deadline_probes_once_without_waiting() {
+        let manager = ProcessManager::with_limits(TerminationLimits {
+            term_grace: Duration::ZERO,
+            quiesce_deadline: Duration::ZERO,
+        });
+        // 公开 API 自证：注入的限额必须原样读回（默认值 250ms/5s 不被这条路径污染）。
+        let limits = manager.termination_limits();
+        assert_eq!(limits.term_grace, Duration::ZERO);
+        assert_eq!(limits.quiesce_deadline, Duration::ZERO);
+        assert_eq!(
+            TerminationLimits::default(),
+            TerminationLimits {
+                term_grace: Duration::from_millis(250),
+                quiesce_deadline: Duration::from_secs(5),
+            }
+        );
+
+        // 受管范围形态：组长 `sh` 在前台 `wait`，孙进程 `trap "" TERM; exec sleep` —— **吞掉
+        // SIGTERM**，因此 rung-1 清不空范围，探测结论必须是非空。
+        // 通过临时就绪标记确保孙进程已执行完 `trap "" TERM` 再发 SIGTERM，避免 CI 高负载下
+        // fork 后尚未装好信号处理器即被击杀的竞态。
+        struct ReadyFileGuard(std::path::PathBuf);
+        impl Drop for ReadyFileGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        static READY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ready_seq = READY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ready_guard = ReadyFileGuard(std::env::temp_dir().join(format!(
+            "pony-b206-ready-{}-{ready_seq}.flag",
+            std::process::id()
+        )));
+        let _ = std::fs::remove_file(&ready_guard.0);
+        let (program, arguments) = (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "/bin/bash -c 'trap \"\" TERM; : > \"$1\"; exec /bin/sleep 60' _ \"$1\" &\nwait\n"
+                    .to_string(),
+                "_".to_string(),
+                ready_guard.0.to_string_lossy().into_owned(),
+            ],
+        );
+        let session = "session-b206-zero-deadline";
+        let handle = start(&manager, session, &program, arguments);
+        let pgid = manager
+            .pid_of(session, &handle)
+            .expect("pid_of must resolve the leader pid") as i32;
+
+        // 反空跑前置：组内必须先出现组长 + 孙进程两个成员，且孙进程已完成 trap 安装。
+        let setup_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let members = scan_range_members(pgid).unwrap_or_default();
+            if members.len() >= 2 && ready_guard.0.exists() {
+                break;
+            }
+            assert!(
+                Instant::now() < setup_deadline,
+                "B206: 前置失败 —— 受管组未在 5s 内出现 ≥2 个成员并完成 trap 就绪（pgid={pgid}，实际 {members:?}，ready={}）",
+                ready_guard.0.exists()
+            );
+            std::thread::sleep(QUIESCE_POLL_INTERVAL);
+        }
+
+        // rung-1：TERM 杀掉组长，孙进程忽略 TERM ⇒ 范围此刻**必然**非空。
+        signal_range(pgid, libc::SIGTERM);
+        let started = Instant::now();
+        // 死线已过期 == ZERO 语义：只探测一次，不进入轮询。
+        let probe = wait_range_empty(pgid, Instant::now());
+        let elapsed = started.elapsed();
+        assert!(
+            !probe.empty,
+            "B206: ZERO 死线不得把「未探测到空」当成空（probe={} members={:?}）",
+            probe.source, probe.members
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "B206: ZERO 死线不得进入等待（实测 {elapsed:?}，应只做一次探测）"
+        );
+
+        // 清场：由本测试自己 SIGKILL 整组并等到空，绝不留孤儿（不用 kill/pkill，不按名字杀）。
+        signal_range(pgid, libc::SIGKILL);
+        let clean_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if probe_range(pgid).empty {
+                break;
+            }
+            assert!(
+                Instant::now() < clean_deadline,
+                "B206: ZERO 死线用例清场超时（pgid={pgid}）"
+            );
+            std::thread::sleep(QUIESCE_POLL_INTERVAL);
+        }
+        // 范围已空 ⇒ 管理器可正常收口该条目（同一路径，ZERO 限额下也不会谎报）。
+        manager
+            .kill_if_exists(session, &handle)
+            .expect("B206: 范围已空时 kill_if_exists 必须返回 Ok");
+    }
+}

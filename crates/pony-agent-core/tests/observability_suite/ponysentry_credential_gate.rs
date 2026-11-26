@@ -220,7 +220,7 @@ fn config_source_contains_no_bare_64_hex_literal() {
     // Arrange
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/agent/ponysentry/config.rs"
+        "/../pony-observability/src/ponysentry/config.rs"
     );
     let source = std::fs::read_to_string(path).expect("config.rs 必须存在");
 

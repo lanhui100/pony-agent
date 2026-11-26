@@ -49,17 +49,21 @@ export function buildCargoInvocation(slot, cargoArgs, repoRoot = REPO_ROOT) {
     throw new Error('缺少 cargo 子命令（示例：check check / exact-a test）');
   }
   const [subcommand, ...extraArgs] = cargoArgs;
+  const manifestPath = path.join(repoRoot, MANIFEST_RELATIVE);
+  const targetDir = path.join(repoRoot, SLOT_TARGET_DIRS[slot]);
+  // `cargo nextest` 将 `--manifest-path` / `--target-dir` 挂在子命令（如 `run` / `list`）之后。
+  if (subcommand === 'nextest' && extraArgs.length > 0 && !extraArgs[0].startsWith('-')) {
+    const [nextestSub, ...rest] = extraArgs;
+    return {
+      command: 'cargo',
+      cwd: repoRoot,
+      args: [subcommand, nextestSub, '--manifest-path', manifestPath, '--target-dir', targetDir, ...rest]
+    };
+  }
   return {
     command: 'cargo',
     cwd: repoRoot,
-    args: [
-      subcommand,
-      '--manifest-path',
-      path.join(repoRoot, MANIFEST_RELATIVE),
-      '--target-dir',
-      path.join(repoRoot, SLOT_TARGET_DIRS[slot]),
-      ...extraArgs
-    ]
+    args: [subcommand, '--manifest-path', manifestPath, '--target-dir', targetDir, ...extraArgs]
   };
 }
 

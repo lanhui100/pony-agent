@@ -1,0 +1,1241 @@
+// wave-39 L2-T：TUI 输入对话框(Composer)收边 + 底部指标行 —— 冻结验收契约（Test Agent 所有，Executor 只读）。
+//
+// 契约来源：.dev-team/contract-matrix-tui-dialog-wave39.md §3（A1–A10）。
+// 红相目标：Protocol 已落盘 `UiEvent::StreamUsage` / `TuiState` 指标字段 /
+// `begin_turn_usage` / `apply_turn_usage` / `resolve_context_window_tokens` 空桩（`unimplemented!()`），
+// 但 R4–R8（去细线 / 内边距几何 / 去 hint / 指标行 / usage 接线）尚未实现，因此本文件在红相
+// 阶段必须「可编译但运行失败（EXIT≠0）」，且失败只能是断言失败或 `unimplemented!()` panic。
+//
+// 本文件把 `src/bin/tui.rs` 以 bin-as-module 方式 include（与 tui_render_layout.rs 同模式），
+// 用 ratatui TestBackend 做真实渲染后断言字符缓冲；bin 的 main 不会被调用，allow 仅用于
+// 消除 bin-as-module 固有的 dead_code 噪声，不放宽任何断言。
+//
+// ADR 0078（implemented）口径迁移：数值指标簇已从「composer 下方最后一行」上移到
+// **header(row 0) 右槽**。故本文件的「指标行」断言一律读 `metrics_row()`（= row 0），
+// 「最后一行」只用于证明底面不再承载工作区/指标（ADR 0078 §决策 6/8）。
+//
+// ADR 0119（implemented，取代 0078 的「最后一行只承载模型身份」）：底面最后一行是**状态行
+// 右槽**，按 3s 时分轮播「模型身份」与「权限 · <级别>」。故凡断言底面行**内容/前景色**的用例
+// 必须先 `pin_carousel_phase()` 钉住相位——否则 `status_carousel_started_at = None` 时相位取
+// 墙钟毫秒 % 周期，断言会随机红（模型相位 GHOST / 权限相位 MUTED）。
+
+use pony_tui as tui;
+
+use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier};
+use ratatui::Terminal;
+
+// 与 tui.rs 保持一致的布局常量（只在断言里复算几何，不参与实现）。
+const GUTTER: u16 = 3;
+const MAX_CONTENT_WIDTH: u16 = 120;
+
+// 主题字面值（`tui::theme` 为私有模块，无法从测试引用；按现实现值冻结）。
+// ADR 0078 §决策 1/8：CANVAS = 正文/header/底面行背景；SURFACE = 色带（含呼吸行）背景；
+// ACCENT = header 品牌；MUTED = header 工作区标签；FAINT = header 分隔符与右簇指标；
+// GHOST = 底面模型身份字形（比 FAINT 更暗一档）。
+const CANVAS: Color = Color::Rgb(18, 16, 14);
+const SURFACE: Color = Color::Rgb(27, 25, 22);
+const GHOST: Color = Color::Rgb(104, 98, 90);
+const FAINT: Color = Color::Rgb(124, 118, 110);
+const MUTED: Color = Color::Rgb(162, 155, 146);
+const ACCENT: Color = Color::Rgb(214, 114, 80);
+
+// ---------------------------------------------------------------------------
+// 渲染与取值工具
+// ---------------------------------------------------------------------------
+
+fn screen(state: &mut tui::TuiState, width: u16, height: u16) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| tui::ui(f, state)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+/// 与 tui.rs `char_width` 同构的东亚宽字符判定：缓冲区里宽字符右侧有一格占位空格，
+/// 断言中文时必须按「视觉字符串」还原，否则 `"缓存 50%"` 会变成 `"缓 存 50%"` 而假失败。
+fn disp_width(ch: char) -> usize {
+    let cp = ch as u32;
+    let wide = matches!(cp,
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F64F
+            | 0x1F900..=0x1F9FF
+            | 0x20000..=0x3FFFD);
+    if wide { 2 } else { 1 }
+}
+
+/// 一行在真实终端上的视觉字符串（跳过宽字符右侧的占位 cell）。
+fn row_text(buf: &Buffer, y: u16) -> String {
+    let mut out = String::new();
+    let mut skip_placeholder = false;
+    for x in 0..buf.area.width {
+        if skip_placeholder {
+            skip_placeholder = false;
+            continue;
+        }
+        let sym = buf[(x, y)].symbol();
+        out.push_str(sym);
+        let mut chars = sym.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            if disp_width(ch) == 2 {
+                skip_placeholder = true;
+            }
+        }
+    }
+    out
+}
+
+fn all_text(buf: &Buffer) -> String {
+    (0..buf.area.height)
+        .map(|y| row_text(buf, y))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 每个 cell 一个 String（宽字符右半格是空格），用于按「列」而不是「字符」定位。
+fn row_cells(buf: &Buffer, y: u16) -> Vec<String> {
+    (0..buf.area.width)
+        .map(|x| buf[(x, y)].symbol().to_string())
+        .collect()
+}
+
+/// 内容列几何：(x, width)。与 tui.rs `ui()` 的 content 计算同构。
+fn content_geometry(terminal_width: u16) -> (u16, u16) {
+    let width = terminal_width
+        .saturating_sub(GUTTER * 2)
+        .min(MAX_CONTENT_WIDTH);
+    ((terminal_width - width) / 2, width)
+}
+
+/// 数值指标簇所在行 = **header(row 0)**。
+///
+/// ADR 0078（implemented）把「cwd + 指标」的底面行契约修订为：指标簇锚定 header 右槽；
+/// ADR 0119 起底面最后一行是状态行右槽（模型身份 / 权限 · 级别 时分轮播）。
+/// 故本文件「指标行」断言一律读 row 0，「最后一行」只用于证明底面不再承载指标。
+fn metrics_row(buf: &Buffer) -> String {
+    row_text(buf, 0)
+}
+
+/// header 左槽固定前缀：`<品牌>  ·  ` 之后紧跟工作区标签。
+///
+/// 与 `ui()` 的 header 组装逐字同源（`Span::styled(HEADER_BRAND)` + `"  ·  "`）。
+const HEADER_BRAND_PREFIX: &str = "PONY  ·  ";
+
+/// 品牌前缀的**显示宽度**（列数），把「列偏移」从「UTF-8 字节长度」里救出来。
+///
+/// `HEADER_BRAND_PREFIX.len()` 是字节数：中点 `·`(U+00B7) 占 2 字节，于是
+/// `cx + len()` 会比真实起排列多 1 列，断言便读到 `~` 之后的下一个字符 `/`。
+/// 该常量内所有字符均为单列宽，故列宽 = 字符数。
+fn header_brand_prefix_width() -> usize {
+    HEADER_BRAND_PREFIX.chars().count()
+}
+
+/// header 中「工作区标签 + 右簇指标」片段（剥掉左侧沟槽空白与品牌前缀）。
+fn header_workspace_part(buf: &Buffer) -> String {
+    let header = metrics_row(buf);
+    let header = header.trim_start();
+    header
+        .strip_prefix(HEADER_BRAND_PREFIX)
+        .unwrap_or(header)
+        .to_string()
+}
+
+/// 路径形态（**显式参数**，与宿主平台无关）。
+///
+/// 为什么不能用宿主 `Path::is_absolute()` 做跨平台镜像：它按**编译目标**的规则判定——
+/// Windows 宿主上 `/home/u/x` 不是绝对路径（无盘符），Linux 宿主上 `C:\x` 也不是绝对路径。
+/// 于是「在 Linux 上镜像验证 Windows 形态」会变成「用 Linux 规则验证 Windows 数据」，
+/// 反之亦然（本用例上一版就是这么红的：Windows 宿主跑 unix 正例时判假）。
+/// 所以判定必须是**纯字符串规则 + 显式形态参数**，两种形态都与宿主无关。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathForms {
+    Unix,
+    Windows,
+}
+
+/// 按**指定形态**判定绝对路径（纯字符串，不看宿主）。
+/// - Unix：以 `/` 开头；
+/// - Windows：盘符绝对（`X:` + `\` 或 `/`）、UNC（`\\server\share`）、
+///   verbatim（`\\?\C:\x`，同样以 `\\` 起，故与 UNC 同支覆盖）。
+fn is_absolute_path_in(token: &str, forms: PathForms) -> bool {
+    match forms {
+        PathForms::Unix => token.starts_with('/'),
+        PathForms::Windows => {
+            let bytes = token.as_bytes();
+            let drive_absolute = bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/');
+            drive_absolute || (token.starts_with("\\\\") && token.len() > 2)
+        }
+    }
+}
+
+/// 判据核心（显式形态参数）：折叠形态（`~` / `~\…`）或该形态下的绝对路径。
+fn is_folded_or_absolute_path_with(text: &str, forms: PathForms) -> bool {
+    let token = text.trim_start().split_whitespace().next().unwrap_or("");
+    token.starts_with('~') || is_absolute_path_in(token, forms)
+}
+
+/// 三条主体沟槽列（左 0/1，右 W-2/W-1）在任何一行都不得出现内容。
+fn assert_gutters_blank(buf: &Buffer, width: u16) {
+    let cols = [0u16, 1, width - 2, width - 1];
+    for y in 0..buf.area.height {
+        for x in cols {
+            let sym = buf[(x, y)].symbol();
+            assert!(
+                sym.trim().is_empty(),
+                "第 {y} 行第 {x} 列（沟槽）出现内容 {sym:?}"
+            );
+        }
+    }
+}
+
+/// 正文态 + 流式状态词的夹具：用于证明最后一行不再是「状态短语行」。
+fn streaming_state(mode: tui::RuntimeMode) -> tui::TuiState {
+    let mut state = tui::TuiState::default();
+    state.add_user_message("分析一下这个仓库的重试逻辑");
+    state.append_assistant_chunk("好的，我先看一下 retry.rs 的实现。");
+    state.is_streaming = true;
+    state.transition_runtime_mode(mode);
+    state.turn_started_at = Some(std::time::Instant::now());
+    state
+}
+
+// ---------------------------------------------------------------------------
+// A1：色带顶部细线去除 —— 全屏只剩 header 一条整行 "▁"
+// ---------------------------------------------------------------------------
+#[test]
+fn a1_only_the_header_rule_keeps_the_hairline_glyph() {
+    // Arrange
+    let mut state = tui::TuiState::default();
+    let (cx, cw) = content_geometry(110);
+
+    // Act
+    let buf = screen(&mut state, 110, 30);
+
+    // Assert：全屏含 "▁" 的行必须恰好是第 1 行（header 发丝线）
+    let rule_rows: Vec<u16> = (0..buf.area.height)
+        .filter(|y| row_text(&buf, *y).contains('▁'))
+        .collect();
+    assert_eq!(
+        rule_rows,
+        vec![1u16],
+        "色带顶部细线必须删除：全屏 \"▁\" 行只能是 header 发丝线（y=1），实际 {rule_rows:?}"
+    );
+
+    // Assert：header 发丝线仍然整行、与内容列同宽同起点
+    let cells = row_cells(&buf, 1);
+    let dashes = cells.iter().filter(|c| c.as_str() == "▁").count();
+    assert_eq!(
+        dashes, cw as usize,
+        "header 发丝线必须独占整行内容宽（{cw} 列），实际 {dashes} 列"
+    );
+    assert_eq!(cells[cx as usize], "▁", "header 发丝线必须从内容列起点开始");
+    assert_eq!(
+        cells[cx as usize + cw as usize - 1],
+        "▁",
+        "header 发丝线必须铺满到内容列最后一列"
+    );
+
+    // Assert：色带上方（y >= 2）任何一行都不允许再出现 "▁"
+    for y in 2..buf.area.height {
+        let row = row_text(&buf, y);
+        assert!(
+            !row.contains('▁'),
+            "色带上方第 {y} 行仍残留 \"▁\" 细线: {row:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A2：底部快捷键提示全部消失（正常态）
+// ---------------------------------------------------------------------------
+#[test]
+fn a2_composer_shortcut_hints_are_gone() {
+    // Arrange：覆盖 5 种会切换旧 hint 文案的正常态
+    let mut states: Vec<(&str, tui::TuiState)> = Vec::new();
+    states.push(("empty", tui::TuiState::default()));
+
+    let mut typed = tui::TuiState::default();
+    typed.set_input("请分析重试逻辑");
+    states.push(("typed", typed));
+
+    let mut scrolled = tui::TuiState::default();
+    scrolled.add_user_message("hello");
+    scrolled.auto_scroll = false;
+    states.push(("scrolled", scrolled));
+
+    let mut streaming = tui::TuiState::default();
+    streaming.add_user_message("hello");
+    streaming.append_assistant_chunk("world");
+    streaming.is_streaming = true;
+    streaming.transition_runtime_mode(tui::RuntimeMode::Responding);
+    states.push(("streaming", streaming));
+
+    let mut menu = tui::TuiState::default();
+    menu.set_input("/");
+    states.push(("slash-menu", menu));
+
+    const FORBIDDEN: [&str; 4] = ["Enter 发送", "Esc 中断", "↑↓ 选择", "Shift+Enter"];
+
+    for (label, state) in states.iter_mut() {
+        // Act
+        let buf = screen(state, 110, 30);
+        let text = all_text(&buf);
+
+        // Assert
+        for needle in FORBIDDEN {
+            assert!(
+                !text.contains(needle),
+                "[{label}] 正常态仍渲染已废弃的快捷键提示 {needle:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A3：最后一行不再承载任何状态词（状态词只留在正文活动行）
+// ---------------------------------------------------------------------------
+#[test]
+fn a3_metrics_row_never_renders_status_words() {
+    // Arrange：覆盖所有 RuntimeMode 分支
+    let mut states: Vec<(&str, tui::TuiState)> = vec![("ready", tui::TuiState::default())];
+    states.push(("responding", streaming_state(tui::RuntimeMode::Responding)));
+    states.push(("thinking", streaming_state(tui::RuntimeMode::Thinking)));
+    states.push((
+        "executing-tool",
+        streaming_state(tui::RuntimeMode::ExecutingTool("Read  src/main.rs".into())),
+    ));
+    states.push((
+        "waiting-approval",
+        streaming_state(tui::RuntimeMode::WaitingApproval),
+    ));
+    states.push(("completed", streaming_state(tui::RuntimeMode::Completed)));
+    states.push((
+        "failed",
+        streaming_state(tui::RuntimeMode::Failed("401 unauthorized".into())),
+    ));
+
+    const FORBIDDEN: [&str; 7] = [
+        "就绪", "完成", "失败", "待确认", "生成中", "思考中", "执行 ·",
+    ];
+
+    for (label, state) in states.iter_mut() {
+        // Act
+        let buf = screen(state, 110, 30);
+        let last = row_text(&buf, buf.area.height - 1);
+
+        // Assert
+        for word in FORBIDDEN {
+            assert!(
+                !last.contains(word),
+                "[{label}] 底面最后一行（模型身份行）不得再出现状态词 {word:?}: {last:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A4：指标行左侧 = workspace 路径标签（HOME 前缀折叠为 ~）
+// ---------------------------------------------------------------------------
+#[test]
+fn a4_metrics_row_left_shows_workspace_label() {
+    let (cx, _cw) = content_geometry(110);
+
+    // 用例 1（Unix）：HOME 前缀 → 折叠为 ~/<basename>。
+    #[cfg(unix)]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert!(
+            !home.is_empty(),
+            "Unix 环境必须提供 HOME 才能验证 ~ 折叠契约"
+        );
+        let mut state = tui::TuiState::default();
+        state.workspace = std::path::PathBuf::from(&home).join("pony-agent");
+        // ADR 0078：折叠真值源是 `state.home_dir`（默认 None ⇒ 不折叠），
+        // 故必须显式注入，否则断言的是「无 home 时的裸 basename」而非折叠契约。
+        state.home_dir = Some(home.clone());
+
+        let buf = screen(&mut state, 110, 30);
+        let ws_part = header_workspace_part(&buf);
+        assert!(
+            ws_part.starts_with("~/pony-agent"),
+            "HOME 下的 workspace 必须折叠为 \"~/pony-agent\" 并紧跟 header 品牌前缀，实际 header {ws_part:?}"
+        );
+        let cells = row_cells(&buf, 0);
+        assert_eq!(
+            cells[cx as usize + header_brand_prefix_width()],
+            "~",
+            "工作区标签必须从 content.x + 品牌前缀宽度({}) 列起排",
+            cx as usize + header_brand_prefix_width()
+        );
+    }
+
+    // 用例 1（Windows 镜像）：同一「HOME 前缀折叠」契约，分隔符用 MAIN_SEPARATOR。
+    //
+    // 原用例整体 `#[cfg(unix)]`，Windows 上折叠契约毫无覆盖；且原断言把分隔符写死成 `/`，
+    // 在 Windows 上即使跑也只在 Unix 成立（产品折叠输出 `~\pony-agent`）。
+    // 按平台分流但保留同等鉴别力：折叠前缀 + 首格 `~` 与 Unix 版一一对应，只换分隔符。
+    #[cfg(windows)]
+    {
+        // 与产品 `workspace_label` 同序解析 home：HOME 优先，其次 USERPROFILE。
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|h| !h.trim().is_empty())
+            .or_else(|| {
+                std::env::var("USERPROFILE")
+                    .ok()
+                    .filter(|h| !h.trim().is_empty())
+            })
+            .unwrap_or_default();
+        assert!(
+            !home.is_empty(),
+            "Windows 环境必须提供 HOME 或 USERPROFILE 才能验证 ~ 折叠契约"
+        );
+        let mut state = tui::TuiState::default();
+        state.workspace = std::path::PathBuf::from(&home).join("pony-agent");
+        // ADR 0078：折叠真值源是 `state.home_dir`（默认 None ⇒ 只显示裸 basename），
+        // Windows 分支同样必须显式注入，否则本断言在 Windows 上是结构性假红。
+        state.home_dir = Some(home.clone());
+
+        let buf = screen(&mut state, 110, 30);
+        let ws_part = header_workspace_part(&buf);
+        // 折叠真值源 `tui.rs::fold_home_prefix` 是**展示**口径：统一用 `/` 拼（`format!("~/{name}")`），
+        // 与平台 FS 分隔符无关；用 `MAIN_SEPARATOR` 会在 Windows 上把「展示正确」判成红。
+        let expected = "~/pony-agent";
+        assert!(
+            ws_part.starts_with(&expected),
+            "HOME 下的 workspace 必须折叠为 {expected:?} 并紧跟 header 品牌前缀，实际 header {ws_part:?}"
+        );
+        let cells = row_cells(&buf, 0);
+        assert_eq!(
+            cells[cx as usize + header_brand_prefix_width()],
+            "~",
+            "工作区标签必须从 content.x + 品牌前缀宽度({}) 列起排",
+            cx as usize + header_brand_prefix_width()
+        );
+    }
+
+    // 用例 2：非 HOME 前缀 → 完整 display，basename 必须出现在左侧。
+    let mut state = tui::TuiState::default();
+    state.workspace = std::env::temp_dir().join("wave39-ws-alpha");
+    let buf = screen(&mut state, 110, 30);
+    let ws_part = header_workspace_part(&buf);
+    assert!(
+        ws_part.contains("wave39-ws-alpha"),
+        "header 左槽必须显示 workspace basename，实际 header 片段 {ws_part:?}"
+    );
+    // ADR 0078 修订了底面行内容契约：`home_dir=None` 时 `workspace_header_label_with_home`
+    // 在 file_name 可取的情况下**只返回裸 basename**（tui.rs `return name.to_string()` 分支），
+    // 不再回退整条绝对路径。旧断言「必须以绝对路径或折叠形态起排」是 ADR 0078 前的口径，
+    // 在 `TuiState::default()`（home_dir=None）下必然假红。
+    // 保留同等鉴别力：basename 必须紧跟品牌前缀起排，且不得回退为原绝对路径。
+    assert!(
+        ws_part.starts_with("wave39-ws-alpha"),
+        "home_dir=None 时 header 左槽必须以裸 basename 起排，实际 header 片段 {ws_part:?}"
+    );
+    let temp_prefix = std::env::temp_dir().display().to_string();
+    assert!(
+        !ws_part.starts_with(&temp_prefix),
+        "home_dir=None 时 header 左槽不得回退为绝对路径（{temp_prefix:?}），实际 header 片段 {ws_part:?}"
+    );
+    let cells = row_cells(&buf, 0);
+    let first = cells[cx as usize + header_brand_prefix_width()].as_str();
+    // 原断言 `first == "/" || first == "~"` 同属 Unix-only 形态假设（Windows 首字符是盘符）。
+    // 该断言的真实契约是「标签紧跟品牌前缀起排」，故与标签首字符对齐比较：
+    // 平台无关，且比"首字符必须是根字符"更贴近起排语义（路径根合法性已由上面判据守住）。
+    let expected_first = ws_part
+        .chars()
+        .next()
+        .map(|c| c.to_string())
+        .unwrap_or_default();
+    assert_eq!(
+        first, expected_first,
+        "工作区标签必须从 content.x + 品牌前缀宽度({}) 列起排",
+        cx as usize + header_brand_prefix_width()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A4-mirror：两种路径形态的判据镜像 —— **本用例在 Linux 与 Windows 上都跑同一张表**。
+//
+// 上一版红在这个位置：`is_folded_or_absolute_path_with(_, windows_forms=false)` 内部用的是
+// **宿主**的 `Path::is_absolute()`，于是在 Windows 宿主上跑「unix 正例 `/home/u/...`」必然判假。
+// 现在判定是纯字符串规则 + 显式形态参数（`PathForms::Unix/Windows`），与宿主无关，
+// 因此正例/反例在两种宿主上的期望完全相同，不需要按平台改期望。
+// ---------------------------------------------------------------------------
+#[test]
+fn a4_path_form_rules_are_host_independent() {
+    // (1) Windows 形态：CI windows-latest 上实际渲染的标签（修复前 `starts_with('/')` 判假 → 假红）。
+    for label in [
+        r"C:\Users\RUNNER~1\AppData\Local\Temp\wave39-ws-alpha",
+        "C:/Users/runner/AppData/Local/Temp/ws",      // 正斜杠盘符形态
+        r"\\server\share\proj",                      // UNC
+        r"\\?\C:\x",                                 // verbatim（同样以 \\ 起）
+        r"~\pony-agent",                                // 折叠形态
+        r"C:\ws-alpha  ↑12 ↓3",                          // 带右侧指标簇的整行
+        "C:\\x",
+    ] {
+        assert!(
+            is_folded_or_absolute_path_with(label, PathForms::Windows),
+            "Windows 形态下应判真：{label:?}"
+        );
+    }
+    for label in ["pony-agent", "", "   ", r"C:foo\bar", "tmp/wave39", r"\only-root"] {
+        assert!(
+            !is_folded_or_absolute_path_with(label, PathForms::Windows),
+            "Windows 形态下应判假：{label:?}"
+        );
+    }
+
+    // (2) Unix 形态：`/a` 与 `~/a` 判真；Windows 盘符形态在 Unix 下判假（形态不通用，这正是显式参数的意义）。
+    for label in ["/a", "/home/u/pony-agent  ↑12 ↓3", "~/pony-agent"] {
+        assert!(
+            is_folded_or_absolute_path_with(label, PathForms::Unix),
+            "Unix 形态下应判真：{label:?}"
+        );
+    }
+    for label in ["pony-agent", "", "tmp/a", r"C:\x", r"\\server\share"] {
+        assert!(
+            !is_folded_or_absolute_path_with(label, PathForms::Unix),
+            "Unix 形态下应判假：{label:?}"
+        );
+    }
+
+    // (3) 交叉一致性：`~` 折叠形态与宿主无关（两套规则都认）。
+    for forms in [PathForms::Unix, PathForms::Windows] {
+        assert!(is_folded_or_absolute_path_with("~/a", forms));
+        assert!(is_folded_or_absolute_path_with(r"~\a", forms));
+        // 单个 `~` 是"折叠后的 HOME 本身"（产品 workspace_label 在 workspace == home 时返回 "~"）。
+        assert!(is_folded_or_absolute_path_with("~", forms));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A5：有值时右簇 = ↑in ↓out · 缓存 x% · 上下文 y%；无值时右簇为空（v3 §6 R11）
+// ---------------------------------------------------------------------------
+#[test]
+fn a5_metrics_row_carries_up_down_cache_and_context() {
+    // Arrange：注入非退化数值，保证右端以百分号结束。
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 1200;
+    state.total_output_tokens = 345;
+    state.total_cache_hit_tokens = 600;
+    state.last_context_tokens = 50_000;
+    state.context_window_tokens = 200_000;
+
+    // Act
+    let buf = screen(&mut state, 110, 30);
+    let last = metrics_row(&buf);
+
+    // Assert 1：四个契约 token 全部在 header(row 0) 右槽（ADR 0078 §决策 1）
+    for needle in ["↑", "↓", "缓存", "上下文"] {
+        assert!(last.contains(needle), "header 指标簇缺少 {needle:?}: {last:?}");
+    }
+
+    // Assert 2：右簇顶到内容列最后一列，且以数字/百分号结尾
+    let (cx, cw) = content_geometry(110);
+    let tail = buf[(cx + cw - 1, 0)].symbol();
+    let tail_ch = tail.chars().next().unwrap_or(' ');
+    assert!(
+        tail_ch.is_ascii_digit() || tail_ch == '%',
+        "header 指标簇必须右对齐到内容列最后一列（x={}）且以数字/百分号结尾，实际 {tail:?}；行文本 {last:?}",
+        cx + cw - 1
+    );
+    let trimmed = last.trim_end();
+    let end_ch = trimmed.chars().next_back().unwrap_or(' ');
+    assert!(
+        end_ch.is_ascii_digit() || end_ch == '%',
+        "header 指标簇去尾空白后必须以数字/百分号结尾，实际 {end_ch:?}；行文本 {last:?}"
+    );
+
+    // Assert 3（v3 R11）：默认全零状态 → 右簇整段为空，只剩左侧 workspace 标签
+    let mut zero = tui::TuiState::default();
+    let buf = screen(&mut zero, 110, 30);
+    let row = metrics_row(&buf);
+    for needle in ["↑", "↓", "缓存", "上下文", "—"] {
+        assert!(
+            !row.contains(needle),
+            "无值状态不得渲染指标段 {needle:?}（v3 R11：无值不显示）: {row:?}"
+        );
+    }
+    let ws = zero
+        .workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        row.contains(&ws),
+        "无值状态仍必须显示左侧 workspace 标签 {ws:?}: {row:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A6：110×30 单行输入几何 v4 —— bottom_top=26 / 提示符 26..27 / 色带呼吸行 28 SURFACE / 底面行 29
+// ---------------------------------------------------------------------------
+#[test]
+fn a6_composer_geometry_is_band_padding_input_spacing_and_metrics() {
+    // Arrange
+    let mut state = tui::TuiState::default();
+    let (cx, cw) = content_geometry(110);
+    let ws = state
+        .workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    // Act
+    let buf = screen(&mut state, 110, 30);
+
+    // Assert 1（R13：bottom_top=26）：y=25 是正文画布，y=26 是色带顶部内边距（SURFACE 空白）
+    assert!(
+        row_text(&buf, 25).trim().is_empty(),
+        "y=25 应为正文区空白，实际 {:?}",
+        row_text(&buf, 25)
+    );
+    assert_eq!(
+        buf[(cx, 25)].bg, CANVAS,
+        "y=25 必须仍是正文画布 CANVAS（v4 色带不得从 25 行开始）"
+    );
+    assert!(
+        row_text(&buf, 26).trim().is_empty(),
+        "y=26 色带顶部内边距必须整行空白，实际 {:?}",
+        row_text(&buf, 26)
+    );
+    assert_eq!(
+        buf[(cx, 26)].bg, SURFACE,
+        "y=26 必须是色带顶部内边距（SURFACE）—— 即 bottom_top=26"
+    );
+
+    // Assert 2（R13：input_h=2）：提示符行唯一，位于输入区 26..=27
+    let prompt_rows: Vec<u16> = (0..buf.area.height)
+        .filter(|y| row_text(&buf, *y).contains('›'))
+        .collect();
+    assert_eq!(
+        prompt_rows.len(),
+        1,
+        "单行输入必须恰好一个提示符行，实际 {prompt_rows:?}"
+    );
+    let prompt_y = prompt_rows[0];
+    assert!(
+        (26..=27).contains(&prompt_y),
+        "v4 几何下提示符必须位于 26..=27（input_h=2），实际 y={prompt_y}"
+    );
+    assert_eq!(
+        buf[(cx, prompt_y)].symbol(),
+        "›",
+        "提示符必须落在输入区内容列起点 x={cx}（y={prompt_y}）"
+    );
+
+    // Assert 3（R13：间距减半 —— 独立 CANVAS 间距行已删除）：
+    // y=28 是**色带内**呼吸行：整行空白且 bg=SURFACE（不再是 CANVAS 间距行）。
+    let breathing = row_text(&buf, 28);
+    assert!(
+        breathing.trim().is_empty(),
+        "y=28 色带呼吸行必须整行空白，实际 {breathing:?}"
+    );
+    assert_eq!(
+        buf[(cx, 28)].bg, SURFACE,
+        "y=28 必须是色带内呼吸行（SURFACE）；v4 已删除独立 CANVAS 间距行"
+    );
+    // 输入正文行（27）→ 底面行（29）之间只隔 1 行空白（v3 为 2 行）。
+    assert_eq!(
+        prompt_y + 2,
+        29,
+        "输入正文行与底面行之间必须只隔 1 行（呼吸行 28），实际 prompt_y={prompt_y}"
+    );
+
+    // Assert 4（ADR 0078 + ADR 0119）：指标簇已锚定 header(row 0)；底面最后一行是状态行右槽，
+    // 本帧已钉在**模型相位**，故只剩模型身份（权限相位见 A12 的第二段断言）。
+    let metrics = metrics_row(&buf);
+    assert!(
+        !metrics.trim().is_empty(),
+        "header(row 0) 必须承载指标簇/工作区标签，不允许整行空白"
+    );
+    assert!(
+        metrics.contains(&ws),
+        "header 左槽必须显示 workspace basename {ws:?}，实际 {metrics:?}"
+    );
+    assert_eq!(
+        buf[(cx, 29)].bg, CANVAS,
+        "y=29 模型身份行必须是 CANVAS 背景（非色带 SURFACE）"
+    );
+    assert_eq!(
+        buf[(cx, 29)].fg, GHOST,
+        "y=29 模型身份行字形前景必须是 GHOST Rgb(104,98,90)"
+    );
+
+    // Assert 5：三条主体沟槽列无内容
+    assert_gutters_blank(&buf, 110);
+
+    // Assert 6：输入行右侧（除底面行之外）不得贴到内容列最后一列
+    let input_row = row_text(&buf, prompt_y);
+    let input_cells = row_cells(&buf, prompt_y);
+    assert!(
+        input_cells[cx as usize + cw as usize - 1].trim().is_empty(),
+        "输入行最后一列 x={} 必须留白，实际 {:?}；行文本 {input_row:?}",
+        cx + cw - 1,
+        input_cells[cx as usize + cw as usize - 1]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A7：指标数字格式化 —— 1.2k / 345 / 缓存 50% / 上下文 25%
+// ---------------------------------------------------------------------------
+#[test]
+fn a7_metrics_row_formats_compact_numbers_and_ratios() {
+    // Arrange：来自契约 §2 R7 的注入值
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 1200;
+    state.total_output_tokens = 345;
+    state.total_cache_hit_tokens = 600;
+    state.last_context_tokens = 50_000;
+    state.context_window_tokens = 200_000;
+
+    // Act
+    let buf = screen(&mut state, 110, 30);
+    let last = metrics_row(&buf);
+
+    // Assert
+    assert!(
+        last.contains("1.2k"),
+        "1200 输入 token 必须格式化为 \"1.2k\"，实际 {last:?}"
+    );
+    assert!(
+        last.contains("345"),
+        "345 输出 token 必须原样显示，实际 {last:?}"
+    );
+    assert!(
+        last.contains("缓存 50%"),
+        "600/1200 缓存命中必须显示 \"缓存 50%\"，实际 {last:?}"
+    );
+    assert!(
+        last.contains("上下文 25%"),
+        "50000/200000 上下文占用必须显示 \"上下文 25%\"，实际 {last:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A8：无值不显示（v3 §6 R11）—— in=0 / window=0 时不出现对应段，也不出现占位符 "—"
+// ---------------------------------------------------------------------------
+#[test]
+fn a8_metrics_row_hides_segments_without_values() {
+    let ws = tui::TuiState::default()
+        .workspace
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    // 用例 1：全零（in=0 / out=0 / window=0）→ 右簇整段为空，只剩 workspace
+    let mut state = tui::TuiState::default();
+    let buf = screen(&mut state, 110, 30);
+    let last = metrics_row(&buf);
+    for needle in ["↑", "↓", "缓存", "上下文", "—"] {
+        assert!(
+            !last.contains(needle),
+            "全零状态不得出现指标段/占位符 {needle:?}（v3 R11）：{last:?}"
+        );
+    }
+    assert!(
+        last.contains(&ws),
+        "全零状态仍必须显示 workspace {ws:?}: {last:?}"
+    );
+
+    // 用例 2：in=0 但 window>0 → 只有「上下文」段；缓存比不可算，不得出现 缓存/↑/↓
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 0;
+    state.total_output_tokens = 0;
+    state.total_cache_hit_tokens = 0;
+    state.last_context_tokens = 50_000;
+    state.context_window_tokens = 200_000;
+    let buf = screen(&mut state, 110, 30);
+    let last = metrics_row(&buf);
+    assert!(
+        last.contains("上下文 25%"),
+        "window>0 时上下文段必须显示（50000/200000=25%）：{last:?}"
+    );
+    for needle in ["缓存", "↑", "↓", "—"] {
+        assert!(
+            !last.contains(needle),
+            "in=0 时不得显示 {needle:?}（缓存比不可算，也不再用占位符）：{last:?}"
+        );
+    }
+
+    // 用例 3：window=0 且 last_ctx>0 → 上下文段不得显示；in>0 时 ↑/↓/缓存 正常
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 500;
+    state.total_output_tokens = 0;
+    state.total_cache_hit_tokens = 0;
+    state.last_context_tokens = 12_345;
+    state.context_window_tokens = 0;
+    let buf = screen(&mut state, 110, 30);
+    let last = metrics_row(&buf);
+    assert!(
+        !last.contains("上下文"),
+        "window=0 时上下文段不得显示：{last:?}"
+    );
+    assert!(
+        last.contains("↑500") && last.contains("↓0"),
+        "in>0 时 ↑/↓ 段必须显示：{last:?}"
+    );
+    assert!(
+        last.contains("缓存 0%"),
+        "in>0 时缓存段必须显示（0/500=0%）：{last:?}"
+    );
+    assert!(!last.contains('—'), "v3 起不再使用占位符 —：{last:?}");
+}
+
+// ---------------------------------------------------------------------------
+// A9：apply_turn_usage 本轮幂等覆盖 + 跨轮累加
+// ---------------------------------------------------------------------------
+#[test]
+fn a9_apply_turn_usage_is_idempotent_per_turn_and_accumulates_across_turns() {
+    // Arrange
+    let mut state = tui::TuiState::default();
+
+    // Act 1：本轮首次回执 (input=1, output=1, cache=0, total=2)
+    state.apply_turn_usage(1, 1, 0, 2);
+
+    // Assert 1：首轮回执直接计入，last_context_tokens 遵循 S1 单次上下文输入
+    assert_eq!(state.total_input_tokens, 1, "首轮回执 input 必须计入");
+    assert_eq!(state.total_output_tokens, 1, "首轮回执 output 必须计入");
+    assert_eq!(state.total_cache_hit_tokens, 0, "首轮回执 cache 必须计入");
+    assert_eq!(
+        state.last_context_tokens, 1,
+        "last_context_tokens 遵循 S1 必须记录当前上下文输入"
+    );
+
+    // Act 2：同一轮重复回执（幂等覆盖，不是累加）
+    state.apply_turn_usage(3, 2, 1, 5);
+
+    // Assert 2：同一轮二次回执必须覆盖旧值 —— 3 而非 4
+    assert_eq!(
+        state.total_input_tokens, 3,
+        "同一轮二次回执必须幂等覆盖（期望 3，累加会得到 4）"
+    );
+    assert_eq!(
+        state.total_output_tokens, 2,
+        "同一轮二次回执必须幂等覆盖 output"
+    );
+    assert_eq!(
+        state.total_cache_hit_tokens, 1,
+        "同一轮二次回执必须幂等覆盖 cache"
+    );
+    assert_eq!(
+        state.last_context_tokens, 3,
+        "同一轮二次回执后 last_context_tokens 必须为最新上下文输入 3"
+    );
+
+    // Act 3：新一轮（begin 清空本轮回执）后再次回执
+    state.begin_turn_usage();
+    state.apply_turn_usage(10, 4, 2, 14);
+
+    // Assert 3：wave-41 对齐 ADR 0035 S1 规范：当前输入为单次上下文输入 10（非跨轮累加 13）；输出与缓存保持跨轮累加
+    assert_eq!(
+        state.total_input_tokens, 10,
+        "wave-41：输入 token 对齐 ADR 0035 S1 当前单次上下文输入（10，非 3+10）"
+    );
+    assert_eq!(
+        state.total_output_tokens, 6,
+        "跨轮 output 必须累加（2 + 4）"
+    );
+    assert_eq!(
+        state.total_cache_hit_tokens, 3,
+        "跨轮 cache 必须累加（1 + 2）"
+    );
+    assert_eq!(
+        state.last_context_tokens, 10,
+        "last_context_tokens 必须跟随最新一轮上下文输入（10）"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A10：退化宽度 + 浮层态 —— 不 panic、不越沟槽、浮层不渲染色带
+// ---------------------------------------------------------------------------
+#[test]
+fn a10_degenerate_widths_and_overlay_mode_degrade_without_panic() {
+    // 用例 1/2：窄终端 header 仍渲染指标簇，且不越沟槽/不越过内容列
+    // （v3 R11：无值不显示，故注入有值状态，右簇才有 ↑/↓ 段可断言）
+    for (w, h) in [(60u16, 20u16), (80u16, 24u16)] {
+        let mut state = tui::TuiState::default();
+        state.total_input_tokens = 12;
+        state.total_output_tokens = 3;
+        state.total_cache_hit_tokens = 6;
+        state.last_context_tokens = 50_000;
+        state.context_window_tokens = 200_000;
+        let buf = screen(&mut state, w, h);
+
+        assert_eq!(buf.area.width, w, "{w}×{h} 渲染宽度不符");
+        assert_eq!(buf.area.height, h, "{w}×{h} 渲染高度不符");
+        assert_gutters_blank(&buf, w);
+
+        let last = metrics_row(&buf);
+        assert!(
+            last.contains("↑") && last.contains("↓"),
+            "{w}×{h} header(row 0) 必须仍承载指标簇（↑/↓），实际 {last:?}"
+        );
+        // 窄终端不得把 header 指标簇挤到内容列外（右端必须收在内容列内）
+        let (cx, cw) = content_geometry(w);
+        let right_edge = row_cells(&buf, 0);
+        assert!(
+            right_edge[(cx + cw) as usize].trim().is_empty(),
+            "{w}×{h} header 指标簇越过内容列右边界（x={}）",
+            cx + cw
+        );
+    }
+
+    // 用例 3：浮层态（mode != Normal）composer + 底面行必须整体收起（指标簇留在 header，不落到底面）
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 1200;
+    state.total_output_tokens = 345;
+    state.total_cache_hit_tokens = 600;
+    state.last_context_tokens = 50_000;
+    state.context_window_tokens = 200_000;
+    state.open_session_selector(vec![tui::SessionItem {
+        id: "session-wave39".into(),
+        title: "Wave 39".into(),
+        updated_at: "0".into(),
+        turn_count: 0,
+        workspace_id: None,
+        workspace_label: None,
+        archived: false,
+    }]);
+    assert_ne!(
+        state.mode,
+        tui::InteractionMode::Normal,
+        "夹具必须进入浮层态"
+    );
+
+    let buf = screen(&mut state, 110, 30);
+    // ADR 0078：指标簇在 header，底面最后一行不得残留指标（浮层态同样成立）。
+    let bottom = row_text(&buf, 29);
+    assert!(
+        !bottom.contains("缓存") && !bottom.contains("上下文") && !bottom.contains("↑"),
+        "浮层态底面最后一行不得渲染指标簇，实际 {bottom:?}"
+    );
+    let text = all_text(&buf);
+    assert!(
+        !text.contains('›'),
+        "浮层态不得渲染色带输入提示符，实际屏幕: {text:?}"
+    );
+    assert_gutters_blank(&buf, 110);
+}
+
+// ---------------------------------------------------------------------------
+// A12（ADR 0078 §决策 1/6/8 + ADR 0119）：header 右簇 = FAINT 前景（品牌 ACCENT+BOLD、
+// 工作区 MUTED）；底面行 = 状态行右槽 on CANVAS：模型相位 = GHOST 模型身份、
+// 权限相位 = 「权限 · 工作区」MUTED；呼吸行 28 = 色带内 SURFACE 空白。
+// ---------------------------------------------------------------------------
+
+/// v3 R11：段间分隔符必须恰好是 `" · "`；只检测**真正的孤立分隔符**。
+///
+/// 仅检查：行首/簇首 `·`、簇尾 `·`、连续分隔符（`"· ·"` / `"·  ·"`）。合法的段间
+/// `" · "` 前缀会自然以 `·` 结尾，不能据此判为孤立（原实现误杀 `"↑500 ↓0 · 缓存 20%"`）。
+fn assert_no_orphan_separator(row: &str, label: &str) {
+    // 右簇 = 行内第一个指标段到行尾（workspace 路径不可能含 ↑/缓存/上下文）。
+    let cluster_start = ["↑", "缓存", "上下文"]
+        .iter()
+        .filter_map(|token| row.find(token))
+        .min()
+        .unwrap_or(row.len());
+    let cluster = row[cluster_start..].trim();
+    if cluster.is_empty() {
+        // 无值不显示：右簇为空时由各用例的存在性断言负责，这里无结构可查。
+        return;
+    }
+    assert!(
+        !cluster.starts_with('·'),
+        "[{label}] 指标右簇不得以孤立分隔符开头: {cluster:?}"
+    );
+    assert!(
+        !cluster.ends_with('·'),
+        "[{label}] 指标右簇不得以孤立分隔符结尾: {cluster:?}"
+    );
+    assert!(
+        !cluster.contains("· ·") && !cluster.contains("·  ·"),
+        "[{label}] 指标段之间不得出现连续孤立分隔符: {cluster:?}"
+    );
+    // 结构断言：段间恰好一个 " · "，各段非空且不含首尾空格（空段会同时暴露为 "· ·"）。
+    for part in cluster.split(" · ") {
+        assert!(
+            !part.is_empty(),
+            "[{label}] 分隔符之间存在空段: {cluster:?}"
+        );
+        assert_eq!(
+            part,
+            part.trim(),
+            "[{label}] 指标段不得含首尾空格: {part:?}（簇 {cluster:?}）"
+        );
+    }
+}
+
+#[test]
+fn a12_metrics_row_is_ghost_on_canvas_and_breathing_row_is_band_surface() {
+    // Arrange：注入非零值，保证指标行右簇有字形（左簇 workspace 始终有字形）
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 1200;
+    state.total_output_tokens = 345;
+    state.total_cache_hit_tokens = 600;
+    state.last_context_tokens = 50_000;
+    state.context_window_tokens = 200_000;
+    let (cx, cw) = content_geometry(110);
+
+    // Act
+    let buf = screen(&mut state, 110, 30);
+
+    // Assert 1（ADR 0078 §决策 6/8 + ADR 0119 模型半周期）：底面行右槽在本相位只承载
+    // 右对齐模型身份（GHOST on CANVAS），不再承载工作区标签或数值指标（二者分别迁到
+    // header 左槽 / 右槽）。
+    //
+    // 只断言内容列（`content.x..content.x+content.width`）：沟槽纪律见 Assert 3；
+    // 宽字符续格跳过逻辑保留（ratatui 0.29 `Buffer::diff` 对续格置 to_skip，
+    // TestBackend 首帧该格为 `Cell::default`，不承载独立 fg/bg 契约）。
+    let mut glyph_cells = 0usize;
+    let mut skip_continuation = false;
+    for x in cx..cx + cw {
+        if skip_continuation {
+            skip_continuation = false;
+            continue;
+        }
+        let cell = &buf[(x, 29)];
+        assert_eq!(
+            cell.bg, CANVAS,
+            "底面行内容列第 {x} 列背景必须是 CANVAS（ADR 0078 §决策 8：不在色带内），实际 {:?}",
+            cell.bg
+        );
+        let symbol = cell.symbol();
+        if !symbol.trim().is_empty() {
+            glyph_cells += 1;
+            assert!(
+                cell.fg == GHOST || cell.fg == MUTED,
+                "底面行内容列第 {x} 列字形前景必须是 GHOST（模型段）或 MUTED（权限段），\
+                 实际 {:?}（symbol={:?}）",
+                cell.fg,
+                symbol
+            );
+        }
+        let mut chars = symbol.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            if disp_width(ch) == 2 {
+                skip_continuation = true;
+            }
+        }
+    }
+    assert!(glyph_cells > 0, "底面行必须至少渲染一个字形（模型身份）");
+    let bottom = row_text(&buf, 29);
+    // 2026-11-17：模型与权限同帧可见（取消时分轮播）——只要求模型在场，不再要求逐字相等。
+    assert!(
+        bottom.contains(state.model.trim()),
+        "底面行必须含模型身份，实际 {bottom:?}"
+    );
+    assert!(
+        bottom.contains("权限 · "),
+        "底面行必须含权限级别（同帧可见），实际 {bottom:?}"
+    );
+    for needle in ["↑", "↓", "缓存", "上下文", "—"] {
+        assert!(
+            !bottom.contains(needle),
+            "底面行不得残留指标段/占位符 {needle:?}（指标簇已上移 header）：{bottom:?}"
+        );
+    }
+
+    // Assert 1b（ADR 0078 §决策 1）：header(row 0) 单行双区配色 ——
+    // 品牌 ACCENT+BOLD、分隔符与右簇 FAINT、工作区标签 MUTED；指标簇右对齐到内容列最后一列。
+    let header = row_text(&buf, 0);
+    assert_eq!(buf[(cx, 0)].symbol(), "P", "header 必须从内容列起点以品牌起排");
+    assert_eq!(
+        buf[(cx, 0)].fg,
+        ACCENT,
+        "header 品牌必须用 ACCENT Rgb(214,114,80)，实际 {:?}",
+        buf[(cx, 0)].fg
+    );
+    assert!(
+        buf[(cx, 0)].modifier.contains(Modifier::BOLD),
+        "header 品牌必须加粗（ADR 0078 §决策 1）"
+    );
+    let dot_x = cx + 6;
+    assert_eq!(buf[(dot_x, 0)].symbol(), "·", "品牌与工作区之间必须有 `·` 分隔符");
+    assert_eq!(
+        buf[(dot_x, 0)].fg,
+        FAINT,
+        "header 分隔符必须用 FAINT，实际 {:?}",
+        buf[(dot_x, 0)].fg
+    );
+    let ws_x = cx + header_brand_prefix_width() as u16;
+    assert_eq!(
+        buf[(ws_x, 0)].fg,
+        MUTED,
+        "header 工作区标签必须用 MUTED，实际 {:?}",
+        buf[(ws_x, 0)].fg
+    );
+    let metrics_start = header
+        .find('↑')
+        .map(|byte| byte as u16)
+        .expect("header 右槽必须渲染指标簇（↑ 段）");
+    assert!(
+        metrics_start > ws_x,
+        "指标簇必须位于工作区标签右侧（左区→右区），实际 x={metrics_start} vs ws_x={ws_x}"
+    );
+    for x in metrics_start..cx + cw {
+        let cell = &buf[(x, 0)];
+        if cell.symbol().trim().is_empty() {
+            continue;
+        }
+        assert_eq!(
+            cell.fg,
+            FAINT,
+            "header 右簇字形必须用 FAINT（x={x}，symbol={:?}），实际 {:?}",
+            cell.symbol(),
+            cell.fg
+        );
+    }
+    assert!(
+        !buf[(cx + cw - 1, 0)].symbol().trim().is_empty(),
+        "header 指标簇必须右对齐到内容列最后一列 x={}（不留行尾空白）",
+        cx + cw - 1
+    );
+
+    // Assert 2（R13/R14）：y=28 是**色带内**呼吸行 —— **内容列**逐格空白且 bg=SURFACE。
+    // v4 已删除独立 CANVAS 间距行；但色带与内容列同宽，不得因呼吸行把 SURFACE 抹到沟槽。
+    for x in cx..cx + cw {
+        let cell = &buf[(x, 28)];
+        assert!(
+            cell.symbol().trim().is_empty(),
+            "色带呼吸行内容列第 {x} 列不得有字符，实际 {:?}",
+            cell.symbol()
+        );
+        assert_eq!(
+            cell.bg, SURFACE,
+            "色带呼吸行内容列第 {x} 列背景必须是 SURFACE（v4：呼吸行属于色带），实际 {:?}",
+            cell.bg
+        );
+    }
+
+    // Assert 3（ADR 0038 沟槽纪律）：沟槽列（0/1/W-2/W-1）在呼吸行（28）与底面行（29）
+    // 必须保持 CANVAS 背景且无字形 —— 色带/底面不得越出内容列。
+    assert_eq!(cx, 3, "110×30 的内容列起点应为 3（GUTTER=3）");
+    for x in [0u16, 1, buf.area.width - 2, buf.area.width - 1] {
+        for y in [28u16, 29u16] {
+            let cell = &buf[(x, y)];
+            assert!(
+                cell.symbol().trim().is_empty(),
+                "沟槽列 x={x}（y={y}）不得有字形，实际 {:?}",
+                cell.symbol()
+            );
+            assert_eq!(
+                cell.bg, CANVAS,
+                "沟槽列 x={x}（y={y}）背景必须是 CANVAS（呼吸行/底面行不得铺满整行），实际 {:?}",
+                cell.bg
+            );
+        }
+    }
+
+    // Assert 4（2026-11-17）：模型与权限**同帧**可见（取消时分轮播）。
+    assert_eq!(
+        state.permission_mode,
+        pony_agent_core::agent::headless::PermissionMode::WorkspaceWrite,
+        "夹具失效：默认权限模式应为「工作区写入」，实际 {:?}",
+        state.permission_mode
+    );
+    let same_frame = row_text(&buf, 29);
+    assert!(
+        same_frame.contains("权限 · 工作区"),
+        "同一帧必须同时可见权限级别，实际 {:?}",
+        same_frame.trim()
+    );
+    assert!(
+        same_frame.contains(&state.model),
+        "同一帧必须同时可见模型身份，实际 {:?}",
+        same_frame.trim()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A13（v3 §6 R11）：分段隐藏组合 —— 有值才显示对应段，且不得出现孤立分隔符
+// ---------------------------------------------------------------------------
+#[test]
+fn a13_metrics_segments_hide_independently() {
+    // 用例 1：仅 in>0（out=0 / window=0）→ ↑/↓/缓存 有，上下文 无
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 500;
+    state.total_output_tokens = 0;
+    state.total_cache_hit_tokens = 100;
+    state.last_context_tokens = 0;
+    state.context_window_tokens = 0;
+    let buf = screen(&mut state, 110, 30);
+    let last = metrics_row(&buf);
+    assert!(
+        last.contains("↑500") && last.contains("↓0"),
+        "in>0 时 ↑/↓ 段必须显示：{last:?}"
+    );
+    assert!(
+        last.contains("缓存 20%"),
+        "in>0 时缓存段必须显示（100/500=20%）：{last:?}"
+    );
+    assert!(
+        !last.contains("上下文"),
+        "window=0 时上下文段必须隐藏：{last:?}"
+    );
+    assert!(!last.contains('—'), "v3 起不再使用占位符：{last:?}");
+    assert_no_orphan_separator(&last, "A13-1 in>0");
+
+    // 用例 2：仅 window>0（in=0 / out=0）→ 仅「上下文」一段
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 0;
+    state.total_output_tokens = 0;
+    state.total_cache_hit_tokens = 0;
+    state.last_context_tokens = 50_000;
+    state.context_window_tokens = 200_000;
+    let buf = screen(&mut state, 110, 30);
+    let last = metrics_row(&buf);
+    assert!(
+        last.contains("上下文 25%"),
+        "window>0 时上下文段必须显示（50000/200000=25%）：{last:?}"
+    );
+    for needle in ["↑", "↓", "缓存", "—"] {
+        assert!(
+            !last.contains(needle),
+            "in=0/out=0 时不得出现 {needle:?}：{last:?}"
+        );
+    }
+    assert_no_orphan_separator(&last, "A13-2 window>0");
+
+    // 用例 3：in=0 且 out>0（window=0）→ ↑/↓ 有，缓存/上下文本无
+    let mut state = tui::TuiState::default();
+    state.total_input_tokens = 0;
+    state.total_output_tokens = 250;
+    state.total_cache_hit_tokens = 0;
+    state.last_context_tokens = 0;
+    state.context_window_tokens = 0;
+    let buf = screen(&mut state, 110, 30);
+    let last = metrics_row(&buf);
+    assert!(
+        last.contains("↑0") && last.contains("↓250"),
+        "out>0 时 ↑/↓ 段必须显示：{last:?}"
+    );
+    assert!(
+        !last.contains("缓存"),
+        "in=0 时缓存段必须隐藏（缓存比不可算）：{last:?}"
+    );
+    assert!(
+        !last.contains("上下文"),
+        "window=0 时上下文段必须隐藏：{last:?}"
+    );
+    assert!(!last.contains('—'), "v3 起不再使用占位符：{last:?}");
+    assert_no_orphan_separator(&last, "A13-3 out>0");
+}

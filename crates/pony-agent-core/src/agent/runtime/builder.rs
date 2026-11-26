@@ -19,6 +19,7 @@ pub struct AgentRuntimeBuilder {
 
 impl AgentRuntimeBuilder {
     pub fn new() -> Self {
+        crate::agent::ensure_runtime_bridges();
         Self {
             sessions: None,
             sessions_shared: None,

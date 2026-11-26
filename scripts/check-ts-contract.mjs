@@ -3,7 +3,7 @@
  * W57-A TS/Rust 契约漂移门禁（纯 Node，零依赖）。
  *
  * 输入：`docs/contracts/ts-contract.snapshot.json` —— 由 Rust 侧
- *   `cargo test -p pony-agent-core --test ts_contract_snapshot`（`UPDATE_CONTRACT_SNAPSHOT=1`）
+ *   `cargo test -p pony-agent-core --test runtime_suite -- ts_contract_snapshot`（`UPDATE_CONTRACT_SNAPSHOT=1`）
  *   用 `serde_json::to_value` 真实序列化产出，键名禁止手抄。
  * 判定：快照里出现的每个 serde 线缆键，必须在对应的 TS 声明（`export type/interface`）里存在。
  *   **只查「Rust 有、TS 无」**（漏声明 → 前端静默丢字段）；不查反向（TS 允许有本地派生字段）。
@@ -25,7 +25,7 @@ function fail(message) {
 if (!existsSync(SNAPSHOT_PATH)) {
   fail(
     `契约快照缺失：${SNAPSHOT_PATH}\n` +
-      "  请先运行：UPDATE_CONTRACT_SNAPSHOT=1 cargo test -p pony-agent-core --test ts_contract_snapshot",
+      "  请先运行：UPDATE_CONTRACT_SNAPSHOT=1 cargo test -p pony-agent-core --test runtime_suite -- ts_contract_snapshot",
   );
 }
 

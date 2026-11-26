@@ -688,7 +688,7 @@ fn rebuild_index_dry_run_on_a_copy_is_exit_zero_and_zero_write() {
     copy_tree(&fixture.log_root(), &session_log_root_for_db(&copy_db));
 
     let before = Fixture::db_fingerprint(&copy_db);
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ponycli"))
+    let output = std::process::Command::new(pony_test_support::ponycli_bin())
         .arg("sessions")
         .arg("rebuild-index")
         .arg("--dry-run")

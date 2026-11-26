@@ -1,0 +1,4410 @@
+//! Agent Trace 的 OpenTelemetry 装配与门禁面（Wave43 B2 实现落地）。
+//!
+//! 本模块是 trace 上报的**唯一**契约面：公开签名只使用中性类型（[`AttrValue`]、
+//! 各类 `*SpanInput`、[`OtelConfig`]），任何 OTel SDK 类型都被封装在私有实现里，
+//! 以保证契约可被无网络、无全局态的单测直接驱动。
+//!
+//! 隐私门禁总契约：全局上报开关默认**关闭**；关闭态必须做到**零 span 分配、零网络出口**
+//! （由 `GatedSampler` 在关闭态直接返回 `Drop` 决策保证）。手动上传
+//! （[`force_export_session_trace`]）是逐次授权的旁路动作，不受该开关约束，且**不改变**
+//! 开关末态（RAII 旁路守卫：递增 → 作用域结束递减）。
+//!
+//! 导出通路：OTLP/HTTP-protobuf（reqwest 异步客户端）+ `BatchSpanProcessor` 后台线程。
+//! reqwest 异步客户端在发送时需要一个 tokio reactor，而批量导出线程不是 tokio 线程，
+//! 因此 [`init`] 建立一个 1-worker runtime，并在导出 future 内部 `Handle::enter()`
+//! 之后才 poll 内层导出（`RuntimeExporter`）；runtime 句柄随全局态存活，[`shutdown`]
+//! 时才随之释放。
+
+/// 最小 JSON 日志面（D8）：仅服务本次新增 trace 代码路径。
+pub mod log;
+pub mod spool;
+
+// ---------------------------------------------------------------- span 名（冻结）
+
+/// Turn root span 名。语义：一个 turn 对应一棵 trace 的根 span，子 span 与之同 trace_id。
+pub const SPAN_AGENT_TURN: &str = "agent.turn";
+
+/// LLM 调用子 span 名。语义：一次模型请求一个 span，父 span 为 [`SPAN_AGENT_TURN`]。
+pub const SPAN_LLM_CHAT: &str = "llm.chat";
+
+/// 工具调用子 span 名。语义：一次工具执行一个 span，父 span 为 [`SPAN_AGENT_TURN`]。
+pub const SPAN_TOOL_CALL: &str = "tool.call";
+
+// ------------------------------------------------------------ 属性键（OTel GenAI 惯例）
+
+/// 模型供应商种类（如 `anthropic` / `openai`）。语义轨路由谓词之一：缺失则 Langfuse 收不到。
+pub const ATTR_GEN_AI_SYSTEM: &str = "gen_ai.system";
+
+/// 请求模型名。契约名（非 `gen_ai.model`）。
+pub const ATTR_GEN_AI_REQUEST_MODEL: &str = "gen_ai.request.model";
+
+/// 输入 token 数。
+pub const ATTR_GEN_AI_USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
+
+/// 输出 token 数。
+pub const ATTR_GEN_AI_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
+
+/// P0-1：OTel GenAI 语义轨 Prompt 预览（脱敏 + 截断后）。
+pub const ATTR_GEN_AI_PROMPT: &str = "gen_ai.prompt";
+
+/// P0-1：OTel GenAI 语义轨 Completion 预览（脱敏 + 截断后）。
+pub const ATTR_GEN_AI_COMPLETION: &str = "gen_ai.completion";
+
+/// 思考（推理）token 数（wave-51 C3 契约键；ADR 0055 起重命名为自有维度）。
+///
+/// semconv 口径（OTel GenAI registry `gen_ai.usage.reasoning.output_tokens`）：该值 SHOULD 已包含在
+/// [`ATTR_GEN_AI_USAGE_OUTPUT_TOKENS`] 之内（`output_tokens` 含思考 token，禁止二次相加）。
+/// 由 [`llm_usage_detail_attributes`] 在有值时产出；缺失 ⇒ **不得输出该键**。
+///
+/// ADR 0055（探针实测）：Langfuse 把该键**独立叠加**在 `output` 之上并计入 `usage.total`，
+/// 与 semconv「已包含于 output」相矛盾 ⇒ 用 semconv 键名会让每次调用的 total 多出思考 token
+/// （探针 A 组：input 1000 + output 200 + reasoning 50 ⇒ total 1250，正确值应为 1200）。
+/// 故键名改为**非** `gen_ai.usage.` 前缀的 `llm.reasoning.output_tokens`：仍留档在 span 属性里，
+/// 不再污染 `usage.total`。
+pub const ATTR_GEN_AI_USAGE_REASONING_TOKENS: &str = "llm.reasoning.output_tokens";
+
+/// 缓存命中输入 token 数（wave-51 C3 契约键；**semconv 标准名**）。
+///
+/// semconv 口径（OTel GenAI registry `gen_ai.usage.cache_read.input_tokens`）：该值 SHOULD 已包含在
+/// [`ATTR_GEN_AI_USAGE_INPUT_TOKENS`] 之内（`input_tokens` 含缓存命中 token）。
+/// Langfuse ingest 会从 `input_tokens` 减本值、从 `output_tokens` 减思考值以避免重复计费
+/// ⇒ 仅当上游 `input_tokens` **确实包含**缓存命中时才允许上报（协议门控见契约 PA51-C3-T6）。
+pub const ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS: &str = "gen_ai.usage.cache_read.input_tokens";
+
+/// 模型生成速度（t/s）。
+pub const ATTR_GEN_AI_SPEED_TOKENS_PER_SECOND: &str = "gen_ai.speed.tokens_per_second";
+
+/// 上下文窗口总大小（tokens）。
+///
+/// ADR 0055：键名**必须**避开 `gen_ai.usage.` 前缀。Langfuse OTel ingest 会把
+/// `gen_ai.usage.*` 下的**每一个数值键**都并入 observation 的 `usageDetails` 并求和成
+/// `usage.total`，因此窗口容量（如 1,000,000）一旦挂在该前缀下，会把每次调用的 token
+/// 总量抬高约 100 万（实测 trace `f47fd028`：`total=1,007,675`，真实约 7,675）。
+/// 窗口容量是**容量**不是**用量**，故改用本仓自有 `llm.context.*` 维度。
+pub const ATTR_GEN_AI_USAGE_CONTEXT_WINDOW: &str = "llm.context.window_tokens";
+
+/// 上下文使用比例（0.0 ~ 1.0）。
+///
+/// ADR 0055：同上，比例是派生指标而非用量，禁止落在 `gen_ai.usage.` 前缀下。
+pub const ATTR_GEN_AI_USAGE_CONTEXT_RATIO: &str = "llm.context.ratio";
+
+/// 前缀缓存命中率（0.0 ~ 1.0）：`cached_input_tokens / input_tokens`（ADR 0055 P1-5）。
+///
+/// 存在理由：真实 trace `f47fd028` / `a1751e1b` 均在同一轮第 7 次调用出现
+/// `cache_read=0` 且 ttft 从 ~7s 跳到 17.5s（整段前缀重算）。客户端侧同一轮内
+/// system / history 前缀是字节稳定的（volatile 段位置固定在历史之后，`current_date` 只到日），
+/// 因此该断崖属**上游侧**缓存失效；本键把它变成可直接查询/告警的派生指标。
+pub const ATTR_LLM_CONTEXT_CACHE_HIT_RATIO: &str = "llm.context.cache_hit_ratio";
+
+/// Langfuse trace release：与 `service.version` 同值（ADR 0055）。
+///
+/// 现状缺口：真实 trace `f47fd028` 的 `version=0.1.167` 但 `release=null`——Langfuse 只从
+/// `service.version` 资源属性填 `version`，`release` 需 span 属性显式给出，导致按发布线筛选失效。
+pub const ATTR_LANGFUSE_RELEASE: &str = "langfuse.release";
+
+/// 整轮综合生成速度（t/s）。
+pub const ATTR_AGENT_TURN_SPEED_TOKENS_PER_SECOND: &str = "agent.turn.speed.tokens_per_second";
+
+/// 单次 LLM 调用成本（USD，f64）。Wave-5 K4：未知模型/门禁关闭时**不输出该键**。
+pub const ATTR_GEN_AI_COST_USD: &str = "gen_ai.cost.usd";
+
+/// Wave-7 G5：治理决策 span 名（宏观调度入口，唯一允许的治理 span）。
+pub const SPAN_GOVERNANCE_DECIDE: &str = "governance.decide";
+
+/// 治理 span 属性白名单（G5.1；**严禁**扩展为金额/阈值等动态数字）。
+pub const ATTR_GOVERNANCE_WINDOW: &str = "governance.window";
+pub const ATTR_GOVERNANCE_DECISION: &str = "governance.decision";
+pub const ATTR_GOVERNANCE_REASON: &str = "governance.reason";
+pub const ATTR_GOVERNANCE_POLICY_VERSION: &str = "governance.policy_version";
+pub const ATTR_GOVERNANCE_UNPRICED_TURNS: &str = "governance.unpriced_turns";
+
+/// 整轮 turn 聚合成本（USD，f64）。Wave-5 K4：无有效计价时**不输出该键**（严禁写 0.0）。
+pub const ATTR_AGENT_TURN_COST_USD: &str = "agent.turn.cost.usd";
+
+// --------------------- 属性键（wave-54 C1/C2：per-call 真值 + turn 速度唯一口径）
+//
+// 契约来源：`.dev-team/contract-matrix-wave54.md` §1 C1/C2（Lead 冻结，只读）。
+// 命名：`llm.call.*` 属 pony-agent 自有 per-call 维度（OTel GenAI semconv 未定义该组键，
+// 故**不是** semconv 标准键），`agent.usage.*` / `agent.turn.*` 沿用既有自有维度前缀；
+// 与语义轨 `gen_ai.*` 并存（`gen_ai.speed.tokens_per_second` 语义不变）。
+// 通用纪律：键不存在即「未知」，**严禁**写 0/空串占位。
+
+/// 单次 provider 调用耗时（毫秒，I64）；wave-54 C1，与 `ProviderCallCacheRecord.turnDurationMs`
+/// 同窗口；`None` ⇒ 不输出该键。
+pub const ATTR_LLM_CALL_DURATION_MS: &str = "llm.call.duration_ms";
+/// B135：被排除出 `llm.call.duration_ms` 的重试等待（失败 attempt + 退避 sleep）。
+/// 只在真的发生过重试时输出；`duration_ms + retry.wait_ms` 即外层总耗时。
+pub const ATTR_LLM_RETRY_WAIT_MS: &str = "llm.retry.wait_ms";
+
+/// 单次 provider 调用首包耗时（毫秒，I64）；wave-54 C1，**仅** `Some` 时输出
+/// （buffered/无首包 ⇒ 键不存在）。
+pub const ATTR_LLM_CALL_TTFT_MS: &str = "llm.call.ttft_ms";
+
+/// 单次 provider 调用生成耗时（毫秒，I64）；wave-54 C1，`= duration - ttft`
+/// （当且仅当 ttft 存在且 `duration > ttft`），否则 `= duration`。
+pub const ATTR_LLM_CALL_GENERATION_MS: &str = "llm.call.generation_ms";
+
+/// usage 来源（字符串，`provider` | `estimated_chars`）；wave-54 C1/C3，
+/// 未记录 usage ⇒ 键不存在（估算值不得冒充真值）。
+pub const ATTR_AGENT_USAGE_ORIGIN: &str = "agent.usage.origin";
+
+/// 单次 `llm.chat` 请求的组装模式（字符串，`initial` | `tool_followup` | `tool_recovery`）。
+///
+/// 为什么需要它：恢复/重建类请求此前与普通 follow-up 在 trace 上**完全不可区分**——
+/// 生产事故（trace `38590d52…`）里末轮请求 input 从 18896 掉到 2311、cache_read=0，
+/// 只能靠 token 断崖反推「上下文被换掉了」。本键让「这条请求是不是重建过的」可直接查询。
+pub const ATTR_LLM_REQUEST_MODE: &str = "llm.request.mode";
+
+/// 单次请求实际发出的消息条数（I64；native transcript 优先，否则取分层 input 条数）。
+///
+/// 与 [`ATTR_LLM_REQUEST_MODE`] 联合使用：同轮相邻请求的条数/前缀发生跳变即为上下文重建信号。
+pub const ATTR_LLM_REQUEST_MESSAGES: &str = "llm.request.messages";
+
+/// 请求首条消息是否为 system 前缀（Bool）。
+///
+/// 上下文塌陷的最强指纹：`false` 表示本次调用在**没有 system prompt**的情况下发生
+/// （历史缺陷 `38590d52…` 的最终回答正是如此）。
+pub const ATTR_LLM_REQUEST_SYSTEM_PREFIX: &str = "llm.request.system_prefix";
+
+/// 单次 `llm.chat` 的实际传输方式（字符串，`stream` | `buffered`）。
+///
+/// 为什么需要它：`llm.request.mode` 只表达「请求在轮次里的角色」（initial / tool_followup /
+/// tool_recovery），对流式与缓冲请求都写 `tool_followup` ⇒ 下游无法区分「批量请求本就
+/// 没有首包」与「流式首包测量丢包」（r2-dim1 L3：18/18 无首包调用全部无口径）。
+/// 本键让「无 `llm.call.ttft_ms`」成为可归因事实，而不是测量空洞。
+pub const ATTR_LLM_REQUEST_TRANSPORT: &str = "llm.request.transport";
+
+/// 传输方式取值：流式（SSE/chunked，有首包）。
+pub const LLM_REQUEST_TRANSPORT_STREAM: &str = "stream";
+
+/// 传输方式取值：缓冲（一次性 HTTP 响应，无首包语义）。
+pub const LLM_REQUEST_TRANSPORT_BUFFERED: &str = "buffered";
+
+/// turn 速度口径标记（字符串）；取值 `stream_decode` | `end_to_end`
+/// （[`pony_protocol::speed::TurnSpeedBasis::as_str`]，I10）。无速度 ⇒ 该键**不输出**。
+pub const ATTR_AGENT_TURN_SPEED_BASIS: &str = "agent.turn.speed.basis";
+
+/// turn 级耗时（毫秒，I64）；wave-54 C2，`None` ⇒ 不输出该键。
+pub const ATTR_AGENT_TURN_DURATION_MS: &str = "agent.turn.duration_ms";
+
+/// turn 级 TTFT（毫秒，I64）；wave-54 C2 语义为「首个带 ttft 的 per-call 值」（不跨 hop 采样），
+/// `None` ⇒ 不输出该键。
+pub const ATTR_AGENT_TURN_TTFT_MS: &str = "agent.turn.ttft_ms";
+
+/// turn 内已完成调用数（I64）；wave-54 C2，`None` ⇒ 不输出该键。
+pub const ATTR_AGENT_TURN_CALLS: &str = "agent.turn.calls";
+
+/// 模型供应商展示名（wave-53 C3，如 `PonyLlm`）：与枚举化的 [`ATTR_GEN_AI_SYSTEM`] 并存。
+pub const ATTR_GEN_AI_PROVIDER_NAME: &str = "gen_ai.provider.name";
+
+/// 工具名（如 `bash`）。
+pub const ATTR_GEN_AI_TOOL_NAME: &str = "gen_ai.tool.name";
+
+/// 模型侧工具调用 id（wave-53 C6）：有值才输出，缺失**不输出该键**。
+pub const ATTR_GEN_AI_TOOL_CALL_ID: &str = "gen_ai.tool.call.id";
+
+/// 操作名；turn root span 上的取值恒为 [`OPERATION_AGENT_TURN`]。
+pub const ATTR_GEN_AI_OPERATION_NAME: &str = "gen_ai.operation.name";
+
+// ------------------------------------------------------- 属性键（Langfuse 语义轨）
+
+/// Langfuse 会话 id：同一会话的多轮 turn 聚合到一条 Langfuse session。
+pub const ATTR_LANGFUSE_SESSION_ID: &str = "langfuse.session.id";
+
+/// Langfuse 用户 id：有则带，无则**不输出该键**。
+pub const ATTR_LANGFUSE_USER_ID: &str = "langfuse.user.id";
+
+/// Langfuse trace 名：turn 级展示名。
+pub const ATTR_LANGFUSE_TRACE_NAME: &str = "langfuse.trace.name";
+
+/// Langfuse observation 类型；工具 span 固定取 [`OBSERVATION_TYPE_TOOL`]。
+pub const ATTR_LANGFUSE_OBSERVATION_TYPE: &str = "langfuse.observation.type";
+
+/// P0-1：工具 span 的入参预览（脱敏 + 截断后）。仅当采集开关开启且输入非 `None` 时输出。
+pub const ATTR_LANGFUSE_OBSERVATION_INPUT: &str = "langfuse.observation.input";
+
+/// P0-1：工具 span 的结果预览（脱敏 + 截断后）。仅当采集开关开启且输入非 `None` 时输出。
+pub const ATTR_LANGFUSE_OBSERVATION_OUTPUT: &str = "langfuse.observation.output";
+
+/// P0-1：工具 span payload 采集开关（**默认开启**，opt-out）。
+///
+/// 取 `0`/`false`/`off`/`no`（trim + 大小写不敏感）关闭；未识别值回落默认并 warn
+/// （与 `PONY_AGENT_RUN_PROMOTE_ON_TIMEOUT` 同一口径）。关闭时只影响
+/// [`ATTR_LANGFUSE_OBSERVATION_INPUT`] / [`ATTR_LANGFUSE_OBSERVATION_OUTPUT`] 两个键，
+/// 既有 span 属性（`gen_ai.tool.name` 等）一律不受影响。
+pub const ENV_CAPTURE_TOOL_PAYLOADS: &str = "PONY_OTEL_CAPTURE_TOOL_PAYLOADS";
+
+/// P0-1：单个预览字段的字节上限（脱敏后、含截断标记）。
+pub const TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES: usize = 2 * 1024;
+
+/// P0-1：LLM / Turn span 单个预览字段的字节上限（4096 字节 = 4KB，脱敏后、含截断标记）。
+pub const LLM_PAYLOAD_PREVIEW_LIMIT_BYTES: usize = 4 * 1024;
+
+/// P0-1：截断标记（追加在被截断预览末尾）。
+const TOOL_PAYLOAD_TRUNCATION_MARKER: &str = "…[truncated]";
+
+/// P0-1：LLM / Turn payload 采集开关环境变量（契约定义：默认开启，opt-out）。
+pub const ENV_CAPTURE_LLM_PAYLOADS: &str = "PONY_AGENT_CAPTURE_LLM_PAYLOADS";
+
+/// Langfuse observation 模型名：与 [`ATTR_GEN_AI_REQUEST_MODEL`] 同值双写。
+pub const ATTR_LANGFUSE_OBSERVATION_MODEL_NAME: &str = "langfuse.observation.model.name";
+
+/// Langfuse 语义轨成本三分量（wave-53 C1）：值为**单行 JSON 字符串**，
+/// 键只允许 `input` / `output` / `total`（各自有值才出现）；无有效总额时**不输出该键**。
+pub const ATTR_LANGFUSE_OBSERVATION_COST_DETAILS: &str = "langfuse.observation.cost_details";
+
+// ------------------------------------------------------- 属性键（pony-agent 自有维度）
+
+/// turn 标识，用于 Langfuse 侧与本地会话记录的互跳。
+pub const ATTR_AGENT_TURN_ID: &str = "agent.turn.id";
+
+/// turn 在会话内的序号（0-based）。
+pub const ATTR_AGENT_TURN_SEQUENCE: &str = "agent.turn.sequence";
+
+/// turn 终态相位（如 `completed` / `failed` / `cancelled`）。
+pub const ATTR_AGENT_TURN_PHASE: &str = "agent.turn.phase";
+
+/// P0-3：失败轮的**归因说明**（如 `tool_failed: timeout`）。仅当有非空白原因时输出，值走
+/// [`crate::ponysentry::sanitize`]；成功/取消轮不输出该键。
+pub const ATTR_AGENT_TURN_FAILED_REASON: &str = "agent.turn.failed_reason";
+
+/// turn 终态错误聚合结论（PA-154 / r1-dim6 F3）：**仅**本轮聚合到子 span 错误时输出。
+///
+/// 值域（r1-dim6 F3 起为单值语义，同一轮只出一个结局）：
+/// - `error`：轮次未正常收尾（`phase != completed` 且聚合到子 span 错误）；
+/// - `degraded`：`phase == completed` 但存在工具失败（降级完成，与
+///   [`ATTR_AGENT_TURN_DEGRADED`] 同源同值域；根 span `Status` 仍为 error）。
+///
+/// 全成功轮次**不输出该键**（保持「有 = 有错」的单义语义，避免污染失败率看板）。
+pub const ATTR_AGENT_TURN_OUTCOME: &str = "agent.turn.outcome";
+
+/// [`ATTR_AGENT_TURN_OUTCOME`] 取值：轮次失败（未正常收尾）。
+pub const TURN_OUTCOME_ERROR: &str = "error";
+
+/// [`ATTR_AGENT_TURN_OUTCOME`] 取值：降级完成（正常收尾但有工具失败）。
+pub const TURN_OUTCOME_DEGRADED: &str = "degraded";
+
+/// 工具执行状态（如 `success` / `failed`）。
+pub const ATTR_AGENT_TOOL_STATUS: &str = "agent.tool.status";
+
+/// 本轮是否存在「已完成但有工具失败」的降级语义（wave-53 C4，Bool）。
+///
+/// 语义：仅当 `phase == "completed"` 且工具失败计数 > 0 时输出 `true`；
+/// 其余相位（error/aborted 等）**不输出**该键（错误语义仍由 outcome/status 表达）。
+pub const ATTR_AGENT_TURN_DEGRADED: &str = "agent.turn.degraded";
+
+/// 本轮工具失败次数（wave-53 C4，I64）；计数为 0 时**不输出该键**。
+pub const ATTR_AGENT_TURN_TOOL_FAILURES: &str = "agent.turn.tool_failures";
+
+/// 「本轮是否已计价」显式标记（wave-53 C2，Bool）。
+///
+/// 语义：记录过成本 ⇒ `true`；只记录 usage 未记成本 ⇒ `false`；两者都没记录 ⇒ 不输出。
+pub const ATTR_PONY_COST_PRICED: &str = "pony.cost.priced";
+
+/// 工具执行耗时（毫秒整数）。
+pub const ATTR_AGENT_TOOL_DURATION_MS: &str = "agent.tool.duration_ms";
+
+/// 工具错误摘要：有则带，无则**不输出该键**。
+pub const ATTR_AGENT_TOOL_ERROR: &str = "agent.tool.error";
+
+/// turn root span 上 `gen_ai.operation.name` 的取值（与 span 名同字面量）。
+pub const OPERATION_AGENT_TURN: &str = "agent.turn";
+
+/// 工具 span 上 `langfuse.observation.type` 的取值。
+pub const OBSERVATION_TYPE_TOOL: &str = "tool";
+
+// ------------------------------------------------------------- 缺省值与环境变量（D3）
+
+/// 集群内 collector 的 OTLP/HTTP 端点常量（4318 端口）。
+///
+/// Wave-4 C1.4：桌面端**内置缺省**端点已改为公网 [`DEFAULT_PUBLIC_ENDPOINT`]；本常量保留为
+/// 「集群内直连」的显式取值（供测试/运维按需经 env 覆盖），**不再**是 [`OtelConfig::default`]
+/// 的取值。历史冻结断言（`otel_trace_migration_test.rs` D3 缺省值扫描）逐字锁定本常量，故不改值。
+pub const DEFAULT_ENDPOINT: &str = "http://otel-collector.observability.svc.cluster.local:4318";
+
+/// 桌面端内置缺省 OTLP/HTTP 端点（公网 edge，Wave-4 C1.4）。
+///
+/// 语义：`settings` 与 `env` 均未提供端点时的最终回落值；端点补齐 `/v1/traces` 由导出层负责。
+pub const DEFAULT_PUBLIC_ENDPOINT: &str = "https://otel.ponyjob.top";
+
+/// `service.name` 资源属性缺省值。
+pub const DEFAULT_SERVICE_NAME: &str = "pony-agent";
+
+/// 采样率缺省值：桌面端属显式授权 + 单机低频场景，缺省全采。
+pub const DEFAULT_SAMPLING_RATIO: f64 = 1.0;
+
+/// 端点覆盖用环境变量名；优先级高于 [`DEFAULT_ENDPOINT`]。
+pub const ENV_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+
+/// 服务名覆盖用环境变量名。
+pub const ENV_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
+
+/// 采样率覆盖用环境变量名。
+pub const ENV_SAMPLER_ARG: &str = "OTEL_TRACES_SAMPLER_ARG";
+
+/// 公网 OTLP 端点鉴权 token 的环境变量名；仅作为 header 注入，不落盘、不入库。
+pub const ENV_PONY_OTEL_TOKEN: &str = "PONY_OTEL_TOKEN";
+
+/// `service.version` resource 属性的进程 env 覆盖名（PA-153）；trim 后非空即覆盖默认值。
+pub const ENV_PONY_OTEL_SERVICE_VERSION: &str = "PONY_OTEL_SERVICE_VERSION";
+
+/// `deployment.environment` resource 属性的进程 env 覆盖名（PA-153）；trim 后非空即覆盖默认值。
+pub const ENV_PONY_OTEL_ENVIRONMENT: &str = "PONY_OTEL_ENVIRONMENT";
+
+/// 探针自报标记环境变量名（O4 探针隔离）；取值为 `1` / `true` / `probe` 时 resource 自动声明 `pony.probe=true`。
+pub const ENV_PONY_OTEL_PROBE: &str = "PONY_OTEL_PROBE";
+
+/// Langfuse `langfuse.user.id` 属性覆盖环境变量名（PA-163）；trim 后非空即注入 root span。
+pub const ENV_PONY_OTEL_USER_ID: &str = "PONY_OTEL_USER_ID";
+
+// ------------------------------------------------------ resource 归因键（PA-153 / O4）
+//
+// 归因维度只在 resource 层表达（span 属性不动）；键名取自 OTel resource 语义约定。
+
+/// resource 语义约定键：服务版本（缺省 = 本 crate 的 `CARGO_PKG_VERSION`）。
+pub const RESOURCE_SERVICE_VERSION: &str = "service.version";
+
+/// resource 语义约定键：部署环境（缺省按构建档位推导，见 [`default_deployment_environment`]）。
+pub const RESOURCE_DEPLOYMENT_ENVIRONMENT: &str = "deployment.environment";
+
+/// resource 语义约定键：探针隔离标记（集群边缘 edge 探针隔离契约源侧自报）。
+pub const RESOURCE_PONY_PROBE: &str = "pony.probe";
+
+/// resource 语义约定键：上报客户端归因标记（区分真实设备与边缘探针）。
+pub const RESOURCE_INGEST_CLIENT_KIND: &str = "ingest.client.kind";
+
+/// resource 语义约定键：跨路径稳定产品名。
+///
+/// 契约依据：公网 edge 会把 `service.name` 改写为 `desktop-client`（原值放入 `client.service.name`），
+/// 但不会改写带 `pony.` 前缀的语义约定属性（skill 契约 §1.0）。因此 `pony.app.name`
+/// 是两条接入路径（内网直连 collector 与公网 edge）唯一保持一致的跨路径检索键。
+pub const RESOURCE_PONY_APP_NAME: &str = "pony.app.name";
+
+/// 产品稳定名。
+pub const PONY_APP_NAME: &str = "pony-agent";
+
+/// 客户端归因标记取值：真实设备客户端。
+pub const INGEST_CLIENT_KIND_DEVICE: &str = "device";
+
+/// 客户端归因标记取值：边缘探针。
+pub const INGEST_CLIENT_KIND_PROBE: &str = "probe";
+
+/// debug 构建的默认部署环境取值。
+pub const ENVIRONMENT_DEVELOPMENT: &str = "development";
+
+/// release 构建的默认部署环境取值。
+pub const ENVIRONMENT_PRODUCTION: &str = "production";
+
+/// 构建期烧录的准入 token 的 env 名（`option_env!` 读取，仅 release 工作流注入）。
+///
+/// 为什么需要它：桌面端此前**没有任何 token 分发通道** —— 用户必须在 Settings 里手填
+/// 公网 edge 的 OTel token，没填就静默 401、trace 全丢（实测：24h 零 trace，而同期探针正常）。
+/// 与 PonySentry 的构建期烧录（ADR 0037）同款取舍：安装包内嵌 token，用户零配置。
+/// 优先级最低（settings > env > 构建期），因此用户/运维仍可覆盖或吊销为本地值。
+pub const ENV_PONY_OTEL_BUILD_TOKEN: &str = "PONY_OTEL_BUILD_TOKEN";
+
+/// 构建期烧录值（未注入时为 `None`；本地 `cargo build` 恒为 None）。
+fn build_time_otel_token() -> Option<&'static str> {
+    option_env!("PONY_OTEL_BUILD_TOKEN")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// 鉴权 header 名（token 值由 [`ENV_PONY_OTEL_TOKEN`] 注入）。
+pub const AUTH_HEADER_NAME: &str = "authorization";
+
+// ---------------------------------------------------------------------- 中性值类型
+
+/// 属性值的中性表示：调用方/测试只与本类型交互，不感知 OTel `Value`。
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttrValue {
+    /// 字符串属性。
+    Str(String),
+    /// 有符号整数属性（token 数、耗时毫秒等）。
+    I64(i64),
+    /// 浮点属性（采样率、比率等）。
+    F64(f64),
+    /// 布尔属性。
+    Bool(bool),
+}
+
+/// turn root span 的属性映射输入。
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnSpanInput {
+    /// 会话 id，映射到 [`ATTR_LANGFUSE_SESSION_ID`]。
+    pub session_id: String,
+    /// 用户 id；`None` 时不得输出 [`ATTR_LANGFUSE_USER_ID`]。
+    pub user_id: Option<String>,
+    /// turn id，映射到 [`ATTR_AGENT_TURN_ID`]。
+    pub turn_id: String,
+    /// 会话内 turn 序号，映射到 [`ATTR_AGENT_TURN_SEQUENCE`]。
+    pub sequence: u64,
+    /// turn 终态相位，映射到 [`ATTR_AGENT_TURN_PHASE`]。
+    pub phase: String,
+    /// P0-3：失败轮归因（`None`/全空白 ⇒ **不输出** [`ATTR_AGENT_TURN_FAILED_REASON`]）。
+    pub failed_reason: Option<String>,
+    /// P0-1：用户输入 Prompt 预览（`None` ⇒ 不输出 `gen_ai.prompt` 与 `langfuse.observation.input`）。
+    pub prompt_preview: Option<String>,
+    /// P0-1：最终输出 Response 预览（`None` ⇒ 不输出 `gen_ai.completion` 与 `langfuse.observation.output`）。
+    pub response_preview: Option<String>,
+}
+
+/// LLM 子 span 的属性映射输入。
+#[derive(Clone, Debug, PartialEq)]
+pub struct LlmSpanInput {
+    /// 供应商种类，映射到 [`ATTR_GEN_AI_SYSTEM`]（语义轨路由谓词）。
+    pub provider_kind: String,
+    /// 模型名；`None` 时不得输出模型相关属性。
+    pub model: Option<String>,
+    /// 输入 token 数；`None` 时不得输出 [`ATTR_GEN_AI_USAGE_INPUT_TOKENS`]。
+    pub input_tokens: Option<u64>,
+    /// 输出 token 数；`None` 时不得输出 [`ATTR_GEN_AI_USAGE_OUTPUT_TOKENS`]。
+    pub output_tokens: Option<u64>,
+    /// 操作名，映射到 [`ATTR_GEN_AI_OPERATION_NAME`]。
+    pub operation: String,
+    /// P0-1：输入 Prompt 预览（`None` ⇒ 不输出 `gen_ai.prompt` 与 `langfuse.observation.input`）。
+    pub prompt_preview: Option<String>,
+    /// P0-1：输出 Completion 预览（`None` ⇒ 不输出 `gen_ai.completion` 与 `langfuse.observation.output`）。
+    pub completion_preview: Option<String>,
+}
+
+/// 工具子 span 的属性映射输入。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolSpanInput {
+    /// 工具名，映射到 [`ATTR_GEN_AI_TOOL_NAME`]。
+    pub tool_name: String,
+    /// 执行状态，映射到 [`ATTR_AGENT_TOOL_STATUS`]。
+    pub status: String,
+    /// 耗时毫秒；`None` 时不得输出 [`ATTR_AGENT_TOOL_DURATION_MS`]。
+    pub duration_ms: Option<u64>,
+    /// 错误摘要；`None` 时不得输出 [`ATTR_AGENT_TOOL_ERROR`]。
+    pub error: Option<String>,
+    /// P0-1：入参预览（调用方传原始串即可；本模块内统一脱敏 + 截断）。
+    /// `None` ⇒ **不输出** [`ATTR_LANGFUSE_OBSERVATION_INPUT`]（禁止空串占位）。
+    pub args_preview: Option<String>,
+    /// P0-1：结果预览（同上）。`None` ⇒ 不输出 [`ATTR_LANGFUSE_OBSERVATION_OUTPUT`]。
+    pub result_preview: Option<String>,
+}
+
+/// trace 装配配置。
+///
+/// 契约：由宿主装配点（Tauri 启动路径）构造后传给 [`init`]；字段可被环境变量覆盖，
+/// 见 [`OtelConfig::from_env`]。
+#[derive(Clone, PartialEq)]
+pub struct OtelConfig {
+    /// OTLP/HTTP 端点；缺省 [`DEFAULT_PUBLIC_ENDPOINT`]（桌面端公网出口 `https://otel.ponyjob.top`）。
+    ///
+    /// 说明：集群内 collector（[`DEFAULT_ENDPOINT`]）**只是**一个常量取值，需经
+    /// [`ENV_OTLP_ENDPOINT`] 或 settings 显式指定才会生效，不再是内置缺省。
+    pub endpoint: String,
+    /// `service.name`；缺省 [`DEFAULT_SERVICE_NAME`]。
+    pub service_name: String,
+    /// 采样率（0.0~1.0）；缺省 [`DEFAULT_SAMPLING_RATIO`]。
+    pub sampling_ratio: f64,
+    /// 额外导出 header（名称, 值）；缺省为空（鉴权 token 由 [`ENV_PONY_OTEL_TOKEN`] 注入）。
+    pub headers: Vec<(String, String)>,
+}
+
+impl fmt::Debug for OtelConfig {
+    /// F1：手写 Debug，**绝不**打印任何 header 值（鉴权 token 一律 `[REDACTED]`）。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(name, _value)| (name.as_str(), "[REDACTED]"))
+            .collect();
+        formatter
+            .debug_struct("OtelConfig")
+            .field("endpoint", &self.endpoint)
+            .field("service_name", &self.service_name)
+            .field("sampling_ratio", &self.sampling_ratio)
+            .field("headers", &headers)
+            .finish()
+    }
+}
+
+impl Default for OtelConfig {
+    /// 契约（缺省语义）：`endpoint` = [`DEFAULT_PUBLIC_ENDPOINT`]（桌面端公网出口）、
+    /// `service_name` = [`DEFAULT_SERVICE_NAME`]、`sampling_ratio` = [`DEFAULT_SAMPLING_RATIO`]、
+    /// `headers` 为空。
+    fn default() -> Self {
+        Self {
+            endpoint: DEFAULT_PUBLIC_ENDPOINT.to_string(),
+            service_name: DEFAULT_SERVICE_NAME.to_string(),
+            sampling_ratio: DEFAULT_SAMPLING_RATIO,
+            headers: Vec::new(),
+        }
+    }
+}
+
+/// settings 持久化来源的中性快照（Wave-4 C1：`settings > env > 内置默认`）。
+///
+/// 契约：由宿主（Tauri `load_app_settings` 路径）从 `AppSettings` 构造；
+/// 字段为 `None` 表示「该项未配置」——必须继续向下一来源回落，**不得**用空串占位。
+/// 凭据（[`OtelSettingsSnapshot::token`]）只允许流入导出 header，绝不进入日志/回显
+/// （因此本类型**手写 Debug**，token 一律 `[REDACTED]`）。
+#[derive(Clone, Default, PartialEq)]
+pub struct OtelSettingsSnapshot {
+    /// 用户配置的 OTLP 端点；`None`/空串 ⇒ 回落 env ⇒ 内置公网缺省。
+    pub endpoint: Option<String>,
+    /// 用户配置的鉴权 token；`None`/空串 ⇒ 回落 env ⇒ 不注入（零 egress 凭证态）。
+    pub token: Option<String>,
+    /// 用户配置的 `service.name`；`None`/空串 ⇒ 回落 env ⇒ [`DEFAULT_SERVICE_NAME`]。
+    pub service_name: Option<String>,
+    /// 用户配置的采样率；`None` 或越界 ⇒ 回落 env ⇒ [`DEFAULT_SAMPLING_RATIO`]。
+    pub sampling_ratio: Option<f64>,
+}
+
+impl fmt::Debug for OtelSettingsSnapshot {
+    /// F1/C1.5：**绝不**打印 token 明文（与 [`OtelConfig`] 手写 Debug 同一约束）。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OtelSettingsSnapshot")
+            .field("endpoint", &self.endpoint)
+            .field(
+                "token",
+                &self.token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("service_name", &self.service_name)
+            .field("sampling_ratio", &self.sampling_ratio)
+            .finish()
+    }
+}
+
+/// 按「settings > env > 内置默认」解析最终生效配置（纯函数，无全局态、无网络 IO）。
+///
+/// 调用方：宿主启动装配点（`otel::init` 之前）与单测；`env` 参数显式传入，
+/// **不读进程环境**（进程环境只在 [`from_env`] 里采集），保证可测性与可重放性。
+/// 语义：
+/// - `settings` 的每个非空字段优先于 `env` 同名项；
+/// - `env` 覆盖内置缺省（[`ENV_OTLP_ENDPOINT`] / [`ENV_SERVICE_NAME`] / [`ENV_SAMPLER_ARG`] /
+///   [`ENV_PONY_OTEL_TOKEN`]）；
+/// - token 统一组装为 [`AUTH_HEADER_NAME`] header（值见 [`authorization_header_value`]），
+///   settings 与 env 互斥生效，绝不重复叠加；
+/// - 采样率越界（非有限值或不在 0.0~1.0）时该来源**拒绝采纳**并降级到下一来源，不 panic。
+pub fn resolve_config(
+    settings: Option<&OtelSettingsSnapshot>,
+    env: Option<&[(&str, &str)]>,
+) -> OtelConfig {
+    resolve_config_with_build_token(settings, env, build_time_otel_token())
+}
+
+/// [`resolve_config`] 的可测内核：把「构建期烧录 token」作为参数显式传入。
+///
+/// 拆出来是为了让「最低优先级兜底」可被单测锁定——`option_env!` 在测试构建里恒为 `None`，
+/// 不拆开就无法验证 "settings/env 都没给时用构建期值" 与 "用户显式配置不会被覆盖"。
+pub fn resolve_config_with_build_token(
+    settings: Option<&OtelSettingsSnapshot>,
+    env: Option<&[(&str, &str)]>,
+    build_token: Option<&str>,
+) -> OtelConfig {
+    let mut config = OtelConfig::default();
+    let lookup = |name: &str| -> Option<String> {
+        env.and_then(|pairs| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+    };
+
+    // ---- 第二优先级：进程 env ----
+    if let Some(endpoint) = lookup(ENV_OTLP_ENDPOINT) {
+        config.endpoint = endpoint;
+    }
+    if let Some(service_name) = lookup(ENV_SERVICE_NAME) {
+        config.service_name = service_name;
+    }
+    if let Some(raw_ratio) = lookup(ENV_SAMPLER_ARG) {
+        match parse_sampling_ratio(&raw_ratio) {
+            Some(ratio) => config.sampling_ratio = ratio,
+            None => log::log_json(
+                "warn",
+                &format!(
+                    "otel::resolve_config：{ENV_SAMPLER_ARG} 取值非法，已回落缺省采样率 {DEFAULT_SAMPLING_RATIO}：{raw_ratio}"
+                ),
+                None,
+            ),
+        }
+    }
+    if let Some(token) = lookup(ENV_PONY_OTEL_TOKEN) {
+        set_authorization_header(&mut config.headers, &token);
+    }
+
+    // ---- 第一优先级：settings 持久化 ----
+    if let Some(settings) = settings {
+        if let Some(endpoint) = non_empty_setting(settings.endpoint.as_deref()) {
+            config.endpoint = endpoint;
+        }
+        if let Some(service_name) = non_empty_setting(settings.service_name.as_deref()) {
+            config.service_name = service_name;
+        }
+        if let Some(ratio) = settings.sampling_ratio {
+            match parse_sampling_ratio(&ratio.to_string()) {
+                Some(ratio) => config.sampling_ratio = ratio,
+                None => log::log_json(
+                    "warn",
+                    &format!(
+                        "otel::resolve_config：settings 采样率越界（须 0.0~1.0），已忽略并沿用上一来源：{ratio}"
+                    ),
+                    None,
+                ),
+            }
+        }
+        // C1.5：settings token 为空串 ⇒ 等同未配置（继续沿用 env 结果 / 零凭证）。
+        if let Some(token) = non_empty_setting(settings.token.as_deref()) {
+            set_authorization_header(&mut config.headers, &token);
+        }
+    }
+
+    // 最低优先级兜底：构建期烧录 token（release 产物零配置可用）。
+    // 仅在 settings 与 env 都没给凭证时生效，因此不会覆盖用户显式配置。
+    if config.headers.is_empty() {
+        if let Some(token) = build_token.map(str::trim).filter(|value| !value.is_empty()) {
+            set_authorization_header(&mut config.headers, token);
+        }
+    }
+
+    config
+}
+
+impl OtelConfig {
+    /// 由 settings 持久化快照 + 进程环境变量解析生效配置（宿主启动装配点）。
+    ///
+    /// 语义：等价于 `resolve_config(settings, Some(进程 env 白名单))`；先按 env 组装，
+    /// 再用 settings 覆盖。失败语义：不返回错误（越界/非法项降级为 warn 日志）。
+    pub fn from_settings(settings: Option<&OtelSettingsSnapshot>) -> OtelConfig {
+        let pairs = process_env_pairs();
+        let borrowed: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        resolve_config(settings, Some(borrowed.as_slice()))
+    }
+}
+
+/// settings 字符串项清洗：`None`/纯空白 ⇒ `None`（回落下一来源）。
+fn non_empty_setting(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// 采样率解析：仅接受有限且落在 0.0~1.0 的值，其余返回 `None`（拒绝采纳）。
+fn parse_sampling_ratio(raw: &str) -> Option<f64> {
+    match raw.trim().parse::<f64>() {
+        Ok(ratio) if ratio.is_finite() && (0.0..=1.0).contains(&ratio) => Some(ratio),
+        _ => None,
+    }
+}
+
+/// 设置鉴权 header：先摘除同名的既有项（settings 覆盖 env，绝不叠加）。
+fn set_authorization_header(headers: &mut Vec<(String, String)>, token: &str) {
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case(AUTH_HEADER_NAME));
+    headers.push((
+        AUTH_HEADER_NAME.to_string(),
+        authorization_header_value(token),
+    ));
+}
+
+/// 采集进程环境变量白名单（仅 OTel 相关四项）；未设置/空白项不出现在结果里。
+fn process_env_pairs() -> Vec<(String, String)> {
+    [ENV_OTLP_ENDPOINT, ENV_SERVICE_NAME, ENV_SAMPLER_ARG, ENV_PONY_OTEL_TOKEN]
+        .iter()
+        .filter_map(|name| {
+            env_non_empty(name).map(|value| ((*name).to_string(), value))
+        })
+        .collect()
+}
+
+/// 默认部署环境（PA-153 / task-13）：
+/// - 优先级 1（运行时环境）：`PONY_OTEL_ENVIRONMENT`（由 `resolve_resource_attributes` 处理）；
+/// - 优先级 2（构建期发布标记）：若设置了 `PONY_RELEASE_BUILD=1`（release.yml CI 流程注入），则为 `production`；
+/// - 优先级 3（构建档位兜底）：仅当 `PONY_RELEASE_BUILD` 未设时，缺省判定为 `development`（即使 debug_assertions=false
+///   也是本地 release 构建的开发/调试会话，避免误标 production）。
+pub fn default_deployment_environment_with_release_flag(
+    debug_assertions: bool,
+    release_build: Option<&str>,
+) -> &'static str {
+    if let Some(flag) = release_build {
+        if flag == "1" || flag.eq_ignore_ascii_case("true") {
+            return ENVIRONMENT_PRODUCTION;
+        }
+    }
+    let _ = debug_assertions;
+    ENVIRONMENT_DEVELOPMENT
+}
+
+pub fn default_deployment_environment(debug_assertions: bool) -> &'static str {
+    default_deployment_environment_with_release_flag(debug_assertions, option_env!("PONY_RELEASE_BUILD"))
+}
+
+/// 显式注入版本串的合法化上限（契约 PA51-C1-T4）：trim 后字节长度上限 **64**。
+const SERVICE_VERSION_MAX_BYTES: usize = 64;
+
+/// 合法化**显式入参**里的版本串（契约 PA51-C1-T4，作用域仅限显式入参与
+/// [`crate::ponysentry::PonySentryConfig::with_release`]）：
+/// ① 拒绝任何 `char::is_control()` 控制字符（`\n` / `\r` / `\t` / NUL 等，先于 trim 判定，
+///    否则 `"1.2.3\n"` 会被 trim 洗白）；② trim 后为空 ⇒ 未设置；③ trim 后字节长度上限 64。
+/// 不合规一律返回 `None`（= 视为未设置，下落下一级），**绝不**写入非法值、绝不 panic。
+///
+/// 注意：env `PONY_OTEL_SERVICE_VERSION` **不**走本规则（v4-V4-1：保持既有 trim-only 语义）。
+fn normalize_service_version(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > SERVICE_VERSION_MAX_BYTES {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// 进程内已解析的 `service.version`（**每次 init 覆盖写入**，供 span 级 `langfuse.release` 复用）。
+///
+/// wave-61-team CI 修复（2026-11-03）：原为 `OnceLock<String>`（首写者胜），而 PA-153-T2 的
+/// 「先覆盖、后置空白」双相位验收要求第二次 init 重新解析 env —— OnceLock 会让首个相位的
+/// `9.9.9-wave45` 残留到第二相位，使 `otel_resource_env_test` 恒红（该用例在基线 commit
+/// `52a7a21` 上同样红，属**既有**缺陷；本次修复以「每次 init 覆盖」恢复 init 期快照语义）。
+/// 生产路径单次 init，行为不变；只有「同进程多次 init」（测试/关闭后重启）才可见差异。
+static RESOLVED_SERVICE_VERSION: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// 当前进程的发布版本（`langfuse.release` 取值；ADR 0055）。
+///
+/// 取值顺序：init 阶段已解析的 `service.version` → env [`ENV_PONY_OTEL_SERVICE_VERSION`]
+/// → 本 crate 的 `CARGO_PKG_VERSION`（与 resource 三级优先保持同源，禁止另起口径）。
+pub fn current_release_version() -> String {
+    RESOLVED_SERVICE_VERSION
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .or_else(|| env_non_empty(ENV_PONY_OTEL_SERVICE_VERSION))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+/// 解析 resource 归因属性（PA-153 + wave-51 C1）：`service.version` + `deployment.environment`。
+///
+/// 语义：`env` 取值 **trim 后非空**即覆盖默认（既有语义不变）；空白串等同未设置（回落默认）。
+/// `service_version`（显式入参，wave-51 C1）取值三级优先：
+/// 1. `service_version` 显式入参（经 [`normalize_service_version`] 合法化，不合规视为未设置）；
+/// 2. env [`ENV_PONY_OTEL_SERVICE_VERSION`]（trim-only，既有语义）；
+/// 3. 本 crate 的 `CARGO_PKG_VERSION`（兜底）。
+/// 纯函数（env 由调用方注入）：实现期单测据此覆盖 release 分支与空白串回退。
+pub fn resolve_resource_attributes(
+    env: impl Fn(&str) -> Option<String>,
+    service_version: Option<&str>,
+) -> Vec<(String, String)> {
+    let override_value = |name: &str| {
+        env(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let service_version = service_version
+        .and_then(normalize_service_version)
+        .or_else(|| override_value(ENV_PONY_OTEL_SERVICE_VERSION))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let environment = override_value(ENV_PONY_OTEL_ENVIRONMENT)
+        .unwrap_or_else(|| default_deployment_environment(cfg!(debug_assertions)).to_string());
+    let mut attrs = vec![
+        (RESOURCE_SERVICE_VERSION.to_string(), service_version.clone()),
+        (RESOURCE_DEPLOYMENT_ENVIRONMENT.to_string(), environment),
+        (RESOURCE_PONY_APP_NAME.to_string(), PONY_APP_NAME.to_string()),
+        // r1-dim6 F2：`langfuse.release` 此前只写在 span 属性。Langfuse 的
+        // `OtelIngestionProcessor.createTraceEvent` 取 `spanAttributes[RELEASE] ??
+        // resourceAttributes[RELEASE]`；浅 trace（由子 span 先到触发）不含该 span 属性，
+        // 后到的浅 trace 会把 trace.release 覆写为 null（实测 9/9）。resource 侧同值补齐后
+        // 两条路径都能取到；与 `service.version` 同源（ADR 0055 已定该语义）。
+        (ATTR_LANGFUSE_RELEASE.to_string(), service_version),
+    ];
+    let mut is_probe = false;
+    if let Some(probe) = override_value(ENV_PONY_OTEL_PROBE) {
+        if probe.eq_ignore_ascii_case("true") || probe == "1" || probe.eq_ignore_ascii_case("probe") {
+            attrs.push((RESOURCE_PONY_PROBE.to_string(), "true".to_string()));
+            is_probe = true;
+        }
+    }
+    let client_kind = if is_probe {
+        INGEST_CLIENT_KIND_PROBE
+    } else {
+        INGEST_CLIENT_KIND_DEVICE
+    };
+    attrs.push((RESOURCE_INGEST_CLIENT_KIND.to_string(), client_kind.to_string()));
+    attrs
+}
+
+/// 装配入口（wave-51 C1）：由调用方显式注入安装包版本后再安装全局 trace provider。
+///
+/// 调用方：宿主启动路径（Tauri 装配点）—— 桌面端传 `app.package_info().version`，
+/// 使 resource `service.version` 与安装包发布线对齐（审计 §4 P0-1）。
+/// 优先级契约（`service.version` resource 属性，三级，高者优先）：
+/// 1. 显式入参 `service_version`（经 [`normalize_service_version`] 合法化：控制字符/空白/超 64 字节 ⇒ 未设置）；
+/// 2. 进程 env [`ENV_PONY_OTEL_SERVICE_VERSION`]（既有 trim-only 语义，不新增过滤）；
+/// 3. 本 crate 的 `CARGO_PKG_VERSION`（兜底）。
+///
+/// 关系：[`init`] 等价于本函数传入 `None`；校验/失败/可重入语义与 [`init`] 完全一致，
+/// 二者互斥 —— 同一进程生命周期内至多成功装配一次。
+/// 语义：以 `config` 建立导出通路与资源属性；provider 常驻，开关只翻转门禁位
+/// （本函数**不改变**上报开关，缺省仍为 `false`）。
+/// 失败语义：配置非法或端点不可解析时返回 `Err`，调用方记录告警后**继续启动**，
+/// 不得 panic、不得阻断主链路；失败时全局态整体回滚为「未 init」，不留半初始化状态。
+/// 可重入：本函数返回 `Ok` 后，需先 [`shutdown`] 才能再次装配。
+pub fn init_with_service_version(
+    config: OtelConfig,
+    service_version: Option<&str>,
+) -> Result<(), String> {
+    if config.endpoint.trim().is_empty() {
+        return Err("otel::init：OTLP 端点不得为空".to_string());
+    }
+    // ADVISORY(F1)：绝不把鉴权 token 送上明文 HTTP 外网端点。
+    if let Some((name, _)) = config
+        .headers
+        .iter()
+        .find(|(name, _)| is_sensitive_header(name))
+    {
+        if is_plaintext_remote(&config.endpoint) {
+            return Err(format!(
+                "otel::init：拒绝在明文 HTTP 的外网端点上发送鉴权 header `{name}`（请改用 https）"
+            ));
+        }
+    }
+    if !config.sampling_ratio.is_finite() || !(0.0..=1.0).contains(&config.sampling_ratio) {
+        return Err(format!(
+            "otel::init：采样率必须落在 0.0~1.0，实际 {}",
+            config.sampling_ratio
+        ));
+    }
+    {
+        let guard = lock_state();
+        if guard.is_some() {
+            return Err("otel::init：已初始化，需先调用 shutdown() 才能再次 init()".to_string());
+        }
+    }
+
+    // 导出用 1-worker runtime：先建 runtime，再在它的上下文里构造 reqwest 客户端。
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .thread_name(RUNTIME_THREAD_NAME)
+        .build()
+        .map_err(|err| format!("otel::init：导出 runtime 创建失败：{err}"))?;
+
+    // 任一步失败都直接返回 Err：此时全局态仍为 None（整体回滚），runtime 随之释放。
+    let exporter = {
+        let _runtime_context = runtime.enter();
+        build_runtime_exporter(&config, runtime.handle().clone())?
+    };
+
+    let resource_attributes = resolve_resource_attributes(env_non_empty, service_version);
+    // ADR 0055：把解析后的 `service.version` 固化为进程级 release 真值，供 span 级
+    // `langfuse.release` 复用（避免 span 层另起口径导致版本漂移）。
+    if let Some((_, version)) = resource_attributes
+        .iter()
+        .find(|(key, _)| key == RESOURCE_SERVICE_VERSION)
+    {
+        if let Ok(mut guard) = RESOLVED_SERVICE_VERSION.write() {
+            *guard = Some(version.clone());
+        }
+    }
+    let resource = opentelemetry_sdk::Resource::builder()
+        .with_service_name(config.service_name.clone())
+        // PA-153：resource 补齐归因维度（service.version / deployment.environment）；
+        // 每份 ResourceSpans 各一次，值来自显式入参 / env 覆盖 / 构建档位默认（wave-51 C1）。
+        .with_attributes(
+            resource_attributes
+                .into_iter()
+                .map(|(key, value)| KeyValue::new(key, opentelemetry::Value::String(value.into()))),
+        )
+        .build();
+    // ADVISORY：批量管道显式有界（队列/批量/并发/超时都钉死，不依赖 SDK 缺省与 env 漂移）。
+    let batch_config = opentelemetry_sdk::trace::BatchConfigBuilder::default()
+        .with_max_queue_size(BATCH_MAX_QUEUE_SIZE)
+        .with_max_export_batch_size(BATCH_MAX_EXPORT_BATCH_SIZE)
+        .with_scheduled_delay(Duration::from_millis(BATCH_SCHEDULED_DELAY_MS))
+        .build();
+    let batch_processor = BatchSpanProcessor::builder(exporter)
+        .with_batch_config(batch_config)
+        .build();
+    let provider = SdkTracerProvider::builder()
+        .with_sampler(GatedSampler {
+            ratio: config.sampling_ratio,
+        })
+        .with_resource(resource)
+        .with_span_processor(batch_processor)
+        .build();
+    let tracer = provider.tracer(TRACER_NAME);
+
+    let state = Arc::new(OtelState {
+        provider,
+        tracer,
+        config,
+        _runtime: runtime,
+    });
+
+    let mut guard = lock_state();
+    if guard.is_some() {
+        // 并发 init 竞争：后者整体回滚，不覆盖已生效的全局态。
+        return Err("otel::init：并发初始化竞争，已存在生效中的 provider".to_string());
+    }
+
+    let auth_configured = state
+        .config
+        .headers
+        .iter()
+        .any(|(name, _)| is_sensitive_header(name));
+    if !auth_configured && is_remote_endpoint(&state.config.endpoint) {
+        log::log_json(
+            "warn",
+            &format!(
+                "otel::init：导出已启用但未配置鉴权 token → 公网 edge 会拒绝（401），\
+                 本进程 trace 不会出现在 Tempo/Langfuse；请在 Settings 填 OTel token 或设 PONY_OTEL_TOKEN（端点：{}）",
+                state.config.endpoint
+            ),
+            None,
+        );
+    }
+
+    *guard = Some(state);
+    Ok(())
+}
+
+/// 装配入口（既有签名，语义零变更）：等价于 [`init_with_service_version`] 传入 `None` ——
+/// `service.version` 仍按 env [`ENV_PONY_OTEL_SERVICE_VERSION`] > `CARGO_PKG_VERSION` 解析。
+///
+/// 调用方：无安装包版本可注入的装配点（CLI / TUI / 单测）。
+pub fn init(config: OtelConfig) -> Result<(), String> {
+    init_with_service_version(config, None)
+}
+
+/// 装配逆过程：flush 并释放 provider 及其后台资源。
+///
+/// 调用方：宿主退出路径（Tauri 退出事件），必须显式调用一次。
+/// 语义：幂等，可重复调用；返回后允许再次 [`init`]。
+/// 失败语义：不返回错误——任何内部异常都必须在内部吞掉并降级为日志，绝不 panic。
+pub fn shutdown() {
+    shutdown_bounded(SHUTDOWN_TIMEOUT_MS);
+}
+
+/// 带预算的 [`shutdown`]：provider 关闭等待上限由调用方给定（毫秒）。
+///
+/// 调用方：进程退出路径（Wave-4.1 A5：退出总预算 ≤3000ms 时传入 1000ms 档位）。
+/// 语义：与 [`shutdown`] 完全一致（幂等、不 panic、失败只降级 warn），仅把内部
+/// `shutdown_with_timeout` 的等待上限替换为 `timeout_ms`（内部仍按 `MAX_FLUSH_WAIT_MS` 夹值）。
+pub fn shutdown_bounded(timeout_ms: u64) {
+    let state = take_state();
+    let Some(state) = state else {
+        return;
+    };
+    let wait_ms = timeout_ms.min(MAX_FLUSH_WAIT_MS);
+
+    let provider = state.provider.clone();
+    match provider.shutdown_with_timeout(Duration::from_millis(wait_ms)) {
+        Ok(()) => {
+            // 正常路径（A7）：先显式释放 provider（导出线程 / reqwest Client），
+            // 再释放含 runtime 的全局态 —— runtime 必须活到所有导出 future 结束之后。
+            drop(provider);
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // 若处于异步 runtime 线程中直接 drop Runtime 会因阻塞等待 worker panic；
+                // 移交独立 std 线程安全释放。
+                std::thread::spawn(move || drop(state));
+            } else {
+                drop(state);
+            }
+        }
+        Err(err) => {
+            // 超时/失败路径（task-10）：**有意不释放** runtime。
+            // 关闭中的 runtime 会与仍在退出中的后台导出线程竞争，触发
+            // `Tokio ... being shutdown` panic；这里改为保留 runtime 至进程终止，仅记 warn。
+            degraded_warn(
+                &format!(
+                    "otel::shutdown：provider 关闭超时或失败，导出 runtime 保留至进程终止：{err}"
+                ),
+                None,
+            );
+            std::mem::forget(state);
+            drop(provider);
+        }
+    }
+}
+
+/// 把当前已入队 span 强制导出，等待至多 `timeout_ms` 毫秒。
+///
+/// 调用方：手动上传旁路与进程退出前的兜底 flush；测试用它取得确定性导出时序。
+/// 语义：未调用过 [`init`] 时返回 `Err`；超时视为失败但仍返回（不 panic、不阻塞调用方）。
+/// 失败语义：`Err(String)` 描述失败原因，调用方只记日志，不得冒泡到 turn 主链路。
+pub fn force_flush(timeout_ms: u64) -> Result<(), String> {
+    let state = current_state().ok_or_else(|| "otel::force_flush：尚未 init".to_string())?;
+    flush_state(&state, timeout_ms)
+}
+
+/// 退出 flush 预算（毫秒）：等于单次导出最坏耗时，占满 NFR 导出预算（r2-dim1 attempt 2）。
+///
+/// 口径推导（attempt 1 实测反证）：导出层单次网络超时 [`EXPORT_TIMEOUT_MS`] = 3000ms，
+/// 而 attempt 1 的预算 1000ms < 3000ms ⇒ 只要队列真有尾批 span 待导出且网络非瞬时，
+/// `flush_state` 的 `recv_timeout(1000)` 必先超时，等于「加了 flush 与没加等价」
+/// （实测 `s1-t02-read-explain` 三行 warn 连发且根 span 整条缺失）。
+/// 预算必须 ≥ 一次导出的最坏耗时才能保证「导出完成」这一语义，故取 3000ms。
+pub const EXIT_FLUSH_BUDGET_MS: u64 = 3_000;
+
+/// 退出 flush 幂等标记（`process::exit` 前的显式调用与 `Drop` 共享短路）。
+static EXIT_FLUSH_DONE: AtomicBool = AtomicBool::new(false);
+
+/// 进程退出路径的有界 flush 出口（CLI / TUI / 桌面端共用，唯一实现）。
+///
+/// r2-dim1 attempt 1：批量调度周期 `BATCH_SCHEDULED_DELAY_MS`=5000ms 远大于关闭等待上限
+/// `SHUTDOWN_TIMEOUT_MS`=1000ms，而单次导出网络超时 3000ms ⇒ 尾批 span 在关闭窗口内
+/// 必然导出未完成，`shutdown()` 走 `mem::forget` 后进程退出（实测 3 会话关闭超时 warn，
+/// 其中 2 个 `agent.turn` 根 span 整条缺失）。
+/// attempt 2：本函数预算提到 [`EXPORT_TIMEOUT_MS`]（3000ms），并把 `SHUTDOWN_TIMEOUT_MS`
+/// 压到只够线程握手的 100ms —— 预算主体给唯一有收益的一步，退出总预算仍不超过 NFR
+/// `observability.exporter_flush_timeout_ms`（flush 步 3000ms）。
+/// 契约：有界／幂等／未装配静默跳过／失败只降级 warn，绝不 panic，也不阻断退出。
+pub fn flush_on_exit(stage: &str) {
+    if config().is_none() || EXIT_FLUSH_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Err(message) = force_flush(EXIT_FLUSH_BUDGET_MS) {
+        degraded_warn(&format!("退出 flush（{stage}）未在预算内完成：{message}"), None);
+    }
+}
+
+/// 翻转全局上报开关。
+///
+/// 调用方：宿主设置读取/保存路径（启动时按持久化值回填 + 用户改开关即时生效）。
+/// 语义：`false` 时不得分配 span、不得产生任何网络出口；`true` 时按采样率上报。
+/// 幂等：并发/重复调用不得 panic，末态等于最后一次写入值。
+pub fn set_reporting_enabled(enabled: bool) {
+    REPORTING_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// 读取全局上报开关当前值。
+///
+/// 调用方：设置页回显与门禁判定的只读查询。
+/// 语义：恒等于最近一次 [`set_reporting_enabled`] 的写入值（与是否 [`init`] **无关**，
+/// 写入是纯内存操作）；进程启动缺省为 `false`。不做任何副作用。
+pub fn is_reporting_enabled() -> bool {
+    REPORTING_ENABLED.load(Ordering::SeqCst)
+}
+
+/// 是否允许采集 span 级属性（Wave-5 K4：成本属性零计算短路判定）。
+///
+/// 调用方：turn/provider 侧「先判门禁、再算价格」的成本接缝。
+/// 语义：`false` ⇒ 调用方**不得**执行价格计算、不得附加任何 span 属性（零分配零计算）。
+pub fn is_span_capture_enabled() -> bool {
+    spans_allowed()
+}
+
+/// 成本值四舍五入到 6 位小数（与 [`pony_protocol::cost::COST_PRECISION_DECIMALS`] 对齐）。
+fn round_cost_usd(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+/// 构造 [`ATTR_LANGFUSE_TRACE_NAME`]（wave-53 C5 v2，纯函数）。
+///
+/// 语义：`pony-agent#turn-<sequence>`（`turn_id` 为空/全空白）/
+/// `pony-agent#turn-<sequence>@<turn_id 尾 6 字符>`（`turn_id` 非空，不足 6 位取全串）。
+/// 尾码按**字符**（`char`）截尾而非字节切片：`turn_id` 含非 ASCII 时按字节切片会落进
+/// UTF-8 多字节边界直接 panic；十进制、无零填充、无空白。
+fn turn_trace_name(sequence: u64, turn_id: &str) -> String {
+    let trimmed = turn_id.trim();
+    if trimmed.is_empty() {
+        return format!("pony-agent#turn-{sequence}");
+    }
+    let tail: String = {
+        let chars: Vec<char> = trimmed.chars().collect();
+        let start = chars.len().saturating_sub(6);
+        chars[start..].iter().collect()
+    };
+    format!("pony-agent#turn-{sequence}@{tail}")
+}
+
+/// 构造 [`ATTR_LANGFUSE_OBSERVATION_COST_DETAILS`] 的单行 JSON（wave-53 C1）。
+///
+/// 语义：键只允许 `input` / `output` / `total`，各自 `Some` 才出现（`total` 由调用方保证有效）；
+/// 数字保留 6 位小数（`{:.6}`，与 [`round_cost_usd`] 的精度口径一致）。
+/// 为什么手写而不用序列化库：本波硬约束「禁止引入新依赖」，且键集固定、无数值歧义。
+/// 非有限分量一律丢弃（`{:.6}` 渲染 `NaN`/`inf` 会产出非法 JSON）。
+fn cost_details_json(input_cost_usd: Option<f64>, output_cost_usd: Option<f64>, total: f64) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if let Some(value) = input_cost_usd.filter(|value| value.is_finite()) {
+        parts.push(format!("\"input\":{value:.6}"));
+    }
+    if let Some(value) = output_cost_usd.filter(|value| value.is_finite()) {
+        parts.push(format!("\"output\":{value:.6}"));
+    }
+    parts.push(format!("\"total\":{total:.6}"));
+    format!("{{{}}}", parts.join(","))
+}
+
+/// 宿主设置桥接：把持久化的 `AppSettings.agent_trace_reporting` 同步到 OTel 门禁。
+///
+/// 调用方：Tauri 侧 `load_app_settings` / `save_app_settings`（D7：启动即按持久化值生效，
+/// 保存即生效）。语义：等价于 [`set_reporting_enabled`]，仅为宿主提供语义明确的入口，
+/// 便于静态断言「设置读写双路径都做了同步」。
+pub fn set_agent_trace_reporting(enabled: bool) {
+    set_reporting_enabled(enabled);
+}
+
+/// 导出链路诊断快照：供 Settings 页/诊断入口展示「trace 到底有没有在往外发」。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportDiagnostics {
+    pub endpoint: String,
+    pub auth_configured: bool, // config.headers 中存在鉴权 header（authorization）
+    pub probe: bool,           // 本次是否探针自报（PONY_OTEL_PROBE 生效）
+}
+
+/// 读取当前导出链路诊断快照；未 [`init`] 时返回 `None`。
+///
+/// 状态取自现有全局 state（`lock_state()`）；`auth_configured` 用已有的
+/// `is_sensitive_header` 判定；**绝不返回 token 真实内容**。
+pub fn export_diagnostics() -> Option<ExportDiagnostics> {
+    current_state().map(|state| {
+        let auth_configured = state
+            .config
+            .headers
+            .iter()
+            .any(|(name, _)| is_sensitive_header(name));
+        let probe = env_non_empty(ENV_PONY_OTEL_PROBE).is_some_and(|probe| {
+            probe.eq_ignore_ascii_case("true")
+                || probe == "1"
+                || probe.eq_ignore_ascii_case("probe")
+        });
+        ExportDiagnostics {
+            endpoint: state.config.endpoint.clone(),
+            auth_configured,
+            probe,
+        }
+    })
+}
+
+/// 回显当前生效配置。
+///
+/// 调用方：设置页/诊断页展示与配置透传断言；未 [`init`] 时返回 `None`。
+/// 语义：返回的采样率等字段必须等于实际生效值（env 覆盖后的值，而非常量）。
+pub fn config() -> Option<OtelConfig> {
+    current_state().map(|state| {
+        let mut config = state.config.clone();
+        // F1：诊断/设置页回显**不得**返回鉴权材料；token 只用于导出通路。
+        config.headers.retain(|(name, _)| !is_sensitive_header(name));
+        config
+    })
+}
+
+/// 按环境变量组装配置（无 settings 来源的兼容入口）。
+///
+/// 调用方：[`init`] 的宿主侧调用点（无持久化 settings 时，如 TUI/CLI 进程）。
+/// 语义：等价于 [`OtelConfig::from_settings`]`(None)` ⇒ 优先级 `env > 内置默认`
+/// （[`ENV_OTLP_ENDPOINT`] / [`ENV_SERVICE_NAME`] / [`ENV_SAMPLER_ARG`]，缺省端点为
+/// [`DEFAULT_PUBLIC_ENDPOINT`]）；[`ENV_PONY_OTEL_TOKEN`] 存在时以 [`AUTH_HEADER_NAME`]
+/// header 注入 headers。不读写全局状态、不发起网络 IO，可被单测直接调用。
+pub fn from_env() -> OtelConfig {
+    OtelConfig::from_settings(None)
+}
+
+/// 把 `PONY_OTEL_TOKEN` 组装成 `Authorization` 头的值。
+///
+/// 契约：集群公网入口的 collector 用 `bearertokenauth`（`scheme: Bearer`），只认
+/// `Authorization: Bearer <token>`；裸 token 会被直接 401（2026-10-24 实测）。因此缺省补
+/// `Bearer ` 前缀。若调用方已在 token 里自带 scheme（`bearer x` / `basic x`，大小写不敏感），
+/// 原样透传，避免出现 `Bearer Bearer x`。除鉴权 scheme 外不解释 token 内容。
+fn authorization_header_value(token: &str) -> String {
+    let trimmed = token.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("bearer ") || lower.starts_with("basic ") {
+        trimmed.to_string()
+    } else {
+        format!("Bearer {trimmed}")
+    }
+}
+
+/// turn 级 span 守卫。
+///
+/// 契约：由 [`TurnScope::new`] 构造（外部不可字面量构造），生命周期覆盖一个 turn；
+/// 必须显式调用 [`TurnScope::end`] 结束 span（本类型不实现 `Drop`）。
+/// 全局开关关闭时，构造出的守卫等价空操作（零分配零导出）。
+pub struct TurnScope {
+    span: Option<opentelemetry_sdk::trace::Span>,
+    trace_id: Option<String>,
+}
+
+impl TurnScope {
+    /// 开启一个 turn 级 span 并返回守卫。
+    ///
+    /// 调用方：turn 终态路径；`session_id` / `turn_id` 须与本地 trace 记录一致，
+    /// `sequence` 为该 turn 在会话内的序号。
+    /// 语义：span 名为 [`SPAN_AGENT_TURN`]，属性由 [`TurnSpanInput`] 描述。
+    /// 失败语义：任何情况下都不得 panic；开关关闭时返回空操作守卫。
+    pub fn new(session_id: &str, turn_id: &str, sequence: u64) -> Self {
+        let empty = Self {
+            span: None,
+            trace_id: None,
+        };
+        if !spans_allowed() {
+            return empty;
+        }
+        let Some(state) = current_state() else {
+            return empty;
+        };
+
+        // phase 由宿主在 turn 终态时补充；此处留空 ⇒ 属性映射不输出该键（禁止空串占位）。
+        let attributes = to_key_values(turn_span_attributes(&TurnSpanInput {
+            session_id: session_id.to_string(),
+            user_id: None,
+            turn_id: turn_id.to_string(),
+            sequence,
+            phase: String::new(),
+            // P0-3：turn span 起建时尚无失败归因（失败时由 `TurnTraceGuard::drop` 写入）。
+            failed_reason: None,
+            prompt_preview: None,
+            response_preview: None,
+        }));
+        let mut span = state.tracer.build_with_context(
+            opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
+                .with_kind(opentelemetry::trace::SpanKind::Internal)
+                .with_attributes(attributes),
+            &opentelemetry::Context::new(),
+        );
+        let trace_id = sampled_trace_id(&mut span);
+
+        Self {
+            span: Some(span),
+            trace_id,
+        }
+    }
+
+    /// 读取该 turn 的 trace_id（十六进制字符串）。
+    ///
+    /// 调用方：日志面与 issue 上报的 `tags.trace_id` 回填。
+    /// 语义：未采样、未 [`init`] 或守卫已结束时返回 `None`。
+    pub fn trace_id(&self) -> Option<String> {
+        self.trace_id.clone()
+    }
+
+    /// 结束 span 并释放守卫。
+    ///
+    /// 语义：消费 `self`，重复结束不可能发生；不得 panic。
+    pub fn end(self) {
+        if let Some(mut span) = self.span {
+            span.end();
+        }
+    }
+}
+
+/// P1-3：手动上传 trace 的**结构化回执**（前端直接消费 `turns` / `traceIds` / `failures`）。
+///
+/// 语义：
+/// - `turns`：真正完成 flush 的 turn 数（不是入队条数）；
+/// - `trace_ids`：**成功导出**的 trace id（按导出顺序；无 trace_id 的 turn 不计入）；
+/// - `failures`：每批失败原因（空 = 全部成功）。**部分成功时二者同时非空** —— 既不把失败
+///   吞成成功，也不因为一批失败就丢弃已成功的 turn。
+#[derive(serde::Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadTraceReceipt {
+    pub turns: usize,
+    pub trace_ids: Vec<String>,
+    pub failures: Vec<String>,
+}
+
+/// 手动上传的强制导出入口（旁路全局开关）。
+///
+/// 调用方：控制面 `upload_session_trace` 转调（用户点击上传按钮 = 逐次授权）。
+/// 语义：把 `traces` 重放为 span 树并强制导出，返回**结构化回执**（P1-3）；
+/// **不受** [`is_reporting_enabled`] 约束，且**不得改变**该开关的末态（用后复原）。
+/// 失败语义：空入参 ⇒ `Ok(空回执)`；单批失败只进 `failures`（已成功的 turn/trace_id 仍返回），
+/// 只有「回执本身不可构造」这类不变量破坏才 `Err`。重复调用幂等（允许产生多条 trace）。
+pub fn force_export_session_trace(
+    session_id: &str,
+    traces: &[pony_protocol::session_types::TurnTraceRecord],
+) -> Result<UploadTraceReceipt, String> {
+    // P1-3：空列表 ⇒ 空回执（**不** Err），让「无可上传内容」与「上传失败」在调用方彻底分开。
+    if traces.is_empty() {
+        return Ok(UploadTraceReceipt::default());
+    }
+    // P1-3：导出器未初始化属于「失败」而不是「崩溃」——原因写进回执 failures，
+    // 让前端如实显示「未完成上传」，而不是静默吞掉或只抛一个恐慌式错误。
+    let Some(state) = current_state() else {
+        return Ok(UploadTraceReceipt {
+            turns: 0,
+            trace_ids: Vec::new(),
+            failures: vec!["otel::force_export_session_trace：尚未 init，无法导出".to_string()],
+        });
+    };
+
+    // A8：按批量管道上限分块重放，**每块 flush 成功后才计入已交付**；
+    // 返回值是「实际完成 flush 的 turn 数」，不是入队条数。
+    //
+    // 总预算约束（Bounded Total Flush Budget）：
+    // 整个会话导出的总 flush 预算严格钉死为 FORCE_EXPORT_FLUSH_TIMEOUT_MS（3000ms），
+    // 跨 chunk 共享倒计时。进入每个 chunk 时若总预算已耗尽则立即返回 Err；
+    // 每块传递的等待时间为剩余预算（remaining_ms），从结构上杜绝 N 个 chunk 各自等待
+    // 3000ms 导致的 N×3000ms（如 2 块 6s）超时膨胀。
+    let total_deadline = std::time::Instant::now()
+        + Duration::from_millis(FORCE_EXPORT_FLUSH_TIMEOUT_MS);
+    let mut receipt = UploadTraceReceipt::default();
+    let chunks: Vec<&[pony_protocol::session_types::TurnTraceRecord]> =
+        traces.chunks(FORCE_EXPORT_CHUNK_TURNS).collect();
+    let total_chunks = chunks.len();
+
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        let remaining = total_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            let skipped = total_chunks - chunk_idx;
+            receipt.failures.push(format!(
+                "otel::force_export_session_trace：整体导出预算已耗尽（{FORCE_EXPORT_FLUSH_TIMEOUT_MS}ms），剩余 {skipped} 个 chunk 未发送"
+            ));
+            break;
+        }
+        let chunk_timeout_ms = (remaining.as_millis() as u64)
+            .min(FORCE_EXPORT_FLUSH_TIMEOUT_MS)
+            .max(1);
+        // 本批 trace id 先暂存：只有本批 flush 成功才计入成功回执（部分成功不得被吞）。
+        let mut chunk_trace_ids: Vec<String> = Vec::with_capacity(chunk.len());
+
+        for (offset, record) in chunk.iter().enumerate() {
+            let record_session = record
+                .session_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(session_id);
+            let mut attributes = to_key_values(turn_span_attributes(&TurnSpanInput {
+                session_id: record_session.to_string(),
+                user_id: None,
+                turn_id: record.turn_id.clone(),
+                sequence: record.sequence.unwrap_or(offset as u64),
+                phase: record.phase.clone(),
+                // P0-3：历史 trace 导出保持既有行为（不回填归因）。
+                failed_reason: None,
+                prompt_preview: None,
+                response_preview: None,
+            }));
+            // F6：逐 span 打「用户逐次授权」标记，只有这些 span 在关闭态被采样与放行。
+            attributes.push(KeyValue::new(ATTR_PONY_OTEL_FORCED, true));
+
+            let mut span = state.tracer.build_with_context(
+                opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
+                    .with_kind(opentelemetry::trace::SpanKind::Internal)
+                    .with_attributes(attributes),
+                &opentelemetry::Context::new(),
+            );
+            span.end();
+            if let Some(trace_id) = record
+                .trace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                chunk_trace_ids.push(trace_id.to_string());
+            }
+        }
+        match flush_state(&state, chunk_timeout_ms) {
+            Ok(()) => {
+                receipt.turns += chunk.len();
+                receipt.trace_ids.extend(chunk_trace_ids);
+            }
+            Err(message) => {
+                receipt.failures.push(format!(
+                    "chunk {}/{}: {message}",
+                    chunk_idx + 1,
+                    total_chunks
+                ));
+            }
+        }
+    }
+
+    Ok(receipt)
+}
+
+/// turn 属性映射（纯函数，无网络、无全局态）。
+///
+/// 调用方：[`TurnScope::new`] 的 span 属性填充，以及单测直接断言属性全集。
+/// 语义：按 [`ATTR_LANGFUSE_SESSION_ID`] / [`ATTR_LANGFUSE_TRACE_NAME`] /
+/// [`ATTR_GEN_AI_OPERATION_NAME`]（[`OPERATION_AGENT_TURN`]）/ [`ATTR_AGENT_TURN_ID`] /
+/// [`ATTR_AGENT_TURN_SEQUENCE`] / [`ATTR_AGENT_TURN_PHASE`] 输出，`user_id` 非空时
+/// 才输出 [`ATTR_LANGFUSE_USER_ID`]；**缺失值不输出键**（禁止空串占位）。
+pub fn turn_span_attributes(input: &TurnSpanInput) -> Vec<(String, AttrValue)> {
+    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(7);
+
+    push_str(&mut attributes, ATTR_LANGFUSE_SESSION_ID, &input.session_id);
+    // wave-53 C5 v2：trace 名可读且可区分 —— `pony-agent#turn-<sequence>`（turn_id 为空）/
+    // `pony-agent#turn-<sequence>@<turn_id 尾 6 字符>`（turn_id 非空）。
+    // 修订缘由：两个运行时入口（turn_sync / turn_stream）均硬传 `sequence = 0`，纯序号命名会让
+    // 所有 turn 同名；尾码让「按名检索」重新可用。
+    // `langfuse.session.id` / `agent.turn.id` / `agent.turn.sequence` 语义零变更。
+    let trace_name = turn_trace_name(input.sequence, &input.turn_id);
+    push_str(&mut attributes, ATTR_LANGFUSE_TRACE_NAME, &trace_name);
+    push_str(
+        &mut attributes,
+        ATTR_GEN_AI_OPERATION_NAME,
+        OPERATION_AGENT_TURN,
+    );
+    push_str(&mut attributes, ATTR_AGENT_TURN_ID, &input.turn_id);
+    attributes.push((
+        ATTR_AGENT_TURN_SEQUENCE.to_string(),
+        AttrValue::I64(input.sequence as i64),
+    ));
+    push_str(&mut attributes, ATTR_AGENT_TURN_PHASE, &input.phase);
+    if let Some(user_id) = input.user_id.as_deref() {
+        push_str(&mut attributes, ATTR_LANGFUSE_USER_ID, user_id);
+    }
+    // P0-3：失败原因**只能追加在最后**（既有键序与取值逐字不变）。
+    if let Some(reason) = turn_failed_reason_value(input.failed_reason.as_deref()) {
+        push_str(&mut attributes, ATTR_AGENT_TURN_FAILED_REASON, &reason);
+    }
+
+    // P0-1：用户输入 Prompt 与最终输出 Response 预览（双轨输出：OTel + Langfuse）。
+    if capture_llm_payloads_enabled() {
+        if let Some(prompt) = input.prompt_preview.as_deref() {
+            push_llm_payload_preview(
+                &mut attributes,
+                ATTR_GEN_AI_PROMPT,
+                ATTR_LANGFUSE_OBSERVATION_INPUT,
+                prompt,
+            );
+        }
+        if let Some(response) = input.response_preview.as_deref() {
+            push_llm_payload_preview(
+                &mut attributes,
+                ATTR_GEN_AI_COMPLETION,
+                ATTR_LANGFUSE_OBSERVATION_OUTPUT,
+                response,
+            );
+        }
+    }
+
+    attributes
+}
+
+/// P0-3：失败原因 → 属性值的**单一映射**（`turn_span_attributes` 与 `TurnTraceGuard::drop` 共用，
+/// 禁止两处各写一份文案/脱敏口径）。
+///
+/// `None` / 全空白（trim 后为空）⇒ `None`（不写键）；否则返回 `sanitize` 后的文本。
+fn turn_failed_reason_value(reason: Option<&str>) -> Option<String> {
+    let reason = reason.map(str::trim).filter(|text| !text.is_empty())?;
+    Some(crate::ponysentry::sanitize(reason))
+}
+
+/// 协议标签 → `gen_ai.system` 枚举值（wave-53 C3）。
+///
+/// 冻结契约：`openai*` → `openai`；`anthropic*` → `anthropic`；`gemini*` / `google*` → `google`；
+/// 其余 → `generic`。入参本身也过映射（幂等：`"openai"` → `"openai"`），因此调用点二次映射
+/// 不会漂移。大小写不敏感（`PonyLlm` → `generic`）。
+pub fn gen_ai_system_enum(protocol_label: &str) -> &'static str {
+    let normalized = protocol_label.trim().to_ascii_lowercase();
+    if normalized.starts_with("openai") {
+        "openai"
+    } else if normalized.starts_with("anthropic") {
+        "anthropic"
+    } else if normalized.starts_with("gemini") || normalized.starts_with("google") {
+        "google"
+    } else {
+        "generic"
+    }
+}
+
+/// LLM 属性映射（纯函数，无网络、无全局态）。
+///
+/// 调用方：LLM 子 span 的属性填充与单测断言。
+/// 语义：恒输出 [`ATTR_GEN_AI_SYSTEM`] 与 [`ATTR_GEN_AI_OPERATION_NAME`]；
+/// `model` 非空时同时输出 [`ATTR_GEN_AI_REQUEST_MODEL`] 与
+/// [`ATTR_LANGFUSE_OBSERVATION_MODEL_NAME`]（同值双写）；token 字段各自非空才输出。
+///
+/// wave-53 C3：`gen_ai.system` 走 [`gen_ai_system_enum`] 枚举映射（协议标签不直接上 wire）；
+/// 本入口无展示名通道 ⇒ **不输出** [`ATTR_GEN_AI_PROVIDER_NAME`]（等价于传 `None` 委托）。
+pub fn llm_span_attributes(input: &LlmSpanInput) -> Vec<(String, AttrValue)> {
+    llm_span_attributes_with_provider(input, None)
+}
+
+/// 带供应商展示名的 LLM 属性映射（wave-53 C3 附加式 API）。
+///
+/// 冻结契约：`gen_ai.system = gen_ai_system_enum(input.provider_kind)`（入参也过映射，保证幂等）；
+/// `provider_name` 非空 ⇒ 追加 [`ATTR_GEN_AI_PROVIDER_NAME`]（展示名，如 `PonyLlm`）；其余键与
+/// [`llm_span_attributes`] 完全一致。旧函数等价于传 `None` 委托本函数。
+pub fn llm_span_attributes_with_provider(
+    input: &LlmSpanInput,
+    provider_name: Option<&str>,
+) -> Vec<(String, AttrValue)> {
+    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(7);
+
+    push_str(
+        &mut attributes,
+        ATTR_GEN_AI_SYSTEM,
+        gen_ai_system_enum(&input.provider_kind),
+    );
+    if let Some(model) = input.model.as_deref() {
+        push_str(&mut attributes, ATTR_GEN_AI_REQUEST_MODEL, model);
+        push_str(
+            &mut attributes,
+            ATTR_LANGFUSE_OBSERVATION_MODEL_NAME,
+            model,
+        );
+    }
+    if let Some(input_tokens) = input.input_tokens {
+        attributes.push((
+            ATTR_GEN_AI_USAGE_INPUT_TOKENS.to_string(),
+            AttrValue::I64(input_tokens as i64),
+        ));
+    }
+    if let Some(output_tokens) = input.output_tokens {
+        attributes.push((
+            ATTR_GEN_AI_USAGE_OUTPUT_TOKENS.to_string(),
+            AttrValue::I64(output_tokens as i64),
+        ));
+    }
+    push_str(
+        &mut attributes,
+        ATTR_GEN_AI_OPERATION_NAME,
+        &input.operation,
+    );
+    // 展示名通道：空串/全空白等价于缺失（禁止空串占位）。
+    if let Some(provider_name) = provider_name.filter(|name| !name.trim().is_empty()) {
+        push_str(&mut attributes, ATTR_GEN_AI_PROVIDER_NAME, provider_name);
+    }
+
+    // P0-1：LLM 请求 Prompt 与 Completion 预览（双轨输出：OTel + Langfuse）。
+    if capture_llm_payloads_enabled() {
+        if let Some(prompt) = input.prompt_preview.as_deref() {
+            push_llm_payload_preview(
+                &mut attributes,
+                ATTR_GEN_AI_PROMPT,
+                ATTR_LANGFUSE_OBSERVATION_INPUT,
+                prompt,
+            );
+        }
+        if let Some(completion) = input.completion_preview.as_deref() {
+            push_llm_payload_preview(
+                &mut attributes,
+                ATTR_GEN_AI_COMPLETION,
+                ATTR_LANGFUSE_OBSERVATION_OUTPUT,
+                completion,
+            );
+        }
+    }
+
+    attributes
+}
+
+/// 「细分用量」属性映射（纯函数，无网络、无全局态；wave-51 C3 契约桩）。
+///
+/// 调用方：[`LlmSpanGuard::record_usage_details`]（`llm.chat` 子 span）与根 `agent.turn`
+/// 聚合路径**共用同一份**映射 ⇒ 键名/取值/出现条件只在一处定义，禁止两条口径漂移。
+/// 语义：有值才输出（`None` ⇒ 不输出该键）；`Some(0)` 是有效取值、必须输出 0；
+/// 值为 `i64`，`u64 -> i64` **安全饱和**（超出 `i64::MAX` 钳到 `i64::MAX`，禁止 `as` 直转成负数）。
+/// 输出键：[`ATTR_GEN_AI_USAGE_REASONING_TOKENS`]、[`ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS`]。
+///
+/// 实现（wave-51 C3）：只对有值的键产出条目；`Some(0)` 是有效采集结果（产出 `I64(0)`）；
+/// `u64 -> i64` 走 [`saturating_token_count`]（超出 `i64::MAX` 钳到 `i64::MAX`，绝不出现负值）。
+pub fn llm_usage_detail_attributes(
+    reasoning_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+) -> Vec<(String, AttrValue)> {
+    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(2);
+    if let Some(reasoning_tokens) = reasoning_tokens {
+        attributes.push((
+            ATTR_GEN_AI_USAGE_REASONING_TOKENS.to_string(),
+            AttrValue::I64(saturating_token_count(reasoning_tokens)),
+        ));
+    }
+    if let Some(cached_input_tokens) = cached_input_tokens {
+        attributes.push((
+            ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS.to_string(),
+            AttrValue::I64(saturating_token_count(cached_input_tokens)),
+        ));
+    }
+    attributes
+}
+
+/// `llm.chat` 请求形状属性映射（纯函数，无网络、无全局态）。
+///
+/// 调用方：[`LlmSpanGuard::record_request_shape`]（落 span）与单测断言（同一出口）。
+/// 四键同生同灭：调用方必须给出真实的消息条数、前缀判定与传输方式，
+/// 禁止用 `false` / `buffered` 占位「未知」。
+pub fn llm_request_shape_attributes(
+    mode: &'static str,
+    messages: usize,
+    has_system_prefix: bool,
+    transport: &'static str,
+) -> Vec<(String, AttrValue)> {
+    vec![
+        (
+            ATTR_LLM_REQUEST_MODE.to_string(),
+            AttrValue::Str(mode.to_string()),
+        ),
+        (
+            ATTR_LLM_REQUEST_MESSAGES.to_string(),
+            AttrValue::I64(saturating_token_count(messages as u64)),
+        ),
+        (
+            ATTR_LLM_REQUEST_SYSTEM_PREFIX.to_string(),
+            AttrValue::Bool(has_system_prefix),
+        ),
+        (
+            ATTR_LLM_REQUEST_TRANSPORT.to_string(),
+            AttrValue::Str(transport.to_string()),
+        ),
+    ]
+}
+
+/// `u64 -> i64` 安全饱和（契约 PA51-C3-T3）：超出 `i64::MAX` 钳到 `i64::MAX`。
+///
+/// 为什么不能用 `as`：`u64 as i64` 对 `u64::MAX` 会产生 **-1**，把用量写成负数会污染
+/// Langfuse 成本/用量聚合与阈值判定。
+fn saturating_token_count(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// 工具属性映射（纯函数，无网络、无全局态）。
+///
+/// 调用方：工具子 span 的属性填充与单测断言。
+/// 语义：恒输出 [`ATTR_GEN_AI_TOOL_NAME`]、[`ATTR_LANGFUSE_OBSERVATION_TYPE`]
+/// （[`OBSERVATION_TYPE_TOOL`]）、[`ATTR_AGENT_TOOL_STATUS`]；`duration_ms` 与
+/// `error` 各自非空才输出。
+pub fn tool_span_attributes(input: &ToolSpanInput) -> Vec<(String, AttrValue)> {
+    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(5);
+
+    push_str(&mut attributes, ATTR_GEN_AI_TOOL_NAME, &input.tool_name);
+    push_str(
+        &mut attributes,
+        ATTR_LANGFUSE_OBSERVATION_TYPE,
+        OBSERVATION_TYPE_TOOL,
+    );
+    push_str(&mut attributes, ATTR_AGENT_TOOL_STATUS, &input.status);
+    if let Some(duration_ms) = input.duration_ms {
+        attributes.push((
+            ATTR_AGENT_TOOL_DURATION_MS.to_string(),
+            AttrValue::I64(duration_ms as i64),
+        ));
+    }
+    if let Some(error) = input.error.as_deref() {
+        push_str(&mut attributes, ATTR_AGENT_TOOL_ERROR, error);
+    }
+
+    // P0-1：入参/结果预览（默认开启采集）。`None` ⇒ 不写键；非 None ⇒ 走统一的
+    // 「脱敏 → UTF-8 安全截断 → push_str（再脱敏一次，幂等）」链路。
+    if capture_tool_payloads_enabled() {
+        if let Some(args) = input.args_preview.as_deref() {
+            push_tool_payload_preview(
+                &mut attributes,
+                ATTR_LANGFUSE_OBSERVATION_INPUT,
+                args,
+            );
+        }
+        if let Some(result) = input.result_preview.as_deref() {
+            push_tool_payload_preview(
+                &mut attributes,
+                ATTR_LANGFUSE_OBSERVATION_OUTPUT,
+                result,
+            );
+        }
+    }
+
+    attributes
+}
+
+/// P0-1：LLM / Turn span payload 采集开关判定（默认开启 = opt-out）。
+///
+/// env 缺失 ⇒ `true`；`1`/`true`/`on`/`yes` ⇒ `true`；`0`/`false`/`off`/`no` ⇒ `false`；
+/// 未识别值 ⇒ 回落默认 `true` 并 warn（避免「开关拼错却静默生效」）。
+pub fn capture_llm_payloads_enabled() -> bool {
+    let Ok(value) = std::env::var(ENV_CAPTURE_LLM_PAYLOADS) else {
+        return true;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => true,
+        "0" | "false" | "off" | "no" => false,
+        _ => {
+            eprintln!(
+                "[otel] unrecognized {ENV_CAPTURE_LLM_PAYLOADS}={value:?}; falling back to default (llm payload capture enabled)"
+            );
+            true
+        }
+    }
+}
+
+/// P0-1：双轨写出 LLM / Turn payload 预览属性（OTel GenAI 语义轨与 Langfuse 语义轨）。
+///
+/// 顺序固定为「先脱敏、再截断、最后 `push_str`」：
+/// 1. 先脱敏 ⇒ 截断不会把凭据切成「前缀残缺但仍可识别」的碎片留在属性里；
+/// 2. 再截断到 [`LLM_PAYLOAD_PREVIEW_LIMIT_BYTES`]（4096 字节，**含**截断标记），保证属性长度有硬上界；
+/// 3. `push_str` 内部还会再脱敏一次 —— 对已脱敏文本是**幂等**的。
+fn push_llm_payload_preview(
+    attributes: &mut Vec<(String, AttrValue)>,
+    otel_key: &str,
+    langfuse_key: &str,
+    raw: &str,
+) {
+    if raw.is_empty() {
+        return;
+    }
+    let sanitized = crate::ponysentry::sanitize(raw);
+    let truncated = truncate_llm_payload_preview(&sanitized);
+    push_str(attributes, otel_key, &truncated);
+    push_str(attributes, langfuse_key, &truncated);
+}
+
+/// P0-1：按 **char 边界**把 LLM / Turn 预览截到 [`LLM_PAYLOAD_PREVIEW_LIMIT_BYTES`] 以内，并追加截断标记。
+///
+/// 不切出非法 UTF-8：从「预算末尾」向前回退到最近的 `is_char_boundary` 位置。
+/// 未超限的文本原样返回（不追加标记）。
+fn truncate_llm_payload_preview(text: &str) -> String {
+    if text.len() <= LLM_PAYLOAD_PREVIEW_LIMIT_BYTES {
+        return text.to_string();
+    }
+    let budget = LLM_PAYLOAD_PREVIEW_LIMIT_BYTES.saturating_sub(TOOL_PAYLOAD_TRUNCATION_MARKER.len());
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = String::with_capacity(end + TOOL_PAYLOAD_TRUNCATION_MARKER.len());
+    truncated.push_str(&text[..end]);
+    truncated.push_str(TOOL_PAYLOAD_TRUNCATION_MARKER);
+    truncated
+}
+
+/// P0-1：工具 span payload 采集开关判定（默认开启 = opt-out）。
+///
+/// env 缺失 ⇒ `true`；`1`/`true`/`on`/`yes` ⇒ `true`；`0`/`false`/`off`/`no` ⇒ `false`；
+/// 未识别值 ⇒ 回落默认 `true` 并 warn（避免「开关拼错却静默生效」）。
+fn capture_tool_payloads_enabled() -> bool {
+    let Ok(value) = std::env::var(ENV_CAPTURE_TOOL_PAYLOADS) else {
+        return true;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => true,
+        "0" | "false" | "off" | "no" => false,
+        _ => {
+            eprintln!(
+                "[otel] unrecognized {ENV_CAPTURE_TOOL_PAYLOADS}={value:?}; falling back to default (tool payload capture enabled)"
+            );
+            true
+        }
+    }
+}
+
+/// P0-1：写出一个 payload 预览属性。
+///
+/// 顺序固定为「先脱敏、再截断、最后 `push_str`」：
+/// 1. 先脱敏 ⇒ 截断不会把凭据切成「前缀残缺但仍可识别」的碎片留在属性里；
+/// 2. 再截断到 [`TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES`]（**含**截断标记），保证属性长度有硬上界；
+/// 3. `push_str` 内部还会再脱敏一次 —— 对已脱敏文本是**幂等**的（替换标记不再命中任何规则），
+///    因此不会把长度顶回上限之上，同时保持「所有字符串属性统一过 PonySentry」这一不变量。
+fn push_tool_payload_preview(
+    attributes: &mut Vec<(String, AttrValue)>,
+    key: &str,
+    raw: &str,
+) {
+    if raw.is_empty() {
+        return;
+    }
+    let sanitized = crate::ponysentry::sanitize(raw);
+    let truncated = truncate_tool_payload_preview(&sanitized);
+    push_str(attributes, key, &truncated);
+}
+
+/// P0-1：按 **char 边界**把预览截到 [`TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES`] 以内，并追加截断标记。
+///
+/// 不切出非法 UTF-8：从「预算末尾」向前回退到最近的 `is_char_boundary` 位置。
+/// 未超限的文本原样返回（不追加标记）。
+fn truncate_tool_payload_preview(text: &str) -> String {
+    if text.len() <= TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES {
+        return text.to_string();
+    }
+    let budget = TOOL_PAYLOAD_PREVIEW_LIMIT_BYTES.saturating_sub(TOOL_PAYLOAD_TRUNCATION_MARKER.len());
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = String::with_capacity(end + TOOL_PAYLOAD_TRUNCATION_MARKER.len());
+    truncated.push_str(&text[..end]);
+    truncated.push_str(TOOL_PAYLOAD_TRUNCATION_MARKER);
+    truncated
+}
+
+
+/// 带模型侧 tool call id 的工具属性映射（wave-53 C6 附加式 API）。
+///
+/// 冻结契约：`call_id` 非空 ⇒ 追加 [`ATTR_GEN_AI_TOOL_CALL_ID`]；`None`/空串 ⇒ **不输出该键**；
+/// 其余键与 [`tool_span_attributes`] 完全一致。旧函数等价于传 `None`。
+pub fn tool_span_attributes_with_call_id(
+    input: &ToolSpanInput,
+    call_id: Option<&str>,
+) -> Vec<(String, AttrValue)> {
+    let mut attributes = tool_span_attributes(input);
+    if let Some(call_id) = call_id.filter(|value| !value.trim().is_empty()) {
+        push_str(&mut attributes, ATTR_GEN_AI_TOOL_CALL_ID, call_id);
+    }
+    attributes
+}
+
+// ---------------------------------------------------------------- W3C Trace Context 契约辅助与空桩
+
+/// W3C traceparent 上下文结构
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct W3cTraceContext {
+    pub version: String,
+    pub trace_id: String,
+    pub parent_id: String,
+    pub trace_flags: String,
+}
+
+impl W3cTraceContext {
+    /// 格式化为标准 W3C traceparent 头部字符串 (例如 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01)
+    pub fn to_header_value(&self) -> String {
+        format!("{}-{}-{}-{}", self.version, self.trace_id, self.parent_id, self.trace_flags)
+    }
+}
+
+/// 将 traceparent 注入到 HTTP 请求头集合中（空桩与契约接口签名）。
+///
+/// 契约约定：
+/// - 若当前上下文存在有效 trace_id 与 span_id，则格式化并设置 `traceparent` 请求头。
+/// - 若不存在或上报门禁关闭，保持空桩或透传既有 headers。
+pub fn inject_traceparent_header<H>(headers: &mut H, _context: Option<&W3cTraceContext>)
+where
+    H: AsMut<reqwest::header::HeaderMap>,
+{
+    if let Some(ctx) = _context {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(&ctx.to_header_value()) {
+            headers.as_mut().insert("traceparent", val);
+        }
+    }
+}
+
+// ------------------------------------------- 当前活跃 turn 上下文查询（Wave-4 C3/C4 契约）
+//
+// 两套 id 语义**必须**严格区分（Wave-4.1 L3-A B1 修复）：
+// - [`current_trace_id`] / [`current_span_id`] / [`current_traceparent`]：**本地相关性** id。
+//   门禁关闭或 provider 未装配时由轮内本地上下文提供，只用于日志关联与出网 traceparent；
+//   这类 id **不保证**可在 Tempo/Langfuse 检索到。
+// - [`exported_trace_id`]：**导出态** id。仅当本轮存在真实 SDK root span 且已采样时返回；
+//   凡是会让用户/第三方「按 id 去查链路」的下游（PonySentry issue、会话 trace DTO）
+//   必须只使用它 —— 否则会出现「有 id 但查不到」的误导。
+
+/// 读取当前活跃 turn 的 trace_id（32 位小写十六进制，**本地相关性**语义）。
+///
+/// 调用方：结构化日志（C4）与出网 traceparent 组装。
+/// 语义：无活跃 turn（或上下文非法）时返回 `None`——**绝不**返回全 0 / dummy 占位值。
+/// 注意：本 id 可能是门禁关闭时的轮内本地 id，**不得**用于「按 id 检索上游链路」的场景，
+/// 那类场景请用 [`exported_trace_id`]。
+pub fn current_trace_id() -> Option<String> {
+    let span_context = active_turn_span_context()?;
+    if !span_context.is_valid() {
+        return None;
+    }
+    let hex = span_context.trace_id().to_string();
+    if is_lower_hex(&hex, 32) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
+/// 读取当前 turn 的**导出态** trace_id；不满足导出条件时一律 `None`。
+///
+/// 调用方：PonySentry issue 的 `trace_id` 回填（C2）、会话 trace DTO（前端按 id 跳转 Tempo）。
+/// 语义（三条同时满足才返回）：
+/// 1. 存在**真实 SDK root span** 建立的登记（本地降级上下文不算）；
+/// 2. `span_context.is_valid()`；
+/// 3. `span_context.is_sampled()`（未被采样 ⇒ 上游无此 trace，返回 id 只会误导）。
+/// 门禁关闭 / 未 init / 未采样 ⇒ `None`，**严禁**回落到 [`current_trace_id`]。
+pub fn exported_trace_id() -> Option<String> {
+    let entry = current_active_turn()?;
+    if !entry.exported || !entry.span_context.is_valid() || !entry.span_context.is_sampled() {
+        return None;
+    }
+    let hex = entry.span_context.trace_id().to_string();
+    if is_lower_hex(&hex, 32) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
+/// 读取当前活跃 turn 的 span_id（16 位小写十六进制）。
+///
+/// 调用方：出网 `traceparent` 组装与诊断透出。语义同 [`current_trace_id`]（无活跃 turn ⇒ `None`）。
+pub fn current_span_id() -> Option<String> {
+    let span_context = active_turn_span_context()?;
+    if !span_context.is_valid() {
+        return None;
+    }
+    let hex = span_context.span_id().to_string();
+    if is_lower_hex(&hex, 16) {
+        Some(hex)
+    } else {
+        None
+    }
+}
+
+/// 组装当前活跃 turn 的 W3C `traceparent` 头值：`00-<trace_id>-<span_id>-<flags>`。
+///
+/// 调用方：出网注入（[`with_current_traceparent`]）与诊断断言。
+/// 语义：无活跃 turn / 任一 id 非法 / 未采样 ⇒ `None`（fail-closed：宁可不注入脏头）。
+/// 采样位固定取 `01`：只有可用的（已采样或本轮本地登记的）上下文才会被注入。
+pub fn current_traceparent() -> Option<String> {
+    // P3：工具执行期间优先返回该工具的 `tool.call` span —— 子代理/队友 turn 因此
+    // 挂在工具之下，而不是与工具并列挂在 turn 下。
+    if let Some(traceparent) =
+        TOOL_SPAN_PARENTS.with(|stack| stack.borrow().last().map(|(_, value)| value.clone()))
+    {
+        return Some(traceparent);
+    }
+    let span_context = active_turn_span_context()?;
+    if !span_context.is_valid() || !span_context.is_sampled() {
+        return None;
+    }
+    let trace_id = span_context.trace_id().to_string();
+    let span_id = span_context.span_id().to_string();
+    if !is_lower_hex(&trace_id, 32) || !is_lower_hex(&span_id, 16) {
+        return None;
+    }
+    Some(format!("00-{trace_id}-{span_id}-01"))
+}
+
+/// 给 outbound 请求注入 `traceparent`（C3 单点注入入口）。
+///
+/// 调用方：**所有** outbound `reqwest` 出网点（provider 模型调用、PonySentry ingest、
+/// 模型目录查询、Exa 搜索、web_fetch）。语义：无活跃 span 时**原样返回**请求
+/// （零分配、不写头）；有活跃 span 时写入 `traceparent` 头；id 非法时 fail-closed（不注入）。
+/// 任何情况下不 panic。
+///
+/// 防重复（Wave-4.1 L3-A #8）：`RequestBuilder::headers(HeaderMap)` 走 reqwest 内部的
+/// `replace_headers`（`Entry::insert` 语义），因此**同名学生头会被替换而非追加** ——
+/// 调用方自带或重复调用都不会产生两个 `traceparent`（W3C 要求每请求至多一个）。
+pub fn with_current_traceparent(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    let Some(headers) = traceparent_header_map() else {
+        return request;
+    };
+    request.headers(headers)
+}
+
+/// 组装只含单个 `traceparent` 的 header map；无活跃 span / 非法值 ⇒ `None`。
+///
+/// 调用方：[`with_current_traceparent`] 与 PonySentry worker（已持有 traceparent 字符串时）。
+pub fn traceparent_header_map() -> Option<reqwest::header::HeaderMap> {
+    let traceparent = current_traceparent()?;
+    traceparent_header_map_from(&traceparent)
+}
+
+/// 由既有 traceparent 字符串组装单头 map（供跨线程传递 traceparent 的调用点复用）。
+pub fn traceparent_header_map_from(traceparent: &str) -> Option<reqwest::header::HeaderMap> {
+    let value = reqwest::header::HeaderValue::from_str(traceparent).ok()?;
+    let mut headers = reqwest::header::HeaderMap::with_capacity(1);
+    headers.insert(reqwest::header::HeaderName::from_static("traceparent"), value);
+    Some(headers)
+}
+
+/// 是否为指定长度的「小写十六进制」串（W3C trace-id / span-id 形态校验）。
+fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// 读取当前活跃 turn 的 span 上下文；无活跃 turn 时 `None`。
+fn active_turn_span_context() -> Option<opentelemetry::trace::SpanContext> {
+    current_active_turn().map(|entry| entry.span_context)
+}
+
+/// 为「不导出但仍需关联」的 turn 生成本地 W3C 上下文（随机、合法、已采样）。
+///
+/// 语义：门禁关闭或 provider 未装配时，turn 仍需要一个稳定的关联标识，供日志
+/// `trace_id`（C4）与出网 `traceparent`（C3）使用；该上下文**只存在于进程内**，
+/// 不产生任何 span 分配与网络出口（导出链路仍由门禁严格关闭）。
+fn local_span_context() -> opentelemetry::trace::SpanContext {
+    let trace_bytes = uuid::Uuid::new_v4().into_bytes();
+    let span_bytes = uuid::Uuid::new_v4().into_bytes();
+    let mut span_id_bytes = [0u8; 8];
+    span_id_bytes.copy_from_slice(&span_bytes[..8]);
+    // W3C 要求 id 非全 0；极低概率命中时按位或 1 兜底（保持随机性，避免出现无效上下文）。
+    let mut trace_id_bytes = trace_bytes;
+    if trace_id_bytes.iter().all(|byte| *byte == 0) {
+        trace_id_bytes[15] = 1;
+    }
+    if span_id_bytes.iter().all(|byte| *byte == 0) {
+        span_id_bytes[7] = 1;
+    }
+    opentelemetry::trace::SpanContext::new(
+        opentelemetry::trace::TraceId::from_bytes(trace_id_bytes),
+        opentelemetry::trace::SpanId::from_bytes(span_id_bytes),
+        opentelemetry::trace::TraceFlags::SAMPLED,
+        false,
+        opentelemetry::trace::TraceState::default(),
+    )
+}
+
+/// W3 trace：以宿主父上下文派生**本地**子上下文（同 trace_id、新随机 span_id、已采样、不导出）。
+///
+/// 用途：导出关闭/门禁拒绝时的降级通路 —— 让队友 turn 的日志 `trace_id` 与出网
+/// `traceparent` 与宿主保持同一 trace，同时保持「本地上下文永不作真实导出父」的既定契约。
+fn local_child_span_context(
+    parent: opentelemetry::trace::SpanContext,
+) -> opentelemetry::trace::SpanContext {
+    let span_bytes = uuid::Uuid::new_v4().into_bytes();
+    let mut span_id_bytes = [0u8; 8];
+    span_id_bytes.copy_from_slice(&span_bytes[..8]);
+    if span_id_bytes.iter().all(|byte| *byte == 0) {
+        span_id_bytes[7] = 1;
+    }
+    opentelemetry::trace::SpanContext::new(
+        parent.trace_id(),
+        opentelemetry::trace::SpanId::from_bytes(span_id_bytes),
+        opentelemetry::trace::TraceFlags::SAMPLED,
+        // 本地派生上下文不是 remote parent 本身（`is_remote=false`），仍不可作导出父。
+        false,
+        opentelemetry::trace::TraceState::default(),
+    )
+}
+
+/// W3 trace：把 W3C `traceparent`（`00-<32hex>-<16hex>-<2hex>`）解析为远端 `SpanContext`。
+///
+/// 合规口径（W3C Trace Context §3.2.2）：
+/// - 版本号 2 位小写十六进制，且**不得**为 `ff`（保留值）；
+/// - trace-id 32 位小写十六进制且非全 0；span-id 16 位小写十六进制且非全 0；
+/// - flags 2 位小写十六进制（保留原值，仅由调用方按需使用 sampled 位）。
+///
+/// 任何不合规输入 ⇒ `None`：调用方 fail-closed 回落 root（宁可不注入脏父上下文）。
+fn traceparent_to_span_context(traceparent: &str) -> Option<opentelemetry::trace::SpanContext> {
+    let mut parts = traceparent.trim().split('-');
+    let version = parts.next()?;
+    let trace_id = parts.next()?;
+    let span_id = parts.next()?;
+    let flags = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if !is_lower_hex(version, 2) || version == "ff" {
+        return None;
+    }
+    if !is_lower_hex(trace_id, 32)
+        || !is_lower_hex(span_id, 16)
+        || !is_lower_hex(flags, 2)
+    {
+        return None;
+    }
+    if trace_id.bytes().all(|byte| byte == b'0') || span_id.bytes().all(|byte| byte == b'0') {
+        return None;
+    }
+    let trace_id = u128::from_str_radix(trace_id, 16).ok()?;
+    let span_id = u64::from_str_radix(span_id, 16).ok()?;
+    let flags = u8::from_str_radix(flags, 16).ok()?;
+    Some(opentelemetry::trace::SpanContext::new(
+        opentelemetry::trace::TraceId::from(trace_id),
+        opentelemetry::trace::SpanId::from(span_id),
+        opentelemetry::trace::TraceFlags::new(flags),
+        true,
+        opentelemetry::trace::TraceState::default(),
+    ))
+}
+
+// ------------------------------------------------- turn / LLM / 工具 span 装配面（挂载切片）
+//
+// 运行时装配点（runtime/turn_*.rs、turn_flow.rs 的 provider 调用缝、工具活动记录点）
+// 只使用这一组**中性**入口：不感知任何 OTel 类型；门禁关闭时一律退化为零分配空操作。
+
+/// 开始一棵 turn trace，返回在 turn 生命周期内持有的守卫。
+///
+/// 语义：创建 `agent.turn` root span，并把其上下文登记为「当前活动 turn」，
+/// 之后 [`start_llm_span`] / [`record_tool_call_span`] 会自动挂到该 turn 之下；
+/// 守卫 **Drop 即结束 span**（turn 有多个出口，避免漏 `end`）。
+/// 失败语义：未 [`init`]、门禁关闭、或 `session_id`/`turn_id` 缺失（空串）时返回空操作守卫
+/// （缺失即跳过，**禁止**用占位值伪造 session）；任何情况下不 panic。
+///
+/// Wave-4 C3/C4：门禁关闭或 provider 未装配时，本函数仍为该 turn 登记一个**进程内本地**
+/// W3C 上下文（随机 trace_id/span_id、已采样、零导出零网络），使 [`current_trace_id`] /
+/// [`current_traceparent`] 在活跃 turn 内可用（日志 trace_id 绑定与出网级联不因「不导出」失效）。
+pub fn begin_turn_trace(session_id: &str, turn_id: &str, sequence: u64) -> TurnTraceGuard {
+    begin_turn_trace_with_parent(session_id, turn_id, sequence, None)
+}
+
+/// W3 trace：让本 turn 的 `agent.turn` root span **继承宿主 turn 的 traceparent**。
+///
+/// 语义：
+/// - 合法 `00-<32hex>-<16hex>-<2hex>` ⇒ 解析为远端 `SpanContext`，并以
+///   `Context::new().with_remote_span_context(...)` 作为 `build_with_context` 的 parent ⇒
+///   teammate/subagent turn 与宿主**同一 trace id**（父 span = 宿主当前 turn span）；
+/// - `None` / 非法 ⇒ 空 `Context`（行为与 [`begin_turn_trace`] 完全一致：root trace）；
+/// - 导出关闭/门禁拒绝的降级通路：仍沿用父 trace id 生成本地子上下文，使日志 `trace_id` 与
+///   出网 `traceparent` 与宿主同 trace（该上下文 `exported = false`，永不作真实导出的父）。
+///
+/// 任何情况下不 panic；非法父头 fail-closed 回落 root，绝不注入脏父上下文。
+fn build_turn_trace_guard(
+    span: Option<opentelemetry_sdk::trace::Span>,
+    slot: Option<ActiveTurnSlot>,
+    trace_id: Option<String>,
+    turn_started_at: Option<std::time::Instant>,
+) -> TurnTraceGuard {
+    TurnTraceGuard {
+        span,
+        slot,
+        phase: None,
+        trace_id,
+        turn_speed: None,
+        turn_speed_basis: None,
+        turn_cost: None,
+        turn_duration_ms: None,
+        turn_ttft_ms: None,
+        turn_calls: None,
+        turn_started_at,
+        turn_speed_recorded: false,
+        turn_timing_recorded: false,
+    }
+}
+
+pub fn begin_turn_trace_with_parent(
+    session_id: &str,
+    turn_id: &str,
+    sequence: u64,
+    parent_traceparent: Option<&str>,
+) -> TurnTraceGuard {
+    // 契约：session_id / turn_id 缺失（空串）⇒ **不创建** turn span。
+    // 绝不用占位值伪造会话——那会在 Langfuse 侧造出不存在的 session，污染数据。
+    if session_id.trim().is_empty() || turn_id.trim().is_empty() {
+        return build_turn_trace_guard(None, None, None, None);
+    }
+    // W3 trace：合法父 traceparent ⇒ 该 turn 的 root span 挂到宿主 turn span 之下（同一 trace）；
+    // 非法/缺失 ⇒ 空 Context（root trace，行为逐字不变）。
+    let parent_span_context = parent_traceparent.and_then(traceparent_to_span_context);
+    let parent_context = parent_span_context
+        .as_ref()
+        .map(|span_context| Context::new().with_remote_span_context(span_context.clone()));
+    if spans_allowed() {
+        if let Some(state) = current_state() {
+            let user_id = env_non_empty(ENV_PONY_OTEL_USER_ID);
+            let mut attributes = to_key_values(turn_span_attributes(&TurnSpanInput {
+                session_id: session_id.to_string(),
+                user_id,
+                turn_id: turn_id.to_string(),
+                sequence,
+                phase: String::new(),
+                // P0-3：turn span 起建时尚无失败归因（失败时由 `TurnTraceGuard::drop` 写入）。
+                failed_reason: None,
+                prompt_preview: None,
+                response_preview: None,
+            }));
+            // ADR 0055：trace.release 需 span 属性显式给出（resource `service.version` 只填 version）。
+            attributes.push(KeyValue::new(
+                ATTR_LANGFUSE_RELEASE,
+                current_release_version(),
+            ));
+            let parent = parent_context.clone().unwrap_or_else(Context::new);
+            let mut span = state.tracer.build_with_context(
+                opentelemetry::trace::SpanBuilder::from_name(SPAN_AGENT_TURN)
+                    .with_kind(opentelemetry::trace::SpanKind::Internal)
+                    .with_attributes(attributes),
+                &parent,
+            );
+            let span_context = span.span_context().clone();
+            // TOCTOU 兜底：若 gate 并发关闭或 provider 被 shutdown，`GatedSampler`/SdkTracer
+            // 会产出 `SpanContext::NONE`（`!is_valid()`）；丢弃该 span 并回落本地降级上下文。
+            if span_context.is_valid() {
+                let trace_id = sampled_trace_id(&mut span);
+                // 只有真实建立且被采样的 root span 才算「导出态」（B1/B1b）。
+                let exported = trace_id.is_some();
+                if let Some(trace_id) = trace_id.as_deref() {
+                    // Wave-6：登记 turn 级导出态 trace_id，供跨上下文失败上报精确回查。
+                    register_turn_exported_trace_id(turn_id, trace_id);
+                }
+                let slot = register_active_turn(turn_id, session_id, span_context, exported);
+                return build_turn_trace_guard(
+                    Some(span),
+                    slot,
+                    trace_id,
+                    Some(std::time::Instant::now()),
+                );
+            }
+            drop(span);
+        }
+    }
+
+    // 降级通路：本地关联上下文（不导出、不联网），仅承担本轮内的 trace 关联标识。
+    // 契约：`exported = false` ⇒ 永不作子 span 的 parent、永不作 issue/前端跳转的 trace_id。
+    // W3 trace：有合法父头时沿用其 trace_id（新本地 span_id），保证无导出后端时
+    // teammate turn 的日志 trace_id / 出网 traceparent 仍与宿主同一 trace。
+    let span_context = match parent_span_context {
+        Some(parent) => local_child_span_context(parent),
+        None => local_span_context(),
+    };
+    let trace_id = span_context.trace_id().to_string();
+    let slot = register_active_turn(turn_id, session_id, span_context, false);
+    build_turn_trace_guard(None, slot, Some(trace_id), Some(std::time::Instant::now()))
+}
+
+/// turn trace 守卫（`Drop` 时补 phase 属性并结束 span）。
+pub struct TurnTraceGuard {
+    span: Option<opentelemetry_sdk::trace::Span>,
+    /// 该 turn 的登记归属（task id 或线程本地栈）；Drop 时精确摘除自己那一条。
+    slot: Option<ActiveTurnSlot>,
+    phase: Option<String>,
+    trace_id: Option<String>,
+    turn_speed: Option<f64>,
+    /// I10：速度口径，与 `turn_speed` 同源同帧；`None` ⇒ 不写 basis 键。
+    turn_speed_basis: Option<TurnSpeedBasis>,
+    /// Wave-5 K4：整轮聚合成本（USD）；`None` ⇒ 不输出 `agent.turn.cost.usd`。
+    turn_cost: Option<f64>,
+    /// wave-54 C2：turn 级耗时/TTFT/已完成调用数；`None` ⇒ 对应键缺席。
+    turn_duration_ms: Option<u64>,
+    turn_ttft_ms: Option<u64>,
+    turn_calls: Option<u32>,
+    /// wave-54 C2（L3 收口）：turn 计时起点（Drop 时派生 `agent.turn.duration_ms`）。
+    turn_started_at: Option<std::time::Instant>,
+    /// 是否由调用方**显式**记录过速度 / timing（显式优先，不因派生覆盖）。
+    turn_speed_recorded: bool,
+    turn_timing_recorded: bool,
+}
+
+impl TurnTraceGuard {
+    /// 记录 turn 综合生成速度（token/s）与**口径**（I10：速度与 basis 必须同源同帧）。
+    ///
+    /// `basis` 必须由公式出口（[`pony_protocol::speed::TurnSpeedTruth`]）给出，
+    /// 禁止在此推断；`speed`（含 NaN/Inf/非正）与 `basis` 同时缺席，保证
+    /// 「无值 ⇒ 两键都不出现」。
+    pub fn record_turn_speed_with_basis(
+        &mut self,
+        speed: Option<f64>,
+        basis: Option<TurnSpeedBasis>,
+    ) {
+        self.turn_speed = speed.filter(|s| s.is_finite() && *s > 0.0);
+        // I10：basis 缺席 ⇔ 无值（速度被过滤掉时 basis 一并作废，不留悬空口径）。
+        self.turn_speed_basis = self.turn_speed.and(basis);
+        // 显式记录即「调用方定义了真值」：即使被过滤成 `None`（0/NaN/Inf），
+        // `Drop` 也不再用派生值顶替（语义：显式无值 = 无值）。
+        self.turn_speed_recorded = true;
+    }
+
+    /// 只记录速度（兼容入口）：**不写** `agent.turn.speed.basis`。
+    ///
+    /// 口径只能由公式出口给出，此处不得伪造；生产路径一律走
+    /// [`TurnTraceGuard::record_turn_speed_with_basis`]。
+    pub fn record_turn_speed(&mut self, speed: Option<f64>) {
+        self.record_turn_speed_with_basis(speed, None);
+    }
+
+    /// 记录 turn 终态相位（`completed` / `failed` / `cancelled` …）。
+    ///
+    /// 语义：在守卫 Drop 前调用；空串视为「无相位」→ 不输出该键。
+    pub fn set_phase(&mut self, phase: &str) {
+        if phase.is_empty() {
+            self.phase = None;
+        } else {
+            // F2：phase 同样过脱敏（防御调用方传入不可信内容）。
+            self.phase = Some(crate::ponysentry::sanitize(phase));
+        }
+    }
+
+    /// 记录整轮 turn 的聚合成本（USD）。
+    ///
+    /// 调用方：turn 终态路径（Wave-5 K4）。语义：`None` / 非有限 / 负值 ⇒ 视为「无有效计价」，
+    /// **不输出** `agent.turn.cost.usd`；门禁关闭时守卫为空操作（零导出），此处只做赋值。
+    /// 注意：未显式记录时，[`TurnTraceGuard::drop`] 会回落到本轮内各 `llm.chat` span 的累计成本。
+    pub fn record_turn_cost(&mut self, cost: Option<f64>) {
+        self.turn_cost = cost.filter(|value| value.is_finite() && *value >= 0.0);
+    }
+
+    /// 读取该 turn 的 trace_id（十六进制字符串）；未采样/门禁关闭/未 init 时 `None`。
+    ///
+    /// 注意：门禁关闭时这里返回的是**本地相关性** id（日志/traceparent 用），
+    /// 若下游要「按 id 去上游检索链路」，必须改用 [`TurnTraceGuard::exported_trace_id`]。
+    pub fn trace_id(&self) -> Option<String> {
+        self.trace_id.clone()
+    }
+
+    /// 读取该 turn 的**导出态** trace_id：仅真实 SDK span 且已采样时返回。
+    ///
+    /// 调用方：会话 trace DTO（前端跳转 Tempo/Langfuse）与任何「可检索」语义的下游。
+    /// 语义：本地降级上下文（`span == None`）或未采样（`trace_id == None`）一律 `None`。
+    pub fn exported_trace_id(&self) -> Option<String> {
+        if self.span.is_some() {
+            self.trace_id.clone()
+        } else {
+            None
+        }
+    }
+
+    /// 记录 turn 级速度真值（wave-54 C2 契约）：映射 [`ATTR_AGENT_TURN_DURATION_MS`] /
+    /// [`ATTR_AGENT_TURN_TTFT_MS`] / [`ATTR_AGENT_TURN_CALLS`]。
+    ///
+    /// 语义（C2）：`duration_ms` = turn 级耗时；`ttft_ms` = **首个带 ttft 的 per-call 值**
+    /// （不是 turn elapsed 内首包，旧 turn 级 TTFT 语义作废）；`calls` = 已完成调用数。
+    /// 每个键 `None` ⇒ 该键缺席（「未知」不得写 0 占位）。只做赋值，落 span 在 `Drop`。
+    pub fn record_turn_timing(
+        &mut self,
+        duration_ms: Option<u64>,
+        ttft_ms: Option<u64>,
+        calls: Option<u32>,
+    ) {
+        self.turn_duration_ms = duration_ms;
+        self.turn_ttft_ms = ttft_ms;
+        self.turn_calls = calls;
+        self.turn_timing_recorded = true;
+    }
+}
+
+impl Drop for TurnTraceGuard {
+    fn drop(&mut self) {
+        // PA-154：先取走本轮错误聚合（取走即清零 ⇒ 跨 turn 不污染）；无活动 turn 时无副作用。
+        let aggregated_error = take_active_turn_error();
+        // wave-53 C4：degraded 判定必须在 `self.phase.take()` **之前**快照相位，
+        // 否则「completed + 工具失败」永远判不出来。
+        let phase_snapshot = self.phase.clone();
+        let phase_failed = self.phase.as_deref() == Some("failed");
+        // r1-dim6 F3：outcome 判定需要与 `degraded` 同源的失败计数（只读不清零 ⇒
+        // 下方 2416 行的读取仍取到同一值）。判定必须在 `self.phase.take()` 之前完成，
+        // 否则「completed + 工具失败」判不出来。
+        let tool_failures_snapshot = take_active_turn_tool_failures();
+        let completed_with_failures =
+            phase_snapshot.as_deref() == Some("completed") && tool_failures_snapshot > 0;
+        if let Some(phase) = self.phase.take() {
+            if let Some(span) = self.span.as_mut() {
+                if phase == "failed" {
+                    span.set_status(opentelemetry::trace::Status::error(phase.clone()));
+                }
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_PHASE, phase));
+            }
+        }
+        // PA-154：phase 语义零变更——phase == "failed" 保持既有 `Status::error(phase)`，
+        // **不写** `turn_error` 文案但仍在根 span 标出终态聚合键；
+        // 其余相位由聚合到的子 span 错误承接 `turn_error: <reason>`。
+        if let Some(span) = self.span.as_mut() {
+            match (phase_failed, aggregated_error) {
+                (true, reason) => {
+                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, TURN_OUTCOME_ERROR));
+                    // P0-3：失败轮把归因写到根 span —— 复用同一映射（含脱敏），不另写文案。
+                    if let Some(value) = turn_failed_reason_value(reason.as_deref()) {
+                        span.set_attribute(KeyValue::new(
+                            ATTR_AGENT_TURN_FAILED_REASON,
+                            value,
+                        ));
+                    }
+                }
+                (false, Some(reason)) => {
+                    span.set_status(opentelemetry::trace::Status::error(
+                        turn_error_status_message(&reason),
+                    ));
+                    // r1-dim6 F3：`phase=completed` 且有工具失败 ⇒ outcome 写「降级完成」，
+                    // 不再与 `degraded=true` 并存地写 `error`（同一轮一个结局单值）。
+                    // `Status` 仍置 error，Tempo 侧按根状态告警的能力不变。
+                    let outcome = if completed_with_failures {
+                        TURN_OUTCOME_DEGRADED
+                    } else {
+                        TURN_OUTCOME_ERROR
+                    };
+                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_OUTCOME, outcome));
+                }
+                (false, None) => {}
+            }
+        }
+        // wave-54 C2（L3 收口）：未显式记录速度/timing 时，由本轮各 `llm.chat` 在
+        // `record_call_timing` 时累积的真值在此结算 ⇒ 根 span 属性**不随退出点漂移**
+        // （completed / cancelled / failed / 多跳 全部覆盖，无需逐点接线）。
+        // 显式值优先（冻结契约 T2 语义不变）。
+        let derived = read_active_turn_call_truth();
+        if !self.turn_speed_recorded {
+            self.turn_speed = derived.speed;
+            self.turn_speed_basis = derived.basis;
+        }
+        if !self.turn_timing_recorded && derived.calls > 0 {
+            // Lead 裁决（T7）：`duration_ms = max(墙钟 elapsed_ms, Σ已计入调用的 dur_ms)`。
+            // 生产路径调用串行 ⇒ `elapsed ≥ Σdur`，下限是 no-op（真实会话 = 98469ms）；
+            // 合成/极短轮 `elapsed()` 取整为 0 时由下限兜底，且仍遵守「>0 才落键」。
+            let wall_ms = self
+                .turn_started_at
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            let duration_ms = wall_ms.max(derived.duration_ms);
+            if duration_ms > 0 {
+                self.turn_duration_ms = self.turn_duration_ms.or(Some(duration_ms));
+            }
+            self.turn_ttft_ms = self.turn_ttft_ms.or(derived.ttft_ms);
+            self.turn_calls = self
+                .turn_calls
+                .or(Some(u32::try_from(derived.calls).unwrap_or(u32::MAX)));
+        }
+        if let Some(speed) = self.turn_speed.take() {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_AGENT_TURN_SPEED_TOKENS_PER_SECOND,
+                    speed,
+                ));
+                // I10：速度必须自带口径（`stream_decode` | `end_to_end`），否则下游无法
+                // 判断分母是否已扣除 TTFT / 过物理下限；口径缺席时不出该键。
+                if let Some(basis) = self.turn_speed_basis {
+                    span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_SPEED_BASIS, basis.as_str()));
+                }
+            }
+        }
+        // wave-54 C2：turn 级耗时 / 首包 / 已完成调用数——`None` ⇒ 键缺席（禁止 0 占位）。
+        if let Some(duration_ms) = self.turn_duration_ms.take() {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_AGENT_TURN_DURATION_MS,
+                    duration_ms as i64,
+                ));
+            }
+        }
+        if let Some(ttft_ms) = self.turn_ttft_ms.take() {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_TTFT_MS, ttft_ms as i64));
+            }
+        }
+        if let Some(calls) = self.turn_calls.take() {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_CALLS, calls as i64));
+            }
+        }
+        // Wave-5 K4：整轮聚合成本——显式记录优先，否则回落到本轮 llm.chat 累计值；
+        // 无有效计价时**不输出该键**（严禁写 0.0）。
+        let accumulated_cost = take_active_turn_cost();
+        let turn_cost = self.turn_cost.take().or_else(|| {
+            if accumulated_cost > 0.0 && accumulated_cost.is_finite() {
+                Some(round_cost_usd(accumulated_cost))
+            } else {
+                None
+            }
+        });
+        // P2：整轮聚合 token 用量（各 llm.chat 子 span 累计值）。
+        let (turn_input_tokens, turn_output_tokens) = take_active_turn_usage();
+        if let Some(input_tokens) = turn_input_tokens {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+                    input_tokens as i64,
+                ));
+            }
+        }
+        if let Some(output_tokens) = turn_output_tokens {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+                    output_tokens as i64,
+                ));
+            }
+        }
+        if let Some(cost) = turn_cost {
+            if let Some(span) = self.span.as_mut() {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_COST_USD, cost));
+                span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
+            }
+        }
+        // wave-53 C4：工具失败语义拆键 —— 计数 > 0 才输出 `agent.turn.tool_failures`；
+        // 且**仅**在 `phase == "completed"` 时追加 `agent.turn.degraded=true`（部分失败）；
+        // `phase != "completed"`（error/aborted/…）⇒ 不输出 degraded（错误语义仍由 outcome/status 表达）。
+        let tool_failures = take_active_turn_tool_failures();
+        let degraded = tool_failures > 0 && phase_snapshot.as_deref() == Some("completed");
+        if let Some(span) = self.span.as_mut() {
+            if tool_failures > 0 {
+                span.set_attribute(KeyValue::new(
+                    ATTR_AGENT_TURN_TOOL_FAILURES,
+                    saturating_token_count(tool_failures),
+                ));
+            }
+            if degraded {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_TURN_DEGRADED, true));
+            }
+        }
+        // wave-51 C3：整轮聚合细分用量（思考 / 缓存命中）——取本轮各 `llm.chat` 的有效值之和，
+        // 与子 span 共用 [`llm_usage_detail_attributes`] 同一份映射（键名/饱和/出现条件同源）。
+        // 语义：本轮从未上报过某键 ⇒ 该键不输出（禁止 0 占位）；上报过 0 ⇒ 输出 0。
+        let (turn_reasoning_tokens, turn_cached_input_tokens) = take_active_turn_usage_details();
+        if let Some(span) = self.span.as_mut() {
+            for attribute in to_key_values(llm_usage_detail_attributes(
+                turn_reasoning_tokens,
+                turn_cached_input_tokens,
+            )) {
+                span.set_attribute(attribute);
+            }
+        }
+        if let Some(mut span) = self.span.take() {
+            span.end();
+        }
+        unregister_active_turn(self.slot.take());
+    }
+}
+
+/// 开一个 `llm.chat` 子 span（父 = 当前活动 turn），返回守卫（`Drop` 即结束）。
+///
+/// 语义：属性按 [`llm_span_attributes`] 生成；token 用量在响应侧拿到后调用
+/// [`LlmSpanGuard::record_usage`] 补写（缺失则不输出该键）。
+/// 失败语义：门禁关闭/未 init 时返回空操作守卫，不 panic。
+///
+/// wave-53 C3：等价于 [`start_llm_span_with_provider`] 传 `provider_name = None`
+/// （无展示名通道 ⇒ 不输出 [`ATTR_GEN_AI_PROVIDER_NAME`]）。
+pub fn start_llm_span(provider_kind: &str, model: Option<&str>, operation: &str) -> LlmSpanGuard {
+    start_llm_span_with_provider(provider_kind, None, model, operation)
+}
+
+/// 带供应商展示名的 `llm.chat` 子 span（wave-53 C3 附加式 API）。
+///
+/// 冻结契约：`gen_ai.system = gen_ai_system_enum(system)`（入参也过映射，保证幂等）；
+/// `provider_name` 非空 ⇒ 输出 [`ATTR_GEN_AI_PROVIDER_NAME`]（展示名，如 `PonyLlm`）。
+/// 与 [`start_llm_span`] 的唯一差异是多了展示名通道，其余语义（父 span/门禁/失败语义）一致。
+pub fn start_llm_span_with_provider(
+    system: &str,
+    provider_name: Option<&str>,
+    model: Option<&str>,
+    operation: &str,
+) -> LlmSpanGuard {
+    let empty = LlmSpanGuard {
+        span: None,
+        input_tokens: None,
+        output_tokens: None,
+        reasoning_tokens: None,
+        cached_input_tokens: None,
+        speed: None,
+        context_window: None,
+        context_ratio: None,
+        context_normalized_input: None,
+        call_duration_ms: None,
+        call_ttft_ms: None,
+        retry_wait_ms: None,
+        usage_origin: None,
+        cost_usd: None,
+        cost_details: None,
+        usage_recorded: false,
+        cost_recorded: false,
+        request_shape_attributes: Vec::new(),
+    };
+    if !spans_allowed() {
+        return empty;
+    }
+    let mut attributes = to_key_values(llm_span_attributes_with_provider(
+        &LlmSpanInput {
+            provider_kind: system.to_string(),
+            model: model.map(|value| value.to_string()),
+            input_tokens: None,
+            output_tokens: None,
+            operation: operation.to_string(),
+            prompt_preview: None,
+            completion_preview: None,
+        },
+        provider_name,
+    ));
+    // Wave-6 K4.1：子 span 下沉会话归属（无活跃 turn / session 为空 ⇒ 不输出该键）。
+    push_active_session_attribute(&mut attributes);
+    let Some(span) = start_child_span(SPAN_LLM_CHAT, attributes) else {
+        return empty;
+    };
+    LlmSpanGuard {
+        span: Some(span),
+        request_shape_attributes: Vec::new(),
+        input_tokens: None,
+        output_tokens: None,
+        reasoning_tokens: None,
+        cached_input_tokens: None,
+        speed: None,
+        context_window: None,
+        context_ratio: None,
+        context_normalized_input: None,
+        call_duration_ms: None,
+        call_ttft_ms: None,
+        retry_wait_ms: None,
+        usage_origin: None,
+        cost_usd: None,
+        cost_details: None,
+        usage_recorded: false,
+        cost_recorded: false,
+    }
+}
+
+/// `llm.chat` 子 span 守卫（`Drop` 时补 token 用量并结束 span）。
+pub struct LlmSpanGuard {
+    span: Option<opentelemetry_sdk::trace::Span>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    /// wave-51 C3：思考 token；`None` ⇒ 不输出 [`ATTR_GEN_AI_USAGE_REASONING_TOKENS`]。
+    reasoning_tokens: Option<u64>,
+    /// wave-51 C3：缓存命中输入 token；`None` ⇒ 不输出 [`ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS`]。
+    cached_input_tokens: Option<u64>,
+    speed: Option<f64>,
+    context_window: Option<u64>,
+    context_ratio: Option<f64>,
+    /// wave-54 C4：协议归一后的上下文输入（anthropic = input + cache_read + cache_creation）；
+    /// 有值时 `gen_ai.usage.context_ratio` 以它作分子，否则回退 `input_tokens`。
+    context_normalized_input: Option<u64>,
+    /// wave-54 C1：本次调用耗时；`None` ⇒ 不输出 [`ATTR_LLM_CALL_DURATION_MS`]。
+    call_duration_ms: Option<u64>,
+    /// wave-54 C1：本次调用首包耗时；`None` ⇒ 不输出 [`ATTR_LLM_CALL_TTFT_MS`]（buffered 无首包）。
+    call_ttft_ms: Option<u64>,
+    /// B135：被排除出 duration 的重试等待；`None` ⇒ 不输出 [`ATTR_LLM_RETRY_WAIT_MS`]。
+    retry_wait_ms: Option<u64>,
+    /// wave-54 C3：usage 来源（`provider` | `estimated_chars`）；`None` ⇒ 不输出
+    /// [`ATTR_AGENT_USAGE_ORIGIN`]（未知不得冒充真值）。
+    usage_origin: Option<&'static str>,
+    /// Wave-5 K4：单次调用成本（USD）；`None` ⇒ 不输出 `gen_ai.cost.usd`。
+    cost_usd: Option<f64>,
+    /// wave-53 C1：成本三分量 JSON（[`ATTR_LANGFUSE_OBSERVATION_COST_DETAILS`]）；
+    /// `None` ⇒ 不输出该键。
+    cost_details: Option<String>,
+    /// wave-53 C2：是否记录过 usage（input 或 output 至少一个 `Some`）。
+    usage_recorded: bool,
+    /// wave-53 C2：是否记录过有效成本。
+    cost_recorded: bool,
+    /// 请求形状属性（模式 / 消息条数 / 是否带 system 前缀）；空 ⇒ 不输出任何键。
+    request_shape_attributes: Vec<(String, AttrValue)>,
+}
+
+impl LlmSpanGuard {
+    /// 记录响应侧 token 用量（`None` 表示缺失 → 不输出该键）。
+    ///
+    /// wave-53 C2：任一分量非 `None` 即视为「记录过 usage」，供 `pony.cost.priced` 三态判定。
+    pub fn record_usage(&mut self, input_tokens: Option<u64>, output_tokens: Option<u64>) {
+        self.input_tokens = input_tokens;
+        self.output_tokens = output_tokens;
+        if input_tokens.is_some() || output_tokens.is_some() {
+            self.usage_recorded = true;
+        }
+        if self.span.is_some() {
+            accumulate_active_turn_usage(input_tokens, output_tokens);
+        }
+    }
+
+    /// 记录思考 token 与缓存命中输入 token（wave-51 C3）。
+    ///
+    /// 语义：**有值才写** —— `None` ⇒ **不得输出**对应键
+    /// （[`ATTR_GEN_AI_USAGE_REASONING_TOKENS`] / [`ATTR_GEN_AI_USAGE_CACHED_INPUT_TOKENS`]）；
+    /// `Some(0)` 是**有效取值**，必须原样输出 0（不得当作缺失丢弃）。
+    /// 类型契约：属性值为 `i64`，`u64 -> i64` 必须**安全饱和**
+    /// （超出 `i64::MAX` 钳到 `i64::MAX`），禁止 `as` 直转产生负数。
+    /// 复用契约：属性映射必须复用纯函数 [`llm_usage_detail_attributes`]（与根 `agent.turn`
+    /// 聚合同一份口径）；调用方负责**协议门控**缓存键（见契约 PA51-C3-T6）。
+    /// 门禁关闭时守卫为空操作（零导出）。
+    pub fn record_usage_details(
+        &mut self,
+        reasoning_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
+    ) {
+        self.reasoning_tokens = reasoning_tokens;
+        self.cached_input_tokens = cached_input_tokens;
+        if self.span.is_some() {
+            accumulate_active_turn_usage_details(reasoning_tokens, cached_input_tokens);
+        }
+    }
+
+    /// 记录单次调用成本（USD）。
+    ///
+    /// 调用方：provider 调用返回真实 usage 之后（Wave-5 K4）。
+    /// 语义：`None` / 非有限 / 负值 ⇒ 不输出 `gen_ai.cost.usd`；门禁关闭时守卫为空操作
+    /// （零导出），且调用方应先用 [`is_span_capture_enabled`] 短路掉价格计算。
+    /// 同时把该成本累加到当前 turn，供 `agent.turn.cost.usd` 聚合。
+    /// wave-53 C2：有效成本 ⇒ 该调用标记为「已计价」（`pony.cost.priced=true`）。
+    pub fn record_cost(&mut self, cost: Option<f64>) {
+        let validated = cost.filter(|value| value.is_finite() && *value >= 0.0);
+        self.cost_usd = validated;
+        if validated.is_some() {
+            self.cost_recorded = true;
+        }
+        if self.span.is_some() {
+            if let Some(cost) = validated {
+                accumulate_active_turn_cost(cost);
+            }
+        }
+    }
+
+    /// 记录单次调用的成本三分量（wave-53 C1）。
+    ///
+    /// 冻结契约：仅当 `total_cost_usd` 为 `Some(v)` 且 `v.is_finite() && v >= 0.0` 才输出
+    /// [`ATTR_LANGFUSE_OBSERVATION_COST_DETAILS`]（单行 JSON，键 `input`/`output`/`total`，
+    /// 各自 `Some` 才出现，数字保留 6 位小数）；并**等价地**计入该 turn 的成本聚合
+    /// （与 [`LlmSpanGuard::record_cost`] 同一聚合口径，根 span 不得漏算或重复计）。
+    /// 既有 [`ATTR_GEN_AI_COST_USD`] 照旧输出（Tempo 面），故此处委托 `record_cost` 一次，
+    /// **只聚合一次**。
+    pub fn record_cost_components(
+        &mut self,
+        input_cost_usd: Option<f64>,
+        output_cost_usd: Option<f64>,
+        total_cost_usd: Option<f64>,
+    ) {
+        let Some(total) = total_cost_usd.filter(|value| value.is_finite() && *value >= 0.0) else {
+            return;
+        };
+        self.cost_details = Some(cost_details_json(input_cost_usd, output_cost_usd, total));
+        // 单一出口：`gen_ai.cost.usd`（Tempo 面）+ turn 聚合 + `pony.cost.priced` 判定。
+        self.record_cost(Some(total));
+    }
+
+    /// 记录单次调用生成速度与上下文用量诊断属性。
+    pub fn record_speed_and_context(
+        &mut self,
+        speed: Option<f64>,
+        context_window: Option<u64>,
+    ) {
+        self.speed = speed.filter(|s| s.is_finite() && *s > 0.0);
+        self.context_window = context_window.filter(|w| *w > 0);
+        if let (Some(input), Some(window)) = (self.input_tokens, self.context_window) {
+            if window > 0 {
+                self.context_ratio = Some((input as f64) / (window as f64));
+            }
+        }
+    }
+
+    /// wave-54 C4（ADVISORY 采纳）：记录**协议归一**的上下文输入（anthropic 含 cache_read /
+    /// cache_creation，其余协议 = input）。
+    ///
+    /// 语义：只影响 `gen_ai.usage.context_ratio` 的**分子**——有值时优先用它，
+    /// 无值回退 `gen_ai.usage.input_tokens`；`gen_ai.usage.input_tokens` 本身不上报该值
+    /// （避免与 `gen_ai.usage.cache_read.input_tokens` 双计）。
+    pub fn record_context_normalized_input(&mut self, context_input_tokens: Option<u64>) {
+        self.context_normalized_input = context_input_tokens;
+    }
+
+    /// 记录本次调用的耗时与首包（wave-54 C1 契约）：映射 [`ATTR_LLM_CALL_DURATION_MS`] /
+    /// [`ATTR_LLM_CALL_TTFT_MS`] / [`ATTR_LLM_CALL_GENERATION_MS`]。
+    ///
+    /// 计算口径（C1/C2 同一公式）：`generation = duration - ttft` **当且仅当** ttft 存在且
+    /// `duration > ttft`；否则 `generation = duration`（`ttft > duration` 时按 C2 退化，
+    /// **不**抵扣、**不**产出负值）。只做赋值，落 span 在 `Drop`。
+    pub fn record_call_timing(&mut self, duration_ms: Option<u64>, ttft_ms: Option<u64>) {
+        // B135：外层耗时含重试等待（失败 attempt + 退避 sleep）。这里重基到「最后一次成功
+        // attempt」的纯窗口，并把被排除的等待单列成 `llm.retry.wait_ms`——两个数相加即总耗时，
+        // 所以既能回答「模型多慢」，也不丢「用户等了多久」。
+        // 账本是**窥视**而非取走：per-call 记录构建（`take_pure_call_window`）还要用同一份窗口。
+        let rebased = pony_protocol::attempt_window::rebase_timing_to_pure_call(duration_ms, ttft_ms);
+        self.call_duration_ms = rebased.duration_ms;
+        self.call_ttft_ms = rebased.first_token_ms;
+        self.retry_wait_ms = rebased.retry_wait_ms;
+        // wave-54 C2（L3 收口）：累加到**当前活动 turn**（同一 task/线程上下文），
+        // 这样根 span 的真值不依赖「每个终态出口都记得显式调用」——所有 provider 路径
+        // 都会经此函数，Drop 时统一结算。门禁关闭（无 span）时不累加。
+        if self.span.is_some() {
+            // turn 级累加与 span 同一口径（重基后的纯耗时），避免根 span 与子 span 对不上。
+            accumulate_active_turn_call(rebased.duration_ms, rebased.first_token_ms, self.output_tokens);
+        }
+    }
+
+    /// 记录 usage 来源（wave-54 C1/C3 契约）：映射 [`ATTR_AGENT_USAGE_ORIGIN`]
+    /// （`provider` | `estimated_chars`）。`None` ⇒ 键缺席（禁止默认值占位）。
+    pub fn record_usage_origin(&mut self, origin: Option<&'static str>) {
+        self.usage_origin = origin;
+    }
+
+    /// 记录本次请求的组装形状（模式 / 消息条数 / 是否带 system 前缀 / 传输方式）。
+    ///
+    /// 语义：四键同生同灭，映射见 [`llm_request_shape_attributes`]；门禁关闭时为空操作。
+    /// `messages` 必须是**实际发出的**消息条数（native transcript 优先），`has_system_prefix`
+    /// 必须是对同一消息序列首条 role 的真实判定，`transport` 必须是实际传输方式
+    /// （[`LLM_REQUEST_TRANSPORT_STREAM`] / [`LLM_REQUEST_TRANSPORT_BUFFERED`]）——
+    /// 三者都不得用占位值。
+    pub fn record_request_shape(
+        &mut self,
+        mode: &'static str,
+        messages: usize,
+        has_system_prefix: bool,
+        transport: &'static str,
+    ) {
+        self.request_shape_attributes =
+            llm_request_shape_attributes(mode, messages, has_system_prefix, transport);
+    }
+}
+
+impl Drop for LlmSpanGuard {
+    fn drop(&mut self) {
+        if let Some(span) = self.span.as_mut() {
+            if let Some(input_tokens) = self.input_tokens {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_INPUT_TOKENS,
+                    input_tokens as i64,
+                ));
+            }
+            if let Some(output_tokens) = self.output_tokens {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_OUTPUT_TOKENS,
+                    output_tokens as i64,
+                ));
+            }
+            if let Some(speed) = self.speed {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_SPEED_TOKENS_PER_SECOND,
+                    speed,
+                ));
+            }
+            if let Some(context_window) = self.context_window {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_CONTEXT_WINDOW,
+                    context_window as i64,
+                ));
+            }
+            // wave-54 C4：ratio 分子优先用协议归一输入（有值时），否则回退 raw input。
+            let context_ratio = match (self.context_normalized_input.or(self.input_tokens), self.context_window) {
+                (Some(input), Some(window)) if window > 0 => {
+                    Some((input as f64) / (window as f64))
+                }
+                _ => self.context_ratio,
+            };
+            if let Some(context_ratio) = context_ratio {
+                span.set_attribute(KeyValue::new(
+                    ATTR_GEN_AI_USAGE_CONTEXT_RATIO,
+                    context_ratio,
+                ));
+            }
+            // ADR 0055 P1-5：前缀缓存命中率（有缓存真值且有输入才输出）。
+            if let (Some(cached), Some(input), true) = (
+                self.cached_input_tokens,
+                self.input_tokens,
+                self.input_tokens.unwrap_or(0) > 0,
+            ) {
+                span.set_attribute(KeyValue::new(
+                    ATTR_LLM_CONTEXT_CACHE_HIT_RATIO,
+                    cached as f64 / input as f64,
+                ));
+            }
+            // wave-54 C1：本次调用耗时 / 首包 / 生成耗时——键不存在即「未知」
+            // （buffered 无首包 ⇒ 无 ttft 键；`duration <= ttft` ⇒ generation 退化为 duration）。
+            if let Some(duration_ms) = self.call_duration_ms {
+                span.set_attribute(KeyValue::new(
+                    ATTR_LLM_CALL_DURATION_MS,
+                    duration_ms as i64,
+                ));
+                let generation_ms = match self.call_ttft_ms {
+                    Some(ttft_ms) if duration_ms > ttft_ms => duration_ms - ttft_ms,
+                    _ => duration_ms,
+                };
+                span.set_attribute(KeyValue::new(
+                    ATTR_LLM_CALL_GENERATION_MS,
+                    generation_ms as i64,
+                ));
+            }
+            // B135：被排除的重试等待。无重试 ⇒ 无键（禁止 0 占位冒充真值）。
+            if let Some(wait_ms) = self.retry_wait_ms.filter(|ms| *ms > 0) {
+                // `as` 会新增 `clippy::as_conversions` / `cast_possible_wrap` 计数（棘轮门按键冻结），
+                // 故用饱和转换：毫秒量级不可能溢出，这里只是不引入新的 cast 告警。
+                let wait_ms = i64::try_from(wait_ms).unwrap_or(i64::MAX);
+                span.set_attribute(KeyValue::new(ATTR_LLM_RETRY_WAIT_MS, wait_ms));
+            }
+            if let Some(ttft_ms) = self.call_ttft_ms {
+                span.set_attribute(KeyValue::new(ATTR_LLM_CALL_TTFT_MS, ttft_ms as i64));
+            }
+            // wave-54 C3：usage 来源（未知 ⇒ 键缺席，估算值必须可辨识）。
+            if let Some(origin) = self.usage_origin {
+                span.set_attribute(KeyValue::new(ATTR_AGENT_USAGE_ORIGIN, origin));
+            }
+            if let Some(cost) = self.cost_usd {
+                span.set_attribute(KeyValue::new(ATTR_GEN_AI_COST_USD, cost));
+            }
+            // wave-53 C1：成本三分量（Langfuse 语义轨）——单行 JSON 字符串，仅 total 有效时存在。
+            if let Some(details) = self.cost_details.as_deref() {
+                span.set_attribute(KeyValue::new(
+                    ATTR_LANGFUSE_OBSERVATION_COST_DETAILS,
+                    details.to_string(),
+                ));
+            }
+            // wave-53 C2：未计价显式标记三态——有 usage 无成本 ⇒ false；有成本 ⇒ true；
+            // 两者皆无 ⇒ **不输出**该键（「未知」不等于「未计价」，禁止 false 占位）。
+            let priced = if self.cost_recorded {
+                Some(true)
+            } else if self.usage_recorded {
+                Some(false)
+            } else {
+                None
+            };
+            if let Some(priced) = priced {
+                span.set_attribute(KeyValue::new(ATTR_PONY_COST_PRICED, priced));
+            }
+            // wave-51 C3：细分用量（思考/缓存命中）——与根 `agent.turn` 聚合同一份映射，
+            // `None` 不产出键、`Some(0)` 原样输出 0。
+            for attribute in
+                to_key_values(llm_usage_detail_attributes(self.reasoning_tokens, self.cached_input_tokens))
+            {
+                span.set_attribute(attribute);
+            }
+            // 请求形状（模式/条数/system 前缀）——上下文重建类缺陷的检索键。
+            if !self.request_shape_attributes.is_empty() {
+                let request_attributes = std::mem::take(&mut self.request_shape_attributes);
+                for attribute in to_key_values(request_attributes) {
+                    span.set_attribute(attribute);
+                }
+            }
+            span.end();
+        }
+    }
+}
+
+/// 打开治理决策 span（`governance.decide`），返回守卫（Drop 即结束）。
+///
+/// 契约 G5.1：**只**在宏观决策调度入口使用；纯函数内部严禁加 span。
+/// 门禁关闭/无 provider 时返回空操作守卫（零分配零导出）。
+pub fn start_governance_decide_span() -> GovernanceDecideGuard {
+    if !spans_allowed() {
+        return GovernanceDecideGuard { span: None };
+    }
+    let mut attributes = vec![KeyValue::new(
+        ATTR_GEN_AI_OPERATION_NAME,
+        "governance.decide",
+    )];
+    // wave-51 C2（审计 §4 P0-2）：治理决策子 span 下沉会话归属，使 Langfuse 会话过滤 9/9 命中。
+    // 无活跃 turn / session 为空 ⇒ 该函数不压入任何键（禁止空串占位）。
+    push_active_session_attribute(&mut attributes);
+    let span = start_child_span(SPAN_GOVERNANCE_DECIDE, attributes);
+    GovernanceDecideGuard { span }
+}
+
+/// 治理决策 span 守卫；只允许写入 G5 白名单属性。
+pub struct GovernanceDecideGuard {
+    span: Option<opentelemetry_sdk::trace::Span>,
+}
+
+impl GovernanceDecideGuard {
+    /// 记录决策判定结果（白名单属性；缺失值不输出键）。
+    ///
+    /// 参数：窗口标签、决策标签、原因标签、策略版本、未计价 turn 数。
+    pub fn record_verdict(
+        &mut self,
+        window: &str,
+        decision: &str,
+        reason: Option<&str>,
+        policy_version: &str,
+        unpriced_turns: u64,
+    ) {
+        let Some(span) = self.span.as_mut() else {
+            return;
+        };
+        if !window.trim().is_empty() {
+            span.set_attribute(KeyValue::new(ATTR_GOVERNANCE_WINDOW, window.to_string()));
+        }
+        if !decision.trim().is_empty() {
+            span.set_attribute(KeyValue::new(ATTR_GOVERNANCE_DECISION, decision.to_string()));
+        }
+        if let Some(reason) = reason.filter(|value| !value.trim().is_empty()) {
+            span.set_attribute(KeyValue::new(ATTR_GOVERNANCE_REASON, reason.to_string()));
+        }
+        if !policy_version.trim().is_empty() {
+            span.set_attribute(KeyValue::new(
+                ATTR_GOVERNANCE_POLICY_VERSION,
+                policy_version.to_string(),
+            ));
+        }
+        span.set_attribute(KeyValue::new(
+            ATTR_GOVERNANCE_UNPRICED_TURNS,
+            unpriced_turns as i64,
+        ));
+        if decision == "block" {
+            span.set_status(opentelemetry::trace::Status::error("quota_blocked".to_string()));
+            // PA-154/F6：治理 block 除子 span 置错外，同时向活动 turn 聚合（根 span 承接）。
+            mark_active_turn_error(TURN_ERROR_PREFIX_QUOTA_BLOCKED);
+        }
+    }
+}
+
+impl Drop for GovernanceDecideGuard {
+    fn drop(&mut self) {
+        if let Some(mut span) = self.span.take() {
+            span.end();
+        }
+    }
+}
+
+thread_local! {
+    /// 当前线程正在执行的工具父链（`call_id → traceparent`）。
+    ///
+    /// 工具**执行期间**子代理/队友读取栈顶，把自己的 turn span 挂到 `tool.call` 下；
+    /// guard Drop 时按 call_id 摘除，嵌套工具调用（workspace_batch）天然后进先出。
+    static TOOL_SPAN_PARENTS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    /// 已开始、尚未记账的 `tool.call` span。等 `record_tool_call_span_*` 补写
+    /// status / result / duration 后结束，保证「一个工具调用只有一个 span」。
+    ///
+    /// 用 `Vec` 而非 `HashMap`：需要 FIFO 淘汰最旧项（取消/异常路径可能永不记账，
+    /// 封顶后必须主动 `end` 掉最旧 span，否则线程内 span 无界堆积且永远不导出）。
+    static PENDING_TOOL_SPANS: RefCell<Vec<(String, opentelemetry_sdk::trace::Span)>> =
+        RefCell::new(Vec::new());
+}
+
+/// 未记账 span 的线程内上限。仅防御异常路径（正常路径 record 必被调用、即刻取走）。
+const PENDING_TOOL_SPANS_MAX: usize = 64;
+
+/// 把预创建的 `tool.call` span 登记为「待记账」（供 [`take_pending_tool_span`] 取回）。
+fn stash_pending_tool_span(call_id: String, span: opentelemetry_sdk::trace::Span) {
+    PENDING_TOOL_SPANS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending.len() >= PENDING_TOOL_SPANS_MAX && !pending.is_empty() {
+            let (_, mut stale) = pending.remove(0);
+            stale.end();
+        }
+        pending.push((call_id, span));
+    });
+}
+
+/// 按 `call_id` 取回并移除预创建的 `tool.call` span；未预创建（或已记账）⇒ `None`。
+fn take_pending_tool_span(call_id: &str) -> Option<opentelemetry_sdk::trace::Span> {
+    PENDING_TOOL_SPANS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        let position = pending.iter().rposition(|(id, _)| id == call_id)?;
+        Some(pending.remove(position).1)
+    })
+}
+
+/// 工具执行前的父链 guard：Drop 时把本工具从父链摘除（span 本身留给记账入口结束）。
+pub struct ToolCallSpanGuard {
+    call_id: String,
+}
+
+impl Drop for ToolCallSpanGuard {
+    fn drop(&mut self) {
+        TOOL_SPAN_PARENTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if let Some(position) = stack.iter().rposition(|(id, _)| id == &self.call_id) {
+                stack.remove(position);
+            }
+        });
+    }
+}
+
+/// 在工具**执行前**创建 `tool.call` span，并登记为当前线程的工具父链栈顶。
+///
+/// 为什么需要它：旧实现要等工具返回、拿到 duration 后才 backdate 创建 span，导致执行期间
+/// 派生的子代理 turn 只能挂到 `agent.turn` 下（与 `tool.call` 成兄弟节点）。前移后
+/// `current_traceparent()` 返回工具 span，子 turn 成为真正的子节点；记账入口按 `call_id`
+/// 取回同一 span 补齐终态，不产生第二个 span。
+///
+/// 门禁关闭 / `call_id` 缺失时返回 `None`（零分配，行为与旧路径一致）。
+pub fn begin_tool_call_span(
+    call_id: Option<&str>,
+    tool_name: &str,
+    args_preview: Option<&str>,
+) -> Option<ToolCallSpanGuard> {
+    if !spans_allowed() {
+        return None;
+    }
+    let call_id = call_id.map(str::trim).filter(|value| !value.is_empty())?;
+    // 起点只写「执行前已确定」的属性；status/result/duration 由记账入口补写，
+    // 避免同名键重复（SDK 的 set_attribute 是 append 语义）。
+    let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(3);
+    push_str(&mut attributes, ATTR_GEN_AI_TOOL_NAME, tool_name);
+    push_str(
+        &mut attributes,
+        ATTR_LANGFUSE_OBSERVATION_TYPE,
+        OBSERVATION_TYPE_TOOL,
+    );
+    push_str(&mut attributes, ATTR_GEN_AI_TOOL_CALL_ID, call_id);
+    if capture_tool_payloads_enabled() {
+        if let Some(args) = args_preview {
+            push_tool_payload_preview(&mut attributes, ATTR_LANGFUSE_OBSERVATION_INPUT, args);
+        }
+    }
+    let span = start_child_span(SPAN_TOOL_CALL, to_key_values(attributes))?;
+    let span_context = span.span_context().clone();
+    if !span_context.is_valid() {
+        return None;
+    }
+    let traceparent = format!(
+        "00-{}-{}-01",
+        span_context.trace_id(),
+        span_context.span_id()
+    );
+    TOOL_SPAN_PARENTS.with(|stack| {
+        stack.borrow_mut().push((call_id.to_string(), traceparent));
+    });
+    stash_pending_tool_span(call_id.to_string(), span);
+    Some(ToolCallSpanGuard {
+        call_id: call_id.to_string(),
+    })
+}
+
+/// 结束预创建的 `tool.call` span（补写终态属性后按真实 duration 回填结束时刻）。
+fn finish_pending_tool_span(span: &mut opentelemetry_sdk::trace::Span, input: &ToolSpanInput) {
+    // Wave-6 K4.1：span 在工具执行前创建（当时不写会话归属），终态由记账入口按同一份
+    // 活跃 turn 快照补写，保证与 backdate 路径的属性集一致。
+    let mut session_attributes: Vec<KeyValue> = Vec::with_capacity(1);
+    push_active_session_attribute(&mut session_attributes);
+    for attribute in session_attributes {
+        span.set_attribute(attribute);
+    }
+    span.set_attribute(KeyValue::new(
+        ATTR_AGENT_TOOL_STATUS,
+        input.status.clone(),
+    ));
+    if let Some(duration_ms) = input.duration_ms {
+        span.set_attribute(KeyValue::new(
+            ATTR_AGENT_TOOL_DURATION_MS,
+            duration_ms as i64,
+        ));
+    }
+    if let Some(error) = input.error.as_deref() {
+        span.set_attribute(KeyValue::new(ATTR_AGENT_TOOL_ERROR, error.to_string()));
+    }
+    if capture_tool_payloads_enabled() {
+        if let Some(result) = input.result_preview.as_deref() {
+            let mut attributes: Vec<(String, AttrValue)> = Vec::with_capacity(1);
+            push_tool_payload_preview(
+                &mut attributes,
+                ATTR_LANGFUSE_OBSERVATION_OUTPUT,
+                result,
+            );
+            for (key, value) in attributes {
+                if let AttrValue::Str(text) = value {
+                    span.set_attribute(KeyValue::new(key, text));
+                }
+            }
+        }
+    }
+    if input.status == "failed" || input.status == "error" || input.error.is_some() {
+        span.set_status(opentelemetry::trace::Status::error(
+            input
+                .error
+                .as_deref()
+                .unwrap_or("tool call failed")
+                .to_string(),
+        ));
+    }
+    let (_, ended_at) = tool_span_bounds(SystemTime::now(), input.duration_ms);
+    span.end_with_timestamp(ended_at);
+}
+
+/// 记一个 `tool.call` 子 span（一次工具执行 = 一个 span，创建即结束）。
+///
+/// 调用方：工具活动落库点（`TurnToolActivity` 生成处）。门禁关闭时为空操作。
+/// wave-53 C6：旧入口等价于 [`record_tool_call_span_with_call_id`] 传 `call_id = None`
+/// （不输出 [`ATTR_GEN_AI_TOOL_CALL_ID`]）。
+///
+/// L3-A review-wave53-a（NFR_VIOLATION 修复）：门禁判定**先于** `input.clone()` ——
+/// 门禁关闭（生产默认）时直接返回，零克隆/零分配；语义与被委托函数完全一致。
+pub fn record_tool_call_span(input: &ToolSpanInput) {
+    if !spans_allowed() {
+        return;
+    }
+    record_tool_call_span_with_call_id(input.clone(), None);
+}
+
+/// 带模型侧 tool call id 的工具 span 记录入口（wave-53 C6 附加式 API）。
+///
+/// 冻结契约：属性走 [`tool_span_attributes_with_call_id`]；`call_id` 非空 ⇒ 输出
+/// [`ATTR_GEN_AI_TOOL_CALL_ID`]；失败聚合/backdate/会话归属等语义与 [`record_tool_call_span`]
+/// 完全一致。旧函数等价于传 `None` 委托本函数。
+///
+/// wave-53 C4：`status != "success"` ⇒ 累加当前活动 turn 的工具失败计数（供根 span
+/// `agent.turn.tool_failures` / `agent.turn.degraded`）。既有错误聚合谓词（F5）零变更。
+pub fn record_tool_call_span_with_call_id(input: ToolSpanInput, call_id: Option<String>) {
+    record_tool_call_span_with_call_id_and_kind(input, call_id, None);
+}
+
+/// 工具错误种类中**不得**提升为整轮 error 的白名单（ADR 0055）。
+///
+/// `non_zero_exit` 是命令级语义信号（`grep` 无匹配返回 1、`git diff --quiet` 有差异返回 1
+/// 都属正常），把它算作整轮失败会让「错误率」失去意义：实测最近 3 条生产 trace
+/// （`f47fd028` / `a1751e1`, `a66af1c4`）全部 `phase=completed` + `outcome=error`
+/// （`tool_error: tool_failed`），而轮次本身已正常给出答复。
+///
+/// 语义边界：工具 span 仍然保持 `status=ERROR` + `agent.tool.error`（失败事实不隐藏），
+/// `agent.turn.tool_failures` / `agent.turn.degraded` 计数不改（降级语义不变），
+/// 仅**不**把根 span 的 outcome 与状态码改为 error。
+pub fn tool_error_kind_is_turn_fatal(kind: Option<&str>) -> bool {
+    match kind.map(str::trim) {
+        Some(kind) if kind.eq_ignore_ascii_case("non_zero_exit") => false,
+        // 未知/缺失种类 fail-closed：照旧提升为整轮错误（不许靠缺字段洗白失败率）。
+        _ => true,
+    }
+}
+
+/// 带工具错误种类的工具 span 记录入口（ADR 0055 附加式 API）。
+///
+/// 与 [`record_tool_call_span_with_call_id`] 的唯一差别：`error_kind` 参与
+/// [`tool_error_kind_is_turn_fatal`] 判定，决定是否向活动 turn 聚合根错误。
+pub fn record_tool_call_span_with_call_id_and_kind(
+    input: ToolSpanInput,
+    call_id: Option<String>,
+    error_kind: Option<&str>,
+) {
+    if !spans_allowed() {
+        return;
+    }
+    let mut attributes = to_key_values(tool_span_attributes_with_call_id(
+        &input,
+        call_id.as_deref(),
+    ));
+    // Wave-6 K4.1：tool.call 同样携带会话归属。
+    push_active_session_attribute(&mut attributes);
+    // wave-53 C4：失败计数（`status != "success"`）——与 F5 错误聚合谓词**解耦**，
+    // F5 语义（`failed` / `error` / 带 error 摘要）零变更。
+    if input.status != "success" {
+        accumulate_active_turn_tool_failure();
+    }
+    // F5 失败谓词（`failed` / `error` / 带 error 摘要）：同一判定既写子 span 状态，
+    // 也向活动 turn 聚合（PA-154：根 span 承接失败，否则按根状态告警全漏）。
+    // ADR 0055：`non_zero_exit` 只算「降级」，不再污染整轮 outcome / 根状态。
+    let failed = input.status == "failed" || input.status == "error" || input.error.is_some();
+    if failed && tool_error_kind_is_turn_fatal(error_kind) {
+        mark_active_turn_error(TURN_ERROR_PREFIX_TOOL_FAILED);
+    }
+    // P3：工具执行前已 `begin_tool_call_span` ⇒ 取回同一个 span 补写终态并结束，
+    // 不再另建第二个（否则子代理 turn 挂在一个永不导出的 span 上）。
+    // 未预创建（旧调用点 / 门禁关闭 / call_id 缺失）⇒ 逐字回落 backdate 路径。
+    if let Some(call_id) = call_id.as_deref() {
+        if let Some(mut span) = take_pending_tool_span(call_id) {
+            finish_pending_tool_span(&mut span, &input);
+            return;
+        }
+    }
+    // T11：span 必须覆盖**真实执行区间**。此前 `start_child_span` + 立即 `end()` 只覆盖
+    // 登记动作（实测：829ms 的工具被导出成 0.002ms 的 span，瀑布图上工具耗时不可见，
+    // 真值只存在于属性 `agent.tool.duration_ms`）。用 duration 反推起点并 backdate。
+    let (started_at, ended_at) = tool_span_bounds(SystemTime::now(), input.duration_ms);
+    if let Some(mut span) = start_child_span_at(SPAN_TOOL_CALL, attributes, started_at) {
+        if failed {
+            let err_desc = input.error.as_deref().unwrap_or("tool call failed");
+            span.set_status(opentelemetry::trace::Status::error(err_desc.to_string()));
+        }
+        // 失败路径同样 end：`set_status` 之后直接 end，绝不提前 return → span 不泄漏。
+        span.end_with_timestamp(ended_at);
+    }
+}
+
+// ==================================================================== 私有实现
+//
+// 以下内容全部为模块私有：任何 OTel 类型都不出现在公开签名里。
+
+use std::collections::HashMap;
+use std::fmt;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime};
+
+use pony_protocol::speed::{self as turn_flow, DecodeTotals, TurnSpeedBasis, ValidTotals};
+
+use opentelemetry::trace::{
+    Link, SamplingDecision, SamplingResult, Span, SpanKind, TraceContextExt, TraceId, TraceState,
+    Tracer, TracerProvider,
+};
+use opentelemetry::{Context, KeyValue};
+use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::trace::{
+    BatchSpanProcessor, ShouldSample, SpanData, SpanExporter, SdkTracerProvider,
+};
+
+/// tracer 名（仅用于 provider 内部标识，不进入 wire 契约）。
+const TRACER_NAME: &str = "pony-agent.agent.trace";
+/// 导出 runtime 的线程名。
+const RUNTIME_THREAD_NAME: &str = "pony-otel-export";
+/// 单次 OTLP/HTTP 导出的网络超时：与 NFR 冻结的 `external_call_timeout_ms = 3000` 对齐。
+/// 导出层自身必须有界（而不是靠调用方干等），黑洞端点下 `force_flush` 才会在 ~3s 内返回 Err。
+const EXPORT_TIMEOUT_MS: u64 = 3_000;
+/// 手动导出的单块 flush 等待上限（每块 ≤3000ms；总耗时随块数线性增长，属用户显式动作）。
+const FORCE_EXPORT_FLUSH_TIMEOUT_MS: u64 = 3_000;
+/// 单批导出的最大尝试次数（含首次）。
+///
+/// r2-dim1 attempt 2 / F5：SDK `BatchSpanProcessor` 对导出失败**不重试**
+/// （`export_batch_sync` 先 `split_off(0)` 清空批次再导出，worker 循环对返回值一律 `let _ =`
+/// 忽略）⇒ 一次瞬时网络抖动就永久丢一整批 span，且因本仓未启用 `internal-logs` 特性，
+/// SDK 的 `otel_error!(BatchSpanProcessor.ExportError)` 被编译成空语句，连一行日志都没有。
+/// 实测 `s3-t01-list-summarize`：会话最早 2 次调用的 `llm.chat` span 整批丢失，根 span 聚合
+/// 用量（662 = 186+203+104+169）证明 4 个 span 都生成过，Tempo/Langfuse 双轨都只有后 2 个。
+const EXPORT_MAX_ATTEMPTS: usize = 2;
+/// 两次导出尝试之间的退避（毫秒）。
+///
+/// 取值依据：批量线程在导出期间被独占（队列同时堆积），退避必须远小于一次导出超时
+/// [`EXPORT_TIMEOUT_MS`]，只为错开瞬时故障窗口；长退避会把尾批推出退出预算。
+const EXPORT_RETRY_DELAY_MS: u64 = 200;
+/// 关闭 provider 时的导出等待上限（r2-dim1 attempt 2：预算主体让给前置 flush）。
+///
+/// 为什么不是 0（实现期实测反证，写在提案之外但必须记录）：`shutdown_with_timeout` 内部是
+/// `message_sender.try_send(Shutdown)` + `receiver.recv_timeout(timeout)` —— 导出线程要先收到
+/// 消息、再回信，即使队列已空也需要一次线程往返。取 0 会让 `recv_timeout(0)` **几乎必然**先超时，
+/// 于是每次正常退出都走 `mem::forget` 分支并刷一条「provider 关闭超时」的假 warn，
+/// 比原来的 1000ms 更糟。故保留一个远大于线程往返（实测 µs 级）、远小于预算主体的正向窗口。
+///
+/// 预算分配（NFR 字段 `observability.exporter_flush_timeout_ms` 上限 3000 是 **flush 步**的上限）：
+/// - [`EXIT_FLUSH_BUDGET_MS`] = [`EXPORT_TIMEOUT_MS`] = 3000ms，用满不超额，覆盖一次导出最坏耗时；
+/// - 本常量 100ms 只承担「队列已空时的关闭握手」，成功路径实测 µs 级返回。
+/// 两者是**顺序上限而非求和常态**：flush 成功 ⇒ 队列已空 ⇒ 关闭立即返回，真实退出耗时 ≈ 导出耗时。
+/// 只有「flush 超时 + 关闭超时」同时发生才会累加到 3100ms，而该场景下尾批 span 无论如何都会丢。
+const SHUTDOWN_TIMEOUT_MS: u64 = 100;
+/// 降级日志单条最大字符数（超出截断，避免把超长响应体写进日志面）。
+const WARN_MESSAGE_MAX_CHARS: usize = 512;
+/// BatchSpanProcessor 队列上限（显式有界：队列满即丢，绝不无界堆积）。
+const BATCH_MAX_QUEUE_SIZE: usize = 2_048;
+/// 单批最大 span 数。
+const BATCH_MAX_EXPORT_BATCH_SIZE: usize = 512;
+/// 批量调度延迟。
+const BATCH_SCHEDULED_DELAY_MS: u64 = 5_000;
+/// `force_flush` 的等待上限夹值：与 `EXPORT_TIMEOUT_MS` / NFR `external_call_timeout_ms`
+/// 对齐为 **3000ms**（task-10：单次 flush 预算不得超基准）。
+const MAX_FLUSH_WAIT_MS: u64 = 3_000;
+/// 手动上传的分块大小 = 单批导出上限（A8：避免「入队成功但被队列丢弃」被当成已交付）。
+const FORCE_EXPORT_CHUNK_TURNS: usize = BATCH_MAX_EXPORT_BATCH_SIZE;
+
+/// 全局上报开关（唯一门禁位；缺省关闭）。
+static REPORTING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// 已装配的全局态；`None` 表示未 init（或已 shutdown）。
+static STATE: Mutex<Option<Arc<OtelState>>> = Mutex::new(None);
+
+/// 全局装配态：provider + tracer + 生效配置 + 导出用 runtime。
+struct OtelState {
+    provider: SdkTracerProvider,
+    tracer: opentelemetry_sdk::trace::Tracer,
+    config: OtelConfig,
+    /// reqwest 异步客户端所需的 reactor 载体；必须存活到 provider 关闭之后。
+    /// 仅用于保活导出 runtime：字段永不读取，drop 时释放 reactor。
+    _runtime: tokio::runtime::Runtime,
+}
+
+fn lock_state() -> MutexGuard<'static, Option<Arc<OtelState>>> {
+    STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn current_state() -> Option<Arc<OtelState>> {
+    lock_state().as_ref().map(Arc::clone)
+}
+
+fn take_state() -> Option<Arc<OtelState>> {
+    lock_state().take()
+}
+
+/// 门禁判定：只有「用户开启上报」时允许分配 span。
+///
+/// F6：手动上传**不再**用进程级旁路计数（那会把同期其它 turn 的 span 一起送出去），
+/// 改为对重放 span 逐个打 `pony.otel.forced` 标：打标 span 由采样器强制采样、
+/// 由导出器在关闭态逐个放行，未打标的 span 在关闭态一律丢弃。
+fn spans_allowed() -> bool {
+    REPORTING_ENABLED.load(Ordering::SeqCst)
+}
+
+/// 手动上传重放 span 的强制标记（仅由 [`force_export_session_trace`] 打标）。
+const ATTR_PONY_OTEL_FORCED: &str = "pony.otel.forced";
+
+/// 该 span 是否带「用户逐次授权」强制标记（F6：逐 span 判定，不看全局态）。
+fn is_forced_attributes(attributes: &[KeyValue]) -> bool {
+    attributes.iter().any(|pair| {
+        pair.key.as_str() == ATTR_PONY_OTEL_FORCED
+            && matches!(pair.value, opentelemetry::Value::Bool(true))
+    })
+}
+
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 是否为「携带凭据」的 header（F1：Debug / config() 回显必须剥离）。
+fn is_sensitive_header(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower == AUTH_HEADER_NAME
+        || lower.contains("token")
+        || lower.contains("api-key")
+        || lower.contains("apikey")
+        || lower.contains("secret")
+        || lower.contains("credential")
+}
+
+/// 明文 HTTP 且目标是**非回环**主机（ADVISORY：带 token 时拒绝出网）。
+fn is_plaintext_remote(endpoint: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host_str() {
+        Some("localhost") | Some("127.0.0.1") | Some("::1") => false,
+        _ => true,
+    }
+}
+
+/// 目标端点是否为远端主机（非本机/回环地址）。用于未配 token 时发起告警。
+fn is_remote_endpoint(endpoint: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(endpoint) else {
+        return true;
+    };
+    match parsed.host_str() {
+        Some("localhost") | Some("127.0.0.1") | Some("::1") => false,
+        _ => true,
+    }
+}
+
+/// 有值才输出该键（A2：缺失值一律不输出键，禁止空串占位）。
+fn push_str(attributes: &mut Vec<(String, AttrValue)>, key: &str, value: &str) {
+    if !value.is_empty() {
+        // F2：所有字符串属性统一过 PonySentry 脱敏（工具错误/tool_name/session_id 等），
+        // 复用既有 sanitize 实现，避免相对旧 trace 上报路径的安全退化（D6 退役后统一走本门面）。
+        attributes.push((
+            key.to_string(),
+            AttrValue::Str(crate::ponysentry::sanitize(value)),
+        ));
+    }
+}
+
+/// 中性属性值 → OTel `KeyValue`（OTel 类型只在私有实现里出现）。
+fn to_key_values(attributes: Vec<(String, AttrValue)>) -> Vec<KeyValue> {
+    attributes
+        .into_iter()
+        .map(|(key, value)| match value {
+            AttrValue::Str(text) => KeyValue::new(key, opentelemetry::Value::String(text.into())),
+            AttrValue::I64(number) => KeyValue::new(key, opentelemetry::Value::I64(number)),
+            AttrValue::F64(number) => KeyValue::new(key, opentelemetry::Value::F64(number)),
+            AttrValue::Bool(flag) => KeyValue::new(key, opentelemetry::Value::Bool(flag)),
+        })
+        .collect()
+}
+
+/// 取 span 的 trace_id 十六进制串；未采样/无效上下文返回 `None`。
+fn sampled_trace_id(span: &mut opentelemetry_sdk::trace::Span) -> Option<String> {
+    let span_context = opentelemetry::trace::Span::span_context(span);
+    if span_context.is_valid() && span_context.is_sampled() {
+        Some(span_context.trace_id().to_string())
+    } else {
+        None
+    }
+}
+
+/// 一次活动 turn 的登记项。
+///
+/// `exported` 是两条通路的**语义分水岭**（Wave-4.1 L3-A B1/B1b）：
+/// - `true`：由**真实 SDK root span** 建立（可导出、可在 Tempo/Langfuse 检索）；
+/// - `false`：门禁关闭 / provider 未装配时的**本地相关性**上下文（只服务日志与出网
+///   traceparent 的轮内关联，永不导出）。
+/// 只有 `exported == true` 的登记才允许作为子 span 的 parent —— 否则会造出无 root 的孤儿 trace。
+#[derive(Clone)]
+struct ActiveTurn {
+    turn_id: String,
+    /// Wave-6 K4.1：所属会话 id（子 span 下沉 `langfuse.session.id` 时读取；空串即不输出）。
+    session_id: String,
+    span_context: opentelemetry::trace::SpanContext,
+    exported: bool,
+    /// Wave-5 K4：本轮内各 `llm.chat` 已记录成本之和（USD；Turn span Drop 时回填属性）。
+    accumulated_cost_usd: f64,
+    /// 本轮内各 `llm.chat` 累积的 input tokens。
+    accumulated_input_tokens: u64,
+    /// 本轮内各 `llm.chat` 累积的 output tokens。
+    accumulated_output_tokens: u64,
+    /// wave-51 C3：本轮内各 `llm.chat` 上报的思考 token 之和（`None` = 本轮从未上报 ⇒
+    /// 根 span 不输出该键；`Some(0)` 是有效值）。
+    accumulated_reasoning_tokens: Option<u64>,
+    /// wave-51 C3：本轮内各 `llm.chat` 上报的缓存命中输入 token 之和（同上，各自独立判定）。
+    accumulated_cached_input_tokens: Option<u64>,
+    /// PA-154：本轮内子 span 错误聚合（`<prefix>: <detail>`，**先记录者胜**）；
+    /// `None` ⇒ 本轮无错误，根 span 不输出 [`ATTR_AGENT_TURN_OUTCOME`]。
+    accumulated_error: Option<String>,
+    /// wave-53 C4：本轮 `status != "success"` 的工具调用次数（根 span Drop 时回填
+    /// [`ATTR_AGENT_TURN_TOOL_FAILURES`]；`0` ⇒ 不输出该键，禁止 0 占位）。
+    tool_failures: u64,
+    /// I5（end_to_end 口径）：本轮 **valid** 调用的 output tokens 之和
+    /// （valid = `duration_ms > 0 && output_tokens > 0`，判据同 `turn_flow::call_valid`）。
+    valid_output_tokens: u64,
+    /// I5/I7：本轮 valid 调用的**原始耗时**之和（`Σdur`）——端到端分母，
+    /// 同时作 `agent.turn.duration_ms` 的物理下限（`elapsed ≥ Σdur` 在串行生产路径恒成立）。
+    valid_duration_ms: u64,
+    /// I5：valid 调用数（`records.len()` 不等于它：planner-only 伪记录不算）。
+    valid_calls: u64,
+    /// I4：本轮 `decode_eligible` 调用的 output tokens 之和。
+    decode_output_tokens: u64,
+    /// I4：本轮 `decode_eligible` 调用的生成窗口之和（`Σgen`）。
+    decode_generation_ms: u64,
+    /// I4：`decode_eligible` 调用数。
+    decode_calls: u64,
+    /// 首个带 ttft 的 valid 调用首包耗时（不跨 hop 采样）。
+    valid_ttft_ms: Option<u64>,
+}
+
+/// turn 根 span 错误聚合前缀：工具执行失败（PA-154，谓词同 F5）。
+const TURN_ERROR_PREFIX_TOOL_FAILED: &str = "tool_failed";
+
+/// turn 根 span 错误聚合前缀：治理决策 block（PA-154，F6）。
+const TURN_ERROR_PREFIX_QUOTA_BLOCKED: &str = "quota_blocked";
+
+/// 根 span 错误承接的 `status.message` 前缀（PA-154）：与子 span 的原始错误文案区分，
+/// 便于根级告警按 `turn_error` 单口径检索。
+const TURN_ERROR_STATUS_PREFIX: &str = "turn_error";
+
+/// 构造根 span 错误承接文案：`turn_error: <reason>`（reason ∈ `tool_failed` / `quota_blocked`）。
+fn turn_error_status_message(reason: &str) -> String {
+    format!("{TURN_ERROR_STATUS_PREFIX}: {reason}")
+}
+
+/// 活动 turn 索引：`tokio::task::Id` → 该任务当前 turn 的登记项。
+///
+/// F5（跨 turn 污染）：宿主按 turn 并发 spawn，若用「栈顶」选父 span，两个 turn 同时
+/// 在跑时 A 的 llm/tool span 会被挂到 B 的 trace 上。改为**按当前 tokio 任务 id 索引**：
+/// 守卫登记自己的 task id，Drop 时只摘除自己那条；无 task id（非 tokio 任务上下文）
+/// 时退回线程本地栈；两者都取不到时**不加 parent** —— 宁可让子 span 自成 root，也绝不猜父 span。
+static ACTIVE_TURNS: std::sync::LazyLock<Mutex<HashMap<tokio::task::Id, ActiveTurn>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 取当前 tokio 任务 id；不在任务上下文时 `None`。
+fn current_task_id() -> Option<tokio::task::Id> {
+    tokio::task::try_id()
+}
+
+thread_local! {
+    /// A9：无 tokio 任务上下文（TUI/CLI `run_sync_turn`、`direct_turn_probe`、std 单测）时的
+    /// 活动 turn 兜底栈 —— 否则这些路径的子 span 会断链成独立 root。
+    static THREAD_TURNS: RefCell<Vec<ActiveTurn>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 一次 turn 登记的归属信息（task 表或线程本地栈，二者择一）。
+struct ActiveTurnSlot {
+    task_id: Option<tokio::task::Id>,
+    /// 本登记的 turn_id 与 trace_id：Drop 时用于**精确**判定「当前登记是否仍属于自己」。
+    turn_id: String,
+    trace_id: String,
+    /// 嵌套 turn 场景：本登记覆盖掉的前一条登记，Drop 时恢复。
+    previous: Option<ActiveTurn>,
+    thread_local: bool,
+}
+
+/// 登记活动 turn，返回归属信息（守卫 Drop 时用它精确摘除/回滚）。
+///
+/// 语义：门禁判定由调用方（[`begin_turn_trace`]）负责；本函数只做登记，
+/// 同时支持「真实 span 上下文」（`exported = true`）与「本地降级上下文」（`exported = false`）。
+/// 嵌套语义（L3-A#2）：同一 task/线程内再次登记会**保存前值**，Drop 时恢复而非丢弃。
+fn register_active_turn(
+    turn_id: &str,
+    session_id: &str,
+    span_context: opentelemetry::trace::SpanContext,
+    exported: bool,
+) -> Option<ActiveTurnSlot> {
+    let trace_id = span_context.trace_id().to_string();
+    let entry = ActiveTurn {
+        turn_id: turn_id.to_string(),
+        session_id: session_id.to_string(),
+        span_context,
+        exported,
+        accumulated_cost_usd: 0.0,
+        accumulated_input_tokens: 0,
+        accumulated_output_tokens: 0,
+        accumulated_reasoning_tokens: None,
+        accumulated_cached_input_tokens: None,
+        accumulated_error: None,
+        tool_failures: 0,
+        valid_output_tokens: 0,
+        valid_duration_ms: 0,
+        valid_calls: 0,
+        decode_output_tokens: 0,
+        decode_generation_ms: 0,
+        decode_calls: 0,
+        valid_ttft_ms: None,
+    };
+
+    // A9：优先按 tokio 任务 id 索引；无任务上下文时退回线程本地栈（不丢父 span）。
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = guard.insert(task_id, entry);
+        return Some(ActiveTurnSlot {
+            task_id: Some(task_id),
+            turn_id: turn_id.to_string(),
+            trace_id,
+            previous,
+            thread_local: false,
+        });
+    }
+    THREAD_TURNS.with(|stack| {
+        stack.borrow_mut().push(entry);
+    });
+    Some(ActiveTurnSlot {
+        task_id: None,
+        turn_id: turn_id.to_string(),
+        trace_id,
+        previous: None,
+        thread_local: true,
+    })
+}
+
+/// 摘除登记：只有「当前登记仍属于自己」时才动，并恢复嵌套时被覆盖的前值。
+fn unregister_active_turn(slot: Option<ActiveTurnSlot>) {
+    let Some(slot) = slot else {
+        return;
+    };
+    if let Some(task_id) = slot.task_id {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owns = guard
+            .get(&task_id)
+            .map(|current| {
+                current.turn_id == slot.turn_id
+                    && current.span_context.trace_id().to_string() == slot.trace_id
+            })
+            .unwrap_or(false);
+        if !owns {
+            // 登记已被同 task 的后续 turn 覆盖：只放弃自己的归属，绝不动别人的登记。
+            return;
+        }
+        match slot.previous {
+            Some(previous) => {
+                guard.insert(task_id, previous);
+            }
+            None => {
+                guard.remove(&task_id);
+            }
+        }
+        return;
+    }
+    if slot.thread_local {
+        THREAD_TURNS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            // 逆序找到属于自己的那条（支持乱序 Drop），只摘除它自己。
+            if let Some(index) = stack.iter().rposition(|entry| {
+                entry.turn_id == slot.turn_id
+                    && entry.span_context.trace_id().to_string() == slot.trace_id
+            }) {
+                stack.remove(index);
+            }
+        });
+    }
+}
+
+/// 读取当前活动的 turn 登记项（真实或本地，未按导出态过滤）。
+fn current_active_turn() -> Option<ActiveTurn> {
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard.get(&task_id).cloned();
+    }
+    THREAD_TURNS.with(|stack| stack.borrow().last().cloned())
+}
+
+/// 把一次调用的成本累加到**当前活动 turn**（供 `agent.turn.cost.usd` 聚合）。
+///
+/// 语义：只在存在活动 turn 时累加；非有限/负值直接忽略。门禁关闭时调用方不会走到这里。
+fn accumulate_active_turn_cost(cost: f64) {
+    if !cost.is_finite() || cost < 0.0 {
+        return;
+    }
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            entry.accumulated_cost_usd += cost;
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            entry.accumulated_cost_usd += cost;
+        }
+    });
+}
+
+/// 把一次调用的 token 用量累加到当前活动 turn。
+fn accumulate_active_turn_usage(input_tokens: Option<u64>, output_tokens: Option<u64>) {
+    let inp = input_tokens.unwrap_or(0);
+    let out = output_tokens.unwrap_or(0);
+    if inp == 0 && out == 0 {
+        return;
+    }
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            entry.accumulated_input_tokens += inp;
+            entry.accumulated_output_tokens += out;
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            entry.accumulated_input_tokens += inp;
+            entry.accumulated_output_tokens += out;
+        }
+    });
+}
+
+/// I1/I3/I4/I5：把一次调用的**耗时真值**按两路口径累加到当前活动 turn。
+///
+/// 分流判据唯一出处是 [`turn_flow::call_valid`] / [`turn_flow::decode_eligible`]：
+/// - valid 侧（I5 回退口径）：全部 `dur > 0 && out > 0` 调用；
+/// - decode 侧（I4 解码口径）：仅 `decode_eligible` 调用。
+///
+/// 两路口径**不得**混进同一个 Σ；结算由 [`read_active_turn_call_truth`] →
+/// [`turn_flow::resolve_turn_speed`] 统一完成（与快照完全同式）。
+fn accumulate_active_turn_call(
+    duration_ms: Option<u64>,
+    ttft_ms: Option<u64>,
+    output_tokens: Option<u64>,
+) {
+    if !turn_flow::call_valid(duration_ms, output_tokens) {
+        return;
+    }
+    let duration = duration_ms.unwrap_or(0);
+    let output = output_tokens.unwrap_or(0);
+    let eligible = turn_flow::decode_eligible(duration_ms, ttft_ms, output_tokens);
+    let generation_ms = turn_flow::call_generation_ms(duration_ms, ttft_ms);
+    let merge = |entry: &mut ActiveTurn| {
+        entry.valid_output_tokens = entry.valid_output_tokens.saturating_add(output);
+        entry.valid_duration_ms = entry.valid_duration_ms.saturating_add(duration);
+        entry.valid_calls = entry.valid_calls.saturating_add(1);
+        if entry.valid_ttft_ms.is_none() {
+            entry.valid_ttft_ms = ttft_ms;
+        }
+        if eligible {
+            entry.decode_output_tokens = entry.decode_output_tokens.saturating_add(output);
+            entry.decode_generation_ms =
+                entry.decode_generation_ms.saturating_add(generation_ms);
+            entry.decode_calls = entry.decode_calls.saturating_add(1);
+        }
+    };
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            merge(entry);
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            merge(entry);
+        }
+    });
+}
+
+/// 活动 turn 的 per-call 速度真值（I4/I5/I6 结算结果 + `Σdur` 下限兜底）。
+#[derive(Clone, Copy, Debug, Default)]
+struct ActiveTurnCallTruth {
+    /// I4/I5 择一结算的速度；无参与计算调用 ⇒ `None`（禁止 0 占位）。
+    speed: Option<f64>,
+    /// I10：与 `speed` 同源的口径。
+    basis: Option<TurnSpeedBasis>,
+    /// 首个带 ttft 的 valid per-call 值。
+    ttft_ms: Option<u64>,
+    /// 参与计算集合的调用数。
+    calls: u64,
+    /// `Σvalid dur`：`agent.turn.duration_ms` 的物理下限。
+    duration_ms: u64,
+}
+
+/// 读取当前活动 turn 的 per-call 速度真值（只读，不重置）。
+///
+/// 结算走 [`turn_flow::resolve_turn_speed`]——与 `weighted_turn_speed` **同一函数**，
+/// 禁止在此复制公式（I9）。
+fn read_active_turn_call_truth() -> ActiveTurnCallTruth {
+    let extract = |entry: &ActiveTurn| {
+        let truth = turn_flow::resolve_turn_speed(
+            DecodeTotals {
+                output_tokens: entry.decode_output_tokens,
+                generation_ms: entry.decode_generation_ms,
+                calls: u32::try_from(entry.decode_calls).unwrap_or(u32::MAX),
+            },
+            ValidTotals {
+                output_tokens: entry.valid_output_tokens,
+                duration_ms: entry.valid_duration_ms,
+                calls: u32::try_from(entry.valid_calls).unwrap_or(u32::MAX),
+            },
+            entry.valid_ttft_ms,
+        );
+        ActiveTurnCallTruth {
+            speed: truth.speed,
+            basis: truth.basis,
+            ttft_ms: truth.ttft_ms,
+            calls: u64::from(truth.calls),
+            duration_ms: entry.valid_duration_ms,
+        }
+    };
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard.get(&task_id).map(extract).unwrap_or_default();
+    }
+    THREAD_TURNS.with(|stack| stack.borrow().last().map(extract).unwrap_or_default())
+}
+
+/// 把一次调用的细分用量（思考 / 缓存命中）累加到当前活动 turn（wave-51 C3）。
+///
+/// 语义：`None` 表示「本次未采集」⇒ 不累加、也不把该键标成「已上报」；
+/// `Some(0)` 是有效采集结果 ⇒ 置位并累加 0（根 span 必须输出 0，不得当缺失）。
+/// 累加用 `saturating_add`：`u64` 溢出只会饱和到 `u64::MAX`（随后由
+/// [`saturating_token_count`] 饱和到 `i64::MAX`），绝不 wrap 成小值、绝不 panic。
+fn accumulate_active_turn_usage_details(
+    reasoning_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+) {
+    if reasoning_tokens.is_none() && cached_input_tokens.is_none() {
+        return;
+    }
+    fn merge(slot: &mut Option<u64>, value: Option<u64>) {
+        if let Some(value) = value {
+            *slot = Some(slot.unwrap_or(0).saturating_add(value));
+        }
+    }
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            merge(&mut entry.accumulated_reasoning_tokens, reasoning_tokens);
+            merge(&mut entry.accumulated_cached_input_tokens, cached_input_tokens);
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            merge(&mut entry.accumulated_reasoning_tokens, reasoning_tokens);
+            merge(&mut entry.accumulated_cached_input_tokens, cached_input_tokens);
+        }
+    });
+}
+
+/// 读取当前活动 turn 的累计细分用量（思考 / 缓存命中；wave-51 C3）。
+///
+/// 语义：无活动 turn ⇒ `(None, None)`；本轮从未上报过某键 ⇒ 该键为 `None`
+/// （根 span **不得**输出，禁止用 0 伪造「已采集」）；上报过 0 ⇒ 返回 `Some(0)`。
+fn take_active_turn_usage_details() -> (Option<u64>, Option<u64>) {
+    let get_details = |entry: &ActiveTurn| {
+        (
+            entry.accumulated_reasoning_tokens,
+            entry.accumulated_cached_input_tokens,
+        )
+    };
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(get_details)
+            .unwrap_or((None, None));
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(get_details)
+            .unwrap_or((None, None))
+    })
+}
+
+/// 读取当前活动 turn 的累计 token 用量；无活动 turn 或全为 0 时返回 None。
+fn take_active_turn_usage() -> (Option<u64>, Option<u64>) {
+    let get_tokens = |entry: &ActiveTurn| {
+        let inp = (entry.accumulated_input_tokens > 0).then_some(entry.accumulated_input_tokens);
+        let out = (entry.accumulated_output_tokens > 0).then_some(entry.accumulated_output_tokens);
+        (inp, out)
+    };
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(get_tokens)
+            .unwrap_or((None, None));
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(get_tokens)
+            .unwrap_or((None, None))
+    })
+}
+
+/// 把一次工具失败（`status != "success"`）累加到**当前活动 turn**（wave-53 C4）。
+///
+/// 语义：与成本/错误聚合同源——按 tokio task id 索引，无任务上下文时退回线程本地栈；
+/// 无活动 turn 时 **no-op**（绝不新建登记）；`saturating_add` 防溢出（绝不 wrap/panic）。
+fn accumulate_active_turn_tool_failure() {
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            entry.tool_failures = entry.tool_failures.saturating_add(1);
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            entry.tool_failures = entry.tool_failures.saturating_add(1);
+        }
+    });
+}
+
+/// 读取当前活动 turn 的累计工具失败计数（wave-53 C4）；无活动 turn 时返回 0。
+///
+/// 语义：与 [`take_active_turn_cost`] 同为**读取**（登记项由
+/// [`unregister_active_turn`] 摘除，无需在此清零）；`0` ⇒ 根 span 不输出该键。
+/// C1（P1-2 收尾）：读取当前活动 turn 的累计工具失败计数（供会话 `TurnTraceRecord`
+/// 回填 `tool_failures` / `degraded`，与根 span **同源同口径**）。
+///
+/// 只读不清零：登记项由 [`unregister_active_turn`] 摘除，因此 trace 落库与 span 收尾
+/// 谁先谁后都能读到同一个数。
+pub fn active_turn_tool_failures() -> u64 {
+    take_active_turn_tool_failures()
+}
+
+fn take_active_turn_tool_failures() -> u64 {
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(|entry| entry.tool_failures)
+            .unwrap_or(0);
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(|entry| entry.tool_failures)
+            .unwrap_or(0)
+    })
+}
+
+/// 读取当前活动 turn 的累计成本；无活动 turn 时返回 0.0。
+fn take_active_turn_cost() -> f64 {
+    if let Some(task_id) = current_task_id() {
+        let guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get(&task_id)
+            .map(|entry| entry.accumulated_cost_usd)
+            .unwrap_or(0.0);
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(|entry| entry.accumulated_cost_usd)
+            .unwrap_or(0.0)
+    })
+}
+
+/// 把一次子 span 错误聚合到**当前活动 turn**（PA-154：根 span 错误承接）。
+///
+/// 语义：与成本聚合同源——按 tokio task id 索引，无任务上下文时退回线程本地栈；
+/// 无活动 turn 时 **no-op**（绝不新建登记）；已有记录时保留**先记录者**（`reason`），
+/// 后续错误不覆盖（双错误并存不拼长文案）。
+fn mark_active_turn_error(reason: &str) {
+    let message = reason.to_string();
+    let record = |entry: &mut ActiveTurn| {
+        if entry.accumulated_error.is_none() {
+            entry.accumulated_error = Some(message);
+        }
+    };
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard.get_mut(&task_id) {
+            record(entry);
+        }
+        return;
+    }
+    THREAD_TURNS.with(|stack| {
+        if let Some(entry) = stack.borrow_mut().last_mut() {
+            record(entry);
+        }
+    });
+}
+
+/// 取走并**清空**当前活动 turn 的错误聚合（Turn 守卫 Drop 调用）。
+///
+/// 语义：取走即清零 ⇒ 跨 turn 不污染；无活动 turn / 本轮无错时返回 `None`。
+fn take_active_turn_error() -> Option<String> {
+    if let Some(task_id) = current_task_id() {
+        let mut guard = ACTIVE_TURNS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return guard
+            .get_mut(&task_id)
+            .and_then(|entry| entry.accumulated_error.take());
+    }
+    THREAD_TURNS.with(|stack| {
+        stack
+            .borrow_mut()
+            .last_mut()
+            .and_then(|entry| entry.accumulated_error.take())
+    })
+}
+
+/// 把当前活跃 turn 的会话 id 作为 `langfuse.session.id` 属性压入子 span 属性表。
+///
+/// 语义（K4.1）：无活跃 turn / session_id 为空或纯空白 ⇒ **不输出该键**（禁止空串/伪造值）。
+fn push_active_session_attribute(attributes: &mut Vec<KeyValue>) {
+    let Some(session_id) = current_active_turn()
+        .map(|entry| entry.session_id)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return;
+    };
+    attributes.push(KeyValue::new(
+        ATTR_LANGFUSE_SESSION_ID,
+        crate::ponysentry::sanitize(&session_id),
+    ));
+}
+
+/// turn_id → 该 turn 的**导出态** trace_id（Wave-6 K6/ Issue 互跳修复）。
+///
+/// 为什么需要：`capture_turn_failure` 可能在与 `begin_turn_trace` **不同的任务/线程上下文**
+/// 中执行（或守卫已 Drop），此时 `exported_trace_id()` 取不到 ⇒ issue 丢 trace_id。
+/// 登记在 turn 建立真实 root span 时写入，按 turn 精确回查（不是伪造：就是该 turn 的真实 id）。
+static TURN_EXPORTED_TRACE_IDS: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 登记 turn 的导出态 trace_id（有界：超过 [`TURN_TRACE_ID_CAPACITY`] 清空重来）。
+fn register_turn_exported_trace_id(turn_id: &str, trace_id: &str) {
+    let mut guard = TURN_EXPORTED_TRACE_IDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.len() >= TURN_TRACE_ID_CAPACITY {
+        guard.clear();
+    }
+    guard.insert(turn_id.to_string(), trace_id.to_string());
+}
+
+/// 按 turn_id 回查其**导出态** trace_id；未登记 / 已淘汰 ⇒ `None`。
+///
+/// 调用方：`ponysentry::capture_turn_failure`（跨上下文补偿，绝不返回本地相关性 id）。
+pub fn exported_trace_id_for_turn(turn_id: &str) -> Option<String> {
+    let guard = TURN_EXPORTED_TRACE_IDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.get(turn_id).cloned()
+}
+
+/// turn → trace_id 登记表的容量上限（进程内最多保留最近这么多轮）。
+const TURN_TRACE_ID_CAPACITY: usize = 512;
+
+/// 子 span 的父上下文：**只**接受真实导出态 root span 的上下文（B1b：杜绝孤儿 trace）。
+///
+/// 本地相关性上下文（`exported = false`）永不作父 —— 否则 turn 中途打开开关时，
+/// 后续子 span 会以一条从无 root 的 trace_id 真实出网。
+fn active_exported_turn_context() -> Option<Context> {
+    let entry = current_active_turn()?;
+    if !entry.exported || !entry.span_context.is_valid() || !entry.span_context.is_sampled() {
+        return None;
+    }
+    Some(Context::new().with_remote_span_context(entry.span_context))
+}
+
+/// 在「当前活动 turn」之下开一个子 span；门禁关闭时返回 `None`（零分配）。
+fn start_child_span(
+    name: &str,
+    attributes: Vec<KeyValue>,
+) -> Option<opentelemetry_sdk::trace::Span> {
+    if !spans_allowed() {
+        return None;
+    }
+    let state = current_state()?;
+    let parent = active_exported_turn_context().unwrap_or_else(Context::new);
+    Some(state.tracer.build_with_context(
+        opentelemetry::trace::SpanBuilder::from_name(name.to_string())
+            .with_kind(SpanKind::Internal)
+            .with_attributes(attributes),
+        &parent,
+    ))
+}
+
+/// 回填上限：单次工具调用超过 24h 视为异常数据（时钟跳变 / 脏 duration）。
+///
+/// 为什么需要它：`SystemTime::checked_sub` 的平台语义不一致——Linux 的 `SystemTime` 允许
+/// 负值（i64 秒），`u64::MAX` 毫秒（≈5.8 亿年）依然能"减成功"，会生成一条跨越几亿年的离奇
+/// span；Windows 的 FILETIME 不能早于 1601，则退化为零长。为了让行为**跨平台确定**、且不让
+/// 脏数据污染 trace 时间轴，这里显式设上限：超出即退化为零长 span（原始值仍原样保留在属性
+/// `agent.tool.duration_ms` 里，信息不丢）。
+const TOOL_SPAN_MAX_BACKDATE_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// T11：工具子 span 的时间边界——`end` 取采集时刻，`start = end - duration`。
+///
+/// 抽成纯函数是为了让「span 覆盖真实执行区间」可被**无线程 / 无全局 provider / 无网络**的
+/// 单测锁定：`None`（耗时未知）、超过 [`TOOL_SPAN_MAX_BACKDATE_MS`] 的异常值、以及
+/// `checked_sub` 溢出，一律退化为零长 span —— 绝不 panic、绝不凭空造时长。
+fn tool_span_bounds(now: SystemTime, duration_ms: Option<u64>) -> (SystemTime, SystemTime) {
+    let Some(millis) =
+        duration_ms.filter(|millis| *millis <= TOOL_SPAN_MAX_BACKDATE_MS)
+    else {
+        return (now, now);
+    };
+    match now.checked_sub(Duration::from_millis(millis)) {
+        Some(started_at) => (started_at, now),
+        // 平台最早时刻之前的回填：退化为零长 span（不 panic、不生成越界时间戳）。
+        None => (now, now),
+    }
+}
+
+/// 与 [`start_child_span`] 同构，唯一差别是允许**显式起点**（回填真实执行区间起点）。
+fn start_child_span_at(
+    name: &str,
+    attributes: Vec<KeyValue>,
+    started_at: SystemTime,
+) -> Option<opentelemetry_sdk::trace::Span> {
+    if !spans_allowed() {
+        return None;
+    }
+    let state = current_state()?;
+    let parent = active_exported_turn_context().unwrap_or_else(Context::new);
+    Some(state.tracer.build_with_context(
+        opentelemetry::trace::SpanBuilder::from_name(name.to_string())
+            .with_kind(SpanKind::Internal)
+            .with_start_time(started_at)
+            .with_attributes(attributes),
+        &parent,
+    ))
+}
+
+/// 门禁采样器：关闭态返回 `Drop`（零 span 分配、零 egress）；开启态按父级与采样率决策。
+#[derive(Clone, Debug)]
+struct GatedSampler {
+    ratio: f64,
+}
+
+impl ShouldSample for GatedSampler {
+    fn should_sample(
+        &self,
+        parent_context: Option<&Context>,
+        trace_id: TraceId,
+        _name: &str,
+        _span_kind: &SpanKind,
+        attributes: &[KeyValue],
+        _links: &[Link],
+    ) -> SamplingResult {
+        let result = |decision| SamplingResult {
+            decision,
+            attributes: Vec::new(),
+            trace_state: TraceState::default(),
+        };
+
+        // F6：手动上传重放 span 带 `pony.otel.forced`，无条件采样（仅这些 span）。
+        if is_forced_attributes(attributes) {
+            return result(SamplingDecision::RecordAndSample);
+        }
+        if !spans_allowed() {
+            return result(SamplingDecision::Drop);
+        }
+
+        // 父级决定（ParentBased）：已采样的父 span 的下游一律采样，保证子 span 不断链。
+        if let Some(parent) = parent_context {
+            // 先落局部绑定：`parent.span()` 的临时 SpanRef 不能在语句结束后被借用。
+            let parent_span = parent.span();
+            let parent_span_context = parent_span.span_context();
+            if parent_span_context.is_valid() {
+                return result(if parent_span_context.is_sampled() {
+                    SamplingDecision::RecordAndSample
+                } else {
+                    SamplingDecision::Drop
+                });
+            }
+        }
+
+        if self.ratio >= 1.0 {
+            result(SamplingDecision::RecordAndSample)
+        } else if self.ratio <= 0.0 {
+            result(SamplingDecision::Drop)
+        } else if trace_fraction(trace_id) < self.ratio {
+            result(SamplingDecision::RecordAndSample)
+        } else {
+            result(SamplingDecision::Drop)
+        }
+    }
+}
+
+/// 以 trace_id 低 64 位把 trace 均匀映射到 `[0.0, 1.0)`。
+fn trace_fraction(trace_id: TraceId) -> f64 {
+    let bytes = trace_id.to_bytes();
+    let mut low = 0u64;
+    for byte in &bytes[8..] {
+        low = (low << 8) | u64::from(*byte);
+    }
+    (low as f64) / (u64::MAX as f64)
+}
+
+/// 导出器包装：在 `BatchSpanProcessor` 的后台线程里为导出 future 提供 tokio reactor 上下文。
+///
+/// 背景：批量导出线程由 SDK 自建（非 tokio 线程），而 reqwest 异步客户端 poll 时需要
+/// 运行时上下文。这里在 poll 之前 `Handle::enter()`，使连接/驱动注册落在 `init` 建的
+/// runtime 上；runtime 句柄随全局态存活，导出期间始终有效。
+struct RuntimeExporter {
+    inner: opentelemetry_otlp::SpanExporter,
+    handle: tokio::runtime::Handle,
+}
+
+impl fmt::Debug for RuntimeExporter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // F1：不转发上游 exporter 的 Debug（其内部含 endpoint/header 等敏感信息）。
+        formatter
+            .debug_struct("RuntimeExporter")
+            .field("runtime", &"pony-otel-export")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SpanExporter for RuntimeExporter {
+    fn export(&self, batch: Vec<SpanData>) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+        let handle = self.handle.clone();
+        // F3 + F6：门禁关闭 ⇒ 逐 span 放行判定（只认 `pony.otel.forced` 打标的重放 span），
+        // 未打标的一律丢弃；过滤后为空则直接成功返回，不产生任何网络出口。
+        let exportable = retain_exportable(batch);
+        if exportable.is_empty() {
+            return futures_util::future::Either::Left(std::future::ready(Ok(())));
+        }
+        futures_util::future::Either::Right(async move {
+            // F5：SDK 批量导出对失败不重试且不可见（见 `EXPORT_MAX_ATTEMPTS` 注释）。
+            // 本包装器是唯一的导出出口，因此在这里做**有界**重试 + 逐次失败告警：
+            // - 每次尝试都重新 clone 批次（`SpanData: Clone`），失败不会消耗掉数据；
+            // - 重试次数与退避都是编译期常量，最坏耗时 2×3000+200 < 退出预算之上限的 2 倍，
+            //   且 force_flush 的超时由调用方夹值兜底，不会无限延长退出；
+            // - 最终仍失败才向上返回 Err（SDK 会忽略，但我们已经把失败写进日志面）。
+            let mut attempt = 1usize;
+            loop {
+                let payload = exportable.clone();
+                let inner_export = self.inner.export(payload);
+                // 守卫**只在单次 poll 内**存活：不能跨 await 持有 `EnterGuard`（它不是 `Send`，
+                // 会让整个导出 future 失去 `Send`）。因此手动逐次 poll，每次 poll 前进入
+                // runtime 上下文，poll 返回后守卫立即释放。
+                let mut inner_export = std::pin::pin!(inner_export);
+                let poll_handle = handle.clone();
+                let outcome = std::future::poll_fn(move |context| {
+                    let _entered = poll_handle.enter();
+                    std::future::Future::poll(inner_export.as_mut(), context)
+                })
+                .await;
+                match outcome {
+                    Ok(()) => return Ok(()),
+                    Err(err) if attempt >= EXPORT_MAX_ATTEMPTS => {
+                        degraded_warn(
+                            &spool::give_up(&err.to_string(), attempt, exportable.len()),
+                            None,
+                        );
+                        return Err(err);
+                    }
+                    Err(err) => {
+                        degraded_warn(
+                            &spool::retry(&err.to_string(), attempt, exportable.len()),
+                            None,
+                        );
+                        // 退避也在导出 runtime 里等待：批量线程本就同步阻塞在本次导出上，
+                        // 用 std sleep 会把 reactor 也一起挂住，故走 runtime 的定时器。
+                        let sleep_handle = handle.clone();
+                        sleep_handle
+                            .spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(EXPORT_RETRY_DELAY_MS)).await;
+                            })
+                            .await
+                            .ok();
+                        attempt += 1;
+                    }
+                }
+            }
+        })
+    }
+
+    /// **必须转发**：`SpanExporter::set_resource` 缺省是空实现，而 OTLP exporter 正是用它
+    /// 得知道「这批 span 的 Resource」，再用它分组（`group_spans_by_resource_and_scope`）。
+    /// 曾经的 bug：包装器没转发 ⇒ 导出的 ResourceSpans 没有 resource ⇒ Tempo 里没有
+    /// `service.name`（公网 edge 侧只能靠它自己改写成 `desktop-client` 才「看起来正常」），
+    /// Langfuse 侧也丢了 service 归因。2026-10-24 由公网端到端探针实测发现。
+    fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
+        self.inner.set_resource(resource);
+    }
+
+    fn shutdown_with_timeout(&mut self, timeout: Duration) -> OTelSdkResult {
+        self.inner.shutdown_with_timeout(timeout)
+    }
+}
+
+/// 把 base 端点补成 OTLP/HTTP trace 导出路径。
+///
+/// OTLP/HTTP 规范：程序化 `with_endpoint` 的取值被**原样**使用（不像
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` 那样自动补 `/v1/traces`），因此这里显式补全；
+/// 已带 `/v1/traces` 的端点保持不变（幂等，避免出现 `/v1/traces/v1/traces`）。
+fn traces_endpoint(base: &str) -> String {
+    let trimmed = base.trim().trim_end_matches('/');
+    if trimmed.ends_with("/v1/traces") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1/traces")
+    }
+}
+
+/// 导出前的逐 span 放行判定（F3 + F6）。
+///
+/// 门禁开启时全量放行；门禁关闭时**只**放行带 `pony.otel.forced` 的手动上传重放 span，
+/// 其余（含已在飞、刚从批量队列取出的正常 turn span）一律丢弃 ⇒ 「关 = 零出网」。
+fn retain_exportable(batch: Vec<SpanData>) -> Vec<SpanData> {
+    if spans_allowed() {
+        return batch;
+    }
+    batch
+        .into_iter()
+        .filter(|span| is_forced_attributes(&span.attributes))
+        .collect()
+}
+
+/// 构造 OTLP/HTTP-protobuf 导出器（带鉴权 header 与网络超时）。
+fn build_runtime_exporter(
+    config: &OtelConfig,
+    handle: tokio::runtime::Handle,
+) -> Result<RuntimeExporter, String> {
+    let mut builder = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(traces_endpoint(&config.endpoint))
+        .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
+        .with_timeout(Duration::from_millis(EXPORT_TIMEOUT_MS));
+
+    let headers: HashMap<String, String> = config.headers.iter().cloned().collect();
+    if !headers.is_empty() {
+        builder = builder.with_headers(headers);
+    }
+
+    let inner = builder
+        .build()
+        .map_err(|err| format!("otel::init：OTLP/HTTP 导出器构建失败：{err}"))?;
+
+    Ok(RuntimeExporter { inner, handle })
+}
+
+/// 执行 `force_flush`，并按 `timeout_ms` 给出超时判定。
+///
+/// 有界性由导出层自身超时保证（`EXPORT_TIMEOUT_MS` = nfr `external_call_timeout_ms` = 3000），
+/// 因此**不再起辅助线程**（辅助线程在超时后无人 join，属泄漏）；这里改为直接调用 + 实测耗时，
+/// 超过 `timeout_ms` 时如实返回 `Err`。失败只降级为 warn JSON 日志，绝不冒泡、不 panic。
+fn flush_state(state: &OtelState, timeout_ms: u64) -> Result<(), String> {
+    let provider = state.provider.clone();
+    // A6：硬截止必须真的落在**等待**路径上（不能「先干等再判超时」）。
+    // 等待上限再夹一层 `MAX_FLUSH_WAIT_MS`，保证调用方（async command）最长阻塞有界。
+    let wait_ms = timeout_ms.min(MAX_FLUSH_WAIT_MS);
+    let (sender, receiver) = std::sync::mpsc::channel::<OTelSdkResult>();
+
+    let worker = std::thread::Builder::new()
+        .name("pony-otel-flush".to_string())
+        .spawn(move || {
+            let _ = sender.send(provider.force_flush());
+        })
+        .map_err(|err| format!("force_flush 线程启动失败：{err}"))?;
+
+    let outcome = match receiver.recv_timeout(Duration::from_millis(wait_ms)) {
+        Ok(Ok(())) => {
+            let _ = worker.join();
+            Ok(())
+        }
+        Ok(Err(err)) => {
+            let _ = worker.join();
+            Err(format!("OTLP 导出失败：{err}"))
+        }
+        Err(err) => Err(format!(
+            "force_flush 在 {wait_ms}ms 内未完成：{err}（导出线程将在导出层自身超时后自行退出）"
+        )),
+    };
+    if let Err(message) = outcome.as_ref() {
+        degraded_warn(message, None);
+    }
+    outcome
+}
+
+/// 失败降级日志面：先脱敏、再截断（避免把密钥或超长响应体写进日志）。
+fn degraded_warn(message: &str, trace_id: Option<&str>) {
+    let sanitized = crate::ponysentry::sanitize(message);
+    let mut text: String = sanitized.chars().take(WARN_MESSAGE_MAX_CHARS).collect();
+    if sanitized.chars().count() > WARN_MESSAGE_MAX_CHARS {
+        text.push_str("…[truncated]");
+    }
+    log::log_json("warn", &text, trace_id);
+}
+
+// ==================================================================== 实现级单测
+//
+// 测试代码独立成 `tests.rs`：`mod.rs` 受文件规模门禁棘轮约束，测试增长不应推高生产文件。
+#[cfg(test)]
+mod tests;

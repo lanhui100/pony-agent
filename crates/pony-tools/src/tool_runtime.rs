@@ -1,0 +1,732 @@
+use crate::tools::{ToolOutcome, ToolProvider, ToolProviderError};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::sync::Mutex;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationOrigin {
+    Model,
+    Child,
+    Host,
+    System,
+}
+
+/// Foundation-only dispatcher boundary. Its governed lifecycle is implemented in phase 3;
+/// primitive and composite handlers must not acquire a `ToolRouter` directly.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDispatchRequest {
+    pub origin: InvocationOrigin,
+    pub descriptor_id: String,
+    pub call_id: String,
+    pub arguments: Value,
+}
+
+pub trait ToolDispatcher: Send + Sync {
+    fn dispatch(&self, request: ToolDispatchRequest) -> ToolOutcome;
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimitiveToolHandlerRequest {
+    pub descriptor_id: String,
+    pub arguments: Value,
+    /// Session injected from the dispatch context (authoritative for ownership decisions such as
+    /// the Plan store's CrossSession guard). `None` when the dispatch context carries no session;
+    /// handlers that need session ownership must fail closed rather than trust model-supplied
+    /// keys (PA-076 phase-7 review P1-2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// 会话级 workspace root（PA-080 P1-2 修复）：由 dispatch context 注入，工具权限判定
+    /// 锚定在会话 workspace 而非进程 cwd。`None` 时 handler 回退构造时的默认 root。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    /// wave-62 A1（C5 桥接修复）：本轮的取消令牌（运行时**句柄**，不进线缆 ⇒ `#[serde(skip)]`）。
+    ///
+    /// 桥接层（`RouterPrimitiveHandler`）必须把它透传进重建的 `ToolExecutionContext`，
+    /// 否则子进程类工具（`Run`）在真实 app 里观测不到 stop（wave-60 A9 未清偿）。
+    #[serde(skip)]
+    pub cancellation: Option<Arc<pony_protocol::budget::CancellationToken>>,
+}
+
+pub trait PrimitiveToolHandler: Send + Sync {
+    fn execute(&self, request: &PrimitiveToolHandlerRequest) -> Result<Value, String>;
+}
+
+pub trait RuntimeClock: Send + Sync {
+    fn now_ms(&self) -> u64;
+}
+
+/// The `PrimitiveToolHandler` binding for an external tool source (ADR 0065 decision 6).
+///
+/// It is the *only* bridge from a [`ToolProvider`] into the governed pipeline: the provider is
+/// reached by stable `descriptor_id`, and its structured [`ToolProviderError`] is turned into the
+/// dispatcher's `code: message` handler-failure shape so the source-specific code
+/// (`mcp_server_unavailable` / `mcp_tool_not_found` / `mcp_timeout` / `plugin_unavailable`)
+/// survives into `error.code` instead of collapsing to `handler_error`.
+///
+/// It cannot fabricate permission evidence, control outcomes, or lifecycle telemetry — by the time
+/// it runs, authorization, budget reservation, and control binding have already happened in the
+/// dispatcher.
+pub struct ExternalToolHandler {
+    provider: Arc<dyn ToolProvider>,
+}
+
+thread_local! {
+    /// 当前 provider 调用的取消令牌（作用域线程局部）。
+    ///
+    /// `ToolProvider::call` 的签名（ADR 0065 冻结）没有取消参数，但外部调用（MCP stdio /
+    /// 插件 IPC）可能长时间阻塞；桥接层若丢掉 `PrimitiveToolHandlerRequest.cancellation`，
+    /// 停止按钮对它们就完全失效。这里用与 `current_provider_selection()` 同构的作用域透传，
+    /// 让 provider 实现能在发起/收尾时观测取消，而不改动冻结的 trait 签名。
+    static PROVIDER_CANCELLATION: std::cell::RefCell<Option<Arc<pony_protocol::budget::CancellationToken>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 当前作用域内的 provider 取消令牌（无作用域时 `None`）。
+pub fn current_provider_cancellation() -> Option<Arc<pony_protocol::budget::CancellationToken>> {
+    PROVIDER_CANCELLATION.with(|slot| slot.borrow().clone())
+}
+
+fn with_provider_cancellation<T>(
+    cancellation: Option<Arc<pony_protocol::budget::CancellationToken>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous = PROVIDER_CANCELLATION.with(|slot| slot.replace(cancellation));
+    let result = f();
+    PROVIDER_CANCELLATION.with(|slot| slot.replace(previous));
+    result
+}
+
+impl ExternalToolHandler {
+    pub fn new(provider: Arc<dyn ToolProvider>) -> Self {
+        Self { provider }
+    }
+
+    pub fn source_id(&self) -> &str {
+        self.provider.source_id()
+    }
+}
+
+impl PrimitiveToolHandler for ExternalToolHandler {
+    fn execute(&self, request: &PrimitiveToolHandlerRequest) -> Result<Value, String> {
+        // ADVISORY：把取消令牌透传给 provider（作用域局部，不改冻结的 trait 签名）。
+        with_provider_cancellation(request.cancellation.clone(), || {
+            self.provider
+                .call(&request.descriptor_id, request.arguments.clone())
+                .map_err(ToolProviderError::into_handler_message)
+        })
+    }
+}
+
+#[derive(Default)]
+pub struct FakeClock {
+    now_ms: Mutex<u64>,
+}
+
+impl FakeClock {
+    pub fn new(now_ms: u64) -> Self {
+        Self {
+            now_ms: Mutex::new(now_ms),
+        }
+    }
+
+    pub fn set_now_ms(&self, now_ms: u64) {
+        *self.now_ms.lock().expect("fake clock mutex poisoned") = now_ms;
+    }
+}
+
+impl RuntimeClock for FakeClock {
+    fn now_ms(&self) -> u64 {
+        *self.now_ms.lock().expect("fake clock mutex poisoned")
+    }
+}
+
+/// Wall-clock `RuntimeClock` for production dispatchers. `now_ms` is Unix epoch milliseconds.
+#[derive(Clone, Debug, Default)]
+pub struct SystemClock;
+
+impl RuntimeClock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0)
+    }
+}
+
+pub use pony_protocol::control_types::PendingControlRequestKind;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingControlRequestState {
+    Pending,
+    Consumed,
+    Cancelled,
+    Expired,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingControlRequest {
+    pub request_id: String,
+    pub request_kind: PendingControlRequestKind,
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub turn_id: String,
+    pub call_id: String,
+    pub descriptor_snapshot_id: String,
+    pub descriptor_id: String,
+    pub final_args_digest: String,
+    pub policy_digest: String,
+    pub nonce: String,
+    pub version: u64,
+    pub expires_at_ms: u64,
+    pub state: PendingControlRequestState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Value>,
+    /// 该 Ask 是否允许**多选**（模型在 `ask_user` 实参里声明的 `multiSelect`）。
+    ///
+    /// 只有 Ask（`Interaction`）用得到：审批恒为单选，恒为 `None`。缺省（含历史持久化记录、
+    /// 旧客户端解析）按**单选**处理，因此这是一个 additive 线缆键：不读它的消费方行为不变。
+    /// 宿主面板据此切换勾选语义（TUI 的 ▢/▣ 勾选框；自由输入仍可提交单条文本）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_select: Option<bool>,
+}
+
+impl PendingControlRequest {
+    /// Compare-and-swap predicate for consuming a pending control request.
+    ///
+    /// **No pending control request is time-bound** (ADR 0074): an unanswered Ask *or* approval is
+    /// session state, so a wall-clock deadline must never turn a valid decision into a failure.
+    /// Both `Interaction` and `Approval` are consumable regardless of `now_ms`; a pending request
+    /// is reclaimed only by an explicit decision (answer / approve / deny), a supersede (a newer
+    /// user message) or session archive — never by the clock. `expires_at_ms` remains inert trace
+    /// metadata only and takes no part in this predicate. `now_ms` stays in the signature so every
+    /// existing CAS call site is unchanged.
+    pub fn can_consume(
+        &self,
+        session_id: Option<&str>,
+        expected_version: u64,
+        nonce: &str,
+        _now_ms: u64,
+    ) -> bool {
+        self.state == PendingControlRequestState::Pending
+            && self.session_id.as_deref() == session_id
+            && self.version == expected_version
+            && self.nonce == nonce
+    }
+
+    /// wave-65 R3（F2）：该请求是否为**路径授权类**审批
+    /// （`request_kind == Approval` **且** `options.approvalKind == "path_authorization"`）。
+    ///
+    /// 这是「审批可恢复」与「审批可列出」的**唯一共享判据**：runtime
+    /// （`suspension_is_unrecoverable`）与 control plane（`approval_is_listable` →
+    /// `list_pending_approvals`）必须同源，否则会再次出现「runtime 判可恢复、宿主列表却不显示」
+    /// （或反过来的「列表显示、批准后续轮再审批」）这种错配。
+    /// 非路径审批（`tool_rule_ask` / `external_requires_approval` / 保守抬升）**不是**一类：
+    /// 它们被消费后不产生任何豁免，续轮必再审批 ⇒ 既不可恢复、也不该进入宿主面板。
+    pub fn is_path_authorization_approval(&self) -> bool {
+        self.request_kind == PendingControlRequestKind::Approval
+            && self
+                .options
+                .as_ref()
+                .and_then(|options| options.get("approvalKind"))
+                .and_then(|kind| kind.as_str())
+                .is_some_and(|kind| kind.trim() == "path_authorization")
+    }
+}
+
+pub use pony_protocol::tool_contract::TurnToolView;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxAvailability {
+    Available,
+    Unavailable,
+    HostApprovedUnsandboxed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxRequest {
+    pub workspace_root: String,
+    /// ⚠️ 当前**未强制**：全仓没有任何代码消费本字段（只是各调用点固定写 `false`），
+    /// 因此它不代表"已做网络管控"，只是留给未来网络隔离实现的占位契约。
+    /// 判定"能否联网"时不要依赖本字段；真正的网络限制属后续工作。
+    pub allow_network: bool,
+    pub environment_allowlist: Vec<String>,
+    /// When true the sandboxed child runs with a minimal environment: `env_clear` plus the
+    /// essential vars plus `environment_allowlist`, never inheriting provider keys, session
+    /// secrets, or ambient proxy env vars (design Decision 7, phase-5 review P1-1). An empty
+    /// `environment_allowlist` still isolates — it keeps only the essential vars.
+    pub isolate_environment: bool,
+}
+
+pub trait SandboxBackend: Send + Sync {
+    fn availability(&self) -> SandboxAvailability;
+    fn validate(&self, request: &SandboxRequest) -> Result<(), String>;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessStartRequest {
+    pub session_id: String,
+    pub program: String,
+    #[serde(default)]
+    pub arguments: Vec<String>,
+    /// 子进程工作目录（additive，B175 ADVISORY①）：`None` = 继承宿主当前目录（既有行为不变）。
+    ///
+    /// 消费方必须在传入前完成校验（绝对路径 / 存在 / 是否在会话 workspace 内）；本层只负责
+    /// 把它交给 `Command::current_dir`（不做边界判定，保持端口职责单一）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub sandbox: SandboxRequest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessState {
+    Running,
+    Exited,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessPollResult {
+    pub state: ProcessState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+/// Process lifecycle port. A process group or Job Object implementation belongs behind this
+/// port and must not be represented as a sandbox implementation.
+pub trait ProcessBackend: Send + Sync {
+    fn start(&self, request: &ProcessStartRequest) -> Result<String, String>;
+    fn poll(&self, session_id: &str, handle: &str) -> Result<ProcessPollResult, String>;
+    fn write_stdin(&self, session_id: &str, handle: &str, input: &[u8]) -> Result<(), String>;
+    fn kill(&self, session_id: &str, handle: &str) -> Result<(), String>;
+}
+
+pub trait WebResolver: Send + Sync {
+    fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, String>;
+}
+
+#[derive(Default)]
+pub struct FakeResolver {
+    records: Mutex<BTreeMap<String, Result<Vec<IpAddr>, String>>>,
+}
+
+impl FakeResolver {
+    pub fn set_addresses(&self, host: impl Into<String>, addresses: Vec<IpAddr>) {
+        self.records
+            .lock()
+            .expect("fake resolver mutex poisoned")
+            .insert(host.into(), Ok(addresses));
+    }
+
+    pub fn set_error(&self, host: impl Into<String>, error: impl Into<String>) {
+        self.records
+            .lock()
+            .expect("fake resolver mutex poisoned")
+            .insert(host.into(), Err(error.into()));
+    }
+}
+
+impl WebResolver for FakeResolver {
+    fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, String> {
+        self.records
+            .lock()
+            .expect("fake resolver mutex poisoned")
+            .get(host)
+            .cloned()
+            .unwrap_or_else(|| Err(format!("no fake DNS record for `{host}`")))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpResourceOperation {
+    ListResources,
+    ListResourceTemplates,
+    ReadResource,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpTransportRequest {
+    pub source_id: String,
+    pub source_revision: String,
+    pub operation: McpResourceOperation,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpTransportResponse {
+    pub content: Value,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+pub trait McpTransport: Send + Sync {
+    fn execute(&self, request: &McpTransportRequest) -> Result<McpTransportResponse, String>;
+}
+
+#[derive(Default)]
+pub struct FakeMcpTransport {
+    responses: Mutex<BTreeMap<(String, String), Result<McpTransportResponse, String>>>,
+}
+
+impl FakeMcpTransport {
+    pub fn set_response(
+        &self,
+        source_id: impl Into<String>,
+        operation: McpResourceOperation,
+        response: Result<McpTransportResponse, String>,
+    ) {
+        self.responses
+            .lock()
+            .expect("fake MCP transport mutex poisoned")
+            .insert(
+                (source_id.into(), legacy_fake_transport_key(&operation).to_string()),
+                response,
+            );
+    }
+}
+
+impl McpTransport for FakeMcpTransport {
+    fn execute(&self, request: &McpTransportRequest) -> Result<McpTransportResponse, String> {
+        self.responses
+            .lock()
+            .expect("fake MCP transport mutex poisoned")
+            .get(&(
+                request.source_id.clone(),
+                legacy_fake_transport_key(&request.operation).to_string(),
+            ))
+            .cloned()
+            .unwrap_or_else(|| Err(format!("no fake MCP response for `{}`", request.source_id)))
+    }
+}
+
+/// Standard I/O Process-based MCP Transport
+pub struct StdioMcpTransport {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+}
+
+impl StdioMcpTransport {
+    pub fn new(command: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            command: command.into(),
+            args,
+            env: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl McpTransport for StdioMcpTransport {
+    fn execute(&self, request: &McpTransportRequest) -> Result<McpTransportResponse, String> {
+        // W27：走规范 MCP 会话（handshake + 规范 method 名 + 长连接），失败时对
+        // 「连接已断开 / 超时」做一次驱逐重连，其余错误直接上抛。
+        // 只有「会话已断开」才重建连接并重试一次（资源读取是幂等只读操作）。
+        // 超时**不**重放：会话可能仍健康，重放会重复执行且误杀会话。
+        match self.execute_with_client(request) {
+            Err(crate::mcp_client::McpClientError::NotConnected) => {
+                evict_stdio_client(self, &request.source_id);
+                self.execute_with_client(request)
+                    .map_err(|retry_err| retry_err.message().to_string())
+            }
+            other => other.map_err(|err| err.message().to_string()),
+        }
+    }
+}
+
+impl StdioMcpTransport {
+    fn execute_with_client(
+        &self,
+        request: &McpTransportRequest,
+    ) -> Result<McpTransportResponse, crate::mcp_client::McpClientError> {
+        use crate::mcp_client::McpClientError;
+
+        let client = stdio_client(self, &request.source_id)?;
+        let content = match request.operation {
+            McpResourceOperation::ListResources => {
+                let resources = client.list_resources()?;
+                serde_json::json!({ "resources": resources })
+            }
+            McpResourceOperation::ListResourceTemplates => {
+                let templates = client.list_resource_templates()?;
+                serde_json::json!({ "resourceTemplates": templates })
+            }
+            McpResourceOperation::ReadResource => {
+                let uri = request
+                    .arguments
+                    .get("uri")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|uri| !uri.trim().is_empty())
+                    .ok_or_else(|| {
+                        McpClientError::Protocol(
+                            "MCP resources/read 缺少非空 uri 参数。".to_string(),
+                        )
+                    })?;
+                client.read_resource(uri)?
+            }
+        };
+
+        Ok(McpTransportResponse {
+            content,
+            truncated: false,
+        })
+    }
+}
+
+fn stdio_client_key(transport: &StdioMcpTransport, source_id: &str) -> String {
+    let mut env = transport.env.clone();
+    let mut env_pairs: Vec<(String, String)> = env.drain().collect();
+    env_pairs.sort();
+    format!(
+        "{}|{:?}|{:?}|{}",
+        transport.command, transport.args, env_pairs, source_id
+    )
+}
+
+fn stdio_client_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<crate::mcp_client::McpClient>>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<crate::mcp_client::McpClient>>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn stdio_client(
+    transport: &StdioMcpTransport,
+    source_id: &str,
+) -> Result<std::sync::Arc<crate::mcp_client::McpClient>, crate::mcp_client::McpClientError>
+{
+    use crate::mcp_client::{McpClient, McpServerSpec};
+
+    let key = stdio_client_key(transport, source_id);
+    if let Ok(cache) = stdio_client_cache().lock() {
+        if let Some(client) = cache.get(&key) {
+            return Ok(std::sync::Arc::clone(client));
+        }
+    }
+
+    let mut env_pairs: Vec<(String, String)> = transport.env.clone().into_iter().collect();
+    env_pairs.sort();
+    let spec = McpServerSpec {
+        id: source_id.to_string(),
+        command: transport.command.clone(),
+        args: transport.args.clone(),
+        env: env_pairs,
+    };
+    let client = McpClient::connect_with_timeouts(
+        &spec,
+        mcp_connect_timeout(),
+        mcp_request_timeout(),
+    )?;
+    let client = std::sync::Arc::new(client);
+    if let Ok(mut cache) = stdio_client_cache().lock() {
+        cache.insert(key, std::sync::Arc::clone(&client));
+    }
+    Ok(client)
+}
+
+fn env_timeout_ms(key: &str, default_ms: u64) -> std::time::Duration {
+    let parsed = std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(default_ms);
+    std::time::Duration::from_millis(parsed)
+}
+
+/// MCP 握手超时（可用 `PONY_MCP_CONNECT_TIMEOUT_MS` 覆盖，默认 20s：npx/uvx 冷启动较慢）。
+fn mcp_connect_timeout() -> std::time::Duration {
+    env_timeout_ms("PONY_MCP_CONNECT_TIMEOUT_MS", 20_000)
+}
+
+/// MCP 单请求超时（可用 `PONY_MCP_REQUEST_TIMEOUT_MS` 覆盖，默认 5s）。
+fn mcp_request_timeout() -> std::time::Duration {
+    env_timeout_ms("PONY_MCP_REQUEST_TIMEOUT_MS", 5_000)
+}
+
+/// 关闭并清空全部 stdio MCP 会话缓存（会话收尾/测试清理用）。
+pub fn shutdown_stdio_mcp_clients() {
+    if let Ok(mut cache) = stdio_client_cache().lock() {
+        cache.clear();
+    }
+}
+
+fn evict_stdio_client(transport: &StdioMcpTransport, source_id: &str) {
+    let key = stdio_client_key(transport, source_id);
+    if let Ok(mut cache) = stdio_client_cache().lock() {
+        cache.remove(&key);
+    }
+}
+
+/// **仅用于 `FakeMcpTransport` 的内存键**（不是 MCP 线上 method 名）。
+///
+/// 规范 method 名见 `crate::mcp_client`（`resources/list`、`resources/read`、
+/// `resources/templates/list`）。此函数已改名以免被误当作协议 method 使用。
+fn legacy_fake_transport_key(operation: &McpResourceOperation) -> &'static str {
+    match operation {
+        McpResourceOperation::ListResources => "list_resources",
+        McpResourceOperation::ListResourceTemplates => "list_resource_templates",
+        McpResourceOperation::ReadResource => "read_resource",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pony_protocol::tool_contract::ToolRegistrySnapshot;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn pending_request_requires_matching_session_version_and_nonce() {
+        let request = PendingControlRequest {
+            request_id: "request-1".to_string(),
+            request_kind: PendingControlRequestKind::Interaction,
+            session_id: Some("session-1".to_string()),
+            run_id: Some("run-1".to_string()),
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            descriptor_snapshot_id: "snapshot-1".to_string(),
+            descriptor_id: "builtin:echo_input".to_string(),
+            final_args_digest: "args".to_string(),
+            policy_digest: "policy".to_string(),
+            nonce: "nonce".to_string(),
+            version: 3,
+            expires_at_ms: 100,
+            state: PendingControlRequestState::Pending,
+            prompt: Some("continue?".to_string()),
+            options: Some(json!(["yes", "no"])),
+            multi_select: None,
+        };
+
+        assert!(request.can_consume(Some("session-1"), 3, "nonce", 100));
+        assert!(!request.can_consume(Some("session-2"), 3, "nonce", 100));
+        assert!(!request.can_consume(Some("session-1"), 2, "nonce", 100));
+        assert!(!request.can_consume(Some("session-1"), 3, "wrong", 100));
+        // ADR 0074: Ask (`Interaction`) is not time-bound — a past deadline never blocks the
+        // answer; wall-clock TTL left product semantics for the Ask path.
+        assert!(
+            request.can_consume(Some("session-1"), 3, "nonce", 101),
+            "an Interaction request must stay consumable past its legacy expires_at_ms"
+        );
+        assert!(
+            request.can_consume(Some("session-1"), 3, "nonce", u64::MAX),
+            "no wall-clock instant may turn a pending Ask into an unconsumable request"
+        );
+
+        // Approvals are no longer time-bound either (this wave aligns Approval with Ask): a past
+        // legacy deadline must not block a valid approval decision.
+        let mut approval = request.clone();
+        approval.request_kind = PendingControlRequestKind::Approval;
+        assert!(approval.can_consume(Some("session-1"), 3, "nonce", 100));
+        assert!(approval.can_consume(Some("session-1"), 3, "nonce", 101));
+        assert!(approval.can_consume(Some("session-1"), 3, "nonce", u64::MAX));
+    }
+
+    #[test]
+    fn turn_tool_view_only_allows_direct_or_elevated_descriptor_ids() {
+        let mut view = TurnToolView {
+            snapshot_id: "snapshot-1".to_string(),
+            direct_descriptor_ids: BTreeSet::from(["builtin:workspace_read_file".to_string()]),
+            elevated_descriptor_ids: BTreeSet::new(),
+        };
+
+        assert!(view.allows_model_descriptor("builtin:workspace_read_file"));
+        assert!(!view.allows_model_descriptor("mcp:server:tool"));
+        view.elevate("mcp:server:tool");
+        assert!(view.allows_model_descriptor("mcp:server:tool"));
+    }
+
+    #[test]
+    fn turn_tool_view_rejects_stale_snapshot_and_only_elevates_deferred_descriptors() {
+        let registry = ToolRegistrySnapshot::builtin().expect("builtin registry should build");
+        let mut view = TurnToolView::from_registry(&registry);
+
+        assert!(view
+            .elevate_from_registry(&registry, "builtin:workspace_path_info")
+            .is_ok());
+        assert!(view
+            .elevate_from_registry(&registry, "builtin:workspace_read_file")
+            .is_err());
+        let contracts = view
+            .provider_contract_views(&registry)
+            .expect("matching snapshot should project provider contracts");
+        assert!(contracts
+            .iter()
+            .any(|contract| contract.execution_primitive == "workspace_path_info"));
+
+        let stale = ToolRegistrySnapshot::from_descriptors(
+            "different-snapshot",
+            registry.descriptors.clone(),
+        )
+        .expect("same descriptors with a new revision remain valid");
+        assert!(view.provider_contract_views(&stale).is_err());
+    }
+
+    #[test]
+    fn fake_runtime_harnesses_are_deterministic_and_source_bound() {
+        let clock = FakeClock::new(10);
+        assert_eq!(clock.now_ms(), 10);
+        clock.set_now_ms(20);
+        assert_eq!(clock.now_ms(), 20);
+
+        let resolver = FakeResolver::default();
+        resolver.set_addresses("public.example", vec!["203.0.113.10".parse().unwrap()]);
+        assert_eq!(
+            resolver
+                .resolve("public.example")
+                .expect("configured record"),
+            vec!["203.0.113.10".parse::<IpAddr>().unwrap()]
+        );
+        assert!(resolver.resolve("missing.example").is_err());
+
+        let transport = FakeMcpTransport::default();
+        transport.set_response(
+            "mcp-source",
+            McpResourceOperation::ListResources,
+            Ok(McpTransportResponse {
+                content: json!({ "resources": [] }),
+                truncated: false,
+            }),
+        );
+        let response = transport
+            .execute(&McpTransportRequest {
+                source_id: "mcp-source".to_string(),
+                source_revision: "v1".to_string(),
+                operation: McpResourceOperation::ListResources,
+                arguments: json!({}),
+            })
+            .expect("configured MCP response");
+        assert_eq!(response.content, json!({ "resources": [] }));
+        assert!(transport
+            .execute(&McpTransportRequest {
+                source_id: "other-source".to_string(),
+                source_revision: "v1".to_string(),
+                operation: McpResourceOperation::ListResources,
+                arguments: json!({}),
+            })
+            .is_err());
+    }
+}

@@ -316,7 +316,7 @@ fn explain_cli_is_read_only_and_mutually_exclusive_with_dry_run() {
     let db = fixture.db();
     let before = std::fs::read(&db).expect("read db");
 
-    let ok = std::process::Command::new(env!("CARGO_BIN_EXE_ponycli"))
+    let ok = std::process::Command::new(pony_test_support::ponycli_bin())
         .args(["sessions", "rebuild-index", "--explain", session_id, "--db"])
         .arg(&db)
         .output()
@@ -334,7 +334,7 @@ fn explain_cli_is_read_only_and_mutually_exclusive_with_dry_run() {
         "该会话折叠与索引一致，必须打印 no difference：\n{stdout}"
     );
 
-    let conflict = std::process::Command::new(env!("CARGO_BIN_EXE_ponycli"))
+    let conflict = std::process::Command::new(pony_test_support::ponycli_bin())
         .args(["sessions", "rebuild-index", "--dry-run", "--explain", session_id, "--db"])
         .arg(&db)
         .output()

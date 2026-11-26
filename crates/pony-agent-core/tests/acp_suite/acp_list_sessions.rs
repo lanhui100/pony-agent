@@ -79,7 +79,7 @@ impl IsolatedCli {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ponycli"));
+        let mut command = Command::new(pony_test_support::ponycli_bin());
         command
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))

@@ -241,7 +241,7 @@ fn c1_no_surface_falls_back_to_legacy_openai_pricing() {
         "落库路径必须委托 turn_flow::estimate_call_cost_usd（单一出口）"
     );
 
-    let budget = include_str!("../../src/agent/budget.rs");
+    let budget = include_str!("../../../pony-protocol/src/budget.rs");
     assert!(
         !budget.contains("calculate_cost_with_pricing("),
         "budget 不得再调用固定 OpenAI 口径的 calculate_cost_with_pricing("

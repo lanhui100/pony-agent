@@ -24,6 +24,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       needs_rust: ${{ steps.scope.outputs.needs_rust }}
+      needs_frontend: ${{ steps.scope.outputs.needs_frontend }}
+      needs_core: ${{ steps.scope.outputs.needs_core }}
+      needs_tui: ${{ steps.scope.outputs.needs_tui }}
+      needs_cli: ${{ steps.scope.outputs.needs_cli }}
+      needs_tauri: ${{ steps.scope.outputs.needs_tauri }}
       scope_reason: ${{ steps.scope.outputs.scope_reason }}
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +73,11 @@ jobs:
           components: clippy
           cache: false
 
+      - uses: taiki-e/install-action@v2
+        if: needs.changes.outputs.needs_rust == 'true'
+        with:
+          tool: cargo-nextest
+
       # 缓存必须对齐 AGENT.md 的 target 槽位约定：check 与 test 分别设 prefix-key 隔离缓存
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.outputs.needs_rust == 'true'
@@ -99,9 +109,11 @@ jobs:
         run: npm ci
 
       - name: 类型检查与前端构建（产出 dist/ 供后续 Tauri 集成与回归复用）
+        if: needs.changes.outputs.needs_frontend == 'true'
         run: npm run build
 
       - name: 前端单元测试
+        if: needs.changes.outputs.needs_frontend == 'true'
         run: npm run test:unit
 
       - name: 前后端及 CLI 契约与扩展点一致性
@@ -137,26 +149,32 @@ jobs:
           npm run rust:lint
 
       - name: Clippy 棘轮门（src-tauri 分册；第二份基线，B244 扩面）
-        if: needs.changes.outputs.needs_rust == 'true'
+        if: needs.changes.outputs.needs_rust == 'true' && needs.changes.outputs.needs_tauri == 'true'
         run: npm run rust:lint:tauri
 
       # tools/tui-audit/*.py 需要 Pillow（render_ansi.py: from PIL import Image）。
       # Windows runner 预装 Python 但不带 Pillow ⇒ tui_audit_*_regression 4 例因
       # ModuleNotFoundError: No module named 'PIL' 恒红（既有 Windows 可移植性缺口）。
       - name: Python 审计依赖（tools/tui-audit：Pillow + fontTools）
-        if: needs.changes.outputs.needs_rust == 'true'
+        if: needs.changes.outputs.needs_tui == 'true'
         run: python3 -m pip install --disable-pip-version-check pillow fonttools
 
       # 首错即停会掩盖整批平台缺口：cargo test 默认首个失败用例即中止，
       # 同 runner 上后续用例根本不会执行，缺口只能靠多轮 CI 逐层剥出。
       # 代价已知：Windows 全量首跑十连红即为代价（B050–B066）。
-      - name: Core 单元与集成测试（含 Windows Job 生命周期）
-        if: needs.changes.outputs.needs_rust == 'true'
-        run: npm run cargo:test:shared -- --package=pony-agent-core --no-fail-fast
+      - name: Core 单元与集成测试（含 Windows Job 生命周期；nextest 进程级隔离防 OnceLock 互染）
+        if: needs.changes.outputs.needs_core == 'true'
+        run: |
+          node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-protocol -p pony-observability -p pony-storage -p pony-provider -p pony-tools -p pony-acp -p pony-agent-core --no-fail-fast
+          npm run cargo:test:shared -- -p pony-protocol -p pony-observability -p pony-storage -p pony-provider -p pony-tools -p pony-acp -p pony-agent-core --doc --no-fail-fast
+
+      - name: TUI 与 CLI 套件测试
+        if: needs.changes.outputs.needs_tui == 'true' || needs.changes.outputs.needs_cli == 'true'
+        run: node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-tui -p pony-cli --no-fail-fast
 
       - name: Tauri 宿主回归测试（session/provider/tool_router/stop_registry）
-        if: needs.changes.outputs.needs_rust == 'true'
-        run: npm run cargo:test:regression -- --no-fail-fast
+        if: needs.changes.outputs.needs_core == 'true'
+        run: node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-agent-core --test session_storage_suite --test runtime_suite --test tools_stop_suite --no-fail-fast
 
   core-platform-check:
     needs: changes
@@ -213,17 +231,25 @@ jobs:
           npm run rust:lint
 
       - name: Clippy 棘轮门（src-tauri 分册；第二份基线，B244 扩面）
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && needs.changes.outputs.needs_tauri == 'true'
         run: npm run rust:lint:tauri
-      - name: Core 非 Windows lib 单元测试（Linux-only）
-        if: runner.os == 'Linux'
+      - name: 工作区底层及核心 crate lib 单元测试（Linux-only）
+        if: runner.os == 'Linux' && needs.changes.outputs.needs_core == 'true'
         env:
           RUSTFLAGS: -D warnings
-        run: node scripts/invoke-rust-target.mjs test test --package=pony-agent-core --lib
+        run: node scripts/invoke-rust-target.mjs test test -p pony-protocol -p pony-observability -p pony-storage -p pony-provider -p pony-tools -p pony-acp -p pony-agent-core --lib
+
+      - name: TUI 与 CLI 单元测试（Linux-only）
+        if: runner.os == 'Linux' && (needs.changes.outputs.needs_tui == 'true' || needs.changes.outputs.needs_cli == 'true')
+        env:
+          RUSTFLAGS: -D warnings
+        run: node scripts/invoke-rust-target.mjs test test -p pony-tui -p pony-cli --lib
 
       # PTY 族 4 例在 Windows 上已被 #[cfg_attr(windows, ignore)] 平台 gating（Windows 无
       # PTY 驱动，缺口 B067）⇒ 若 Linux 侧没有执行点，gating 直接等于「覆盖消失」。
       # 故在 ubuntu 分支补一个真实执行点。本步骤只挂 Linux：macOS 分支未覆盖，是待办而非已覆盖。
       - name: Core Linux 集成：PTY 族（Windows 上已平台 gating）
-        if: runner.os == 'Linux'
-        run: node scripts/invoke-rust-target.mjs test test --package=pony-agent-core --test tui_startup_input_guard --test tui_overlay_cancel_acceptance
+        if: runner.os == 'Linux' && needs.changes.outputs.needs_tui == 'true'
+        run: |
+          node scripts/invoke-rust-target.mjs test test --package=pony-tui --test tui_suite -- tui_startup_input_guard
+          node scripts/invoke-rust-target.mjs test test --package=pony-tui --test tui_suite -- tui_overlay_cancel_acceptance

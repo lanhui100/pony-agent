@@ -1,0 +1,37 @@
+[package]
+name = "pony-tui"
+version = "0.1.179"
+edition = "2021"
+
+[lib]
+name = "pony_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pony"
+path = "src/main.rs"
+
+[dependencies]
+pony-agent-core = { path = "../pony-agent-core" }
+tracing = "0.1"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "8.1", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+dirs = "6"
+regex = "1"
+url = "2"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "charset", "stream"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+pony-test-support = { path = "../pony-test-support" }
+sha2 = "0.10"

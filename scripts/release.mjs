@@ -9,7 +9,11 @@ const repoRoot = process.env.PONY_RELEASE_REPO_ROOT
   ? path.resolve(process.env.PONY_RELEASE_REPO_ROOT)
   : path.resolve(__dirname, "..");
 const versionFile = path.join(repoRoot, ".version.json");
-const coreCargo = path.join(repoRoot, "crates/pony-agent-core/Cargo.toml");
+const coreCargoFiles = [
+  "crates/pony-agent-core/Cargo.toml",
+  "crates/pony-tui/Cargo.toml",
+  "crates/pony-cli/Cargo.toml",
+];
 const tauriCargo = path.join(repoRoot, "src-tauri/Cargo.toml");
 const packageJson = path.join(repoRoot, "package.json");
 const tauriConf = path.join(repoRoot, "src-tauri/tauri.conf.json");
@@ -178,7 +182,10 @@ function updateCargoVersion(filePath, verStr) {
 }
 
 if (bumpTargets.includes("core")) {
-  updateCargoVersion(coreCargo, getVersionString(state.core.major, state.core.minor, state.core.patch));
+  const coreVerStr = getVersionString(state.core.major, state.core.minor, state.core.patch);
+  for (const rel of coreCargoFiles) {
+    updateCargoVersion(path.join(repoRoot, rel), coreVerStr);
+  }
 }
 
 if (bumpTargets.includes("tauri")) {
@@ -218,7 +225,7 @@ const tagName = `v${tauriVer}`;
 // Commit and tag (ADR 0011: git add 包含 Cargo.lock)
 execSync("git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json .version.json Cargo.lock", { stdio: "inherit", cwd: repoRoot });
 if (bumpTargets.includes("core")) {
-  execSync("git add crates/pony-agent-core/Cargo.toml", { stdio: "inherit", cwd: repoRoot });
+  execSync(`git add ${coreCargoFiles.join(" ")}`, { stdio: "inherit", cwd: repoRoot });
 }
 
 execSync(`git commit -m "chore(release): bump version to ${tauriVer}"`, { stdio: "inherit", cwd: repoRoot });

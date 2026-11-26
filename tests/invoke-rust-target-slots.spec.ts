@@ -49,6 +49,22 @@ describe('invoke-rust-target 槽位调用器', () => {
     expect(SLOT_TARGET_DIRS.release).toBe('target');
   });
 
+  it('nextest 子命令将 manifest-path 与 target-dir 置于 nextest run 之后', () => {
+    const invocation = buildCargoInvocation('test', ['nextest', 'run', '--profile', 'quick', '-p', 'pony-agent-core'], '/repo');
+    expect(invocation.args).toEqual([
+      'nextest',
+      'run',
+      '--manifest-path',
+      path.join('/repo', 'src-tauri', 'Cargo.toml'),
+      '--target-dir',
+      path.join('/repo', 'target-test'),
+      '--profile',
+      'quick',
+      '-p',
+      'pony-agent-core'
+    ]);
+  });
+
   it('额外 cargo 参数原序透传（不重排、不加引号）', () => {
     const invocation = buildCargoInvocation('exact-b', [
       'test',
@@ -83,15 +99,15 @@ describe('invoke-rust-target 槽位调用器', () => {
       'cargo:test': 'test test',
       'cargo:test:lib': 'test test --lib',
       'cargo:test:regression':
-        'test test --test session_regression --test provider_registry_regression --test tool_router_regression --test stop_registry_wave60',
-      'conformance:test': 'test test -p pony-agent-core --test conformance'
+        'test test -p pony-agent-core --test session_storage_suite --test runtime_suite --test tools_stop_suite',
+      'conformance:test': 'test test -p pony-agent-core --test runtime_suite -- conformance'
     };
     for (const [name, slotAndSubcommand] of Object.entries(expected)) {
       expect(scripts[name]).toBe(`node scripts/invoke-rust-target.mjs ${slotAndSubcommand}`);
       expect(scripts[name]).not.toMatch(/powershell|pwsh/i);
     }
     expect(scripts['cli:build']).toBe(
-      'node scripts/invoke-rust-target.mjs release build --release -p pony-agent-core --bin pony --bin ponycli && node scripts/install-cli.mjs'
+      'node scripts/invoke-rust-target.mjs release build --release -p pony-tui -p pony-cli --bin pony --bin ponycli && node scripts/install-cli.mjs'
     );
   });
 

@@ -1505,6 +1505,7 @@ mod tests {
     #[test]
     fn graph_planner_uses_armed_goal_regardless_of_run_goal_keywords() {
         let _lock = test_support::lock();
+        let _store = test_support::TempGoalStore::install("planner-armed-goal");
         let session = "wave1-planner-armed-goal";
         let goal = create_test_goal(session, "把报告写完", 10);
 
@@ -1527,6 +1528,7 @@ mod tests {
     #[test]
     fn graph_planner_paused_goal_does_not_drive_continue() {
         let _lock = test_support::lock();
+        let _store = test_support::TempGoalStore::install("planner-paused-goal");
         let session = "wave1-planner-paused-goal";
         let goal = create_test_goal(session, "把报告写完", 10);
         disarm(&goal);
@@ -1542,6 +1544,7 @@ mod tests {
     #[test]
     fn graph_planner_armed_goal_respects_max_goal_rounds_budget() {
         let _lock = test_support::lock();
+        let _store = test_support::TempGoalStore::install("planner-goal-budget");
         let session = "wave1-planner-goal-budget";
         let goal = create_test_goal(session, "把报告写完", 1);
         crate::agent::goal::advance_goal_round(&goal.id).expect("advance round");
@@ -1563,6 +1566,7 @@ mod tests {
     #[test]
     fn graph_planner_ignores_mid_sentence_question_mark_for_armed_goal() {
         let _lock = test_support::lock();
+        let _store = test_support::TempGoalStore::install("planner-mid-question");
         let session = "wave1-planner-mid-question";
         let goal = create_test_goal(session, "把报告写完", 10);
 
@@ -1583,6 +1587,7 @@ mod tests {
     #[test]
     fn graph_planner_trailing_question_mark_still_waits_user() {
         let _lock = test_support::lock();
+        let _store = test_support::TempGoalStore::install("planner-trailing-question");
         let session = "wave1-planner-trailing-question";
         let goal = create_test_goal(session, "把报告写完", 10);
 

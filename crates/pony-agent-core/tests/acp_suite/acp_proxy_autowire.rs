@@ -462,7 +462,7 @@ fn g6_acp_delegate_exposes_builtin_agent_ids() {
     let root = temp_dir("g6-cli");
     let config = root.join("config");
     std::fs::create_dir_all(&config).expect("创建隔离配置目录");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ponycli"))
+    let output = std::process::Command::new(pony_test_support::ponycli_bin())
         .args(["acp", "--list"])
         .env("HOME", root.join("home"))
         .env("XDG_CONFIG_HOME", &config)

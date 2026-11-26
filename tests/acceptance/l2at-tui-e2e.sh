@@ -2,7 +2,7 @@
 # //! acceptance: pony TUI end-to-end acceptance (L2-T functional contract + L2-AT adversarial robustness)
 # //! ticket: l2at-tui-e2e | frozen acceptance tests — verify-only, DO NOT MODIFY during fixes
 # //!
-# //! Contract under test (crates/pony-agent-core/src/bin/tui.rs):
+# //! Contract under test (crates/pony-tui/src/tui.rs):
 # //!   L2-T1: non-TTY (pipe/null stdin) `pony` must exit gracefully:
 # //!          no panic message, readable diagnostic on stdout/stderr,
 # //!          exit code 0 OR explicit non-zero with hint, no terminal pollution
@@ -25,9 +25,9 @@ mkdir -p "$RECEIPTS"
 # Resolve binary under test (TEST-DEFECT fix: target/debug/pony-tui was a stale
 # artifact; current [[bin]] name is "pony" — prefer fresh repo build, then installed)
 PONY=""
-if [ -x "$REPO/target/debug/pony" ] && [ "$REPO/target/debug/pony" -nt "$REPO/crates/pony-agent-core/src/bin/tui.rs" ]; then
+if [ -x "$REPO/target/debug/pony" ] && [ "$REPO/target/debug/pony" -nt "$REPO/crates/pony-tui/src/tui.rs" ]; then
   PONY="$REPO/target/debug/pony"
-elif [ -x "$REPO/target/release/pony" ] && [ "$REPO/target/release/pony" -nt "$REPO/crates/pony-agent-core/src/bin/tui.rs" ]; then
+elif [ -x "$REPO/target/release/pony" ] && [ "$REPO/target/release/pony" -nt "$REPO/crates/pony-tui/src/tui.rs" ]; then
   PONY="$REPO/target/release/pony"
 elif command -v pony >/dev/null 2>&1; then
   PONY="$(command -v pony)"

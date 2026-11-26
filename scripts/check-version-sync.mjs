@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const versionFile = path.join(repoRoot, ".version.json");
-const coreCargo = path.join(repoRoot, "crates/pony-agent-core/Cargo.toml");
+const coreCargoFiles = [
+  "crates/pony-agent-core/Cargo.toml",
+  "crates/pony-tui/Cargo.toml",
+  "crates/pony-cli/Cargo.toml",
+];
 const tauriCargo = path.join(repoRoot, "src-tauri/Cargo.toml");
 const packageJson = path.join(repoRoot, "package.json");
 const tauriConf = path.join(repoRoot, "src-tauri/tauri.conf.json");
@@ -33,12 +37,16 @@ const state = JSON.parse(fs.readFileSync(versionFile, "utf8"));
 const stateCoreVer = `${state.core.major}.${state.core.minor}.${state.core.patch}`;
 const stateTauriVer = `${state.tauri.major}.${state.tauri.minor}.${state.tauri.patch}`;
 
-const coreCargoVer = extractCargoVersion(coreCargo);
-if (coreCargoVer !== stateCoreVer) {
-  console.error(`[check-version-sync] Core mismatch: crates/pony-agent-core/Cargo.toml (${coreCargoVer}) != .version.json (${stateCoreVer})`);
-  hasError = true;
-} else {
-  console.log(`[check-version-sync] Core version ok: ${stateCoreVer}`);
+for (const rel of coreCargoFiles) {
+  const fullPath = path.join(repoRoot, rel);
+  const cargoVer = extractCargoVersion(fullPath);
+  if (cargoVer !== stateCoreVer) {
+    console.error(`[check-version-sync] Core mismatch: ${rel} (${cargoVer}) != .version.json (${stateCoreVer})`);
+    hasError = true;
+  }
+}
+if (!hasError) {
+  console.log(`[check-version-sync] Core version ok (${coreCargoFiles.length} crates in sync): ${stateCoreVer}`);
 }
 
 const tauriCargoVer = extractCargoVersion(tauriCargo);

@@ -77,7 +77,7 @@ trap cleanup EXIT INT TERM
 # ---------------------------------------------------------------------------
 # 1. 二进制：优先本次构建的 target/debug/pony；陈旧则重建并留 build.log/EXIT
 # ---------------------------------------------------------------------------
-TUI_SRC="$REPO/crates/pony-agent-core/src/bin/tui.rs"
+TUI_SRC="$REPO/crates/pony-tui/src/tui.rs"
 BIN="$REPO/target/debug/pony"
 NEED_BUILD=0
 if [ ! -x "$BIN" ]; then

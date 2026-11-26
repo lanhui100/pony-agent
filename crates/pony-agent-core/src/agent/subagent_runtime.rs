@@ -180,6 +180,7 @@ static SUBAGENT_ENGINE: OnceLock<Arc<dyn SubagentTurnEngine>> = OnceLock::new();
 
 /// 注册全局子代理引擎；重复注册返回 Err。
 pub fn set_subagent_engine(eng: Arc<dyn SubagentTurnEngine>) -> Result<(), String> {
+    crate::agent::ensure_runtime_bridges();
     SUBAGENT_ENGINE.set(eng).map_err(|_| {
         "subagent engine already set".to_string()
     })
@@ -268,9 +269,35 @@ impl Drop for InflightGuard {
     }
 }
 
+#[cfg(test)]
+static SUBAGENT_TEST_READERS: (std::sync::Mutex<(bool, usize)>, std::sync::Condvar) =
+    (std::sync::Mutex::new((false, 0)), std::sync::Condvar::new());
+
+#[cfg(test)]
+struct SubagentTestReader;
+
+#[cfg(test)]
+impl Drop for SubagentTestReader {
+    fn drop(&mut self) {
+        let (lock, cvar) = &SUBAGENT_TEST_READERS;
+        let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+        state.1 = state.1.saturating_sub(1);
+        cvar.notify_all();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static IN_SUBAGENT_LIMIT_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// 并发许可 guard（对外导出：orchestration::subagent 入口在引擎调用前
 /// 统一过门，保证 Stub 引擎注入场景下 busy/oversize 契约同样生效）。
-pub struct SubagentInflightGuard(InflightGuard);
+pub struct SubagentInflightGuard {
+    _inflight: InflightGuard,
+    #[cfg(test)]
+    _test_read: Option<SubagentTestReader>,
+}
 
 /// 子代理入口统一门：prompt 字节 >200000 → `prompt_too_large`；
 /// 并发运行数已达生效上限（[`subagent_max_concurrent`]）→ `subagent_busy`。
@@ -279,7 +306,23 @@ pub fn subagent_gate_enter(prompt: &str) -> Result<SubagentInflightGuard, String
     if prompt.as_bytes().len() > SUBAGENT_MAX_PROMPT_BYTES {
         return Err("prompt_too_large".to_string());
     }
-    Ok(SubagentInflightGuard(InflightGuard::acquire()?))
+    #[cfg(test)]
+    let _test_read = if IN_SUBAGENT_LIMIT_TEST.with(std::cell::Cell::get) {
+        None
+    } else {
+        let (lock, cvar) = &SUBAGENT_TEST_READERS;
+        let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+        while state.0 {
+            state = cvar.wait(state).unwrap_or_else(|p| p.into_inner());
+        }
+        state.1 += 1;
+        Some(SubagentTestReader)
+    };
+    Ok(SubagentInflightGuard {
+        _inflight: InflightGuard::acquire()?,
+        #[cfg(test)]
+        _test_read,
+    })
 }
 
 /// 宿主默认引擎：独立 `AgentRuntimeBuilder` 建栈运行子代理 turn。
@@ -646,7 +689,7 @@ impl SubagentTurnEngine for HostTurnEngine {
 mod tests {
     use super::*;
 
-    /// 并发上限是进程级静态：本模块用例串行执行，且退出时恢复默认值（含 panic 展开）。
+    /// 并发上限是进程级静态：本模块用例串行执行并等待并行 in-flight 许可清空，退出时恢复默认值。
     static LIMIT_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct LimitTestGuard {
@@ -656,15 +699,26 @@ mod tests {
     impl Drop for LimitTestGuard {
         fn drop(&mut self) {
             set_subagent_max_concurrent(None);
+            IN_SUBAGENT_LIMIT_TEST.with(|flag| flag.set(false));
+            let (lock, cvar) = &SUBAGENT_TEST_READERS;
+            let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            state.0 = false;
+            cvar.notify_all();
         }
     }
 
     fn limit_test_guard() -> LimitTestGuard {
-        LimitTestGuard {
-            _guard: LIMIT_TEST_GUARD
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        let guard = LIMIT_TEST_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (lock, cvar) = &SUBAGENT_TEST_READERS;
+        let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+        state.0 = true;
+        while state.1 > 0 {
+            state = cvar.wait(state).unwrap_or_else(|p| p.into_inner());
         }
+        IN_SUBAGENT_LIMIT_TEST.with(|flag| flag.set(true));
+        LimitTestGuard { _guard: guard }
     }
 
     #[test]
@@ -844,7 +898,7 @@ mod tests {
         // ③ 两级都缺失 ⇒ 按 root 在已注册 workspace 中反查；共享 store 缺失时保持 None。
         assert_eq!(bare.resolve_child_workspace_id(None, None, root), None);
 
-        let mut store = crate::agent::session::SessionStore::new();
+        let mut store = crate::agent::session::SessionStore::memory_only();
         let workspace = store
             .create_workspace("subagent-test", root.to_str().expect("utf-8 root"))
             .expect("workspace 注册必须成功");

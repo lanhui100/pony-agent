@@ -699,8 +699,9 @@ fn bare_eprintln_hits(source: &str) -> Vec<(usize, String)> {
 
 #[test]
 fn c3_1_acp_sources_have_no_bare_eprintln() {
-    // Arrange：`src/acp/**` 的全部 Rust 源文件。
-    let acp_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("acp");
+    // Arrange：`crates/pony-acp/src/**` 的全部 Rust 源文件。
+    let acp_crate_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("pony-acp");
+    let acp_dir = acp_crate_dir.join("src");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&acp_dir)
         .unwrap_or_else(|error| panic!("读取 ACP 源码目录失败 {}: {error}", acp_dir.display()))
         .filter_map(Result::ok)
@@ -712,7 +713,7 @@ fn c3_1_acp_sources_have_no_bare_eprintln() {
     // Assert ①：扫描面必须真实存在（防「目录改名 ⇒ 空扫描恒绿」的假测试）。
     assert!(
         files.len() >= 8,
-        "C3.1 测试设施：`src/acp/` 至少应有 8 个 .rs 文件（client/config/protocol/session/transport/handlers/mod/…），实际 {}",
+        "C3.1 测试设施：`crates/pony-acp/src/` 至少应有 8 个 .rs 文件（client/config/protocol/session/transport/handlers/lib/…），实际 {}",
         files.len()
     );
     let names: Vec<String> = files
@@ -722,7 +723,7 @@ fn c3_1_acp_sources_have_no_bare_eprintln() {
     for required in ["client.rs", "session.rs", "transport.rs", "handlers.rs", "config.rs"] {
         assert!(
             names.iter().any(|name| name == required),
-            "C3.1 测试设施：`src/acp/{required}` 必须在扫描面内，实际 = {names:?}"
+            "C3.1 测试设施：`crates/pony-acp/src/{required}` 必须在扫描面内，实际 = {names:?}"
         );
     }
 
@@ -733,7 +734,7 @@ fn c3_1_acp_sources_have_no_bare_eprintln() {
             .unwrap_or_else(|error| panic!("读取 {} 失败: {error}", path.display()));
         for (line, text) in bare_eprintln_hits(&source) {
             let relative = path
-                .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .strip_prefix(&acp_crate_dir)
                 .unwrap_or(path)
                 .display()
                 .to_string();
@@ -1603,11 +1604,12 @@ fn run_acp_delegate_with_parent(
 /// 不含外部正文；同时用工具结果里的 `finalText` 作正控（证明确实收到过该正文）。
 #[test]
 fn t_vis_02_external_chunk_text_never_enters_parent_assistant_stream() {
+    // 必须先初始化 AGENTS_ROOT（内部也会加 env_lock），避免在持锁期间二次加锁死锁。
+    let root = agents_root();
     // 持久化通道是进程级全局单槽 ⇒ 与 C4/C5 的捕获用例及 persist 用例互斥。
     let _guard = crate::env_lock::lock();
 
     // Arrange：外部 agent 先发正文 chunk（带唯一标记）再发一条工具活动。
-    let root = agents_root();
     write_updates(
         &vis_file(&root),
         &[text_chunk(EXTERNAL_BODY_MARKER), tool_chunk("tc-vis-1")],

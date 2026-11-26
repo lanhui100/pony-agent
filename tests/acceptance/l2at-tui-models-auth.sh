@@ -22,7 +22,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 RECEIPTS="$HERE/receipts/l2at-tui-models-auth"
 mkdir -p "$RECEIPTS"
-SRC="$REPO/crates/pony-agent-core/src/bin/tui.rs"
+SRC="$REPO/crates/pony-tui/src/tui.rs"
 
 PONY=""
 newer_than_src() {

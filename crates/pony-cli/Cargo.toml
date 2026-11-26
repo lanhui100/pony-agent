@@ -1,0 +1,23 @@
+[package]
+name = "pony-cli"
+version = "0.1.179"
+edition = "2021"
+
+[lib]
+name = "pony_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ponycli"
+path = "src/main.rs"
+
+[dependencies]
+pony-agent-core = { path = "../pony-agent-core" }
+dirs = "6"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+[dev-dependencies]
+pony-test-support = { path = "../pony-test-support" }

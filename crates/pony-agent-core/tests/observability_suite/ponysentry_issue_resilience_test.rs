@@ -56,7 +56,7 @@ fn issue_reporting_burst_over_bounded_queue_never_blocks() {
 #[test]
 fn issue_queue_stays_bounded_and_drops_on_overflow() {
     // 行为断言之外补静态锚点：证明溢出分支是「有界 + 丢弃」，而不是无界堆积或阻塞发送。
-    let path = crate_root().join("src/agent/ponysentry/client.rs");
+    let path = crate_root().join("../pony-observability/src/ponysentry/client.rs");
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("证据源必须可读（{}）：{err}", path.display()));
 

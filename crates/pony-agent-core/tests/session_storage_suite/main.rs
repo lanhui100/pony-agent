@@ -40,3 +40,4 @@ mod tui_rewind_acceptance;
 mod tui_rewind_capture_seam;
 mod tui_session_resilience_chunk_split;
 mod turn_failed_keeps_partial_text_test;
+mod interrupted_turn_resume_acceptance;

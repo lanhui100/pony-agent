@@ -22,8 +22,8 @@ import numpy as np
 from PIL import Image
 
 MASTER = "src-tauri/icons/icon-master-approved.png"
-OUT_COVERAGE = "crates/pony-agent-core/src/tui/splash_coverage.rs"
-OUT_PNG = "crates/pony-agent-core/assets/splash-logo.png"
+OUT_COVERAGE = "crates/pony-tui/src/tui/splash_coverage.rs"
+OUT_PNG = "crates/pony-tui/assets/splash-logo.png"
 
 # 画布底色，必须等于 `mod theme::CANVAS`：位图与周围字符格无缝衔接的前提。
 CANVAS = (18, 16, 14)

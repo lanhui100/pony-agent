@@ -10,7 +10,7 @@
 //!
 //! 本文件全部为真实断言；不读真实时钟、不 sleep、不吞异常。
 
-use pony_agent_core::agent::session::{history_from_turn_events, SessionStore, TurnHistoryMessage};
+use pony_agent_core::agent::session::{history_from_turn_events, TurnHistoryMessage};
 use pony_agent_core::agent::turn_event::{TurnEndReason, TurnEvent};
 
 /// 一条「重复写入的同一轮」事件流：同一 `turn_id` 出现两条 user（seq=1 与 seq=2）。
@@ -272,13 +272,13 @@ fn b222_single_user_unchanged() {
 
 /// 5. store 级幂等：同一 turn_id 连续两次 append ⇒ user 与 assistant 各只留一条，且保留**首次**写入。
 ///
-/// 真实重复源于写路径的第二次 push（`session/store.rs:748`）；本用例走公开
-/// `SessionStore::memory_only()`（test-support 特性，dev-dependency 已启用）构造隔离后端。
+/// 真实重复源于写路径的第二次 push（`session/store.rs:748`）；本用例走
+/// `pony_test_support::memory_only_session_store()` 构造隔离后端。
 #[test]
 fn b222_store_append_same_turn_id_is_idempotent() {
     // Arrange：内存后端（不落盘、不污染真实会话库）；第二次写入内容刻意不同，
     // 用于区分「保留首次」与「后端覆盖成末次」两种实现。
-    let mut store = SessionStore::memory_only();
+    let mut store = pony_test_support::memory_only_session_store();
     let session = Some("session-b222");
 
     // Act：同一 turn_id 连续写入两次（模拟重放/补写）。

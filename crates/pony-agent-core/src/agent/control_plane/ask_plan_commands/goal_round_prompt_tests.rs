@@ -64,7 +64,16 @@ fn control_plane_with_pending_ask() -> HostControlPlane {
         .expect("ask registry must build"),
     );
     let dispatcher = Arc::new(GovernedDispatcher::new(registry, Arc::new(FakeClock::new(1_000))));
+    let runtime = crate::agent::runtime::AgentRuntimeBuilder::new()
+        .session_store(crate::agent::session::SessionStore::memory_only())
+        .build();
+    let ask_store: Arc<dyn crate::agent::ask_persistence::AskPersistenceStore> = Arc::from(
+        crate::agent::ask_persistence::open_in_memory_ask_store()
+            .expect("in-memory ask store must open"),
+    );
     let control_plane = HostControlPlaneBuilder::new()
+        .runtime(runtime)
+        .ask_store(ask_store)
         .ask_dispatcher(Arc::clone(&dispatcher))
         .build();
 

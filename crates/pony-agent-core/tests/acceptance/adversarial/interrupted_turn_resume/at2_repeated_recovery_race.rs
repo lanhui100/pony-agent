@@ -12,7 +12,7 @@ use pony_agent_core::agent::session::interrupted_turn::{
     interrupted_turn_assistant_text, interrupted_turn_transcript_closure, ClosedToolStep, PendingToolCall,
 };
 
-use crate::{
+use super::super::{
     assert_roundtrips_closed, build_request, closed, interrupted_history, isolate_process_data_dir,
     native_provider, snapshot_of, DELIVERED_TEXT, INTERRUPTED_USER, NEXT_USER,
 };

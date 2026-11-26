@@ -262,6 +262,7 @@ reviewed_at: "2026-11-09"
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+
 # B231（ADR 2026-11-17-tui-status-waiting-copy）归属说明：等待首字节的用户可见文案收敛。
 # (1) 变更面全在本地呈现层：TUI `crates/pony-agent-core/src/bin/tui.rs` 的状态词分支
 #     （等待窗口 ⇒ 「等待响应中…」）与 `bin/tui/status_dwell.rs` 的 `UpstreamIdle` 布尔窗口；
@@ -276,6 +277,7 @@ reviewed_at: "2026-11-09"
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+
 # B241（ADR 2026-11-17-tui-speed-segment-drop-annotations）归属说明：TUI header 速度段去注释文字。
 # (1) 变更面全在本地呈现层：`crates/pony-agent-core/src/bin/tui.rs` 的 `format_speed_segment`
 #     只输出「值 + t/s」，不再追加 ` e2e` / ` 剔突发N` 后缀（快照字段 `turn_speed_basis` /
@@ -288,6 +290,7 @@ reviewed_at: "2026-11-09"
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+
 # B203（ADR 2026-11-16-tui-scrollbar-mouse-drag）归属说明：TUI 滚动条补鼠标命中与拖拽。
 # 纯输入/呈现层变更（`crates/pony-agent-core/src/bin/tui.rs`）：新增 `scrollbar_offset_for_row` /
 # `scrollbar_hit` / `apply_scrollbar_row` 三个纯逻辑入口，消费的是既有的 crossterm `Event::Mouse`
@@ -298,6 +301,7 @@ reviewed_at: "2026-11-09"
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+
 # 团队面板轮询（ADR 2026-11-16-team-panel-live-polling）归属说明：看板/花名册改为挂载期轮询。
 # (1) 变更面纯前端 + 既有只读 IPC（`src/stores/team.ts` 的 `startPolling` / `stopPolling`，
 #     调 `team_get_roster` / `team_get_tasks`）：新增的是**前端定时器**，每 2s 两次本地进程内
@@ -307,6 +311,7 @@ reviewed_at: "2026-11-09"
 #     （桌面/TUI 无常驻监听地址、无 `/metrics`、pull 模型不成立）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
 
 # B218/B219/B220/B221/B222/B223（ADR 2026-11-16-tui-turn-lifecycle-status-line、
 # 2026-11-16-degraded-turn-reason-and-trace、2026-11-16-tui-upstream-stall-heartbeat、
@@ -343,7 +348,7 @@ dimensions:
   tracing:
     applicable: true
     # OTel 初始化/导出/资源属性的唯一落点（span 与 resource 构造、配置解析、traceparent 注入器都在这个模块）
-    anchor: crates/pony-agent-core/src/agent/otel/mod.rs
+    anchor: crates/pony-observability/src/otel/mod.rs
     # 检索口径补充（declaration-rubric §7 / 方案 C）：只扩大检索面，不改变 applicable 的判定。
     # 事实依据：公网 OTLP edge 把 service.name 改写成 desktop-client（原名挪到 client.service.name），
     # dev 机自报名带环境后缀（pony-agent → pony-agent-dev）；内置两键
@@ -370,7 +375,7 @@ dimensions:
   issues:
     applicable: true
     # PonySentry ingest 客户端（事件上报/幂等键 event_id/trace_id 回填/重试都在这里）
-    anchor: crates/pony-agent-core/src/agent/ponysentry/client.rs
+    anchor: crates/pony-observability/src/ponysentry/client.rs
   metrics:
     applicable: false
     reason: >-
@@ -396,7 +401,7 @@ enforcement_points:
         hint: 前端组件级异常捕获必须统一使用 ErrorBoundary.vue 统一收口与上报，禁止在别处私自声明 onErrorCaptured
 
   http_client:
-    path: crates/pony-agent-core/src/agent/otel/mod.rs
+    path: crates/pony-observability/src/otel/mod.rs
     guarantees:
       - traceparent
       - timeout
@@ -1827,3 +1832,16 @@ note: >-
 #     `agent/jobs.rs` 内联 1 例（description 透传与空白归一）、`tests/tui_task_visibility.rs`
 #     （抽屉与输入框间距、真实渲染下长目标折行）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
+
+# Build & Test Layering / Workspace Crate Split（ADR 2026-11-25-build-test-layering-and-workspace-crate-split）归属说明：
+# (1) Workspace 结构重构：将 `pony-agent-core` 按 6 层无环依赖 DAG 拆分为
+#     `pony-protocol` → `pony-observability` → (`pony-storage`, `pony-provider`) →
+#     `pony-tools` → `pony-acp` → `pony-agent-core` → (`pony-tui`, `pony-cli`, `src-tauri`)，
+#     并抽出 `crates/pony-test-support`。`agent/otel` 与 `agent/ponysentry` 迁至
+#     `crates/pony-observability/src/{otel,ponysentry}`（原 `pony-agent-core::agent::{otel,ponysentry}`
+#     保留 `pub use` 兼容再导出）。无新增对外网络接口、无新增 span / metric / issue 出口。
+# (2) 同步将 `dimensions.tracing.anchor`、`enforcement_points.http_client.path` 更新为
+#     `crates/pony-observability/src/otel/mod.rs`，将 `dimensions.issues.anchor` 更新为
+#     `crates/pony-observability/src/ponysentry/client.rs`；四维归属不变（tracing / issues 仍 applicable，
+#     metrics / logs 仍结构性 N-A）。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。

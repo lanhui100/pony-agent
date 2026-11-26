@@ -13,41 +13,167 @@
 //   node scripts/ci-scope.mjs --base <sha> [--head HEAD] [--json]
 // 输出（stdout，可直接 >> $GITHUB_OUTPUT）：
 //   needs_rust=true|false
+//   needs_frontend=true|false
+//   needs_core=true|false
+//   needs_tui=true|false
+//   needs_cli=true|false
+//   needs_tauri=true|false
 //   scope_reason=code|docs-only|empty-diff|no-base|error
 import { execFileSync } from "node:child_process";
 
-// 即使文件以 .md 结尾也要跑 Rust 的树：.meta 的 lint 表是真值源、.github 里是 CI 自身、
-// scripts/crates/src-tauri 是编译面本体。路径一旦落在这里，判定直接短路为 true。
-const UNSAFE_PREFIXES = [
+// 即使文件以 .md 结尾也要跑全量的树：.meta 的 lint 表是真值源、.github 里是 CI 自身、
+// scripts/Cargo 根定义影响全工作区。路径一旦落在这里，全量判定短路为 true。
+const GLOBAL_UNSAFE_PREFIXES = [
   ".github/",
   ".meta/",
   ".githooks/",
   "scripts/",
-  "crates/",
-  "src-tauri/",
-  "src/",
-  "tools/",
-  "tests/",
-  "public/",
-  "package.json",
-  "package-lock.json",
   "Cargo.toml",
   "Cargo.lock",
   "rust-toolchain.toml",
-  "vite.config",
-  "tsconfig",
 ];
 
-// 纯文档/账本树：只改这里不影响 Rust 编译与测试面。
+// 与 Rust 侧核心编译面（含其传递下游）对齐；用于保证旧契约 needs_rust 的保守边界。
+const FRONTEND_CODE_PREFIXES = [
+  "src/",
+  "tests/",
+  "public/",
+  "index.html",
+  "package.json",
+  "package-lock.json",
+  "vite.config",
+  "tsconfig",
+  "vitest.config",
+];
+
+const CORE_CRATE_PREFIXES = [
+  "crates/pony-protocol/",
+  "crates/pony-observability/",
+  "crates/pony-storage/",
+  "crates/pony-provider/",
+  "crates/pony-tools/",
+  "crates/pony-acp/",
+  "crates/pony-agent-core/",
+];
+
+const TUI_PREFIXES = ["crates/pony-tui/", "tools/tui-audit/"];
+const CLI_PREFIXES = ["crates/pony-cli/"];
+const TAURI_PREFIXES = ["src-tauri/"];
+const TEST_SUPPORT_PREFIXES = ["crates/pony-test-support/"];
+
+const UNSAFE_PREFIXES = [
+  ...GLOBAL_UNSAFE_PREFIXES,
+  ...FRONTEND_CODE_PREFIXES,
+  "crates/",
+  "src-tauri/",
+  "tools/",
+];
+
+// 纯文档/账本树：只改这里不影响 Rust 编译与前端测试面。
 const SAFE_PREFIXES = ["docs/", "backlog/", "openspec/", ".agents/notes/", ".agents/skills/"];
 
-function needsRust(file) {
-  if (UNSAFE_PREFIXES.some((p) => file.startsWith(p))) return true;
-  if (SAFE_PREFIXES.some((p) => file.startsWith(p))) return false;
+function isDocsOnlyFile(file) {
+  if (UNSAFE_PREFIXES.some((p) => file.startsWith(p))) return false;
+  if (SAFE_PREFIXES.some((p) => file.startsWith(p))) return true;
   // 根级 markdown（README.md / AGENTS.md…）是纯文案；子目录里未列入 SAFE 树的
-  // markdown 一律保守判 true——「看起来像文档」不是证据，路径白名单才是。
-  if (!file.includes("/") && file.endsWith(".md")) return false;
-  return true;
+  // markdown 一律保守判代码面——「看起来像文档」不是证据，路径白名单才是。
+  if (!file.includes("/") && file.endsWith(".md")) return true;
+  return false;
+}
+
+function classifyFiles(files) {
+  if (files.length === 0) {
+    return {
+      needs_rust: false,
+      needs_frontend: false,
+      needs_core: false,
+      needs_tui: false,
+      needs_cli: false,
+      needs_tauri: false,
+      scope_reason: "empty-diff",
+    };
+  }
+
+  let needs_rust = false;
+  let needs_frontend = false;
+  let needs_core = false;
+  let needs_tui = false;
+  let needs_cli = false;
+  let needs_tauri = false;
+
+  for (const file of files) {
+    if (isDocsOnlyFile(file)) {
+      continue;
+    }
+    needs_rust = true;
+
+    if (GLOBAL_UNSAFE_PREFIXES.some((p) => file.startsWith(p))) {
+      needs_frontend = true;
+      needs_core = true;
+      needs_tui = true;
+      needs_cli = true;
+      needs_tauri = true;
+      continue;
+    }
+
+    if (FRONTEND_CODE_PREFIXES.some((p) => file.startsWith(p))) {
+      needs_frontend = true;
+      if (file.startsWith("tests/")) {
+        needs_core = true;
+        needs_tui = true;
+        needs_cli = true;
+        needs_tauri = true;
+      }
+      continue;
+    }
+
+    if (CORE_CRATE_PREFIXES.some((p) => file.startsWith(p))) {
+      needs_core = true;
+      needs_tui = true;
+      needs_cli = true;
+      needs_tauri = true;
+      continue;
+    }
+
+    if (TEST_SUPPORT_PREFIXES.some((p) => file.startsWith(p))) {
+      needs_core = true;
+      needs_tui = true;
+      needs_cli = true;
+      continue;
+    }
+
+    if (TUI_PREFIXES.some((p) => file.startsWith(p))) {
+      needs_tui = true;
+      continue;
+    }
+
+    if (CLI_PREFIXES.some((p) => file.startsWith(p))) {
+      needs_cli = true;
+      continue;
+    }
+
+    if (TAURI_PREFIXES.some((p) => file.startsWith(p))) {
+      needs_tauri = true;
+      continue;
+    }
+
+    // 未在白/灰表列明的路径：fail-safe 跑全量
+    needs_frontend = true;
+    needs_core = true;
+    needs_tui = true;
+    needs_cli = true;
+    needs_tauri = true;
+  }
+
+  return {
+    needs_rust,
+    needs_frontend,
+    needs_core,
+    needs_tui,
+    needs_cli,
+    needs_tauri,
+    scope_reason: needs_rust ? "code" : "docs-only",
+  };
 }
 
 function parseArgs(argv) {
@@ -92,38 +218,48 @@ function main() {
     return;
   }
 
-  let needs_rust = true;
-  let scope_reason = "no-base";
+  let flags = {
+    needs_rust: true,
+    needs_frontend: true,
+    needs_core: true,
+    needs_tui: true,
+    needs_cli: true,
+    needs_tauri: true,
+    scope_reason: "no-base",
+  };
   let changed = [];
 
   try {
     const base = resolveBase(args.base);
     if (base) {
       changed = listChanged(base, args.head);
-      if (changed.length === 0) {
-        needs_rust = false;
-        scope_reason = "empty-diff";
-      } else if (changed.some(needsRust)) {
-        needs_rust = true;
-        scope_reason = "code";
-      } else {
-        needs_rust = false;
-        scope_reason = "docs-only";
-      }
+      flags = classifyFiles(changed);
     }
   } catch (error) {
     // 上面契约第 2 条：任何意外都只降级为「跑全量」，不向上抛。
-    needs_rust = true;
-    scope_reason = `error:${error instanceof Error ? error.message : String(error)}`;
+    flags = {
+      needs_rust: true,
+      needs_frontend: true,
+      needs_core: true,
+      needs_tui: true,
+      needs_cli: true,
+      needs_tauri: true,
+      scope_reason: `error:${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 
   if (args.json) {
     console.log(
-      JSON.stringify({ needs_rust, scope_reason, base: args.base, head: args.head, changed }, null, 2),
+      JSON.stringify({ ...flags, base: args.base, head: args.head, changed }, null, 2),
     );
   } else {
-    console.log(`needs_rust=${needs_rust}`);
-    console.log(`scope_reason=${scope_reason.replace(/\n/g, " ")}`);
+    console.log(`needs_rust=${flags.needs_rust}`);
+    console.log(`needs_frontend=${flags.needs_frontend}`);
+    console.log(`needs_core=${flags.needs_core}`);
+    console.log(`needs_tui=${flags.needs_tui}`);
+    console.log(`needs_cli=${flags.needs_cli}`);
+    console.log(`needs_tauri=${flags.needs_tauri}`);
+    console.log(`scope_reason=${flags.scope_reason.replace(/\n/g, " ")}`);
   }
 }
 

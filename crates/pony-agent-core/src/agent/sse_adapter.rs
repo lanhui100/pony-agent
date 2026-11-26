@@ -204,7 +204,10 @@ mod tests {
 
     #[test]
     fn control_plane_can_stream_failed_turn_into_sse_sink() {
-        let control_plane = HostControlPlane::new();
+        let runtime = crate::agent::runtime::AgentRuntimeBuilder::new()
+            .session_store(crate::agent::session::SessionStore::memory_only())
+            .build();
+        let control_plane = HostControlPlane::with_runtime(runtime);
 
         let frames = collect_turn_stream_frames(
             &control_plane,

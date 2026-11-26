@@ -330,7 +330,7 @@ jobs:
           PONY_RELEASE_BUILD: "1"
           CARGO_INCREMENTAL: "0"
           RUSTFLAGS: "-D warnings"
-        run: cargo build --release --locked --bin pony
+        run: cargo build --release --locked -p pony-tui --bin pony
 
       # 版本链 fail-closed：CLI 二进制只承载 `pony-agent-core` 的版本（本仓是 core / tauri-app 两条独立
       # 版本线），因此**只与 core Cargo.toml 比对**，不与 package.json 比对。

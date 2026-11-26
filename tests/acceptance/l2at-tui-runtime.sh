@@ -2,7 +2,7 @@
 # //! acceptance: pony TUI runtime robustness (L2-AT) — independent frozen suite
 # //! ticket: l2at-tui-runtime | verify-only, DO NOT MODIFY during fixes
 # //!
-# //! Contract under test (crates/pony-agent-core/src/bin/tui.rs):
+# //! Contract under test (crates/pony-tui/src/tui.rs):
 # //!   R1: `pony --version` exits 0, prints semver + binary path, never enters alt screen.
 # //!   R2: `pony --help` exits 0, lists --version/--doctor and >=3 key bindings.
 # //!   R3: `pony --doctor` exits 0 with [ok]/[warn] markers; under LANG=C/LC_ALL=C
@@ -23,7 +23,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 RECEIPTS="$HERE/receipts/l2at-tui-runtime"
 mkdir -p "$RECEIPTS"
-SRC="$REPO/crates/pony-agent-core/src/bin/tui.rs"
+SRC="$REPO/crates/pony-tui/src/tui.rs"
 
 # Binary resolution: fresh debug build -> fresh release build -> installed
 PONY=""

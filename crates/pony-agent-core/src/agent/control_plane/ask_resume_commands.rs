@@ -792,7 +792,11 @@ mod ask_resume_fallback_tests {
     /// ask wait）时，ask-aware 准备必须**复用**它，而不是每轮新建 run（避免持久化 store 无界膨胀）。
     #[test]
     fn prepare_reuses_the_latest_continuable_run_of_the_session() {
+        let runtime = AgentRuntimeBuilder::new()
+            .session_store(SessionStore::memory_only())
+            .build();
         let control_plane = HostControlPlaneBuilder::new()
+            .runtime(runtime)
             .graph_run_store(GraphRunStore::new())
             .build();
         seed_ready_run(&control_plane, "run-reuse-seed", Some("session-reuse-unit"));
@@ -821,7 +825,11 @@ mod ask_resume_fallback_tests {
     /// （两次准备得到两个不同 run id），不得复用任意既有 run。
     #[test]
     fn prepare_creates_a_fresh_run_when_none_is_continuable() {
+        let runtime = AgentRuntimeBuilder::new()
+            .session_store(SessionStore::memory_only())
+            .build();
         let control_plane = HostControlPlaneBuilder::new()
+            .runtime(runtime)
             .graph_run_store(GraphRunStore::new())
             .build();
 

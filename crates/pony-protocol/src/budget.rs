@@ -1,0 +1,402 @@
+//! Atomic budget ledger and cancellation token for governed tool dispatch (PA-076 phase 3).
+//!
+//! A `BudgetLedger` is created once per top-level invocation and shared (via `Arc`) by every
+//! child that runs underneath it. All reservations are atomic so composite handlers dispatching
+//! children from multiple threads cannot oversubscribe a shared budget. Every reservation path
+//! fails closed: `reserve_call`, `begin_execution`, `reserve_bytes`, and `check_deadline` return
+//! structured errors instead of silently degrading.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// A shared cancellation token. Once cancelled, every dependent invocation fails closed with a
+/// `Cancelled` execution status instead of producing a provider-consumable result.
+#[derive(Debug, Default)]
+pub struct CancellationToken {
+    cancelled: AtomicBool,
+}
+
+/// wave-62 T0（纯类型面）：`DispatchContext` 派生 `PartialEq/Eq` 需要该 impl。
+/// 语义说明：取消令牌是运行时**句柄**，不参与「事实」比较；故按**指针身份**比较
+/// （同一 `Arc` 克隆体相等），保持 Eq 的自反/对称/传递三律，不引入新的取消语义。
+impl PartialEq for CancellationToken {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Eq for CancellationToken {}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn check(&self) -> Result<(), String> {
+        if self.is_cancelled() {
+            Err("tool invocation cancelled".to_string())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Tunable budget limits for governed dispatch. A value of `0` means "unlimited" for the
+/// corresponding numeric limit (except `max_composite_depth`, where `0` disables child
+/// dispatch entirely).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispatchBudgetConfig {
+    /// Maximum number of child invocations allowed under one top-level invocation.
+    pub max_composite_calls: u64,
+    /// Maximum number of concurrently executing children (`0` = unlimited).
+    pub max_concurrency: u64,
+    /// Maximum composite nesting depth (`0` = no children allowed).
+    pub max_composite_depth: u32,
+    /// Global output-byte cap for an invocation. `0` falls back to the descriptor
+    /// execution-policy `result_budget_bytes`.
+    pub max_result_bytes: u64,
+    /// Default time-to-live for persisted control requests, in milliseconds.
+    pub control_request_expiry_ms: u64,
+    /// Legacy-compatibility mode: ignore the descriptor's output-byte and deadline budgets and
+    /// run every invocation unbounded (no `output_budget_exceeded`, no `deadline exceeded`).
+    /// Used by `build_governed_executor` so the runtime switch reproduces the legacy
+    /// `ToolRouter`'s absence of tool-level byte/deadline caps (phase-4..7 review P1-2), instead
+    /// of silently regressing large reads/batches.
+    pub unbounded_output_and_deadline: bool,
+}
+
+impl Default for DispatchBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_composite_calls: 24,
+            max_concurrency: 0,
+            max_composite_depth: 4,
+            max_result_bytes: 0,
+            control_request_expiry_ms: 60_000,
+            unbounded_output_and_deadline: false,
+        }
+    }
+}
+
+/// Atomically reserved budget ledger shared by one top-level invocation and every child that
+/// runs underneath it.
+#[derive(Debug)]
+pub struct BudgetLedger {
+    max_calls: u64,
+    calls_reserved: AtomicU64,
+    max_concurrency: u64,
+    concurrency_active: AtomicU64,
+    max_bytes: u64,
+    bytes_reserved: AtomicU64,
+    start_ms: u64,
+    max_duration_ms: u64,
+}
+
+impl BudgetLedger {
+    pub fn new(
+        max_calls: u64,
+        max_concurrency: u64,
+        max_bytes: u64,
+        start_ms: u64,
+        max_duration_ms: u64,
+    ) -> Self {
+        Self {
+            max_calls,
+            calls_reserved: AtomicU64::new(0),
+            max_concurrency,
+            concurrency_active: AtomicU64::new(0),
+            max_bytes,
+            bytes_reserved: AtomicU64::new(0),
+            start_ms,
+            max_duration_ms,
+        }
+    }
+
+    /// Atomically reserve one call slot. Fails closed when the call budget is exhausted.
+    pub fn reserve_call(&self) -> Result<(), String> {
+        if self.max_calls == 0 {
+            return Ok(());
+        }
+        let current = self.calls_reserved.fetch_add(1, Ordering::Relaxed);
+        if current >= self.max_calls {
+            self.calls_reserved.fetch_sub(1, Ordering::Relaxed);
+            return Err(format!("call budget exhausted (max {})", self.max_calls));
+        }
+        Ok(())
+    }
+
+    /// Atomically acquire a concurrency slot. The returned guard releases the slot on drop, so
+    /// a panicking handler cannot leak the reservation.
+    pub fn begin_execution(self: &Arc<Self>) -> Result<ConcurrencyGuard, String> {
+        if self.max_concurrency != 0 {
+            let current = self.concurrency_active.fetch_add(1, Ordering::Relaxed);
+            if current >= self.max_concurrency {
+                self.concurrency_active.fetch_sub(1, Ordering::Relaxed);
+                return Err(format!(
+                    "concurrency budget exhausted (max {})",
+                    self.max_concurrency
+                ));
+            }
+            return Ok(ConcurrencyGuard {
+                ledger: Arc::clone(self),
+                active: true,
+            });
+        }
+        Ok(ConcurrencyGuard {
+            ledger: Arc::clone(self),
+            active: false,
+        })
+    }
+
+    fn release_concurrency(&self) {
+        self.concurrency_active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Atomically reserve `bytes` of output budget. Fails closed when the byte budget is
+    /// exhausted.
+    pub fn reserve_bytes(&self, bytes: u64) -> Result<(), String> {
+        if self.max_bytes == 0 {
+            return Ok(());
+        }
+        let current = self.bytes_reserved.fetch_add(bytes, Ordering::Relaxed);
+        if current.saturating_add(bytes) > self.max_bytes {
+            self.bytes_reserved.fetch_sub(bytes, Ordering::Relaxed);
+            return Err(format!(
+                "output budget exhausted (max {} bytes, tried to add {bytes})",
+                self.max_bytes
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fails closed once `now_ms` passes the invocation deadline.
+    pub fn check_deadline(&self, now_ms: u64) -> Result<(), String> {
+        if self.max_duration_ms == 0 {
+            return Ok(());
+        }
+        let deadline = self.start_ms.saturating_add(self.max_duration_ms);
+        if now_ms > deadline {
+            Err(format!(
+                "deadline exceeded at {} ms (started at {}, budget {} ms)",
+                now_ms, self.start_ms, self.max_duration_ms
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn deadline_absolute_ms(&self) -> u64 {
+        self.start_ms.saturating_add(self.max_duration_ms)
+    }
+
+    /// Remaining time until the deadline, or `None` when the invocation has no duration limit.
+    pub fn remaining_deadline_ms(&self, now_ms: u64) -> Option<u64> {
+        if self.max_duration_ms == 0 {
+            return None;
+        }
+        Some(self.deadline_absolute_ms().saturating_sub(now_ms))
+    }
+
+    pub fn calls_reserved(&self) -> u64 {
+        self.calls_reserved.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes_reserved(&self) -> u64 {
+        self.bytes_reserved.load(Ordering::Relaxed)
+    }
+}
+
+/// RAII guard that releases a concurrency slot when dropped.
+#[derive(Debug)]
+pub struct ConcurrencyGuard {
+    ledger: Arc<BudgetLedger>,
+    active: bool,
+}
+
+impl Drop for ConcurrencyGuard {
+    fn drop(&mut self) {
+        // Only decrement when a slot was actually acquired. With `max_concurrency == 0`
+        // (unlimited) `begin_execution` returns a non-counting guard and release must be a no-op,
+        // otherwise the shared counter underflows to `u64::MAX` (phase-3 review P3).
+        if self.active {
+            self.ledger.release_concurrency();
+        }
+    }
+}
+
+/// 模型定价矩阵（每百万 Token 的 USD 价格）。
+///
+/// **唯一真源说明（Wave-5 FIX-3）**：单价与计价公式的真源在
+/// [`crate::agent::cost`]（`cost::ModelPricing` / `cost::calculate_cost_with_protocol`）。
+/// 本结构保留**仅为兼容既有预算 DTO 的字段命名**（`*_per_million_usd`），
+/// 通过 [`From`] 转换后委托 `cost` 计算 —— 不再是第二份价格真源。
+///
+/// 同时**已删除**原先编造的 `Default` 实现（`$3 / $15 / $0.75`）：未知单价必须显式给出，
+/// 禁止任何「兜底价」默认值（与契约 K1「未知模型 ⇒ None、宁缺勿错」一致）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelPricing {
+    pub input_per_million_usd: f64,
+    pub output_per_million_usd: f64,
+    pub cached_input_per_million_usd: f64,
+}
+
+impl From<&ModelPricing> for crate::cost::ModelPricing {
+    /// 适配到 `cost` 的唯一真源结构（字段命名不同，语义一一对应）。
+    fn from(value: &ModelPricing) -> Self {
+        Self {
+            input_per_mtok: value.input_per_million_usd,
+            output_per_mtok: value.output_per_million_usd,
+            cache_read_per_mtok: value.cached_input_per_million_usd,
+        }
+    }
+}
+
+/// 会话成本与用量摘要。
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct CostSummary {
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub currency: &'static str,
+}
+
+/// 生产级成本追踪与硬预算熔断器（A16 闭环）。
+#[derive(Debug, Clone)]
+pub struct CostTracker {
+    pub max_budget_usd: Option<f64>,
+    pub summary: CostSummary,
+    budget_exceeded: bool,
+}
+
+impl CostTracker {
+    pub fn new(max_budget_usd: Option<f64>) -> Self {
+        Self {
+            max_budget_usd,
+            summary: CostSummary {
+                currency: "USD",
+                ..Default::default()
+            },
+            budget_exceeded: false,
+        }
+    }
+
+    /// 记录单次回合的 Token 用量，更新累计金额并在超限时触发熔断。
+    ///
+    /// B027 口径（契约 `C1`–`C4`）：
+    /// - 未缓存输入取自 [`crate::cost::normalized_uncached_input_tokens`]（单一真值，协议归一）；
+    /// - 计价委托 [`crate::cost::calculate_cost_with_protocol`]（协议感知，禁止固定 OpenAI）；
+    /// - `total_tokens = uncached + cached + output`，保证
+    ///   `total_tokens == total_input_tokens + total_cached_tokens + total_output_tokens`（C4 自洽）。
+    ///
+    /// 顺序不变：**先累加四项与成本，再判预算**（保证熔断时台账仍是完整事实）。
+    pub fn record_usage(
+        &mut self,
+        _model: &str,
+        pricing: &ModelPricing,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        protocol: crate::cost::ProviderCostProtocol,
+    ) -> Result<f64, String> {
+        let uncached_input = crate::cost::normalized_uncached_input_tokens(
+            input_tokens,
+            Some(cached_tokens),
+            protocol,
+        );
+        // FIX-3 / B027：计价委托 `cost` 唯一真源（含 6 位小数取整与非法值 None 语义），此处不再二次实现公式。
+        let estimate = crate::cost::calculate_cost_with_protocol(
+            &crate::cost::ModelPricing::from(pricing),
+            input_tokens,
+            output_tokens,
+            Some(cached_tokens),
+            protocol,
+        )
+        .ok_or_else(|| "invalid_pricing: 单价矩阵非法（NaN/Inf/负值），拒绝计入成本".to_string())?;
+        let call_cost = estimate.total_cost_usd;
+
+        self.summary.total_input_tokens += uncached_input;
+        self.summary.total_cached_tokens += cached_tokens;
+        self.summary.total_output_tokens += output_tokens;
+        // B027 C4：total 必须与三项分项同源（`input + output` 会漏缓存且与分项不同源）。
+        self.summary.total_tokens += uncached_input + cached_tokens + output_tokens;
+        self.summary.total_cost_usd += call_cost;
+
+        if let Some(limit) = self.max_budget_usd {
+            if self.summary.total_cost_usd > limit {
+                self.budget_exceeded = true;
+                return Err(format!(
+                    "budget_exceeded: session cost ${:.4} exceeds budget limit ${:.4}",
+                    self.summary.total_cost_usd, limit
+                ));
+            }
+        }
+
+        Ok(call_cost)
+    }
+
+    pub fn is_budget_exceeded(&self) -> bool {
+        self.budget_exceeded
+    }
+
+    pub fn summary(&self) -> CostSummary {
+        self.summary.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_token_checks_after_cancel() {
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+        assert!(token.check().is_ok());
+        token.cancel();
+        assert!(token.is_cancelled());
+        assert!(token.check().is_err());
+    }
+
+    #[test]
+    fn call_budget_exhaustion_is_atomic_and_fail_closed() {
+        let ledger = Arc::new(BudgetLedger::new(2, 0, 0, 100, 0));
+        assert!(ledger.reserve_call().is_ok());
+        assert!(ledger.reserve_call().is_ok());
+        assert!(ledger.reserve_call().is_err());
+        assert_eq!(ledger.calls_reserved(), 2);
+    }
+
+    #[test]
+    fn concurrency_guard_releases_on_drop() {
+        let ledger = Arc::new(BudgetLedger::new(0, 1, 0, 100, 0));
+        {
+            let _guard = ledger.begin_execution().expect("first slot is free");
+            assert!(ledger.begin_execution().is_err());
+        }
+        // The guard dropped, so a new execution can acquire the slot.
+        assert!(ledger.begin_execution().is_ok());
+    }
+
+    #[test]
+    fn byte_and_deadline_budgets_fail_closed() {
+        let ledger = BudgetLedger::new(0, 0, 10, 100, 50);
+        assert!(ledger.reserve_bytes(6).is_ok());
+        assert!(ledger.reserve_bytes(4).is_ok());
+        assert!(ledger.reserve_bytes(1).is_err());
+        assert!(ledger.check_deadline(149).is_ok());
+        assert!(ledger.check_deadline(151).is_err());
+        assert_eq!(ledger.remaining_deadline_ms(120), Some(30));
+    }
+}
