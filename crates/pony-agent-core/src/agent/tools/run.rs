@@ -30,17 +30,20 @@ pub(super) const PROMOTE_KILL_AFTER_GRACE_MS: u64 = 1_000;
 
 pub(super) const TOOL_TIMEOUT_RETRY_MAX_ATTEMPTS: u32 = 2;
 
+/// 面向用户的中文描述（schema 已强制模型提供）：promote 成后台作业时透传，
+/// 让 TUI Jobs 页签展示「这段命令在干什么」而不是原始 shell 文本。空串/纯空白按「无描述」。
+fn job_description_from_arguments(arguments: &Value) -> Option<String> {
+    arguments
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
 impl ToolRouter {
     pub(super) fn run_command(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
-        // 面向用户的中文描述（schema 已强制模型提供）：promote 成后台作业时透传，
-        // 让 TUI Jobs 页签展示「这段命令在干什么」而不是原始 shell 文本。
-        let job_description = call
-            .arguments
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string);
+        let job_description = job_description_from_arguments(&call.arguments);
         let Some(command) = call.arguments.get("command").and_then(Value::as_str) else {
             return error_result(
                 TOOL_WORKSPACE_RUN_COMMAND,
