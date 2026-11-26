@@ -18,7 +18,7 @@ use windows_sys::Win32::System::JobObjects::{
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct FailureInjection {
+pub struct FailureInjection {
     pub create: bool,
     pub configure: bool,
     pub assign: bool,
