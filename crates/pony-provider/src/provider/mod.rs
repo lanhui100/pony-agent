@@ -5415,7 +5415,7 @@ fn decide_scoped_retry_next_delay(
     mode: crate::retry::RetryMode,
     err: &str,
     failure: &crate::retry::FailureKind,
-    ctx: ScopedRetryDecisionCtx<'_>,
+    ctx: &mut ScopedRetryDecisionCtx<'_>,
 ) -> Option<u64> {
     let use_rate_limit =
         scope == ProviderRetryScope::Followup && failure.is_retryable() && is_rate_limit_error(err);
@@ -5616,7 +5616,7 @@ where
                     mode,
                     &err,
                     &failure,
-                    ScopedRetryDecisionCtx {
+                    &mut ScopedRetryDecisionCtx {
                         attempts_total,
                         budget: &mut budget,
                         active_config: &mut active_config,
