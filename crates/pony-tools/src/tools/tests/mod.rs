@@ -72,14 +72,17 @@ fn serve_timeout_http_response(delay_ms: u64) -> String {
     let address = listener.local_addr().expect("read test server addr");
 
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept test request");
-        let mut buffer = [0_u8; 4096];
-        let _ = stream.read(&mut buffer);
-        thread::sleep(Duration::from_millis(delay_ms));
-        let _ = stream.write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 7\r\nConnection: close\r\n\r\ntimeout",
-        );
-        let _ = stream.flush();
+        for mut stream in listener.incoming().flatten().take(8) {
+            thread::spawn(move || {
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer);
+                thread::sleep(Duration::from_millis(delay_ms));
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 7\r\nConnection: close\r\n\r\ntimeout",
+                );
+                let _ = stream.flush();
+            });
+        }
     });
 
     format!("http://{}", address)

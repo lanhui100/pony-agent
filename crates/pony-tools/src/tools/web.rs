@@ -208,7 +208,7 @@ impl ToolRouter {
             timeout_ms.max(WEB_FETCH_TOTAL_DEADLINE_MS),
             |_deadline| {
                 let request = client
-                    .post("https://api.exa.ai/search")
+                    .post(exa_search_url())
                     .header("x-api-key", &api_key)
                     .header("Content-Type", "application/json");
                 // Wave-4 C3：工具出网在活跃 turn 内级联 traceparent（无活跃 turn 时零改动）。
@@ -971,4 +971,15 @@ pub(super) fn web_access_deny_message(reason: &WebAccessDenyReason) -> String {
             format!("重定向次数超过上限 {limit}。")
         }
     }
+}
+
+fn exa_search_url() -> String {
+    #[cfg(test)]
+    if let Ok(base) = std::env::var("EXA_API_BASE_URL") {
+        let trimmed = base.trim();
+        if !trimmed.is_empty() {
+            return format!("{}/search", trimmed.trim_end_matches('/'));
+        }
+    }
+    "https://api.exa.ai/search".to_string()
 }
