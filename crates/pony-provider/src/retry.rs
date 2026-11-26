@@ -272,6 +272,13 @@ pub struct RetryAfter {
     pub seconds: Option<u64>,
 }
 
+/// B1795488338167：上游恢复窗口的**单次等待封顶**（10 分钟）。
+///
+/// 上游可回任意秒数（含异常头），不封顶等于把取消通道之外的 wall-clock 交给上游；
+/// 10min 覆盖分钟级 TPM/5h 窗口的常见子集，同时保证单次 sleep 不会把一轮拖到不可控。
+/// 注意这是**等待**上限，不是预算上限：窗口本身超过剩余预算时直接快速失败（见 `decide`）。
+pub const RETRY_AFTER_WINDOW_MAX_MS: u64 = 10 * 60 * 1_000;
+
 impl RetryAfter {
     pub fn parse(header_value: &str) -> Self {
         if let Ok(secs) = header_value.trim().parse::<u64>() {
@@ -292,6 +299,24 @@ impl RetryAfter {
         }
         Some(backoff_delay_ms.max(ra_ms).min(remaining_budget_ms))
     }
+
+    /// B1795488338167：上游声明的恢复窗口（毫秒）。`Some(0)` = 上游明确说「立刻可重试」。
+    pub fn window_ms(&self) -> Option<u64> {
+        self.seconds.map(|secs| secs.saturating_mul(1_000))
+    }
+}
+
+/// B1795488338167：从错误文本提取上游声明的恢复窗口（`Retry-After` 结构化后缀的
+/// **唯一**解析点 [`parse_retry_after_marker`] 的调度侧包装）。
+///
+/// 存在的理由：HTTP 出口早已把 `Retry-After` 折叠成 `retry_after=` 后缀，但重试调度
+/// 三处 `decide` 调用**恒传 `None`**，导致退避曲线与上游窗口完全脱钩——上游说 90s
+/// 后恢复，调度仍按 0.5/1/2/4s 短退避硬撞（必然再失败），或按固定 20s→40s 长退避
+/// 白睡两轮。本函数是让调度侧看见窗口的最小接缝（不新增关键词表、不改错误文案）。
+pub fn retry_after_from_error(err: &str) -> Option<RetryAfter> {
+    parse_retry_after_marker(err).map(|seconds| RetryAfter {
+        seconds: Some(seconds),
+    })
 }
 
 /// Stage2（task-5 R1/R2.4/R3.1）：关键词表收编为注册表单一来源。
@@ -787,13 +812,23 @@ impl ProviderRetryPolicy {
         // P1-4：`Always` 档位无视「次数上限 + 预算耗尽」两个闸门（dsh `always` 语义），
         // 流安全与不可重试错误已在上面两道判据拦下。退避仍按既有曲线封顶（max_delay_ms），
         // 退避 sleep 本身仍受调用方 deadline（`DeadlineSleeper`）截断 ⇒ 不新增无界等待面。
+        //
+        // B1795488338167：上游声明的恢复窗口（`Retry-After`）在此**抬高**本地曲线——
+        // `always` 的本意是「等到成功」，按 8s 封顶去撞 90s 窗口只是把同一次失败重复多遍。
+        // m1（评审复核）：窗口只能抬高不能压低（与 `Normal` 分支同一口径），否则上游回
+        // `Retry-After: 1` 会把已到 20s/40s 的 RL 曲线压回 1s，反而更频繁撞同一窗口。
         if self.mode == RetryMode::Always {
             let base_delay = compute_delay(attempt, &self.config, 0.5);
-            return RetryDecision::Retry {
-                delay_ms: u64::try_from(base_delay.as_millis())
-                    .unwrap_or(u64::MAX)
-                    .min(self.config.max_delay_ms),
+            let base_delay_ms = u64::try_from(base_delay.as_millis())
+                .unwrap_or(u64::MAX)
+                .min(self.config.max_delay_ms);
+            let delay_ms = match retry_after.and_then(RetryAfter::window_ms) {
+                Some(window) if window > 0 => {
+                    window.max(base_delay_ms).min(RETRY_AFTER_WINDOW_MAX_MS)
+                }
+                _ => base_delay_ms,
             };
+            return RetryDecision::Retry { delay_ms };
         }
         if budget.is_exhausted() {
             return RetryDecision::Escalate {
@@ -801,18 +836,42 @@ impl ProviderRetryPolicy {
             };
         }
         let base_delay = compute_delay(attempt, &self.config, 0.5);
-        let delay = if let Some(ra) = retry_after {
-            let remaining = self
-                .config
-                .total_budget_ms
-                .saturating_sub(budget.elapsed_ms);
-            ra.effective_delay(base_delay.as_millis() as u64, remaining)
-                .unwrap_or(base_delay.as_millis() as u64)
-        } else {
-            base_delay.as_millis() as u64
-        };
+        let base_delay_ms = u64::try_from(base_delay.as_millis()).unwrap_or(u64::MAX);
+        let remaining = self
+            .config
+            .total_budget_ms
+            .saturating_sub(budget.elapsed_ms);
+        // B1795488338167：窗口 > 剩余预算 ⇒ **快速失败**。旧行为是 `effective_delay`
+        // 返回 `None` 后回落短退避（0.5/1/2/4s），必然再撞同一窗口；把「等不到」显式
+        // 说清楚，由 provider 冷却（`enter_cooldown` 已按同一窗口登记）与换手接管。
+        //
+        // M1（评审复核）：**先用未截断的 `raw_window` 判生死**。旧实现先
+        // `.min(RETRY_AFTER_WINDOW_MAX_MS)` 再比较，`budget=700s + Retry-After=900s` 会被
+        // 截成 600s 后「装得下」⇒ sleep 600s 提前 300s 撞同一窗口，且 Abort 诊断值被污染
+        // （把 3600s 报成 600s）。截断语义收敛为：`Normal` 超封顶即快败、`Always` 封顶单次 sleep。
+        if let Some(raw_window) = retry_after.and_then(RetryAfter::window_ms) {
+            if raw_window > 0 {
+                if raw_window > RETRY_AFTER_WINDOW_MAX_MS {
+                    return RetryDecision::Abort {
+                        reason: format!(
+                            "upstream retry window {raw_window}ms exceeds single-wait cap {RETRY_AFTER_WINDOW_MAX_MS}ms"
+                        ),
+                    };
+                }
+                if raw_window > remaining {
+                    return RetryDecision::Abort {
+                        reason: format!(
+                            "upstream retry window {raw_window}ms exceeds remaining retry budget {remaining}ms"
+                        ),
+                    };
+                }
+                return RetryDecision::Retry {
+                    delay_ms: raw_window.max(base_delay_ms).min(remaining),
+                };
+            }
+        }
         RetryDecision::Retry {
-            delay_ms: delay.min(self.config.max_delay_ms),
+            delay_ms: base_delay_ms.min(self.config.max_delay_ms),
         }
     }
 
@@ -933,20 +992,95 @@ pub fn is_auth_error(error: &str) -> bool {
 ///
 /// 重试编排见此标记立即 Abort（**全 scope**：Decision 与 Followup 都不 sleep、不再发 HTTP），
 /// 这是「冷却期 0 次 HTTP」在编排层的唯一判据（不依赖错误分类，避免把正常限流重试误伤）。
+///
+/// 标记值区分**来源**（[`CooldownMarkerSource`]）：`entered` = 本轮真的收到过上游响应并登记
+/// 冷却；`short_circuit` = 发送前即被冷却短路（本轮 0 次 HTTP）。B1795506800001 的
+/// 「短窗口 429 是否值得在预算内等过冷却」只对 `entered` 开放——`short_circuit` 若也放行，
+/// 冷却期内会反复排队重试，破坏「冷却期 0 次 HTTP」。
 pub const COOLDOWN_ACTIVE_MARKER: &str = "provider_cooldown_active=";
 
-/// L3-B ADVISORY：给错误文本追加冷却标记（幂等）。
-pub fn append_cooldown_active_marker(err: &str) -> String {
-    if err.contains(COOLDOWN_ACTIVE_MARKER) {
+/// 冷却标记的来源（写入错误文本头部段的结构化值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CooldownMarkerSource {
+    /// HTTP 出口登记冷却后打标：本轮确实收到过上游响应（含 429 与 `Retry-After`）。
+    Entered,
+    /// `ensure_not_cooling` 发送前短路打标：本轮 0 次 HTTP。
+    ShortCircuit,
+}
+
+impl CooldownMarkerSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Entered => "entered",
+            Self::ShortCircuit => "short_circuit",
+        }
+    }
+}
+
+/// L3-B ADVISORY：给错误文本追加冷却标记（幂等，**落在头部段**）。
+///
+/// L3-B BLOCKING（B1795506800001 复核）：标记必须落在 `；响应正文` **之前**且判定只读头部段。
+/// 旧实现拼在字符串尾部 + `is_cooldown_active_error` 扫全文，上游正文里出现该字样就能
+/// 触发全 scope 短路——与 [`append_retry_after_marker`] 的「正文不可劫持」口径相悖。
+pub fn append_cooldown_marker(err: &str, source: CooldownMarkerSource) -> String {
+    // 幂等只看头部段：正文里同名 token 不得短路权威来源的写入。
+    if cooldown_marker_source(err).is_some() {
         return err.to_string();
     }
-    format!("{err}；{COOLDOWN_ACTIVE_MARKER}true")
+    let marker = format!("{COOLDOWN_ACTIVE_MARKER}{}", source.as_str());
+    match err.find("响应正文") {
+        Some(index) => {
+            let (head, body) = err.split_at(index);
+            format!("{}；{marker}；{body}", head.trim_end_matches('；'))
+        }
+        None => format!("{err}；{marker}"),
+    }
+}
+
+/// 既有调用面（4 个 HTTP 出口）：登记冷却后打标 ⇒ 来源恒为 [`CooldownMarkerSource::Entered`]。
+pub fn append_cooldown_active_marker(err: &str) -> String {
+    append_cooldown_marker(err, CooldownMarkerSource::Entered)
+}
+
+/// 解析冷却标记的来源（**只读头部段**，唯一解析点）。
+pub fn cooldown_marker_source(err: &str) -> Option<CooldownMarkerSource> {
+    let head = error_head_segment(err);
+    let index = head.find(COOLDOWN_ACTIVE_MARKER)?;
+    let value = &head[index + COOLDOWN_ACTIVE_MARKER.len()..];
+    if value.starts_with(CooldownMarkerSource::ShortCircuit.as_str()) {
+        Some(CooldownMarkerSource::ShortCircuit)
+    } else {
+        // `entered` 与历史文本（标记值为 `true`）语义相同：已登记冷却。
+        Some(CooldownMarkerSource::Entered)
+    }
 }
 
 /// L3-B ADVISORY：该错误是否表示「provider 已进入/处于冷却期」。
 pub fn is_cooldown_active_error(err: &str) -> bool {
-    err.contains(COOLDOWN_ACTIVE_MARKER)
+    cooldown_marker_source(err).is_some()
 }
+
+/// B1795506800001：该错误是否为「发送前冷却短路」（本轮 0 次 HTTP）。
+pub fn is_cooldown_short_circuit_error(err: &str) -> bool {
+    cooldown_marker_source(err) == Some(CooldownMarkerSource::ShortCircuit)
+}
+
+/// B1795506800001：Followup 作用域允许「在预算内等过冷却期」的**显式短窗口**上限（30s）。
+///
+/// 严格小于默认冷却窗口 60s：只有「上游明确说 30s 内恢复」才值得等，更长的窗口交给
+/// 冷却 + 换手，避免单跳不可取消阻塞。`Retry-After` 缺失或超此上限一律维持既有
+/// 「冷却短路即 Abort」语义。
+pub const SHORT_429_WAIT_MAX_MS: u64 = 30_000;
+
+/// B1795506800001：短窗口等待后越过冷却登记的计时抖动余量（ms）。
+///
+/// 冷却 `until_unix_ms` 与本轮 sleep 都基于毫秒时钟，但 `enter_cooldown` 的登记发生在
+/// 收到响应时、sleep 起点在其后：多等 250ms 保证醒来时注册表里的窗口**确已过期**，
+/// 从而不需要给 `ensure_not_cooling` 开后门（冷却期内仍严格 0 次 HTTP）。
+pub const COOLDOWN_EXPIRY_SLACK_MS: u64 = 250;
+
+/// B1795506800001：短窗口 429 在同一跳内的等待次数上限（防止「无限等 429」）。
+pub const SHORT_429_MAX_WAITS: u32 = 2;
 
 /// C4：错误文本 → 审计可判的 `error_class`（`turn_flow` 失败事件消费）。
 ///
@@ -1201,7 +1335,18 @@ where
                         label, attempt, policy.config.max_retries, err, failure
                     );
                 }
-                let decision = policy.decide(&failure, &budget, attempt, None, stream_state);
+                // N2（评审复核）：`decide` 的 `attempt` 是 **1-based 的下一次尝试序号**
+                // （`compute_delay(0)` 恒为 ZERO）。循环内 `attempt` 0-based，故 +1 统一口径
+                // ——与 `provider::retry_provider_scoped_with_report_config` 的调用点一致。
+                // 本函数不消费 `RetryDecision::Retry.delay_ms`（退避在循环顶部按 `attempt`
+                // 自算），故该修正不改任何 sleep 数值，只让判决面口径唯一。
+                let decision = policy.decide(
+                    &failure,
+                    &budget,
+                    attempt.saturating_add(1),
+                    None,
+                    stream_state,
+                );
                 match &decision {
                     RetryDecision::Retry { .. } => {
                         last_decision = decision;
@@ -1421,19 +1566,18 @@ impl RetryNotifier {
     }
 
     /// 派发一次通知（未安装观察者 ⇒ no-op）。`attempt` = 已失败次数（1 起）。
-    pub fn notify(
-        &self,
-        attempt: u32,
-        config: &BackoffConfig,
-        last_error: &str,
-        next_attempt: u32,
-    ) {
+    ///
+    /// M3（评审复核）：`delay_ms` 由调用方传入**判决结果**（`RetryDecision::Retry` 的
+    /// `delay_ms`），不在此自算 `compute_delay`。缺陷现场：上游 `Retry-After: 90` 时
+    /// 实际 sleep 90s，而事件上报 `compute_delay(1) = 500ms` —— `llm/retry` 与会话时间轴
+    /// 从此对不上，事后复盘退避行为只能退回读 `provider_log` 文本。
+    pub fn notify(&self, attempt: u32, config: &BackoffConfig, last_error: &str, delay_ms: u64) {
         notify_provider_retry(&RetryNotice {
             label: self.label.clone(),
             scope: self.scope,
             attempt,
             max_attempts: config.max_retries.saturating_add(1),
-            delay_ms: compute_delay(next_attempt, config, 0.5).as_millis() as u64,
+            delay_ms,
             error_class: classify_error_class(last_error).to_string(),
         });
     }
@@ -2769,3 +2913,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "retry_window_tests.rs"]
+mod retry_window_tests;
