@@ -2768,5 +2768,8 @@
         );
     }
 
+    #[path = "tests_retry_window.rs"]
+    mod tests_retry_window;
+
     #[path = "tests_streaming_wire.rs"]
     mod tests_streaming_wire;

@@ -863,6 +863,59 @@ Some trailing text"#;
         assert!(tokens > 16, "工具往返必须计入 transcript 压力: {tokens}");
     }
 
+    /// B1795506800002：`reasoning_content` 与 `tool_calls` 必须计入同一条消息的估算。
+    ///
+    /// 缺陷现场：旧实现只算 `content`，而 DeepSeek 等推理模型的思考正文可达正文同量级、
+    /// 一个 patch 类工具调用的参数 JSON 上万字符 —— 漏算让预算裁剪与压缩阈值系统性低估，
+    /// 是「token 预算看着没超、实际请求体已 300KB+」的成因之一。
+    #[test]
+    fn test_estimate_native_message_tokens_counts_reasoning_and_tool_calls() {
+        let content_only = serde_json::json!({
+            "role": "assistant",
+            "content": "x".repeat(4_000),
+        });
+        let base = estimate_native_message_tokens(&content_only);
+
+        // 同 content + 4k 字符思考正文 ⇒ 至少多 1000 token（chars/4 口径）。
+        let with_reasoning = serde_json::json!({
+            "role": "assistant",
+            "content": "x".repeat(4_000),
+            "reasoning_content": "r".repeat(4_000),
+        });
+        let with_reasoning_tokens = estimate_native_message_tokens(&with_reasoning);
+        assert!(
+            with_reasoning_tokens >= base + 1_000,
+            "reasoning_content 必须计入估算：base={base} with_reasoning={with_reasoning_tokens}"
+        );
+
+        // 同 content + 一个参数 JSON 很大的工具调用 ⇒ 必须显著抬高。
+        let with_tool_calls = serde_json::json!({
+            "role": "assistant",
+            "content": "x".repeat(4_000),
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "workspace.write_file",
+                    "arguments": serde_json::json!({ "content": "y".repeat(4_000) }).to_string(),
+                }
+            }],
+        });
+        let with_tool_calls_tokens = estimate_native_message_tokens(&with_tool_calls);
+        assert!(
+            with_tool_calls_tokens >= base + 1_000,
+            "tool_calls 参数 JSON 必须计入估算：base={base} with_tool_calls={with_tool_calls_tokens}"
+        );
+
+        // 无这些字段的消息估算必须逐字不变（既有预算断言不得漂移）。
+        let plain = serde_json::json!({ "role": "user", "content": "hello world" });
+        assert_eq!(
+            estimate_native_message_tokens(&plain),
+            4 + estimate_text_tokens("hello world"),
+            "不含 reasoning/tool_calls 的消息必须保持原口径"
+        );
+    }
+
     #[test]
     fn test_derive_squash_base_seq_follows_retained_suffix() {
         let folded = vec![
