@@ -11254,7 +11254,7 @@
     },
     "darwin": {
       "toolchain": "rustc 1.91.1 (ed61e7d7e 2025-11-07) / clippy 0.1.91 (ed61e7d7e2 2025-11-07)",
-      "generated_at": "2026-11-18T01:38:30.282Z",
+      "generated_at": "2026-11-26T04:52:01.186Z",
       "lints_sha256": "0a03b8cf4f934595f7083e327b27f9460e48c0c616f77b08e86afdfccb805913",
       "entries": [
         {
@@ -11346,6 +11346,11 @@
           "lint": "clippy::allow_attributes",
           "path": "crates/pony-observability/src/usage_ledger.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::allow_attributes",
+          "path": "crates/pony-protocol/src/provider_types.rs",
+          "count": 1
         },
         {
           "lint": "clippy::allow_attributes",
@@ -11526,6 +11531,11 @@
           "lint": "clippy::allow_attributes_without_reason",
           "path": "crates/pony-observability/src/usage_ledger.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::allow_attributes_without_reason",
+          "path": "crates/pony-protocol/src/provider_types.rs",
+          "count": 1
         },
         {
           "lint": "clippy::allow_attributes_without_reason",
@@ -11629,11 +11639,6 @@
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-acp/src/transport.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::as_conversions",
           "path": "crates/pony-agent-core/src/agent/context.rs",
           "count": 4
         },
@@ -11719,18 +11724,13 @@
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-agent-core/src/agent/tools/mod.rs",
-          "count": 2
-        },
-        {
-          "lint": "clippy::as_conversions",
           "path": "crates/pony-agent-core/src/agent/tools_orchestration.rs",
           "count": 3
         },
         {
           "lint": "clippy::as_conversions",
           "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
-          "count": 15
+          "count": 13
         },
         {
           "lint": "clippy::as_conversions",
@@ -11769,6 +11769,11 @@
         },
         {
           "lint": "clippy::as_conversions",
+          "path": "crates/pony-protocol/src/attempt_window.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::as_conversions",
           "path": "crates/pony-protocol/src/cost.rs",
           "count": 3
         },
@@ -11784,6 +11789,16 @@
         },
         {
           "lint": "clippy::as_conversions",
+          "path": "crates/pony-protocol/src/path_auth.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::as_conversions",
+          "path": "crates/pony-protocol/src/speed.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::as_conversions",
           "path": "crates/pony-protocol/src/spill.rs",
           "count": 9
         },
@@ -11791,6 +11806,26 @@
           "lint": "clippy::as_conversions",
           "path": "crates/pony-protocol/src/telemetry.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::as_conversions",
+          "path": "crates/pony-protocol/src/tool_contract/contract.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::as_conversions",
+          "path": "crates/pony-protocol/src/tool_contract/names.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::as_conversions",
+          "path": "crates/pony-protocol/src/turn_flow_registry.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::as_conversions",
+          "path": "crates/pony-protocol/src/workspace_types.rs",
+          "count": 1
         },
         {
           "lint": "clippy::as_conversions",
@@ -11820,7 +11855,7 @@
         {
           "lint": "clippy::as_conversions",
           "path": "crates/pony-provider/src/retry.rs",
-          "count": 20
+          "count": 19
         },
         {
           "lint": "clippy::as_conversions",
@@ -11959,11 +11994,6 @@
         },
         {
           "lint": "clippy::as_conversions",
-          "path": "crates/pony-tools/src/path_permission.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::as_conversions",
           "path": "crates/pony-tools/src/plugin_host/transport.rs",
           "count": 1
         },
@@ -11999,6 +12029,11 @@
         },
         {
           "lint": "clippy::as_conversions",
+          "path": "crates/pony-tools/src/tools/mod.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::as_conversions",
           "path": "crates/pony-tools/src/tools/run.rs",
           "count": 3
         },
@@ -12011,11 +12046,6 @@
           "lint": "clippy::as_conversions",
           "path": "crates/pony-tools/src/tools/workspace.rs",
           "count": 6
-        },
-        {
-          "lint": "clippy::as_conversions",
-          "path": "crates/pony-tools/src/workspace.rs",
-          "count": 1
         },
         {
           "lint": "clippy::as_conversions",
@@ -12046,6 +12076,11 @@
           "lint": "clippy::assigning_clones",
           "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
           "count": 4
+        },
+        {
+          "lint": "clippy::assigning_clones",
+          "path": "crates/pony-protocol/src/workspace_types.rs",
+          "count": 1
         },
         {
           "lint": "clippy::assigning_clones",
@@ -12111,11 +12146,6 @@
           "lint": "clippy::assigning_clones",
           "path": "crates/pony-tools/src/jobs.rs",
           "count": 2
-        },
-        {
-          "lint": "clippy::assigning_clones",
-          "path": "crates/pony-tools/src/workspace.rs",
-          "count": 1
         },
         {
           "lint": "clippy::bool_to_int_with_if",
@@ -12279,11 +12309,6 @@
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-agent-core/src/agent/tools/mod.rs",
-          "count": 2
-        },
-        {
-          "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-agent-core/src/agent/tools_orchestration.rs",
           "count": 1
         },
@@ -12309,12 +12334,37 @@
         },
         {
           "lint": "clippy::cast_possible_truncation",
+          "path": "crates/pony-protocol/src/attempt_window.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-protocol/src/metrics_snapshot.rs",
           "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
+          "path": "crates/pony-protocol/src/path_auth.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-protocol/src/spill.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::cast_possible_truncation",
+          "path": "crates/pony-protocol/src/tool_contract/contract.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::cast_possible_truncation",
+          "path": "crates/pony-protocol/src/tool_contract/names.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::cast_possible_truncation",
+          "path": "crates/pony-protocol/src/workspace_types.rs",
           "count": 1
         },
         {
@@ -12345,7 +12395,7 @@
         {
           "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-provider/src/retry.rs",
-          "count": 10
+          "count": 9
         },
         {
           "lint": "clippy::cast_possible_truncation",
@@ -12434,11 +12484,6 @@
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-tools/src/path_permission.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-tools/src/process.rs",
           "count": 1
         },
@@ -12459,6 +12504,11 @@
         },
         {
           "lint": "clippy::cast_possible_truncation",
+          "path": "crates/pony-tools/src/tools/mod.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-tools/src/tools/run.rs",
           "count": 1
         },
@@ -12474,18 +12524,8 @@
         },
         {
           "lint": "clippy::cast_possible_truncation",
-          "path": "crates/pony-tools/src/workspace.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-tools/src/workspace_hotloader.rs",
           "count": 3
-        },
-        {
-          "lint": "clippy::cast_possible_wrap",
-          "path": "crates/pony-acp/src/transport.rs",
-          "count": 1
         },
         {
           "lint": "clippy::cast_possible_wrap",
@@ -12574,11 +12614,6 @@
         },
         {
           "lint": "clippy::cast_precision_loss",
-          "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
-          "count": 2
-        },
-        {
-          "lint": "clippy::cast_precision_loss",
           "path": "crates/pony-observability/src/otel/mod.rs",
           "count": 8
         },
@@ -12591,6 +12626,11 @@
           "lint": "clippy::cast_precision_loss",
           "path": "crates/pony-protocol/src/metrics_snapshot.rs",
           "count": 4
+        },
+        {
+          "lint": "clippy::cast_precision_loss",
+          "path": "crates/pony-protocol/src/speed.rs",
+          "count": 2
         },
         {
           "lint": "clippy::cast_precision_loss",
@@ -12804,12 +12844,7 @@
         },
         {
           "lint": "clippy::derivable_impls",
-          "path": "crates/pony-provider/src/config.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::derivable_impls",
-          "path": "crates/pony-provider/src/provider/mod.rs",
+          "path": "crates/pony-protocol/src/provider_types.rs",
           "count": 1
         },
         {
@@ -12854,6 +12889,11 @@
         },
         {
           "lint": "clippy::doc_lazy_continuation",
+          "path": "crates/pony-protocol/src/workspace_types.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::doc_lazy_continuation",
           "path": "crates/pony-provider/src/provider/mod.rs",
           "count": 2
         },
@@ -12878,11 +12918,6 @@
           "count": 4
         },
         {
-          "lint": "clippy::doc_lazy_continuation",
-          "path": "crates/pony-tools/src/workspace.rs",
-          "count": 3
-        },
-        {
           "lint": "clippy::doc_link_with_quotes",
           "path": "crates/pony-tools/src/tools/exec.rs",
           "count": 1
@@ -12904,8 +12939,8 @@
         },
         {
           "lint": "clippy::empty_line_after_doc_comments",
-          "path": "crates/pony-agent-core/src/agent/tools/mod.rs",
-          "count": 6
+          "path": "crates/pony-protocol/src/turn_stream_types.rs",
+          "count": 1
         },
         {
           "lint": "clippy::empty_line_after_doc_comments",
@@ -12916,6 +12951,11 @@
           "lint": "clippy::empty_line_after_doc_comments",
           "path": "crates/pony-storage/src/sqlite_session_commit.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::empty_line_after_doc_comments",
+          "path": "crates/pony-tools/src/tools/mod.rs",
+          "count": 6
         },
         {
           "lint": "clippy::explicit_counter_loop",
@@ -13059,11 +13099,6 @@
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-agent-core/src/agent/tools/mod.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::fn_params_excessive_bools",
           "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
           "count": 3
         },
@@ -13094,6 +13129,11 @@
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
+          "path": "crates/pony-protocol/src/provider_types.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::fn_params_excessive_bools",
           "path": "crates/pony-protocol/src/spill.rs",
           "count": 1
         },
@@ -13109,8 +13149,18 @@
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
+          "path": "crates/pony-protocol/src/turn_flow_registry.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::fn_params_excessive_bools",
+          "path": "crates/pony-protocol/src/workspace_types.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::fn_params_excessive_bools",
           "path": "crates/pony-provider/src/provider/mod.rs",
-          "count": 3
+          "count": 2
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
@@ -13219,12 +13269,12 @@
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-tools/src/tools/run.rs",
+          "path": "crates/pony-tools/src/tools/mod.rs",
           "count": 1
         },
         {
           "lint": "clippy::fn_params_excessive_bools",
-          "path": "crates/pony-tools/src/workspace.rs",
+          "path": "crates/pony-tools/src/tools/run.rs",
           "count": 1
         },
         {
@@ -13245,11 +13295,6 @@
         {
           "lint": "clippy::format_push_string",
           "path": "crates/pony-agent-core/src/agent/orchestration.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::format_push_string",
-          "path": "crates/pony-provider/src/provider/fallback_body.rs",
           "count": 1
         },
         {
@@ -13363,6 +13408,26 @@
           "count": 1
         },
         {
+          "lint": "clippy::implicit_hasher",
+          "path": "crates/pony-storage/src/session/fold.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::implicit_hasher",
+          "path": "crates/pony-storage/src/session/fold_read_view.rs",
+          "count": 4
+        },
+        {
+          "lint": "clippy::implicit_hasher",
+          "path": "crates/pony-storage/src/session/history.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::implicit_hasher",
+          "path": "crates/pony-storage/src/session/startup_repair.rs",
+          "count": 1
+        },
+        {
           "lint": "clippy::implicit_saturating_sub",
           "path": "crates/pony-tools/src/jobs.rs",
           "count": 1
@@ -13414,7 +13479,12 @@
         },
         {
           "lint": "clippy::items_after_statements",
-          "path": "crates/pony-provider/src/provider/mod.rs",
+          "path": "crates/pony-protocol/src/dsml.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::items_after_statements",
+          "path": "crates/pony-protocol/src/tool_contract/contract.rs",
           "count": 1
         },
         {
@@ -13478,11 +13548,6 @@
           "count": 1
         },
         {
-          "lint": "clippy::let_and_return",
-          "path": "crates/pony-provider/src/provider/mod.rs",
-          "count": 1
-        },
-        {
           "lint": "clippy::let_unit_value",
           "path": "crates/pony-tools/src/process.rs",
           "count": 1
@@ -13525,11 +13590,6 @@
         {
           "lint": "clippy::manual_let_else",
           "path": "crates/pony-acp/src/session.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::manual_let_else",
-          "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
           "count": 1
         },
         {
@@ -13665,7 +13725,7 @@
         {
           "lint": "clippy::map_unwrap_or",
           "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
-          "count": 8
+          "count": 7
         },
         {
           "lint": "clippy::map_unwrap_or",
@@ -13781,6 +13841,16 @@
           "lint": "clippy::map_unwrap_or",
           "path": "crates/pony-protocol/src/hooks.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::map_unwrap_or",
+          "path": "crates/pony-protocol/src/tool_contract/contract.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::map_unwrap_or",
+          "path": "crates/pony-protocol/src/tool_contract/names.rs",
+          "count": 1
         },
         {
           "lint": "clippy::map_unwrap_or",
@@ -14041,6 +14111,16 @@
           "lint": "clippy::match_same_arms",
           "path": "crates/pony-protocol/src/telemetry.rs",
           "count": 1
+        },
+        {
+          "lint": "clippy::match_same_arms",
+          "path": "crates/pony-protocol/src/tool_contract/names.rs",
+          "count": 15
+        },
+        {
+          "lint": "clippy::match_same_arms",
+          "path": "crates/pony-protocol/src/tool_contract/schema.rs",
+          "count": 2
         },
         {
           "lint": "clippy::match_same_arms",
@@ -14389,6 +14469,16 @@
         },
         {
           "lint": "clippy::needless_pass_by_value",
+          "path": "crates/pony-protocol/src/tool_types.rs",
+          "count": 7
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "crates/pony-protocol/src/turn_flow_registry.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
           "path": "crates/pony-provider/src/config.rs",
           "count": 2
         },
@@ -14465,7 +14555,7 @@
         {
           "lint": "clippy::needless_pass_by_value",
           "path": "crates/pony-tools/src/jobs.rs",
-          "count": 3
+          "count": 2
         },
         {
           "lint": "clippy::needless_pass_by_value",
@@ -14519,11 +14609,6 @@
         },
         {
           "lint": "clippy::needless_pass_by_value",
-          "path": "crates/pony-tools/src/tools/exec.rs",
-          "count": 7
-        },
-        {
-          "lint": "clippy::needless_pass_by_value",
           "path": "crates/pony-tools/src/workspace_hotloader.rs",
           "count": 1
         },
@@ -14569,11 +14654,6 @@
         },
         {
           "lint": "clippy::new_without_default",
-          "path": "crates/pony-agent-core/src/agent/tools/mod.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::new_without_default",
           "path": "crates/pony-protocol/src/runtime_helper.rs",
           "count": 1
         },
@@ -14603,6 +14683,11 @@
           "count": 1
         },
         {
+          "lint": "clippy::new_without_default",
+          "path": "crates/pony-tools/src/tools/mod.rs",
+          "count": 1
+        },
+        {
           "lint": "clippy::only_used_in_recursion",
           "path": "crates/pony-agent-core/src/bin/conformance.rs",
           "count": 1
@@ -14624,12 +14709,12 @@
         },
         {
           "lint": "clippy::ptr_arg",
-          "path": "crates/pony-storage/src/session/bundle.rs",
+          "path": "crates/pony-protocol/src/workspace_types.rs",
           "count": 1
         },
         {
           "lint": "clippy::ptr_arg",
-          "path": "crates/pony-tools/src/workspace.rs",
+          "path": "crates/pony-storage/src/session/bundle.rs",
           "count": 1
         },
         {
@@ -14779,22 +14864,12 @@
         },
         {
           "lint": "clippy::redundant_clone",
-          "path": "crates/pony-tools/src/jobs.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::redundant_clone",
           "path": "crates/pony-tools/src/plugin_host/mod.rs",
           "count": 1
         },
         {
           "lint": "clippy::redundant_clone",
           "path": "crates/pony-tools/src/tools/composite.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::redundant_clone",
-          "path": "crates/pony-tools/src/tools/run.rs",
           "count": 1
         },
         {
@@ -14830,11 +14905,6 @@
         {
           "lint": "clippy::redundant_closure",
           "path": "crates/pony-tools/src/governed_executor.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::redundant_closure_call",
-          "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
           "count": 1
         },
         {
@@ -14904,11 +14974,6 @@
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-agent-core/src/agent/tools/mod.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::redundant_closure_for_method_calls",
           "path": "crates/pony-agent-core/src/agent/tools_orchestration.rs",
           "count": 1
         },
@@ -14954,8 +15019,18 @@
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
+          "path": "crates/pony-protocol/src/path_auth.rs",
+          "count": 5
+        },
+        {
+          "lint": "clippy::redundant_closure_for_method_calls",
           "path": "crates/pony-protocol/src/telemetry.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::redundant_closure_for_method_calls",
+          "path": "crates/pony-protocol/src/tool_contract/contract.rs",
+          "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
@@ -14975,7 +15050,7 @@
         {
           "lint": "clippy::redundant_closure_for_method_calls",
           "path": "crates/pony-storage/src/goal.rs",
-          "count": 2
+          "count": 3
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
@@ -15035,7 +15110,7 @@
         {
           "lint": "clippy::redundant_closure_for_method_calls",
           "path": "crates/pony-tools/src/path_permission.rs",
-          "count": 6
+          "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
@@ -15044,13 +15119,13 @@
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-tools/src/tool_runtime.rs",
-          "count": 1
+          "path": "crates/pony-tools/src/tools/instructions.rs",
+          "count": 5
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
-          "path": "crates/pony-tools/src/tools/instructions.rs",
-          "count": 5
+          "path": "crates/pony-tools/src/tools/mod.rs",
+          "count": 1
         },
         {
           "lint": "clippy::redundant_closure_for_method_calls",
@@ -15074,13 +15149,13 @@
         },
         {
           "lint": "clippy::ref_option",
-          "path": "crates/pony-storage/src/session/log_migrate.rs",
-          "count": 1
+          "path": "crates/pony-protocol/src/session_types.rs",
+          "count": 2
         },
         {
           "lint": "clippy::ref_option",
-          "path": "crates/pony-storage/src/session/types.rs",
-          "count": 2
+          "path": "crates/pony-storage/src/session/log_migrate.rs",
+          "count": 1
         },
         {
           "lint": "clippy::result_large_err",
@@ -15176,6 +15251,11 @@
           "lint": "clippy::return_self_not_must_use",
           "path": "crates/pony-tools/src/plugin_host/supervisor.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::return_self_not_must_use",
+          "path": "crates/pony-tools/src/tools/mod.rs",
+          "count": 4
         },
         {
           "lint": "clippy::return_self_not_must_use",
@@ -15399,17 +15479,7 @@
         },
         {
           "lint": "clippy::struct_excessive_bools",
-          "path": "crates/pony-provider/src/config.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::struct_excessive_bools",
           "path": "crates/pony-tools/src/search.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::struct_field_names",
-          "path": "crates/pony-acp/src/delegate_events.rs",
           "count": 1
         },
         {
@@ -15489,23 +15559,23 @@
         },
         {
           "lint": "clippy::trivially_copy_pass_by_ref",
-          "path": "crates/pony-acp/src/protocol.rs",
-          "count": 1
-        },
-        {
-          "lint": "clippy::trivially_copy_pass_by_ref",
           "path": "crates/pony-acp/src/session.rs",
           "count": 2
         },
         {
           "lint": "clippy::trivially_copy_pass_by_ref",
-          "path": "crates/pony-provider/src/provider/mod.rs",
-          "count": 2
+          "path": "crates/pony-protocol/src/acp_protocol.rs",
+          "count": 1
         },
         {
           "lint": "clippy::trivially_copy_pass_by_ref",
-          "path": "crates/pony-storage/src/session/types.rs",
+          "path": "crates/pony-protocol/src/session_types.rs",
           "count": 1
+        },
+        {
+          "lint": "clippy::trivially_copy_pass_by_ref",
+          "path": "crates/pony-provider/src/provider/mod.rs",
+          "count": 2
         },
         {
           "lint": "clippy::trivially_copy_pass_by_ref",
@@ -15525,7 +15595,7 @@
         {
           "lint": "clippy::type_complexity",
           "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
-          "count": 2
+          "count": 1
         },
         {
           "lint": "clippy::type_complexity",
@@ -15534,13 +15604,13 @@
         },
         {
           "lint": "clippy::type_complexity",
-          "path": "crates/pony-agent-core/src/agent/tools/mod.rs",
+          "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
           "count": 1
         },
         {
           "lint": "clippy::type_complexity",
-          "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
-          "count": 1
+          "path": "crates/pony-protocol/src/path_auth.rs",
+          "count": 3
         },
         {
           "lint": "clippy::type_complexity",
@@ -15559,8 +15629,8 @@
         },
         {
           "lint": "clippy::type_complexity",
-          "path": "crates/pony-tools/src/path_permission.rs",
-          "count": 3
+          "path": "crates/pony-tools/src/tools/mod.rs",
+          "count": 1
         },
         {
           "lint": "clippy::undocumented_unsafe_blocks",
@@ -15655,7 +15725,7 @@
         {
           "lint": "clippy::uninlined_format_args",
           "path": "crates/pony-agent-core/src/agent/tools_orchestration.rs",
-          "count": 21
+          "count": 8
         },
         {
           "lint": "clippy::uninlined_format_args",
@@ -15671,6 +15741,11 @@
           "lint": "clippy::uninlined_format_args",
           "path": "crates/pony-protocol/src/telemetry.rs",
           "count": 4
+        },
+        {
+          "lint": "clippy::uninlined_format_args",
+          "path": "crates/pony-protocol/src/workspace_types.rs",
+          "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
@@ -15769,6 +15844,11 @@
         },
         {
           "lint": "clippy::uninlined_format_args",
+          "path": "crates/pony-tools/src/tools/misc.rs",
+          "count": 13
+        },
+        {
+          "lint": "clippy::uninlined_format_args",
           "path": "crates/pony-tools/src/tools/paths.rs",
           "count": 5
         },
@@ -15786,11 +15866,6 @@
           "lint": "clippy::uninlined_format_args",
           "path": "crates/pony-tools/src/tools/workspace.rs",
           "count": 17
-        },
-        {
-          "lint": "clippy::uninlined_format_args",
-          "path": "crates/pony-tools/src/workspace.rs",
-          "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
@@ -15831,6 +15906,11 @@
           "lint": "clippy::unnecessary_map_or",
           "path": "crates/pony-agent-core/src/agent/runtime/stream_support.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::unnecessary_map_or",
+          "path": "crates/pony-protocol/src/host_hooks.rs",
+          "count": 1
         },
         {
           "lint": "clippy::unnecessary_map_or",
@@ -16019,11 +16099,6 @@
         },
         {
           "lint": "clippy::unused_self",
-          "path": "crates/pony-agent-core/src/agent/tools_orchestration.rs",
-          "count": 18
-        },
-        {
-          "lint": "clippy::unused_self",
           "path": "crates/pony-observability/src/frontend_diagnostics.rs",
           "count": 1
         },
@@ -16045,7 +16120,7 @@
         {
           "lint": "clippy::unused_self",
           "path": "crates/pony-storage/src/sqlite_session_commit.rs",
-          "count": 3
+          "count": 2
         },
         {
           "lint": "clippy::unused_self",
@@ -16089,8 +16164,13 @@
         },
         {
           "lint": "clippy::unused_self",
+          "path": "crates/pony-tools/src/tools/misc.rs",
+          "count": 11
+        },
+        {
+          "lint": "clippy::unused_self",
           "path": "crates/pony-tools/src/tools/paths.rs",
-          "count": 2
+          "count": 1
         },
         {
           "lint": "clippy::unused_self",
@@ -16149,13 +16229,18 @@
         },
         {
           "lint": "clippy::unwrap_used",
+          "path": "crates/pony-protocol/src/tool_contract/schema.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::unwrap_used",
           "path": "crates/pony-provider/src/provider/mod.rs",
           "count": 1
         },
         {
           "lint": "clippy::unwrap_used",
           "path": "crates/pony-tools/src/jobs.rs",
-          "count": 26
+          "count": 25
         },
         {
           "lint": "clippy::unwrap_used",
@@ -16175,6 +16260,11 @@
         {
           "lint": "clippy::used_underscore_binding",
           "path": "crates/pony-observability/src/otel/mod.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::used_underscore_binding",
+          "path": "crates/pony-protocol/src/turn_flow_registry.rs",
           "count": 1
         },
         {
@@ -16380,6 +16470,21 @@
         {
           "lint": "clippy::wildcard_imports",
           "path": "crates/pony-agent-core/src/agent/tools_orchestration.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::wildcard_imports",
+          "path": "crates/pony-protocol/src/tool_contract/contract.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::wildcard_imports",
+          "path": "crates/pony-protocol/src/tool_contract/names.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::wildcard_imports",
+          "path": "crates/pony-protocol/src/tool_contract/schema.rs",
           "count": 1
         },
         {
@@ -16425,6 +16530,11 @@
         {
           "lint": "clippy::wildcard_imports",
           "path": "crates/pony-tools/src/tools/instructions.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::wildcard_imports",
+          "path": "crates/pony-tools/src/tools/misc.rs",
           "count": 1
         },
         {
@@ -16535,7 +16645,7 @@
         {
           "lint": "missing_debug_implementations",
           "path": "crates/pony-agent-core/src/agent/runtime/types.rs",
-          "count": 4
+          "count": 3
         },
         {
           "lint": "missing_debug_implementations",
@@ -16560,7 +16670,7 @@
         {
           "lint": "missing_debug_implementations",
           "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
-          "count": 8
+          "count": 6
         },
         {
           "lint": "missing_debug_implementations",
@@ -16604,13 +16714,33 @@
         },
         {
           "lint": "missing_debug_implementations",
+          "path": "crates/pony-protocol/src/speed.rs",
+          "count": 1
+        },
+        {
+          "lint": "missing_debug_implementations",
           "path": "crates/pony-protocol/src/telemetry.rs",
           "count": 1
         },
         {
           "lint": "missing_debug_implementations",
+          "path": "crates/pony-protocol/src/tool_contract/contract.rs",
+          "count": 1
+        },
+        {
+          "lint": "missing_debug_implementations",
+          "path": "crates/pony-protocol/src/turn_flow_registry.rs",
+          "count": 3
+        },
+        {
+          "lint": "missing_debug_implementations",
+          "path": "crates/pony-protocol/src/turn_stream_types.rs",
+          "count": 2
+        },
+        {
+          "lint": "missing_debug_implementations",
           "path": "crates/pony-provider/src/config.rs",
-          "count": 7
+          "count": 5
         },
         {
           "lint": "missing_debug_implementations",
@@ -16625,6 +16755,11 @@
         {
           "lint": "missing_debug_implementations",
           "path": "crates/pony-provider/src/secret_store.rs",
+          "count": 1
+        },
+        {
+          "lint": "missing_debug_implementations",
+          "path": "crates/pony-storage/src/goal.rs",
           "count": 1
         },
         {
@@ -16649,6 +16784,11 @@
         },
         {
           "lint": "missing_debug_implementations",
+          "path": "crates/pony-storage/src/sqlite_session_commit.rs",
+          "count": 3
+        },
+        {
+          "lint": "missing_debug_implementations",
           "path": "crates/pony-storage/src/trace_persistence.rs",
           "count": 2
         },
@@ -16665,7 +16805,7 @@
         {
           "lint": "missing_debug_implementations",
           "path": "crates/pony-tools/src/dispatcher.rs",
-          "count": 1
+          "count": 4
         },
         {
           "lint": "missing_debug_implementations",
@@ -16719,6 +16859,11 @@
         },
         {
           "lint": "missing_debug_implementations",
+          "path": "crates/pony-tools/src/process_range.rs",
+          "count": 2
+        },
+        {
+          "lint": "missing_debug_implementations",
           "path": "crates/pony-tools/src/search.rs",
           "count": 1
         },
@@ -16739,8 +16884,23 @@
         },
         {
           "lint": "missing_debug_implementations",
+          "path": "crates/pony-tools/src/tools/mod.rs",
+          "count": 1
+        },
+        {
+          "lint": "missing_debug_implementations",
+          "path": "crates/pony-tools/src/tools/prompt_contract.rs",
+          "count": 1
+        },
+        {
+          "lint": "missing_debug_implementations",
           "path": "crates/pony-tools/src/web_access.rs",
           "count": 1
+        },
+        {
+          "lint": "unfulfilled_lint_expectations",
+          "path": "crates/pony-acp/src/process_tree.rs",
+          "count": 3
         },
         {
           "lint": "unreachable_pub",
@@ -16759,18 +16919,33 @@
         },
         {
           "lint": "unreachable_pub",
+          "path": "crates/pony-provider/src/provider/openai_sse.rs",
+          "count": 6
+        },
+        {
+          "lint": "unreachable_pub",
+          "path": "crates/pony-provider/src/provider/openai_wire.rs",
+          "count": 1
+        },
+        {
+          "lint": "unreachable_pub",
+          "path": "crates/pony-provider/src/provider/responses_api.rs",
+          "count": 11
+        },
+        {
+          "lint": "unreachable_pub",
           "path": "crates/pony-storage/src/session/backend.rs",
+          "count": 4
+        },
+        {
+          "lint": "unreachable_pub",
+          "path": "crates/pony-storage/src/session/file_backend.rs",
+          "count": 1
+        },
+        {
+          "lint": "unreachable_pub",
+          "path": "crates/pony-storage/src/session/history.rs",
           "count": 2
-        },
-        {
-          "lint": "unreachable_pub",
-          "path": "crates/pony-storage/src/session/fold.rs",
-          "count": 9
-        },
-        {
-          "lint": "unreachable_pub",
-          "path": "crates/pony-storage/src/session/fold_read_view.rs",
-          "count": 8
         },
         {
           "lint": "unreachable_pub",
@@ -16779,22 +16954,22 @@
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-storage/src/session/startup_repair.rs",
-          "count": 6
-        },
-        {
-          "lint": "unreachable_pub",
-          "path": "crates/pony-storage/src/session/store.rs",
+          "path": "crates/pony-storage/src/session/log_store.rs",
           "count": 1
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-storage/src/session/types.rs",
+          "path": "crates/pony-storage/src/session/store.rs",
           "count": 2
         },
         {
           "lint": "unreachable_pub",
-          "path": "crates/pony-storage/src/sqlite_session_commit.rs",
+          "path": "crates/pony-storage/src/session/transcript_sanitize.rs",
+          "count": 2
+        },
+        {
+          "lint": "unreachable_pub",
+          "path": "crates/pony-storage/src/sqlite_session_p1.rs",
           "count": 3
         },
         {
@@ -16806,11 +16981,6 @@
           "lint": "unreachable_pub",
           "path": "crates/pony-tools/src/patch.rs",
           "count": 1
-        },
-        {
-          "lint": "unreachable_pub",
-          "path": "crates/pony-tools/src/tools/prompt_contract.rs",
-          "count": 3
         }
       ]
     }
