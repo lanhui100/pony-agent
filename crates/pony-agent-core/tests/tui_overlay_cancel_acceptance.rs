@@ -884,6 +884,10 @@ def main():
         "XDG_DATA_HOME": os.path.join(iso, "xdg-data"),
         "XDG_CACHE_HOME": os.path.join(iso, "xdg-cache"),
         "HOME": os.path.join(iso, "home"),
+        # resume 流是**两个进程**（seed 与 `pony resume`）：test-support 兜底沙箱按 pid 分目录，
+        # 跨进程会各写各的 ⇒ 恢复不到历史。显式给同一个数据目录（ADR
+        # 2026-11-25-test-support-default-data-dir-isolation 认可的 `PONY_AGENT_DATA_DIR` 旁路）。
+        "PONY_AGENT_DATA_DIR": os.path.join(iso, "pony-data"),
         "PONY_TUI_RUNTIME_LOG": runtime_log,
         "TERM": "xterm-256color",
         "LANG": "C.UTF-8",

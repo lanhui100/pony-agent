@@ -71,11 +71,20 @@ fn drawer_tasks_tab_reads_session_todos_not_team_board() {
 }
 
 #[test]
-fn team_board_does_not_leak_into_drawer_tasks_tab() {
+fn tasks_tab_merges_session_todos_and_team_tasks() {
+    // 需求：Tasks 页签同时承载主 Agent 会话 Todo 与 Agent Team 团队 Tasks，
+    // 两者皆有值时分成两段（各自带进度），只有一方时直接列表（不加冗余分组头）。
     let mut state = TuiState::default();
     state.task_center = Some(task_center::TaskCenterState::new());
     state.task_center.as_mut().unwrap().tab = task_center::TaskCenterTab::Tasks;
-    // 团队看板有任务也不算抽屉数据源（抽屉要的是本会话待办）。
+    state.todos_state = Some(vec![TuiTask {
+        id: "todo-1".to_string(),
+        subject: "本会话待办".to_string(),
+        status: TuiTaskStatus::InProgress,
+        owner: None,
+        blocked_by: Vec::new(),
+        write_scopes: Vec::new(),
+    }]);
     state.update_task_board(vec![TuiTask {
         id: "team-1".to_string(),
         subject: "团队任务".to_string(),
@@ -85,8 +94,36 @@ fn team_board_does_not_leak_into_drawer_tasks_tab() {
         write_scopes: Vec::new(),
     }]);
     let lines = task_center::content_lines(&state);
-    assert_eq!(lines.len(), 1, "团队看板不得冒充抽屉待办：{lines:?}");
-    assert!(lines[0].0.contains("没有任务"), "{lines:?}");
+    let joined = lines
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("本会话待办 0/1"), "必须有会话待办分区：{joined}");
+    assert!(joined.contains("团队任务 0/1"), "必须有团队任务分区：{joined}");
+    assert!(joined.contains("本会话待办\n") || joined.contains("本会话待办"), "{joined}");
+    assert!(joined.contains("团队任务"), "{joined}");
+
+    // 只有团队任务时：单段直接列表，不出现「本会话待办」空标题。
+    let mut team_only = TuiState::default();
+    team_only.task_center = Some(task_center::TaskCenterState::new());
+    team_only.task_center.as_mut().unwrap().tab = task_center::TaskCenterTab::Tasks;
+    team_only.update_task_board(vec![TuiTask {
+        id: "team-2".to_string(),
+        subject: "仅团队".to_string(),
+        status: TuiTaskStatus::Pending,
+        owner: None,
+        blocked_by: Vec::new(),
+        write_scopes: Vec::new(),
+    }]);
+    let lines = task_center::content_lines(&team_only);
+    let joined = lines
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!joined.contains("本会话待办"), "单段不得有空分组头：{joined}");
+    assert!(joined.contains("仅团队"), "{joined}");
 }
 
 #[test]
@@ -137,7 +174,14 @@ fn drawer_goal_tab_renders_current_goal() {
         "Goal 页签必须显示目标正文：{lines:?}"
     );
     assert!(
-        lines.iter().any(|(text, _)| text.contains("轮次 2 / 5")),
+        lines.iter().any(|(text, _)| text.contains("2/5 轮")),
         "Goal 页签必须显示真实轮次：{lines:?}"
+    );
+    // 决策：阶段/轮次收拢成一行弱化状态，不再各占一行中心位置。
+    assert!(
+        lines
+            .iter()
+            .any(|(text, _)| text.contains("进行中") && text.contains("2/5 轮")),
+        "阶段与轮次必须在同一行：{lines:?}"
     );
 }

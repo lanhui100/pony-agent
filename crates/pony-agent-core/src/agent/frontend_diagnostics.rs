@@ -498,9 +498,18 @@ pub fn default_frontend_diagnostics_sqlite_path() -> PathBuf {
         .join("frontend-diagnostics.db")
     }
 
-    #[cfg(not(test))]
+    #[cfg(all(not(test), feature = "test-support"))]
     {
-        dirs::data_local_dir()
+        crate::agent::sqlite_session::data_dir_override()
+            .unwrap_or_else(crate::agent::sqlite_session::test_support_fallback_data_dir)
+            .join("PonyAgent")
+            .join("frontend-diagnostics.db")
+    }
+
+    #[cfg(all(not(test), not(feature = "test-support")))]
+    {
+        crate::agent::sqlite_session::data_dir_override()
+            .or_else(dirs::data_local_dir)
             .or_else(dirs::home_dir)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))

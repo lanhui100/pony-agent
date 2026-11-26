@@ -154,7 +154,11 @@ fn test_control_plane_approve_control_request_flow() {
     let dir = std::env::temp_dir().join(format!("pony-test-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&dir).expect("create dir");
 
+    let runtime = pony_agent_core::agent::runtime::AgentRuntimeBuilder::new()
+        .session_store(pony_agent_core::agent::session::SessionStore::memory_only())
+        .build();
     let cp = HostControlPlaneBuilder::new()
+        .runtime(runtime)
         .ask_dispatcher(dispatcher_with_ask_rule_for_write())
         .build();
 
@@ -227,7 +231,11 @@ fn test_approve_control_request_rejects_stale_version() {
     let dir = std::env::temp_dir().join(format!("pony-test-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&dir).expect("create dir");
 
+    let runtime = pony_agent_core::agent::runtime::AgentRuntimeBuilder::new()
+        .session_store(pony_agent_core::agent::session::SessionStore::memory_only())
+        .build();
     let cp = HostControlPlaneBuilder::new()
+        .runtime(runtime)
         .ask_dispatcher(dispatcher_with_ask_rule_for_write())
         .build();
 

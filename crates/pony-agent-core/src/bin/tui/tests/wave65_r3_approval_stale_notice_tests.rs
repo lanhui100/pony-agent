@@ -104,7 +104,11 @@ fn sync_pending_control_request_silently_closes_answered_ask_without_stale_notic
     };
     store.upsert(&ask).expect("upsert answered ask");
 
+    let runtime = pony_agent_core::agent::runtime::AgentRuntimeBuilder::new()
+        .session_store(pony_agent_core::agent::session::SessionStore::memory_only())
+        .build();
     let control_plane = pony_agent_core::agent::control_plane::HostControlPlaneBuilder::new()
+        .runtime(runtime)
         .ask_store(Arc::clone(&store))
         .build();
 

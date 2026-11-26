@@ -3478,6 +3478,8 @@ mod sqlite_paths;
 pub use self::sqlite_paths::default_sqlite_path;
 #[cfg(not(test))]
 pub(crate) use self::sqlite_paths::data_dir_override;
+#[cfg(all(not(test), feature = "test-support"))]
+pub(crate) use self::sqlite_paths::test_support_fallback_data_dir;
 
 #[cfg(test)]
 mod tests {

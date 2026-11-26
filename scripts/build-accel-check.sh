@@ -48,6 +48,7 @@ FACTOR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding
 CONF_JOBS="$(awk -F'=' '/^jobs[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2}' "$REPO_ROOT/.cargo/config.toml" 2>/dev/null)"
 SCCACHE="$(resolve_tool sccache || echo MISSING)"
 MOLD="$(resolve_tool mold || echo MISSING)"
+NEXTEST="$(resolve_tool cargo-nextest || echo MISSING)"
 LLD="$(resolve_tool ld.lld || resolve_tool lld || echo MISSING)"
 CLANG="$(resolve_tool clang || echo MISSING)"
 MINGW="$(resolve_tool x86_64-w64-mingw32-gcc || echo MISSING)"
@@ -68,10 +69,11 @@ done
 missing=""
 [ "$SCCACHE" = "MISSING" ] && missing="$missing sccache"
 [ "$MOLD" = "MISSING" ] && missing="$missing mold"
+[ "$NEXTEST" = "MISSING" ] && missing="$missing cargo-nextest"
 
 if [ "$JSON" -eq 1 ]; then
-  printf '{"cores":%s,"load1":"%s","jobs":%s,"cargo_config_jobs":%s,"load_ceiling_factor":%s,"sccache":"%s","mold":"%s","ld_lld":"%s","clang":"%s","mingw":"%s","installed_targets":"%s","incremental_kb":%s,"missing":"%s"}\n' \
-    "$CORES" "$LOAD1" "${JOBS:-0}" "${CONF_JOBS:-0}" "${FACTOR:-0}" "$SCCACHE" "$MOLD" "$LLD" "$CLANG" "$MINGW" "$TARGETS" "$INCREMENTAL_KB" "$(printf '%s' "$missing" | sed 's/^ *//')"
+  printf '{"cores":%s,"load1":"%s","jobs":%s,"cargo_config_jobs":%s,"load_ceiling_factor":%s,"sccache":"%s","mold":"%s","nextest":"%s","ld_lld":"%s","clang":"%s","mingw":"%s","installed_targets":"%s","incremental_kb":%s,"missing":"%s"}\n' \
+    "$CORES" "$LOAD1" "${JOBS:-0}" "${CONF_JOBS:-0}" "${FACTOR:-0}" "$SCCACHE" "$MOLD" "$NEXTEST" "$LLD" "$CLANG" "$MINGW" "$TARGETS" "$INCREMENTAL_KB" "$(printf '%s' "$missing" | sed 's/^ *//')"
 else
   echo "[build-accel] 仓库：$REPO_ROOT"
   printf '  %-26s %s\n' "CPU 核数 / load1" "$CORES / $LOAD1"
@@ -79,6 +81,7 @@ else
   printf '  %-26s %s\n' "load 熔断上限" "$(python3 -c "print(round($CORES * ${FACTOR:-1.5}, 2))" 2>/dev/null || echo unknown)（= 核数 × $FACTOR）"
   printf '  %-26s %s\n' "sccache（跨 worktree 复用）" "$SCCACHE"
   printf '  %-26s %s\n' "mold / ld.lld / clang" "$MOLD / $LLD / $CLANG"
+  printf '  %-26s %s\n' "cargo-nextest（测试加速）" "$NEXTEST"
   printf '  %-26s %s\n' "mingw（windows-gnu 交叉）" "$MINGW"
   printf '  %-26s %s\n' "已装编译目标" "${TARGETS:-未知（rustc 不可用）}"
   printf '  %-26s %s\n' "增量目录占用合计" "$(numfmt --to=iec --suffix=B $((INCREMENTAL_KB * 1024)) 2>/dev/null || echo "${INCREMENTAL_KB}K")"
@@ -115,9 +118,10 @@ if [ -n "$REQUIRE" ]; then
     case "${item// /}" in
       sccache) [ "$SCCACHE" != "MISSING" ] || { echo "[build-accel] FAIL：缺 sccache" >&2; rc=1; } ;;
       mold) [ "$MOLD" != "MISSING" ] || { echo "[build-accel] FAIL：缺 mold" >&2; rc=1; } ;;
+      nextest) [ "$NEXTEST" != "MISSING" ] || { echo "[build-accel] FAIL：缺 cargo-nextest" >&2; rc=1; } ;;
       cross-mingw) [ "$MINGW" != "MISSING" ] || { echo "[build-accel] FAIL：缺 mingw-w64（windows-gnu 交叉不可用）" >&2; rc=1; } ;;
       "") ;;
-      *) echo "[build-accel] FAIL：未知要求项 $item（可用：sccache,mold,cross-mingw）" >&2; rc=2 ;;
+      *) echo "[build-accel] FAIL：未知要求项 $item（可用：sccache,mold,nextest,cross-mingw）" >&2; rc=2 ;;
     esac
   done
   exit "$rc"

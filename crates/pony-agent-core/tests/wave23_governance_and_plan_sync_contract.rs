@@ -1,11 +1,18 @@
 use pony_agent_core::agent::control_plane::HostControlPlaneBuilder;
 use pony_agent_core::agent::plan_state::PlanStore;
+use pony_agent_core::agent::runtime::AgentRuntimeBuilder;
+use pony_agent_core::agent::session::SessionStore;
 use serde_json::json;
 
 #[test]
 fn test_plan_store_is_unified_between_control_plane_and_executor() {
     let shared_store = PlanStore::new();
+    let runtime = AgentRuntimeBuilder::new()
+        .session_store(SessionStore::memory_only())
+        .plan_store(shared_store.clone())
+        .build();
     let cp = HostControlPlaneBuilder::new()
+        .runtime(runtime)
         .plan_store(shared_store.clone())
         .build();
 

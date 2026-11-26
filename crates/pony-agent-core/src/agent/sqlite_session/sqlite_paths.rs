@@ -23,6 +23,24 @@ pub(crate) fn data_dir_override() -> Option<PathBuf> {
         .filter(|override_dir| !override_dir.as_os_str().is_empty())
 }
 
+/// `test-support` 集成/bin 测试兜底数据目录根（进程内固定，未设置 `PONY_AGENT_DATA_DIR` 时启用）。
+#[cfg(all(not(test), feature = "test-support"))]
+pub(crate) fn test_support_fallback_data_dir() -> PathBuf {
+    static SANDBOX_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SANDBOX_ROOT
+        .get_or_init(|| {
+            std::env::temp_dir().join(format!(
+                "pony-agent-test-support-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or_default()
+            ))
+        })
+        .clone()
+}
+
 /// Returns the default SQLite database path.
 pub fn default_sqlite_path() -> PathBuf {
     #[cfg(test)]
@@ -31,7 +49,17 @@ pub fn default_sqlite_path() -> PathBuf {
         unique_test_sqlite_path()
     }
 
-    #[cfg(not(test))]
+    #[cfg(all(not(test), feature = "test-support"))]
+    {
+        // 集成/bin 测试启用了 `test-support`：优先尊重显式 `PONY_AGENT_DATA_DIR` 旁路，
+        // 未设置时回落进程级临时沙箱，严禁退回到用户真实生产库。
+        data_dir_override()
+            .unwrap_or_else(test_support_fallback_data_dir)
+            .join("PonyAgent")
+            .join("sessions.db")
+    }
+
+    #[cfg(all(not(test), not(feature = "test-support")))]
     {
         data_dir_override()
             .or_else(dirs::data_local_dir)

@@ -21,9 +21,19 @@
 #   sccache：与增量编译**硬互斥**（CARGO_INCREMENTAL 存在时 sccache 直接 exit 101）。默认 auto——
 #            仅在「已给 CARGO_INCREMENTAL=0」或「--release」的冷编/全树场景注入 wrapper，并压 CARGO_INCREMENTAL=0；
 #            日常增量构建不注入（装了也只用增量）。强制开关：PONY_BUILD_SCCACHE=1 开（放弃增量）/ =0 关。
-#   mold 在 PATH 且 PONY_BUILD_FAST_LINK=1   ⇒ 注入 -C link-arg=-fuse-ld=mold（默认关：改 RUSTFLAGS 会让既有产物全量失效）
+#   mold：默认 auto，Linux 下探测到 mold 且支持 `mold -run` 时自动包装 cargo（零 RUSTFLAGS 变动，
+#         不使既有缓存失效）；PONY_BUILD_FAST_LINK=0 可关闭，=1 强制要求。
 #
-# 环境覆盖（排障用，不改变默认预算）：PONY_BUILD_JOBS / PONY_BUILD_LOCK / PONY_BUILD_NICE / PONY_BUILD_LOAD_FACTOR
+# 防卡死护栏（B1795589917594）：
+#   cgroup：Linux 下默认 auto，探测 systemd-run --user --scope 并设置 CPUQuota=600%、MemoryHigh=14G、MemoryMax=18G
+#           （若 cgroup v2 委托了 io 控制器再附带 IOWeight=50）；无 user-systemd 时安全降级，显式 PONY_BUILD_CGROUP=1 时 fail-closed。
+#   ionice：默认 auto，可用时注入 ionice -c 3（空闲级磁盘 IO），PONY_BUILD_IONICE=0 可关闭。
+#   test  ：test/nextest 子命令默认注入 timeout(180s) + RUST_TEST_THREADS=4（PONY_TEST_THREADS=0 可关闭）。
+#
+# 环境覆盖（排障用，不改变默认预算）：
+#   PONY_BUILD_JOBS / PONY_BUILD_LOCK / PONY_BUILD_NICE / PONY_BUILD_LOAD_FACTOR
+#   PONY_BUILD_CGROUP / PONY_BUILD_CPU_QUOTA / PONY_BUILD_MEM_HIGH / PONY_BUILD_MEM_MAX / PONY_BUILD_IO_WEIGHT
+#   PONY_BUILD_IONICE / PONY_TEST_THREADS / PONY_TEST_TIMEOUT / PONY_TEST_ULIMIT_KB
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -187,9 +197,31 @@ elif [ "$SCCACHE_ENABLE" -eq 0 ] && [ "$WANT_SCCACHE" != "0" ] && [ "$WANT_SCCAC
      && SCCACHE_BIN="$(resolve_tool sccache)"; then
   ACCEL_SKIP_NOTE="sccache 已装但本轮未启用（增量编译优先）：冷编/跨 worktree 请 PONY_BUILD_SCCACHE=1"
 fi
-if [ "${PONY_BUILD_FAST_LINK:-0}" = "1" ] && command -v mold >/dev/null 2>&1; then
-  ACCEL_ENV+=("RUSTFLAGS=${RUSTFLAGS:-} -C link-arg=-fuse-ld=mold")
-  ACCEL_NOTE="${ACCEL_NOTE:+$ACCEL_NOTE+}mold"
+FAST_LINK_CMD=()
+WANT_FAST_LINK="${PONY_BUILD_FAST_LINK:-auto}"
+case "$WANT_FAST_LINK" in
+  auto|1|on|0|off) ;;
+  *) echo "[cargo-lane] 用法错误：PONY_BUILD_FAST_LINK 只接受 auto|1|on|0|off，收到 $WANT_FAST_LINK" >&2; exit 2 ;;
+esac
+
+if [ "$WANT_FAST_LINK" != "0" ] && [ "$WANT_FAST_LINK" != "off" ]; then
+  if [ "$(uname -s 2>/dev/null || echo unknown)" = "Linux" ] \
+     && MOLD_BIN="$(resolve_tool mold)" \
+     && "$MOLD_BIN" -run true >/dev/null 2>&1; then
+    FAST_LINK_CMD=("$MOLD_BIN" -run)
+    ACCEL_NOTE="${ACCEL_NOTE:+$ACCEL_NOTE+}mold(-run)"
+  elif [ "$WANT_FAST_LINK" = "1" ] || [ "$WANT_FAST_LINK" = "on" ]; then
+    echo "[cargo-lane] fail-closed：显式要求 mold（PONY_BUILD_FAST_LINK=$WANT_FAST_LINK），但当前环境未就绪" >&2
+    exit 2
+  fi
+fi
+
+# 保证子进程 cargo 能找到 ~/.local/bin（如 cargo-nextest）
+if [ -n "${HOME:-}" ] && [ -d "$HOME/.local/bin" ]; then
+  case ":${PATH:-}:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) export PATH="$HOME/.local/bin:${PATH:-}" ;;
+  esac
 fi
 if [ -n "$ACCEL_NOTE" ]; then
   echo "[cargo-lane] 加速通道：$ACCEL_NOTE"
@@ -197,10 +229,138 @@ elif [ -n "$ACCEL_SKIP_NOTE" ]; then
   echo "[cargo-lane] 加速通道：$ACCEL_SKIP_NOTE"
 fi
 
-if [ "$LOCK_IMPL" = "flock" ]; then
-  CMD=(flock "$LOCK" nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
+# ── 测试执行期硬超时 + 并发限流 + 内核级 cgroup/ionice 护栏（防拖死主机）───
+# 仅对 test/nextest 子命令注入测试超时与 RUST_TEST_THREADS；避免重型 build 被误杀。
+TEST_TIMEOUT_CMD=()
+TEST_ENV=()
+ULIMIT_CMD=()
+is_test=0
+for arg in "$@"; do
+  case "$arg" in
+    --) break ;;
+    test|nextest) is_test=1; break ;;
+  esac
+done
+
+GUARD_NOTES=()
+
+# 1) cgroup v2 资源隔离（Linux user-systemd scope，不可用时安全降级）
+WANT_CGROUP="${PONY_BUILD_CGROUP:-auto}"
+case "$WANT_CGROUP" in
+  auto|on|1|off|0) ;;
+  *) echo "[cargo-lane] 用法错误：PONY_BUILD_CGROUP 只接受 auto|on|1|off|0，收到 $WANT_CGROUP" >&2; exit 2 ;;
+esac
+
+CGROUP_CMD=()
+if [ "$WANT_CGROUP" != "0" ] && [ "$WANT_CGROUP" != "off" ]; then
+  if [ "$(uname -s 2>/dev/null || echo unknown)" = "Linux" ] \
+     && command -v systemd-run >/dev/null 2>&1 \
+     && command -v systemctl >/dev/null 2>&1 \
+     && systemctl --user show-environment >/dev/null 2>&1; then
+    CPU_QUOTA="${PONY_BUILD_CPU_QUOTA:-600%}"
+    MEM_HIGH="${PONY_BUILD_MEM_HIGH:-14G}"
+    MEM_MAX="${PONY_BUILD_MEM_MAX:-18G}"
+    IO_WEIGHT="${PONY_BUILD_IO_WEIGHT:-}"
+    if [ -z "$IO_WEIGHT" ]; then
+      CTRL_FILE="/sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers"
+      if [ -r "$CTRL_FILE" ] && grep -qw "io" "$CTRL_FILE" 2>/dev/null; then
+        IO_WEIGHT="50"
+      fi
+    fi
+
+    CGROUP_PROPS=()
+    CGROUP_DESC=()
+    if [ -n "$CPU_QUOTA" ] && [ "$CPU_QUOTA" != "0" ] && [ "$CPU_QUOTA" != "none" ]; then
+      CGROUP_PROPS+=(-p "CPUQuota=$CPU_QUOTA")
+      CGROUP_DESC+=("CPUQuota=$CPU_QUOTA")
+    fi
+    if [ -n "$MEM_HIGH" ] && [ "$MEM_HIGH" != "0" ] && [ "$MEM_HIGH" != "none" ]; then
+      CGROUP_PROPS+=(-p "MemoryHigh=$MEM_HIGH")
+      CGROUP_DESC+=("MemoryHigh=$MEM_HIGH")
+    fi
+    if [ -n "$MEM_MAX" ] && [ "$MEM_MAX" != "0" ] && [ "$MEM_MAX" != "none" ]; then
+      CGROUP_PROPS+=(-p "MemoryMax=$MEM_MAX")
+      CGROUP_DESC+=("MemoryMax=$MEM_MAX")
+    fi
+    if [ -n "$IO_WEIGHT" ] && [ "$IO_WEIGHT" != "0" ] && [ "$IO_WEIGHT" != "none" ]; then
+      CGROUP_PROPS+=(-p "IOWeight=$IO_WEIGHT")
+      CGROUP_DESC+=("IOWeight=$IO_WEIGHT")
+    fi
+
+    CGROUP_CMD=(systemd-run --user --scope --quiet "${CGROUP_PROPS[@]}" --)
+    GUARD_NOTES+=("cgroup($(IFS=,; echo "${CGROUP_DESC[*]:-default}"))")
+  elif [ "$WANT_CGROUP" = "on" ] || [ "$WANT_CGROUP" = "1" ]; then
+    echo "[cargo-lane] fail-closed：显式要求 cgroup（PONY_BUILD_CGROUP=$WANT_CGROUP），但当前环境不支持 systemd-run --user --scope" >&2
+    exit 2
+  else
+    GUARD_NOTES+=("cgroup(降级: 无 user-systemd)")
+  fi
 else
-  CMD=(nice -n "$NICE_VALUE" env "${ACCEL_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" cargo "$@")
+  GUARD_NOTES+=("cgroup(off)")
+fi
+
+# 2) 空闲级磁盘 IO（ionice -c 3）
+WANT_IONICE="${PONY_BUILD_IONICE:-auto}"
+case "$WANT_IONICE" in
+  auto|on|1|off|0) ;;
+  *) echo "[cargo-lane] 用法错误：PONY_BUILD_IONICE 只接受 auto|on|1|off|0，收到 $WANT_IONICE" >&2; exit 2 ;;
+esac
+
+IONICE_CMD=()
+if [ "$WANT_IONICE" != "0" ] && [ "$WANT_IONICE" != "off" ]; then
+  if command -v ionice >/dev/null 2>&1 && ionice -c 3 true >/dev/null 2>&1; then
+    IONICE_CMD=(ionice -c 3)
+    GUARD_NOTES+=("ionice(idle)")
+  elif [ "$WANT_IONICE" = "on" ] || [ "$WANT_IONICE" = "1" ]; then
+    echo "[cargo-lane] fail-closed：显式要求 ionice（PONY_BUILD_IONICE=$WANT_IONICE），但当前环境不支持 ionice -c 3" >&2
+    exit 2
+  fi
+fi
+
+# 3) 测试路径：超时 + 运行期线程限流 + 无 cgroup 时的可选 ulimit 降级
+if [ "$is_test" -eq 1 ]; then
+  TEST_TIMEOUT="${PONY_TEST_TIMEOUT:-180s}"
+  if [ "$TEST_TIMEOUT" != "0" ] && [ "$TEST_TIMEOUT" != "none" ] && command -v timeout >/dev/null 2>&1; then
+    TEST_TIMEOUT_CMD=(timeout --signal=TERM --kill-after=15s "$TEST_TIMEOUT")
+    GUARD_NOTES+=("timeout=$TEST_TIMEOUT")
+  fi
+
+  WANT_TEST_THREADS="${PONY_TEST_THREADS:-${RUST_TEST_THREADS:-4}}"
+  if [ "$WANT_TEST_THREADS" != "0" ] && [ "$WANT_TEST_THREADS" != "none" ]; then
+    case "$WANT_TEST_THREADS" in
+      ''|*[!0-9]*)
+        echo "[cargo-lane] 用法错误：PONY_TEST_THREADS 必须为正整数或 0/none，收到 $WANT_TEST_THREADS" >&2
+        exit 2
+        ;;
+      0*)
+        echo "[cargo-lane] 用法错误：PONY_TEST_THREADS 必须为正整数或 0/none，收到 $WANT_TEST_THREADS" >&2
+        exit 2
+        ;;
+    esac
+    TEST_ENV+=("RUST_TEST_THREADS=$WANT_TEST_THREADS")
+    GUARD_NOTES+=("test-threads=$WANT_TEST_THREADS")
+  fi
+
+  if [ "${#CGROUP_CMD[@]}" -eq 0 ] && [ -n "${PONY_TEST_ULIMIT_KB:-}" ] && [ "${PONY_TEST_ULIMIT_KB}" != "0" ] && [ "${PONY_TEST_ULIMIT_KB}" != "none" ]; then
+    case "$PONY_TEST_ULIMIT_KB" in
+      ''|*[!0-9]*)
+        echo "[cargo-lane] 用法错误：PONY_TEST_ULIMIT_KB 必须为正整数（KB），收到 $PONY_TEST_ULIMIT_KB" >&2
+        exit 2
+        ;;
+    esac
+    ULIMIT_CMD=(bash -c 'ulimit -v "$1" && shift && exec "$@"' _ "$PONY_TEST_ULIMIT_KB")
+    GUARD_NOTES+=("ulimit-v=${PONY_TEST_ULIMIT_KB}KB")
+  fi
+fi
+
+if [ "${#GUARD_NOTES[@]}" -gt 0 ]; then
+  echo "[cargo-lane] 护栏：$(IFS=' + '; echo "${GUARD_NOTES[*]}")"
+fi
+
+if [ "$LOCK_IMPL" = "flock" ]; then
+  CMD=("${TEST_TIMEOUT_CMD[@]}" flock "$LOCK" "${CGROUP_CMD[@]}" "${IONICE_CMD[@]}" nice -n "$NICE_VALUE" "${ULIMIT_CMD[@]}" env "${ACCEL_ENV[@]}" "${TEST_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" "${FAST_LINK_CMD[@]}" cargo "$@")
+else
+  CMD=("${TEST_TIMEOUT_CMD[@]}" "${CGROUP_CMD[@]}" "${IONICE_CMD[@]}" nice -n "$NICE_VALUE" "${ULIMIT_CMD[@]}" env "${ACCEL_ENV[@]}" "${TEST_ENV[@]}" "CARGO_BUILD_JOBS=$JOBS" "${FAST_LINK_CMD[@]}" cargo "$@")
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then

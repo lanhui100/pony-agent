@@ -103,9 +103,9 @@ else
 fi
 
 # P10：加速通道缺失即跳过——不得因为没装 sccache/mold 改变命令形状。
-# 本用例显式关掉 sccache（PONY_BUILD_SCCACHE=0）来**模拟**缺失态：本机装了 sccache 时
-# 不加这个开关，用例会因为「注入生效」而失败——那不是回归，是环境变了。
-out=$(PONY_BUILD_SCCACHE=0 PONY_BUILD_FAST_LINK=0 bash "$LANE" --dry-run test 2>&1)
+# 本用例显式关掉 sccache（PONY_BUILD_SCCACHE=0）与默认测试线程限流来**模拟**基线命令形状：
+# 本机装了 sccache 时不加这个开关，用例会因为「注入生效」而失败——那不是回归，是环境变了。
+out=$(PONY_BUILD_SCCACHE=0 PONY_BUILD_FAST_LINK=0 PONY_TEST_THREADS=0 bash "$LANE" --dry-run test 2>&1)
 assert_contains "P10 无加速工具时命令形状不变" "$out" "env CARGO_BUILD_JOBS=$BUDGET_JOBS cargo test"
 
 # P11：sccache 与增量编译硬互斥——强制开启时必须同时压 CARGO_INCREMENTAL=0，
@@ -146,6 +146,95 @@ else
   printf 'FAIL P16 非法锁实现未 fail-closed（exit %s，输出：%s）\n' "$code" "$out"
   FAIL=1
 fi
+
+# P17：test 子命令默认注入超时守护（B353 / 防死循环/内存泄漏拖死主机）
+out=$(bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
+assert_contains "P17 test 默认注入超时" "$out" "timeout --signal=TERM --kill-after=15s 180s"
+
+# P18：非 test 命令（如 build/check）默认不注入超时
+out=$(bash "$LANE" --dry-run build --bin pony 2>&1)
+assert_not_contains "P18 build 不注入超时" "$out" "timeout"
+
+# P19：可通过 PONY_TEST_TIMEOUT=0 关闭超时
+out=$(PONY_TEST_TIMEOUT=0 bash "$LANE" --dry-run test 2>&1)
+assert_not_contains "P19 PONY_TEST_TIMEOUT=0 允许关闭超时" "$out" "timeout"
+
+# P20：test 子命令默认注入 RUST_TEST_THREADS=4；非 test 子命令不注入
+out=$(bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
+assert_contains "P20 test 默认注入 RUST_TEST_THREADS=4" "$out" "RUST_TEST_THREADS=4"
+out=$(bash "$LANE" --dry-run build --bin pony 2>&1)
+assert_not_contains "P20 build 不注入 RUST_TEST_THREADS" "$out" "RUST_TEST_THREADS="
+
+# P21：PONY_TEST_THREADS 覆盖与关闭生效
+out=$(PONY_TEST_THREADS=2 bash "$LANE" --dry-run test 2>&1)
+assert_contains "P21 PONY_TEST_THREADS=2 生效" "$out" "RUST_TEST_THREADS=2"
+out=$(PONY_TEST_THREADS=0 bash "$LANE" --dry-run test 2>&1)
+assert_not_contains "P21 PONY_TEST_THREADS=0 允许关闭" "$out" "RUST_TEST_THREADS="
+
+# P22：Linux 且 user-systemd 可用时默认注入 cgroup v2 资源边界
+if [ "$(uname -s 2>/dev/null)" = "Linux" ] && command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  out=$(bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
+  assert_contains "P22 默认启用 systemd-run scope" "$out" "systemd-run --user --scope --quiet"
+  assert_contains "P22 默认 CPUQuota=600%" "$out" "CPUQuota=600%"
+  assert_contains "P22 默认 MemoryHigh=14G" "$out" "MemoryHigh=14G"
+  assert_contains "P22 默认 MemoryMax=18G" "$out" "MemoryMax=18G"
+else
+  printf 'SKIP P22 当前环境无 user-systemd\n'
+fi
+
+# P23：PONY_BUILD_CGROUP=0 可关闭；非法值 fail-closed
+out=$(PONY_BUILD_CGROUP=0 bash "$LANE" --dry-run test 2>&1)
+assert_not_contains "P23 PONY_BUILD_CGROUP=0 关闭 scope" "$out" "systemd-run"
+out=$(PONY_BUILD_CGROUP=bogus bash "$LANE" --dry-run test 2>&1); code=$?
+if [ "$code" -eq 2 ] && printf '%s' "$out" | grep -qF "只接受 auto|on|1|off|0"; then
+  printf 'PASS P23 非法 cgroup 开关 fail-closed（exit 2）\n'
+else
+  printf 'FAIL P23 非法 cgroup 开关未 fail-closed（exit %s，输出：%s）\n' "$code" "$out"
+  FAIL=1
+fi
+
+# P24：自定义 CPUQuota / MemoryMax 覆盖生效
+if [ "$(uname -s 2>/dev/null)" = "Linux" ] && command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  out=$(PONY_BUILD_CPU_QUOTA=400% PONY_BUILD_MEM_MAX=12G bash "$LANE" --dry-run test 2>&1)
+  assert_contains "P24 CPUQuota 覆盖生效" "$out" "CPUQuota=400%"
+  assert_contains "P24 MemoryMax 覆盖生效" "$out" "MemoryMax=12G"
+else
+  printf 'SKIP P24 当前环境无 user-systemd\n'
+fi
+
+# P25：ionice 可用时默认注入 ionice -c 3，PONY_BUILD_IONICE=0 可关闭
+if command -v ionice >/dev/null 2>&1 && ionice -c 3 true >/dev/null 2>&1; then
+  out=$(bash "$LANE" --dry-run test 2>&1)
+  assert_contains "P25 默认注入 ionice -c 3" "$out" "ionice -c 3"
+  out=$(PONY_BUILD_IONICE=0 bash "$LANE" --dry-run test 2>&1)
+  assert_not_contains "P25 PONY_BUILD_IONICE=0 允许关闭" "$out" "ionice -c 3"
+else
+  printf 'SKIP P25 当前环境无 ionice\n'
+fi
+
+# P26：端到端真跑轻量命令（cgroup + ionice + flock + nice + cargo --version）
+out=$(bash "$LANE" --version 2>&1); code=$?
+if [ "$code" -eq 0 ] && printf '%s' "$out" | grep -qF "cargo "; then
+  printf 'PASS P26 端到端真跑 --version 通过\n'
+else
+  printf 'FAIL P26 端到端真跑 --version 失败（exit %s，输出：%s）\n' "$code" "$out"
+  FAIL=1
+fi
+
+# P27：mold -run 通道（存在 mold 时可用，PONY_BUILD_FAST_LINK=0 可关闭）
+if [ -x "${HOME}/.local/bin/mold" ] || command -v mold >/dev/null 2>&1; then
+  out=$(PONY_BUILD_FAST_LINK=1 bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
+  assert_contains "P27 PONY_BUILD_FAST_LINK=1 注入 mold -run" "$out" "mold -run cargo"
+  out=$(PONY_BUILD_FAST_LINK=0 bash "$LANE" --dry-run test -p pony-agent-core --lib 2>&1)
+  assert_not_contains "P27 PONY_BUILD_FAST_LINK=0 关闭 mold -run" "$out" "mold -run"
+else
+  printf 'SKIP P27 未安装 mold\n'
+fi
+
+# P28：nextest 子命令识别为 test 并注入超时与线程限流护栏
+out=$(bash "$LANE" --dry-run nextest run --profile quick -p pony-agent-core --lib 2>&1)
+assert_contains "P28 nextest 注入 timeout 护栏" "$out" "timeout --signal=TERM --kill-after=15s 180s"
+assert_contains "P28 nextest 注入 RUST_TEST_THREADS=4" "$out" "RUST_TEST_THREADS=4"
 
 if [ "$FAIL" -ne 0 ]; then
   echo "cargo-lane.spec: FAILED"

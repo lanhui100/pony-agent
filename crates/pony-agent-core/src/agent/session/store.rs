@@ -5334,7 +5334,15 @@ fn default_storage_path() -> PathBuf {
         unique_test_session_dir("pony-agent-storage").join("sessions.json")
     }
 
-    #[cfg(not(test))]
+    #[cfg(all(not(test), feature = "test-support"))]
+    {
+        crate::agent::sqlite_session::data_dir_override()
+            .unwrap_or_else(crate::agent::sqlite_session::test_support_fallback_data_dir)
+            .join("PonyAgent")
+            .join("sessions.json")
+    }
+
+    #[cfg(all(not(test), not(feature = "test-support")))]
     {
         // 默认工作区分叉收敛：dirs 全失败才回退 cwd；中间加 compute_default_workspace_root
         //（Windows Documents/pony_agent，Unix ~/pony_agent）一跳。

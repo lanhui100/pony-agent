@@ -68,7 +68,13 @@ fn state_with_panel() -> TuiState {
 }
 
 fn plane_with_store(store: Arc<dyn AskPersistenceStore>) -> HostControlPlane {
-    HostControlPlaneBuilder::new().ask_store(store).build()
+    let runtime = pony_agent_core::agent::runtime::AgentRuntimeBuilder::new()
+        .session_store(pony_agent_core::agent::session::SessionStore::memory_only())
+        .build();
+    HostControlPlaneBuilder::new()
+        .runtime(runtime)
+        .ask_store(store)
+        .build()
 }
 
 /// 可注入「快照为空 / 读失败 / 仍 Pending」三种真值的测试存储。

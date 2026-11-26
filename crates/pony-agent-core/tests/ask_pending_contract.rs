@@ -411,6 +411,7 @@ fn c1_6_host_control_plane_projection_excludes_terminal_requests() {
     let waiting_ask = dispatch_ask(&h.dispatcher, "call-2", "等待？");
 
     let plane: HostControlPlane = HostControlPlaneBuilder::new()
+        .runtime(memory_runtime())
         .ask_dispatcher(Arc::clone(&h.dispatcher))
         .ask_store(Arc::clone(&store))
         .build();
@@ -502,6 +503,12 @@ fn c1_6_host_control_plane_projection_excludes_terminal_requests() {
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
 }
 
+fn memory_runtime() -> pony_agent_core::agent::runtime::AgentRuntime {
+    pony_agent_core::agent::runtime::AgentRuntimeBuilder::new()
+        .session_store(pony_agent_core::agent::session::SessionStore::memory_only())
+        .build()
+}
+
 /// 独立的临时 SQLite 库路径（谁创建谁清理；不污染真实会话库）。
 fn unique_temp_db_path(tag: &str) -> std::path::PathBuf {
     let unique = format!(
@@ -533,6 +540,7 @@ fn c1_7_get_ask_lifecycle_state_reports_truthful_state() {
     let ask3 = dispatch_ask(&h.dispatcher, "call-lifecycle-3", "问题3？");
 
     let plane = HostControlPlaneBuilder::new()
+        .runtime(memory_runtime())
         .ask_dispatcher(Arc::clone(&h.dispatcher))
         .ask_store(Arc::clone(&store))
         .build();
@@ -652,6 +660,7 @@ fn c1_8_get_ask_lifecycle_state_surfaces_read_failures_as_err() {
     }
 
     let plane = HostControlPlaneBuilder::new()
+        .runtime(memory_runtime())
         .ask_store(Arc::from(Box::new(ReadFailingStore) as Box<dyn AskPersistenceStore>))
         .build();
     let error = plane

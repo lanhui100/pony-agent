@@ -123,7 +123,11 @@ fn wait_until<F: FnMut() -> bool>(mut predicate: F, timeout_ms: u64) -> bool {
 
 fn control_plane_with_registry() -> (HostControlPlane, ExecutionControlRegistry) {
     let registry = ExecutionControlRegistry::new();
+    let runtime = pony_agent_core::agent::runtime::AgentRuntimeBuilder::new()
+        .session_store(pony_agent_core::agent::session::SessionStore::memory_only())
+        .build();
     let control_plane = HostControlPlaneBuilder::new()
+        .runtime(runtime)
         .execution_control(registry.clone())
         .build();
     (control_plane, registry)

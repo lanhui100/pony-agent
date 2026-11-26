@@ -50,6 +50,37 @@ fn ensure_owned(job: &JobSession, caller: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// 作业归属会话 id 归一化：`trim()` 后为空一律视为「无归属」（`None`）。
+fn normalize_job_owner(owner: Option<&str>) -> Option<String> {
+    owner
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// 列表接口（`job_list_scoped`）的会话可见性判定：
+/// - `caller == None`（内部/单测无作用域直调 `job_list`）⇒ 返回全部作业；
+/// - `caller == Some(raw)` ⇒ 先 `trim()`，空串 fail-closed 不可见，否则严格只返回
+///   `job.owner == Some(target)`（`owner = None` 的无归属作业不再暴露给具体会话）。
+fn is_visible_to_list_caller(job: &JobSession, caller: Option<&str>) -> bool {
+    let Some(raw) = caller else {
+        return true;
+    };
+    let target = raw.trim();
+    if target.is_empty() {
+        return false;
+    }
+    job.owner.as_deref() == Some(target)
+}
+
+/// 作业描述归一化：`trim()` 后为空一律视为「无描述」（`None`），避免 TUI 渲染出空行。
+fn normalize_job_description(description: Option<&str>) -> Option<String> {
+    description
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobStartArgs {
     pub command: String,
@@ -58,6 +89,10 @@ pub struct JobStartArgs {
     /// 工具 schema 声明 `timeoutMs`（camelCase），结构体是 snake_case：两种拼法都收。
     #[serde(alias = "timeoutMs")]
     pub timeout_ms: Option<u64>,
+    /// 面向用户的中文任务描述（schema 已强制模型提供）：TUI Jobs 页签优先展示它，
+    /// 避免把冗长原始 shell 命令直接摊给用户。空串/纯空白按「无描述」处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +152,10 @@ pub struct JobListItem {
     pub started_at: u64,
     /// 作业来源：`owned`（`job_start` 自建）或 `promoted`（Run 到期转后台）。
     pub kind: String,
+    /// 面向用户的中文描述（`job_start` 的 `description` / promote 时继承的 Run 描述）；
+    /// `None` = 调用方未提供（TUI 回退展示精简命令）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +258,9 @@ struct JobSession {
     /// B012：作业归属的会话 id（`job_start` / promote 时的 `ToolExecutionContext.session_id`）。
     /// `None` = 无归属（内部直调 / 未提供上下文），对任意 caller 放行。
     owner: Option<String>,
+    /// 面向用户的中文描述（`job_start` 的 `description` / promote 继承的 Run 描述）。
+    /// 只做展示，不参与归属判定与生命周期。
+    description: Option<String>,
     /// B013：promote 时移交的临时脚本（Windows `<ws>/.tmp/pony-agent-run-{sid}.cmd`）。
     /// 前台 Run 在 promote 路径上**不得**自己删除它（进程仍可能读该脚本），清理责任移交
     /// job 生命周期：在终态回收点（[`JobSession::release_promoted_entry`]）删除，POSIX 恒 `None`。
@@ -751,7 +793,8 @@ pub fn job_start_scoped(
         stdout_truncated: AtomicBool::new(false),
         stderr_truncated: AtomicBool::new(false),
         released: AtomicBool::new(false),
-        owner: owner.map(str::to_string),
+        owner: normalize_job_owner(owner),
+        description: normalize_job_description(args.description.as_deref()),
         cleanup_script: None,
         cancel: None,
         kind: JobKind::Owned,
@@ -795,16 +838,68 @@ pub fn register_promoted(
     owner: Option<&str>,
     cleanup_script: Option<PathBuf>,
 ) -> Result<String, String> {
+    Ok(register_promoted_spec(PromotedJobSpec {
+        manager,
+        session_id,
+        handle,
+        command_line,
+        first_stdout: first_stdout.to_string(),
+        first_stderr: first_stderr.to_string(),
+        stdout_truncated,
+        stderr_truncated,
+        cancel,
+        owner: owner.map(str::to_string),
+        cleanup_script,
+        description: None,
+    }))
+}
+
+/// promote 作业的登记入参（结构体形态：新增字段不再扩散到调用点参数列表）。
+///
+/// 字段语义与 [`register_promoted`] 逐项对应，额外带 `description`（面向用户的中文描述）。
+///
+/// 不 derive `Debug`：`ProcessManager` 未实现 `Debug`，而该字段只是句柄载体。
+#[derive(Clone)]
+#[expect(
+    missing_debug_implementations,
+    reason = "ProcessManager 未实现 Debug；本结构只是登记入参载体，排障靠 job_id/command_line"
+)]
+pub struct PromotedJobSpec {
+    pub manager: ProcessManager,
+    pub session_id: String,
+    pub handle: String,
+    pub command_line: String,
+    pub first_stdout: String,
+    pub first_stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub cancel: Option<Arc<CancellationToken>>,
+    pub owner: Option<String>,
+    pub cleanup_script: Option<PathBuf>,
+    /// 面向用户的中文描述（Run 的 `description` 参数）：TUI Jobs 页签优先展示它。
+    pub description: Option<String>,
+}
+
+/// 带描述的 promote 登记：与 [`register_promoted`] 同一实现，只多透传 `description`。
+pub fn register_promoted_with_description(spec: PromotedJobSpec) -> Result<String, String> {
+    Ok(register_promoted_spec(spec))
+}
+
+/// [`register_promoted`] 与 [`register_promoted_with_description`] 的共用实现。
+///
+/// 返回裸 `String`：登记路径不产生可恢复失败（registry 锁走毒锁恢复），`Result` 外壳只由
+/// 两个公开入口为兼容既有 `Result` 签名而保留。
+fn register_promoted_spec(spec: PromotedJobSpec) -> String {
     let buffer = Arc::new(Mutex::new(RingBuffer::new(JOB_BUFFER_CAP)));
     // 契约 CT-P7b：首读快照若本身已超过 ring buffer 容量，同样置 truncated 标记。
-    let mut stdout_truncated = stdout_truncated;
-    let mut stderr_truncated = stderr_truncated;
+    let mut stdout_truncated = spec.stdout_truncated;
+    let mut stderr_truncated = spec.stderr_truncated;
     {
         let mut buffer_guard = buffer.lock().unwrap();
-        if !first_stdout.is_empty() && buffer_guard.push(first_stdout.as_bytes()) > 0 {
+        if !spec.first_stdout.is_empty() && buffer_guard.push(spec.first_stdout.as_bytes()) > 0 {
             stdout_truncated = true;
         }
-        if !first_stderr.is_empty() && buffer_guard.push(first_stderr.as_bytes()) > 0 {
+        if !spec.first_stderr.is_empty() && buffer_guard.push(spec.first_stderr.as_bytes()) > 0 {
             stderr_truncated = true;
         }
     }
@@ -816,7 +911,7 @@ pub fn register_promoted(
         .as_secs();
     let session = Arc::new(JobSession {
         job_id: job_id.clone(),
-        command_line,
+        command_line: spec.command_line,
         // promoted 作业的进程 pid 未单独暴露（所有权仍在 ProcessManager），固定为 0。
         pid: 0,
         started_at,
@@ -831,21 +926,25 @@ pub fn register_promoted(
         stdout_truncated: AtomicBool::new(stdout_truncated),
         stderr_truncated: AtomicBool::new(stderr_truncated),
         released: AtomicBool::new(false),
-        owner: owner.map(str::to_string),
-        cleanup_script,
-        cancel: cancel.clone(),
+        owner: normalize_job_owner(spec.owner.as_deref()),
+        description: normalize_job_description(spec.description.as_deref()),
+        cleanup_script: spec.cleanup_script,
+        cancel: spec.cancel.clone(),
         kind: JobKind::Promoted {
-            manager,
-            session_id,
-            handle,
+            manager: spec.manager,
+            session_id: spec.session_id,
+            handle: spec.handle,
         },
         #[cfg(windows)]
         job: None,
     });
 
-    registry().lock().unwrap().insert(job_id.clone(), session.clone());
+    registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(job_id.clone(), session.clone());
     spawn_cancel_watcher(Arc::downgrade(&session));
-    Ok(job_id)
+    job_id
 }
 
 /// B009：promoted 作业的取消观察者（短生命周期，20ms tick）。
@@ -971,14 +1070,16 @@ pub fn job_list(_args: JobListArgs) -> Result<JobListResult, String> {
     job_list_scoped(_args, None)
 }
 
-/// 带调用方归属的 `job_list`（工具路径用）：非 owner 的作业被**过滤掉**（不暴露存在性）。
+/// 带调用方归属的 `job_list`（工具路径与 TUI Jobs 页签共用）：
+/// - `caller = Some(session)`：严格只保留 `owner == Some(session)` 的作业（无归属或空白 caller 不暴露）；
+/// - `caller = None`：内部无作用域直调（`job_list`），返回全部作业。
 pub fn job_list_scoped(_args: JobListArgs, caller: Option<&str>) -> Result<JobListResult, String> {
     let sessions = registry().lock().unwrap().list();
     let jobs = sessions
         .into_iter()
-        // 契约 B012：非 owner 的作业**直接过滤掉**（列表接口泄露存在性同样算泄露），
+        // 契约 B012：非本会话归属的作业**直接过滤掉**（列表接口泄露存在性同样算泄露），
         // 而不是返回错误 —— 错误会让调用方区分「不存在」与「存在但无权」。
-        .filter(|session| ensure_owned(session, caller).is_ok())
+        .filter(|session| is_visible_to_list_caller(session, caller))
         .map(|session| {
             let (status, _) = session.update_status();
             JobListItem {
@@ -988,6 +1089,7 @@ pub fn job_list_scoped(_args: JobListArgs, caller: Option<&str>) -> Result<JobLi
                 pid: session.pid,
                 started_at: session.started_at,
                 kind: session.kind.label().to_string(),
+                description: session.description.clone(),
             }
         })
         .collect();
@@ -1285,5 +1387,67 @@ mod tests {
         })
         .expect("job_output after kill must still succeed");
         assert_eq!(out.status, "killed", "kill 后仍必须能读到终态状态");
+    }
+
+    /// 2026-11-25：`job_start` 的中文描述必须透传到 `job_list`（TUI Jobs 页签的唯一主文案来源）。
+    #[test]
+    fn job_description_round_trips_through_job_list() {
+        let owner = "job-description-owner";
+        let started = job_start_scoped(
+            JobStartArgs {
+                command: "sh".to_string(),
+                args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+                cwd: None,
+                timeout_ms: None,
+                description: Some("  构建前端产物  ".to_string()),
+            },
+            None,
+            Some(owner),
+        )
+        .expect("job_start 必须成功");
+
+        let listed = job_list_scoped(JobListArgs {}, Some(owner)).expect("job_list 必须成功");
+        let item = listed
+            .jobs
+            .iter()
+            .find(|item| item.job_id == started.job_id)
+            .expect("刚启动的作业必须出现在列表里");
+        assert_eq!(
+            item.description.as_deref(),
+            Some("构建前端产物"),
+            "描述必须原样透传并 trim"
+        );
+
+        // 纯空白描述 = 无描述（不得渲染出空行）。
+        let blank = job_start_scoped(
+            JobStartArgs {
+                command: "sh".to_string(),
+                args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+                cwd: None,
+                timeout_ms: None,
+                description: Some("   ".to_string()),
+            },
+            None,
+            Some(owner),
+        )
+        .expect("job_start 必须成功");
+        let listed = job_list_scoped(JobListArgs {}, Some(owner)).expect("job_list 必须成功");
+        let blank_item = listed
+            .jobs
+            .iter()
+            .find(|item| item.job_id == blank.job_id)
+            .expect("作业必须出现在列表里");
+        assert!(blank_item.description.is_none(), "空白描述必须归一化为 None");
+
+        // 清场：两条 sleep 作业都不留进程。
+        for job_id in [started.job_id, blank.job_id] {
+            let _ = job_kill_scoped(
+                JobKillArgs {
+                    job_id,
+                    reason: Some("test cleanup".to_string()),
+                },
+                Some(owner),
+            );
+        }
     }
 }
