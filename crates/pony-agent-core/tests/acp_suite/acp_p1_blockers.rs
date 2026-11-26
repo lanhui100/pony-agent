@@ -689,3 +689,105 @@ fn p1_14_tool_entry_default_budget_not_capped_at_five_seconds() {
 
     cleanup(&cwd);
 }
+
+// ───────────────── B169 cancel-race：Ok 优先，取消不覆盖已到达终态 ─────────────────
+
+/// B169 正例（**确定性**，不靠 sleep 抢跑）：
+/// 夹具 `cancel_race_ok` 先发一条 update，然后**阻塞等 `session/cancel`**，收到后才回
+/// `{"stopReason":"end_turn"}`。因此「取消已观察」与「终态 Ok 到达」的先后由**因果**保证：
+/// 宿主若不真发 cancel，agent 永不回包（用例会等满预算失败）；宿主一旦发 cancel，
+/// 终态必然在其后到达。
+///
+/// 契约（ADR `2026-11-23-acp-cancel-race-ok-precedence`）：此时必须仍按 **Ok** 归约——
+/// `status="ok"`、`stopReason="end_turn"`、正文完整带回；**不得**退化成 aborted/tool_cancelled。
+#[test]
+fn b169_cancel_race_keeps_ok_terminal_state() {
+    let baseline_ms = nfr_acp_ms("request_timeout_ms");
+    // cancel_race_ok 在收到 cancel 前永不回包 ⇒ 预算即「失败上界」。
+    let horizon_ms = baseline_ms + 3000;
+
+    let cwd = temp_dir("cancel-race-ok");
+    let marker = cwd.join("race-ok.marker");
+    let marker_text = marker.to_string_lossy().into_owned();
+    let session = spawn_session(
+        "cancel_race_ok",
+        &[marker_text.as_str(), "acp-sess-1"],
+        &cwd,
+    );
+    session.set_turn_budget(Duration::from_millis(horizon_ms));
+
+    let token = Arc::new(CancellationToken::new());
+    session.set_cancellation_token(Arc::clone(&token));
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = session.prompt(prompt_blocks("race task"), &NoopSink);
+            let _ = sender.send(result);
+        });
+
+        // 前置：agent 必须先真正收到 session/prompt（否则后续 cancel 无对象）。
+        assert!(
+            wait_until(|| marker.exists(), Duration::from_millis(baseline_ms)),
+            "B169 前置：fake agent 必须在 {baseline_ms}ms 内收到 session/prompt"
+        );
+
+        token.cancel();
+
+        let result = receiver
+            .recv_timeout(Duration::from_millis(horizon_ms))
+            .expect("B169 违约：取消后终态必须及时返回（agent 收到 cancel 才回 Ok，实际等满预算）");
+
+        // 核心断言①：Ok 优先——取消不覆盖已到达的终态。
+        assert_eq!(
+            result.status, "ok",
+            "B169 违约：cancel-race 下终态 Ok 必须按 Ok 归约（不得改写成 aborted），实际 {result:?}"
+        );
+        // 核心断言②：终态事实保留（`stopReason` 在结果 JSON 里，不在 ToolResult 顶层字段）。
+        let payload: Value =
+            serde_json::from_str(&result.output).expect("B169：工具结果必须是合法 JSON");
+        assert_eq!(
+            payload["stopReason"],
+            serde_json::json!("end_turn"),
+            "B169 违约：stopReason 必须保持 agent 给的 end_turn，实际 {}",
+            result.output
+        );
+        assert_eq!(
+            payload["ok"],
+            serde_json::json!(true),
+            "B169 违约：Ok 归约必须 `ok:true`，实际 {}",
+            result.output
+        );
+        // 核心断言③：正文不得因取消被丢弃（这正是「Ok 优先」要保护的东西）。
+        assert!(
+            result.output.contains("race-ok-body"),
+            "B169 违约：Ok 归约必须带回完整正文（含 race-ok-body），实际 {}",
+            result.output
+        );
+        // 核心断言④：不得伪造取消错误码。
+        assert!(
+            !result.output.contains(ACP_TOOL_CANCELLED),
+            "B169 违约：Ok 归约不得出现 {ACP_TOOL_CANCELLED}，实际 {}",
+            result.output
+        );
+
+        // 反相对照：本用例确实覆盖了竞态——agent 侧必须有 cancel 证据。
+        let cancel_evidence = cwd.join("race-ok.marker.cancel");
+        assert!(
+            wait_until(|| cancel_evidence.exists(), Duration::from_millis(baseline_ms)),
+            "B169 反相对照失败：agent 侧无 session/cancel 证据 ⇒ 本用例没有覆盖 cancel-race（假绿）"
+        );
+        let raw = std::fs::read_to_string(&cancel_evidence).expect("读取 cancel 证据");
+        let frame: Value = serde_json::from_str(raw.lines().next().expect("cancel 证据行缺失"))
+            .expect("cancel 证据必须是 JSON");
+        assert_eq!(
+            frame["method"],
+            serde_json::json!("session/cancel"),
+            "B169：发出的必须是 session/cancel notification"
+        );
+    });
+
+    let mut session = session;
+    session.close();
+    cleanup(&cwd);
+}
