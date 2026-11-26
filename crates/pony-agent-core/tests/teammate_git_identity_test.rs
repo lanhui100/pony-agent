@@ -51,6 +51,7 @@ fn read_author_name(owner: Option<&str>) -> String {
         ]),
         cwd: None,
         timeout_ms: None,
+        description: None,
     };
     #[cfg(windows)]
     let args = JobStartArgs {
@@ -61,6 +62,7 @@ fn read_author_name(owner: Option<&str>) -> String {
         ]),
         cwd: None,
         timeout_ms: None,
+        description: None,
     };
 
     let started = job_start_scoped(args, None, owner).expect("后台作业必须能启动");

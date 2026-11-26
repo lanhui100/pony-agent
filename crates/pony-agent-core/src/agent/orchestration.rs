@@ -535,6 +535,106 @@ pub fn teammate_target_for_session(session_id: &str) -> Option<String> {
         .map(|(target, _)| target.clone())
 }
 
+// ==========================================
+// 1a. 会话隔离：teammate / team task 的宿主会话归属
+// ==========================================
+
+/// 每个 teammate target 派生于哪个宿主会话（`None` 值不写入）。
+///
+/// 为什么需要：`TEAMMATES` / `TEAM_TASKS` 是进程全局静态表，同一进程里的多个 TUI 会话
+/// 会互相看到对方的队友与任务（跨会话串话）。本表记录归属，TUI 侧据此过滤。
+static TEAMMATE_HOST_SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// 每个 team task 由哪个宿主会话创建（`None` 值不写入）。
+static TEAM_TASK_HOST_SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// 登记 teammate 的宿主会话归属（派生阶段调用；空 host 忽略）。
+pub fn set_teammate_host_session(target: &str, host_session_id: &str) {
+    let target = normalize_target(target);
+    let host_session_id = host_session_id.trim();
+    if target.is_empty() || host_session_id.is_empty() || target == LEAD_TARGET {
+        return;
+    }
+    let mut lock = TEAMMATE_HOST_SESSIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let map = lock.get_or_insert_with(HashMap::new);
+    map.insert(target, host_session_id.to_string());
+}
+
+/// 读取 teammate 的宿主会话；无登记 ⇒ `None`（旧记录 / 库层直调）。
+pub fn teammate_host_session(target: &str) -> Option<String> {
+    let target = normalize_target(target);
+    let lock = TEAMMATE_HOST_SESSIONS.lock().ok()?;
+    lock.as_ref()?.get(&target).cloned()
+}
+
+/// 把**工具调用的会话 id**解析成「归属的宿主会话 id」。
+///
+/// - 宿主会话（TUI 主会话 / 桌面会话）⇒ 就是它自己；
+/// - 队友子会话（`team-*`，`teammate_target_for_session` 可反查）⇒ 该队友的宿主会话；
+/// - 反查不到且非空 ⇒ 自身（无归属的上游，保持可用）。
+pub fn host_session_for_caller(session_id: Option<&str>) -> Option<String> {
+    let session_id = session_id.map(str::trim).filter(|id| !id.is_empty())?;
+    if let Some(target) = teammate_target_for_session(session_id) {
+        return teammate_host_session(&target).or_else(|| Some(session_id.to_string()));
+    }
+    Some(session_id.to_string())
+}
+
+/// 登记 team task 的宿主会话归属（创建阶段调用）。
+pub fn set_team_task_host_session(task_id: &str, host_session_id: &str) {
+    let task_id = task_id.trim();
+    let host_session_id = host_session_id.trim();
+    if task_id.is_empty() || host_session_id.is_empty() {
+        return;
+    }
+    let mut lock = TEAM_TASK_HOST_SESSIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let map = lock.get_or_insert_with(HashMap::new);
+    map.insert(task_id.to_string(), host_session_id.to_string());
+}
+
+/// 某宿主会话名下的 teammate 名册（过滤掉伪成员 `lead` 与其他会话的队友）。
+///
+/// 与 [`list_agents`] 同源（同一 `TEAMMATES` 表与 `is_driving` 判定），只是多一道归属过滤。
+pub fn list_agents_for_session(host_session_id: &str) -> Result<ListAgentsResult, String> {
+    let host_session_id = host_session_id.trim();
+    if host_session_id.is_empty() {
+        return list_agents();
+    }
+    let mut agents = list_agents()?.agents;
+    agents.retain(|member| {
+        member.target != LEAD_TARGET
+            && teammate_host_session(&member.target).as_deref() == Some(host_session_id)
+    });
+    Ok(ListAgentsResult { agents })
+}
+
+/// 某宿主会话名下的 team task 列表（过滤掉其他会话创建的任务）。
+///
+/// 与 [`team_task_list`] 同源（同一 `TEAM_TASKS` 表与 `deleted` 过滤），只多一道归属过滤。
+pub fn team_task_list_for_session(host_session_id: &str) -> Result<TeamTaskListResult, String> {
+    let host_session_id = host_session_id.trim();
+    if host_session_id.is_empty() {
+        return team_task_list();
+    }
+    let mut list = team_task_list()?;
+    let lock = TEAM_TASK_HOST_SESSIONS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(map) = lock.as_ref() {
+        list.tasks.retain(|task| {
+            map.get(&task.task_id).map(String::as_str) == Some(host_session_id)
+        });
+    } else {
+        // 没有任何归属登记：严格隔离 —— 不把无主任务串给任意会话。
+        list.tasks.clear();
+    }
+    Ok(list)
+}
+
 /// W3 trace：每个 teammate target 派发时捕获的**宿主 turn traceparent**。
 ///
 /// 用途：`drive_teammate_turn_in`（在后台线程/另一 turn 上执行）已经离开宿主 turn 的
@@ -565,6 +665,160 @@ pub(crate) fn teammate_traceparent(target: &str) -> Option<String> {
     }
     let lock = TEAMMATE_TRACEPARENTS.lock().unwrap();
     lock.as_ref()?.get(target).cloned()
+}
+
+// ==========================================
+// 1b. Subagent 运行注册表（TUI Agents 页签可见性）
+// ==========================================
+
+/// 子智能体一次运行的终态（`Running` 期间对用户可见为「● 运行中」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentRunStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl SubagentRunStatus {
+    /// 是否仍在运行（TUI 状态条与页签计数的唯一判据）。
+    pub fn is_running(self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// 是否「需要人看一眼」（只有失败算；完成与运行中都不算）。
+    pub fn needs_attention(self) -> bool {
+        matches!(self, Self::Failed)
+    }
+}
+
+/// 一次子智能体运行的**可见性记录**（进程内，无正文、无输出）。
+///
+/// 为什么需要它：`subagent_in_workspace_with_context` 预分配了 `subagent-<uuid>` 会话 id，
+/// 但此前没有登记到任何花名册 —— TUI 的 Agents 页签与状态条因此完全看不到子智能体
+/// （见 ADR `2026-11-25-tui-drawer-ux-and-subagent-visibility`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentRunRecord {
+    /// 子会话 id（`subagent-<uuid>`；与宿主 `SessionStore` 中的真实历史同一个 id）。
+    pub session_id: String,
+    /// 面向用户的中文描述（`subagent` 的 `description` 参数）。
+    pub description: String,
+    pub status: SubagentRunStatus,
+    /// 发起子代理的宿主会话 id；`None` = 无会话归属（内部直调，不串到任何 TUI 会话）。
+    pub parent_session_id: Option<String>,
+    /// 开始时刻（Unix 毫秒）。
+    pub started_at_ms: u64,
+    /// 失败原因（仅 `Failed` 有值）。
+    pub error: Option<String>,
+}
+
+/// 子智能体运行记录的保留上限：超出后淘汰**最早的非运行中**记录。
+///
+/// 运行中记录永不淘汰（否则「在跑的子代理」会从界面上凭空消失）。
+const MAX_SUBAGENT_RUNS: usize = 64;
+
+static SUBAGENT_RUNS: Mutex<Option<VecDeque<SubagentRunRecord>>> = Mutex::new(None);
+
+/// 登记一次「开始运行」的子代理（入口预分配 id 之后立即调用）。
+pub fn register_subagent_run(
+    session_id: &str,
+    description: &str,
+    parent_session_id: Option<&str>,
+) {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return;
+    }
+    let record = SubagentRunRecord {
+        session_id: session_id.to_string(),
+        description: description.trim().to_string(),
+        status: SubagentRunStatus::Running,
+        parent_session_id: parent_session_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
+        started_at_ms: now_unix_ms(),
+        error: None,
+    };
+    let mut lock = SUBAGENT_RUNS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runs = lock.get_or_insert_with(VecDeque::new);
+    runs.push_back(record);
+    // 淘汰：只在超过上限时移除**最早的终态**记录；全是运行中则保留（宁可多留几行）。
+    while runs.len() > MAX_SUBAGENT_RUNS {
+        match runs.iter().position(|run| !run.status.is_running()) {
+            Some(index) => {
+                runs.remove(index);
+            }
+            None => break,
+        }
+    }
+}
+
+/// 更新一次子代理运行的终态（`Completed` / `Failed`）；未知 id 静默忽略。
+pub fn finish_subagent_run(
+    session_id: &str,
+    status: SubagentRunStatus,
+    error: Option<&str>,
+) {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return;
+    }
+    let mut lock = SUBAGENT_RUNS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(runs) = lock.as_mut() else {
+        return;
+    };
+    if let Some(record) = runs.iter_mut().find(|run| run.session_id == session_id) {
+        record.status = status;
+        record.error = error.map(str::to_string);
+    }
+}
+
+/// 把运行记录的会话 id 从预分配值迁到引擎回传的真实 id。
+///
+/// 为什么需要：Stub / 自定义引擎可能忽略预分配 id 而回传自己的会话 id；不迁移的话
+/// 页签里会留一条**永不结束**的「运行中」记录（用户永远看不到它完成）。
+pub fn rebind_subagent_run(from_session_id: &str, to_session_id: &str) {
+    let from = from_session_id.trim();
+    let to = to_session_id.trim();
+    if from.is_empty() || to.is_empty() || from == to {
+        return;
+    }
+    let mut lock = SUBAGENT_RUNS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(runs) = lock.as_mut() else {
+        return;
+    };
+    if let Some(record) = runs.iter_mut().find(|run| run.session_id == from) {
+        record.session_id = to.to_string();
+    }
+}
+
+/// 某宿主会话名下的子代理运行记录（按开始时刻升序，运行中排在后面也无妨——由调用方排序）。
+///
+/// 无 `parent_session_id` 的记录**不**返回给任何具体会话：内部直调的子代理不得串到
+/// TUI 会话的页签里（与 ACP 委派/作业归属同一条纪律）。
+pub fn list_subagent_runs_for_session(parent_session_id: &str) -> Vec<SubagentRunRecord> {
+    let target = parent_session_id.trim();
+    if target.is_empty() {
+        return Vec::new();
+    }
+    let lock = SUBAGENT_RUNS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    lock.as_ref()
+        .map(|runs| {
+            runs.iter()
+                .filter(|run| run.parent_session_id.as_deref() == Some(target))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// wave-37 C3：真实子代理执行入口。
@@ -649,6 +903,9 @@ pub fn subagent_in_workspace_with_context(
     let subagent_id = format!("subagent-{}", Uuid::new_v4());
     let is_bg = args.run_in_background.unwrap_or(false);
     let fork_context = args.fork_context.unwrap_or(false);
+    // TUI Agents 页签的可见性来源：预分配 id 之后立即登记「运行中」，两条路径收尾时更新终态。
+    let run_description = args.description.clone();
+    register_subagent_run(&subagent_id, &run_description, parent_session_id);
 
     if is_bg {
         let bg_id = subagent_id.clone();
@@ -670,8 +927,12 @@ pub fn subagent_in_workspace_with_context(
                 workspace_id: bg_workspace_id.as_deref(),
                 fork_context,
             };
-            if let Err(err) = engine.run_turn_request(&request) {
-                eprintln!("[subagent] background turn failed ({}): {}", bg_id, err);
+            match engine.run_turn_request(&request) {
+                Ok(_) => finish_subagent_run(&bg_id, SubagentRunStatus::Completed, None),
+                Err(err) => {
+                    eprintln!("[subagent] background turn failed ({}): {}", bg_id, err);
+                    finish_subagent_run(&bg_id, SubagentRunStatus::Failed, Some(err.as_str()));
+                }
             }
         });
         return Ok(SubagentResult {
@@ -699,17 +960,23 @@ pub fn subagent_in_workspace_with_context(
             // P2：引擎回传真实会话 id 时以它为准（Stub 引擎可能忽略预分配 id）；
             // 为空才回落预分配值，保证返回值永远可检索。
             let resolved_id = if outcome.session_id.trim().is_empty() {
-                subagent_id
+                subagent_id.clone()
             } else {
                 outcome.session_id
             };
+            // 引擎换 id 时把运行记录一并迁移（否则页签里会留一条永不结束的「运行中」）。
+            rebind_subagent_run(&subagent_id, &resolved_id);
+            finish_subagent_run(&resolved_id, SubagentRunStatus::Completed, None);
             Ok(SubagentResult {
                 subagent_id: resolved_id,
                 status: "completed".to_string(),
                 output: Some(outcome.final_text),
             })
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            finish_subagent_run(&subagent_id, SubagentRunStatus::Failed, Some(err.as_str()));
+            Err(err)
+        }
     }
 }
 
@@ -2064,5 +2331,167 @@ mod team_activity_and_task_tests {
         assert!(authorize_task(&teammate, &owned).is_ok());
         assert!(authorize_task(&teammate, &foreign).is_err());
         assert!(authorize_task(&teammate, &unowned).is_err());
+    }
+}
+
+/// 2026-11-25：子智能体运行注册表与「宿主会话归属」的隔离语义。
+///
+/// 这些注册表只承载 TUI 可见性，不参与权限/生命周期裁决；用例断言的是**隔离与终态迁移**
+/// 两条不变量（跨会话不得串话、引擎换 id 不得留幽灵「运行中」）。
+#[cfg(test)]
+mod subagent_and_host_session_tests {
+    use super::*;
+
+    #[test]
+    fn subagent_runs_are_isolated_per_parent_session() {
+        let mine = "host-subagent-mine";
+        let other = "host-subagent-other";
+        register_subagent_run("subagent-mine-1", "梳理调用链", Some(mine));
+        register_subagent_run("subagent-other-1", "别人的子代理", Some(other));
+        // 无宿主归属（内部直调）不得串到任何会话。
+        register_subagent_run("subagent-orphan", "无归属", None);
+
+        let listed = list_subagent_runs_for_session(mine);
+        let ids: Vec<&str> = listed.iter().map(|run| run.session_id.as_str()).collect();
+        assert!(ids.contains(&"subagent-mine-1"), "本会话子代理必须可见：{ids:?}");
+        assert!(
+            !ids.contains(&"subagent-other-1"),
+            "别的会话的子代理不得串入：{ids:?}"
+        );
+        assert!(
+            !ids.contains(&"subagent-orphan"),
+            "无宿主归属的子代理不归任何会话：{ids:?}"
+        );
+        assert_eq!(
+            listed[0].status,
+            SubagentRunStatus::Running,
+            "登记即运行中"
+        );
+
+        // 空宿主会话 ⇒ 空列表（不把「无归属」读成「全量」）。
+        assert!(list_subagent_runs_for_session("  ").is_empty());
+    }
+
+    #[test]
+    fn finishing_a_subagent_run_updates_status_and_error() {
+        let host = "host-subagent-finish";
+        register_subagent_run("subagent-finish-1", "跑测试", Some(host));
+        finish_subagent_run("subagent-finish-1", SubagentRunStatus::Failed, Some("boom"));
+        let run = list_subagent_runs_for_session(host)
+            .into_iter()
+            .find(|run| run.session_id == "subagent-finish-1")
+            .expect("记录必须存在");
+        assert_eq!(run.status, SubagentRunStatus::Failed);
+        assert_eq!(run.error.as_deref(), Some("boom"));
+        assert!(run.status.needs_attention(), "失败必须计入需关注");
+        assert!(!run.status.is_running(), "终态不再算运行中");
+    }
+
+    #[test]
+    fn rebind_moves_run_to_engine_resolved_session_id() {
+        let host = "host-subagent-rebind";
+        register_subagent_run("subagent-pre-allocated", "迁移用例", Some(host));
+        rebind_subagent_run("subagent-pre-allocated", "subagent-engine-real");
+        let runs = list_subagent_runs_for_session(host);
+        assert!(
+            runs.iter()
+                .any(|run| run.session_id == "subagent-engine-real"),
+            "必须迁移到引擎真实 id：{runs:?}"
+        );
+        assert!(
+            !runs
+                .iter()
+                .any(|run| run.session_id == "subagent-pre-allocated"),
+            "旧 id 不得残留（否则页签留一条永不结束的运行中）：{runs:?}"
+        );
+    }
+
+    #[test]
+    fn teammate_host_session_round_trips_and_resolves_team_caller() {
+        let host = "host-team-owner";
+        // 队友子会话 → 宿主会话的反查依赖 TEAMMATE_SESSIONS（登记 teammate 时写入）。
+        set_teammate_session("worker-host-test", "team-worker-host-test-0001");
+        set_teammate_host_session("worker-host-test", host);
+
+        assert_eq!(
+            teammate_host_session("worker-host-test").as_deref(),
+            Some(host),
+            "队友宿主归属必须可回读"
+        );
+        assert_eq!(
+            host_session_for_caller(Some("team-worker-host-test-0001")).as_deref(),
+            Some(host),
+            "队友会话必须反查到宿主会话"
+        );
+        assert_eq!(
+            host_session_for_caller(Some(host)).as_deref(),
+            Some(host),
+            "宿主会话归属就是它自己"
+        );
+        assert!(host_session_for_caller(None).is_none(), "无上下文 ⇒ 无归属");
+    }
+
+    #[test]
+    fn list_agents_for_session_drops_lead_and_foreign_members() {
+        let host = "host-agents-owner";
+        let other = "host-agents-other";
+        let mut member = TeammateMember {
+            target: "agent-host-test".to_string(),
+            name: "Ada".to_string(),
+            role: "executor".to_string(),
+            status: TeammateStatus::Active,
+            description: String::new(),
+            is_driving: false,
+            last_error: None,
+        };
+        {
+            let mut lock = TEAMMATES.lock().unwrap();
+            let map = lock.get_or_insert_with(HashMap::new);
+            map.insert(member.target.clone(), member.clone());
+            member.target = "agent-host-other".to_string();
+            member.name = "Bob".to_string();
+            map.insert(member.target.clone(), member);
+        }
+        set_teammate_host_session("agent-host-test", host);
+        set_teammate_host_session("agent-host-other", other);
+
+        let mine = list_agents_for_session(host).expect("名册读取必须成功");
+        let targets: Vec<&str> = mine.agents.iter().map(|m| m.target.as_str()).collect();
+        assert!(targets.contains(&"agent-host-test"), "本会话队友必须可见：{targets:?}");
+        assert!(
+            !targets.contains(&"agent-host-other"),
+            "别的会话队友不得串入：{targets:?}"
+        );
+        assert!(
+            !targets.contains(&"lead"),
+            "伪成员 lead 不得进入会话视图：{targets:?}"
+        );
+    }
+
+    #[test]
+    fn team_task_list_for_session_filters_by_creator_host() {
+        let host = "host-task-owner";
+        let other = "host-task-other";
+        let create = |subject: &str| {
+            team_task_create(TeamTaskCreateArgs {
+                subject: subject.to_string(),
+                description: "d".to_string(),
+                write_scopes: None,
+                blocked_by: None,
+            })
+            .expect("任务创建必须成功")
+        };
+        let mine = create("本会话任务");
+        let foreign = create("别的会话任务");
+        set_team_task_host_session(&mine.task_id, host);
+        set_team_task_host_session(&foreign.task_id, other);
+
+        let listed = team_task_list_for_session(host).expect("任务列表必须成功");
+        let ids: Vec<&str> = listed.tasks.iter().map(|t| t.task_id.as_str()).collect();
+        assert!(ids.contains(&mine.task_id.as_str()), "本会话任务必须可见：{ids:?}");
+        assert!(
+            !ids.contains(&foreign.task_id.as_str()),
+            "别的会话任务不得串入：{ids:?}"
+        );
     }
 }

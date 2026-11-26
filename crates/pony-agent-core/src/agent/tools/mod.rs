@@ -55,7 +55,8 @@ mod tests;
 use crate::agent::process::ProcessManager;
 pub use crate::agent::jobs::{
     job_kill, job_kill_scoped, job_list, job_list_scoped, job_output, job_output_scoped,
-    register_promoted, job_start, job_start_scoped, job_start_with_workspace_root,
+    register_promoted, register_promoted_with_description, PromotedJobSpec,
+    job_start, job_start_scoped, job_start_with_workspace_root,
     JobKillArgs, JobKillResult, JobListArgs, JobListItem, JobListResult,
     JobOutputArgs, JobOutputResult, JobStartArgs, JobStartResult,
     JOB_BUFFER_CAP, MAX_HISTORY_JOBS,

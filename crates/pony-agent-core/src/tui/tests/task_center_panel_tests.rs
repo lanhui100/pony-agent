@@ -17,14 +17,14 @@ fn drawer_state() -> TuiState {
     state
 }
 
-/// 构造一条后台任务视图行（命令/pid/来源都用固定值，断言只看措辞与计数）。
+/// 构造一条后台任务视图行（命令/描述/起始时刻都用固定值，断言只看措辞与计数）。
 fn job_row(id: &str, status: jobs_panel::JobStatus) -> jobs_panel::JobViewRow {
     jobs_panel::JobViewRow {
         id: id.to_string(),
         command: "sleep 1".to_string(),
+        description: None,
         status,
-        pid: 4242,
-        kind: "owned".to_string(),
+        started_at: 0,
     }
 }
 
@@ -81,7 +81,8 @@ fn arrows_cycle_tabs_with_wraparound_and_reset_scroll() {
 }
 
 #[test]
-fn status_bar_uses_background_task_wording_without_warning_glyph() {
+fn status_bar_uses_icon_and_short_wording_for_jobs() {
+    // 决策 3A：底栏左槽是「语义图标 + 极简中文短词」，失败用 `✘N` 而非长句。
     let mut state = TuiState::default();
     state.jobs_state = Some(jobs_panel::JobsViewState {
         jobs: vec![
@@ -91,16 +92,16 @@ fn status_bar_uses_background_task_wording_without_warning_glyph() {
     });
     let summary = task_summary(&state).expect("有在跑/失败作业时后台任务段必须出现");
     assert!(
-        summary.contains("后台任务 1·失败 1"),
-        "状态栏应报「后台任务 运行中数·失败数」：{summary}"
+        summary.contains("⚙ 后台 1·✘1"),
+        "状态栏应报「⚙ 后台 运行中数·✘失败数」：{summary}"
     );
     assert!(
         !summary.contains('⚠'),
         "计数旁不得再出现警告图标：{summary}"
     );
     assert!(
-        !summary.contains("作业"),
-        "旧措辞「作业」不得再出现在状态栏：{summary}"
+        !summary.contains("作业") && !summary.contains("后台任务"),
+        "旧长措辞不得再出现在状态栏：{summary}"
     );
 }
 
@@ -115,4 +116,151 @@ fn status_bar_background_task_segment_hides_when_nothing_to_report() {
         jobs: vec![job_row("job-done", jobs_panel::JobStatus::Completed)],
     });
     assert!(task_summary(&state).is_none(), "只有完成态不应有摘要段");
+}
+
+// ---------------------------------------------------------------------------
+// 2026-11-25 重构：统一折行、Goal 层级、底栏 3A
+// ---------------------------------------------------------------------------
+
+/// 长目标在窄/标准宽度下必须自动换行（旧实现从不折行 ⇒ 右侧硬截断）。
+#[test]
+fn goal_objective_wraps_instead_of_being_truncated() {
+    let mut state = drawer_state();
+    state.task_center.as_mut().expect("抽屉已打开").tab = task_center::TaskCenterTab::Goal;
+    let objective = "把底部任务抽屉的目标正文完整显示出来，不能因为宽度不足而在右侧被硬截断掉后半段内容";
+    state.set_goal(TuiGoal {
+        id: "goal-wrap".to_string(),
+        objective: objective.to_string(),
+        phase: GoalPhase::Active,
+        activation: GoalActivation::Armed,
+        round_count: 1,
+        max_rounds: Some(5),
+        revision: 1,
+    });
+
+    for width in [30usize, 60, 100] {
+        let lines = task_center::build_lines(&state, width);
+        let joined: String = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let joined: String = joined.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            joined.contains(&objective.chars().filter(|c| !c.is_whitespace()).collect::<String>()),
+            "宽度 {width} 下目标正文必须完整可读（折行而非截断）：{joined}"
+        );
+        // 折行口径：任何渲染行都不得超过抽屉宽度。
+        for line in &lines {
+            let w: usize = line.spans.iter().map(|span| str_width(&span.content)).sum();
+            assert!(w <= width, "宽度 {width} 下行宽 {w} 越界：{line:?}");
+        }
+    }
+}
+
+/// Goal 页签：阶段与轮次收拢在一行弱化状态里，命令提示在最末行（不与正文抢中心）。
+#[test]
+fn goal_tab_status_and_hint_are_demoted() {
+    let mut state = drawer_state();
+    state.task_center.as_mut().expect("抽屉已打开").tab = task_center::TaskCenterTab::Goal;
+    state.set_goal(TuiGoal {
+        id: "goal-hierarchy".to_string(),
+        objective: "主体目标".to_string(),
+        phase: GoalPhase::Active,
+        activation: GoalActivation::Armed,
+        round_count: 2,
+        max_rounds: Some(8),
+        revision: 1,
+    });
+    let lines = task_center::content_lines(&state);
+    assert_eq!(lines[0].0.trim(), "主体目标", "目标正文是首行主体：{lines:?}");
+    let status_index = lines
+        .iter()
+        .position(|(text, _)| text.contains("进行中") && text.contains("2/8 轮"))
+        .expect("阶段与轮次必须在同一行");
+    let hint_index = lines
+        .iter()
+        .position(|(text, _)| text.contains("/goal pause"))
+        .expect("命令提示必须存在");
+    assert!(hint_index > status_index, "命令提示必须弱化地排在状态之后：{lines:?}");
+    assert_eq!(hint_index, lines.len() - 1, "命令提示必须是最后一行：{lines:?}");
+}
+
+/// Plan 页签：终态计划标 `· 已结束`，并在底栏左槽消失（决策 3A）。
+#[test]
+fn terminal_plan_is_marked_in_drawer_and_hidden_in_status_bar() {
+    let mut state = drawer_state();
+    state.task_center.as_mut().expect("抽屉已打开").tab = task_center::TaskCenterTab::Plan;
+    let mut plan = PlanState::new("p-terminal".to_string(), "已结束的计划".to_string());
+    plan.steps.push(PlanStep {
+        step_id: "s1".to_string(),
+        name: "步骤一".to_string(),
+        summary: String::new(),
+        status: PlanStepStatus::Completed,
+    });
+    plan.is_terminal = true;
+    state.update_plan(plan);
+
+    let joined = task_center::content_lines(&state)
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("已结束"), "抽屉可回看，但必须标注已结束：{joined}");
+    assert!(
+        task_summary(&state).is_none(),
+        "终态计划不得常驻底栏左槽：{:?}",
+        task_summary(&state)
+    );
+}
+
+/// 底栏 3A：完成态 Goal 从常驻左槽隐藏（抽屉内仍可查看）。
+#[test]
+fn completed_goal_is_hidden_from_status_bar() {
+    let mut state = TuiState::default();
+    state.set_goal(TuiGoal {
+        id: "goal-done".to_string(),
+        objective: "已完成的目标".to_string(),
+        phase: GoalPhase::Completed,
+        activation: GoalActivation::Armed,
+        round_count: 5,
+        max_rounds: Some(5),
+        revision: 2,
+    });
+    assert!(
+        task_summary(&state).is_none(),
+        "完成态目标必须从底栏消失：{:?}",
+        task_summary(&state)
+    );
+
+    // 抽屉 Goal 页签仍能看到它。
+    let mut drawer = state;
+    drawer.task_center = Some(task_center::TaskCenterState::new());
+    let joined = task_center::content_lines(&drawer)
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("已完成的目标"), "抽屉内仍可回看目标：{joined}");
+}
+
+/// 底栏 3A：Subagent 运行态计入 `⚡ 智能体`。
+#[test]
+fn running_subagent_counts_toward_agents_segment() {
+    let mut state = TuiState::default();
+    state.subagent_runs = vec![SubagentViewRow {
+        session_id: "subagent-1".to_string(),
+        description: "跑测试".to_string(),
+        status: crate::agent::orchestration::SubagentRunStatus::Running,
+        started_at_ms: 0,
+        error: None,
+    }];
+    state.task_glance.subagents_running = 1;
+    let summary = task_summary(&state).expect("有运行中子代理时智能体段必须出现");
+    assert!(summary.contains("⚡ 智能体 1"), "子代理必须计入智能体段：{summary}");
 }

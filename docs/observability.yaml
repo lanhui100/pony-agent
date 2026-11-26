@@ -1800,3 +1800,30 @@ note: >-
 #     T4 list_agents 回传 wait 结果）。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
+# B1795582686515（ADR 2026-11-25-tui-drawer-ux-and-subagent-visibility）归属说明：
+# Ctrl+T 抽屉与底栏左槽的面向用户重构（统一折行 / 会话隔离 / 子代理可见性）。
+# (1) 变更面全部**本地**：`src/tui/task_center.rs`（统一折行 `build_lines`、5 页签分层、行焦点）、
+#     `src/tui/jobs_panel.rs`（description 主文案、运行时长、选中态）、`src/tui/status_bar.rs`
+#     （3A 图标 + 中文短词、会话归属）、`src/tui/projection.rs`（`effective_host_session_id`、
+#     `sync_goal_state_lossless`、团队任务/子代理投影）、`src/tui/protocol.rs`（`PlanState::is_terminal`、
+#     `SubagentViewRow`、`AcpDelegateRow::description`）、`src/tui.rs`（抽屉间距、1A 行焦点交互、
+#     2A 斜杠入口统一、`subagent_runs` 快照）。
+# (2) 新增**进程内只读注册表**（非遥测出口）：`agent/orchestration.rs` 的 `SUBAGENT_RUNS`
+#     （子代理运行记录，上限 64，只含会话 id / 中文描述 / 状态 / 宿主会话 / 起始毫秒 / 错误串，
+#     **不含子会话正文**）、`TEAMMATE_HOST_SESSIONS` 与 `TEAM_TASK_HOST_SESSIONS`（宿主会话归属映射）。
+#     三者只服务 TUI 可见性与跨会话隔离，不参与权限、调度与生命周期裁决；不产生 span / metric / 日志行。
+# (3) 既有可见性面扩容（additive，无新增出口）：`agent/jobs.rs` 的 `JobStartArgs` / `JobListItem` /
+#     `JobSession` 增 `description`（面向用户中文描述，纯展示字段）；`acp/registry.rs` 的
+#     `ActiveDelegate` 增 `description`，新增 `register_with_description`（原 `register` 与
+#     `DelegateRegistration` 字段集不变）。tracing / issues 落点仍是 `agent/otel/mod.rs` 与
+#     `agent/ponysentry/client.rs`；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 `/metrics`、
+#     Prometheus pull 模型不成立）。不新增 applicable 判定、不新增 enforcement_point。
+# (4) 行为门落在测试层：`src/tui/tests/task_center_panel_tests.rs`（新增 5 例：折行不截断、Goal 层级、
+#     终态计划、完成态目标、子代理计入智能体段）、`task_center_acp_and_jobs_tests.rs`（新增 6 例：
+#     lead 隐藏、子代理列出与可选、ACP 外部进程标注与不可选、cwd 回退、description 优先与内部字段隐藏、
+#     命令精简与终止提示）、`task_center_data_sources_tests.rs`（Tasks 双数据源合并）、
+#     `agent/orchestration.rs` 内联 6 例（子代理运行隔离/终态迁移/宿主反查/名册与任务隔离）、
+#     `agent/jobs.rs` 内联 1 例（description 透传与空白归一）、`tests/tui_task_visibility.rs`
+#     （抽屉与输入框间距、真实渲染下长目标折行）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。

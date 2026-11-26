@@ -22,10 +22,18 @@ pub struct TaskGlance {
     pub team_open: usize,
     /// 其中被阻塞的任务数。
     pub team_blocked: usize,
+    /// 当前会话里未完成的 todo 数（pending + in_progress）。
+    pub todos_open: usize,
     /// 正在跑（`driving`）的队友数。
     pub agents_running: usize,
     /// 需要人看一眼的队友数（`failed`）。
     pub agents_attention: usize,
+    /// 正在跑的子智能体数（`subagent_runs` 中 `Running` 的条目）。
+    pub subagents_running: usize,
+    /// 失败的子智能体数。
+    pub subagents_attention: usize,
+    /// 正在跑的外部 ACP 委派数。
+    pub acp_running: usize,
 }
 
 /// 摘要刷新周期（毫秒）。
@@ -35,13 +43,13 @@ pub struct TaskGlance {
 /// `ProcessManager::poll()` 并把增量输出追加进 ring buffer。按 16ms 刷新等于每秒 60 次系统调用
 /// 与 60 次缓冲推进，既浪费 CPU 又扰动 `job_output` 的增量语义。故按固定周期节流，
 /// `TuiState::last_glance_sync` 是唯一时间戳。
-pub const GLANCE_REFRESH_MS: u64 = 500;
+pub(crate) const GLANCE_REFRESH_MS: u64 = 500;
 
 /// 刷新常驻任务摘要与抽屉 live 数据源：全部是**进程内**注册表（无网络、无 LLM、无磁盘）。
 ///
 /// 与 `sync_tasks_from_store` / `sync_jobs_from_registry` 同一投影纪律：失败只写状态文案，
 /// 不让既有快照瞬间归零。节流口径见 [`GLANCE_REFRESH_MS`]：作业起止最多延迟一个周期可见。
-pub fn sync_task_glance(state: &mut TuiState, control_plane: &HostControlPlane) {
+pub(crate) fn sync_task_glance(state: &mut TuiState, control_plane: &HostControlPlane) {
     if let Some(last) = state.last_glance_sync {
         if last.elapsed().as_millis() < GLANCE_REFRESH_MS as u128 {
             return;
@@ -49,7 +57,10 @@ pub fn sync_task_glance(state: &mut TuiState, control_plane: &HostControlPlane) 
     }
     state.last_glance_sync = Some(std::time::Instant::now());
 
-    match team_task_list() {
+    // 团队视图归属**宿主会话**：进入队友/子代理子会话后仍看主会话的团队，不突然变空。
+    let host = effective_host_session_id(state).to_string();
+
+    match team_task_list_for_session(&host) {
         Ok(list) => {
             let mut open = 0usize;
             let mut blocked = 0usize;
@@ -69,7 +80,16 @@ pub fn sync_task_glance(state: &mut TuiState, control_plane: &HostControlPlane) 
         Err(error) => state.status_text = format!("任务同步失败: {error}"),
     }
 
-    let roster = agent_roster_state_from_runtime();
+    // 本会话 todo：与团队任务合并计入「☑ 任务」（不重复计数：两者是不同数据源）。
+    projection::sync_todos_from_store(state);
+    state.task_glance.todos_open = state.todos_state.as_ref().map_or(0, |todos| {
+        todos
+            .iter()
+            .filter(|task| task.status != TuiTaskStatus::Completed)
+            .count()
+    });
+
+    let roster = agent_roster_state_for_session(&host);
     state.task_glance.agents_running = roster.entries.iter().filter(|entry| entry.driving).count();
     state.task_glance.agents_attention = roster
         .entries
@@ -78,20 +98,36 @@ pub fn sync_task_glance(state: &mut TuiState, control_plane: &HostControlPlane) 
         .count();
 
     jobs_panel::sync_jobs_from_registry(state);
-    // Agents 页签的「ACP 委派」分区：活跃 ACP 注册表与名册同周期刷新（进程内、无网络）。
-    state.acp_delegates = acp_delegates_from_runtime(&state.session_id);
+    // Agents 页签的「ACP 委派」「子智能体」分区：与名册同周期刷新（进程内、无网络）。
+    state.acp_delegates = acp_delegates_from_runtime(&host);
+    state.subagent_runs = subagent_runs_from_runtime(&host);
+    state.task_glance.subagents_running =
+        state.subagent_runs.iter().filter(|run| run.is_running()).count();
+    state.task_glance.subagents_attention = state
+        .subagent_runs
+        .iter()
+        .filter(|run| run.needs_attention())
+        .count();
+    state.task_glance.acp_running = state.acp_delegates.len();
 
-    // 抽屉 Plan / Tasks 页签的 live 数据源（plan 存储 + 会话 todo）：与摘要同周期刷新，
-    // 让抽屉开着时也能看到轮内计划/待办推进；goal 不在此列（见 `sync_drawer_live_sources`）。
+    // 抽屉 Plan / Tasks 页签的 live 数据源（plan 存储 + 会话 todo + 团队任务）：
+    // 与摘要同周期刷新，让抽屉开着时也能看到轮内计划/待办推进。
     projection::sync_drawer_live_sources(state, control_plane);
+    // goal 的安全刷新：只认 `Ok`（瞬时错误不得清横幅），与「打开抽屉」的全量同步区分开。
+    projection::sync_goal_state_lossless(state);
 }
 
-/// Goal 摘要段（`None` = 没有目标，不出段）。
+/// Goal 摘要段（决策 3A）：`◎ 目标 {round}/{max}{状态后缀}`。
+///
+/// 完成态（`GoalPhase::Completed`）不出段 —— 抽屉 Goal 页签仍可回看；常驻左槽只报活跃/需关注态。
 fn goal_segment(state: &TuiState) -> Option<String> {
     let goal = state.goal_state.as_ref()?;
+    if goal.phase == GoalPhase::Completed {
+        return None;
+    }
     let rounds = match goal.max_rounds {
-        Some(max) => format!("轮{}/{}", goal.round_count, max),
-        None => format!("轮{}", goal.round_count),
+        Some(max) => format!("{}/{}", goal.round_count, max),
+        None => format!("{}", goal.round_count),
     };
     let suffix = match goal.phase {
         GoalPhase::Active => match state.goal_rounds_stopped.as_ref() {
@@ -104,15 +140,18 @@ fn goal_segment(state: &TuiState) -> Option<String> {
         },
         GoalPhase::Paused => "·暂停",
         GoalPhase::Blocked => "·阻塞",
-        GoalPhase::Completed => "·完成",
+        GoalPhase::Completed => "",
     };
-    Some(format!("goal {rounds}{suffix}"))
+    Some(format!("◎ 目标 {rounds}{suffix}"))
 }
 
-/// Plan 摘要段：`plan 已完成/总数`，待批准时补 `待批`。
+/// Plan 摘要段（决策 3A）：`▤ 计划 {done}/{total}{·待批}`。
+///
+/// 终态计划（`completed` / `aborted`）与空步骤计划都不出段 —— 已结束的计划常驻左槽会
+/// 谎称还在推进（`PlanState::is_terminal` 的唯一消费点就在这里）。
 fn plan_segment(state: &TuiState) -> Option<String> {
     let plan = state.plan_state.as_ref()?;
-    if plan.steps.is_empty() {
+    if plan.is_terminal || plan.steps.is_empty() {
         return None;
     }
     let total = plan.steps.len();
@@ -122,46 +161,50 @@ fn plan_segment(state: &TuiState) -> Option<String> {
         .filter(|step| step.status == PlanStepStatus::Completed)
         .count();
     let suffix = if plan.awaiting_approval { "·待批" } else { "" };
-    Some(format!("plan {done}/{total}{suffix}"))
+    Some(format!("▤ 计划 {done}/{total}{suffix}"))
 }
 
-/// 团队看板摘要段：未完成数为 0 时不出段；有阻塞补 `(⛔n)`。
-fn team_segment(glance: &TaskGlance) -> Option<String> {
-    if glance.team_open == 0 {
+/// 任务摘要段（决策 3A）：`☑ 任务 {open}`（有阻塞补 `⛔N`）。
+///
+/// 合并本会话未完成 todo 与团队开放任务（两者是不同数据源，相加不重复计数）。
+fn tasks_segment(glance: &TaskGlance) -> Option<String> {
+    let open = glance.todos_open + glance.team_open;
+    if open == 0 {
         return None;
     }
     if glance.team_blocked > 0 {
-        Some(format!(
-            "团队 {}(⛔{})",
-            glance.team_open, glance.team_blocked
-        ))
+        Some(format!("☑ 任务 {open}(⛔{})", glance.team_blocked))
     } else {
-        Some(format!("团队 {}", glance.team_open))
+        Some(format!("☑ 任务 {open}"))
     }
 }
 
-/// 队友摘要段：只报「在跑」与「失败」，都为空时不出段。
-fn agents_segment(glance: &TaskGlance) -> Option<String> {
-    match (glance.agents_running, glance.agents_attention) {
-        (0, 0) => None,
-        (running, 0) => Some(format!("队友 {running}")),
-        (0, attention) => Some(format!("队友 ⚠{attention}")),
-        (running, attention) => Some(format!("队友 {running}⚠{attention}")),
-    }
-}
-
-/// 后台任务摘要段：只报「在跑」与「失败」，都为空时不出段。
+/// 智能体摘要段（决策 3A）：`⚡ 智能体 {running}`（有失败补 `✘N`）。
 ///
-/// 计数旁**不带警告图标**：失败数用「失败 N」文字表达（`⚠` 与「队友」段的图标语义
-/// 混在同一条状态栏里会被读成整句告警，与「后台任务计数」混淆）。
+/// 合并三类运行态：Teammate driving + 运行中子代理 + 活跃 ACP 委派；失败数只取
+/// Teammate 与子代理（ACP 委派失败即返回，不在注册表留痕）。
+fn agents_segment(glance: &TaskGlance) -> Option<String> {
+    let running = glance.agents_running + glance.subagents_running + glance.acp_running;
+    let attention = glance.agents_attention + glance.subagents_attention;
+    match (running, attention) {
+        (0, 0) => None,
+        (running, 0) => Some(format!("⚡ 智能体 {running}")),
+        (0, attention) => Some(format!("⚡ 智能体 ✘{attention}")),
+        (running, attention) => Some(format!("⚡ 智能体 {running}·✘{attention}")),
+    }
+}
+
+/// 后台任务摘要段（决策 3A）：`⚙ 后台 {running}` / `⚙ 后台 ✘{attention}`。
+///
+/// 只统计当前会话归属的作业（契约 B012，`jobs_state` 已按 `state.session_id` 过滤）。
 fn jobs_segment(state: &TuiState) -> Option<String> {
     let view = state.jobs_state.as_ref()?;
     let (running, attention) = view.counts();
     match (running, attention) {
         (0, 0) => None,
-        (running, 0) => Some(format!("后台任务 {running}")),
-        (0, attention) => Some(format!("后台任务 失败 {attention}")),
-        (running, attention) => Some(format!("后台任务 {running}·失败 {attention}")),
+        (running, 0) => Some(format!("⚙ 后台 {running}")),
+        (0, attention) => Some(format!("⚙ 后台 ✘{attention}")),
+        (running, attention) => Some(format!("⚙ 后台 {running}·✘{attention}")),
     }
 }
 
@@ -174,7 +217,7 @@ pub fn task_summary(state: &TuiState) -> Option<String> {
     if let Some(segment) = plan_segment(state) {
         parts.push(segment);
     }
-    if let Some(segment) = team_segment(&state.task_glance) {
+    if let Some(segment) = tasks_segment(&state.task_glance) {
         parts.push(segment);
     }
     if let Some(segment) = agents_segment(&state.task_glance) {

@@ -84,6 +84,21 @@ pub fn sync_tasks_from_store(state: &mut TuiState) {
     }
 }
 
+/// 抽屉 / 状态条查询团队视图时的**宿主会话归属**。
+///
+/// 进入 Teammate 或 Subagent 子会话后 `state.session_id` 变成子会话 id，而
+/// `state.return_session_id` 保存着宿主主会话 id：团队名册、团队任务、子代理列表都归属宿主，
+/// 用子会话 id 查询会让抽屉里的团队视图**突然变空**（ADR
+/// `2026-11-25-tui-drawer-ux-and-subagent-visibility`）。
+///
+/// 注意：`jobs` **不**走本函数 —— 契约 B012 要求作业严格按当前会话过滤，防止跨会话泄露。
+pub fn effective_host_session_id(state: &TuiState) -> &str {
+    state
+        .return_session_id
+        .as_deref()
+        .unwrap_or(state.session_id.as_str())
+}
+
 /// 当前会话的 **todo 存储** → `TuiState::todos_state`（抽屉 Tasks 页签的唯一数据源）。
 ///
 /// 数据源是 `todo_write` 写入的会话级注册表（进程内、无网络、无磁盘）：**不是** `task_board_state`
@@ -114,13 +129,40 @@ pub fn sync_plan_from_store(state: &mut TuiState, control_plane: &HostControlPla
     }
 }
 
-/// 抽屉数据源的**常驻**刷新（500ms 与状态条摘要同周期）：todo + plan。
+/// 抽屉数据源的**常驻**刷新（500ms 与状态条摘要同周期）：todo + plan + team tasks。
 ///
-/// 两者都是进程内注册表（todo 是 HashMap，plan 是 PlanStore），不含网络/磁盘，可安全节流刷新。
-/// goal 不在此列：它有自己的命令/事件回写通道，且读取失败会 fail-closed 清横幅，不宜每 500ms 触发。
+/// 三者都是进程内注册表（todo 是 HashMap，plan 是 PlanStore，team task 是静态表），
+/// 不含网络/磁盘，可安全节流刷新。goal 不在此列：读取失败会 fail-closed 清横幅，
+/// 不宜每 500ms 触发（它的安全刷新在 [`sync_goal_state_lossless`]）。
 pub fn sync_drawer_live_sources(state: &mut TuiState, control_plane: &HostControlPlane) {
     sync_todos_from_store(state);
     sync_plan_from_store(state, control_plane);
+    sync_team_tasks_for_session(state);
+}
+
+/// goal 的**无损**刷新：只在读取成功时更新（`Ok(Some)` 覆盖、`Ok(None)` 清空），
+/// 读取错误一律保留既有横幅。
+///
+/// 为什么与 `hydrate_goal_state` 分开：后者是「打开抽屉 / 切会话」的一次性全量同步，
+/// 失败即 fail-closed 清横幅是正确语义；而 500ms 常驻刷新若同样清空，任何瞬时错误都会
+/// 让横幅闪断（`get_goal` 首次加载后只读进程内存缓存，成功路径无反复磁盘 IO）。
+pub fn sync_goal_state_lossless(state: &mut TuiState) {
+    let session_id = state.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return;
+    }
+    match crate::agent::goal::get_goal(crate::agent::goal::GetGoalArgs {
+        session_id: Some(session_id.clone()),
+    }) {
+        Ok(result) => match result.goal {
+            Some(goal) => state.set_goal(tui_goal_from_goal(&goal)),
+            None => state.clear_goal_banner(),
+        },
+        Err(error) => {
+            // 只留痕，不清横幅：瞬时错误不得把「有目标」读成「没有目标」。
+            eprintln!("[tui] goal 常驻刷新失败（保留既有横幅）: session={session_id} error={error}");
+        }
+    }
 }
 
 /// 打开/切换抽屉时的**全量**同步点：live 数据源 + jobs + goal（含 fail-closed 清空语义）。
@@ -168,9 +210,18 @@ pub fn session_tail(session_id: &str) -> String {
 /// 数据源全部是真实存储（`list_agents` 名册 / 收件箱 / 驱动态 / 最近成功会话），
 /// 不构造任何假成员；`lead` 固定排首位（其余按 target 字典序，保证面板顺序稳定）。
 pub fn agent_roster_state_from_runtime() -> AgentRosterState {
-    let mut entries: Vec<AgentRosterEntry> = match list_agents() {
-        Ok(roster) => roster
-            .agents
+    roster_state_from_members(list_agents().map(|roster| roster.agents))
+}
+
+/// 某宿主会话名下的花名册快照（会话隔离口径：不含伪成员 `lead`、不含其他会话的队友）。
+pub fn agent_roster_state_for_session(host_session_id: &str) -> AgentRosterState {
+    roster_state_from_members(list_agents_for_session(host_session_id).map(|roster| roster.agents))
+}
+
+/// `list_agents*` 的成员列表 → TUI 名册（唯一投影点，两条查询入口共用）。
+fn roster_state_from_members(members: Result<Vec<TeammateMember>, String>) -> AgentRosterState {
+    let mut entries: Vec<AgentRosterEntry> = match members {
+        Ok(members) => members
             .into_iter()
             .map(|member| AgentRosterEntry {
                 pending_inbox: inbox_pending_len(&member.target),
@@ -195,6 +246,42 @@ pub fn agent_roster_state_from_runtime() -> AgentRosterState {
     AgentRosterState::new(entries)
 }
 
+/// 子代理运行注册表 → TUI 视图行（只返回本宿主会话发起的运行；按开始时刻升序）。
+pub fn subagent_runs_from_runtime(host_session_id: &str) -> Vec<SubagentViewRow> {
+    let mut rows: Vec<SubagentViewRow> = list_subagent_runs_for_session(host_session_id)
+        .into_iter()
+        .map(|run| SubagentViewRow {
+            session_id: run.session_id,
+            description: run.description,
+            status: run.status,
+            started_at_ms: run.started_at_ms,
+            error: run.error,
+        })
+        .collect();
+    rows.sort_by_key(|row| row.started_at_ms);
+    rows
+}
+
+/// 某宿主会话名下的 **team task** → `TuiState::task_board_state`（抽屉 Tasks 页签的团队分区）。
+///
+/// 与 [`sync_tasks_from_store`] 同一投影纪律（空列表保留 `None`），只多一道会话归属过滤。
+pub fn sync_team_tasks_for_session(state: &mut TuiState) {
+    let host = effective_host_session_id(state).to_string();
+    match team_task_list_for_session(&host) {
+        Ok(list) => {
+            let tasks = tui_tasks_from_team_tasks(list.tasks);
+            if tasks.is_empty() {
+                state.task_board_state = None;
+            } else {
+                state.update_task_board(tasks);
+            }
+        }
+        Err(error) => {
+            state.status_text = format!("任务同步失败: {error}");
+        }
+    }
+}
+
 /// 活跃 ACP 委派注册表 → TUI 视图行（按当前宿主会话过滤；`None` 宿主的条目不串到任意会话）。
 ///
 /// 为什么按会话过滤：`acp_delegate` 会话由**某个宿主会话的轮次线程**发起，别的会话的 Agents
@@ -213,6 +300,7 @@ pub fn acp_delegates_from_runtime(host_session_id: &str) -> Vec<AcpDelegateRow> 
             host_session_id: delegate.host_session_id,
             cwd: delegate.cwd,
             started_at_ms: delegate.started_at_ms,
+            description: delegate.description,
         })
         .collect()
 }
@@ -370,6 +458,7 @@ pub fn tui_plan_from_value(value: &serde_json::Value) -> Option<PlanState> {
             .get("lifecycle")
             .and_then(|lifecycle| lifecycle.as_str())
             .is_some_and(|lifecycle| lifecycle == "draft"),
+        is_terminal: is_terminal_plan(plan),
     })
 }
 
