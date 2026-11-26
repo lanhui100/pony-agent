@@ -2396,7 +2396,7 @@ mod tests {
                     let descendant = std::process::Command::new(std::env::current_exe().unwrap())
                         .args([
                             "--exact",
-                            "agent::process::tests::helper_process",
+                            "process::tests::helper_process",
                             "--nocapture",
                         ])
                         .env("PONY_AGENT_TEST_HELPER", "descendant")
@@ -2417,7 +2417,7 @@ mod tests {
                     let descendant = std::process::Command::new(std::env::current_exe().unwrap())
                         .args([
                             "--exact",
-                            "agent::process::tests::helper_process",
+                            "process::tests::helper_process",
                             "--nocapture",
                         ])
                         .env("PONY_AGENT_TEST_HELPER", "descendant")
@@ -2484,7 +2484,7 @@ mod tests {
                     .to_string(),
                 arguments: vec![
                     "--exact".to_string(),
-                    "agent::process::tests::helper_process".to_string(),
+                    "process::tests::helper_process".to_string(),
                     "--nocapture".to_string(),
                 ],
                 cwd: None,

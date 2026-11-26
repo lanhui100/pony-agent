@@ -198,7 +198,7 @@ pub trait PluginCall {
 ///
 /// ```no_run
 /// # use std::sync::Arc;
-/// # use pony_agent_core::agent::plugin_host::{PluginHostConfig, PluginHostProvider, PluginManifest, PluginSupervisor};
+/// # use pony_tools::plugin_host::{PluginHostConfig, PluginHostProvider, PluginManifest, PluginSupervisor};
 /// # fn demo(manifest: PluginManifest, command: std::path::PathBuf) -> Result<(), String> {
 /// let mut supervisor = PluginSupervisor::spawn(manifest, command, PluginHostConfig::default())?;
 /// supervisor.initialize()?;                  // 注册面在 initialize 后才有工具

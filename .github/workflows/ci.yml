@@ -73,6 +73,11 @@ jobs:
           components: clippy
           cache: false
 
+      - uses: taiki-e/install-action@v2
+        if: needs.changes.outputs.needs_rust == 'true'
+        with:
+          tool: cargo-nextest
+
       # 缓存必须对齐 AGENT.md 的 target 槽位约定：check 与 test 分别设 prefix-key 隔离缓存
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.outputs.needs_rust == 'true'
@@ -157,17 +162,19 @@ jobs:
       # 首错即停会掩盖整批平台缺口：cargo test 默认首个失败用例即中止，
       # 同 runner 上后续用例根本不会执行，缺口只能靠多轮 CI 逐层剥出。
       # 代价已知：Windows 全量首跑十连红即为代价（B050–B066）。
-      - name: Core 单元与集成测试（含 Windows Job 生命周期）
+      - name: Core 单元与集成测试（含 Windows Job 生命周期；nextest 进程级隔离防 OnceLock 互染）
         if: needs.changes.outputs.needs_core == 'true'
-        run: npm run cargo:test:shared -- -p pony-protocol -p pony-observability -p pony-storage -p pony-provider -p pony-tools -p pony-acp -p pony-agent-core --no-fail-fast
+        run: |
+          node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-protocol -p pony-observability -p pony-storage -p pony-provider -p pony-tools -p pony-acp -p pony-agent-core --no-fail-fast
+          npm run cargo:test:shared -- -p pony-protocol -p pony-observability -p pony-storage -p pony-provider -p pony-tools -p pony-acp -p pony-agent-core --doc --no-fail-fast
 
       - name: TUI 与 CLI 套件测试
         if: needs.changes.outputs.needs_tui == 'true' || needs.changes.outputs.needs_cli == 'true'
-        run: npm run cargo:test:shared -- -p pony-tui -p pony-cli --no-fail-fast
+        run: node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-tui -p pony-cli --no-fail-fast
 
       - name: Tauri 宿主回归测试（session/provider/tool_router/stop_registry）
         if: needs.changes.outputs.needs_core == 'true'
-        run: npm run cargo:test:regression -- --no-fail-fast
+        run: node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-agent-core --test session_storage_suite --test runtime_suite --test tools_stop_suite --no-fail-fast
 
   core-platform-check:
     needs: changes
