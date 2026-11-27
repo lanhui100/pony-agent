@@ -255,7 +255,12 @@ fn dirty_state() -> tui::TuiState {
     state.total_cache_hit_tokens = 6;
     state.last_context_tokens = 789;
     state.context_window_tokens = 128_000;
-    state.plan_state = Some(tui::PlanState::new("plan-1".to_string(), "脏计划".to_string()));
+    state.plan_state = Some(tui::PlanModeState {
+        active: true,
+        plan: Some("# 脏方案".to_string()),
+        plan_approved: false,
+        revision: 1,
+    });
     state.task_board_state = Some(tui::TaskBoardState::new(Vec::new()));
     state.goal_state = Some(tui::TuiGoal::new(
         "goal-1".to_string(),

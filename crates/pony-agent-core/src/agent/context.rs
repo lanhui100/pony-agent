@@ -2829,8 +2829,8 @@ mod tests {
         // v1 已废弃表述必须缺席。
         assert!(!base_system_prompt().contains("2-3 lines"));
         assert!(!base_system_prompt().contains("Initialize pending items"));
-        // 契约 §6 实测：v2.4.0 全文 3878 字节（含尾部换行；新增 Plan 模式边界条款）。
-        assert_eq!(base_system_prompt().len(), 3878);
+        // 契约 §6 实测：v2.4.0 全文 3886 字节（含尾部换行；Plan 模式边界条款）。
+        assert_eq!(base_system_prompt().len(), 3886);
     }
 
     mod todo_label_tests; // B1795774426544：Todo 回灌标签 `Todos:` 回归（单列文件，免抬行数基线）

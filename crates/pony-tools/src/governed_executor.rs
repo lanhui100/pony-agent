@@ -37,7 +37,7 @@ use crate::dispatcher_composites::{
 };
 use crate::document_conversion::ReadDocumentHandler;
 use crate::image_artifact::ViewImageHandler;
-use crate::plan_state::{PlanLifecycleState, PlanControlHandler, PlanStore};
+use crate::exit_plan_mode::ExitPlanModeHandler;
 use crate::sandbox::{HostApprovedUnsandboxedBackend, NativeSandboxBackend};
 use crate::tool_runtime::{
     InvocationOrigin, PrimitiveToolHandler, PrimitiveToolHandlerRequest, RuntimeClock,
@@ -80,20 +80,19 @@ impl ToolPolicyEvaluator for LegacyCompatiblePolicyEvaluator {
     }
 }
 
-/// W30b：治理型策略评估器，支持工具级规则（Allow / Ask / Deny）及 Plan 草稿态写保护门禁。
+/// 治理型策略评估器：工具级规则（Allow / Ask / Deny）+ Plan 模式写/执行硬拦截门禁
+/// （ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）。
+///
+/// Plan 状态已迁到进程级 `plan_mode` 注册表（会话级协作模式），本评估器不再持有步骤机。
 #[derive(Clone, Debug, Default)]
 pub struct GovernedPolicyEvaluator {
     pub rules: Vec<crate::app_settings::ToolRule>,
-    pub plan_store: Option<Arc<crate::plan_state::PlanStore>>,
     pub authorize_store: Option<Arc<crate::path_permission::AuthorizeStore>>,
 }
 
 impl GovernedPolicyEvaluator {
-    pub fn new(
-        rules: Vec<crate::app_settings::ToolRule>,
-        plan_store: Option<Arc<crate::plan_state::PlanStore>>,
-    ) -> Self {
-        Self { rules, plan_store, authorize_store: None }
+    pub fn new(rules: Vec<crate::app_settings::ToolRule>) -> Self {
+        Self { rules, authorize_store: None }
     }
 
     pub fn with_authorize_store(mut self, authorize_store: Arc<crate::path_permission::AuthorizeStore>) -> Self {
@@ -101,16 +100,19 @@ impl GovernedPolicyEvaluator {
         self
     }
 
-    /// PA-141（方案 b）扩展裁定核心：在 `session_id` 之外额外接收宿主注入的
-    /// `plan_execution_approval`（仅来自 `DispatchContext`，模型工具参数不是审批来源）。
-    /// `session_id` 是**运行时注入**的权威会话（`DispatchContext.session_id`）：工具参数
-    /// 不是会话键（生产 schema 不允许，且可被模型控制）；`None` 表示本次 dispatch 未绑定
-    /// 会话上下文（按 C-138-4 fail-closed 语义处理）。
+    /// 裁定核心：`session_id` 是**运行时注入**的权威会话（`DispatchContext.session_id`）：
+    /// 工具参数不是会话键（生产 schema 不允许，且可被模型控制）；`None` 表示本次 dispatch
+    /// 未绑定会话上下文（按 fail-closed 语义交由只读闸门兜底）。
+    ///
+    /// `plan_execution_approval` 形参已**不再参与任何判定**：`Plan` 步骤机下线后，
+    /// 解锁写权限的唯一路径是「用户批准 `ExitPlanMode` 提交的方案」或 `/plan off`
+    /// （ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）。该形参保留是为了让
+    /// `DispatchContext` 的既有字段与调用面零改动（线缆兼容），语义上已是惰性数据。
     fn decide_with_context(
         &self,
         descriptor: &crate::tools::ToolDescriptor,
         session_id: Option<&str>,
-        plan_execution_approval: Option<&crate::dispatcher::PlanExecutionApproval>,
+        _plan_execution_approval: Option<&crate::dispatcher::PlanExecutionApproval>,
         workspace_root: Option<&str>,
         json_arguments: &Value,
     ) -> PermissionDecision {
@@ -153,86 +155,38 @@ impl GovernedPolicyEvaluator {
             }
         }
 
-        // 2. Plan 相位门禁：如果存在 Draft 态 Plan，则写类/执行类工具被拒绝
-        // 例外:`plan_control` 自身豁免本门禁——它是解除草稿态写保护的唯一机制
-        // (`plan_state.rs` 中 `start_execution` = "unlock write operations")。否则
-        // merge / complete_step / replace / start_execution 全被 Deny,plan 永远无法
-        // 离开 Draft(自锁死)。豁免按 canonical primitive 名判定,不影响其它写类描述符。
-        if let Some(plan_store) = &self.plan_store {
-            // L3-B-C（计划门禁漂移）：判定必须与 read_only 闸门**同口径**——按**权限事实**
-            // （`kind` + descriptor 声明的 scopes）判定，而不是只看 `kind`。否则外部工具
-            // （MCP/插件，`kind = External`）只要声明 `workspace_write` 就能在 Draft 计划期
-            // 绕过写保护（实测 builtin 同语义为 Deny）。
-            let is_write_or_exec = matches!(
-                descriptor.kind,
-                crate::tools::ToolKind::Write | crate::tools::ToolKind::Execute
-            ) || descriptor.permission_declaration.scopes.iter().any(|scope| {
-                matches!(
-                    scope,
-                    crate::tools::ToolPermissionScope::WorkspaceWrite
-                        | crate::tools::ToolPermissionScope::WorkspaceExecute
-                )
-            });
-            if is_write_or_exec && descriptor.identity.primitive_name == TOOL_PLAN_CONTROL {
-                // ── W36 / PA-141（方案 b，C-141-2..8）：宿主审批闸门 ─────────────────────
-                // 触发面：`start_execution`，或目标 plan 仍处 Draft 的 `complete_step`
-                //（complete_step 是第二条 Draft→Executing 迁移路径）。仅该迁移面需要审批；
-                // 其余 plan_control op（create/merge/replace/abort…）与 Executing 态的
-                // complete_step 不受影响（C-141-8）。审批证据只来自宿主注入的
-                // DispatchContext，模型工具参数不是来源（C-141-3）。ADR 0092：判据是「plan 仍为
-                // Draft」——宿主已用 plan_execution_approve 推进到 Executing 时不再索要审批。
-                let requires_execution_approval = || -> Option<bool> {
-                    let op = json_arguments
-                        .get("op")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let session =
-                        json_arguments.get("session_id").and_then(Value::as_str)?;
-                    let plan_id = json_arguments.get("plan_id").and_then(Value::as_str)?;
-                    match op {
-                        "start_execution" | "complete_step" => {
-                            let plan = plan_store.plan(session, plan_id).ok()?;
-                            Some(plan.lifecycle == PlanLifecycleState::Draft)
-                        }
-                        _ => Some(false),
-                    }
-                }();
-                if requires_execution_approval == Some(true) {
-                    // ISSUE-20261111-002: 对齐 ADR 0074 全面去墙钟原则，已批准的审批凭据由显式决策与会话状态管理，
-                    // 消费侧不再受 expires_at_ms 墙钟到期限制，避免慢人工决策被误拒。
-                    let valid = plan_execution_approval
-                        .map(|approval| {
-                            approval.session_id == session_id.unwrap_or_default()
-                                && json_arguments.get("plan_id").and_then(Value::as_str)
-                                    == Some(approval.plan_id.as_str())
-                        })
-                        .unwrap_or(false);
-                    if !valid {
-                        return PermissionDecision {
-                            verdict: PermissionVerdict::Deny,
-                            decision_source: "plan_execution_approval_gate".to_string(),
-                            reason: Some(
-                                "host plan execution approval is required to transition a Draft plan to Executing (missing or mismatched)."
-                                    .to_string(),
-                            ),
-                        };
-                    }
-                }
-                // 其余 plan_control op 豁免草稿写门禁（既有 PA-138 语义不变）。
-            } else if is_write_or_exec {
-                // PA-138：唯一会话判据 = 运行期注入的 `DispatchContext.session_id`。
-                // 未绑定会话上下文（None）时**不得**回退到默认/环境/测试会话名，而是走
-                // fail-closed 判定：PlanStore 存在任一 Draft ⇒ 拒绝（C-138-4）。
-                let draft_gate_tripped = match session_id {
-                    Some(session_id) => plan_store.has_active_draft_plan(session_id),
-                    None => plan_store.has_any_draft_plan(),
-                };
-                if draft_gate_tripped {
+        // 2. Plan 模式门禁（ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count，方案 1A）：
+        // 会话处于 Plan 模式时**硬拦截写/执行类工具**，只放行只读检索、提问与退出审查工具。
+        // 退出路径唯一：宿主 Ask 批准 `ExitPlanMode`（或宿主 `/plan off`）。
+        // 判定与 read_only 闸门**同口径**——按权限事实（`kind` + descriptor 声明的 scopes），
+        // 不看名字，否则外部工具（MCP/插件，`kind = External`）只要声明 `workspace_write`
+        // 就能在 Plan 模式下绕过写保护（L3-B-C 实测过的同类漂移）。
+        let is_write_or_exec = matches!(
+            descriptor.kind,
+            crate::tools::ToolKind::Write | crate::tools::ToolKind::Execute
+        ) || descriptor.permission_declaration.scopes.iter().any(|scope| {
+            matches!(
+                scope,
+                crate::tools::ToolPermissionScope::WorkspaceWrite
+                    | crate::tools::ToolPermissionScope::WorkspaceExecute
+            )
+        });
+        // 例外一：`ExitPlanMode`（primitive `plan_control`）自身必须可调用——它是解除本门禁的
+        // 唯一机制（自锁死防护）。
+        let is_exit_plan_mode = descriptor.identity.primitive_name == TOOL_PLAN_CONTROL;
+        // 例外二：宿主 Ask（`WaitingHost`）在步骤 1 已提前返回，不参与写判定。
+        if is_write_or_exec && !is_exit_plan_mode {
+            // 会话判据唯一来源 = 运行期注入的 `DispatchContext.session_id`（模型实参不是会话键）。
+            // 未绑定会话 ⇒ 无从证明该会话处于 Plan 模式，故按「未激活」处理并交由
+            // read_only 闸门兜底，不回落默认/环境会话名（与 C-138-4 同向 fail-closed）。
+            if let Some(session_id) = session_id {
+                if crate::plan_mode::is_active(session_id) {
                     return PermissionDecision {
                         verdict: PermissionVerdict::Deny,
-                        decision_source: "plan_draft_gate".to_string(),
+                        decision_source: "plan_mode_gate".to_string(),
                         reason: Some(
-                            "Plan is currently in Draft state; write and execute operations are blocked."
+                            "Plan mode is active: write and execute tools are blocked until the user \
+                             approves the plan through ExitPlanMode (or leaves with /plan off)."
                                 .to_string(),
                         ),
                     };
@@ -454,15 +408,7 @@ pub fn build_governed_executor(
     workspace_root: Option<PathBuf>,
     authorize_store: Option<Arc<crate::path_permission::AuthorizeStore>>,
 ) -> GovernedToolExecutor {
-    build_governed_executor_full(workspace_root, authorize_store, None, None)
-}
-
-pub fn build_governed_executor_with_plan_store(
-    workspace_root: Option<PathBuf>,
-    authorize_store: Option<Arc<crate::path_permission::AuthorizeStore>>,
-    plan_store: Option<PlanStore>,
-) -> GovernedToolExecutor {
-    build_governed_executor_full(workspace_root, authorize_store, None, plan_store)
+    build_governed_executor_full(workspace_root, authorize_store, None)
 }
 
 /// 生产沙箱装配的显式 override 入口（测试注入用）：`Some(backend)` 时直接注册该后端；
@@ -472,14 +418,13 @@ pub fn build_governed_executor_with_sandbox_backend(
     authorize_store: Option<Arc<crate::path_permission::AuthorizeStore>>,
     sandbox_override: Option<Arc<dyn SandboxBackend>>,
 ) -> GovernedToolExecutor {
-    build_governed_executor_full(workspace_root, authorize_store, sandbox_override, None)
+    build_governed_executor_full(workspace_root, authorize_store, sandbox_override)
 }
 
 pub fn build_governed_executor_full(
     workspace_root: Option<PathBuf>,
     authorize_store: Option<Arc<crate::path_permission::AuthorizeStore>>,
     sandbox_override: Option<Arc<dyn SandboxBackend>>,
-    plan_store: Option<PlanStore>,
 ) -> GovernedToolExecutor {
     let registry = Arc::new(
         ToolRegistrySnapshot::builtin().expect("builtin registry must validate"),
@@ -487,9 +432,6 @@ pub fn build_governed_executor_full(
     let clock: Arc<dyn RuntimeClock> = Arc::new(SystemClock);
     let dispatcher = GovernedDispatcher::new(registry.clone(), clock);
     
-    // Each runtime owns one PlanStore; session isolation is enforced by the store's
-    // CrossSession guard on every operation (PA-076 Decision 6). ──
-    let shared_plan_store = Arc::new(plan_store.unwrap_or_else(PlanStore::new));
 
     // 默认工作区分叉收敛：None 兜底取 compute_default_workspace_root()
     //（Windows Documents/pony_agent，Unix ~/pony_agent），dirs 解析失败才回退 cwd。
@@ -505,11 +447,8 @@ pub fn build_governed_executor_full(
     // W30b：加载并注册基于规则与真实共享 Plan 状态以及路径授权状态的策略评估器
     let settings = crate::app_settings::AppSettingsStore::new().load_view();
     dispatcher.register_policy_evaluator(Arc::new(
-        GovernedPolicyEvaluator::new(
-            settings.tool_rules,
-            Some(Arc::clone(&shared_plan_store)),
-        )
-        .with_authorize_store(Arc::clone(&shared_authorizations)),
+        GovernedPolicyEvaluator::new(settings.tool_rules)
+            .with_authorize_store(Arc::clone(&shared_authorizations)),
     ));
     let native_probe = NativeSandboxBackend::detect();
     let native_available = native_probe.availability() == SandboxAvailability::Available;
@@ -541,10 +480,9 @@ pub fn build_governed_executor_full(
     };
     let router = Arc::new(router);
 
-    // ── Plan state control: session-owned, revisioned create/replace/merge/complete-step.
-    // Each runtime owns one PlanStore; session isolation is enforced by the store's
-    // CrossSession guard on every operation (PA-076 Decision 6). ──
-    let plan_handler = Arc::new(PlanControlHandler::new((*shared_plan_store).clone()));
+    // ── Plan 模式退出审查（primitive `plan_control`，模型可见名 `ExitPlanMode`）：
+    // 只登记 Markdown 方案并请求宿主审核，不持有步骤机（ADR 2026-11-27 方案 1A）。 ──
+    let plan_handler = Arc::new(ExitPlanModeHandler::new());
 
     // ── view_image: reference-based artifact with default include_bytes=false (design Decision 11).
     // Whether the encoded bytes reach a model is a provider modality choice. ──
@@ -925,239 +863,6 @@ mod tests {
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["successCount"], 2);
         assert_eq!(payload["results"].as_array().map(Vec::len), Some(2));
-    }
-
-    // ── ISSUE-20261111-002: approval no wall-clock expiry ─────────────────────────────────────
-
-    #[test]
-    fn governed_executor_plan_execution_approval_valid_past_wall_clock_expiry() {
-        let workspace = temp_workspace();
-        let governed = build_governed_executor(Some(workspace.clone()), None);
-        let init_context = crate::dispatcher::DispatchContext {
-            session_id: Some("session-1".to_string()),
-            run_id: Some("run-1".to_string()),
-            turn_id: Some("turn-1".to_string()),
-            ..Default::default()
-        };
-        let bound = BoundGoverned::new(&governed, init_context);
-
-        let created = bound.execute(&same_call(
-            "Plan",
-            json!({
-                "op": "create",
-                "session_id": "session-1",
-                "payload": {
-                    "kind": "implement",
-                    "summary": "Implement feature",
-                    "steps": [
-                        { "name": "draft", "summary": "Write spec" }
-                    ]
-                },
-                "description": "test",
-            }),
-        ));
-        assert_eq!(created.status, "ok");
-        let payload: serde_json::Value =
-            serde_json::from_str(&created.output).expect("create output json");
-        let plan_id = payload["planId"].as_str().expect("planId");
-        let revision = payload["revision"].as_i64().unwrap_or(1);
-
-        // expires_at_ms 设置为过去的固定时间戳（模拟慢人工决策超过60s）
-        let turn_context = crate::dispatcher::DispatchContext {
-            session_id: Some("session-1".to_string()),
-            run_id: Some("run-1".to_string()),
-            turn_id: Some("turn-1".to_string()),
-            plan_execution_approval: Some(crate::dispatcher::PlanExecutionApproval {
-                session_id: "session-1".to_string(),
-                plan_id: plan_id.to_string(),
-                expires_at_ms: 1000, // 远低于当前 now_ms
-            }),
-            ..Default::default()
-        };
-        let bound_approved = BoundGoverned::new(&governed, turn_context);
-
-        // 尝试执行 start_execution 触发 Draft→Executing 迁移
-        let completed = bound_approved.execute(&same_call(
-            "Plan",
-            json!({
-                "op": "start_execution",
-                "session_id": "session-1",
-                "plan_id": plan_id,
-                "revision": revision,
-                "description": "test",
-            }),
-        ));
-        assert_eq!(
-            completed.status,
-            "ok",
-            "去墙钟后已批准的审批不应因 expires_at_ms 被拒绝: {:?}",
-            completed.output
-        );
-    }
-
-    // ── PA-076 P2-6: plan_control via governed dispatch ──────────────────────────────────────
-
-    #[test]
-    fn governed_executor_dispatches_plan_control_create_replace_merge_and_complete_step() {
-        let workspace = temp_workspace();
-        let governed = build_governed_executor(Some(workspace.clone()), None);
-        let turn_context = crate::dispatcher::DispatchContext {
-            session_id: Some("session-1".to_string()),
-            run_id: Some("run-1".to_string()),
-            turn_id: Some("turn-1".to_string()),
-            // W36 / PA-141：Draft→Executing 迁移（complete_step 首步）需要宿主审批证据。
-            plan_execution_approval: Some(crate::dispatcher::PlanExecutionApproval {
-                session_id: "session-1".to_string(),
-                plan_id: "plan-1".to_string(),
-                expires_at_ms: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64 + 3_600_000)
-                    .unwrap_or(u64::MAX),
-            }),
-            ..Default::default()
-        }; let governed = BoundGoverned::new(&governed, turn_context);
-
-        // Create a draft plan with two steps.
-        let created = governed.execute(&same_call(
-            "Plan",
-            json!({
-                "op": "create",
-                "session_id": "session-1",
-                "payload": {
-                    "kind": "implement",
-                    "summary": "Implement feature",
-                    "steps": [
-                        { "name": "draft", "summary": "Write spec" },
-                        { "name": "code", "summary": "Implement" }
-                    ]
-                },
-                "description": "test",
-            }),
-        ));
-        assert_eq!(created.status, "ok", "create failed: {}", created.output);
-        let created_value: Value =
-            serde_json::from_str(&created.output).expect("plan output json");
-        assert_eq!(created_value["planId"], "plan-1");
-        assert_eq!(created_value["revision"], 1);
-        assert_eq!(created_value["lifecycle"], "draft");
-        assert_eq!(created_value["steps"].as_array().map(Vec::len), Some(2));
-
-        // Merge a third step, preserving existing step ids.
-        let merged = governed.execute(&same_call(
-            "Plan",
-            json!({
-                "op": "merge",
-                "session_id": "session-1",
-                "plan_id": "plan-1",
-                "revision": 1,
-                "step": { "name": "test", "summary": "Add tests" },
-                "description": "test",
-            }),
-        ));
-        assert_eq!(merged.status, "ok", "merge failed: {}", merged.output);
-        let merged_value: Value = serde_json::from_str(&merged.output).expect("plan output json");
-        assert_eq!(merged_value["revision"], 2);
-        assert_eq!(merged_value["steps"].as_array().map(Vec::len), Some(3));
-
-        // Complete the first step → lifecycle advances to Executing.
-        let step_id = merged_value["steps"][0]["stepId"]
-            .as_str()
-            .expect("step id")
-            .to_string();
-        let completed = governed.execute(&same_call(
-            "Plan",
-            json!({
-                "op": "complete_step",
-                "session_id": "session-1",
-                "plan_id": "plan-1",
-                "revision": 2,
-                "step_id": step_id,
-                "description": "test",
-            }),
-        ));
-        assert_eq!(
-            completed.status, "ok",
-            "complete_step failed: {}",
-            completed.output
-        );
-        let completed_value: Value =
-            serde_json::from_str(&completed.output).expect("plan output json");
-        assert_eq!(completed_value["steps"][0]["status"], "completed");
-        assert_eq!(completed_value["lifecycle"], "executing");
-
-        // Replace the plan content, keeping the same plan_id.
-        let replaced = governed.execute(&same_call(
-            "Plan",
-            json!({
-                "op": "replace",
-                "session_id": "session-1",
-                "plan_id": "plan-1",
-                "revision": 3,
-                "payload": { "kind": "refactor", "summary": "Refactor after review", "steps": [] },
-                "description": "test",
-            }),
-        ));
-        assert_eq!(
-            replaced.status, "ok",
-            "replace failed: {}",
-            replaced.output
-        );
-        let replaced_value: Value =
-            serde_json::from_str(&replaced.output).expect("plan output json");
-        assert_eq!(replaced_value["planId"], "plan-1");
-        assert_eq!(replaced_value["kind"], "refactor");
-        assert_eq!(replaced_value["revision"], 4);
-    }
-
-    #[test]
-    fn governed_executor_plan_control_stale_revision_and_missing_op_fail_closed() {
-        let workspace = temp_workspace();
-        let governed = build_governed_executor(Some(workspace.clone()), None);
-        let turn_context = crate::dispatcher::DispatchContext {
-            session_id: Some("session-1".to_string()),
-            ..Default::default()
-        }; let governed = BoundGoverned::new(&governed, turn_context);
-
-        // Set up a plan so a stale revision can be attempted.
-        let created = governed.execute(&same_call(
-            "Plan",
-            json!({
-                "op": "create",
-                "session_id": "session-1",
-                "payload": { "kind": "k", "summary": "s", "steps": [{ "name": "a", "summary": "sa" }] },
-                "description": "test",
-            }),
-        ));
-        assert_eq!(created.status, "ok", "plan setup failed: {}", created.output);
-
-        let stale = governed.execute(&same_call(
-            "Plan",
-            json!({
-                "op": "replace",
-                "session_id": "session-1",
-                "plan_id": "plan-1",
-                "revision": 99,
-                "payload": { "kind": "x", "summary": "y", "steps": [] },
-                "description": "test",
-            }),
-        ));
-        assert_eq!(stale.status, "error");
-        assert!(stale.output.contains("stale_revision"), "{}", stale.output);
-
-        // Missing `op` is rejected by schema validation.
-        let no_op = governed.execute(&same_call(
-            "Plan",
-            json!({
-                "session_id": "session-1",
-                "description": "test",
-            }),
-        ));
-        assert_eq!(no_op.status, "error");
-        assert!(
-            no_op.output.contains("missing required argument `op`"),
-            "{}",
-            no_op.output
-        );
     }
 
     // ── PA-076 P2-6: view_image via governed dispatch ────────────────────────────────────────

@@ -2,16 +2,16 @@
 //!
 //! These are the host-agnostic read/write adapters the Tauri command layer calls. Ask
 //! list/answer/cancel/expire delegate to `ask_control` (which drives the dispatcher's
-//! compare-and-swap control-request store); Plan create/replace/merge/complete-step/list/get
-//! delegate to `plan_state::PlanStore`; the graph Ask wait bind/resume surface wires a run's
-//! `wait_user` suspension to a `PendingControlRequest` (design.md Decision 5). Everything returns
-//! serializable `serde_json::Value` projections so no Tauri type leaks into core.
+//! compare-and-swap control-request store); Plan 模式的 读取/进入/退出/审核 委托给
+//! `pony_tools::plan_mode` 的进程级注册表（Plan 是会话级协作模式，不是步骤清单）；the graph
+//! Ask wait bind/resume surface wires a run's `wait_user` suspension to a
+//! `PendingControlRequest` (design.md Decision 5). Everything returns serializable
+//! `serde_json::Value` projections so no Tauri type leaks into core.
 use super::*;
 use crate::agent::ask_control;
 use crate::agent::ask_persistence::{AskLifecycleState, PersistedAsk};
 use crate::agent::dispatcher::ControlRequestAuthorization;
 use crate::agent::graph::{GraphAskResumeInjection, GraphAskWaitBinding};
-use crate::agent::plan_state::{Plan, PlanPayload, PlanStepSpec};
 use crate::agent::tool_runtime::PendingControlRequestState;
 use serde_json::{json, Value};
 
@@ -688,101 +688,51 @@ impl HostControlPlane {
             .collect()
     }
 
-    // ── Plan control surface (design.md Decision 6) ───────────────────────────────────────
+    // ── Plan 模式宿主控制面（ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）─────
+    //
+    // Plan 是**会话级协作模式**，不是步骤清单：这里只有 读取 / 进入 / 退出 / 审核 四个动作。
+    // 旧的 plan_create / plan_replace / plan_merge / plan_complete_step /
+    // plan_execution_approve / plan_list / plan_get 一并下线（步骤进度归 TodoWrite）。
 
-    /// Create a session-owned `Draft` plan from a `PlanPayload` projection.
-    pub fn plan_create(&self, session_id: &str, payload: Value) -> Result<Value, String> {
-        let payload: PlanPayload = serde_json::from_value(payload)
-            .map_err(|error| format!("invalid_request: malformed plan payload: {error}"))?;
-        let plan = self
-            .plan_store
-            .create(session_id, payload)
-            .map_err(|error| error.to_message())?;
-        plan_value(&plan)
+    /// 读取会话的 Plan 模式状态（`active` / `pending` / 方案正文 / 是否已批准 / `revision`）。
+    pub fn plan_mode_get(&self, session_id: &str) -> Value {
+        plan_mode_value(session_id)
     }
 
-    /// Replace a plan's content, preserving its `plan_id`, with a compare-and-swap `revision`.
-    pub fn plan_replace(
-        &self,
-        session_id: &str,
-        plan_id: &str,
-        revision: u64,
-        payload: Value,
-    ) -> Result<Value, String> {
-        let payload: PlanPayload = serde_json::from_value(payload)
-            .map_err(|error| format!("invalid_request: malformed plan payload: {error}"))?;
-        let plan = self
-            .plan_store
-            .replace(session_id, plan_id, revision, payload)
-            .map_err(|error| error.to_message())?;
-        plan_value(&plan)
+    /// 进入 / 退出 Plan 模式。`active = true` 进入（下一轮 pre-step 生效），
+    /// `active = false` 立即退出（宿主 `/plan off`）。
+    pub fn plan_mode_set(&self, session_id: &str, active: bool) -> Result<Value, String> {
+        let session = require_session(session_id, "plan_mode_set")?;
+        if active {
+            pony_tools::plan_mode::request_toggle(&session, true);
+        } else {
+            pony_tools::plan_mode::set_active(&session, false);
+        }
+        Ok(plan_mode_value(&session))
     }
 
-    /// Append a single step to a plan, preserving every existing `step_id`.
-    pub fn plan_merge(
-        &self,
-        session_id: &str,
-        plan_id: &str,
-        revision: u64,
-        step: Value,
-    ) -> Result<Value, String> {
-        let step: PlanStepSpec = serde_json::from_value(step)
-            .map_err(|error| format!("invalid_request: malformed plan step: {error}"))?;
-        let plan = self
-            .plan_store
-            .merge(session_id, plan_id, revision, step)
-            .map_err(|error| error.to_message())?;
-        plan_value(&plan)
+    /// 把用户上一轮表达的切换意图落地（宿主在每次 pre-step 前调用；幂等）。
+    pub fn plan_mode_commit(&self, session_id: &str) -> Value {
+        let session = session_id.trim();
+        if session.is_empty() {
+            return plan_mode_value(session);
+        }
+        pony_tools::plan_mode::commit_pending(session);
+        plan_mode_value(session)
     }
 
-    /// Mark a plan step completed; the first completion moves the plan to `Executing` and the
-    /// last moves it to `Completed`.
-    pub fn plan_complete_step(
-        &self,
-        session_id: &str,
-        plan_id: &str,
-        revision: u64,
-        step_id: &str,
-    ) -> Result<Value, String> {
-        let plan = self
-            .plan_store
-            .complete_step(session_id, plan_id, revision, step_id)
-            .map_err(|error| error.to_message())?;
-        plan_value(&plan)
-    }
-
-    /// Explicitly approve execution of a Draft plan from host, transitioning it to `Executing`.
-    pub fn plan_execution_approve(
-        &self,
-        session_id: &str,
-        plan_id: &str,
-        revision: u64,
-    ) -> Result<Value, String> {
-        let plan = self
-            .plan_store
-            .start_execution(session_id, plan_id, revision)
-            .map_err(|error| error.to_message())?;
-        plan_value(&plan)
-    }
-
-    /// Every plan owned by `session_id`, in creation order.
-    pub fn plan_list(&self, session_id: &str) -> Value {
-        let plans = self.plan_store.plans_for_session(session_id);
-        Value::Array(
-            plans
-                .iter()
-                .filter_map(|plan| serde_json::to_value(plan).ok())
-                .collect(),
-        )
-    }
-
-    /// Read a single plan by stable id (fails closed on cross-session or unknown plan).
-    pub fn plan_get(&self, session_id: &str, plan_id: &str) -> Result<Value, String> {
-        let plan = self
-            .plan_store
-            .plan(session_id, plan_id)
-            .map_err(|error| error.to_message())?;
-        plan_value(&plan)
+    /// 用户在方案审核卡片上的决定：`approved = true` 退出模式并解锁写/执行；
+    /// `false` 表示「继续规划」，模式保持激活、方案标记为未批准。
+    pub fn plan_mode_review(&self, session_id: &str, approved: bool) -> Result<Value, String> {
+        let session = require_session(session_id, "plan_mode_review")?;
+        let state = pony_tools::plan_mode::plan_mode_state(&session);
+        if state.plan.is_none() {
+            return Err(
+                "plan_review_no_plan: no plan has been submitted for this session yet".to_string(),
+            );
+        }
+        pony_tools::plan_mode::resolve_review(&session, approved);
+        Ok(plan_mode_value(&session))
     }
 
     // ── graph Ask wait surface (design.md Decision 5) ─────────────────────────────────────
@@ -929,9 +879,46 @@ pub(super) fn require_current_version(pending: &crate::agent::tool_runtime::Pend
     Ok(())
 }
 
-fn plan_value(plan: &Plan) -> Result<Value, String> {
-    serde_json::to_value(plan)
-        .map_err(|error| format!("handler_error: plan projection serialization failed: {error}"))
+/// Plan 模式状态的宿主投影（camelCase，前端 `src/stores/plan.ts` 直接消费）。
+///
+/// 不含任何步骤清单：Plan 只有模式开关与方案正文（步骤归 TodoWrite）。
+fn plan_mode_value(session_id: &str) -> Value {
+    let session = session_id.trim();
+    if session.is_empty() {
+        return json!({
+            "sessionId": "",
+            "active": false,
+            "plan": Value::Null,
+            "planApproved": false,
+            "revision": 0,
+        });
+    }
+    let state = pony_tools::plan_mode::plan_mode_state(session);
+    json!({
+        "sessionId": session,
+        "active": state.effective_active(),
+        "committedActive": state.active,
+        "pending": state.pending,
+        "plan": state.plan,
+        "planApproved": state.plan_approved,
+        "revision": state.revision,
+        "policy": pony_tools::plan_mode::PLAN_MODE_POLICY,
+        "reviewOptions": [
+            pony_tools::plan_mode::PLAN_REVIEW_APPROVE,
+            pony_tools::plan_mode::PLAN_REVIEW_KEEP_PLANNING,
+        ],
+    })
+}
+
+/// Plan 模式变更必须有非空会话作用域（空会话会让状态落到空键上，无法回读）。
+fn require_session(session_id: &str, action: &str) -> Result<String, String> {
+    let session = session_id.trim();
+    if session.is_empty() {
+        return Err(format!(
+            "plan_scope_required: `{action}` requires a non-empty session scope"
+        ));
+    }
+    Ok(session.to_string())
 }
 
 /// Wire projection of a durable Ask record for the host panel.

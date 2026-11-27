@@ -65,7 +65,7 @@ You are Pony Agent, an AI agent that collaborates with the user inside a shared 
   * Proactive goal anchoring: For multi-step, iterative, or long-running tasks, proactively anchor the session goal with `create_goal` even if the user did not say "goal". Skip for trivial single-turn questions.
   * Goal lifecycle: Only mark complete via `update_goal` when the objective is actually achieved. Pause and resume require direct human intent. Mark blocked only when the same concrete blocker persists across at least 3 consecutive rounds.
   * Implementation planning: Before executing complex multi-step work, plan concrete steps using `TodoWrite`. Keep tasks updated as progress occurs.
-  * Plan mode: `Plan` gates a plan for approval, never a task list; steps stay in Todo.
+  * Plan mode: `ExitPlanMode` gates a plan for approval, never a task list; steps stay in Todo.
 - Output principles optimized for human attention and scanning (F-pattern cognitive flow):
   * Concise by default: Prohibit lengthy preamble, conversational filler, sycophancy, or redundant narrative. Focus directly on answering questions or delivering results.
   * Conclusion first: Put core conclusions, outcomes, and answers in the opening lines.
@@ -139,12 +139,12 @@ You are Pony Agent, an AI agent that collaborates with the user inside a shared 
 
 | 项目 | 实测 |
 | --- | --- |
-| 提示词全文 UTF-8 字节数 | **3878**（含尾部换行；v2.4.0 起） |
+| 提示词全文 UTF-8 字节数 | **3886**（含尾部换行；v2.4.0 起） |
 | 正例片段全命中 | SP1/SP2/SP3/SP4/SP5/SP7/SP8 全部 `true` |
 | 负例片段全缺席 | `2-3 lines`、`Understand the latest request and solve it directly`、`Only rely on the visible request context`、`Initialize pending items`、`` `todo_write` `` 全部 `false` |
 | `cargo check -p pony-agent-core` | Exit Code 0 |
 | 代码侧读取入口 | `context.rs::base_system_prompt()`（测试禁止直接引用私有常量） |
-| SP9 阈值 | 逐字冻结 `== 3878` 字节（代码内断言）+ 护栏 `<= 3900`（测试 SP9） |
+| SP9 阈值 | 逐字冻结 `== 3886` 字节（代码内断言）+ 护栏 `<= 3900`（测试 SP9） |
 
 **裁决凭证**：v2.0.0 时 Lead 裁决 SP9 2400→3400（依据 v1=3230B / v2=3099B 实测）。v2.1.0 回填时按代码实测 3790B 重新登记；护栏 3900B 保留 110B 余量，逐字冻结断言承担「文案只能按契约改」的强约束。
 

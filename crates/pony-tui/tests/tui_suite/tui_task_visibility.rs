@@ -19,7 +19,7 @@ use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 use tui::{
     GoalActivation, GoalPhase, JobStatus, JobsViewState, PermissionChoice, PermissionRequest,
-    PermissionState, PlanState, PlanStep, PlanStepStatus, TaskCenterState, TaskCenterTab, TuiGoal,
+    PermissionState, PlanModeState, TaskCenterState, TaskCenterTab, TuiGoal,
     TuiState,
 };
 
@@ -58,21 +58,14 @@ fn goal(round: u32, max: Option<u32>, phase: GoalPhase) -> TuiGoal {
     }
 }
 
-fn plan_with(done: usize, total: usize) -> PlanState {
-    let mut plan = PlanState::new("p1".to_string(), "步骤".to_string());
-    for index in 0..total {
-        plan.steps.push(PlanStep {
-            step_id: format!("s{index}"),
-            name: format!("步骤 {index}"),
-            summary: String::new(),
-            status: if index < done {
-                PlanStepStatus::Completed
-            } else {
-                PlanStepStatus::Pending
-            },
-        });
+/// 激活中的 Plan 模式状态（无步骤清单：Plan 只有模式与方案正文）。
+fn plan_mode() -> PlanModeState {
+    PlanModeState {
+        active: true,
+        plan: Some("# 方案".to_string()),
+        plan_approved: false,
+        revision: 1,
     }
-    plan
 }
 
 fn job(status: &str) -> JobListItem {
@@ -106,19 +99,24 @@ fn summary_lists_goal_plan_tasks_agents_jobs_in_order() {
     // 目标 → 计划 → 任务 → 智能体 → 后台。
     let mut state = TuiState::default();
     state.set_goal(goal(3, Some(5), GoalPhase::Active));
-    state.plan_state = Some(plan_with(2, 5));
+    state.plan_state = Some(plan_mode());
     state.task_glance.team_open = 4;
     state.task_glance.team_blocked = 1;
+    state.task_glance.team_done = 2;
+    state.task_glance.team_total = 6;
     state.task_glance.agents_running = 2;
     state.jobs_state = Some(JobsViewState::from_items(vec![job("running")]));
 
     let summary = tui::task_summary(&state).expect("摘要必须存在");
-    let positions = ["◎ 目标", "▤ 计划", "☑ 任务", "⚡ 智能体", "⚙ 后台"]
+    let positions = ["◎ 目标", "▤ Plan", "☑ 任务", "⚡ 智能体", "⚙ 后台"]
         .map(|needle| summary.find(needle).unwrap_or_else(|| panic!("缺少 {needle} 段：{summary:?}")));
     assert!(
         positions.windows(2).all(|pair| pair[0] < pair[1]),
         "摘要段顺序必须是 目标 → 计划 → 任务 → 智能体 → 后台，实际 {summary:?}"
     );
+    // 合并后口径（main #109 的 goal 图标化 + 本 ADR 的 Plan/任务分工）：
+    // 目标段只报状态图标（轮次归抽屉 Goal 页签）、Plan 段只报模式标识（无数字）、
+    // 任务段报 `done/total`（步骤进度唯一去处）。
     assert!(
         summary.contains("◎ 目标"),
         "目标段必须出现且带状态图标：{summary:?}"
@@ -127,7 +125,11 @@ fn summary_lists_goal_plan_tasks_agents_jobs_in_order() {
         !summary.contains("3/5"),
         "底栏目标段不再显示轮次（轮次只属于抽屉 Goal 页签）：{summary:?}"
     );
-    assert!(summary.contains("2/5"), "计划段必须带完成比：{summary:?}");
+    assert!(
+        !summary.contains("2/5") && summary.contains("▤ Plan 模式"),
+        "Plan 段必须是纯模式标识、不得带任何数字：{summary:?}"
+    );
+    assert!(summary.contains("☑ 任务 2/6"), "任务段必须是 done/total：{summary:?}");
     assert!(summary.contains("⛔1"), "任务段必须标阻塞数：{summary:?}");
 }
 
@@ -200,7 +202,7 @@ fn drawer_height_is_zero_when_closed() {
 fn drawer_height_never_exceeds_two_thirds() {
     let mut state = TuiState::default();
     state.task_center = Some(TaskCenterState::new());
-    state.plan_state = Some(plan_with(1, 40));
+    state.plan_state = Some(plan_mode());
     for available in [6u16, 10, 30, 60] {
         let height = tui::task_center_height(&state, available);
         let cap = (available as u32 * 2 / 3) as u16;
@@ -243,7 +245,7 @@ fn drawer_puts_a_breathing_row_between_tabs_and_content() {
         rows[tab_row + 1]
     );
     assert!(
-        rows[tab_row + 2].replace(' ', "").contains("当前会话还没有计划"),
+        rows[tab_row + 2].replace(' ', "").contains("当前会话未启用Plan模式"),
         "呼吸行之后应是内容首行，实际：{:?}",
         rows[tab_row + 2]
     );

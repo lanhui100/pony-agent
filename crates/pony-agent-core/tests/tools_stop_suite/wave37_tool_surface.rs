@@ -130,7 +130,8 @@ fn t1_model_visible_surface_is_exact_38_tool_list() {
         "Write",
         "Edit",
         "BatchExecute",
-        "Plan",
+        // 2026-11-27：`Plan` 步骤机下线，同槽位模型可见名收敛为 `ExitPlanMode`。
+        "ExitPlanMode",
         "ViewImage",
         // W61-C1 新增 9 项团队工具（v1.2：workflow 退回 Internal 故不在此列），按 builtin_tools
         // 定义序（tools.rs:5925-6138）插在 view_image(:5894) 与 todo_write(:6147) 之间。

@@ -23,21 +23,6 @@ fn write_todos(session: &str, items: Vec<(&str, StoreTodoStatus)>) {
     .expect("todo_write 必须成功");
 }
 
-/// 计划 JSON（`plan_list` 的真实 wire 形状：camelCase 字段 + snake_case lifecycle）。
-fn plan_json(plan_id: &str, summary: &str, lifecycle: &str) -> serde_json::Value {
-    serde_json::json!({
-        "planId": plan_id,
-        "sessionId": "s",
-        "revision": 1,
-        "kind": "implementation",
-        "summary": summary,
-        "lifecycle": lifecycle,
-        "steps": [
-            { "stepId": "step-1", "name": "第一步", "summary": "", "status": "pending" }
-        ]
-    })
-}
-
 #[test]
 fn drawer_tasks_tab_reads_session_todos_not_team_board() {
     let session = "b268-session-todos";
@@ -126,32 +111,54 @@ fn tasks_tab_merges_session_todos_and_team_tasks() {
     assert!(joined.contains("仅团队"), "{joined}");
 }
 
+/// Plan 模式投影：只认 `active` / `plan` / `planApproved`，**没有步骤清单**。
 #[test]
-fn plan_projection_prefers_newest_unfinished_plan() {
-    // 旧实现固定取 first() ⇒ 第二份（未终态）计划永远不显示。
-    let plans = serde_json::Value::Array(vec![
-        plan_json("plan-old", "旧计划", "completed"),
-        plan_json("plan-new", "新计划", "draft"),
-    ]);
-    let plan = tui_plan_from_value(&plans).expect("有未终态计划必须投影成功");
-    assert_eq!(plan.plan_id, "plan-new", "必须选最新一份未终态计划");
-    assert_eq!(plan.summary, "新计划");
-    assert!(plan.awaiting_approval, "draft 计划必须标记待批准");
+fn plan_mode_projection_maps_mode_state_and_plan_body() {
+    // 未激活且无方案 ⇒ None（抽屉不留空页签）。
+    assert!(PlanModeState::from_projection(&serde_json::json!({
+        "active": false,
+        "plan": null,
+    }))
+    .is_none());
 
-    // 全终态 ⇒ 退回最新一份（可回看最近完成/中止的计划）。
-    let all_terminal = serde_json::Value::Array(vec![
-        plan_json("plan-a", "A", "completed"),
-        plan_json("plan-b", "B", "aborted"),
-    ]);
+    // 激活但方案未提交 ⇒ 有状态、无正文。
+    let active = PlanModeState::from_projection(&serde_json::json!({
+        "active": true,
+        "plan": null,
+        "planApproved": false,
+        "revision": 2,
+    }))
+    .expect("激活必须投影成功");
+    assert!(active.active);
+    assert!(active.plan.is_none());
+    assert_eq!(active.marker(), Some("▤ Plan 模式"));
+
+    // 已提交方案 ⇒ 正文进抽屉，未批准。
+    let submitted = PlanModeState::from_projection(&serde_json::json!({
+        "active": true,
+        "plan": "# 方案\n- 第一步",
+        "planApproved": false,
+        "revision": 3,
+    }))
+    .expect("有方案必须投影成功");
+    assert_eq!(submitted.plan.as_deref(), Some("# 方案\n- 第一步"));
+    assert!(!submitted.plan_approved);
+
+    // 未激活但有方案 ⇒ 保留（可回看最近一次方案）。
+    let approved = PlanModeState::from_projection(&serde_json::json!({
+        "active": false,
+        "plan": "# 已批准方案",
+        "planApproved": true,
+        "revision": 4,
+    }))
+    .expect("已批准方案必须可回看");
+    assert!(!approved.active);
+    assert!(approved.plan_approved);
     assert_eq!(
-        tui_plan_from_value(&all_terminal).map(|plan| plan.plan_id),
-        Some("plan-b".to_string()),
-        "全终态时必须退回最后一份"
+        approved.marker(),
+        None,
+        "未激活时底栏不得出现模式标识"
     );
-
-    // 空数组 / 非数组 ⇒ None（空态，不得伪造计划）。
-    assert!(tui_plan_from_value(&serde_json::json!([])).is_none());
-    assert!(tui_plan_from_value(&serde_json::json!({"plans": []})).is_none());
 }
 
 #[test]

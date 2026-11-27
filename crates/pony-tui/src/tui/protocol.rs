@@ -250,56 +250,55 @@ impl AskUserState {
 // 3. Plan 交互与展示数据结构 (Plan)
 // -----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanStepStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanStep {
-    pub step_id: String,
-    pub name: String,
-    pub summary: String,
-    pub status: PlanStepStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanState {
-    pub plan_id: String,
-    pub revision: u64,
-    pub summary: String,
-    pub steps: Vec<PlanStep>,
-    pub is_active_plan_mode: bool,
-    pub selected_step_index: usize,
-    pub awaiting_approval: bool,
-    /// 计划是否已终态（`completed` / `aborted`）。
-    ///
-    /// 用途：底栏左槽只在「还有活的计划」时出现（终态计划常驻会谎称还在推进）；
-    /// 抽屉 Plan 页签仍可回看（追加弱化的「· 已结束」标注）。
+/// 会话级 **Plan 模式**投影（ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）。
+///
+/// Plan 不是任务清单：这里只有模式开关与一份 Markdown 方案正文；步骤进度归 Todos 页签。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanModeState {
+    /// 模式是否生效（`pending` 优先，与宿主视图一致）。
+    pub active: bool,
+    /// 最近一次提交审核的方案正文（Markdown）。
     #[serde(default)]
-    pub is_terminal: bool,
+    pub plan: Option<String>,
+    /// 该方案是否已获用户批准。
+    #[serde(default)]
+    pub plan_approved: bool,
+    /// 状态迁移版本号（宿主据此判断是否需要重绘）。
+    #[serde(default)]
+    pub revision: u64,
 }
 
-impl PlanState {
-    pub fn new(plan_id: String, summary: String) -> Self {
-        Self {
-            plan_id,
-            revision: 1,
-            summary,
-            steps: Vec::new(),
-            is_active_plan_mode: false,
-            selected_step_index: 0,
-            awaiting_approval: false,
-            is_terminal: false,
+impl PlanModeState {
+    /// 从控制面投影构造；`active` 与方案正文都缺省时返回 `None`（不占用抽屉页签）。
+    pub fn from_projection(value: &serde_json::Value) -> Option<Self> {
+        let active = value.get("active").and_then(serde_json::Value::as_bool)?;
+        let plan = value
+            .get("plan")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let state = Self {
+            active,
+            plan,
+            plan_approved: value
+                .get("planApproved")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            revision: value
+                .get("revision")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        };
+        // 未激活且没有方案正文 ⇒ 视为「无 Plan 状态」，避免抽屉留一个空页签。
+        if !state.active && state.plan.is_none() {
+            return None;
         }
+        Some(state)
     }
 
-    pub fn toggle_plan_mode(&mut self) {
-        self.is_active_plan_mode = !self.is_active_plan_mode;
+    /// 底栏模式标识（仅激活时出现）。
+    pub fn marker(&self) -> Option<&'static str> {
+        self.active.then_some("▤ Plan 模式")
     }
 }
 

@@ -338,9 +338,10 @@ const BUILTIN_GOLDEN: &[(&str, &str, &str, &str, u64)] = &[
     ("builtin:workspace_write_file", "Write", "write", "model_visible", 0x5196db9d3c2fc7be),
     ("builtin:workspace_edit_file", "Edit", "write", "model_visible", 0x5247515e4c7ae95b),
     ("builtin:workspace_batch", "BatchExecute", "composite", "model_visible", 0x8c3195523121c376),
-    // `abort` op 由 b6fd928d（[decl-change-approved]）加入模型可见输入面，schema 逐字节变化属**已批准**变更，
-    // golden 随之同步；日后再变必须重新走 decl-change 评审，不得照抄实测值。
-    ("builtin:plan_control", "Plan", "write", "model_visible", 0x1e6b65963cc9549a),
+    // 2026-11-27（ADR plan-mode-dsh-alignment）：`Plan` 步骤机下线，原槽位语义收敛为
+    // `ExitPlanMode`（提交 Markdown 方案走宿主审查），schema 从 op 机收敛为单 `plan` 入参。
+    // 属**已批准**变更（[decl-change-approved]），golden 随之同步；日后再变必须重新评审。
+    ("builtin:plan_control", "ExitPlanMode", "write", "model_visible", 0x6f4b8041524c0cf7),
     ("builtin:view_image", "ViewImage", "read", "model_visible", 0x2e5e324a17a5cab2),
     ("builtin:subagent", "subagent", "composite", "model_visible", 0xc9f3f6ae8f81c76a),
     ("builtin:spawn_teammate", "spawn_teammate", "interactive", "model_visible", 0xf884da9528ced99b),
@@ -2080,25 +2081,14 @@ fn t1_reregistering_a_source_prunes_the_previous_provider() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// 13. 回归栅栏（第二轮 L3）：Draft 计划期的外部写工具必须与内建写工具同口径被拒
+// 13. 回归栅栏（第二轮 L3 → 2026-11-27 Plan 模式）：Plan 模式期的外部写工具必须与内建写工具同口径被拒
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn t1_draft_plan_denies_external_write_tool() {
-    use pony_agent_core::agent::plan_state::{PlanPayload, PlanStore};
-
-    // Arrange — 会话里存在 Draft 计划（写/执行类工具必须被拦）
-    let plan_store = Arc::new(PlanStore::new());
-    plan_store
-        .create(
-            "session-draft",
-            PlanPayload {
-                kind: "plan".to_string(),
-                summary: "draft plan blocks write tools".to_string(),
-                steps: Vec::new(),
-            },
-        )
-        .expect("Draft 计划必须能创建");
+fn t1_plan_mode_denies_external_write_tool() {
+    // Arrange — 会话处于 Plan 模式（写/执行类工具必须被拦）
+    let session_id = format!("session-plan-mode-external-{}", uuid::Uuid::new_v4());
+    pony_agent_core::agent::plan_mode::set_active(&session_id, true);
 
     let external_write = external_descriptor(
         "demo",
@@ -2110,21 +2100,18 @@ fn t1_draft_plan_denies_external_write_tool() {
     let invocations = Arc::new(AtomicUsize::new(0));
     let registry = Arc::new(registry_with("draft-surface", vec![external_write]));
     let dispatcher = GovernedDispatcher::new(Arc::clone(&registry), Arc::new(FakeClock::new(0)));
-    dispatcher.register_policy_evaluator(Arc::new(GovernedPolicyEvaluator::new(
-        Vec::new(),
-        Some(Arc::clone(&plan_store)),
-    )));
+    dispatcher.register_policy_evaluator(Arc::new(GovernedPolicyEvaluator::new(Vec::new())));
     dispatcher.register_handler(
         external_id.clone(),
         Arc::new(CountingHandler(Arc::clone(&invocations))) as Arc<dyn PrimitiveToolHandler>,
     );
     dispatcher.set_turn_view(registry.default_turn_tool_view());
     let context = DispatchContext {
-        session_id: Some("session-draft".to_string()),
+        session_id: Some(session_id.clone()),
         ..Default::default()
     };
 
-    // Act — 外部写工具在 Draft 计划期被调用
+    // Act — 外部写工具在 Plan 模式期被调用
     let outcome = dispatcher.dispatch_governed(
         request(
             InvocationOrigin::Model,
@@ -2140,7 +2127,7 @@ fn t1_draft_plan_denies_external_write_tool() {
     assert_eq!(
         code.as_deref(),
         Some("permission_denied"),
-        "Draft 计划期外部写工具必须被 Deny（与内建写工具同口径），实际 {code:?}，输出：{}",
+        "Plan 模式期外部写工具必须被 Deny（与内建写工具同口径），实际 {code:?}，输出：{}",
         outcome_output(&outcome)
     );
 
@@ -2148,7 +2135,7 @@ fn t1_draft_plan_denies_external_write_tool() {
     assert_eq!(
         invocations.load(Ordering::SeqCst),
         0,
-        "Draft 计划期被拒绝的外部写工具不得执行 handler"
+        "Plan 模式期被拒绝的外部写工具不得执行 handler"
     );
 
     // Assert 3 — 内建写工具在同一上下文下的对照（证明"同口径"不是空的）
@@ -2171,7 +2158,7 @@ fn t1_draft_plan_denies_external_write_tool() {
     assert_eq!(
         outcome_error_code(&builtin_outcome).as_deref(),
         Some("permission_denied"),
-        "对照失败：内建写工具在 Draft 计划期必须同样 Deny，实际 {:?}",
+        "对照失败：内建写工具在 Plan 模式期必须同样 Deny，实际 {:?}",
         outcome_error_code(&builtin_outcome)
     );
 }

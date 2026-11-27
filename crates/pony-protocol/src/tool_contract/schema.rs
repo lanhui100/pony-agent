@@ -501,59 +501,16 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         // ── PA-076 phase 7 P2-6: Plan + ViewImage 追加在既有定义之后，保持稳定前缀（Decision 10）。 ──
         ToolDefinition {
             name: TOOL_PLAN_CONTROL,
-            description: "Plan 模式控制面（写方案 + 请求批准），不是任务清单：步骤进度一律走 TodoWrite，团队分工走 team_task_*，长程目标走 create_goal。不执行任意子调用。",
+            description: "Plan 模式的退出审查入口（模型可见名 ExitPlanMode）：提交完整 Markdown 方案请用户批准，批准后退出 Plan 模式并解锁写/执行。步骤进度一律走 TodoWrite，团队分工走 team_task_*，长程目标走 create_goal。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
-                    "op": {
+                    "plan": {
                         "type": "string",
-                        "description": "plan 控制操作：create / replace / merge / complete_step / start_execution / abort"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "拥有该 plan 的 session id"
-                    },
-                    "plan_id": {
-                        "type": "string",
-                        "description": "要修改的 plan id（replace / merge / complete_step / start_execution / abort 需要；abort 省略时撤销本会话最早的 Draft 计划）"
-                    },
-                    "revision": {
-                        "type": "integer",
-                        "description": "期望的 plan revision，用于 CAS 冲突检测（replace / merge / complete_step / start_execution 需要；abort 省略时取当前 revision）"
-                    },
-                    "step_id": {
-                        "type": "string",
-                        "description": "要标记完成的 step id（complete_step 需要）"
-                    },
-                    "payload": {
-                        "type": "object",
-                        "description": "plan 内容（create / replace 需要）",
-                        "properties": {
-                            "kind": { "type": "string", "description": "plan 分类标签" },
-                            "summary": { "type": "string", "description": "plan 概要描述" },
-                            "steps": {
-                                "type": "array",
-                                "description": "step 规范列表",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": { "type": "string" },
-                                        "summary": { "type": "string" }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    "step": {
-                        "type": "object",
-                        "description": "merge 操作要追加的 step 规范",
-                        "properties": {
-                            "name": { "type": "string" },
-                            "summary": { "type": "string" }
-                        }
+                        "description": "完整方案正文（Markdown，必须以 '# 标题' 开头）"
                     }
                 },
-                "required": ["op"],
+                "required": ["plan"],
                 "additionalProperties": false
             })),
         },

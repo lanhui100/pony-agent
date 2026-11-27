@@ -24,7 +24,9 @@ pub fn canonical_tool_name(name: &str) -> Option<&'static str> {
         "Write" => Some(TOOL_WORKSPACE_WRITE_FILE),
         "Edit" => Some(TOOL_WORKSPACE_EDIT_FILE),
         "BatchExecute" => Some(TOOL_WORKSPACE_BATCH),
-        "Plan" => Some(TOOL_PLAN_CONTROL),
+        // 2026-11-27：模型可见名收敛为 `ExitPlanMode`（Plan 是会话级协作模式，不是步骤机）。
+        // `Plan` 保留为历史别名：旧会话/旧日志/外部 MCP 注册名仍要能解析回同一 primitive。
+        "ExitPlanMode" | "exit.plan_mode" | "Plan" => Some(TOOL_PLAN_CONTROL),
         "ViewImage" => Some(TOOL_VIEW_IMAGE),
         TOOL_TIME_NOW | "time.now" => Some(TOOL_TIME_NOW),
         TOOL_ECHO_INPUT | "echo.input" => Some(TOOL_ECHO_INPUT),
@@ -277,7 +279,7 @@ pub fn model_visible_tool_name_opt(name: &str) -> Option<&'static str> {
         TOOL_WORKSPACE_EDIT_FILE => "Edit",
         TOOL_WORKSPACE_BATCH => "BatchExecute",
         TOOL_WORKSPACE_GATHER_CONTEXT => "Read",
-        TOOL_PLAN_CONTROL => "Plan",
+        TOOL_PLAN_CONTROL => "ExitPlanMode",
         TOOL_VIEW_IMAGE => "ViewImage",
         TOOL_WORKSPACE_READ_DOCUMENT => "ReadDocument",
         // W26：spill 回读工具的产品名（Deferred，经 tool_search 提升后出现）。
@@ -486,6 +488,7 @@ pub fn tool_display_metadata_for_name(name: &str) -> ToolDisplayMetadata {
         "Run" => Some("运行".to_string()),
         "Write" => Some("写入".to_string()),
         "Edit" => Some("编辑".to_string()),
+        "ExitPlanMode" => Some("退出计划模式".to_string()),
         "Plan" => Some("计划".to_string()),
         "ViewImage" => Some("看图".to_string()),
         "ReadDocument" => Some("读文档".to_string()),

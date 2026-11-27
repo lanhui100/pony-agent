@@ -22,8 +22,16 @@ pub struct TaskGlance {
     pub team_open: usize,
     /// 其中被阻塞的任务数。
     pub team_blocked: usize,
+    /// 团队看板已完成数。
+    pub team_done: usize,
+    /// 团队看板任务总数（已完成 + 未完成）。
+    pub team_total: usize,
     /// 当前会话里未完成的 todo 数（pending + in_progress）。
     pub todos_open: usize,
+    /// 当前会话 todo 已完成数。
+    pub todos_done: usize,
+    /// 当前会话 todo 总数。
+    pub todos_total: usize,
     /// 正在跑（`driving`）的队友数。
     pub agents_running: usize,
     /// 需要人看一眼的队友数（`failed`）。
@@ -64,9 +72,10 @@ pub(crate) fn sync_task_glance(state: &mut TuiState, control_plane: &HostControl
         Ok(list) => {
             let mut open = 0usize;
             let mut blocked = 0usize;
+            let mut done = 0usize;
             for task in &list.tasks {
                 match tui_task_status_from_team_status(&task.status) {
-                    TuiTaskStatus::Completed => {}
+                    TuiTaskStatus::Completed => done += 1,
                     TuiTaskStatus::Blocked => {
                         open += 1;
                         blocked += 1;
@@ -76,18 +85,27 @@ pub(crate) fn sync_task_glance(state: &mut TuiState, control_plane: &HostControl
             }
             state.task_glance.team_open = open;
             state.task_glance.team_blocked = blocked;
+            state.task_glance.team_done = done;
+            state.task_glance.team_total = list.tasks.len();
         }
         Err(error) => state.status_text = format!("任务同步失败: {error}"),
     }
 
     // 本会话 todo：与团队任务合并计入「☑ 任务」（不重复计数：两者是不同数据源）。
     projection::sync_todos_from_store(state);
-    state.task_glance.todos_open = state.todos_state.as_ref().map_or(0, |todos| {
-        todos
+    // 本会话 todo：与团队任务合并计入「☑ 任务 x/x」。
+    // 归属口径与抽屉一致——todo 按**当前会话**取（`sync_todos_from_store` 已按 session 过滤），
+    // 团队看板按**宿主会话**取（子会话里仍看主会话的团队，不突然变空）。
+    let (todos_open, todos_done) = state.todos_state.as_ref().map_or((0, 0), |todos| {
+        let done = todos
             .iter()
-            .filter(|task| task.status != TuiTaskStatus::Completed)
-            .count()
+            .filter(|task| task.status == TuiTaskStatus::Completed)
+            .count();
+        (todos.len() - done, done)
     });
+    state.task_glance.todos_open = todos_open;
+    state.task_glance.todos_done = todos_done;
+    state.task_glance.todos_total = state.todos_state.as_ref().map_or(0, Vec::len);
 
     let roster = agent_roster_state_for_session(&host);
     state.task_glance.agents_running = roster.entries.iter().filter(|entry| entry.driving).count();
@@ -144,37 +162,29 @@ fn goal_segment(state: &TuiState) -> Option<String> {
     Some(format!("{glyph} 目标"))
 }
 
-/// Plan 摘要段（决策 3A）：`▤ 计划 {done}/{total}{·待批}`。
+/// Plan 模式标识段：**只在模式激活时**出现，且不带任何数字。
 ///
-/// 终态计划（`completed` / `aborted`）与空步骤计划都不出段 —— 已结束的计划常驻左槽会
-/// 谎称还在推进（`PlanState::is_terminal` 的唯一消费点就在这里）。
+/// Plan 是会话级协作模式（写/执行锁定），不是任务清单；步骤进度归 `☑ 任务 x/x`。
+/// 旧实现把计划步骤计数画在这里、与 Todo 进度并排出现，直接制造了「Plan 还是 Todo」的混淆
+/// （ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）。
 fn plan_segment(state: &TuiState) -> Option<String> {
-    let plan = state.plan_state.as_ref()?;
-    if plan.is_terminal || plan.steps.is_empty() {
-        return None;
-    }
-    let total = plan.steps.len();
-    let done = plan
-        .steps
-        .iter()
-        .filter(|step| step.status == PlanStepStatus::Completed)
-        .count();
-    let suffix = if plan.awaiting_approval { "·待批" } else { "" };
-    Some(format!("▤ 计划 {done}/{total}{suffix}"))
+    state.plan_state.as_ref()?.marker().map(str::to_string)
 }
 
-/// 任务摘要段（决策 3A）：`☑ 任务 {open}`（有阻塞补 `⛔N`）。
+/// 任务摘要段（方案 A）：`☑ 任务 {done}/{total}`（有阻塞补 `⛔N`），全部完成时隐藏。
 ///
-/// 合并本会话未完成 todo 与团队开放任务（两者是不同数据源，相加不重复计数）。
+/// 合并本会话 todo 与团队任务的**已完成/总数**：两者是不同数据源，相加不重复计数
+/// （单人场景只有 todo，团队场景才有 team task）。语法与抽屉 Tasks 页签的 `x/x` 一致。
 fn tasks_segment(glance: &TaskGlance) -> Option<String> {
-    let open = glance.todos_open + glance.team_open;
-    if open == 0 {
+    let done = glance.todos_done + glance.team_done;
+    let total = glance.todos_total + glance.team_total;
+    if total == 0 || done >= total {
         return None;
     }
     if glance.team_blocked > 0 {
-        Some(format!("☑ 任务 {open}(⛔{})", glance.team_blocked))
+        Some(format!("☑ 任务 {done}/{total}(⛔{})", glance.team_blocked))
     } else {
-        Some(format!("☑ 任务 {open}"))
+        Some(format!("☑ 任务 {done}/{total}"))
     }
 }
 

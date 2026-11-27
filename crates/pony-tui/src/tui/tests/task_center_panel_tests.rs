@@ -191,31 +191,31 @@ fn goal_tab_status_and_hint_are_demoted() {
     assert_eq!(hint_index, lines.len() - 1, "命令提示必须是最后一行：{lines:?}");
 }
 
-/// Plan 页签：终态计划标 `· 已结束`，并在底栏左槽消失（决策 3A）。
+/// Plan 页签：展示**模式状态与方案正文**（Plan 不再是步骤清单）。
 #[test]
-fn terminal_plan_is_marked_in_drawer_and_hidden_in_status_bar() {
+fn plan_tab_shows_mode_state_and_plan_body() {
     let mut state = drawer_state();
     state.task_center.as_mut().expect("抽屉已打开").tab = task_center::TaskCenterTab::Plan;
-    let mut plan = PlanState::new("p-terminal".to_string(), "已结束的计划".to_string());
-    plan.steps.push(PlanStep {
-        step_id: "s1".to_string(),
-        name: "步骤一".to_string(),
-        summary: String::new(),
-        status: PlanStepStatus::Completed,
+    state.update_plan(PlanModeState {
+        active: true,
+        plan: Some("# 方案\n- 第一步".to_string()),
+        plan_approved: false,
+        revision: 3,
     });
-    plan.is_terminal = true;
-    state.update_plan(plan);
 
     let joined = task_center::content_lines(&state)
         .iter()
         .map(|(text, _)| text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(joined.contains("已结束"), "抽屉可回看，但必须标注已结束：{joined}");
     assert!(
-        task_summary(&state).is_none(),
-        "终态计划不得常驻底栏左槽：{:?}",
-        task_summary(&state)
+        joined.contains("规划中"),
+        "激活且未批准时必须显示「规划中」: {joined}"
+    );
+    assert!(joined.contains("# 方案"), "抽屉必须展示方案正文: {joined}");
+    assert!(
+        joined.contains("/approve"),
+        "待批状态必须给出 /approve 入口: {joined}"
     );
 }
 

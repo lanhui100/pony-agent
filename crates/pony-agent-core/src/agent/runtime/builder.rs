@@ -11,7 +11,6 @@ pub struct AgentRuntimeBuilder {
     planner: Option<Box<dyn TurnPlanner>>,
     context_builder: Option<Box<dyn TurnContextBuilder>>,
     telemetry_builder: Option<Box<dyn TurnTelemetryBuilder>>,
-    plan_store: Option<crate::agent::plan_state::PlanStore>,
     /// wave-65 C1：审批挂起可恢复能力位（默认 `false`，仅 TUI 宿主打开）。
     host_approval_resume: bool,
 }
@@ -29,7 +28,6 @@ impl AgentRuntimeBuilder {
             planner: None,
             context_builder: None,
             telemetry_builder: None,
-            plan_store: None,
             host_approval_resume: false,
         }
     }
@@ -92,11 +90,6 @@ impl AgentRuntimeBuilder {
         self
     }
 
-    pub fn plan_store(mut self, plan_store: crate::agent::plan_state::PlanStore) -> Self {
-        self.plan_store = Some(plan_store);
-        self
-    }
-
     /// wave-65 C1：打开/关闭「审批（`Approval`）挂起可恢复」能力位。
     ///
     /// 默认 `false` —— 桌面（`src-tauri`）与 CLI 不调用本方法，行为逐字不变（挂起仍
@@ -133,16 +126,14 @@ impl AgentRuntimeBuilder {
                 e.into_inner()
             })
             .path_authorizations();
-        let plan_store = self.plan_store;
         let mut runtime = AgentRuntime::with_shared_sessions(
             sessions_arc,
             self.provider_resolver
                 .unwrap_or_else(|| Box::new(ProviderRegistryStore::new())),
             self.tool_executor.unwrap_or_else(|| {
-                Box::new(crate::agent::governed_executor::build_governed_executor_with_plan_store(
+                Box::new(crate::agent::governed_executor::build_governed_executor(
                     self.workspace_root.clone(),
                     Some(shared_authorizations),
-                    plan_store,
                 ))
             }),
             self.planner.unwrap_or_else(|| Box::new(LocalTurnPlanner)),

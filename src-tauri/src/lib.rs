@@ -371,82 +371,46 @@ fn ask_expire(control_plane: State<'_, HostControlPlane>, now_ms: Option<u64>) -
     control_plane.expire_asks(now_ms)
 }
 
-// ── Plan control surface (PA-076 task 4.4) ─────────────────────────────────────────────────
+// ── Plan 模式控制面（ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）──────────────
+//
+// Plan 是**会话级协作模式**（active / 已提交方案 / 是否批准），不是任务清单：
+// 只有「读取 / 进入 / 退出 / 审核」四个动作，旧的 plan_create / plan_replace / plan_merge /
+// plan_complete_step / plan_execution_approve / plan_list / plan_get 一并下线
+// （步骤进度归 TodoWrite，团队分工归 team_task_*）。
 
-/// Create a session-owned `Draft` plan from a `{ kind, summary, steps }` payload.
+/// 读取会话的 Plan 模式状态（`active` / `plan` / `planApproved` / `revision`）。
 #[tauri::command]
-fn plan_create(
-    control_plane: State<'_, HostControlPlane>,
-    session_id: String,
-    payload: Value,
-) -> Result<Value, String> {
-    control_plane.plan_create(&session_id, payload)
+fn plan_mode_get(control_plane: State<'_, HostControlPlane>, session_id: String) -> Value {
+    control_plane.plan_mode_get(&session_id)
 }
 
-/// Replace a plan's content, preserving its `plan_id`, with a compare-and-swap `revision`.
+/// 进入（`active = true`）/ 退出（`active = false`）Plan 模式。
+///
+/// 进入走 `pending`：下一轮 pre-step 才生效（DSH「用户选择待提交」语义）；退出立即生效。
 #[tauri::command]
-fn plan_replace(
+fn plan_mode_set(
     control_plane: State<'_, HostControlPlane>,
     session_id: String,
-    plan_id: String,
-    revision: u64,
-    payload: Value,
+    active: bool,
 ) -> Result<Value, String> {
-    control_plane.plan_replace(&session_id, &plan_id, revision, payload)
+    control_plane.plan_mode_set(&session_id, active)
 }
 
-/// Append a single step to a plan, preserving every existing `step_id`.
+/// 把上一轮的切换意图落地（宿主在每次 pre-step 前调用；幂等）。
 #[tauri::command]
-fn plan_merge(
-    control_plane: State<'_, HostControlPlane>,
-    session_id: String,
-    plan_id: String,
-    revision: u64,
-    step: Value,
-) -> Result<Value, String> {
-    control_plane.plan_merge(&session_id, &plan_id, revision, step)
+fn plan_mode_commit(control_plane: State<'_, HostControlPlane>, session_id: String) -> Value {
+    control_plane.plan_mode_commit(&session_id)
 }
 
-/// Mark a plan step completed (first completion -> Executing, last -> Completed).
+/// 用户在方案审核卡片上的决定：`approved = true` 退出模式并解锁写/执行；
+/// `false` 保持模式激活（「继续规划」）。
 #[tauri::command]
-fn plan_complete_step(
+fn plan_mode_review(
     control_plane: State<'_, HostControlPlane>,
     session_id: String,
-    plan_id: String,
-    revision: u64,
-    step_id: String,
+    approved: bool,
 ) -> Result<Value, String> {
-    control_plane.plan_complete_step(&session_id, &plan_id, revision, &step_id)
-}
-
-/// Host approval: explicitly transition a Draft plan to Executing (PA-141).
-#[tauri::command]
-fn plan_execution_approve(
-    control_plane: State<'_, HostControlPlane>,
-    session_id: String,
-    plan_id: String,
-    revision: u64,
-) -> Result<Value, String> {
-    control_plane.plan_execution_approve(&session_id, &plan_id, revision)
-}
-
-/// Every plan owned by a session, in creation order.
-#[tauri::command]
-fn plan_list(
-    control_plane: State<'_, HostControlPlane>,
-    session_id: String,
-) -> Value {
-    control_plane.plan_list(&session_id)
-}
-
-/// Read a single plan by stable id.
-#[tauri::command]
-fn plan_get(
-    control_plane: State<'_, HostControlPlane>,
-    session_id: String,
-    plan_id: String,
-) -> Result<Value, String> {
-    control_plane.plan_get(&session_id, &plan_id)
+    control_plane.plan_mode_review(&session_id, approved)
 }
 
 /// List todos for a session.
@@ -1734,13 +1698,10 @@ pub fn run() {
             control_approve_request,
             ask_cancel,
             ask_expire,
-            plan_create,
-            plan_replace,
-            plan_merge,
-            plan_complete_step,
-            plan_execution_approve,
-            plan_list,
-            plan_get,
+            plan_mode_get,
+            plan_mode_set,
+            plan_mode_commit,
+            plan_mode_review,
             todo_list,
             goal_get,
             goal_budget_lines,

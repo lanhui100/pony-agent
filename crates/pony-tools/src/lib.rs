@@ -20,6 +20,8 @@ pub mod mcp_resources;
 pub mod parallel_tools;
 pub mod patch;
 pub mod path_permission;
+pub mod exit_plan_mode;
+pub mod plan_mode;
 pub mod plan_state;
 pub mod plugin_host;
 pub mod process;
