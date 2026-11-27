@@ -83,35 +83,30 @@ export type TodoItem = {
   status: TodoItemStatus;
 };
 
-export type PlanStepStatus = "pending" | "inProgress" | "completed" | "failed" | string;
-export type PlanLifecycle = "draft" | "executing" | "completed" | "aborted" | string;
-
-export type PlanStep = {
-  stepId: string;
-  name: string;
-  summary: string;
-  status: PlanStepStatus;
-};
-
-export type Plan = {
-  planId: string;
+/**
+ * 会话级 **Plan 模式**投影（ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）。
+ *
+ * Plan 不是任务清单：这里只有模式开关与一份 Markdown 方案正文。步骤进度归 Todo
+ * （`todoProgress`），团队分工归 team_task_*，长程目标归 goal store。
+ */
+export type PlanModeState = {
   sessionId: string;
+  /** 生效值（含未 commit 的 pending 意图）。 */
+  active: boolean;
+  /** 最近一次提交审核的方案正文（Markdown）；未提交时为 null。 */
+  plan?: string | null;
+  /** 该方案是否已获用户批准。 */
+  planApproved: boolean;
+  /** 状态迁移版本号。 */
   revision: number;
-  kind: string;
-  summary: string;
-  lifecycle: PlanLifecycle;
-  steps: PlanStep[];
-};
-
-export type PlanStepSpec = {
-  name: string;
-  summary?: string;
-};
-
-export type PlanPayload = {
-  kind: string;
-  summary?: string;
-  steps?: PlanStepSpec[];
+  /** 未落地的切换意图（宿主 pre-step 时 commit）。 */
+  pending?: boolean | null;
+  /** 已落地的开关值（与 `active` 的区别仅在 pending 存在时）。 */
+  committedActive?: boolean;
+  /** 激活期注入模型的策略段文案。 */
+  policy?: string;
+  /** 审核卡片的固定选项（批准执行 / 继续规划）。 */
+  reviewOptions?: string[];
 };
 
 /**

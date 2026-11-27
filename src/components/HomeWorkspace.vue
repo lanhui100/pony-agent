@@ -15,6 +15,7 @@ import {
   describeGoalOutcome,
   goalCommandArgs,
   parseSlashCommand,
+  planCommandArgs,
   type DesktopSlashCommand,
   type GoalCommandOutcome,
   type ManualCompactionOutcome
@@ -1554,16 +1555,23 @@ async function executeSlashCommand(command: DesktopSlashCommand) {
   runtimeStore.draftMessage = "";
   runtimeStore.setSessionNotice(null);
 
+  // `/plan` 与 `/plan off`：真正的 Plan 模式开关（写/执行硬拦截），不是「打开面板」。
+  // 面板只是视图：进入时顺带铺开，退出时保持原样（用户可继续回看最近一次方案）。
   if (command === "plan") {
-    const hasPlanData =
-      planStore.plans.length > 0 || planStore.todos.length > 0 || goalStore.hasGoal;
-    if (!hasPlanData) {
-      runtimeStore.setSessionNotice("当前会话暂无计划");
+    const args = (planCommandArgs(commandInput) ?? "").trim().toLowerCase();
+    const turnOff = args === "off";
+    await planStore.setMode(runtimeStore.sessionId, !turnOff);
+    if (planStore.error) {
+      runtimeStore.setSessionNotice(planStore.error);
       return;
     }
-    // 契约 C-8「切换面板」：与 HomeSidebar 点击标题同一 toggle 语义
-    // （同一面板再执行一次即收起，不同面板则切到目标面板）。
-    workspacePanelsStore.togglePanel("plan");
+    // 进入时把方案正文摆到眼前（幂等展开）；退出不收起，便于回看最近一次方案。
+    workspacePanelsStore.openPanel("plan");
+    runtimeStore.setSessionNotice(
+      turnOff
+        ? "已退出 Plan 模式：写/执行工具已解锁"
+        : "已进入 Plan 模式：写/执行锁定，出方案后批准执行"
+    );
     return;
   }
 

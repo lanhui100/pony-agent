@@ -284,55 +284,62 @@ describe("T7 命中斜杠命令时的提交拦截", () => {
     expect(runtimeStore.draftMessage).toBe("");
   });
 
-  // ── G-1（Lead 裁决追加，ADVISORY 缺口）：上面两条用例的 store 为空，`/plan` 永远走
-  //    「当前会话暂无计划」分支，`openPanel("plan")` 从未被执行过（审查实测：删掉该行仍全绿）。
-  //    下面两条用具真实计划数据把 openPanel 拉到覆盖面上，并按契约 C-8「切换」语义锁住收起行为。
+  // ── 2026-11-27：`/plan` 与 `/plan off` 是**模式开关**（写/执行硬拦截），
+  //    不再是「打开面板」。面板只是视图：进入时幂等展开（openPanel），退出不收起。
 
-  /** mount & flush 之后再播种计划数据：避免 onMounted 的 plan_list/todo_list 异步加载清空种子。 */
-  async function seedPlanData() {
+  /** mount & flush 之后再播种模式状态：避免 onMounted 的 plan_mode_get 异步加载覆盖种子。 */
+  async function seedPlanMode(active: boolean) {
     const planStore = usePlanStore();
     planStore.$patch({
-      todos: [{ content: "接入斜杠命令", status: "pending" }]
+      mode: {
+        sessionId: SESSION_ID,
+        active,
+        plan: "# 方案",
+        planApproved: false,
+        revision: 1
+      }
     });
     await nextTick();
-    // 前置条件（真实断言）：确有计划数据，否则 /plan 走 notice 分支、openPanel 不可达。
-    expect(planStore.todos.length).toBeGreaterThan(0);
+    expect(planStore.mode.active).toBe(active);
   }
 
-  it("/plan 命中且计划面板有数据：真实切换到「计划」面板（openPanel 被执行）", async () => {
+  it("/plan 命中：真实进入 Plan 模式并幂等展开计划面板", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({ sessionId: SESSION_ID, messages: [] });
     const submitSpy = vi.spyOn(runtimeStore, "submitTurn").mockResolvedValue(true);
     const panelsStore = useWorkspacePanelsStore();
+    const planStore = usePlanStore();
+    const setModeSpy = vi.spyOn(planStore, "setMode").mockResolvedValue(planStore.mode);
 
     const wrapper = mountWorkspace();
     await nextTick();
     await flushAsyncWork();
-    await seedPlanData();
 
     await submitDraftByEnter(wrapper, "/plan");
 
+    expect(setModeSpy).toHaveBeenCalledWith(SESSION_ID, true);
     expect(panelsStore.activePanel).toBe("plan");
     expect(submitSpy).not.toHaveBeenCalled();
     expect(runtimeStore.draftMessage).toBe("");
   });
 
-  it("/plan 第二次执行按「切换」语义收起面板（契约 C-8 用词是切换，非幂等展开）", async () => {
+  it("/plan off 命中：退出 Plan 模式（不调用 submitTurn）", async () => {
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({ sessionId: SESSION_ID, messages: [] });
-    vi.spyOn(runtimeStore, "submitTurn").mockResolvedValue(true);
-    const panelsStore = useWorkspacePanelsStore();
+    const submitSpy = vi.spyOn(runtimeStore, "submitTurn").mockResolvedValue(true);
+    const planStore = usePlanStore();
+    const setModeSpy = vi.spyOn(planStore, "setMode").mockResolvedValue(planStore.mode);
 
     const wrapper = mountWorkspace();
     await nextTick();
     await flushAsyncWork();
-    await seedPlanData();
+    await seedPlanMode(true);
 
-    await submitDraftByEnter(wrapper, "/plan");
-    expect(panelsStore.activePanel).toBe("plan");
+    await submitDraftByEnter(wrapper, "/plan off");
 
-    await submitDraftByEnter(wrapper, "/plan");
-    expect(panelsStore.activePanel).toBe("");
+    expect(setModeSpy).toHaveBeenCalledWith(SESSION_ID, false);
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(runtimeStore.draftMessage).toBe("");
   });
 });
 

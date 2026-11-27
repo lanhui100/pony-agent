@@ -18,7 +18,7 @@ export interface DesktopSlashCommandSpec {
 }
 
 export const DESKTOP_SLASH_COMMANDS: ReadonlyArray<DesktopSlashCommandSpec> = [
-  { name: "plan", usage: "/plan", description: "查看并展开当前会话计划" },
+  { name: "plan", usage: "/plan", description: "进入 Plan 模式（写/执行锁定，出方案后审批）；/plan off 退出" },
   { name: "tasks", usage: "/tasks", description: "查看 Team 任务看板" },
   { name: "compact", usage: "/compact", description: "压缩当前会话上下文" },
   { name: "goal", usage: "/goal", description: "设置或查看当前会话目标" }
@@ -106,6 +106,30 @@ export function describeCompactionOutcome(
  * 口径（契约 C-5）：`trim()` 后必须以 `/` 开头、首 token 大小写不敏感等于 `goal`；
  * 返回首个空白之后的原文（仅做首尾空白裁剪，正文不做任何改写）；`/goa`、`/goalx` 一律不命中。
  */
+/**
+ * `/plan` 之后的参数文本（未命中 `/plan` ⇒ `null`）。
+ *
+ * 与 `goalCommandArgs` 同口径（契约 C-5）：`trim()` 后必须以 `/` 开头、首 token 大小写不敏感
+ * 等于 `plan`；返回首个空白之后的原文（仅裁剪首尾空白）。`/planx`、`/planning` 一律不命中。
+ */
+export function planCommandArgs(input: string): string | null {
+  if (typeof input !== "string") {
+    return null;
+  }
+
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) {
+    return null;
+  }
+
+  const match = /^\/plan(?:\s+([\s\S]*))?$/i.exec(trimmed);
+  if (!match) {
+    return null;
+  }
+
+  return (match[1] ?? "").trim();
+}
+
 export function goalCommandArgs(input: string): string {
   if (typeof input !== "string") {
     return "";

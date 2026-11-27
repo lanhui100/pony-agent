@@ -27,9 +27,12 @@ const planStore = usePlanStore();
 const goalStore = useGoalStore();
 const teamStore = useTeamStore();
 
-// 计划与任务在有值时显示（有 plan 或 todo）
+// Plan 模式与任务在有值时显示（Plan 激活 / 有方案 / 有 todo）
 const hasPlanOrTasks = computed(
-  () => planStore.plans.length > 0 || planStore.todos.length > 0
+  () =>
+    planStore.mode.active ||
+    Boolean(planStore.mode.plan) ||
+    planStore.todos.length > 0
 );
 
 // 团队在有子智能体时才显示（成员数 > 1，或排除 lead 后的子代理数 > 0）
@@ -89,12 +92,15 @@ async function refreshSidebarPanels(sid: string) {
   const normalized = sid?.trim();
   if (!normalized) return;
   await Promise.allSettled([
-    planStore.list(normalized),
+    planStore.fetchMode(normalized),
     planStore.listTodos(normalized),
     goalStore.fetchGoal(normalized),
     teamStore.fetchTeamOverview()
   ]);
-  if ((planStore.plans.length > 0 || planStore.todos.length > 0) && !workspacePanelsStore.activePanel) {
+  if (
+    (planStore.mode.active || Boolean(planStore.mode.plan) || planStore.todos.length > 0) &&
+    !workspacePanelsStore.activePanel
+  ) {
     workspacePanelsStore.activePanel = "plan";
   }
 }

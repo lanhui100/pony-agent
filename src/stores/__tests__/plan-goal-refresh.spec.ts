@@ -52,16 +52,16 @@ describe("wave-1 C6: turn 结束后的 plan / goal 刷新", () => {
 
     // Assert：两条命令都必须以真实 sessionId 发起（禁止 "default" 兜底）
     const commands = invokedCommands();
-    const planListCall = commands.find((call) => call.command === "plan_list");
+    const planModeCall = commands.find((call) => call.command === "plan_mode_get");
     const todoListCall = commands.find((call) => call.command === "todo_list");
 
     expect(
-      planListCall,
-      `契约 C6 违约：refreshForTurn 必须以 sessionId 调用 plan_list；实际命令序列 = ${JSON.stringify(
+      planModeCall,
+      `契约 C6 违约：refreshForTurn 必须以 sessionId 调用 plan_mode_get；实际命令序列 = ${JSON.stringify(
         commands.map((call) => call.command)
       )}`
     ).toBeDefined();
-    expect(planListCall?.args).toEqual({ sessionId });
+    expect(planModeCall?.args).toEqual({ sessionId });
 
     expect(
       todoListCall,
@@ -71,9 +71,10 @@ describe("wave-1 C6: turn 结束后的 plan / goal 刷新", () => {
     ).toBeDefined();
     expect(todoListCall?.args).toEqual({ sessionId });
 
-    // Assert：store 侧以真实 sessionId 落地（空计划也允许，但不得使用 "default"）
+    // Assert：store 侧以真实 sessionId 落地（空模式也允许，但不得使用 "default"）
     const planStore = usePlanStore();
-    expect(planStore.plans).toEqual([]);
+    expect(planStore.mode.active).toBe(false);
+    expect(planStore.mode.plan).toBeNull();
     expect(planStore.todos).toEqual([]);
   });
 
@@ -118,7 +119,7 @@ describe("wave-1 C6: turn 结束后的 plan / goal 刷新", () => {
     await expect(refreshGoalForTurn("sess-1")).resolves.toBeUndefined();
 
     const planStore = usePlanStore();
-    expect(planStore.plans).toEqual([]);
+    expect(planStore.mode.active).toBe(false);
     expect(planStore.todos).toEqual([]);
     expect(useGoalStore().currentGoal).toBeNull();
   });

@@ -1,241 +1,141 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { usePlanStore } from "@/stores/plan";
-import type { Plan, PlanStep } from "@/types/ask-plan";
 
 const tauriMocks = vi.hoisted(() => ({
-  mockSafeInvoke: vi.fn(),
-  mockIsTauriAvailable: vi.fn()
+  isTauriAvailable: vi.fn(() => true),
+  safeInvoke: vi.fn()
 }));
 
 vi.mock("@/lib/tauri", () => ({
-  safeInvoke: tauriMocks.mockSafeInvoke,
-  isTauriAvailable: tauriMocks.mockIsTauriAvailable
+  isTauriAvailable: tauriMocks.isTauriAvailable,
+  safeInvoke: tauriMocks.safeInvoke
 }));
 
-function createStep(partial: Partial<PlanStep> = {}): PlanStep {
-  return {
-    stepId: partial.stepId ?? "step-1",
-    name: partial.name ?? "调研方案",
-    summary: partial.summary ?? "梳理接入点",
-    status: partial.status ?? "pending"
-  };
-}
+import { usePlanStore } from "@/stores/plan";
 
-function createPlan(partial: Partial<Plan> = {}): Plan {
-  return {
-    planId: partial.planId ?? "plan-1",
-    sessionId: partial.sessionId ?? "session-1",
-    revision: partial.revision ?? 1,
-    kind: partial.kind ?? "plan",
-    summary: partial.summary ?? "接入 Ask/Plan 面板",
-    lifecycle: partial.lifecycle ?? "draft",
-    steps: partial.steps ?? [createStep()]
-  };
-}
+const modeProjection = (overrides: Record<string, unknown> = {}) => ({
+  sessionId: "sess-1",
+  active: false,
+  plan: null,
+  planApproved: false,
+  revision: 0,
+  ...overrides
+});
 
-describe("plan store", () => {
+describe("plan store（Plan 模式 + 独立任务进度）", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
     setActivePinia(createPinia());
-    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
+    tauriMocks.isTauriAvailable.mockReturnValue(true);
+    tauriMocks.safeInvoke.mockReset();
   });
 
-  it("lists a session's plans through plan_list and auto-selects the first", async () => {
-    const plans = [createPlan({ planId: "plan-1" }), createPlan({ planId: "plan-2" })];
-    tauriMocks.mockSafeInvoke.mockResolvedValue(plans);
-
-    const store = usePlanStore();
-    const result = await store.list("session-1");
-
-    expect(result).toHaveLength(2);
-    expect(store.plans).toHaveLength(2);
-    expect(store.selectedPlanId).toBe("plan-1");
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_list", {
-      sessionId: "session-1"
-    });
-  });
-
-  it("falls back to an empty list when the host returns null", async () => {
-    tauriMocks.mockSafeInvoke.mockResolvedValue(null);
-
-    const store = usePlanStore();
-    const result = await store.list("session-1");
-
-    expect(result).toEqual([]);
-    expect(store.plans).toEqual([]);
-    expect(store.selectedPlan).toBeNull();
-  });
-
-  it("does not call the host in browser preview mode or without a session", async () => {
-    tauriMocks.mockIsTauriAvailable.mockReturnValue(false);
-
-    const store = usePlanStore();
-    expect(await store.list("")).toEqual([]);
-    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalled();
-
-    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
-    expect(await store.list("   ")).toEqual([]);
-    expect(tauriMocks.mockSafeInvoke).not.toHaveBeenCalled();
-  });
-
-  it("completes a step with the listed revision and stores the bumped-revision plan", async () => {
-    const plan = createPlan({
-      planId: "plan-1",
-      revision: 2,
-      lifecycle: "executing",
-      steps: [createStep({ stepId: "step-1" }), createStep({ stepId: "step-2" })]
-    });
-    tauriMocks.mockSafeInvoke.mockResolvedValueOnce([plan]).mockResolvedValueOnce(
-      createPlan({
-        planId: "plan-1",
-        revision: 3,
-        lifecycle: "executing",
-        steps: [
-          createStep({ stepId: "step-1", status: "completed" }),
-          createStep({ stepId: "step-2" })
-        ]
-      })
+  it("通过 plan_mode_get 读取模式状态并落到 store", async () => {
+    tauriMocks.safeInvoke.mockResolvedValue(
+      modeProjection({ active: true, plan: "# 方案", revision: 3 })
     );
 
     const store = usePlanStore();
-    await store.list("session-1");
-    expect(store.selectedPlan?.revision).toBe(2);
+    const mode = await store.fetchMode("sess-1");
 
-    const updated = await store.completeStep("session-1", "plan-1", 2, "step-1");
-
-    expect(updated?.revision).toBe(3);
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_complete_step", {
-      sessionId: "session-1",
-      planId: "plan-1",
-      revision: 2,
-      stepId: "step-1"
-    });
-    expect(store.selectedPlan?.revision).toBe(3);
-    expect(store.selectedPlan?.steps[0]?.status).toBe("completed");
-    expect(store.completingStepKey).toBeNull();
+    expect(tauriMocks.safeInvoke).toHaveBeenCalledWith("plan_mode_get", { sessionId: "sess-1" });
+    expect(mode.active).toBe(true);
+    expect(store.mode.plan).toBe("# 方案");
+    expect(store.mode.revision).toBe(3);
   });
 
-  it("refuses a second step completion while one is in flight", async () => {
-    const plan = createPlan({ planId: "plan-1", revision: 1 });
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "plan_list") {
-        return Promise.resolve([plan]);
-      }
-      if (command === "plan_complete_step") {
-        return new Promise((resolve) => {
-          setTimeout(() => resolve(plan), 10);
-        });
-      }
-      return Promise.resolve(null);
-    });
+  it("宿主返回 null 时降级为「未激活」，不抛错", async () => {
+    tauriMocks.safeInvoke.mockResolvedValue(null);
 
     const store = usePlanStore();
-    await store.list("session-1");
+    const mode = await store.fetchMode("sess-1");
 
-    const first = store.completeStep("session-1", "plan-1", 1, "step-1");
-    const second = store.completeStep("session-1", "plan-1", 1, "step-1");
-
-    expect(store.completingStepKey).toBe("plan-1:step-1");
-    expect(second).resolves.toBeNull();
-    await first;
-    expect(store.completingStepKey).toBeNull();
+    expect(mode.active).toBe(false);
+    expect(mode.plan).toBeNull();
+    expect(store.error).toBeNull();
   });
 
-  it("creates a draft plan through plan_create and selects it", async () => {
-    const created = createPlan({
-      planId: "plan-new",
-      revision: 1,
-      lifecycle: "draft",
-      steps: []
-    });
-    tauriMocks.mockSafeInvoke.mockResolvedValue(created);
-
+  it("浏览器预览或空会话不发起 IPC", async () => {
+    tauriMocks.isTauriAvailable.mockReturnValue(false);
     const store = usePlanStore();
-    const result = await store.create("session-1", {
-      kind: "plan",
-      summary: "新计划",
-      steps: []
-    });
+    await store.fetchMode("sess-1");
+    expect(tauriMocks.safeInvoke).not.toHaveBeenCalled();
 
-    expect(result?.planId).toBe("plan-new");
-    expect(store.selectedPlanId).toBe("plan-new");
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_create", {
-      sessionId: "session-1",
-      payload: { kind: "plan", summary: "新计划", steps: [] }
-    });
+    tauriMocks.isTauriAvailable.mockReturnValue(true);
+    await store.fetchMode("   ");
+    expect(tauriMocks.safeInvoke).not.toHaveBeenCalled();
   });
 
-  it("reads a single plan through plan_get and upserts it", async () => {
-    const plan = createPlan({ planId: "plan-9", revision: 4 });
-    tauriMocks.mockSafeInvoke.mockResolvedValue(plan);
-
+  it("plan_mode_set 进入 / 退出模式", async () => {
+    tauriMocks.safeInvoke.mockResolvedValue(modeProjection({ active: true }));
     const store = usePlanStore();
-    const result = await store.get("session-1", "plan-9");
-
-    expect(result?.planId).toBe("plan-9");
-    expect(store.plans).toContainEqual(plan);
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_get", {
-      sessionId: "session-1",
-      planId: "plan-9"
+    await store.setMode("sess-1", true);
+    expect(tauriMocks.safeInvoke).toHaveBeenCalledWith("plan_mode_set", {
+      sessionId: "sess-1",
+      active: true
     });
+    expect(store.mode.active).toBe(true);
+
+    tauriMocks.safeInvoke.mockResolvedValue(modeProjection({ active: false, plan: "# 方案" }));
+    await store.setMode("sess-1", false);
+    expect(store.mode.active).toBe(false);
   });
 
-  it("appends a step through plan_merge using the listed revision", async () => {
-    const updated = createPlan({
-      planId: "plan-1",
-      revision: 2,
-      steps: [createStep(), createStep({ stepId: "step-2", name: "第二步" })]
-    });
-    tauriMocks.mockSafeInvoke.mockResolvedValue(updated);
-
+  it("plan_mode_review 批准后退出模式并标记方案已批准", async () => {
+    tauriMocks.safeInvoke.mockResolvedValue(
+      modeProjection({ active: false, plan: "# 方案", planApproved: true })
+    );
     const store = usePlanStore();
-    const result = await store.mergeStep("session-1", "plan-1", 1, {
-      name: "第二步",
-      summary: "追加的步骤"
-    });
 
-    expect(result?.revision).toBe(2);
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_merge", {
-      sessionId: "session-1",
-      planId: "plan-1",
-      revision: 1,
-      step: { name: "第二步", summary: "追加的步骤" }
+    const mode = await store.reviewPlan("sess-1", true);
+
+    expect(tauriMocks.safeInvoke).toHaveBeenCalledWith("plan_mode_review", {
+      sessionId: "sess-1",
+      approved: true
     });
+    expect(mode.planApproved).toBe(true);
+    expect(mode.active).toBe(false);
   });
 
-  it("replaces a plan through plan_replace preserving the plan id", async () => {
-    const replaced = createPlan({ planId: "plan-1", revision: 5, summary: "替换后的计划" });
-    tauriMocks.mockSafeInvoke.mockResolvedValue(replaced);
-
+  it("IPC 失败时记录错误且状态保持可用（不抛错）", async () => {
+    tauriMocks.safeInvoke.mockRejectedValue(new Error("ipc unavailable"));
     const store = usePlanStore();
-    const result = await store.replace("session-1", "plan-1", 4, {
-      kind: "plan",
-      summary: "替换后的计划"
-    });
 
-    expect(result?.summary).toBe("替换后的计划");
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_replace", {
-      sessionId: "session-1",
-      planId: "plan-1",
-      revision: 4,
-      payload: { kind: "plan", summary: "替换后的计划" }
-    });
+    await expect(store.fetchMode("sess-1")).resolves.toBeDefined();
+    expect(store.error).toContain("加载 Plan 模式失败");
+    expect(store.mode.active).toBe(false);
   });
 
-  it("keeps the selection valid after the selected plan disappears", async () => {
-    tauriMocks.mockSafeInvoke.mockResolvedValue([
-      createPlan({ planId: "plan-1" }),
-      createPlan({ planId: "plan-2" })
+  it("任务进度独立计数（不与 Plan 混加）", async () => {
+    tauriMocks.safeInvoke.mockResolvedValue([
+      { content: "a", status: "completed" },
+      { content: "b", status: "in_progress" },
+      { content: "c", status: "pending" }
     ]);
-
     const store = usePlanStore();
-    await store.list("session-1");
-    store.select("plan-2");
-    expect(store.selectedPlanId).toBe("plan-2");
+    await store.listTodos("sess-1");
 
-    tauriMocks.mockSafeInvoke.mockResolvedValue([createPlan({ planId: "plan-1" })]);
-    await store.list("session-1");
-    expect(store.selectedPlanId).toBe("plan-1");
+    expect(store.todoProgress).toEqual({ completed: 1, inProgress: 1, pending: 1, total: 3 });
+    expect(store.todoProgressLabel).toBe("1/3");
+  });
+
+  it("没有任务时进度文案为空串（调用方据此隐藏角标）", () => {
+    const store = usePlanStore();
+    expect(store.todoProgress.total).toBe(0);
+    expect(store.todoProgressLabel).toBe("");
+  });
+
+  it("reset 清空模式与任务（切会话不残留）", async () => {
+    tauriMocks.safeInvoke.mockResolvedValue(
+      modeProjection({ active: true, plan: "# 方案" })
+    );
+    const store = usePlanStore();
+    await store.fetchMode("sess-1");
+    store.todos = [{ content: "a", status: "pending" }];
+
+    store.reset();
+
+    expect(store.mode.active).toBe(false);
+    expect(store.mode.plan).toBeNull();
+    expect(store.todos).toEqual([]);
   });
 });
