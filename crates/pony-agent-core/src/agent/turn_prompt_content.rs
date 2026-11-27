@@ -14,6 +14,22 @@ use serde_json::{json, Value};
 use crate::agent::context::VolatileNotes;
 use crate::agent::provider::ProviderMessage;
 
+pub(crate) const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
+pub(crate) const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
+
+/// 将易变运行时提示包装为 `<system-reminder>`；空串原样返回（调用方跳过空消息）。
+pub(crate) fn wrap_system_reminder(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{SYSTEM_REMINDER_OPEN}\n{trimmed}\n{SYSTEM_REMINDER_CLOSE}")
+}
+
+pub(crate) fn is_system_reminder_message(content: &str) -> bool {
+    content.trim_start().starts_with(SYSTEM_REMINDER_OPEN)
+}
+
 /// 一次 turn 的**内容单源**：稳定/半稳定层只渲染一次，两个 provider 视图只做角色投影。
 ///
 /// 为什么要有这一层：同一批内容要同时进 normalized（`ProviderMessage`）与 native（OpenAI
@@ -37,7 +53,7 @@ pub(crate) struct TurnPromptContent {
 }
 
 impl TurnPromptContent {
-    /// normalized 预留前缀：稳定层 + 易变段 + 当前输入，顺序与 `flatten_layered_input_messages` 一致。
+    /// normalized 预留前缀：稳定层 + 当前输入 + 易变提醒，顺序与 `flatten_layered_input_messages` 一致。
     pub(crate) fn normalized_prefix(
         &self,
         truncation_note: Option<&str>,
@@ -48,30 +64,34 @@ impl TurnPromptContent {
         messages.extend(self.domain_profile.iter().cloned().map(ProviderMessage::developer));
         messages.extend(self.semistable.iter().cloned().map(ProviderMessage::developer));
         messages.extend(self.memory.iter().cloned().map(ProviderMessage::developer));
-        messages.push(ProviderMessage::developer(self.volatile.render(truncation_note)));
         messages.push(user);
+        let reminder = wrap_system_reminder(&self.volatile.render(truncation_note));
+        if !reminder.is_empty() {
+            messages.push(ProviderMessage::developer(reminder));
+        }
         messages
     }
 
-    /// native 预留前缀：同一个内容单源，只换角色（native 侧稳定层全为 `system`）。
+    /// native 预留前缀：同一个内容单源，稳定层使用 `system`，当前用户输入后置 `user` 级 `<system-reminder>`。
     pub(crate) fn native_prefix(&self, truncation_note: Option<&str>, user: Value) -> Vec<Value> {
         let mut messages = Vec::new();
         messages.extend(system_messages_of(&self.base));
         messages.extend(system_messages_of(&self.domain_profile));
         messages.extend(system_messages_of(&self.semistable));
         messages.extend(system_messages_of(&self.memory));
-        messages.push(json!({
-            "role": "system",
-            "content": self.volatile.render(truncation_note),
-        }));
         messages.push(user);
+        messages.extend(self.native_volatile(truncation_note));
         messages
     }
 
     pub(crate) fn native_volatile(&self, truncation_note: Option<&str>) -> Vec<Value> {
+        let reminder = wrap_system_reminder(&self.volatile.render(truncation_note));
+        if reminder.is_empty() {
+            return Vec::new();
+        }
         vec![json!({
-            "role": "system",
-            "content": self.volatile.render(truncation_note),
+            "role": "user",
+            "content": reminder,
         })]
     }
 }
@@ -84,3 +104,28 @@ pub(crate) fn system_messages_of(texts: &[String]) -> Vec<Value> {
         .collect()
 }
 
+/// 将 `ProviderMessage` 切片转换为 OpenAI/DeepSeek 兼容的 `native_messages` JSON 数组：
+/// 用于 Ask 恢复等原本 `native_messages` 为空、但需要追加原生 `[assistant(tool_call), tool(result)]` 的场景。
+pub(crate) fn native_messages_from_provider_input(
+    input: &[crate::agent::provider::ProviderMessage],
+) -> Vec<Value> {
+    use crate::agent::provider::ProviderRole;
+    input
+        .iter()
+        .map(|message| {
+            if matches!(message.role, ProviderRole::Developer) {
+                if let Some(reply) = message.content.strip_prefix("Previous assistant reply: ") {
+                    return json!({ "role": "assistant", "content": reply });
+                }
+                if is_system_reminder_message(&message.content) {
+                    return json!({ "role": "user", "content": message.content });
+                }
+            }
+            let role = match message.role {
+                ProviderRole::System | ProviderRole::Developer => "system",
+                ProviderRole::User => "user",
+            };
+            json!({ "role": role, "content": message.content })
+        })
+        .collect()
+}

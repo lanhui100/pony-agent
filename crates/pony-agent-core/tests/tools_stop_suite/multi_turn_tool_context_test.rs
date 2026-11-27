@@ -182,13 +182,21 @@ fn test_multi_turn_tool_transcript_retained_and_pruned_in_new_turn() {
         "修剪后的工具输出长度必须显著小于原始长度"
     );
 
-    // 4. 当前轮的用户提问必须在最后一条
-    let last_msg = request.native_messages.last().expect("至少有一条消息");
-    assert_eq!(last_msg.get("role").and_then(|r| r.as_str()), Some("user"));
+    // 4. 当前轮的用户提问置于尾部 <system-reminder> 之前（倒数第二条）
+    let len = request.native_messages.len();
+    assert!(len >= 2, "至少包含用户输入与尾部 <system-reminder>");
+    let user_msg = &request.native_messages[len - 2];
+    assert_eq!(user_msg.get("role").and_then(|r| r.as_str()), Some("user"));
     assert_eq!(
-        last_msg.get("content").and_then(|c| c.as_str()),
+        user_msg.get("content").and_then(|c| c.as_str()),
         Some(user_message_turn2)
     );
+    let last_msg = &request.native_messages[len - 1];
+    assert_eq!(last_msg.get("role").and_then(|r| r.as_str()), Some("user"));
+    assert!(last_msg
+        .get("content")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c.starts_with("<system-reminder>")));
 }
 
 #[test]
@@ -419,11 +427,19 @@ fn test_store_level_e2e_append_snapshot_and_retrieve_multiturn_flow() {
         contents
     );
 
-    // 关键断言 5：第三轮当前输入位于末尾
-    let last = request.native_messages.last().unwrap();
-    assert_eq!(last.get("role").and_then(|r| r.as_str()), Some("user"));
+    // 关键断言 5：第三轮当前输入紧接在尾部 <system-reminder> 之前
+    let len = request.native_messages.len();
+    assert!(len >= 2);
+    let user_msg = &request.native_messages[len - 2];
+    assert_eq!(user_msg.get("role").and_then(|r| r.as_str()), Some("user"));
     assert_eq!(
-        last.get("content").and_then(|c| c.as_str()),
+        user_msg.get("content").and_then(|c| c.as_str()),
         Some(user_msg_t3)
     );
+    let last = &request.native_messages[len - 1];
+    assert_eq!(last.get("role").and_then(|r| r.as_str()), Some("user"));
+    assert!(last
+        .get("content")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c.starts_with("<system-reminder>")));
 }
