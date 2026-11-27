@@ -1106,6 +1106,10 @@ fn sse_response(chunks: &[serde_json::Value]) -> MockHttpResponse {
     }
 }
 
+fn sse_completion(text: &str) -> MockHttpResponse {
+    sse_response(&[json!({"choices": [{"delta": {"content": text}}]})])
+}
+
 fn test_provider_selection(base_url: String) -> ResolvedProviderSelection {
     ResolvedProviderSelection {
         requested_name: "test-openai".to_string(),
@@ -13046,8 +13050,8 @@ fn start_turn_stream_executes_batch_of_tool_calls_and_backfills_one_assistant_pl
             ("workspace_list_files", json!({"path": ".", "limit": 40})),
             ("workspace_read_file", json!({"path": "tauri.conf.json"})),
         ]),
-        // N>1 的批后 followup 走 D2 批量入口（同步 post 后回放，非真增量）⇒ 该响应是**非流式** JSON。
-        json_completion(final_text),
+        // N>1 且 supports_streaming=true 的批后 followup 走真流式 SSE ⇒ 该响应是 SSE 流。
+        sse_completion(final_text),
     ]);
     let executed: Arc<Mutex<Vec<ToolCall>>> = Arc::new(Mutex::new(Vec::new()));
     let mut runtime = build_runtime_for_test_with_tool_executor(
@@ -13515,7 +13519,7 @@ fn start_turn_stream_parallel_tools_executes_concurrent_safe_segment_concurrentl
             ("workspace_list_files", json!({"path": ".", "limit": 40})),
             ("workspace_read_file", json!({"path": "tauri.conf.json"})),
         ]),
-        json_completion(final_text),
+        sse_completion(final_text),
     ]);
     let probe = ConcurrencyProbeToolExecutor::new(2, PARALLEL_PROBE_RENDEZVOUS_BUDGET);
     let observed = ConcurrencyProbeToolExecutor {
