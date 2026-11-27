@@ -416,6 +416,13 @@ impl HostControlPlane {
             command.input.session_id.as_deref(),
             None,
         );
+        let checkpoint_user = command
+            .input
+            .display_message
+            .as_deref()
+            .unwrap_or(command.input.message.as_str());
+        self.execution_control
+            .set_turn_user_message(&command.turn_id, checkpoint_user);
 
         let runtime = self.runtime.read().expect("runtime lock poisoned");
         // PA-095 #3：入口返回前补提交缓冲事件（终态发射时 sessions 锁可能被

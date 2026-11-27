@@ -730,6 +730,7 @@ impl AgentRuntime {
 
         loop {
             accumulated_turn_text.push_str(&current_assistant_output_text);
+            control.set_turn_partial_text(turn_id, accumulated_turn_text.as_str());
             // ── 1) 执行本 hop 的**整批**调用（段内可并发；规划与引擎接线见 `batch_plan`）──
             executed_calls.clear();
             executed_results.clear();
@@ -1309,6 +1310,14 @@ impl AgentRuntime {
                     return;
                 }
             };
+            if crate::agent::runtime::turn_control::turn_has_terminal_status(control, turn_id) {
+                crate::agent::runtime::turn_control::log_terminal_dispatch_suppressed(
+                    turn_id,
+                    "completed",
+                    "completed_before_persist_tool_turn",
+                );
+                return;
+            }
             let persisted = self.persist_completed_turn_outcome(
                 input.session_id.as_deref(),
                 // A1：成功轮同样写轮次身份（gate 历史腿对任意轮一致成立）。
@@ -1503,6 +1512,18 @@ impl AgentRuntime {
                 );
                 return;
             }
+            if !crate::agent::runtime::turn_control::claim_terminal_status(
+                control,
+                turn_id,
+                "completed",
+            ) {
+                crate::agent::runtime::turn_control::log_terminal_dispatch_suppressed(
+                    turn_id,
+                    "completed",
+                    "completed_before_emit_tool_turn",
+                );
+                return;
+            }
             self.update_execution_checkpoint(
                 control,
                 turn_id,
@@ -1648,6 +1669,11 @@ impl AgentRuntime {
         // Wave43 task-8 挂载切片：turn root span（agent.turn）在流式轮唯一顶层入口创建，
         // 函数返回时 Drop 自动结束 span，覆盖整轮生命周期（含同步执行的工具子轮）。
         // ADR 0055 P0-3：序号取「会话已登记轮次数」（0-based），不再硬编码 0。
+        let checkpoint_user = input
+            .display_message
+            .as_deref()
+            .unwrap_or(input.message.as_str());
+        control.set_turn_user_message(&turn_id, checkpoint_user);
         let (turn_seq, _retry_ctx) = self.enter_turn(input.session_id.as_deref(), &turn_id);
         let turn_started_at = Instant::now(); // P5：与 `agent.turn` span 同点起算（旧实现实测差 35.4s）
         // W3 trace：队友/子代理 runtime 继承宿主 traceparent（宿主 runtime 为 `None` ⇒ root）。
@@ -2443,29 +2469,23 @@ impl AgentRuntime {
                     Some("failed"),
                     Some(&error),
                 );
-                self.persist_turn_trace(
+                self.persist_failed_inline_turn_with_trace(
                     input.session_id.as_deref(),
                     &turn_id,
                     &prepared.display_message,
-                    "failed",
-                    trace_steps.clone(),
-                    Vec::new(),
+                    Some(streamed_assistant_text.borrow().as_str())
+                        .filter(|text| !text.trim().is_empty()),
                     Some(&prepared_provider_meta),
                     None,
                     None,
+                    None,
                     Some(prepared.build_context_observation.clone()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+                    trace_steps.clone(),
+                    Vec::new(),
+                    Vec::new(),
                     None,
                     Some(turn_started_at.elapsed().as_millis() as u64),
-                    None,
-                    Some(error.clone()),
+                    error.clone(),
                 );
                 emit_turn_failed(
                     sink,
@@ -2513,29 +2533,22 @@ impl AgentRuntime {
                         Some("failed"),
                         Some(&error),
                     );
-                    self.persist_turn_trace(
+                    self.persist_failed_inline_turn_with_trace(
                         input.session_id.as_deref(),
                         &turn_id,
                         &prepared.display_message,
-                        "failed",
-                        trace_steps.clone(),
-                        Vec::new(),
+                        None,
                         Some(&prepared_provider_meta),
                         None,
                         None,
+                        None,
                         Some(prepared.build_context_observation.clone()),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        trace_steps.clone(),
+                        Vec::new(),
+                        Vec::new(),
                         initial_turn_first_token_latency_ms,
                         Some(turn_started_at.elapsed().as_millis() as u64),
-                        None,
-                        Some(error.clone()),
+                        error.clone(),
                     );
                     emit_turn_failed(
                         sink,
@@ -2776,30 +2789,22 @@ impl AgentRuntime {
                 Some("failed"),
                 Some(&error),
             );
-            self.persist_turn_trace_with_provider_calls(
+            self.persist_failed_inline_turn_with_trace(
                 input.session_id.as_deref(),
                 &turn_id,
                 &display_message,
-                "failed",
-                trace_steps.clone(),
-                Vec::new(),
-                provider_call_records.clone(),
+                None,
                 Some(&provider_meta),
                 Some(first_decision.provider_source.clone()),
                 Some(first_decision.provider_mode.clone()),
-                Some(build_context_observation.clone()),
-                None,
-                None,
                 first_decision.fallback_reason.clone(),
-                None,
-                None,
-                None,
-                None,
-                None,
+                Some(build_context_observation.clone()),
+                trace_steps.clone(),
+                provider_call_records.clone(),
+                Vec::new(),
                 None,
                 Some(turn_started_at.elapsed().as_millis() as u64),
-                None,
-                Some(error.clone()),
+                error.clone(),
             );
             // PA-171 C4：首跳 decision 失败 ⇒ 触发方 `provider_decision_failed`；
             // 归因三字段落真实值（provider_source 含真实 provider 名），并附 `error_class`。
@@ -3023,30 +3028,22 @@ impl AgentRuntime {
                     Some("failed"),
                     Some(&error),
                 );
-                self.persist_turn_trace_with_provider_calls(
+                self.persist_failed_inline_turn_with_trace(
                     input.session_id.as_deref(),
                     &turn_id,
                     &display_message,
-                    "failed",
-                    trace_steps.clone(),
-                    Vec::new(),
-                    provider_call_records.clone(),
+                    Some(completed_text.as_str()),
                     Some(&provider_meta),
                     Some(first_decision.provider_source.clone()),
                     Some(first_decision.provider_mode.clone()),
-                    Some(build_context_observation.clone()),
-                    None,
-                    None,
                     first_decision.fallback_reason.clone(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+                    Some(build_context_observation.clone()),
+                    trace_steps.clone(),
+                    provider_call_records.clone(),
+                    Vec::new(),
                     first_token_latency_ms,
                     Some(turn_started_at.elapsed().as_millis() as u64),
-                    None,
-                    Some(error.clone()),
+                    error.clone(),
                 );
                 // PA-171 C4：附件保存失败（首跳回复已渲染）走 14 参冻结入口，
                 // 归因由 `FailedTurnAttribution::from_failure` 派生（三字段非 None + error_class）。
@@ -3072,6 +3069,14 @@ impl AgentRuntime {
                 return;
             }
         };
+        if crate::agent::runtime::turn_control::turn_has_terminal_status(control, &turn_id) {
+            crate::agent::runtime::turn_control::log_terminal_dispatch_suppressed(
+                &turn_id,
+                "completed",
+                "completed_before_persist_single_hop",
+            );
+            return;
+        }
         let persisted = self.persist_turn_outcome(
             input.session_id.as_deref(),
             // A1：成功轮同样写轮次身份（gate 历史腿对任意轮一致成立）。
@@ -3254,6 +3259,18 @@ impl AgentRuntime {
                 None,
             );
             otel_turn_scope.set_phase("failed");
+            return;
+        }
+        if !crate::agent::runtime::turn_control::claim_terminal_status(
+            control,
+            &turn_id,
+            "completed",
+        ) {
+            crate::agent::runtime::turn_control::log_terminal_dispatch_suppressed(
+                &turn_id,
+                "completed",
+                "completed_before_emit_single_hop",
+            );
             return;
         }
         self.update_execution_checkpoint(

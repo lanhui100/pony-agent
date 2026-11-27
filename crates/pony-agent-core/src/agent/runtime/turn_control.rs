@@ -139,6 +139,22 @@ pub(super) fn build_unrecoverable_suspension_error(
 /// 与 [`crate::agent::stop_escalation`] 的 `escalate_now` 互斥：后者同样以
 /// "`status == running` 才置 cancelled" 的锁内判定收口，两者抢的是同一状态位，
 /// 故宽限期收口与 in-band 收口至多一方派发终态。
+/// 检查 checkpoint 是否已进入任一终态（只读、不改状态）。
+/// 用于 completed 路径在写入 `SessionStore` 前检查是否已被 C5 监督者收口。
+pub(crate) fn turn_has_terminal_status(
+    control: &ExecutionControlRegistry,
+    turn_id: &str,
+) -> bool {
+    control
+        .load_checkpoint(Some(turn_id), None)
+        .is_some_and(|checkpoint| {
+            matches!(
+                checkpoint.status.trim().to_ascii_lowercase().as_str(),
+                "completed" | "failed" | "cancelled"
+            )
+        })
+}
+
 pub(crate) fn claim_terminal_status(
     control: &ExecutionControlRegistry,
     turn_id: &str,
@@ -229,7 +245,11 @@ impl AgentRuntime {
     }
 
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::needless_pass_by_value,
+        reason = "preserving existing cancel_stream_turn caller signature across stream call sites"
+    )]
     pub(super) fn cancel_stream_turn<S: TurnEventSink>(
         &self,
         sink: &S,
@@ -289,19 +309,22 @@ impl AgentRuntime {
         let attachments = self
             .save_input_attachments_for_session(session_id, input_images)
             .unwrap_or_default();
-        let persisted = self.persist_cancelled_turn_outcome(
+        self.persist_cancelled_turn_outcome_with_trace(
             session_id,
-            // A1：取消轮写轮次身份——history 腿是 gate 的唯一真值源。
-            Some(turn_id),
+            turn_id,
             user_message,
             provider_meta,
             attachments,
             None,
             partial_assistant_text,
-            // C1/R3：全量工具活动（含 `result_text`）+ 未执行调用一并进闭合结构。
             tool_activities.clone(),
-            pending_calls,
+            &pending_calls,
             provider_native_transcript,
+            trace_steps.clone(),
+            build_context_observation.clone(),
+            first_token_latency_ms,
+            turn_duration_ms,
+            error.clone(),
         );
         if claimed {
             self.update_execution_checkpoint(
@@ -320,30 +343,6 @@ impl AgentRuntime {
                 Some(&error),
             );
         }
-        self.persist_turn_trace(
-            session_id,
-            turn_id,
-            user_message,
-            "cancelled",
-            trace_steps.clone(),
-            tool_activities.clone(),
-            provider_meta,
-            None,
-            None,
-            build_context_observation.clone(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            first_token_latency_ms,
-            turn_duration_ms,
-            Some(persisted.session_summary),
-            Some(error.clone()),
-        );
         if !claimed {
             // 终态事件已由 C5 监督者派发：此处只落持久化，绝不派发第二条终态。
             return;

@@ -51,6 +51,12 @@ pub struct ExecutionCheckpoint {
     /// wave-60 §1：结构化停止原因（wire `stopReason`，取值见 `StopReason::as_str`）；
     /// 未记录 ⇒ `None`（终态呈现按 `"legacy"` 处理）。
     pub stop_reason: Option<String>,
+    /// B-CTX-LOAD：本轮用户输入原话（供 C5 宽限监督收口时写入闭合历史与 trace，不依赖工作线程存活）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message: Option<String>,
+    /// B-CTX-LOAD：本轮在工具 hop 之间已产出的部分 assistant 正文（供 C5 收口保留中间输出）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_assistant_text: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -134,6 +140,14 @@ impl ExecutionControlRegistry {
             updated_at_ms: now,
             stop_requested_at_ms: carried_stop_requested_at_ms,
             stop_reason: carried_stop_reason,
+            user_message: state
+                .turns
+                .get(turn_id)
+                .and_then(|checkpoint| checkpoint.user_message.clone()),
+            partial_assistant_text: state
+                .turns
+                .get(turn_id)
+                .and_then(|checkpoint| checkpoint.partial_assistant_text.clone()),
         };
         refresh_execution_checkpoint_projection(&mut checkpoint);
         state.turns.insert(turn_id.to_string(), checkpoint);
@@ -147,6 +161,20 @@ impl ExecutionControlRegistry {
             .cloned()
             .unwrap_or_else(|| Arc::new(CancellationToken::new()));
         state.tokens.insert(turn_id.to_string(), token);
+    }
+
+    pub fn set_turn_user_message(&self, turn_id: &str, user_message: impl Into<String>) {
+        let user_message = user_message.into();
+        self.update(turn_id, |checkpoint| {
+            checkpoint.user_message = Some(user_message);
+        });
+    }
+
+    pub fn set_turn_partial_text(&self, turn_id: &str, partial_text: impl Into<String>) {
+        let partial_text = partial_text.into();
+        self.update(turn_id, |checkpoint| {
+            checkpoint.partial_assistant_text = Some(partial_text);
+        });
     }
 
     pub fn update<F>(&self, turn_id: &str, update: F)
@@ -487,6 +515,8 @@ mod tests {
             updated_at_ms: 0,
             stop_requested_at_ms: None,
             stop_reason: None,
+            user_message: None,
+            partial_assistant_text: None,
         };
 
         refresh_execution_checkpoint_projection(&mut checkpoint);

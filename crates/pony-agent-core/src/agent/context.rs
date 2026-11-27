@@ -1778,6 +1778,8 @@ mod tests {
             updated_at_ms: 0,
             stop_requested_at_ms: None,
             stop_reason: None,
+            user_message: None,
+            partial_assistant_text: None,
         }
     }
 

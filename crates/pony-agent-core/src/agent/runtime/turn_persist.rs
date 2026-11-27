@@ -166,6 +166,7 @@ impl AgentRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn persist_turn_outcome(
         &self,
         session_id: Option<&str>,
@@ -184,9 +185,47 @@ impl AgentRuntime {
         // 成功轮传 `None`；它坐实「载体种类」，展示层不再嗅探文本。
         assistant_kind: Option<HistoryMessageKind>,
     ) -> PersistedTurnOutcome {
-        // PA-095 #2：物化前置——在获取 sessions 写锁之前请求提交本会话缓冲事件
-        // （flush 闭包需要 sessions 写锁；持锁调用会自锁死锁）。提交后 append_turn
-        // 内部的 flush 为空操作（缓冲已清），物化从事件表读取本 turn 消息。
+        self.persist_turn_outcome_with_trace(
+            session_id,
+            turn_id,
+            user_message,
+            assistant_message,
+            None,
+            provider_name,
+            provider_mode,
+            token_usage,
+            provider_native_transcript,
+            attachments,
+            workspace_mode,
+            assistant_kind,
+            None,
+        )
+    }
+
+    /// 原子写入一轮历史与可选 `TurnTraceRecord`（同一 `SessionStore` 批事务）。
+    ///
+    /// 失败/取消轮走本入口后，历史消息、`HistoryNode` 与 trace 行在单事务内同时生效，
+    /// 彻底消除「历史节点先提交、trace 后补写或未写导致 `turn_trace_refs` 缺失」的撕裂窗口。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "atomic turn history and trace commit mirrors full outcome payload"
+    )]
+    pub(crate) fn persist_turn_outcome_with_trace(
+        &self,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        user_message: &str,
+        assistant_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        provider_name: &str,
+        provider_mode: &str,
+        token_usage: Option<&TokenUsage>,
+        provider_native_transcript: Option<Vec<Value>>,
+        attachments: Vec<SessionAttachment>,
+        workspace_mode: Option<&str>,
+        assistant_kind: Option<HistoryMessageKind>,
+        trace: Option<TurnTraceRecord>,
+    ) -> PersistedTurnOutcome {
         let flush_session_key = session_id.unwrap_or(crate::agent::session::DEFAULT_SESSION_ID);
         if let Err(error) =
             crate::agent::turn_flow::flush_session_buffered_events(flush_session_key)
@@ -195,6 +234,9 @@ impl AgentRuntime {
                 "[pony-agent][runtime] pre-materialization event flush failed: {error}"
             );
         }
+        let ledger_tokens = trace
+            .as_ref()
+            .map(|t| (t.turn_id.clone(), t.input_tokens, t.output_tokens, t.cache_hit_input_tokens));
         let updated_session = self
             .sessions
             .write()
@@ -202,7 +244,7 @@ impl AgentRuntime {
                 tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
-            .append_turn_with_kind(
+            .append_turn_with_kind_and_trace(
                 session_id,
                 user_message,
                 assistant_message,
@@ -210,6 +252,7 @@ impl AgentRuntime {
                 attachments,
                 assistant_kind,
                 turn_id,
+                trace,
             );
         let retrieved = self.context_builder.retrieve_context_state(
             user_message,
@@ -227,6 +270,16 @@ impl AgentRuntime {
         );
         let (input_tokens, cache_hit_input_tokens, reasoning_tokens, output_tokens, total_tokens) =
             token_usage_parts(token_usage);
+        if let Some((trace_turn_id, trace_in, trace_out, trace_cache)) = ledger_tokens {
+            self.append_usage_ledger(
+                session_id,
+                &trace_turn_id,
+                provider_meta,
+                trace_in,
+                trace_out,
+                trace_cache,
+            );
+        }
 
         PersistedTurnOutcome {
             session_summary,
@@ -239,14 +292,16 @@ impl AgentRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn persist_turn_trace(
-        &self,
+    pub(crate) fn build_turn_trace_record(
         session_id: Option<&str>,
         turn_id: &str,
         user_message: &str,
         phase: &str,
         trace_steps: Vec<TurnTraceStep>,
         tool_activities: Vec<TurnToolActivity>,
+        model_hop_trace_contents: &[ModelHopTraceContent],
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
         provider_meta: Option<&ProviderEventMeta>,
         provider_source: Option<String>,
         provider_mode: Option<String>,
@@ -263,22 +318,27 @@ impl AgentRuntime {
         turn_duration_ms: Option<u64>,
         session_summary: Option<String>,
         error: Option<String>,
-    ) {
-        self.persist_turn_trace_with_provider_calls(
-            session_id,
-            turn_id,
+    ) -> TurnTraceRecord {
+        let error_class = error
+            .as_deref()
+            .map(|text| crate::agent::retry::classify_error_class(text).to_string());
+        let provider_fallback = fallback_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty())
+            .map(|_| true);
+        let trace_timeline = build_persisted_trace_timeline_with_provider_calls(
             user_message,
             phase,
-            trace_steps,
-            tool_activities,
-            Vec::new(),
             provider_meta,
-            provider_source,
-            provider_mode,
-            build_context_observation,
-            return_text,
-            return_reasoning_content,
-            fallback_reason,
+            provider_source.as_deref(),
+            provider_mode.as_deref(),
+            build_context_observation.as_ref(),
+            &tool_activities,
+            model_hop_trace_contents,
+            return_text.as_deref(),
+            return_reasoning_content.as_deref(),
+            fallback_reason.as_deref(),
+            error.as_deref(),
             input_tokens,
             cache_hit_input_tokens,
             reasoning_tokens,
@@ -286,9 +346,59 @@ impl AgentRuntime {
             total_tokens,
             first_token_latency_ms,
             turn_duration_ms,
-            session_summary,
-            error,
+            &provider_call_records,
         );
+        let (degraded, tool_failures) = Self::session_trace_health_fields(phase);
+        TurnTraceRecord {
+            turn_id: turn_id.to_string(),
+            session_id: session_id.map(str::to_string),
+            event_id: None,
+            trace_id: crate::agent::otel::exported_trace_id(),
+            cost_usd: estimate_trace_cost(
+                provider_meta,
+                input_tokens,
+                output_tokens,
+                cache_hit_input_tokens,
+            ),
+            event_type: None,
+            event_version: None,
+            sequence: None,
+            emitted_at_ms: None,
+            title: build_turn_trace_title(user_message),
+            phase: phase.to_string(),
+            trace_steps,
+            trace_timeline,
+            tool_activities,
+            provider_call_records,
+            hook_trace_records,
+            provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
+            provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
+            provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
+            provider_model: provider_meta.map(|meta| meta.model.clone()),
+            provider_source,
+            provider_mode,
+            build_context_observation,
+            build_context_observation_ref: None,
+            session_summary,
+            fallback_reason,
+            error,
+            error_class,
+            input_tokens,
+            cache_hit_input_tokens,
+            reasoning_tokens,
+            output_tokens,
+            total_tokens,
+            first_token_latency_ms,
+            turn_duration_ms,
+            usage_origin: None,
+            context_input_tokens: None,
+            input_text: Some(user_message.to_string()),
+            output_text: return_text.as_deref().map(str::to_string),
+            degraded,
+            tool_failures,
+            provider_fallback,
+            updated_at: 0,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -320,30 +430,23 @@ impl AgentRuntime {
         session_summary: Option<String>,
         error: Option<String>,
     ) {
-        // PA-171 C4-S3：失败轮落盘同样带归类（唯一来源 `retry::classify_error_class`）。
-        let error_class = error
-            .as_deref()
-            .map(|text| crate::agent::retry::classify_error_class(text).to_string());
-        // B219：provider 本地兜底事实——`fallback_reason` 非空 ⇒ 本轮以**降级**收尾
-        // （与 `degraded` 的工具失败语义严格分离）。必须在 `fallback_reason` 被移进
-        // `TurnTraceRecord` 之前求值；空白串视同无原因（与 `completed_turn_end_reason` 同口径）。
-        let provider_fallback = fallback_reason
-            .as_deref()
-            .filter(|reason| !reason.trim().is_empty())
-            .map(|_| true);
-        let trace_timeline = build_persisted_trace_timeline_with_provider_calls(
+        let trace_record = Self::build_turn_trace_record(
+            session_id,
+            turn_id,
             user_message,
             phase,
-            provider_meta,
-            provider_source.as_deref(),
-            provider_mode.as_deref(),
-            build_context_observation.as_ref(),
-            &tool_activities,
+            trace_steps,
+            tool_activities,
             model_hop_trace_contents,
-            return_text.as_deref(),
-            return_reasoning_content.as_deref(),
-            fallback_reason.as_deref(),
-            error.as_deref(),
+            provider_call_records,
+            hook_trace_records,
+            provider_meta,
+            provider_source,
+            provider_mode,
+            build_context_observation,
+            return_text,
+            return_reasoning_content,
+            fallback_reason,
             input_tokens,
             cache_hit_input_tokens,
             reasoning_tokens,
@@ -351,13 +454,9 @@ impl AgentRuntime {
             total_tokens,
             first_token_latency_ms,
             turn_duration_ms,
-            // Wave-15 R2：每条 call_model 携带自身 per-call 指标（按调用序号）。
-            &provider_call_records,
+            session_summary,
+            error,
         );
-        // 内存更新同步（快），SQLite 落库通过后台队列异步执行，
-        // 避免 trace（可观测性）写盘阻塞主对话执行路径。
-        // C1：健康度字段取自 OTel 同一计数器（与根 span 的 tool_failures/degraded 同源同口径）。
-        let (degraded, tool_failures) = Self::session_trace_health_fields(phase);
         let (session_key, mutation) = self
             .sessions
             .write()
@@ -365,68 +464,9 @@ impl AgentRuntime {
                 tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
                 e.into_inner()
             })
-            .record_turn_trace_in_memory(
-                session_id,
-                TurnTraceRecord {
-                    turn_id: turn_id.to_string(),
-                    session_id: session_id.map(str::to_string),
-                    event_id: None,
-                    // Wave-4.1 A6：导出态 trace_id（门禁关闭/未采样/本地降级时一律 None）——
-                    // 由当前 turn 的 otel 守卫在本调用栈上下文中登记，这里按同一上下文读取。
-                    trace_id: crate::agent::otel::exported_trace_id(),
-                    // Wave-5 K2：会话 trace 成本（未知模型 / 缺 usage ⇒ None，键缺席）。
-                    cost_usd: estimate_trace_cost(
-                        provider_meta,
-                        input_tokens,
-                        output_tokens,
-                        cache_hit_input_tokens,
-                    ),
-                    event_type: None,
-                    event_version: None,
-                    sequence: None,
-                    emitted_at_ms: None,
-                    title: build_turn_trace_title(user_message),
-                    phase: phase.to_string(),
-                    trace_steps,
-                    trace_timeline,
-                    tool_activities,
-                    provider_call_records,
-                    hook_trace_records,
-                    provider_requested_name: provider_meta.map(|meta| meta.requested_name.clone()),
-                    provider_name: provider_meta.map(|meta| meta.provider_name.clone()),
-                    provider_protocol: provider_meta.map(|meta| meta.protocol.clone()),
-                    provider_model: provider_meta.map(|meta| meta.model.clone()),
-                    provider_source,
-                    provider_mode,
-                    build_context_observation,
-                    build_context_observation_ref: None,
-                    session_summary,
-                    fallback_reason,
-                    error,
-                    error_class,
-                    input_tokens,
-                    cache_hit_input_tokens,
-                    reasoning_tokens,
-                    output_tokens,
-                    total_tokens,
-                    first_token_latency_ms,
-                    turn_duration_ms,
-                    // wave-54 C3/C4：来源/上下文口径由 store 侧按 per-call records 派生。
-                    usage_origin: None,
-                    context_input_tokens: None,
-                    input_text: Some(user_message.to_string()),
-                    output_text: return_text.as_deref().map(str::to_string),
-                    degraded,
-                    tool_failures,
-                    // B219：provider 本地兜底事实（None ⇒ 键缺席；与 `degraded` 不同源）。
-                    provider_fallback,
-                    updated_at: 0,
-                },
-            );
+            .record_turn_trace_in_memory(session_id, trace_record);
         self.enqueue_trace_persistence(session_key, mutation);
 
-        // Wave-7 B001/B003：本轮用量写入 `usage_ledger`（幂等 UPSERT；协议感知计价）。
-        // 失败只 warn + spool（append_entry_resilient 内部处理），**绝不阻塞 turn 返回**。
         self.append_usage_ledger(
             session_id,
             turn_id,
@@ -470,62 +510,6 @@ impl AgentRuntime {
         });
         // 失败已在 append_entry_resilient 内降级（warn + spool），这里只吞掉结果。
         let _ = store.append_usage_ledger_entry(&entry);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn persist_turn_trace_with_provider_calls(
-        &self,
-        session_id: Option<&str>,
-        turn_id: &str,
-        user_message: &str,
-        phase: &str,
-        trace_steps: Vec<TurnTraceStep>,
-        tool_activities: Vec<TurnToolActivity>,
-        provider_call_records: Vec<ProviderCallCacheRecord>,
-        provider_meta: Option<&ProviderEventMeta>,
-        provider_source: Option<String>,
-        provider_mode: Option<String>,
-        build_context_observation: Option<BuildContextObservation>,
-        return_text: Option<String>,
-        return_reasoning_content: Option<String>,
-        fallback_reason: Option<String>,
-        input_tokens: Option<u64>,
-        cache_hit_input_tokens: Option<u64>,
-        reasoning_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-        total_tokens: Option<u64>,
-        first_token_latency_ms: Option<u64>,
-        turn_duration_ms: Option<u64>,
-        session_summary: Option<String>,
-        error: Option<String>,
-    ) {
-        self.persist_turn_trace_with_provider_calls_and_hooks(
-            session_id,
-            turn_id,
-            user_message,
-            phase,
-            trace_steps,
-            tool_activities,
-            &[],
-            provider_call_records,
-            Vec::new(),
-            provider_meta,
-            provider_source,
-            provider_mode,
-            build_context_observation,
-            return_text,
-            return_reasoning_content,
-            fallback_reason,
-            input_tokens,
-            cache_hit_input_tokens,
-            reasoning_tokens,
-            output_tokens,
-            total_tokens,
-            first_token_latency_ms,
-            turn_duration_ms,
-            session_summary,
-            error,
-        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -733,17 +717,11 @@ impl AgentRuntime {
         // 「user 原话 + 中断检查点」，native 侧写「user + 已闭合工具往返 + 中断标记」。
         // 为什么两层都要写：native 会话的 prompt 只取 transcript（历史层不进 prompt），
         // 只写历史等于没写；遗留会话反之。两层都写才是「两条 provider 路径都续得上」。
-        self.persist_failed_turn_context(
-            session_id,
-            Some(turn_id),
-            user_message,
+        let (assistant_message, transcript) = Self::build_failed_turn_close_out(
             &tool_activities,
             partial_text.as_deref(),
             &error,
-            provider_meta,
             failed_turn_native_transcript,
-            // R3：失败面与取消面同构——"已宣告未执行"的调用同样入闭合结构
-            // （默认入口传空列表；批内中止路径经 `..._with_pending` 显式透传）。
             pending_calls,
         );
         self.update_execution_checkpoint(
@@ -761,7 +739,7 @@ impl AgentRuntime {
             Some("failed"),
             Some(&error),
         );
-        self.persist_turn_trace_with_provider_calls_and_hooks(
+        let trace_record = Self::build_turn_trace_record(
             session_id,
             turn_id,
             user_message,
@@ -787,6 +765,21 @@ impl AgentRuntime {
             turn_duration_ms,
             None,
             Some(error.clone()),
+        );
+        self.persist_turn_outcome_with_trace(
+            session_id,
+            Some(turn_id),
+            user_message,
+            &assistant_message,
+            provider_meta,
+            provider_meta.map_or("runtime", |meta| meta.provider_name.as_str()),
+            "failed",
+            None,
+            transcript,
+            Vec::new(),
+            None,
+            Some(HistoryMessageKind::Error),
+            Some(trace_record),
         );
         emit_stream_failed_attributed(
             sink,
@@ -833,28 +826,14 @@ impl AgentRuntime {
             .save_input_attachments(session_id, images)
     }
 
-    /// P0：失败轮的上下文收口（历史 + native transcript，**不写 trace**）。
-    ///
-    /// 分工：trace（含 per-call / hook 记录）由
-    /// `persist_turn_trace_with_provider_calls_and_hooks` 负责；本方法只补「下一轮上下文
-    /// 需要看到的两层载体」，所以不能复用 `append_failed_turn`（那会把 trace 再写一遍）。
-    /// 落盘走 `persist_turn_outcome` ⇒ 与成功轮同一条 `append_turn` 通道（同一套日志命令、
-    /// 同一套两阶段暂存提交），失败轮由此获得与成功轮一致的「可重放」语义。
     #[allow(clippy::too_many_arguments)]
-    fn persist_failed_turn_context(
-        &self,
-        session_id: Option<&str>,
-        // A1：失败轮同样把 `turn_id` 写进历史消息（gate 的历史腿唯一判据）。
-        turn_id: Option<&str>,
-        user_message: &str,
+    fn build_failed_turn_close_out(
         tool_activities: &[TurnToolActivity],
         partial_text: Option<&str>,
         error: &str,
-        provider_meta: Option<&ProviderEventMeta>,
         provider_native_transcript: Option<Vec<Value>>,
-        // R3：模型已宣告但未执行/未返回的调用（失败轮同样补齐，不截断）。
         pending_calls: Vec<PendingToolCall>,
-    ) {
+    ) -> (String, Option<Vec<Value>>) {
         let checkpoint_tools: Vec<String> = tool_activities
             .iter()
             .map(|activity| {
@@ -865,12 +844,10 @@ impl AgentRuntime {
                 }
             })
             .collect();
-        // C7（同构）：失败轮与取消轮走**同一个**闭合出口——差别只在头部携带失败原因
-        // （`failed_turn_checkpoint_text` 逐字保留 `<reason>`），结果段/未开始段完全同形。
         let (assistant_message, transcript) = Self::build_interrupted_turn_close_out(
             partial_text.unwrap_or_default(),
             &checkpoint_tools,
-            &tool_activities,
+            tool_activities,
             &pending_calls,
             Some(error),
             provider_native_transcript,
@@ -880,36 +857,79 @@ impl AgentRuntime {
         } else {
             assistant_message
         };
-        self.persist_turn_outcome(
+        (assistant_message, transcript)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "inline failed turn closeout forwards full telemetry and trace context"
+    )]
+    pub(super) fn persist_failed_inline_turn_with_trace(
+        &self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        partial_text: Option<&str>,
+        provider_meta: Option<&ProviderEventMeta>,
+        provider_source: Option<String>,
+        provider_mode: Option<String>,
+        fallback_reason: Option<String>,
+        build_context_observation: Option<BuildContextObservation>,
+        trace_steps: Vec<TurnTraceStep>,
+        provider_call_records: Vec<ProviderCallCacheRecord>,
+        hook_trace_records: Vec<HookTraceRecord>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        error: String,
+    ) {
+        let (assistant_message, transcript) =
+            Self::build_failed_turn_close_out(&[], partial_text, &error, None, Vec::new());
+        let trace_record = Self::build_turn_trace_record(
             session_id,
             turn_id,
             user_message,
+            "failed",
+            trace_steps,
+            Vec::new(),
+            &[],
+            provider_call_records,
+            hook_trace_records,
+            provider_meta,
+            provider_source,
+            provider_mode,
+            build_context_observation,
+            None,
+            None,
+            fallback_reason,
+            None,
+            None,
+            None,
+            None,
+            None,
+            first_token_latency_ms,
+            turn_duration_ms,
+            None,
+            Some(error),
+        );
+        self.persist_turn_outcome_with_trace(
+            session_id,
+            Some(turn_id),
+            user_message,
             &assistant_message,
-            provider_meta
-                .map(|meta| meta.provider_name.as_str())
-                .unwrap_or("runtime"),
+            provider_meta,
+            provider_meta.map_or("runtime", |meta| meta.provider_name.as_str()),
             "failed",
             None,
             transcript,
             Vec::new(),
             None,
-            // B217：失败收口写 `Error`（不是 `Interrupted`）—— 进程中断由恢复路径补写
-            // `Interrupted`，两者在历史与状态条上必须可区分。
             Some(HistoryMessageKind::Error),
+            Some(trace_record),
         );
     }
 
     /// 中断/失败轮收口的**唯一生产出口**（C1/C7 + RC1 的写侧接线）。
-    ///
-    /// 返回 `(assistant 承载正文, native transcript 片段)`：
-    /// - 正文 = 已交付正文 + 已闭合步骤（名称 → 结果摘要）+ 未开始调用的事实注记；
-    ///   失败轮由 `failure_reason` 把原因逐字带进头部（`failed_turn_checkpoint_text`）。
-    /// - transcript = 闭合片段（tool_calls ↔ tool 成对、末条 assistant 带 reasoning），
-    ///   使 native 家族续跑请求**读得到**这一轮的过程事实；无步骤时回落既有协议族片段
-    ///   （`native_transcript_for_cancelled_turn` / `native_transcript_for_failed_turn`）。
-    ///
-    /// 事故 `pa_01a1ce16` 的 RC1 正是这里：收口只写一条检查点句，工具往返与结果没有载体。
-    fn build_interrupted_turn_close_out(
+    pub(crate) fn build_interrupted_turn_close_out(
         prior_assistant_text: &str,
         header_step_lines: &[String],
         tool_activities: &[TurnToolActivity],
@@ -1006,15 +1026,128 @@ impl AgentRuntime {
             turn_id,
             user_message,
             &assistant_message,
-            provider_meta
-                .map(|meta| meta.provider_name.as_str())
-                .unwrap_or("runtime"),
+            provider_meta.map_or("runtime", |meta| meta.provider_name.as_str()),
             "cancelled",
             None,
             transcript,
             attachments,
             workspace_mode,
             Some(HistoryMessageKind::Cancelled),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cancelled turn closeout forwards full telemetry and trace context"
+    )]
+    pub(crate) fn persist_cancelled_turn_outcome_with_trace(
+        &self,
+        session_id: Option<&str>,
+        turn_id: &str,
+        user_message: &str,
+        provider_meta: Option<&ProviderEventMeta>,
+        attachments: Vec<SessionAttachment>,
+        workspace_mode: Option<&str>,
+        prior_assistant_text: &str,
+        tool_activities: Vec<TurnToolActivity>,
+        pending_calls: &[PendingToolCall],
+        provider_native_transcript: Option<Vec<Value>>,
+        trace_steps: Vec<TurnTraceStep>,
+        build_context_observation: Option<BuildContextObservation>,
+        first_token_latency_ms: Option<u64>,
+        turn_duration_ms: Option<u64>,
+        error: String,
+    ) -> PersistedTurnOutcome {
+        let header_step_lines: Vec<String> = tool_activities
+            .iter()
+            .map(|activity| {
+                if activity.description.trim().is_empty() {
+                    activity.name.clone()
+                } else {
+                    format!("{} {}", activity.name, activity.description.trim())
+                }
+            })
+            .collect();
+        let (assistant_message, transcript) = Self::build_interrupted_turn_close_out(
+            prior_assistant_text,
+            &header_step_lines,
+            &tool_activities,
+            pending_calls,
+            None,
+            provider_native_transcript,
+        );
+        let assistant_message = if assistant_message.trim().is_empty() {
+            CANCELLED_TURN_MESSAGE.to_string()
+        } else {
+            assistant_message
+        };
+        let provider_name = provider_meta
+            .map(|meta| meta.provider_name.as_str())
+            .unwrap_or("runtime");
+        let pre_snapshot = {
+            let key = session_id.unwrap_or(crate::agent::session::DEFAULT_SESSION_ID);
+            self.sessions
+                .read()
+                .ok()
+                .map(|s| s.snapshot_at_readonly(Some(key), None, &[]))
+        };
+        let session_summary = pre_snapshot.as_ref().map(|session| {
+            let retrieved = self.context_builder.retrieve_context_state(
+                user_message,
+                &[],
+                workspace_mode,
+                session,
+                None,
+                None,
+            );
+            self.context_builder.build_session_summary(
+                self.graph.name(),
+                &retrieved,
+                provider_name,
+                Some("cancelled"),
+            )
+        });
+        let trace_record = Self::build_turn_trace_record(
+            session_id,
+            turn_id,
+            user_message,
+            "cancelled",
+            trace_steps,
+            tool_activities,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            provider_meta,
+            None,
+            None,
+            build_context_observation,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            first_token_latency_ms,
+            turn_duration_ms,
+            session_summary,
+            Some(error),
+        );
+        self.persist_turn_outcome_with_trace(
+            session_id,
+            Some(turn_id),
+            user_message,
+            &assistant_message,
+            provider_meta,
+            provider_name,
+            "cancelled",
+            None,
+            transcript,
+            attachments,
+            workspace_mode,
+            Some(HistoryMessageKind::Cancelled),
+            Some(trace_record),
         )
     }
 
@@ -1407,6 +1540,14 @@ impl AgentRuntime {
         error: Option<&str>,
     ) {
         control.update(turn_id, |checkpoint| {
+            // 若终态已被 C5 监督者或其它终态路径抢占，禁止把非 running 状态覆盖回 running。
+            let already_terminal = matches!(
+                checkpoint.status.trim().to_ascii_lowercase().as_str(),
+                "completed" | "failed" | "cancelled"
+            );
+            if already_terminal && status == Some("running") {
+                return;
+            }
             checkpoint.phase = phase.to_string();
             checkpoint.completed_hops = completed_hops;
             checkpoint.max_hops = max_tool_hops_per_turn();

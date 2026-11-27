@@ -250,6 +250,14 @@ impl SessionStore {
         }
     }
 
+    /// 把运行时新创建的会话显式标为已装载：防止 Turn 1 尚未落盘前的读/准备动作触发
+    /// `ensure_session_hydrated`，把半截 `turn_events` 重建为 `legacy-node-1`。
+    pub(super) fn mark_session_loaded(&mut self, session_id: &str) {
+        if let Some(lazy) = self.lazy.as_mut() {
+            lazy.loaded.insert(session_id.to_string());
+        }
+    }
+
     /// 显式管理操作（删工作区 / 归档批量 / 导入导出）需要全量视图时的升级入口。
     ///
     /// 语义等价于全量装载：一次性把全部会话读入内存并做启动期派生修复（不写盘），

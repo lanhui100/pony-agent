@@ -37,6 +37,14 @@ pub struct RewindPlan {
     pub cancelled_turn_ids: Vec<String>,
 }
 
+/// 可作为双 Esc 撤回目标的轮次节点类型（成功轮与失败/取消的活跃轮均允许撤回；`TurnRewound` 已失效不可再撤）。
+pub(in crate::session) fn is_rewindable_turn_node(kind: &HistoryNodeKind) -> bool {
+    matches!(
+        kind,
+        HistoryNodeKind::TurnCommitted | HistoryNodeKind::TurnCancelled
+    )
+}
+
 impl SessionStore {
     /// 当前会话活动分支链（旧→新）。
     pub fn rewind_activity_chain(&mut self, session_id: Option<&str>) -> Vec<HistoryNode> {
@@ -70,11 +78,11 @@ impl SessionStore {
         chain
     }
 
-    /// 活动链上的**已提交用户轮次**（旧→新，撤回菜单的候选集）。
+    /// 活动链上的**可撤回用户轮次**（旧→新，含成功轮与失败/取消的活跃轮；`TurnRewound` 已失效不可再撤）。
     pub fn rewind_turns(&mut self, session_id: Option<&str>) -> Vec<HistoryNode> {
         self.rewind_activity_chain(session_id)
             .into_iter()
-            .filter(|node| matches!(node.kind, HistoryNodeKind::TurnCommitted))
+            .filter(|node| is_rewindable_turn_node(&node.kind))
             .collect()
     }
 
@@ -94,18 +102,18 @@ impl SessionStore {
             .position(|node| node.node_id == node_id)
             .ok_or_else(|| format!("历史节点不在当前活动分支：{node_id}"))?;
         let target = chain[position].clone();
-        if !matches!(target.kind, HistoryNodeKind::TurnCommitted) {
-            return Err("只能撤回到已提交的用户轮次".to_string());
+        if !is_rewindable_turn_node(&target.kind) {
+            return Err("只能撤回到有效用户轮次".to_string());
         }
         let cancelled_turn_ids: Vec<String> = chain[position..]
             .iter()
             .filter_map(|node| node.turn_id.clone())
             .collect();
         let user_message = self.rewind_user_message_for_node(&session_key, &target.node_id);
-        // 轮次序号按**已提交用户轮次**计（活动链上还有 checkpoint 根等非轮次节点）。
+        // 轮次序号按**可撤回用户轮次**计（活动链上还有 checkpoint 根等非轮次节点）。
         let turn_index = chain[..=position]
             .iter()
-            .filter(|node| matches!(node.kind, HistoryNodeKind::TurnCommitted))
+            .filter(|node| is_rewindable_turn_node(&node.kind))
             .count();
         Ok(RewindPlan {
             target_node_id: target.node_id.clone(),

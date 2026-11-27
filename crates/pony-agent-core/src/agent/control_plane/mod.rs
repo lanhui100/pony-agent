@@ -65,6 +65,7 @@ mod query_commands;
 // ADR 0113「撤回」：命令类型与编排独立成文件（mod.rs 已计入文件行数棘轮）。
 pub mod rewind_commands;
 mod trace_commands;
+mod turn_closeout;
 mod workspace_commands;
 
 /// 默认 workspace root：`compute_default_workspace_root()`（Windows Documents~/pony_agent，
@@ -959,32 +960,6 @@ impl<'a, S: TurnEventSink> TurnEventSink for RecordingTurnEventSink<'a, S> {
         ) {
             self.record_terminal_payload(&payload);
         }
-    }
-}
-
-/// wave-60 C5：把「监督者收口」接到该 turn 已注册的事件出口上（`turn:cancelled` 走同一 sink）。
-///
-/// 存在意义：core 不引用任何宿主表面；宿主只注入 sink，收口事件自然经同一条通道下发。
-struct SinkTerminalEmitter<S> {
-    sink: Arc<S>,
-}
-
-impl<S> crate::agent::stop_escalation::TerminalEmitter for SinkTerminalEmitter<S>
-where
-    S: crate::agent::turn_flow::TurnEventSink + Send + Sync + 'static,
-{
-    fn emit_cancelled(
-        &self,
-        turn_id: &str,
-        session_id: Option<&str>,
-        stop_reason: crate::agent::stop_escalation::StopReason,
-    ) {
-        crate::agent::turn_flow::emit_supervisor_cancelled(
-            self.sink.as_ref(),
-            turn_id.to_string(),
-            session_id.map(str::to_string),
-            stop_reason,
-        );
     }
 }
 
@@ -2437,7 +2412,11 @@ impl HostControlPlane {
         }
         self.stop_escalation.register_emitter(
             turn_id,
-            Arc::new(crate::agent::control_plane::SinkTerminalEmitter { sink }),
+            Arc::new(crate::agent::control_plane::turn_closeout::SupervisorCloseoutEmitter {
+                sink,
+                sessions: Arc::clone(&self.sessions_rwlock),
+                execution_control: self.execution_control.clone(),
+            }),
         );
     }
 
@@ -2812,6 +2791,12 @@ impl HostControlPlane {
         self.note_user_message_entry(&input);
         self.execution_control
             .register_turn(&turn_id, input.session_id.as_deref(), Some(&run_id));
+        let checkpoint_user = input
+            .display_message
+            .as_deref()
+            .unwrap_or(input.message.as_str());
+        self.execution_control
+            .set_turn_user_message(&turn_id, checkpoint_user);
 
         let lifecycle = {
             let mut graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
@@ -7386,14 +7371,11 @@ mod tests {
                 expected_cursor_version: None,
             })
             .expect("switch back to main should succeed");
-        // The fork command runs ensure_history_graph, which recomputes the
-        // main branch head as the last main-branch node (excluding the
-        // cancelled node).
-        // RC2 新口径（wave-interrupted-turn-resume，Lead 裁决）：分支头 = 该分支**最后一条节点**，
-        // `TurnCancelled` 同样参与（与 `commit_history_node_from_live_state` 的写入一致）。
-        // 旧口径把未完成轮排除在 head 之外，于是"中断节点成了悬挂兄弟"：装载/投影时被排除、
-        // 重启后不可见，且 `visible ≠ head` 漂移会触发下一次隐式 fork。因此切回 main 的落点
-        // 是 main 分支的**最新节点**（本例为分叉前那次未完成轮提交），不再是首轮节点。
+        // `checkout_history_node(first_node_id)` marks the truncated suffix as
+        // `TurnRewound`, so `ensure_history_graph` during `fork_from_history_node`
+        // keeps `branch-main`'s head at `first_node_id` instead of resurrecting
+        // the rewound turn. (Genuine interrupted `TurnCancelled` turns still count
+        // as active branch heads via `resolve_main_branch_head`.)
         let expected_main_head = post_fork_graph
             .branches
             .iter()
@@ -7401,13 +7383,13 @@ mod tests {
             .and_then(|branch| branch.head_node_id.clone());
         assert_eq!(
             switched.node_id, expected_main_head,
-            "切回 main 必须落在该分支头（含 TurnCancelled 节点），实际 = {:?}",
+            "切回 main 必须落在该分支头（first_node_id），实际 = {:?}",
             switched.node_id
         );
-        assert_ne!(
+        assert_eq!(
             switched.node_id.as_deref(),
             Some(first_node_id.as_str()),
-            "新口径下 main head 已推进到未完成轮节点，不再是首轮节点"
+            "已撤回节点标为 TurnRewound 后，branch-main head 保持在首轮节点，不会被重新复活"
         );
 
         let restored = control_plane

@@ -40,6 +40,7 @@ pub fn command_session_id(command: &PersistCommand) -> Option<&str> {
         | PersistCommand::UpdateTraceTerminal { session_id, .. }
         | PersistCommand::AppendHookRecords { session_id, .. }
         | PersistCommand::UpdateHistoryNode { session_id, .. }
+        | PersistCommand::ReplaceHistory { session_id, .. }
         | PersistCommand::CompactHistory { session_id, .. }
         | PersistCommand::UpdateCursor { session_id, .. }
         | PersistCommand::UpdateBranch { session_id, .. }
@@ -130,6 +131,17 @@ pub fn command_to_value(command: &PersistCommand) -> Result<Value, String> {
             "epoch": epoch,
             "sessionId": session_id,
             "node": serialize(node)?,
+        }),
+        PersistCommand::ReplaceHistory {
+            epoch,
+            session_id,
+            messages,
+        } => json!({
+            "type": "replace_history",
+            "encodingVersion": SESSION_LOG_COMMAND_ENCODING_VERSION,
+            "epoch": epoch,
+            "sessionId": session_id,
+            "messages": serialize(messages)?,
         }),
         PersistCommand::CompactHistory {
             epoch,

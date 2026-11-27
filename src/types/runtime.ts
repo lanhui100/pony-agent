@@ -420,6 +420,7 @@ export type WorkspaceStateRef = {
 export type HistoryNodeKind =
   | "turn_committed"
   | "turn_cancelled"
+  | "turn_rewound"
   | "run_paused"
   | "checkpoint"
   | "manual_snapshot";
