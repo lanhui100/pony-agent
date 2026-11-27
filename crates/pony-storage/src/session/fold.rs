@@ -345,6 +345,10 @@ enum FoldCommand {
         session_id: String,
         node: HistoryNode,
     },
+    ReplaceHistory {
+        session_id: String,
+        messages: Vec<TurnHistoryMessage>,
+    },
     /// 上下文压缩提交：可见节点快照**整份替换** + 原生 transcript **全量替换**。
     ///
     /// 与 `UpdateHistoryNode`（单条节点 upsert）的区别只在 transcript：压缩把被摘要
@@ -584,6 +588,10 @@ impl FoldCommand {
                 session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
                 node: payload(value, seq, kind, "node")?,
             },
+            "replace_history" => Self::ReplaceHistory {
+                session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
+                messages: payload(value, seq, kind, "messages")?,
+            },
             "compact_history" => Self::CompactHistory {
                 session_id: required_str(value, seq, kind, "sessionId")?.to_string(),
                 node: payload(value, seq, kind, "node")?,
@@ -647,6 +655,7 @@ impl FoldCommand {
             | Self::UpdateTraceTerminal { session_id, .. }
             | Self::AppendHookRecords { session_id, .. }
             | Self::UpdateHistoryNode { session_id, .. }
+            | Self::ReplaceHistory { session_id, .. }
             | Self::CompactHistory { session_id, .. }
             | Self::UpdateCursor { session_id, .. }
             | Self::UpdateBranch { session_id, .. }
@@ -838,6 +847,9 @@ impl Folder {
             FoldCommand::UpdateHistoryNode { node, .. } => {
                 self.nodes.retain(|existing| existing.node_id != node.node_id);
                 self.nodes.push(node);
+            }
+            FoldCommand::ReplaceHistory { messages, .. } => {
+                self.state().history = messages;
             }
             FoldCommand::CompactHistory {
                 node, transcript, ..
@@ -1063,7 +1075,10 @@ pub fn read_session_state(
 
 // B190：读路径预算（字节预检 + 定向补折）搬到 `fold_read_view.rs`；仅 re-export 仍有
 // 外部消费者的 `merge_log_truth_into_sessions`，保持 `fold::*` 既有寻址契约零改动。
-pub use super::fold_read_view::merge_log_truth_into_sessions;
+pub use super::fold_read_view::{
+    apply_visible_node_projection_to_loaded_session, merge_log_truth_into_sessions,
+    persist_graph_projection_commands, replace_normalized_messages_tx,
+};
 
 /// 把**索引独有的投影产物**套到日志 fold 出的状态上（日志里没有承载它们的命令）。
 ///
@@ -1929,7 +1944,7 @@ pub fn update_session_memory_tx(
 
 /// ADR 0102：把「内容类命令」写进索引投影（`apply_persist_command_tx` 的单一分派点）。
 ///
-/// 只覆盖这两条命令；其它命令由调用方的**穷尽 match** 各自表态（这里不是兜底：
+/// 只覆盖这三条命令；其它命令由调用方的**穷尽 match** 各自表态（这里不是兜底：
 /// 调用点的主 match 仍无通配臂，新增变体会被编译器逼着表态）。非内容类命令传进来属于
 /// 编程错误，返回 `Err` 而不是静默 no-op。
 pub fn persist_session_content_tx(
@@ -1945,6 +1960,9 @@ pub fn persist_session_content_tx(
         } => update_session_memory_tx(
             tx, session_id, entries, evidence, hook_trace_records, history_state_evidence,
         ),
+        PersistCommand::ReplaceHistory { session_id, messages, .. } => {
+            replace_normalized_messages_tx(tx, session_id, messages)
+        }
         other => Err(format!("persist_session_content_tx 收到非内容类命令：{other:?}")),
     }
 }
@@ -2011,72 +2029,6 @@ pub fn append_memory_command_if_changed(
         hook_trace_records: after.memory_write_hook_trace_records.clone(),
         history_state_evidence: evidence_delta,
     });
-}
-
-/// 把**整份图投影**（trace 行 + 节点 + 分支 + 光标）作为命令流追加进真源日志。
-///
-/// ADR 0099 阶段 2-D：`ReplaceAll` 突变（fork / switch / checkout / restore / trace 全量重写）
-/// 以前只写 blob + trace 表。停写 blob 之后，图状态若仍不落日志，重启会读回旧分支、
-/// trace 变空 —— 那不是「SQLite 退为索引」，而是真数据丢失。故这些路径改走命令流。
-///
-/// 返回批次的 [`super::backend::PersistCommandOutcome`]（ADR 0107 P0.1 / R6）：
-/// `Succeeded` = 命令流已提交（调用方不必再走整包路径）；其它 = 回退全量写（不丢数据）。
-/// 透出 outcome 而不是 `bool`，是为了让调用方区分 `LogPersisted`（日志已落盘、索引滞后，
-/// 可告警）与 `Failed`/`StaleEpoch`（真失败）。
-pub fn persist_graph_projection_commands(
-    backend: &dyn SessionBackend,
-    session_id: &str,
-    session: &SessionState,
-    mutation: &super::backend::SessionTraceMutation,
-) -> super::backend::PersistCommandOutcome {
-    const EPOCH: u64 = 1;
-    let traces = match mutation {
-        super::backend::SessionTraceMutation::ReplaceAll { traces } => traces.as_slice(),
-        _ => &[],
-    };
-    let mut commands: Vec<PersistCommand> =
-        Vec::with_capacity(traces.len() + session.history_nodes.len() + session.history_branches.len() + 2);
-    for (trace_order, trace) in traces.iter().enumerate() {
-        commands.push(PersistCommand::AppendTrace {
-            epoch: EPOCH,
-            session_id: session_id.to_string(),
-            trace: trace.clone(),
-            trace_order,
-        });
-    }
-    for node in &session.history_nodes {
-        commands.push(PersistCommand::UpdateHistoryNode {
-            epoch: EPOCH,
-            session_id: session_id.to_string(),
-            node: node.clone(),
-        });
-    }
-    for branch in &session.history_branches {
-        commands.push(PersistCommand::UpdateBranch {
-            epoch: EPOCH,
-            session_id: session_id.to_string(),
-            branch: branch.clone(),
-        });
-    }
-    commands.push(PersistCommand::UpdateCursor {
-        epoch: EPOCH,
-        session_id: session_id.to_string(),
-        cursor: session.history_cursor.clone(),
-    });
-    commands.push(PersistCommand::UpdateSessionMeta {
-        epoch: EPOCH,
-        session_id: session_id.to_string(),
-        meta_patch: SessionMetaPatch {
-            title: Some(session.title.clone()),
-            title_override: Some(session.title_override.clone()),
-            archived: Some(session.archived),
-            summary: Some(session.summary.clone()),
-            turn_count: Some(session.turn_count),
-            last_referenced_file: session.last_referenced_file.clone(),
-            updated_at_ms: Some(session.updated_at_ms),
-        },
-    });
-    backend.persist_commands_batch(commands)
 }
 
 /// 会话级元数据的**真源追加**（ADR 0099 阶段 2-D）。

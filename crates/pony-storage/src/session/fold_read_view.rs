@@ -420,3 +420,134 @@ fn apply_folded_into_sessions(
         sessions.remove(session_id);
     }
 }
+
+/// B-CTX-LOAD：`normalized_messages` 整份替换（撤回/图截断后与可见历史对齐，清除被撤回轮次残余）。
+pub fn replace_normalized_messages_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    messages: &[super::types::TurnHistoryMessage],
+) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM normalized_messages WHERE session_id = ?1",
+        rusqlite::params![session_id],
+    )
+    .map_err(|e| format!("clear normalized messages: {e}"))?;
+    for (ordinal, message) in messages.iter().enumerate() {
+        let message_id = match &message.turn_id {
+            Some(turn_id) if !turn_id.is_empty() => format!("{turn_id}-{}", message.role),
+            _ => format!("msg-{ordinal}-{}", message.role),
+        };
+        tx.execute(
+            "INSERT OR REPLACE INTO normalized_messages
+             (session_id, message_id, turn_id, ordinal, role, content, reasoning_content,
+              status, model_name, token_count, attachments_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+            rusqlite::params![
+                session_id,
+                message_id,
+                message.turn_id,
+                ordinal,
+                message.role,
+                message.content,
+                message.reasoning_content,
+                message
+                    .status
+                    .as_ref()
+                    .map(|s| serde_json::to_string(s).unwrap_or_default()),
+                message.model_name,
+                message.token_count,
+                serde_json::to_string(&message.attachments)
+                    .unwrap_or_else(|_| "[]".to_string()),
+            ],
+        )
+        .map_err(|e| format!("replace normalized message: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 规范化表重建会话后应用光标所指可见节点快照（`normalized_messages` 已由 `ReplaceHistory` 同步）。
+pub fn apply_visible_node_projection_to_loaded_session(session: &mut SessionState) {
+    let Some(visible_id) = &session.history_cursor.visible_node_id else {
+        return;
+    };
+    let Some(node) = session
+        .history_nodes
+        .iter()
+        .find(|n| &n.node_id == visible_id)
+    else {
+        return;
+    };
+    if !node.history.is_empty() {
+        session.history = node.history.clone();
+        session.long_term_memory_entries = node.long_term_memory_entries.clone();
+        if node.turn_count > 0 {
+            session.turn_count = node.turn_count;
+        }
+        if node.last_referenced_file.is_some() {
+            session.last_referenced_file = node.last_referenced_file.clone();
+        }
+    }
+}
+
+/// 分支 / checkout / trace 整图重建的**命令流写路径**（同步历史、节点、分支、光标与会话元数据）。
+pub fn persist_graph_projection_commands(
+    backend: &dyn super::backend::SessionBackend,
+    session_id: &str,
+    session: &SessionState,
+    mutation: &super::backend::SessionTraceMutation,
+) -> super::backend::PersistCommandOutcome {
+    const EPOCH: u64 = 1;
+    let traces = match mutation {
+        super::backend::SessionTraceMutation::ReplaceAll { traces } => traces.as_slice(),
+        _ => &[],
+    };
+    let mut commands: Vec<super::backend::PersistCommand> = Vec::with_capacity(
+        traces.len() + session.history_nodes.len() + session.history_branches.len() + 3,
+    );
+    for (trace_order, trace) in traces.iter().enumerate() {
+        commands.push(super::backend::PersistCommand::AppendTrace {
+            epoch: EPOCH,
+            session_id: session_id.to_string(),
+            trace: trace.clone(),
+            trace_order,
+        });
+    }
+    for node in &session.history_nodes {
+        commands.push(super::backend::PersistCommand::UpdateHistoryNode {
+            epoch: EPOCH,
+            session_id: session_id.to_string(),
+            node: node.clone(),
+        });
+    }
+    for branch in &session.history_branches {
+        commands.push(super::backend::PersistCommand::UpdateBranch {
+            epoch: EPOCH,
+            session_id: session_id.to_string(),
+            branch: branch.clone(),
+        });
+    }
+    commands.push(super::backend::PersistCommand::UpdateCursor {
+        epoch: EPOCH,
+        session_id: session_id.to_string(),
+        cursor: session.history_cursor.clone(),
+    });
+    commands.push(super::backend::PersistCommand::ReplaceHistory {
+        epoch: EPOCH,
+        session_id: session_id.to_string(),
+        messages: session.history.clone(),
+    });
+    commands.push(super::backend::PersistCommand::UpdateSessionMeta {
+        epoch: EPOCH,
+        session_id: session_id.to_string(),
+        meta_patch: super::backend::SessionMetaPatch {
+            title: Some(session.title.clone()),
+            title_override: Some(session.title_override.clone()),
+            archived: Some(session.archived),
+            summary: Some(session.summary.clone()),
+            turn_count: Some(session.turn_count),
+            last_referenced_file: session.last_referenced_file.clone(),
+            updated_at_ms: Some(session.updated_at_ms),
+        },
+    });
+    backend.persist_commands_batch(commands)
+}

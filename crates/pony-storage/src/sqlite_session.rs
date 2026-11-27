@@ -1208,7 +1208,7 @@ impl SqliteSessionBackend {
                 | PersistCommand::UpdateTraceTerminal { session_id, .. }
                 | PersistCommand::AppendHookRecords { session_id, .. }
                 | PersistCommand::UpdateHistoryNode { session_id, .. }
-                | PersistCommand::CompactHistory { session_id, .. }
+                | PersistCommand::ReplaceHistory { session_id, .. } | PersistCommand::CompactHistory { session_id, .. }
                 | PersistCommand::UpdateCursor { session_id, .. }
                 | PersistCommand::UpdateBranch { session_id, .. }
                 | PersistCommand::UpdateSessionMeta { session_id, .. }
@@ -1477,7 +1477,7 @@ impl SqliteSessionBackend {
                 )
                 .map_err(|e| format!("update session meta: {e}"))?;
             }
-            PersistCommand::AppendProviderTranscript { .. } | PersistCommand::UpdateSessionMemory { .. } => super::session::fold::persist_session_content_tx(tx, command)?, // ADR 0102
+            PersistCommand::AppendProviderTranscript { .. } | PersistCommand::UpdateSessionMemory { .. } | PersistCommand::ReplaceHistory { .. } => super::session::fold::persist_session_content_tx(tx, command)?, // ADR 0102
             PersistCommand::RemoveSession { session_id, .. } => {
                 tx.execute(
                     "DELETE FROM normalized_sessions WHERE session_id = ?1",
@@ -2348,20 +2348,9 @@ impl SqliteSessionBackend {
                 session.event_watermark = session.history_cursor.event_watermark;
                 session.last_commit_watermark = session.history_cursor.event_watermark;
 
-                if let Some(visible_id) = &session.history_cursor.visible_node_id {
-                    if let Some(node) = session.history_nodes.iter().find(|n| &n.node_id == visible_id) {
-                        if !node.history.is_empty() {
-                            session.history = node.history.clone();
-                            session.long_term_memory_entries = node.long_term_memory_entries.clone();
-                            if node.turn_count > 0 {
-                                session.turn_count = node.turn_count;
-                            }
-                            if node.last_referenced_file.is_some() {
-                                session.last_referenced_file = node.last_referenced_file.clone();
-                            }
-                        }
-                    }
-                }
+                super::session::fold::apply_visible_node_projection_to_loaded_session(
+                    &mut session,
+                );
             }
 
             sessions.insert(session_id, session);

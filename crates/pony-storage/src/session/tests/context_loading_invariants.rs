@@ -352,3 +352,93 @@ fn t5_atomic_append_with_trace_populates_node_refs_and_survives_reload() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// T6：撤回截断同步清理 `normalized_messages`，`load_normalized_session` 重建视图绝不复活已撤回轮次或交错序号。
+#[test]
+fn t6_checkout_syncs_normalized_messages_and_root_projection() {
+    let dir = temp_sqlite_dir("t6");
+    let sid = "sess-t6-norm";
+    let db_path = dir.join("sessions.db");
+
+    {
+        let mut store = SessionStore::with_backend(new_sqlite_backend(
+            &dir,
+            SeparateTraceTableMode::WriteSeparate,
+        ));
+        store.append_turn_with_kind_and_trace(
+            Some(sid),
+            "Q1_REWIND_TARGET",
+            "A1_FAILED",
+            None,
+            Vec::new(),
+            Some(HistoryMessageKind::Error),
+            Some("turn-t6-1"),
+            None,
+        );
+        let (nodes, _, _) = store.load_history_graph(Some(sid));
+        let root_node_id = nodes
+            .iter()
+            .find(|n| matches!(n.kind, HistoryNodeKind::Checkpoint))
+            .expect("root checkpoint")
+            .node_id
+            .clone();
+        store
+            .checkout_history_node(
+                Some(sid),
+                &root_node_id,
+                HistoryCheckoutMode::TranscriptOnly,
+                None,
+            )
+            .expect("checkout to root");
+
+        let backend_probe = SqliteSessionBackend::new_with_trace_mode(
+            db_path.clone(),
+            SeparateTraceTableMode::WriteSeparate,
+        );
+        let after_rewind = backend_probe
+            .load_normalized_session(sid)
+            .expect("normalized projection exists");
+        assert!(
+            after_rewind.history.is_empty(),
+            "撤回至根 Checkpoint 后 normalized 投影必须为空，实际={:?}",
+            after_rewind.history
+        );
+
+        store.append_turn_with_kind_and_trace(
+            Some(sid),
+            "Q2_ACTIVE",
+            "A2_CANCELLED",
+            None,
+            Vec::new(),
+            Some(HistoryMessageKind::Cancelled),
+            Some("turn-t6-2"),
+            None,
+        );
+        store.append_turn_with_kind_and_trace(
+            Some(sid),
+            "Q3_ACTIVE",
+            "A3_DONE",
+            None,
+            Vec::new(),
+            None,
+            Some("turn-t6-3"),
+            None,
+        );
+    }
+
+    let backend_probe = SqliteSessionBackend::new_with_trace_mode(
+        db_path,
+        SeparateTraceTableMode::WriteSeparate,
+    );
+    let rebuilt = backend_probe
+        .load_normalized_session(sid)
+        .expect("normalized projection after new turns");
+    let contents: Vec<&str> = rebuilt.history.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(
+        contents,
+        vec!["Q2_ACTIVE", "A2_CANCELLED", "Q3_ACTIVE", "A3_DONE"],
+        "规范化表历史不得掺入已撤回的 Q1 或错乱序号"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

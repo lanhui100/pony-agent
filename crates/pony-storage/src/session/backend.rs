@@ -141,6 +141,15 @@ pub enum PersistCommand {
         session_id: String,
         node: HistoryNode,
     },
+    /// 可见历史快照的**整份替换**（`checkout_history_node` / 撤回截断用）。
+    ///
+    /// 撤回把后续轮次从活跃历史截断后，`normalized_messages` 若只增不删就会永久残留
+    /// 已撤回轮次的旧行（并在后续按 `ordinal` 查询时与新轮次交错复活）。
+    ReplaceHistory {
+        epoch: u64,
+        session_id: String,
+        messages: Vec<TurnHistoryMessage>,
+    },
     /// 上下文压缩提交：**一次压缩 = 一条 append-only 命令**。
     ///
     /// 语义（与 `TurnEvent::HistorySquash` 事件、`store.rs::commit_compaction`
@@ -368,6 +377,7 @@ impl PersistCommand {
             | PersistCommand::UpdateTraceTerminal { epoch, .. }
             | PersistCommand::AppendHookRecords { epoch, .. }
             | PersistCommand::UpdateHistoryNode { epoch, .. }
+            | PersistCommand::ReplaceHistory { epoch, .. }
             | PersistCommand::CompactHistory { epoch, .. }
             | PersistCommand::UpdateCursor { epoch, .. }
             | PersistCommand::UpdateBranch { epoch, .. }

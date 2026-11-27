@@ -486,7 +486,9 @@ fn e2e_pa01a21aa3_failed_turn_rewind_c5_cancel_and_restart_context_intact() {
     });
     assert_eq!(live_view.session.history.len(), 4, "活跃历史只含 Turn 3 与 Turn 4 共 4 条消息");
 
-    // 5) 冷重启重载：全量与稀疏装载均与 live 一致。
+    // 5) 冷重启重载：先释放旧控制面持有的独占写者句柄（Windows LockFileEx 对并发读取强制互斥），
+    //    再分别按 WriteSeparate 全量与稀疏重开 SQLite，历史与 trace 必须与 live 一致。
+    drop(control_plane);
     let reloaded = SessionStore::with_backend(Box::new(
         SqliteSessionBackend::new_with_trace_mode(db_path.clone(), SeparateTraceTableMode::WriteSeparate),
     ));
@@ -496,6 +498,7 @@ fn e2e_pa01a21aa3_failed_turn_rewind_c5_cancel_and_restart_context_intact() {
     assert_eq!(snap.history[2].content, "TURN4_CONTINUATION_QUESTION");
     assert_eq!(snap.history[3].content, "TURN4_FINAL_ANSWER");
     assert!(snap.history_nodes.iter().any(|n| n.kind == HistoryNodeKind::TurnRewound));
+    drop(reloaded);
 
     let mut lazy = SessionStore::open_lazy_with_backend(Box::new(
         SqliteSessionBackend::new_with_trace_mode(db_path, SeparateTraceTableMode::WriteSeparate),
