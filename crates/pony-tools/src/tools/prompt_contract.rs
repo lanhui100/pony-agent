@@ -47,6 +47,11 @@ pub const GUIDELINES: &[ToolGuideline] = &[
         text: "Only mark complete via `{{tool}}` when the objective is actually achieved. Pause and resume require direct human intent. Mark blocked only when the same concrete blocker persists across at least 3 consecutive rounds.",
     },
     ToolGuideline {
+        key: "plan_mode_scope",
+        primitive: "plan_control",
+        text: "Plan mode: `{{tool}}` gates a plan for approval, never a task list; steps stay in Todo.",
+    },
+    ToolGuideline {
         key: "todo_implementation_planning",
         primitive: "todo_write",
         text: "Before executing complex multi-step work, plan concrete steps using `{{tool}}`. Keep tasks updated as progress occurs.",

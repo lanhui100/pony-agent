@@ -501,7 +501,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         // ── PA-076 phase 7 P2-6: Plan + ViewImage 追加在既有定义之后，保持稳定前缀（Decision 10）。 ──
         ToolDefinition {
             name: TOOL_PLAN_CONTROL,
-            description: "控制会话级 Plan 状态：create / replace / merge / complete_step / start_execution / abort，不执行任意子调用。",
+            description: "Plan 模式控制面（写方案 + 请求批准），不是任务清单：步骤进度一律走 TodoWrite，团队分工走 team_task_*，长程目标走 create_goal。不执行任意子调用。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
@@ -751,7 +751,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_TEAM_TASK_CREATE,
-            description: "在团队任务看板上创建待认领任务，支持设置写域范围与依赖阻塞。",
+            description: "在团队共享看板上创建待认领任务（多智能体分工，含写域与依赖阻塞）；单智能体自己的步骤用 TodoWrite，不要用看板。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
@@ -817,7 +817,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_TODO_WRITE,
-            description: "记录并全量覆写当前任务列表以规划多步工作并展示进度；单步简单任务可跳过。在开始前为每个具体步骤添加一条 todo；当仍有工作剩余时，将正在执行的任务置为 in_progress（支持并发多个）；某个步骤经物理验证完成后，立即更新置为 completed。参数直接传入全量 todos 列表。",
+            description: "记录并全量覆写**本智能体**的步骤清单（Todo）以规划多步工作并展示进度；单步简单任务可跳过。团队分工用 team_task_*，长程目标用 create_goal，Plan 模式不是任务清单。在开始前为每个具体步骤添加一条 todo；当仍有工作剩余时，将正在执行的任务置为 in_progress（支持并发多个）；某个步骤经物理验证完成后，立即更新置为 completed。参数直接传入全量 todos 列表。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
@@ -851,7 +851,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_TODO_LIST,
-            description: "获取当前 session 记录的 todo 任务列表及状态。",
+            description: "获取当前 session 记录的 Todo 步骤列表及状态（单智能体步骤，非团队看板、非 Plan 模式）。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {
@@ -888,7 +888,7 @@ pub fn builtin_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_CREATE_GOAL,
-            description: "创建会话目标，使 Agent 在同会话内支持跨多轮自动续行追求持久目标。",
+            description: "创建会话级持久目标（跨多轮自动续行的顶层验收标准）；它不承载步骤清单——步骤归 TodoWrite。Plan 模式是方案审批，团队分工是 team_task_*。",
             input_schema: with_description(json!({
                 "type": "object",
                 "properties": {

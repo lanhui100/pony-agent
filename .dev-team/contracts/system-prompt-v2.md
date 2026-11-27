@@ -1,10 +1,10 @@
 # 冻结契约：系统提示词 v2（System Prompt v2）
 
-- 契约版本：`v2.3.0`
+- 契约版本：`v2.4.0`
 - 状态：**FROZEN（冻结）**
 - 负责人：Protocol Agent（契约面）/ Lead（唯一解冻权）
 - 关联决策：[ADR 0007](../../docs/decisions/)（提示层序与前缀缓存）、[提示词-工具一致性门禁与契约对齐](../../.agents/notes/implemented/process/2026-11-13-prompt-tool-consistency-gate.md)
-- 冻结时间：2026-10-20；修订：2026-11-13（v2.1.0 契约回填 / v2.2.0 模板化解耦 / v2.3.0 结构与快照门禁）
+- 冻结时间：2026-10-20；修订：2026-11-13（v2.1.0 契约回填 / v2.2.0 模板化解耦 / v2.3.0 结构与快照门禁）；2026-11-27（v2.4.0 Plan 模式边界条款，见 ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）
 
 **版本沿革**：v2.2.0 → v2.3.0 新增**结构与快照门禁**（ST1–ST3）：片段断言查不出「段落换位/新增段/整段改写」，故把 BASE 顶层条目序列、团队策略段顶层条目序列与团队策略段全文快照一并冻结；渲染文本与字节数不变。v2.1.0 → v2.2.0 是**所有权搬迁**：稳定层提示词改为「模板 + 占位符 + 工具注册表渲染」，提示词模板本体不再出现工具专名，**渲染结果逐字节不变**（BASE 3790B / 团队段 2624B），模型可见行为零变化。v2.0.0 → v2.1.0 是对**已发生漂移的收敛**，未删除任何承诺条款。v2.0.0 冻结后，代码经 receipts / 不可信数据边界 / goal 策略等 ADR 追加了条款，但本文件未同步，导致 §2 全文、SP2/SP7 片段、§6 字节数（3099）、SP9 阈值（3400）四项与代码失配。本次按代码现状回填，并新增 §7 一致性门禁，把「文档 ⇄ 代码」与「提示词 ⇄ 工具表」变成机械可验的承诺。
 
@@ -65,6 +65,7 @@ You are Pony Agent, an AI agent that collaborates with the user inside a shared 
   * Proactive goal anchoring: For multi-step, iterative, or long-running tasks, proactively anchor the session goal with `create_goal` even if the user did not say "goal". Skip for trivial single-turn questions.
   * Goal lifecycle: Only mark complete via `update_goal` when the objective is actually achieved. Pause and resume require direct human intent. Mark blocked only when the same concrete blocker persists across at least 3 consecutive rounds.
   * Implementation planning: Before executing complex multi-step work, plan concrete steps using `TodoWrite`. Keep tasks updated as progress occurs.
+  * Plan mode: `Plan` gates a plan for approval, never a task list; steps stay in Todo.
 - Output principles optimized for human attention and scanning (F-pattern cognitive flow):
   * Concise by default: Prohibit lengthy preamble, conversational filler, sycophancy, or redundant narrative. Focus directly on answering questions or delivering results.
   * Conclusion first: Put core conclusions, outcomes, and answers in the opening lines.
@@ -138,12 +139,12 @@ You are Pony Agent, an AI agent that collaborates with the user inside a shared 
 
 | 项目 | 实测 |
 | --- | --- |
-| 提示词全文 UTF-8 字节数 | **3790**（含尾部换行；字符 3766） |
+| 提示词全文 UTF-8 字节数 | **3878**（含尾部换行；v2.4.0 起） |
 | 正例片段全命中 | SP1/SP2/SP3/SP4/SP5/SP7/SP8 全部 `true` |
 | 负例片段全缺席 | `2-3 lines`、`Understand the latest request and solve it directly`、`Only rely on the visible request context`、`Initialize pending items`、`` `todo_write` `` 全部 `false` |
 | `cargo check -p pony-agent-core` | Exit Code 0 |
 | 代码侧读取入口 | `context.rs::base_system_prompt()`（测试禁止直接引用私有常量） |
-| SP9 阈值 | 逐字冻结 `== 3790` 字节（代码内断言）+ 护栏 `<= 3900`（测试 SP9） |
+| SP9 阈值 | 逐字冻结 `== 3878` 字节（代码内断言）+ 护栏 `<= 3900`（测试 SP9） |
 
 **裁决凭证**：v2.0.0 时 Lead 裁决 SP9 2400→3400（依据 v1=3230B / v2=3099B 实测）。v2.1.0 回填时按代码实测 3790B 重新登记；护栏 3900B 保留 110B 余量，逐字冻结断言承担「文案只能按契约改」的强约束。
 
