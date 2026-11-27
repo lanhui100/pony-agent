@@ -33,4 +33,4 @@ Status: implemented
 
 - 涉及源码：`crates/pony-agent-core/src/agent/compression.rs`、`crates/pony-agent-core/src/agent/retry.rs`、`crates/pony-agent-core/src/agent/runtime/compaction_ops.rs`、`crates/pony-agent-core/src/agent/runtime/overflow_rescue.rs`、`crates/pony-agent-core/src/agent/runtime/turn_stream.rs`、`crates/pony-agent-core/src/agent/runtime/turn_sync.rs`。
 - 1M 上下文重工具会话在到达 80% 线或执行 `/compact` 时不再卡死于 `history_too_short`，且上游返回 `400 context_length_exceeded` / `413 Payload Too Large` 时可自动触发一轮受控压缩/裁剪并恢复。
-- 残余边界：单轮中途已执行多个 tool hop 后的 follow-up 溢出当前仍按既有失败检查点收口，下一轮用户继续时即可命中本自救路径并安全恢复（不在同一轮内篡改进行中的 `accumulated_messages` 以免破坏工具去重与计费语义）。
+- 残余边界：单轮中途已执行多个 tool hop 后的 follow-up 溢出此前按既有失败检查点收口；该缺口已由 `.agents/notes/implemented/bug-fix/2026-11-26-tool-followup-overflow-rescue.md` 补齐单次受控自救接线（首轮单工具结果自身过大且无历史可压时仍按失败终态落盘）。

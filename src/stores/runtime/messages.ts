@@ -258,7 +258,7 @@ export const messagesActions = {
   },
   /**
    * 处理选中的文件并加入待发送附件列表。逐文件：类型解析（扩展名优先/MIME 兜底）→
-   * 大小上限 → 图片数量上限（3）→ 浏览器模式二进制文档拒绝 → 去重 → 图片魔数嗅探 →
+   * 大小上限 → 图片数量上限（600）→ 浏览器模式二进制文档拒绝 → 去重 → 图片魔数嗅探 →
    * 文本内容截断 → 宿主导入（Tauri）或内存引用（浏览器）。
    */
   async addPendingAttachments(this: RuntimeStoreThis, 

@@ -18,8 +18,8 @@ export type AttachmentHandlerSpec = {
   injectMaxBytes: number;
 };
 
-/** 与后端 `MAX_TURN_IMAGES = 3` 对齐（runtime/mod.rs:244）。 */
-export const MAX_TURN_IMAGES = 3;
+/** 与后端 `MAX_TURN_IMAGES = 600` 对齐（runtime/trace_timeline.rs）。 */
+export const MAX_TURN_IMAGES = 600;
 
 /** 文本注入内容预算（spec.md 规范值）。 */
 export const TEXT_INJECT_MAX_BYTES = 64 * 1024;
@@ -31,7 +31,7 @@ export const IMPORT_RELATIVE_DIR = ".tmp/imports";
 export type SniffedImageKind = "png" | "jpeg" | "webp" | "gif";
 
 export const ATTACHMENT_TYPE_REGISTRY: AttachmentHandlerSpec[] = [
-  // 图片 → 多模态输入（dataUrl），后端上限 3 张
+  // 图片 → 多模态输入（dataUrl），后端上限 600 张
   {
     route: "image",
     mimeTypes: ["image/png", "image/jpeg", "image/webp", "image/gif"],
