@@ -896,6 +896,11 @@ impl ProviderManager {
         self.config.max_output_tokens
     }
 
+    /// 该 provider 模型是否具备流式输出能力。
+    pub fn supports_streaming(&self) -> bool {
+        self.config.capabilities.supports_streaming
+    }
+
     pub fn supports_true_streaming_followup(&self) -> bool {
         if !self.config.capabilities.supports_streaming {
             return false;
@@ -1492,23 +1497,59 @@ impl ProviderManager {
                 tool_call,
                 tool_result,
             )?;
-            if let Some(reasoning_content) = response.reasoning_content.clone() {
-                on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
-            }
-            on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
+            replay_sync_response_as_deltas(&response, &mut on_delta);
             return Ok(response);
         }
 
-        provider_log(format!(
-            "followup:start mode=stream requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={} ",
-            self.config.requested_name,
-            self.config.provider_name,
-            self.protocol_label(),
-            request.model,
-            tool_call.name,
-            tool_result.status,
-            preview_text(&tool_result.output, 160)
-        ));
+        self.dispatch_followup_stream_bounded(
+            guard,
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            std::slice::from_ref(tool_call),
+            std::slice::from_ref(tool_result),
+            on_delta,
+        )
+    }
+
+    fn dispatch_followup_stream_bounded<F>(
+        &self,
+        guard: &ProviderStreamGuard<'_>,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        calls: &[ToolCall],
+        results: &[ToolResult],
+        mut on_delta: F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        if calls.len() == 1 && results.len() == 1 {
+            let tool_call = &calls[0];
+            let tool_result = &results[0];
+            provider_log(format!(
+                "followup:start mode=stream requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={} ",
+                self.config.requested_name,
+                self.config.provider_name,
+                self.protocol_label(),
+                request.model,
+                tool_call.name,
+                tool_result.status,
+                preview_text(&tool_result.output, 160)
+            ));
+        } else {
+            provider_log(format!(
+                "followup:start mode=stream requested={} provider={} protocol={} model={} calls={} ",
+                self.config.requested_name,
+                self.config.provider_name,
+                self.protocol_label(),
+                request.model,
+                calls.len()
+            ));
+        }
         if self.config.api_key.is_none() {
             let error = format!(
                 "provider {} missing API key; please save a key in the model config page (field: {}).",
@@ -1520,31 +1561,19 @@ impl ProviderManager {
 
         match self.config.protocol {
             ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
-                // 流式断流/超时等网络瞬态错误允许退避重试；仅在用户显式取消时提前放弃。
+                // 流式断流/超时等网络瞬态错误允许退避重试；仅在用户显式取消或发出可见文本后放弃。
                 let on_delta_cell = std::cell::RefCell::new(on_delta);
-                // PA-174 F1 的**流式对偶**（B1795488338107）：与同步 1:1 臂同构——构造器在
-                // **每次尝试内**把「assistant + tool」写回 `accumulated_messages`
-                // （`openai_messages_with_tool_result`）。若重试沿用上次写回结果作 base，
-                // 每次尝试都会在转录尾部再追加一遍 ⇒ 2N 条重复往返、请求体积几何膨胀
-                // （上游按重复内容计费，边缘侧还会因请求体过大/高频重发直接 RST）。
-                // 故每次尝试前重置为进入本入口时的 pristine 快照：成功 = base + 恰好 1 次追加。
+                // PA-174 F1 的**流式对偶**：每次尝试前重置为入口时的 pristine 快照，
+                // 避免重试向 `accumulated_messages` 尾部重复追加 `assistant + tool`。
                 let base_messages = accumulated_messages.clone();
-                // B1795488338107 评审 B1（blocker）：`StreamState` 的「发出可见增量后禁止
-                // 自动重试」在生产流式循环里**从未被驱动**（`decide` 恒传 `NoDelta`），
-                // 而此处的 `no_more_retries_hint` 只查用户取消（`guard.cancel_requested()`，
-                // 生产路径 `without_cancel()` 恒 false）。于是 SSE 发出可见文本后遇可重试
-                // 传输错误（`unexpected eof` / `connection closed before message completed`）
-                // 仍会重试，并把 attempt 1 的半截增量与 attempt 2 的输出**重复上屏**。
-                // 这里把该信号真正接线：跨 attempt 累计（一旦发出即置位，不随重置清零）。
+                // 跨 attempt 累计：一旦发出可见 Text 增量即置位，禁止自动重试导致重复上屏。
                 let emitted_visible = std::cell::Cell::new(false);
-                let stream_result = retry_provider_followup_stream_timeout_with_policy(
+                retry_provider_followup_stream_timeout_with_policy(
                     "followup_stream",
                     &self.policy,
                     || {
                         accumulated_messages.clone_from(&base_messages);
                         let mut delta_sink = on_delta_cell.borrow_mut();
-                        // 只把 `Text` 计入「可见增量」：`Reasoning` 与 `StreamStart` 按既有
-                        // `StreamState::may_auto_retry` 口径仍允许重试（不改变既有语义）。
                         let mut record_visible = |chunk: ProviderStreamChunk| {
                             if matches!(chunk, ProviderStreamChunk::Text(_)) {
                                 emitted_visible.set(true);
@@ -1559,8 +1588,8 @@ impl ProviderManager {
                                     tools,
                                     accumulated_messages,
                                     assistant_message,
-                                    tool_call,
-                                    tool_result,
+                                    calls,
+                                    results,
                                     &mut record_visible,
                                 ),
                             _ => self.send_openai_tool_followup_stream_request(
@@ -1569,20 +1598,14 @@ impl ProviderManager {
                                 tools,
                                 accumulated_messages,
                                 assistant_message,
-                                tool_call,
-                                tool_result,
+                                calls,
+                                results,
                                 &mut record_visible,
                             ),
                         }
                     },
                     &|| guard.cancel_requested() || emitted_visible.get(),
-                );
-                // B254 C1/C4：流式是唯一通道。策略重试已耗尽时**原样上抛**真实错误，
-                // 不再回退同步 buffered 请求，也不再合成「本地兜底摘要」冒充模型输出。
-                match stream_result {
-                    Ok(response) => Ok(response),
-                    Err(stream_error) => Err(stream_error),
-                }
+                )
             }
             ProviderProtocol::AnthropicMessages => self
                 .send_anthropic_tool_followup_stream_request(
@@ -1591,8 +1614,8 @@ impl ProviderManager {
                     tools,
                     accumulated_messages,
                     assistant_message,
-                    tool_call,
-                    tool_result,
+                    calls,
+                    results,
                     &mut on_delta,
                 ),
         }
@@ -1753,14 +1776,50 @@ impl ProviderManager {
         outcome.map_err(|degraded| last_provider_error.unwrap_or(degraded))
     }
 
-    /// D2：批量工具结果 followup（流式入口）。分派顺序与同步入口逐字一致。
+    /// D2/2026-11-27 修订：批量工具结果 followup（流式入口）。
     ///
-    /// N>1 的传输沿用 §6 指定的既有同步 `post_*` 通道（不新写 HTTP 层），整段结果按
-    /// 「reasoning → text」顺序回放为增量——与既有 `!supports_streaming` 分支同一语义
-    /// （`continue_with_tool_result_stream_bounded`），因此批量路径**不是**逐 token 增量。
-    #[allow(clippy::too_many_arguments)]
+    /// 分派顺序：
+    /// 1) 长度不匹配 / 空集合 ⇒ 立刻 `Err`（零 HTTP）；
+    /// 2) `calls.len() == 1` ⇒ 逐字委派既有 1:1 流式入口；
+    /// 3) `!supports_streaming` ⇒ 走同步 `continue_with_tool_results` 并整段回放；
+    /// 4) `supports_streaming && N > 1` ⇒ 走真流式 SSE 通道（不回退 45s 同步通道）。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "沿用 provider tool followup 既有签名形状"
+    )]
     pub fn continue_with_tool_results_stream<F>(
         &self,
+        request: &ProviderRequest,
+        tools: &[ToolDefinition],
+        accumulated_messages: &mut Vec<Value>,
+        assistant_message: Option<&Value>,
+        calls: &[ToolCall],
+        results: &[ToolResult],
+        on_delta: F,
+    ) -> Result<ProviderResponse, String>
+    where
+        F: FnMut(ProviderStreamChunk),
+    {
+        self.continue_with_tool_results_stream_bounded(
+            &ProviderStreamGuard::without_cancel(),
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            calls,
+            results,
+            on_delta,
+        )
+    }
+
+    /// 带取消守卫的批量工具结果流式 followup 入口。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "沿用 provider tool followup 既有签名形状"
+    )]
+    pub fn continue_with_tool_results_stream_bounded<F>(
+        &self,
+        guard: &ProviderStreamGuard<'_>,
         request: &ProviderRequest,
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
@@ -1783,7 +1842,8 @@ impl ProviderManager {
             return Err("tool_calls/tool_results must not be empty".to_string());
         }
         if calls.len() == 1 {
-            return self.continue_with_tool_result_stream(
+            return self.continue_with_tool_result_stream_bounded(
+                guard,
                 request,
                 tools,
                 accumulated_messages,
@@ -1794,19 +1854,31 @@ impl ProviderManager {
             );
         }
 
-        let response = self.continue_with_tool_results(
+        let request_cow = self.sanitize_request(request);
+        let request = request_cow.as_ref();
+        if !self.config.capabilities.supports_streaming {
+            let response = self.continue_with_tool_results(
+                request,
+                tools,
+                accumulated_messages,
+                assistant_message,
+                calls,
+                results,
+            )?;
+            replay_sync_response_as_deltas(&response, &mut on_delta);
+            return Ok(response);
+        }
+
+        self.dispatch_followup_stream_bounded(
+            guard,
             request,
             tools,
             accumulated_messages,
             assistant_message,
             calls,
             results,
-        )?;
-        if let Some(reasoning_content) = response.reasoning_content.clone() {
-            on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
-        }
-        on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
-        Ok(response)
+            on_delta,
+        )
     }
 
     /// D2：OpenAI chat completions 的批量回填（1 assistant + N tool），复用 `post_openai_json`。
@@ -2131,6 +2203,10 @@ impl ProviderManager {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "沿用 provider tool followup 既有签名形状"
+    )]
     fn send_openai_tool_followup_stream_request<F>(
         &self,
         guard: &ProviderStreamGuard<'_>,
@@ -2138,8 +2214,8 @@ impl ProviderManager {
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
+        calls: &[ToolCall],
+        results: &[ToolResult],
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
@@ -2149,25 +2225,45 @@ impl ProviderManager {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        provider_log(format!(
-            "request:openai followup-stream endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
-        let messages = normalize_openai_messages(openai_messages_with_tool_result(
+        if calls.len() == 1 {
+            provider_log(format!(
+                "request:openai followup-stream endpoint={} model={} tool={}",
+                endpoint, request.model, calls[0].name
+            ));
+        } else {
+            provider_log(format!(
+                "request:openai followup-stream endpoint={} model={} calls={}",
+                endpoint,
+                request.model,
+                calls.len()
+            ));
+        }
+        let messages = build_openai_followup_stream_messages(
             request,
             accumulated_messages,
             assistant_message,
-            tool_call,
-            tool_result,
-        ));
-        {
-            let tool_call_id = tool_call
-                .call_id
-                .clone()
-                .unwrap_or_else(|| "tool_call_local".to_string());
+            calls,
+            results,
+        )?;
+        let tool_call_ids = calls
+            .iter()
+            .map(|call| {
+                call.call_id
+                    .clone()
+                    .unwrap_or_else(|| "tool_call_local".to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        if calls.len() == 1 {
             provider_log(format!(
                 "request:openai followup-stream tool_call_id={} messages={}",
-                tool_call_id,
+                tool_call_ids,
+                messages.len(),
+            ));
+        } else {
+            provider_log(format!(
+                "request:openai followup-stream tool_call_ids={} messages={}",
+                tool_call_ids,
                 messages.len(),
             ));
         }
@@ -2269,6 +2365,10 @@ impl ProviderManager {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "沿用 provider tool followup 既有签名形状"
+    )]
     fn send_anthropic_tool_followup_stream_request<F>(
         &self,
         guard: &ProviderStreamGuard<'_>,
@@ -2276,23 +2376,49 @@ impl ProviderManager {
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
+        calls: &[ToolCall],
+        results: &[ToolResult],
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
         F: FnMut(ProviderStreamChunk),
     {
         let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
-        provider_log(format!(
-            "request:anthropic followup-stream endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
+        if calls.len() == 1 {
+            provider_log(format!(
+                "request:anthropic followup-stream endpoint={} model={} tool={}",
+                endpoint, request.model, calls[0].name
+            ));
+        } else {
+            provider_log(format!(
+                "request:anthropic followup-stream endpoint={} model={} calls={}",
+                endpoint,
+                request.model,
+                calls.len()
+            ));
+        }
+        let messages = if calls.len() == 1 && results.len() == 1 {
+            anthropic_messages_with_tool_result(
+                request,
+                accumulated_messages,
+                assistant_message,
+                &calls[0],
+                &results[0],
+            )
+        } else {
+            anthropic_followup_messages_for_tool_results(
+                request,
+                accumulated_messages,
+                assistant_message,
+                calls,
+                results,
+            )?
+        };
         let body = with_anthropic_request_options(
             json!({
                 "model": request.model,
                 "system": anthropic_system_text(&request.input),
-                "messages": anthropic_messages_with_tool_result(request, accumulated_messages, assistant_message, tool_call, tool_result),
+                "messages": messages,
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": true,
@@ -2499,6 +2625,10 @@ impl ProviderManager {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "沿用 provider tool followup 既有签名形状"
+    )]
     fn send_responses_tool_followup_stream_request<F>(
         &self,
         guard: &ProviderStreamGuard<'_>,
@@ -2506,25 +2636,34 @@ impl ProviderManager {
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
+        calls: &[ToolCall],
+        results: &[ToolResult],
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
         F: FnMut(ProviderStreamChunk),
     {
         let endpoint = self.responses_endpoint();
-        provider_log(format!(
-            "request:responses followup-stream endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
-        let messages = openai_messages_with_tool_result(
+        if calls.len() == 1 {
+            provider_log(format!(
+                "request:responses followup-stream endpoint={} model={} tool={}",
+                endpoint, request.model, calls[0].name
+            ));
+        } else {
+            provider_log(format!(
+                "request:responses followup-stream endpoint={} model={} calls={}",
+                endpoint,
+                request.model,
+                calls.len()
+            ));
+        }
+        let messages = build_openai_followup_stream_messages(
             request,
             accumulated_messages,
             assistant_message,
-            tool_call,
-            tool_result,
-        );
+            calls,
+            results,
+        )?;
         let mut conversion_request = request.clone();
         conversion_request.native_messages = messages;
         let body = build_responses_request_body(&conversion_request, tools, &self.config, true);
@@ -2539,20 +2678,16 @@ impl ProviderManager {
         )?;
         finalize_responses_stream_message(message, "followup", request).map(
             |(output_text, tool_call, reasoning_content, reasoning_content_value, token_usage)| {
-                let assistant_message = match tool_call.as_ref() {
-                    Some(call) => provider_native_assistant_tool_call_message_with_reasoning_value(
-                        text_if_present(&output_text),
-                        reasoning_content_value.as_ref(),
-                        call,
-                    ),
-                    None => provider_native_assistant_message_with_reasoning_value(
-                        &output_text,
-                        reasoning_content_value.as_ref(),
-                    ),
-                };
+                let tool_calls = tool_calls_from_single(&tool_call);
+                let assistant_message = build_openai_stream_assistant_message(
+                    &output_text,
+                    reasoning_content_value.as_ref(),
+                    tool_call.as_ref(),
+                    &tool_calls,
+                );
                 ProviderResponse {
                     output_text,
-                    tool_calls: tool_calls_from_single(&tool_call),
+                    tool_calls,
                     tool_call,
                     reasoning_content,
                     reasoning_content_value,
@@ -2592,20 +2727,12 @@ impl ProviderManager {
             .clone()
             .unwrap_or_else(|| estimate_token_usage(request, &output_text));
         provider_log_token_usage("openai followup-stream", &token_usage);
-        let assistant_message = if let Some(tool_call) = message.tool_call.as_ref() {
-            Some(
-                provider_native_assistant_tool_call_message_with_reasoning_value(
-                    text_if_present(&output_text),
-                    message.reasoning_content_value.as_ref(),
-                    tool_call,
-                ),
-            )
-        } else {
-            Some(provider_native_assistant_message_with_reasoning_value(
-                &output_text,
-                message.reasoning_content_value.as_ref(),
-            ))
-        };
+        let assistant_message = Some(build_openai_stream_assistant_message(
+            &output_text,
+            message.reasoning_content_value.as_ref(),
+            message.tool_call.as_ref(),
+            &message.tool_calls,
+        ));
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
@@ -2975,20 +3102,12 @@ impl ProviderManager {
             .unwrap_or_else(|| estimate_token_usage(request, &output_text));
         provider_log_token_usage("openai decision-stream", &token_usage);
 
-        let assistant_message = if let Some(tool_call) = tool_call.as_ref() {
-            Some(
-                provider_native_assistant_tool_call_message_with_reasoning_value(
-                    text_if_present(&output_text),
-                    message.reasoning_content_value.as_ref(),
-                    tool_call,
-                ),
-            )
-        } else {
-            Some(provider_native_assistant_message_with_reasoning_value(
-                &output_text,
-                message.reasoning_content_value.as_ref(),
-            ))
-        };
+        let assistant_message = Some(build_openai_stream_assistant_message(
+            &output_text,
+            message.reasoning_content_value.as_ref(),
+            tool_call.as_ref(),
+            &tool_calls,
+        ));
 
         Ok(ProviderDecision {
             output_text,
@@ -6066,6 +6185,68 @@ pub fn anthropic_messages_with_tool_results(
         .collect();
     out.push(json!({ "role": "user", "content": blocks }));
     Ok(out)
+}
+
+/// 将非流式回填响应按 `reasoning -> text` 顺序回放为增量事件（用于 `!supports_streaming` 分支）。
+fn replay_sync_response_as_deltas<F>(response: &ProviderResponse, on_delta: &mut F)
+where
+    F: FnMut(ProviderStreamChunk),
+{
+    if let Some(reasoning_content) = response.reasoning_content.clone() {
+        on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
+    }
+    on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
+}
+
+/// 为 OpenAI 流式 followup（1:1 与批量共用）构造标准化消息转录并更新 `accumulated_messages`。
+fn build_openai_followup_stream_messages(
+    request: &ProviderRequest,
+    accumulated_messages: &mut Vec<Value>,
+    assistant_message: Option<&Value>,
+    calls: &[ToolCall],
+    results: &[ToolResult],
+) -> Result<Vec<Value>, String> {
+    if calls.len() == 1 && results.len() == 1 {
+        Ok(normalize_openai_messages(openai_messages_with_tool_result(
+            request,
+            accumulated_messages,
+            assistant_message,
+            &calls[0],
+            &results[0],
+        )))
+    } else {
+        openai_followup_messages_for_tool_results(
+            request,
+            accumulated_messages,
+            assistant_message,
+            calls,
+            results,
+        )
+    }
+}
+
+/// 按流式响应中的完整 `tool_calls` 列表（无则回落单值）构造 OpenAI native assistant 消息。
+fn build_openai_stream_assistant_message(
+    output_text: &str,
+    reasoning_content_value: Option<&Value>,
+    tool_call: Option<&ToolCall>,
+    tool_calls: &[ToolCall],
+) -> Value {
+    if !tool_calls.is_empty() {
+        provider_native_assistant_tool_calls_message_with_reasoning_value(
+            text_if_present(output_text),
+            reasoning_content_value,
+            tool_calls,
+        )
+    } else if let Some(call) = tool_call {
+        provider_native_assistant_tool_call_message_with_reasoning_value(
+            text_if_present(output_text),
+            reasoning_content_value,
+            call,
+        )
+    } else {
+        provider_native_assistant_message_with_reasoning_value(output_text, reasoning_content_value)
+    }
 }
 
 /// D2：批量回填的 OpenAI chat 转录（基础转录 + 1 assistant + N tool），并写回累积转录。
