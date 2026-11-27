@@ -4073,7 +4073,10 @@ pub fn approve_pending_plan(control_plane: &HostControlPlane, session_id: &str) 
     if !has_plan {
         return "当前会话还没有提交待审方案（模型调用 ExitPlanMode 后即可批准）".to_string();
     }
-    match control_plane.plan_mode_review(session_id, true) {
+    match control_plane.plan_mode_review(
+        session_id,
+        pony_agent_core::agent::plan_mode::PlanReviewDecision::Approve,
+    ) {
         Ok(_) => "已批准方案：Plan 模式已退出，写文件/跑命令已解锁".to_string(),
         Err(error) => format!("批准方案失败：{error}"),
     }
@@ -9392,7 +9395,14 @@ fn apply_plan_mode_switch(
     arg: &str,
 ) {
     let turn_off = arg.trim().eq_ignore_ascii_case("off");
-    match control_plane.plan_mode_set(&state.session_id, !turn_off) {
+    match control_plane.plan_mode_set(
+        &state.session_id,
+        if turn_off {
+            pony_agent_core::agent::plan_mode::ModeToggle::Exit
+        } else {
+            pony_agent_core::agent::plan_mode::ModeToggle::Enter
+        },
+    ) {
         Ok(projection) => {
             state.update_plan_from_projection(&projection);
             let entering = state.mode != InteractionMode::PlanMode && !turn_off;

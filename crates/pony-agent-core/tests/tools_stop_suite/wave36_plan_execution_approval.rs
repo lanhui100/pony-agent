@@ -91,7 +91,7 @@ fn error_code(output: &str) -> Option<String> {
 fn c141_1_submitting_a_plan_does_not_approve_it() {
     let cp = plan_control_plane();
     let target = session("submit-only");
-    cp.plan_mode_set(&target, true).expect("enter");
+    cp.plan_mode_set(&target, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
     cp.plan_mode_commit(&target);
 
     let submitted = cp.plan_mode_get(&target);
@@ -108,7 +108,7 @@ fn c141_1_submitting_a_plan_does_not_approve_it() {
 fn c141_2_model_arguments_cannot_forge_approval() {
     let cp = plan_control_plane();
     let target = session("forge");
-    cp.plan_mode_set(&target, true).expect("enter");
+    cp.plan_mode_set(&target, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
     cp.plan_mode_commit(&target);
 
     // 模型没有任何"带 approved 参数"的入口：ExitPlanMode 的 schema 只有 plan。
@@ -135,7 +135,7 @@ fn c141_3_approval_unlocks_writes_only_after_the_host_decides() {
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let cp = plan_control_plane();
     let target = session("unlock");
-    cp.plan_mode_set(&target, true).expect("enter");
+    cp.plan_mode_set(&target, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
     cp.plan_mode_commit(&target);
 
     let exec_context = ToolExecutionContext {
@@ -152,7 +152,7 @@ fn c141_3_approval_unlocks_writes_only_after_the_host_decides() {
 
     // 宿主批准（必须先有提交的方案）。
     pony_agent_core::agent::plan_mode::submit_plan(&target, "# 方案");
-    cp.plan_mode_review(&target, true).expect("approve");
+    cp.plan_mode_review(&target, pony_tools::plan_mode::PlanReviewDecision::Approve).expect("approve");
 
     let allowed = execute_in_session(&executor, &target, &write_call("after.txt"));
     assert_eq!(allowed, "ok", "批准后写工具必须立刻解锁");
@@ -167,13 +167,13 @@ fn c141_4_approval_is_scoped_to_one_session() {
     let cp = plan_control_plane();
     let session_a = session("scope-a");
     let session_b = session("scope-b");
-    cp.plan_mode_set(&session_a, true).expect("enter a");
+    cp.plan_mode_set(&session_a, pony_tools::plan_mode::ModeToggle::Enter).expect("enter a");
     cp.plan_mode_commit(&session_a);
-    cp.plan_mode_set(&session_b, true).expect("enter b");
+    cp.plan_mode_set(&session_b, pony_tools::plan_mode::ModeToggle::Enter).expect("enter b");
     cp.plan_mode_commit(&session_b);
 
     pony_agent_core::agent::plan_mode::submit_plan(&session_a, "# A 的方案");
-    cp.plan_mode_review(&session_a, true).expect("approve a");
+    cp.plan_mode_review(&session_a, pony_tools::plan_mode::PlanReviewDecision::Approve).expect("approve a");
 
     assert_eq!(cp.plan_mode_get(&session_a)["active"].as_bool(), Some(false));
     assert_eq!(
@@ -188,13 +188,13 @@ fn c141_4_approval_is_scoped_to_one_session() {
 fn c141_5_approval_is_one_shot_per_plan() {
     let cp = plan_control_plane();
     let target = session("one-shot");
-    cp.plan_mode_set(&target, true).expect("enter");
+    cp.plan_mode_set(&target, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
     cp.plan_mode_commit(&target);
     pony_agent_core::agent::plan_mode::submit_plan(&target, "# 第一版方案");
-    cp.plan_mode_review(&target, true).expect("approve");
+    cp.plan_mode_review(&target, pony_tools::plan_mode::PlanReviewDecision::Approve).expect("approve");
 
     // 重新进入：方案仍是上一份（已批准标记保留），但模式重新激活后必须重新走审核。
-    cp.plan_mode_set(&target, true).expect("re-enter");
+    cp.plan_mode_set(&target, pony_tools::plan_mode::ModeToggle::Enter).expect("re-enter");
     cp.plan_mode_commit(&target);
     let state = cp.plan_mode_get(&target);
     assert_eq!(state["active"].as_bool(), Some(true), "重新进入必须重新锁定写权限");
@@ -212,11 +212,11 @@ fn c141_6_keep_planning_keeps_the_write_gate_closed() {
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let cp = plan_control_plane();
     let target = session("keep");
-    cp.plan_mode_set(&target, true).expect("enter");
+    cp.plan_mode_set(&target, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
     cp.plan_mode_commit(&target);
     pony_agent_core::agent::plan_mode::submit_plan(&target, "# 草案");
 
-    cp.plan_mode_review(&target, false).expect("keep planning");
+    cp.plan_mode_review(&target, pony_tools::plan_mode::PlanReviewDecision::KeepPlanning).expect("keep planning");
     let status = execute_in_session(&executor, &target, &write_call("still-blocked.txt"));
     assert_eq!(status, "error", "「继续规划」必须保持写门禁关闭");
     assert!(!workspace.join("still-blocked.txt").exists());
@@ -229,11 +229,11 @@ fn c141_6_keep_planning_keeps_the_write_gate_closed() {
 fn c141_7_review_without_a_plan_fails_closed() {
     let cp = plan_control_plane();
     let target = session("no-plan");
-    cp.plan_mode_set(&target, true).expect("enter");
+    cp.plan_mode_set(&target, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
     cp.plan_mode_commit(&target);
 
     let error = cp
-        .plan_mode_review(&target, true)
+        .plan_mode_review(&target, pony_tools::plan_mode::PlanReviewDecision::Approve)
         .expect_err("无方案不得批准");
     assert!(error.starts_with("plan_review_no_plan:"), "{error}");
     assert_eq!(

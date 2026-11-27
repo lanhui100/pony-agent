@@ -15,6 +15,7 @@
 //!    - `TodoWriteArgs` 与 `TodoItem` 支持关联 `plan_id` / `step_id`
 //!    - 读写往返保证 `plan_id` 字段不丢失
 
+use pony_agent_core::agent::plan_mode::ModeToggle;
 use pony_agent_core::agent::app_settings::{RuleAction, ToolRule, ToolRuleMatcher};
 use pony_agent_core::agent::dispatcher::{
     DispatchContext, PermissionVerdict, ToolPolicyEvaluator,
@@ -27,7 +28,6 @@ use pony_agent_core::agent::tools::{
     ToolPermissionDeclaration,
 };
 use serde_json::json;
-use std::sync::Arc;
 
 fn dummy_descriptor(name: &str, kind: ToolKind) -> ToolDescriptor {
     ToolDescriptor {
@@ -124,7 +124,7 @@ fn test_plan_mode_blocks_write_tools_and_allows_read_tools() {
     assert_eq!(before.verdict, PermissionVerdict::Allow);
 
     // 2. 进入 Plan 模式后：写/执行工具被拒绝，来源可追溯。
-    pony_agent_core::agent::plan_mode::set_active(&session_id, true);
+    pony_agent_core::agent::plan_mode::set_active(&session_id, ModeToggle::Enter);
     let context = DispatchContext {
         session_id: Some(session_id.clone()),
         ..DispatchContext::default()
@@ -151,7 +151,7 @@ fn test_plan_mode_blocks_write_tools_and_allows_read_tools() {
     assert_eq!(read_decision.verdict, PermissionVerdict::Allow);
 
     // 4. 退出 Plan 模式（批准或 /plan off）后写工具解锁。
-    pony_agent_core::agent::plan_mode::set_active(&session_id, false);
+    pony_agent_core::agent::plan_mode::set_active(&session_id, ModeToggle::Exit);
     let after = evaluator.evaluate_with_context(&write_desc, &origin, &json!({}), &context);
     assert_eq!(after.verdict, PermissionVerdict::Allow);
 }

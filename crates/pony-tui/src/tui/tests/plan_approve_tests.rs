@@ -43,7 +43,7 @@ fn session(label: &str) -> String {
 /// 让会话进入 Plan 模式并提交一份方案（模拟模型调用 `ExitPlanMode`）。
 fn enter_plan_mode_with_plan(control_plane: &HostControlPlane, session_id: &str) {
     control_plane
-        .plan_mode_set(session_id, true)
+        .plan_mode_set(session_id, pony_agent_core::agent::plan_mode::ModeToggle::Enter)
         .expect("enter plan mode");
     control_plane.plan_mode_commit(session_id);
     pony_agent_core::agent::plan_mode::submit_plan(session_id, "# 待批准的方案\n- 第一步");
@@ -72,7 +72,7 @@ fn approve_without_a_submitted_plan_reports_state_instead_of_failing() {
     let control_plane = isolated_control_plane();
     let session = session("approve-no-plan");
     control_plane
-        .plan_mode_set(&session, true)
+        .plan_mode_set(&session, pony_agent_core::agent::plan_mode::ModeToggle::Enter)
         .expect("enter plan mode");
     control_plane.plan_mode_commit(&session);
 

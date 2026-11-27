@@ -41,6 +41,38 @@ pub const PLAN_MODE_POLICY: &str = "Plan mode is active: research and produce a 
 pub const PLAN_REVIEW_APPROVE: &str = "批准执行";
 pub const PLAN_REVIEW_KEEP_PLANNING: &str = "继续规划";
 
+/// Plan 模式的切换意图（枚举替代 `bool` 入参：本仓 `clippy::fn_params_excessive_bools`
+/// 阈值为 0，新增 bool 形参即判红；调用点 `request_toggle(s, ModeToggle::Enter)` 也比
+/// `request_toggle(s, true)` 可读）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeToggle {
+    /// 进入模式（下一轮 pre-step 生效）。
+    Enter,
+    /// 退出模式（`/plan off`，立即生效）。
+    Exit,
+}
+
+impl ModeToggle {
+    pub fn is_enter(self) -> bool {
+        matches!(self, Self::Enter)
+    }
+}
+
+/// 方案审核结果（同上：枚举替代 `bool`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanReviewDecision {
+    /// 批准执行：退出模式并标记方案已批准。
+    Approve,
+    /// 继续规划：保持激活，方案仍未批准。
+    KeepPlanning,
+}
+
+impl PlanReviewDecision {
+    pub fn is_approved(self) -> bool {
+        matches!(self, Self::Approve)
+    }
+}
+
 /// 一条会话的 Plan 模式状态。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,19 +185,19 @@ pub fn is_active(session_id: &str) -> bool {
 ///
 /// 重新进入（`active = true`）会**清掉上一份方案的已批准标记**：批准是一次性状态迁移，
 /// 新一次规划必须重新提交方案并重新走宿主审核（否则上一份批准会变成长期通行证）。
-pub fn request_toggle(session_id: &str, active: bool) -> PlanModeState {
+pub fn request_toggle(session_id: &str, toggle: ModeToggle) -> PlanModeState {
     mutate(session_id, |state| {
-        state.pending = Some(active);
-        if active {
+        state.pending = Some(toggle.is_enter());
+        if toggle.is_enter() {
             state.plan_approved = false;
         }
     })
 }
 
 /// 立即切换（宿主 `/plan off` 与审核批准都走这里：不再等下一轮）。
-pub fn set_active(session_id: &str, active: bool) -> PlanModeState {
+pub fn set_active(session_id: &str, toggle: ModeToggle) -> PlanModeState {
     mutate(session_id, |state| {
-        state.active = active;
+        state.active = toggle.is_enter();
         state.pending = None;
     })
 }
@@ -192,9 +224,9 @@ pub fn submit_plan(session_id: &str, plan: &str) -> PlanModeState {
 }
 
 /// 审核结果落地：`approved = true` 关闭模式并标记方案已批准；否则保持激活。
-pub fn resolve_review(session_id: &str, approved: bool) -> PlanModeState {
+pub fn resolve_review(session_id: &str, decision: PlanReviewDecision) -> PlanModeState {
     mutate(session_id, |state| {
-        if approved {
+        if decision.is_approved() {
             state.active = false;
             state.pending = None;
             state.plan_approved = true;
@@ -220,9 +252,7 @@ pub fn answer_is_approval(answer: &serde_json::Value) -> bool {
             _ => None,
         }
     }
-    text_of(answer)
-        .map(|text| text.trim().contains(PLAN_REVIEW_APPROVE))
-        .unwrap_or(false)
+    text_of(answer).is_some_and(|text| text.trim().contains(PLAN_REVIEW_APPROVE))
 }
 
 /// 测试接缝：清空进程内注册表并强制下次访问重新读盘。
@@ -271,7 +301,7 @@ mod tests {
         let session = session.as_str();
         assert!(!is_active(session));
 
-        request_toggle(session, true);
+        request_toggle(session, ModeToggle::Enter);
         assert!(
             plan_mode_state(session).effective_active(),
             "pending 期间生效值必须按用户最新意图回答"
@@ -291,10 +321,10 @@ mod tests {
         isolate();
         let session = session_id("s-review");
         let session = session.as_str();
-        set_active(session, true);
+        set_active(session, ModeToggle::Enter);
         submit_plan(session, "# 方案\n- 步骤一");
 
-        resolve_review(session, true);
+        resolve_review(session, PlanReviewDecision::Approve);
         let state = plan_mode_state(session);
         assert!(!state.active, "批准后必须退出 Plan 模式（解锁写权限）");
         assert!(state.plan_approved);
@@ -306,10 +336,10 @@ mod tests {
         isolate();
         let session = session_id("s-keep");
         let session = session.as_str();
-        set_active(session, true);
+        set_active(session, ModeToggle::Enter);
         submit_plan(session, "# 方案");
 
-        resolve_review(session, false);
+        resolve_review(session, PlanReviewDecision::KeepPlanning);
         let state = plan_mode_state(session);
         assert!(state.active);
         assert!(!state.plan_approved);
@@ -337,7 +367,7 @@ mod tests {
         isolate();
         let session = session_id("s-persist");
         let session = session.as_str();
-        set_active(session, true);
+        set_active(session, ModeToggle::Enter);
         submit_plan(session, "# 持久化方案");
 
         let body = std::fs::read_to_string(plan_mode_store_path()).expect("sidecar must exist");

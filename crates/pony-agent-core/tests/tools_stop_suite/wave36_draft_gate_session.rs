@@ -14,6 +14,7 @@
 //!
 //! 走**生产装配路径**（`build_governed_executor` + `set_context` + `execute`）。
 
+use pony_agent_core::agent::plan_mode::ModeToggle;
 use pony_agent_core::agent::dispatcher::DispatchContext;
 use pony_agent_core::agent::dispatcher_composites::GovernedToolExecutor;
 use pony_agent_core::agent::governed_executor::build_governed_executor;
@@ -103,7 +104,7 @@ fn plan_mode_gate_blocks_write_and_execute_for_the_runtime_injected_session() {
     let workspace = temp_workspace();
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let active = session("active");
-    pony_agent_core::agent::plan_mode::set_active(&active, true);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Enter);
 
     let write = execute_in_session(&executor, Some(&active), &write_call("blocked.txt"));
     assert_eq!(write.status, "error", "Plan 模式下写工具必须被拒绝");
@@ -122,7 +123,7 @@ fn plan_mode_gate_blocks_write_and_execute_for_the_runtime_injected_session() {
     assert_eq!(run.status, "error", "Plan 模式下执行工具必须被拒绝");
     assert_eq!(error_code(&run).as_deref(), Some("permission_denied"));
 
-    pony_agent_core::agent::plan_mode::set_active(&active, false);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Exit);
     let _ = fs::remove_dir_all(&workspace);
 }
 
@@ -132,7 +133,7 @@ fn plan_mode_gate_does_not_cross_block_other_sessions() {
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let active = session("other-active");
     let passive = session("passive");
-    pony_agent_core::agent::plan_mode::set_active(&active, true);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Enter);
 
     let result = execute_in_session(&executor, Some(&passive), &write_call("allowed.txt"));
     assert_eq!(
@@ -142,7 +143,7 @@ fn plan_mode_gate_does_not_cross_block_other_sessions() {
     );
     assert!(workspace.join("allowed.txt").exists());
 
-    pony_agent_core::agent::plan_mode::set_active(&active, false);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Exit);
     let _ = fs::remove_dir_all(&workspace);
 }
 
@@ -151,7 +152,7 @@ fn plan_mode_gate_does_not_guess_a_session_when_context_is_missing() {
     let workspace = temp_workspace();
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let active = session("unbound");
-    pony_agent_core::agent::plan_mode::set_active(&active, true);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Enter);
 
     // 未注入会话 ⇒ 无从证明处于 Plan 模式：按「未激活」处理，不得凭工具参数/环境变量猜。
     let result = execute_in_session(&executor, None, &write_call("unbound.txt"));
@@ -161,7 +162,7 @@ fn plan_mode_gate_does_not_guess_a_session_when_context_is_missing() {
         result.output
     );
 
-    pony_agent_core::agent::plan_mode::set_active(&active, false);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Exit);
     let _ = fs::remove_dir_all(&workspace);
 }
 
@@ -171,7 +172,7 @@ fn plan_mode_gate_allows_read_tools() {
     fs::write(workspace.join("readme.md"), "hello").expect("seed file");
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let active = session("read");
-    pony_agent_core::agent::plan_mode::set_active(&active, true);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Enter);
     let result = execute_in_session(
         &executor,
         Some(&active),
@@ -186,7 +187,7 @@ fn plan_mode_gate_allows_read_tools() {
         result.output
     );
 
-    pony_agent_core::agent::plan_mode::set_active(&active, false);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Exit);
     let _ = fs::remove_dir_all(&workspace);
 }
 
@@ -195,14 +196,14 @@ fn leaving_plan_mode_unlocks_writes_immediately() {
     let workspace = temp_workspace();
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let active = session("leave");
-    pony_agent_core::agent::plan_mode::set_active(&active, true);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Enter);
     assert_eq!(
         execute_in_session(&executor, Some(&active), &write_call("first.txt")).status,
         "error"
     );
 
     // 用户批准方案 / `/plan off`：模式关闭后写工具立刻解锁。
-    pony_agent_core::agent::plan_mode::set_active(&active, false);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Exit);
     let after = execute_in_session(&executor, Some(&active), &write_call("second.txt"));
     assert_eq!(
         after.status, "ok",
@@ -221,7 +222,7 @@ fn plan_mode_gate_keeps_exit_plan_mode_exempt() {
     let workspace = temp_workspace();
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let active = session("exempt");
-    pony_agent_core::agent::plan_mode::set_active(&active, true);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Enter);
     let result = execute_in_session(
         &executor,
         Some(&active),
@@ -242,7 +243,7 @@ fn plan_mode_gate_keeps_exit_plan_mode_exempt() {
         "提交方案后必须请求宿主审核: {parsed}"
     );
 
-    pony_agent_core::agent::plan_mode::set_active(&active, false);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Exit);
     let _ = fs::remove_dir_all(&workspace);
 }
 
@@ -275,7 +276,7 @@ fn exit_plan_mode_requires_a_markdown_heading() {
     let workspace = temp_workspace();
     let executor = build_governed_executor(Some(workspace.clone()), None);
     let active = session("heading");
-    pony_agent_core::agent::plan_mode::set_active(&active, true);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Enter);
     let result = execute_in_session(
         &executor,
         Some(&active),
@@ -292,7 +293,7 @@ fn exit_plan_mode_requires_a_markdown_heading() {
         result.output
     );
 
-    pony_agent_core::agent::plan_mode::set_active(&active, false);
+    pony_agent_core::agent::plan_mode::set_active(&active, ModeToggle::Exit);
     let _ = fs::remove_dir_all(&workspace);
 }
 

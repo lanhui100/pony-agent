@@ -41,7 +41,7 @@ fn test_plan_mode_state_is_shared_between_control_plane_and_executor() {
     };
 
     // Act 1 — 控制面进入 Plan 模式
-    cp.plan_mode_set(&session_id, true).expect("enter plan mode");
+    cp.plan_mode_set(&session_id, pony_tools::plan_mode::ModeToggle::Enter).expect("enter plan mode");
     cp.plan_mode_commit(&session_id);
 
     // Assert 1 — 工具门禁立刻看到同一份状态：写工具被拒
@@ -55,7 +55,7 @@ fn test_plan_mode_state_is_shared_between_control_plane_and_executor() {
     assert_eq!(blocked.decision_source, "plan_mode_gate");
 
     // Act 2 — 控制面退出 Plan 模式
-    cp.plan_mode_set(&session_id, false).expect("leave plan mode");
+    cp.plan_mode_set(&session_id, pony_tools::plan_mode::ModeToggle::Exit).expect("leave plan mode");
 
     // Assert 2 — 写工具立刻解锁
     let allowed =

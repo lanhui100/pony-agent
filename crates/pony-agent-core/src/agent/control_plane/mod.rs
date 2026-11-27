@@ -10059,7 +10059,7 @@ mod tests {
         assert!(initial["plan"].is_null());
 
         // 2. 进入（写 pending，未 commit 前 active 已按用户意图回答）。
-        let entered = control_plane.plan_mode_set(session, true).expect("enter");
+        let entered = control_plane.plan_mode_set(session, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
         assert_eq!(entered["active"].as_bool(), Some(true));
         assert_eq!(entered["committedActive"].as_bool(), Some(false));
 
@@ -10070,7 +10070,7 @@ mod tests {
 
         // 4. 无方案时审核必须 fail-closed（不许空批准解锁写权限）。
         let no_plan = control_plane
-            .plan_mode_review(session, true)
+            .plan_mode_review(session, pony_tools::plan_mode::PlanReviewDecision::Approve)
             .expect_err("没有提交方案时不得批准");
         assert!(no_plan.starts_with("plan_review_no_plan:"), "{no_plan}");
 
@@ -10082,14 +10082,14 @@ mod tests {
 
         // 6. 批准 → 退出模式并标记方案已批准。
         let approved = control_plane
-            .plan_mode_review(session, true)
+            .plan_mode_review(session, pony_tools::plan_mode::PlanReviewDecision::Approve)
             .expect("approve");
         assert_eq!(approved["active"].as_bool(), Some(false));
         assert_eq!(approved["planApproved"].as_bool(), Some(true));
 
         // 7. 空会话作用域一律 fail-closed（否则状态会落到空键上无法回读）。
-        assert!(control_plane.plan_mode_set("  ", true).is_err());
-        assert!(control_plane.plan_mode_review("  ", true).is_err());
+        assert!(control_plane.plan_mode_set("  ", pony_tools::plan_mode::ModeToggle::Enter).is_err());
+        assert!(control_plane.plan_mode_review("  ", pony_tools::plan_mode::PlanReviewDecision::Approve).is_err());
     }
 
     /// 「继续规划」必须保持模式激活且方案仍未批准（默认不放大权限）。
@@ -10104,12 +10104,12 @@ mod tests {
             )
             .build();
         let session = "session-plan-mode-keep";
-        control_plane.plan_mode_set(session, true).expect("enter");
+        control_plane.plan_mode_set(session, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
         control_plane.plan_mode_commit(session);
         pony_tools::plan_mode::submit_plan(session, "# 方案");
 
         let kept = control_plane
-            .plan_mode_review(session, false)
+            .plan_mode_review(session, pony_tools::plan_mode::PlanReviewDecision::KeepPlanning)
             .expect("keep planning");
         assert_eq!(kept["active"].as_bool(), Some(true));
         assert_eq!(kept["planApproved"].as_bool(), Some(false));

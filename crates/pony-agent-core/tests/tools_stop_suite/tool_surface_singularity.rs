@@ -43,6 +43,7 @@
 //! - 46 工具的 golden 是**本文件内的独立字面量**（不是从被测代码推导出来的）。schema 用 FNV-1a
 //!   对 `serde_json::to_string(input_schema)` 取值，避免 30KB schema 文本淹没断言。
 
+use pony_agent_core::agent::plan_mode::ModeToggle;
 use pony_agent_core::agent::budget::DispatchBudgetConfig;
 use pony_agent_core::agent::dispatcher::{
     DispatchContext, DispatchLifecycleObserver, DispatchLifecyclePhase, DispatchLifecycleRecord,
@@ -2088,7 +2089,7 @@ fn t1_reregistering_a_source_prunes_the_previous_provider() {
 fn t1_plan_mode_denies_external_write_tool() {
     // Arrange — 会话处于 Plan 模式（写/执行类工具必须被拦）
     let session_id = format!("session-plan-mode-external-{}", uuid::Uuid::new_v4());
-    pony_agent_core::agent::plan_mode::set_active(&session_id, true);
+    pony_agent_core::agent::plan_mode::set_active(&session_id, ModeToggle::Enter);
 
     let external_write = external_descriptor(
         "demo",

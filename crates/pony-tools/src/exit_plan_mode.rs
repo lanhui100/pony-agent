@@ -118,7 +118,7 @@ mod tests {
     fn submit_requires_the_dispatch_injected_session() {
         isolate();
         let s2 = session_id("s2");
-        crate::plan_mode::set_active(&s2, true);
+        crate::plan_mode::set_active(&s2, crate::plan_mode::ModeToggle::Enter);
         let err = ExitPlanModeHandler::new()
             .submit(None, &json!({"plan": "# 方案"}))
             .expect_err("无权威会话必须 fail-closed");
@@ -129,7 +129,7 @@ mod tests {
     fn submit_rejects_empty_or_headingless_plans() {
         isolate();
         let s3 = session_id("s3");
-        crate::plan_mode::set_active(&s3, true);
+        crate::plan_mode::set_active(&s3, crate::plan_mode::ModeToggle::Enter);
         let handler = ExitPlanModeHandler::new();
 
         for bad in [json!({}), json!({"plan": "   "}), json!({"plan": "随便写写"}), json!({"plan": "#"})] {
@@ -144,7 +144,7 @@ mod tests {
     fn submit_registers_the_plan_and_requests_review_without_closing_the_mode() {
         isolate();
         let s4 = session_id("s4");
-        crate::plan_mode::set_active(&s4, true);
+        crate::plan_mode::set_active(&s4, crate::plan_mode::ModeToggle::Enter);
 
         let out = ExitPlanModeHandler::new()
             .submit(Some(&s4), &json!({"plan": "# 方案\n- 步骤"}))

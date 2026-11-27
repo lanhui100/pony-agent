@@ -82,7 +82,10 @@ fn test_plan_mode_gate_is_fail_closed_for_write_tools() {
 
     // 会话进入 Plan 模式（进程级注册表；用独立 session id 隔离其它用例）。
     let session_id = format!("session-plan-mode-gate-{}", uuid::Uuid::new_v4());
-    pony_agent_core::agent::plan_mode::set_active(&session_id, true);
+    pony_agent_core::agent::plan_mode::set_active(
+        &session_id,
+        pony_agent_core::agent::plan_mode::ModeToggle::Enter,
+    );
 
     let executor = build_governed_executor(Some(dir.clone()), None);
 

@@ -699,14 +699,18 @@ impl HostControlPlane {
         plan_mode_value(session_id)
     }
 
-    /// 进入 / 退出 Plan 模式。`active = true` 进入（下一轮 pre-step 生效），
-    /// `active = false` 立即退出（宿主 `/plan off`）。
-    pub fn plan_mode_set(&self, session_id: &str, active: bool) -> Result<Value, String> {
+    /// 进入 / 退出 Plan 模式（`ModeToggle::Enter` 走下一轮 pre-step 生效；
+    /// `ModeToggle::Exit` 立即生效，对应宿主 `/plan off`）。
+    pub fn plan_mode_set(
+        &self,
+        session_id: &str,
+        toggle: pony_tools::plan_mode::ModeToggle,
+    ) -> Result<Value, String> {
         let session = require_session(session_id, "plan_mode_set")?;
-        if active {
-            pony_tools::plan_mode::request_toggle(&session, true);
+        if toggle.is_enter() {
+            pony_tools::plan_mode::request_toggle(&session, toggle);
         } else {
-            pony_tools::plan_mode::set_active(&session, false);
+            pony_tools::plan_mode::set_active(&session, toggle);
         }
         Ok(plan_mode_value(&session))
     }
@@ -721,9 +725,13 @@ impl HostControlPlane {
         plan_mode_value(session)
     }
 
-    /// 用户在方案审核卡片上的决定：`approved = true` 退出模式并解锁写/执行；
-    /// `false` 表示「继续规划」，模式保持激活、方案标记为未批准。
-    pub fn plan_mode_review(&self, session_id: &str, approved: bool) -> Result<Value, String> {
+    /// 用户在方案审核卡片上的决定：`Approve` 退出模式并解锁写/执行；
+    /// `KeepPlanning` 保持激活、方案标记为未批准。
+    pub fn plan_mode_review(
+        &self,
+        session_id: &str,
+        decision: pony_tools::plan_mode::PlanReviewDecision,
+    ) -> Result<Value, String> {
         let session = require_session(session_id, "plan_mode_review")?;
         let state = pony_tools::plan_mode::plan_mode_state(&session);
         if state.plan.is_none() {
@@ -731,7 +739,7 @@ impl HostControlPlane {
                 "plan_review_no_plan: no plan has been submitted for this session yet".to_string(),
             );
         }
-        pony_tools::plan_mode::resolve_review(&session, approved);
+        pony_tools::plan_mode::resolve_review(&session, decision);
         Ok(plan_mode_value(&session))
     }
 
