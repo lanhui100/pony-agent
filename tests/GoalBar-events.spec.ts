@@ -34,7 +34,8 @@ function goalGetCalls(): number {
 async function mountGoalBar(sessionId = "session-1") {
   const wrapper = mount(GoalBar, { props: { sessionId } });
   // onMounted 内的订阅是 async IIFE：等 safeListen 全部登记完成。
-  await vi.waitFor(() => expect(listeners.size).toBe(3));
+  // O6（2026-11-27）：新增 `goal://rounds_stopped` 订阅 ⇒ 四个通道。
+  await vi.waitFor(() => expect(listeners.size).toBe(4));
   await flushPromises();
   return wrapper;
 }
@@ -58,13 +59,58 @@ describe("GoalBar goal:// events (B130)", () => {
     vi.restoreAllMocks();
   });
 
-  it("subscribes to changed, round and cleared with the frozen event names", async () => {
+  it("subscribes to changed, round, cleared and rounds_stopped with the frozen event names", async () => {
     const wrapper = await mountGoalBar();
     expect([...listeners.keys()].sort()).toEqual([
       "goal://changed",
       "goal://cleared",
-      "goal://round"
+      "goal://round",
+      "goal://rounds_stopped"
     ]);
+    wrapper.unmount();
+  });
+
+  // O6（2026-11-27）：续轮停止/暂停必须在桌面可见（审核报告 P1-3：桌面端此前零事件面）。
+  it("renders the rounds_stopped visibleLine for the matching session and clears it on the next round", async () => {
+    tauriMocks.mockSafeInvoke.mockResolvedValue({
+      id: "goal-1",
+      sessionId: "session-1",
+      objective: "把审核报告 P0 落地",
+      phase: "active",
+      activation: "armed",
+      revision: 1,
+      roundsStarted: 2,
+      maxGoalRounds: 50,
+      blockedReason: null
+    });
+    const wrapper = await mountGoalBar();
+    await flushPromises();
+
+    const stopped = listeners.get("goal://rounds_stopped")!;
+    stopped({ payload: { sessionId: "session-2", visibleLine: "别的会话" } });
+    await flushPromises();
+    expect(wrapper.find("[data-testid='goal-rounds-stopped']").exists()).toBe(false);
+
+    stopped({
+      payload: {
+        sessionId: "session-1",
+        goalId: "goal-1",
+        reason: "turn_suspended",
+        visibleLine: "目标已暂停：等你作答｜本轮在等你作答/审批｜先回答上面的提问，作答后自动继续",
+        roundsStarted: 2,
+        maxRoundRounds: 50,
+        consecutiveFailures: 0
+      }
+    });
+    await flushPromises();
+    const line = wrapper.find("[data-testid='goal-rounds-stopped']");
+    expect(line.exists()).toBe(true);
+    expect(line.text()).toContain("等你作答");
+
+    // 新的一轮起来 ⇒ 上一条停止原因不再成立。
+    listeners.get("goal://round")!({ payload: { round: 3, status: "started" } });
+    await flushPromises();
+    expect(wrapper.find("[data-testid='goal-rounds-stopped']").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -114,7 +160,7 @@ describe("GoalBar goal:// events (B130)", () => {
 
   it("unsubscribes every listener on unmount", async () => {
     const wrapper = await mountGoalBar();
-    expect(listeners.size).toBe(3);
+    expect(listeners.size).toBe(4);
     wrapper.unmount();
     expect(listeners.size).toBe(0);
   });

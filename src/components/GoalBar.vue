@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
   Target,
@@ -55,14 +55,29 @@ const shouldRender = computed(() => currentGoal.value !== null || props.open ===
 type GoalChangedEventPayload = { sessionId?: string };
 type GoalRoundEventPayload = { round?: number; status?: string };
 type GoalClearedEventPayload = { sessionId?: string; goalId?: string | null };
+// O6（2026-11-27）：续轮停止/暂停事件。`visibleLine` 由 Rust 侧 `GoalRoundStopReason::visible_line()`
+// 唯一拼装（与 TUI 状态行同源），前端**不得**自行拼措辞。
+type GoalRoundsStoppedEventPayload = {
+  sessionId?: string;
+  goalId?: string;
+  reason?: string;
+  visibleLine?: string;
+  roundsStarted?: number;
+  maxRounds?: number;
+  consecutiveFailures?: number;
+};
 
 const GOAL_CHANGED_EVENT = "goal://changed";
 const GOAL_ROUND_EVENT = "goal://round";
 const GOAL_CLEARED_EVENT = "goal://cleared";
+const GOAL_ROUNDS_STOPPED_EVENT = "goal://rounds_stopped";
 
 function refreshGoal(): void {
   void refreshForTurn(props.sessionId);
 }
+
+// O6：最近一次续轮停止/暂停的可见原因（成功起一轮或目标变更后清空）。
+const roundsStoppedLine = ref<string | null>(null);
 
 let unlistenHandlers: Array<() => void> = [];
 
@@ -76,13 +91,30 @@ onMounted(() => {
           if (eventSessionId && eventSessionId !== props.sessionId) {
             return;
           }
+          roundsStoppedLine.value = null;
           refreshGoal();
         })
       );
       unlistenHandlers.push(
         await safeListen<GoalRoundEventPayload>(GOAL_ROUND_EVENT, () => {
+          // 新的一轮已经起来 ⇒ 上一条「已暂停/已停止」不再成立。
+          roundsStoppedLine.value = null;
           refreshGoal();
         })
+      );
+      unlistenHandlers.push(
+        await safeListen<GoalRoundsStoppedEventPayload>(
+          GOAL_ROUNDS_STOPPED_EVENT,
+          ({ payload }) => {
+            const eventSessionId = payload?.sessionId?.trim();
+            if (eventSessionId && eventSessionId !== props.sessionId) {
+              return;
+            }
+            roundsStoppedLine.value = payload?.visibleLine?.trim() || null;
+            // 停止原因本身可能伴随相位变化（如预算耗尽落 blocked）⇒ 顺带刷新目标条。
+            refreshGoal();
+          }
+        )
       );
       unlistenHandlers.push(
         await safeListen<GoalClearedEventPayload>(GOAL_CLEARED_EVENT, ({ payload }) => {
@@ -207,6 +239,14 @@ async function handleComplete() {
           </div>
           <div class="text-[10px] text-stone-400">
             轮次: {{ currentGoal.roundsStarted }} / {{ currentGoal.maxGoalRounds }}
+          </div>
+          <!-- O6：续轮停止/暂停的可见原因（文案真源在 Rust `GoalRoundStopReason::visible_line()`）。 -->
+          <div
+            v-if="roundsStoppedLine"
+            class="text-[10px] leading-snug text-amber-600 dark:text-amber-400"
+            data-testid="goal-rounds-stopped"
+          >
+            {{ roundsStoppedLine }}
           </div>
         </div>
 

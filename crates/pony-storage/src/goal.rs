@@ -107,6 +107,42 @@ pub enum GoalEvent {
         session_id: String,
         goal_id: Option<String>,
     },
+    /// O6（2026-11-27）：一次自动续轮**停止/暂停**（原因是结构化事实，不是 UI 自造文案）。
+    ///
+    /// 为什么是领域事件：旧实现只有 TUI 的 `UiEvent::GoalRoundsStopped`，桌面端零事件面 ⇒
+    /// 「为什么目标不动了」在所有桌面停止路径上都不可见（审核报告 P1-3）。停止原因本身是
+    /// goal 生命周期的领域事实（`GoalRoundStopReason`），由领域层广播才可能被两端同源消费。
+    RoundsStopped {
+        session_id: String,
+        goal_id: String,
+        /// `GoalRoundStopReason::code()`（稳定机器识别码，UI 不解析文案）。
+        reason_code: String,
+        /// `GoalRoundStopReason::visible_line()`（用户可见文案的结构化真源）。
+        visible_line: String,
+        rounds_started: u32,
+        max_rounds: u32,
+        consecutive_failures: u32,
+    },
+}
+
+/// O6：广播一次续轮停止/暂停（`reason` 的结构化投影，字段集与 TUI `GoalRoundsStopped` 对齐）。
+pub fn notify_goal_rounds_stopped(
+    session_id: &str,
+    goal_id: &str,
+    reason: &GoalRoundStopReason,
+    consecutive_failures: u32,
+    rounds_started: u32,
+    max_rounds: u32,
+) {
+    notify_goal_event(&GoalEvent::RoundsStopped {
+        session_id: session_id.to_string(),
+        goal_id: goal_id.to_string(),
+        reason_code: reason.code().to_string(),
+        visible_line: reason.visible_line(),
+        rounds_started,
+        max_rounds,
+        consecutive_failures,
+    });
 }
 
 /// 宿主注入的观察者（桌面层安装一次；测试可替换）。
@@ -124,7 +160,13 @@ pub fn install_goal_event_observer(observer: std::sync::Arc<GoalEventObserver>) 
     *slot = Some(observer);
 }
 
-#[cfg(test)]
+/// 测试接缝：复位进程级观察者（集成测试与 lib 单测共用同一进程观察者槽位）。
+///
+/// 为什么不是 `#[cfg(test)]`：`pony-agent-core` 的 `tests/` 集成测试需要在本用例结束时
+/// 卸载收集器，否则观察者会把后续用例的事件也收集进去（跨用例串话）。本仓既有接缝
+/// （`test_support` 模块）同样是「常驻导出 + `#[doc(hidden)]`」的口径，此处对齐，
+/// 避免集成测试被迫自己再造一份观察者管理。
+#[doc(hidden)]
 pub fn reset_goal_event_observer_for_test() {
     let mut slot = GOAL_EVENT_OBSERVER
         .lock()
@@ -662,7 +704,14 @@ impl GoalRoundStopReason {
     pub fn headline(&self) -> &'static str {
         match self {
             Self::LoopAlreadyOwned => "本会话已有续轮循环在运行",
+            // 「未启动」是 `never_started()` 的专属措辞：这三个原因不存在「停下来」这个事实。
             Self::FirstRoundNotSucceeded => "自动续轮未启动",
+            // O1-B（PR #106）：挂起/待作答是**暂停**而不是终止——作答后宿主会重入续轮，措辞必须一致，
+            // 否则用户看到「续轮已停止」会以为目标已死，于是不去作答，而作答正是唯一的解锁动作。
+            // 两处用词都是刻意的：① 主语只取「续轮」，不写「目标已暂停」——目标此刻可能仍是
+            // `GoalPhase::Active`，冒认阶段会与 Goal 页签的阶段行打脸（B1795767639536 的回归）；
+            // ② 用「续轮暂停」而非「续轮已暂停」，避开 `GoalPhase::Paused` 的既有译词「已暂停」。
+            Self::TurnSuspended => "续轮暂停：等你作答",
             _ => "自动续轮已停止",
         }
     }
@@ -694,7 +743,8 @@ impl GoalRoundStopReason {
             Self::Cancelled | Self::AutoContinueBudget => Some("发消息可继续"),
             Self::ConsecutiveFailures { .. } => Some("查看上方错误，修复后发「继续」"),
             Self::BudgetExhausted { .. } => Some("/goal 查看或提高轮次上限"),
-            Self::TurnSuspended => Some("先回答上面的提问"),
+            // O1-B：挂起 ≠ 终止——承诺「作答后自动继续」，用户才会去作答（P0-1 的可见面）。
+            Self::TurnSuspended => Some("作答后自动继续"),
             Self::TurnUnclassified => Some("查看日志后发「继续」"),
             Self::LoopAlreadyOwned => None,
             Self::BudgetPersistFailed => Some("检查磁盘后发「继续」"),
@@ -757,31 +807,154 @@ impl GoalRoundStopReason {
     }
 }
 
-/// PA-171 C1/C2：续轮循环的**轮次边界判定**（纯函数，可单测）。
+/// O2（2026-11-27）：续轮判据的**唯一输入**。
 ///
-/// 判定顺序（冻结真值表）：`cancelled` → 连续失败 ≥ 阈值 → 预算用满 → 继续（`None`）。
-/// 调用方必须在**开新一轮之前**判定（`Some` 即停止并回报 `visible_line()`）。
+/// 为什么要有它：旧实现在 TUI（`run_goal_rounds`）与 core（`execute_graph_run_stream` /
+/// `advance_graph_run`）各写一套停止判据，能力不对等——core 缺待作答让位、缺连续失败熔断、
+/// 失败轮照烧预算且停止不可见。把全部判据收进一个纯 struct + 一个纯函数，两端共用同一真值表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoalRoundGateInput {
+    /// 本会话是否仍有 `active + Armed` 的目标（无 ⇒ 无轮可续）。
+    pub has_active_goal: bool,
+    /// 用户已请求停止该会话的续轮（Esc / 切走会话）。
+    pub cancelled: bool,
+    /// 待作答的 Ask 数量（宿主请求，续轮必须让位）。
+    pub pending_asks: usize,
+    /// 待决策的审批数量（同上）。
+    pub pending_approvals: usize,
+    /// 本循环内连续失败的轮数。
+    pub consecutive_failures: u32,
+    /// 目标已成功推进的轮数。
+    pub rounds_started: u32,
+    /// 目标轮次上限（`GoalData::max_goal_rounds`）。
+    pub max_rounds: u32,
+    /// 本次用户输入触发的自动续轮次数（每线程预算）。
+    pub consecutive_auto_continues: u32,
+    /// 每线程自动续轮上限（`MAX_CONSECUTIVE_AUTO_CONTINUES`）。
+    pub max_auto_continues: u32,
+}
+
+/// O2：续轮边界决策。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalRoundGateDecision {
+    /// 可以开下一轮。
+    Continue,
+    /// **暂停**：有人在等宿主（Ask/审批待作答）。目标保持 Armed，作答后宿主必须重入续轮
+    /// （O1-B 的语义支点：暂停 ≠ 终止）。可见原因复用 [`GoalRoundStopReason::TurnSuspended`]。
+    Pause,
+    /// **终止**本轮自动续轮（原因必须可见）。
+    Stop(GoalRoundStopReason),
+}
+
+impl GoalRoundGateDecision {
+    /// 决策对应的可见原因（`Continue` ⇒ `None`；`Pause` ⇒ `TurnSuspended`）。
+    pub fn stop_reason(&self) -> Option<GoalRoundStopReason> {
+        match self {
+            Self::Continue => None,
+            Self::Pause => Some(GoalRoundStopReason::TurnSuspended),
+            Self::Stop(reason) => Some(reason.clone()),
+        }
+    }
+
+    /// 是否应继续开下一轮。
+    pub fn is_continue(&self) -> bool {
+        matches!(self, Self::Continue)
+    }
+
+    /// 是否为「暂停等人类」（不是终止：作答后必须重入续轮）。
+    pub fn is_pause(&self) -> bool {
+        matches!(self, Self::Pause)
+    }
+}
+
+/// O2：续轮循环的**唯一轮次边界判定**（纯函数，可单测）。
+///
+/// 判定顺序（冻结真值表，TUI 与 core 必须逐字一致）：
+/// `has_active_goal=false` → `cancelled` → 有待作答宿主请求（**Pause**） →
+/// 连续失败 ≥ [`MAX_CONSECUTIVE_GOAL_ROUND_FAILURES`] → 目标预算用满 →
+/// 每线程自动续轮用尽 → `Continue`。
+///
+/// 为什么让位排在失败/预算之前：有待作答的 Ask 时**根本不该起新轮**（新轮入口会把旧提问判为
+/// 过期，模型只能重复提问）；这不计入失败、也不消耗预算。
+pub fn goal_round_gate(input: GoalRoundGateInput) -> GoalRoundGateDecision {
+    if !input.has_active_goal {
+        return GoalRoundGateDecision::Stop(GoalRoundStopReason::NoActiveGoal);
+    }
+    if input.cancelled {
+        return GoalRoundGateDecision::Stop(GoalRoundStopReason::Cancelled);
+    }
+    if input.pending_asks > 0 || input.pending_approvals > 0 {
+        return GoalRoundGateDecision::Pause;
+    }
+    if input.consecutive_failures >= MAX_CONSECUTIVE_GOAL_ROUND_FAILURES {
+        return GoalRoundGateDecision::Stop(GoalRoundStopReason::ConsecutiveFailures {
+            failures: input.consecutive_failures,
+        });
+    }
+    if input.rounds_started >= input.max_rounds {
+        return GoalRoundGateDecision::Stop(GoalRoundStopReason::BudgetExhausted {
+            rounds_started: input.rounds_started,
+            max_rounds: input.max_rounds,
+        });
+    }
+    if input.consecutive_auto_continues >= input.max_auto_continues {
+        return GoalRoundGateDecision::Stop(GoalRoundStopReason::AutoContinueBudget);
+    }
+    GoalRoundGateDecision::Continue
+}
+
+/// O2：单轮终态（宿主归约后）→ 续轮决策。
+///
+/// 「首轮门」与「每步归约」共用本函数：失败 ⇒ [`GoalRoundStopReason::FirstRoundNotSucceeded`]
+/// （续轮从未启动；不得复用 `ConsecutiveFailures`——那读作「已经连跑了好几轮」），
+/// 挂起 ⇒ **Pause**（`TurnSuspended` 语义：目标仍 Armed，作答后重入）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalRoundStepOutcome {
+    Completed,
+    Failed,
+    Suspended,
+    Cancelled,
+    Unclassified,
+}
+
+pub fn goal_round_outcome_gate(outcome: GoalRoundStepOutcome) -> GoalRoundGateDecision {
+    match outcome {
+        GoalRoundStepOutcome::Completed => GoalRoundGateDecision::Continue,
+        GoalRoundStepOutcome::Failed => {
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::FirstRoundNotSucceeded)
+        }
+        GoalRoundStepOutcome::Suspended => GoalRoundGateDecision::Pause,
+        GoalRoundStepOutcome::Cancelled => {
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::Cancelled)
+        }
+        GoalRoundStepOutcome::Unclassified => {
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::TurnUnclassified)
+        }
+    }
+}
+
+/// PA-171 C1/C2 兼容读面：等价于 [`goal_round_gate`] 的「无待作答、无自动续轮预算」投影。
+///
+/// 保留本函数只为既有单测/调用方（它们只关心 cancelled/失败/目标预算三值）；**新代码一律
+/// 用 [`goal_round_gate`]**——两处判据漂移正是 O2 要消灭的缺陷。
 pub fn goal_round_stop_reason(
     cancelled: bool,
     consecutive_failures: u32,
     rounds_started: u32,
     max_rounds: u32,
 ) -> Option<GoalRoundStopReason> {
-    if cancelled {
-        return Some(GoalRoundStopReason::Cancelled);
-    }
-    if consecutive_failures >= MAX_CONSECUTIVE_GOAL_ROUND_FAILURES {
-        return Some(GoalRoundStopReason::ConsecutiveFailures {
-            failures: consecutive_failures,
-        });
-    }
-    if rounds_started >= max_rounds {
-        return Some(GoalRoundStopReason::BudgetExhausted {
-            rounds_started,
-            max_rounds,
-        });
-    }
-    None
+    goal_round_gate(GoalRoundGateInput {
+        has_active_goal: true,
+        cancelled,
+        pending_asks: 0,
+        pending_approvals: 0,
+        consecutive_failures,
+        rounds_started,
+        max_rounds,
+        consecutive_auto_continues: 0,
+        max_auto_continues: u32::MAX,
+    })
+    .stop_reason()
 }
 
 /// PA-171 C2：按**本轮终态**推进轮次预算——只有成功轮 `rounds_started += 1`。
@@ -796,6 +969,66 @@ pub fn advance_goal_round_for_outcome(
         GoalRoundOutcome::Succeeded => advance_goal_round(goal_id),
         GoalRoundOutcome::Failed => goal_snapshot(goal_id),
     }
+}
+
+/// O5（2026-11-27）：`update_goal blocked` 的**最小轮次门槛**。
+///
+/// 旧实现只在提示词里写「同一阻塞连续 3 轮才可标记 blocked」（`tools/prompt_contract.rs`），
+/// 代码零校验 ⇒ 模型第 1 轮就能 blocked，目标被人为提前判死。DSH 的
+/// `GOAL_TOOL_BLOCK_THRESHOLD` 是硬拒（`tool-goal/src/index.ts`），这里对齐。
+pub const GOAL_BLOCK_MIN_ROUNDS: u32 = 3;
+
+/// O5：预算耗尽时的稳定阻塞原因（`GoalData::blocked_reason` 的取值，UI 与 `resume` 指引共用）。
+pub const GOAL_BLOCKED_REASON_ROUND_LIMIT: &str = "round_limit";
+
+/// O5：预算耗尽 ⇒ 落 `blocked`（而不是静默 `return`）。
+///
+/// 旧实现里 `rounds_started >= max_goal_rounds` 只是不再续轮，目标仍停在 `active + Armed`：
+/// UI 永久显示「进行中」，`resume` 又被「预算耗尽」拒绝（`goal.rs` 的 Resume 分支）⇒ 死局
+/// 且没有任何解释。落 `blocked` 让相位与原因都可见，`resume` 的拒绝也有据可依。
+pub fn block_goal_for_round_limit(goal_id: &str) -> Result<GoalData, String> {
+    let target = goal_id.trim();
+    if target.is_empty() {
+        return Err("Goal ID cannot be empty".to_string());
+    }
+
+    let mut guard = goal_store_guard();
+    ensure_goal_store_loaded(&mut guard);
+    let goals = guard.as_mut().expect("goal store must be loaded");
+    let session = goals
+        .iter()
+        .find(|(_, goal)| goal.id == target)
+        .map(|(session, _)| session.clone())
+        .ok_or_else(|| format!("No goal found for goal id `{target}`"))?;
+    let previous = goals.get(&session).cloned();
+    let updated = {
+        let goal = goals
+            .get_mut(&session)
+            .expect("goal must exist after id lookup");
+        goal.phase = "blocked".to_string();
+        goal.activation = GoalActivation::Disarmed;
+        goal.blocked_reason = Some(GOAL_BLOCKED_REASON_ROUND_LIMIT.to_string());
+        goal.clone()
+    };
+
+    if let Err(error) = persist_goal_store(goals, &[]) {
+        match previous {
+            Some(previous) => {
+                goals.insert(session, previous);
+            }
+            None => {
+                goals.remove(&session);
+            }
+        }
+        return Err(error);
+    }
+
+    // B130：先释放写锁再广播（观察者可能回调本模块读面）。
+    drop(guard);
+    notify_goal_event(&GoalEvent::Changed {
+        goal: updated.clone(),
+    });
+    Ok(updated)
 }
 
 /// 只读回读某 goal 的当前快照（不推进预算、不落盘）；不存在 ⇒ `Err`。
@@ -947,6 +1180,15 @@ pub fn update_goal(args: UpdateGoalArgs) -> Result<UpdateGoalResult, String> {
             UpdateGoalAction::Blocked => {
                 if current.phase == "completed" {
                     return Err("Cannot block a completed goal".to_string());
+                }
+                // O5：硬门槛（对齐 DSH `GOAL_TOOL_BLOCK_THRESHOLD`）。错误串前缀是稳定契约：
+                // 工具层据此映射 `goal_block_threshold` 错误码，不得改成别的措辞。
+                if current.rounds_started < GOAL_BLOCK_MIN_ROUNDS {
+                    return Err(format!(
+                        "goal_block_threshold: blocked requires at least {GOAL_BLOCK_MIN_ROUNDS} \
+                         goal rounds, current rounds_started={}",
+                        current.rounds_started
+                    ));
                 }
                 let reason = args
                     .blocked_reason
@@ -1148,7 +1390,11 @@ mod tests {
         assert_eq!(pause_res.goal.phase, "paused");
         assert_eq!(pause_res.goal.activation, GoalActivation::Disarmed);
 
-        // Blocked requires reason
+        // Blocked requires reason（O5：先满足最小轮次门槛，否则会在门槛处先失败，
+        // 那样这条断言就不再校验「缺 reason」本身，故先把 rounds_started 推到门槛）
+        for _ in 0..GOAL_BLOCK_MIN_ROUNDS {
+            advance_goal_round(&create_res.goal.id).expect("advance to block threshold");
+        }
         let block_without_reason = update_goal(UpdateGoalArgs {
             session_id: Some(session.clone()),
             goal_id: create_res.goal.id.clone(),
@@ -1663,6 +1909,7 @@ mod b130_event_tests {
                         goal.session_id == session
                     }
                     GoalEvent::Cleared { session_id, .. } => session_id == session,
+                    GoalEvent::RoundsStopped { session_id, .. } => session_id == session,
                 })
                 .cloned()
                 .collect()
@@ -1952,5 +2199,392 @@ mod b130_event_tests {
                 "除 LoopAlreadyOwned 外 visible_line 不得包含「落盘」: {line}"
             );
         }
+    }
+
+    // ======================================================================
+    // O2（2026-11-27）：续轮 gate 真值表锚定（TUI 与 core 的唯一判定点）
+    // ======================================================================
+
+    fn gate_input() -> GoalRoundGateInput {
+        GoalRoundGateInput {
+            has_active_goal: true,
+            cancelled: false,
+            pending_asks: 0,
+            pending_approvals: 0,
+            consecutive_failures: 0,
+            rounds_started: 1,
+            max_rounds: 50,
+            consecutive_auto_continues: 0,
+            max_auto_continues: 8,
+        }
+    }
+
+    #[test]
+    fn gate_stops_without_active_goal_first() {
+        let input = GoalRoundGateInput {
+            has_active_goal: false,
+            // 即使其余判据都成立，也先报「无轮可续」——否则 UI 会说「预算用尽」而真因是无目标。
+            cancelled: true,
+            pending_asks: 3,
+            ..gate_input()
+        };
+        assert_eq!(
+            goal_round_gate(input),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::NoActiveGoal)
+        );
+    }
+
+    #[test]
+    fn gate_cancelled_outranks_pending_requests() {
+        let input = GoalRoundGateInput {
+            cancelled: true,
+            pending_asks: 1,
+            ..gate_input()
+        };
+        assert_eq!(
+            goal_round_gate(input),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::Cancelled)
+        );
+    }
+
+    #[test]
+    fn gate_pauses_on_pending_host_requests_before_failures_and_budget() {
+        for (asks, approvals) in [(1usize, 0usize), (0, 1), (2, 3)] {
+            let input = GoalRoundGateInput {
+                pending_asks: asks,
+                pending_approvals: approvals,
+                // 同时踩中失败熔断与预算用满：让位优先级更高（不起新轮，不计失败、不烧预算）。
+                consecutive_failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES,
+                rounds_started: 50,
+                ..gate_input()
+            };
+            let decision = goal_round_gate(input);
+            assert!(decision.is_pause(), "asks={asks} approvals={approvals} ⇒ {decision:?}");
+            assert_eq!(
+                decision.stop_reason(),
+                Some(GoalRoundStopReason::TurnSuspended),
+                "Pause 的可见原因必须是 TurnSuspended（暂停 ≠ 终止）"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_stops_on_consecutive_failure_threshold() {
+        let input = GoalRoundGateInput {
+            consecutive_failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES,
+            ..gate_input()
+        };
+        assert_eq!(
+            goal_round_gate(input),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::ConsecutiveFailures {
+                failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES
+            })
+        );
+        // 差一轮不熔断。
+        assert!(goal_round_gate(GoalRoundGateInput {
+            consecutive_failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES - 1,
+            ..gate_input()
+        })
+        .is_continue());
+    }
+
+    #[test]
+    fn gate_stops_when_goal_budget_exhausted() {
+        let input = GoalRoundGateInput {
+            rounds_started: 50,
+            max_rounds: 50,
+            ..gate_input()
+        };
+        assert_eq!(
+            goal_round_gate(input),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::BudgetExhausted {
+                rounds_started: 50,
+                max_rounds: 50
+            })
+        );
+    }
+
+    #[test]
+    fn gate_stops_when_auto_continue_budget_exhausted() {
+        let input = GoalRoundGateInput {
+            consecutive_auto_continues: 8,
+            max_auto_continues: 8,
+            ..gate_input()
+        };
+        assert_eq!(
+            goal_round_gate(input),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::AutoContinueBudget)
+        );
+        assert!(goal_round_gate(GoalRoundGateInput {
+            consecutive_auto_continues: 7,
+            max_auto_continues: 8,
+            ..gate_input()
+        })
+        .is_continue());
+    }
+
+    #[test]
+    fn gate_continues_on_clean_input() {
+        assert!(goal_round_gate(gate_input()).is_continue());
+    }
+
+    #[test]
+    fn outcome_gate_suspended_is_pause_not_stop() {
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Suspended),
+            GoalRoundGateDecision::Pause
+        );
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Completed),
+            GoalRoundGateDecision::Continue
+        );
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Failed),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::FirstRoundNotSucceeded)
+        );
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Cancelled),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::Cancelled)
+        );
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Unclassified),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::TurnUnclassified)
+        );
+    }
+
+    #[test]
+    fn pause_reason_reads_as_paused_not_dead() {
+        let line = GoalRoundStopReason::TurnSuspended.visible_line();
+        assert!(line.contains("等你作答"), "{line}");
+        assert!(line.contains("作答后自动继续"), "{line}");
+        assert!(
+            !line.contains("续轮已停止"),
+            "暂停语义不得复用「已停止」措辞: {line}"
+        );
+        assert_eq!(GoalRoundStopReason::all_variants().len(), 10);
+    }
+}
+
+/// O2（2026-11-27）：续轮 gate 的**真值表**单测（C1 冻结判定顺序，逐行锚定）。
+///
+/// 为什么这些断言必须存在：`goal_round_gate` 是两个宿主循环（core 的
+/// `execute_graph_run_stream` / `advance_graph_run` 与 TUI 的 `run_goal_rounds`）**唯一**的
+/// 轮次边界判据。判定顺序一旦被后人调换（例如把失败熔断提到待作答之前），`ask_user` 挂起
+/// 就会被当成「失败停止」，目标永久失活——正是审核报告 P0-1 的症状，且没有任何编译器或
+/// 既有用例会红。故此处把冻结顺序逐条写死。
+#[cfg(test)]
+mod goal_round_gate_tests {
+    use super::*;
+
+    /// 全部绿灯输入：每个用例只改自己关心的字段，从而把「谁优先」变成可判定的问题。
+    fn passable() -> GoalRoundGateInput {
+        GoalRoundGateInput {
+            has_active_goal: true,
+            cancelled: false,
+            pending_asks: 0,
+            pending_approvals: 0,
+            consecutive_failures: 0,
+            rounds_started: 0,
+            max_rounds: 10,
+            consecutive_auto_continues: 0,
+            max_auto_continues: 8,
+        }
+    }
+
+    #[test]
+    fn all_green_continues() {
+        assert_eq!(goal_round_gate(passable()), GoalRoundGateDecision::Continue);
+    }
+
+    #[test]
+    fn no_active_goal_stops_first() {
+        let decision = goal_round_gate(GoalRoundGateInput {
+            has_active_goal: false,
+            cancelled: true,
+            pending_asks: 2,
+            consecutive_failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES,
+            rounds_started: 10,
+            ..passable()
+        });
+        assert_eq!(
+            decision,
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::NoActiveGoal),
+            "无 active goal 必须压过取消/待作答/失败/预算（否则会为不存在的目标起轮）"
+        );
+    }
+
+    #[test]
+    fn cancelled_beats_pending_asks() {
+        let decision = goal_round_gate(GoalRoundGateInput {
+            cancelled: true,
+            pending_asks: 1,
+            ..passable()
+        });
+        assert_eq!(
+            decision,
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::Cancelled),
+            "用户已取消时不得再判「等你作答」（Pause 会让循环继续等待一个已放弃的目标）"
+        );
+    }
+
+    #[test]
+    fn pending_asks_pause_beats_failures_and_budget() {
+        let decision = goal_round_gate(GoalRoundGateInput {
+            pending_asks: 1,
+            consecutive_failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES + 5,
+            rounds_started: 10,
+            consecutive_auto_continues: 8,
+            ..passable()
+        });
+        assert_eq!(
+            decision,
+            GoalRoundGateDecision::Pause,
+            "待作答必须判 Pause（不是 Stop）：作答后宿主才能重入续轮"
+        );
+    }
+
+    #[test]
+    fn pending_approvals_pause() {
+        assert_eq!(
+            goal_round_gate(GoalRoundGateInput {
+                pending_approvals: 1,
+                ..passable()
+            }),
+            GoalRoundGateDecision::Pause,
+            "审批待作答与 Ask 同权（都是「有人在等宿主」）"
+        );
+    }
+
+    #[test]
+    fn consecutive_failures_stop_with_actual_count() {
+        assert_eq!(
+            goal_round_gate(GoalRoundGateInput {
+                consecutive_failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES,
+                rounds_started: 10,
+                ..passable()
+            }),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::ConsecutiveFailures {
+                failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES,
+            }),
+            "恰好达到阈值必须停，且压过预算耗尽"
+        );
+        assert_eq!(
+            goal_round_gate(GoalRoundGateInput {
+                consecutive_failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES + 3,
+                ..passable()
+            }),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::ConsecutiveFailures {
+                failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES + 3,
+            }),
+            "失败计数必须如实（不得截断成阈值）"
+        );
+        assert_eq!(
+            goal_round_gate(GoalRoundGateInput {
+                consecutive_failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES - 1,
+                ..passable()
+            }),
+            GoalRoundGateDecision::Continue,
+            "未达阈值不得提前停（一次限流不该终止目标）"
+        );
+    }
+
+    #[test]
+    fn round_budget_beats_auto_continue_budget() {
+        assert_eq!(
+            goal_round_gate(GoalRoundGateInput {
+                rounds_started: 10,
+                max_rounds: 10,
+                consecutive_auto_continues: 8,
+                ..passable()
+            }),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::BudgetExhausted {
+                rounds_started: 10,
+                max_rounds: 10,
+            }),
+            "目标预算耗尽优先于每线程预算（不得把「轮次用尽」说成「连续自动推进达上限」）"
+        );
+    }
+
+    #[test]
+    fn auto_continue_budget_stops_last() {
+        assert_eq!(
+            goal_round_gate(GoalRoundGateInput {
+                consecutive_auto_continues: 8,
+                ..passable()
+            }),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::AutoContinueBudget)
+        );
+    }
+
+    #[test]
+    fn outcome_gate_truth_table() {
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Completed),
+            GoalRoundGateDecision::Continue,
+            "只有成功轮才推进续轮"
+        );
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Failed),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::FirstRoundNotSucceeded),
+            "失败轮必须报「本轮未成功」，不得复用 ConsecutiveFailures（那读作已经连跑多轮）"
+        );
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Suspended),
+            GoalRoundGateDecision::Pause,
+            "挂起是暂停不是终止（作答后必须重入续轮）"
+        );
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Cancelled),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::Cancelled)
+        );
+        assert_eq!(
+            goal_round_outcome_gate(GoalRoundStepOutcome::Unclassified),
+            GoalRoundGateDecision::Stop(GoalRoundStopReason::TurnUnclassified),
+            "不知道成没成 ⇒ 既不冒充成功也不冒充失败"
+        );
+    }
+
+    /// `Pause` 的可见原因是 `TurnSuspended`，文案必须表达「等你作答 + 作答后自动继续」。
+    #[test]
+    fn pause_reason_is_turn_suspended_with_resume_copy() {
+        assert_eq!(
+            GoalRoundGateDecision::Pause.stop_reason(),
+            Some(GoalRoundStopReason::TurnSuspended),
+            "Pause 复用既有 TurnSuspended（禁止新增变体）"
+        );
+        let line = GoalRoundStopReason::TurnSuspended.visible_line();
+        assert!(line.contains("等你作答"), "Pause 文案必须点名「等你作答」：{line}");
+        assert!(
+            line.contains("作答后自动继续"),
+            "Pause 文案必须承诺「作答后自动继续」（否则用户以为目标已死）：{line}"
+        );
+        assert!(
+            !line.contains("续轮已停止"),
+            "Pause 不得复用「续轮已停止」措辞：{line}"
+        );
+    }
+
+    /// 兼容读面 `goal_round_stop_reason` 必须与 gate 的三值投影逐行一致（防两处判据漂移）。
+    #[test]
+    fn legacy_stop_reason_is_gate_projection() {
+        assert_eq!(goal_round_stop_reason(false, 0, 0, 10), None);
+        assert_eq!(goal_round_stop_reason(false, 1, 3, 10), None);
+        assert_eq!(
+            goal_round_stop_reason(true, 0, 0, 10),
+            Some(GoalRoundStopReason::Cancelled)
+        );
+        assert_eq!(
+            goal_round_stop_reason(false, MAX_CONSECUTIVE_GOAL_ROUND_FAILURES, 4, 10),
+            Some(GoalRoundStopReason::ConsecutiveFailures {
+                failures: MAX_CONSECUTIVE_GOAL_ROUND_FAILURES,
+            })
+        );
+        assert_eq!(
+            goal_round_stop_reason(false, 0, 10, 10),
+            Some(GoalRoundStopReason::BudgetExhausted {
+                rounds_started: 10,
+                max_rounds: 10,
+            })
+        );
     }
 }

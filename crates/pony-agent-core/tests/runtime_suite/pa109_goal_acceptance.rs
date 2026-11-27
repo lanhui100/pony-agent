@@ -129,10 +129,24 @@ fn test_ac03_blocked_requires_reason() {
     };
     let created = create_goal(create_args).unwrap();
 
+    // 2026-11-27（O5）：`Blocked` 新增最小轮次门槛（`GOAL_BLOCK_MIN_ROUNDS`），
+    // 本用例的语义是「缺 blocked_reason 必须被拒 / 给了原因必须成功」，与轮次无关。
+    // 故先推进到门槛之上，使被测分支（reason 校验）成为唯一决定因素。
+    for _ in 0..pony_agent_core::agent::goal::GOAL_BLOCK_MIN_ROUNDS {
+        pony_agent_core::agent::goal::advance_goal_round(&created.goal.id)
+            .expect("O5 前置：advance_goal_round 必须成功");
+    }
+    let created = pony_agent_core::agent::goal::get_goal(GetGoalArgs {
+        session_id: Some(SESSION.to_string()),
+    })
+    .expect("O5 前置：get_goal 必须成功")
+    .goal
+    .expect("O5 前置：目标必须存在");
+
     let invalid_block = UpdateGoalArgs {
         session_id: Some(SESSION.to_string()),
-        goal_id: created.goal.id.clone(),
-        revision: created.goal.revision,
+        goal_id: created.id.clone(),
+        revision: created.revision,
         action: UpdateGoalAction::Blocked,
         objective: None,
         blocked_reason: None,
@@ -142,8 +156,8 @@ fn test_ac03_blocked_requires_reason() {
 
     let valid_block = UpdateGoalArgs {
         session_id: Some(SESSION.to_string()),
-        goal_id: created.goal.id.clone(),
-        revision: created.goal.revision,
+        goal_id: created.id.clone(),
+        revision: created.revision,
         action: UpdateGoalAction::Blocked,
         objective: None,
         blocked_reason: Some("Network gateway unreachable".to_string()),

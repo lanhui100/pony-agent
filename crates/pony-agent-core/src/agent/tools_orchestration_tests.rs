@@ -736,6 +736,37 @@ fn terminal_goal_wrapup_is_injected_into_tool_result_b129() {
         .expect("create_goal 必须返回 goal.id")
         .to_string();
 
+    // O5（2026-11-27）：blocked 有最小轮次门槛（3 轮）——首轮就放弃必须被拒。
+    let premature = router.execute_with_context(
+        &call(
+            "update_goal",
+            json!({
+                "session_id": session,
+                "goal_id": second_goal_id,
+                "revision": 1,
+                "action": "blocked",
+                "blocked_reason": "上游模型连续失败"
+            }),
+        ),
+        &goal_round_ctx,
+    );
+    assert_eq!(
+        premature.status, "error",
+        "首轮 blocked 必须被门槛拒绝: {}",
+        premature.output
+    );
+    let premature_payload: Value =
+        serde_json::from_str(&premature.output).expect("update_goal 输出必须是 JSON");
+    assert_eq!(
+        premature_payload["error"]["code"], "goal_block_threshold",
+        "门槛拒绝必须带稳定错误码: {}",
+        premature.output
+    );
+
+    // 走满 3 轮后 blocked 才被允许（本条只验证 wrapup 注入，轮次由领域层推进，不伪造工具输入）。
+    for _ in 0..3 {
+        crate::agent::goal::advance_goal_round(&second_goal_id).expect("推进轮次必须成功");
+    }
     let blocked = router.execute_with_context(
         &call(
             "update_goal",

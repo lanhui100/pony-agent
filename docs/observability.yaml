@@ -1875,6 +1875,28 @@ note: >-
 #     与 `crates/pony-agent-core/tests/session_storage_suite/b254_stream_only_followup.rs`（批量 `N>1` 流式断流重试与真增量验收）。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
 
+# Goal 续轮判据单点化 / 作答后重入 / 停止可见（ADR 2026-11-27-goal-round-gate-and-ask-resume）归属说明：
+# (1) 变更面：`crates/pony-storage/src/goal.rs`（新增纯函数 `goal_round_gate` /
+#     `goal_round_outcome_gate` / `block_goal_for_round_limit` / `notify_goal_rounds_stopped`，
+#     `GoalEvent` additive 变体 `RoundsStopped`）、`crates/pony-agent-core/src/agent/{planner.rs,
+#     control_plane/mod.rs,control_plane/ask_resume_commands.rs}`（gate 接线 + checked 续轮入口）、
+#     `crates/pony-tui/src/tui.rs`（gate 接线 + 作答后重入）、`src-tauri/src/{goal_events.rs,
+#     goal_resume.rs,lib.rs}`（新领域事件映射 + Rust 侧续轮驱动者）、`src/components/GoalBar.vue`
+#     （消费 `goal://rounds_stopped`）。**无**新增网络出口、常驻后台线程、LLM 调用或新依赖；
+#     桌面续跑仍走既有 `spawn_graph_run_stream`（同一阻塞线程池）。
+# (2) 新增/扩容**本地取证面**（非遥测出口）：
+#     - 结构化日志 `goal_rounds_stopped`（info；字段 session_id / goal_id / reason /
+#       consecutive_failures / rounds_started / max_rounds；桌面侧另有 stage）与
+#       `goal_round_continuation_failed`（warn；stage / session_id / error）、
+#       `goal_round_block_on_round_limit_failed`（warn；session_id / goal_id / error）。
+#       字段只含会话/目标标识、稳定 reason code 与错误串，**不含目标正文与消息正文**。
+#     - 本地 Tauri 窗口事件 `goal://rounds_stopped`（additive；载荷 sessionId / goalId /
+#       reason / visibleLine / roundsStarted / maxRounds / consecutiveFailures）。`visibleLine`
+#       由 `GoalRoundStopReason::visible_line()` 唯一拼装，与 TUI 状态行同源。
+# (3) ⇒ 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-observability/src/
+#     otel/mod.rs` 与 `.../ponysentry/client.rs`）；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻
+#     监听地址、无 `/metrics`、pull 模型不成立）。不新增 applicable 判定、不新增 enforcement_point。
+
 # B1795767639536 邻接变更（ADR 2026-11-27-goal-stop-copy-owner-and-status-bar-icon）归属说明：
 # (1) 变更面全部**本地展示层**：`crates/pony-storage/src/goal.rs`（`GoalRoundStopReason::headline()` /
 #     一处 `detail()` 文案：停止原因不再冒认「目标已暂停」阶段）、`crates/pony-tui/src/tui/status_bar.rs`

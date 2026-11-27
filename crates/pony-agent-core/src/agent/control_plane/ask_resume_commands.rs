@@ -148,8 +148,28 @@ impl HostControlPlane {
         run_id: &str,
         command: StartTurnStreamCommand,
     ) -> Result<(), String> {
+        self.continue_ask_resume_turn_stream_checked(sink, run_id, command)
+            .map(|_| ())
+    }
+
+    /// C4（2026-11-27）：Ask 恢复轮的**可观测终态**版本（既有入口的 checked 委托源）。
+    ///
+    /// 为什么必须另立入口：`Result<(), String>` 只能区分「执行失败」，无法区分「执行成功但
+    /// `failed` 终态」（一次上游 429 就是后者）。宿主在恢复轮之后要判断「goal 续轮是否可以
+    /// 重入」，判据必须是终态归约（与 `start_turn_stream_checked` 同一套
+    /// `RecordingTurnEventSink` + [`HostControlPlane::reduce_turn_outcome`]）。
+    ///
+    /// 失败语义与既有版本逐字一致：`Err` = 该轮**已执行过**但单步收口失败（不重跑）；
+    /// `Ok(Unknown)` = 无可采终态（调用方不得当作成功）；run 不可续时仍回落到通用入口。
+    pub fn continue_ask_resume_turn_stream_checked<S: TurnEventSink>(
+        &self,
+        sink: &S,
+        run_id: &str,
+        command: StartTurnStreamCommand,
+    ) -> Result<TurnStreamOutcome, String> {
         let turn_id = command.turn_id.clone();
-        match self.continue_bound_graph_run_stream(sink, run_id, &command) {
+        let recording = RecordingTurnEventSink::new(sink);
+        match self.continue_bound_graph_run_stream(&recording, run_id, &command) {
             BoundContinuation::Executed(Ok(response)) => {
                 crate::agent::otel::log::log_json_with_fields(
                     "debug",
@@ -168,7 +188,7 @@ impl HostControlPlane {
                         ),
                     ],
                 );
-                Ok(())
+                Ok(self.reduce_turn_outcome(&recording, &turn_id))
             }
             BoundContinuation::Executed(Err(error)) => {
                 crate::agent::otel::log::log_json_with_fields(
@@ -194,7 +214,11 @@ impl HostControlPlane {
                         ("error", serde_json::json!(error)),
                     ],
                 );
-                self.start_ask_aware_turn_stream(sink, command)
+                // 回落分支复用**同一个** recording sink：终态采集面与 run-bound 路径一致。
+                match self.start_ask_aware_turn_stream(&recording, command) {
+                    Ok(()) => Ok(self.reduce_turn_outcome(&recording, &turn_id)),
+                    Err(error) => Err(error),
+                }
             }
         }
     }
@@ -215,8 +239,23 @@ impl HostControlPlane {
         run_id: &str,
         command: &StartTurnStreamCommand,
     ) -> Result<(), String> {
+        self.continue_approval_resume_turn_stream_checked(sink, run_id, command)
+            .map(|_| ())
+    }
+
+    /// C4（2026-11-27）：审批恢复轮的**可观测终态**版本（既有入口的 checked 委托源）。
+    ///
+    /// 与 [`Self::continue_ask_resume_turn_stream_checked`] 的唯一差别是失败语义：run 不可续时
+    /// **fail-closed**（不回落新起 turn），其余（终态归约、日志面）逐字共用。
+    pub fn continue_approval_resume_turn_stream_checked<S: TurnEventSink>(
+        &self,
+        sink: &S,
+        run_id: &str,
+        command: &StartTurnStreamCommand,
+    ) -> Result<TurnStreamOutcome, String> {
         let turn_id = command.turn_id.clone();
-        match self.continue_bound_graph_run_stream(sink, run_id, command) {
+        let recording = RecordingTurnEventSink::new(sink);
+        match self.continue_bound_graph_run_stream(&recording, run_id, command) {
             BoundContinuation::Executed(Ok(response)) => {
                 crate::agent::otel::log::log_json_with_fields(
                     "debug",
@@ -235,7 +274,7 @@ impl HostControlPlane {
                         ),
                     ],
                 );
-                Ok(())
+                Ok(self.reduce_turn_outcome(&recording, &turn_id))
             }
             BoundContinuation::Executed(Err(error)) => {
                 crate::agent::otel::log::log_json_with_fields(
