@@ -14,7 +14,7 @@
 
 | 能力 | 落点（取证） | 说明 |
 | --- | --- | --- |
-| 目标数据结构 | `crates/pony-agent-core/src/agent/goal.rs:29` `GoalData` | 含 `phase` / `activation` / `revision` / `rounds_started` / `max_goal_rounds` / `blocked_reason` |
+| 目标数据结构 | `crates/pony-storage/src/goal.rs` `GoalData`（经 `pony_agent_core::agent::goal` re-export） | 含 `phase` / `activation` / `revision` / `rounds_started` / `max_goal_rounds` / `blocked_reason` |
 | sidecar 存储路径 | `goal.rs:97` `goal_store_path()`，覆盖点 `goal.rs:9` `PONY_AGENT_GOAL_STORE_PATH` | 单 JSON sidecar，非会话事件日志 |
 | 创建 | `goal.rs:559` `create_goal` | 无「重复创建」硬拦（可覆盖 completed） |
 | 读取 | `goal.rs:595` `get_goal` | — |
@@ -78,7 +78,7 @@
 1. **goal 变更工具的权威校验**（对位 `tool-goal/authority`）
    - 现状风险：`create_goal`/`update_goal` 对模型全天候开放（`goal.rs:559/605`），模型可在**非目标轮次**静默覆盖用户目标；人类命令面已用「已存在目标 ⇒ Err」兜底，但工具面没有。
    - 建议：在 core 增加 `goal_tool_authority()` 判定，仅允许「直接人类轮次」或「当前 session 的 armed goal round」改写目标，其余返回结构化拒绝码。
-   - 落点：`crates/pony-agent-core/src/agent/goal.rs`（新增判定）＋ 模型工具注册处（`src-tauri`/工具注册表）。
+   - 落点：`crates/pony-storage/src/goal.rs`（新增判定）＋ 模型工具注册处（`src-tauri`/工具注册表）。
    - **采纳**：是。属于正确性而非风格问题，且改动局部（不改 sidecar 格式）。
 
 2. **稳定错误码**（对位 `GoalError` / `HarnessError`）

@@ -1,6 +1,7 @@
 pub use pony_agent_core::agent;
 mod blocking_helper;
 mod goal_events;
+mod goal_resume;
 mod platform;
 mod tauri_adapter;
 /// wave-60 C6（A1 裁决）：注册表需被 `src-tauri/tests/` 直接引用 ⇒ 改 `pub mod`。
@@ -118,14 +119,20 @@ fn continue_graph_run(
     control_plane.continue_graph_run(ContinueGraphRunCommand { run_id, input })
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn continue_graph_run_stream(
     app: AppHandle,
     control_plane: State<'_, HostControlPlane>,
+    authorization_modes: State<'_, goal_resume::SessionAuthorizationModes>,
     turn_id: String,
     run_id: String,
     input: TurnInput,
 ) -> Result<GraphRunStreamStartResponse, String> {
+    authorization_modes.record(input.session_id.as_deref(), input.tool_authorization_mode.as_deref());
     let (response, prepared) =
         control_plane.prepare_continue_graph_run_stream(ContinueGraphRunStreamCommand {
             turn_id,
@@ -147,14 +154,20 @@ fn resume_graph_run(
     control_plane.resume_graph_run(ResumeGraphRunCommand { run_id, input })
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn resume_graph_run_stream(
     app: AppHandle,
     control_plane: State<'_, HostControlPlane>,
+    authorization_modes: State<'_, goal_resume::SessionAuthorizationModes>,
     turn_id: String,
     run_id: String,
     input: TurnInput,
 ) -> Result<GraphRunStreamStartResponse, String> {
+    authorization_modes.record(input.session_id.as_deref(), input.tool_authorization_mode.as_deref());
     let (response, prepared) =
         control_plane.prepare_resume_graph_run_stream(ResumeGraphRunStreamCommand {
             turn_id,
@@ -297,9 +310,15 @@ fn ask_answer(
 }
 
 /// Approve an Approval control request by stable `request_id` and compare-and-swap `version` (or `expected_version`).
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn control_approve_request(
+    app: AppHandle,
     control_plane: State<'_, HostControlPlane>,
+    authorization_modes: State<'_, goal_resume::SessionAuthorizationModes>,
     request_id: String,
     version: Option<u64>,
     expected_version: Option<u64>,
@@ -307,7 +326,24 @@ fn control_approve_request(
     let ver = expected_version
         .or(version)
         .ok_or_else(|| "missing required key `expected_version` or `version`".to_string())?;
-    control_plane.approve_control_request(&request_id, ver)
+    let approved = control_plane.approve_control_request(&request_id, ver)?;
+    // O1-B：审批决策同样是「宿主作答」——决策后必须把 goal 续轮重新接上（与 Ask 同构）。
+    // run 身份来自审批投影的 `runId`（缺失 ⇒ 该审批不绑定 run，无需续跑）。
+    if let Some(run_id) = approved
+        .get("runId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        if let Err(error) = goal_resume::resume_goal_rounds_after_host_answer(
+            &app,
+            &control_plane,
+            &run_id,
+            &authorization_modes,
+        ) {
+            eprintln!("[pony-agent] goal continuation after approval failed: {error}");
+        }
+    }
+    Ok(approved)
 }
 
 /// Cancel a pending Ask by stable `request_id` and compare-and-swap `version` (or `expected_version`).
@@ -561,15 +597,33 @@ fn graph_bind_ask_wait(
 
 /// Resolve a bound Ask wait, injecting exactly one terminal tool result for the original call id.
 /// A stale `version` is rejected.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn graph_resume_ask(
+    app: AppHandle,
     control_plane: State<'_, HostControlPlane>,
+    authorization_modes: State<'_, goal_resume::SessionAuthorizationModes>,
     run_id: String,
     request_id: String,
     version: u64,
     answer: Value,
 ) -> Result<Value, String> {
-    control_plane.graph_resume_ask(&run_id, &request_id, version, answer)
+    let resumed = control_plane.graph_resume_ask(&run_id, &request_id, version, answer)?;
+    // O1-B（2026-11-27）：答案落地后把 goal 自动续轮重新接上——旧实现到此为止，run 停在
+    // `Ready` 且没有任何线程再发下一轮，目标永久 `active + Armed`（审核报告 P0-1）。
+    // 续跑失败不得回滚答案（答案已持久化），只做可见留痕。
+    if let Err(error) = goal_resume::resume_goal_rounds_after_host_answer(
+        &app,
+        &control_plane,
+        &run_id,
+        &authorization_modes,
+    ) {
+        eprintln!("[pony-agent] goal continuation after ask resume failed: {error}");
+    }
+    Ok(resumed)
 }
 
 #[tauri::command]
@@ -1527,6 +1581,8 @@ pub fn run() {
             latest: Mutex::new(json!({})),
         })
         .manage(TurnTaskRegistry::with_max_concurrent(3))
+        // O1-B：桌面端续轮驱动者继承「该会话最近一次提交的授权模式」（缺省 read_only）。
+        .manage(goal_resume::SessionAuthorizationModes::default())
         .setup(|app| {
             // B130：goal 领域事件 → `goal://*` 宿主事件的唯一装配点。必须在任何 goal
             // 变更发生前完成安装（否则首批 create/update 无事件；UI 只能等 turn 结束再拉）。

@@ -58,6 +58,8 @@ mod capability_commands;
 mod compaction_commands;
 mod title_commands;
 mod graph_projection;
+// O2（2026-11-27）：goal 续轮判据接线独立成文件（mod.rs 已计入文件行数棘轮）。
+mod goal_round_loop;
 mod history_commands;
 mod message_projection;
 mod path_authorization_commands;
@@ -726,6 +728,23 @@ pub fn turn_stream_outcome_from_terminal(
     }
 }
 
+/// O2（2026-11-27）：`GraphRunPhase` → `turn_stream_outcome_from_terminal` 认得的相位字符串。
+///
+/// 为什么不在 `graph.rs` 加 `as_str`：相位→字符串的线缆口径已经由 `serde` 的
+/// `snake_case` 重命名固定，这里只做一次与之一致的映射，避免第二处真值源。
+fn graph_run_phase_wire(phase: &crate::agent::graph::GraphRunPhase) -> &'static str {
+    use crate::agent::graph::GraphRunPhase;
+    match phase {
+        GraphRunPhase::Ready => "ready",
+        GraphRunPhase::Running => "running",
+        GraphRunPhase::WaitingUser => "waiting_user",
+        GraphRunPhase::Paused => "paused",
+        GraphRunPhase::Completed => "completed",
+        GraphRunPhase::Failed => "failed",
+        GraphRunPhase::Cancelled => "cancelled",
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphRunControlResponse {
@@ -806,13 +825,18 @@ struct RecordedTurnTerminal {
     error: Option<String>,
 }
 
-struct RecordingTurnEventSink<'a, S> {
+/// PA-171 C1-A1：终态采集 sink（包住宿主 sink）。
+///
+/// `pub(crate)`：`ask_resume_commands.rs` 的 checked 续轮变体必须用**同一个**采集器与
+/// 同一个归约函数（`turn_graph_decision_for`）判定「本轮是否成功收口」。复制第二套会让
+/// 「首轮门」与「恢复轮」的成败口径分叉——正是 O2 要消灭的缺陷类型。
+pub(crate) struct RecordingTurnEventSink<'a, S> {
     inner: &'a S,
     terminal: Mutex<RecordedTurnTerminal>,
 }
 
 impl<'a, S> RecordingTurnEventSink<'a, S> {
-    fn new(inner: &'a S) -> Self {
+    pub(crate) fn new(inner: &'a S) -> Self {
         Self {
             inner,
             terminal: Mutex::new(RecordedTurnTerminal::default()),
@@ -915,7 +939,7 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
     /// PA-171 C1-A1：终态快照 `(phase, error)`，供宿主归约为 [`TurnStreamOutcome`]。
     ///
     /// `None` ⇒ 本轮**没有可采终态**（视为 `Unknown`，绝不当成功）。
-    fn recorded_terminal_outcome(&self) -> Option<(String, Option<String>)> {
+    pub(crate) fn recorded_terminal_outcome(&self) -> Option<(String, Option<String>)> {
         let terminal = self.terminal.lock().unwrap_or_else(|e| {
             tracing::warn!(target: "control_plane", error = %e, "[pony-agent] recording sink lock poisoned");
             e.into_inner()
@@ -924,7 +948,7 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         Some((phase, terminal.error.clone()))
     }
 
-    fn terminal_trace_annotation(
+    pub(crate) fn terminal_trace_annotation(
         &self,
     ) -> Option<(
         Option<String>,
@@ -1986,88 +2010,39 @@ impl HostControlPlane {
     ) -> Result<GraphRunTurnResponse, String> {
         // T7：本 run 的授权事实来自原始输入，续轮必须继承它（不能丢成 None）。
         let inherited_authorization_mode = prepared.input.tool_authorization_mode.clone();
-        let mut consecutive_continues = 0;
+        let mut state = goal_round_loop::ContinuationState::new();
         loop {
             let response = self.execute_graph_run_stream_step(sink, prepared)?;
-            if response.decision.kind != GraphDecisionKind::Continue {
-                return Ok(response);
-            }
-
-            let Some((session_id, active_goal)) =
-                crate::agent::goal::continuation_goal_for_run(response.run.session_id.as_deref())
-            else {
-                return Ok(response);
-            };
-
-            if consecutive_continues >= crate::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES {
-                return Ok(response);
-            }
-
-            if active_goal.rounds_started >= active_goal.max_goal_rounds {
-                return Ok(response);
-            }
-
-            let updated_goal = match crate::agent::goal::advance_goal_round(&active_goal.id) {
-                Ok(goal) => goal,
-                Err(error) => {
-                    // PA-172 §8 B6（遗留 #21）：静默吞掉预算推进失败 ⇒ 补结构化 warn。
-                    // **行为不变**：仍返回 `Ok(response)`（不得改调度语义），只是消除静默。
-                    crate::agent::otel::log::log_json_with_fields(
-                        "warn",
-                        "goal_round_advance_failed",
-                        None,
-                        &[
-                            ("stage", serde_json::json!("after_turn")),
-                            ("session_id", serde_json::json!(session_id)),
-                            ("goal_id", serde_json::json!(&active_goal.id)),
-                            ("error", serde_json::json!(error)),
-                        ],
-                    );
-                    return Ok(response);
+            let pending_session = response.run.session_id.clone();
+            // 判据真值源唯一：见 `goal_round_loop` 模块头注释（O2）。
+            match goal_round_loop::after_goal_round(
+                &response,
+                &mut state,
+                inherited_authorization_mode.as_deref(),
+                move || {
+                    pending_session.as_deref().map_or((0, 0), |session| {
+                        goal_round_loop::pending_host_request_counts(self, session)
+                    })
+                },
+            ) {
+                goal_round_loop::Advance::Stop => return Ok(response),
+                goal_round_loop::Advance::Continue(input) => {
+                    let next_cmd = ContinueGraphRunStreamCommand {
+                        run_id: response.run.id.clone(),
+                        turn_id: format!("{}-turn-{}", response.run.id, response.run.steps.len() + 1),
+                        input: *input,
+                    };
+                    let Ok((_, next_prepared)) = self.prepare_continue_graph_run_stream(next_cmd)
+                    else {
+                        return Ok(response);
+                    };
+                    prepared = next_prepared;
                 }
-            };
-
-            consecutive_continues += 1;
-            let round_num = updated_goal.rounds_started;
-            let goal_msg = crate::agent::goal::build_goal_round_message(
-                &updated_goal.objective,
-                round_num,
-                updated_goal.max_goal_rounds,
-            );
-
-            let next_turn_id = format!("{}-turn-{}", response.run.id, response.run.steps.len() + 1);
-            let next_input = TurnInput {
-                message: goal_msg,
-                session_id: Some(session_id.clone()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                display_message: Some(format!("[goal round {round_num}] 推进目标：{}", updated_goal.objective)),
-                workspace_mode: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_id: None,
-                plan_execution_approval: None,
-                // T7：继承原会话授权事实（缺失时 read_only），绝不回落为 None（=Allow）。
-                tool_authorization_mode: Some(continuation_tool_authorization_mode(
-                    inherited_authorization_mode.as_deref(),
-                )),
-            };
-
-            let next_cmd = ContinueGraphRunStreamCommand {
-                run_id: response.run.id.clone(),
-                turn_id: next_turn_id,
-                input: next_input,
-            };
-
-            let Ok((_, next_prepared)) = self.prepare_continue_graph_run_stream(next_cmd) else {
-                return Ok(response);
-            };
-
-            prepared = next_prepared;
+            }
         }
     }
+
+
 
 
     /// wave-65 C4（run-bound）：审批挂起没有 Ask wait，`bind_ask_wait` 不会清 active turn ⇒
@@ -2352,18 +2327,28 @@ impl HostControlPlane {
         let turn_id = command.turn_id.clone();
         let recording = RecordingTurnEventSink::new(sink);
         match self.start_ask_aware_turn_stream(&recording, command) {
-            Ok(()) => {
-                // 契约矩阵 §3.1 C1-A1：终态 phase + **graph 决策**双真值判定。
-                // 只看 phase 会把「WaitUser（模型挂起等用户）」当成 Completed，进而多开一轮。
-                let decision = self.turn_graph_decision_for(&turn_id);
-                Ok(match recording.recorded_terminal_outcome() {
-                    Some((phase, error)) => {
-                        turn_stream_outcome_from_terminal(&phase, error, decision)
-                    }
-                    None => TurnStreamOutcome::Unknown,
-                })
-            }
+            Ok(()) => Ok(self.reduce_turn_outcome(&recording, &turn_id)),
             Err(error) => Err(error),
+        }
+    }
+
+    /// C4（2026-11-27）：把已采集的终态 + 该轮的 graph 决策归约为 [`TurnStreamOutcome`]。
+    ///
+    /// 单一归约点：`start_turn_stream_checked`（首轮）与 `ask_resume_commands` 的 checked
+    /// 续轮变体（恢复轮）必须逐字共用本函数，否则「首轮成功、恢复轮失败」被判成成功，
+    /// goal 循环会在一次 429 后继续烧预算。
+    ///
+    /// 归约口径（契约矩阵 §3.1 C1-A1）：终态 phase + **graph 决策**双真值判定；只看 phase
+    /// 会把「WaitUser（模型挂起等用户）」当成 `Completed`，进而多开一轮。
+    pub(crate) fn reduce_turn_outcome<S: TurnEventSink>(
+        &self,
+        recording: &RecordingTurnEventSink<'_, S>,
+        turn_id: &str,
+    ) -> TurnStreamOutcome {
+        let decision = self.turn_graph_decision_for(turn_id);
+        match recording.recorded_terminal_outcome() {
+            Some((phase, error)) => turn_stream_outcome_from_terminal(&phase, error, decision),
+            None => TurnStreamOutcome::Unknown,
         }
     }
 
@@ -2371,7 +2356,7 @@ impl HostControlPlane {
     ///
     /// 真值来源：`GraphRun.last_decision`（由 `GraphRunner::apply_turn_result` 按
     /// `decide_after_turn` 落库）+ `last_completed_turn_id` 定位本轮。
-    fn turn_graph_decision_for(&self, turn_id: &str) -> Option<GraphDecisionKind> {
+    pub(crate) fn turn_graph_decision_for(&self, turn_id: &str) -> Option<GraphDecisionKind> {
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
             tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
@@ -2863,75 +2848,27 @@ impl HostControlPlane {
         self.note_user_message_entry(&input);
         // T7：同上——续轮/推进继承原会话授权事实（无事实时按 read_only 兜底）。
         let inherited_authorization_mode = input.tool_authorization_mode.clone();
-        let mut consecutive_continues = 0;
+        // O2（2026-11-27）：与 `execute_graph_run_stream` 同一套判据（`goal_round_loop` 模块头注释）。
+        let mut state = goal_round_loop::ContinuationState::new();
         loop {
             let response = self.advance_graph_run_step(run_id.clone(), input)?;
-            if response.decision.kind != GraphDecisionKind::Continue {
-                return Ok(response);
+            let pending_session = response.run.session_id.clone();
+            match goal_round_loop::after_goal_round(
+                &response,
+                &mut state,
+                inherited_authorization_mode.as_deref(),
+                move || {
+                    pending_session.as_deref().map_or((0, 0), |session| {
+                        goal_round_loop::pending_host_request_counts(self, session)
+                    })
+                },
+            ) {
+                goal_round_loop::Advance::Stop => return Ok(response),
+                goal_round_loop::Advance::Continue(next_input) => input = *next_input,
             }
-
-            let Some((session_id, active_goal)) =
-                crate::agent::goal::continuation_goal_for_run(response.run.session_id.as_deref())
-            else {
-                return Ok(response);
-            };
-
-            if consecutive_continues >= crate::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES {
-                return Ok(response);
-            }
-
-            if active_goal.rounds_started >= active_goal.max_goal_rounds {
-                return Ok(response);
-            }
-
-            let updated_goal = match crate::agent::goal::advance_goal_round(&active_goal.id) {
-                Ok(goal) => goal,
-                Err(error) => {
-                    // PA-172 §8 B6（遗留 #21）：静默吞掉预算推进失败 ⇒ 补结构化 warn。
-                    // **行为不变**：仍返回 `Ok(response)`（不得改调度语义），只是消除静默。
-                    crate::agent::otel::log::log_json_with_fields(
-                        "warn",
-                        "goal_round_advance_failed",
-                        None,
-                        &[
-                            ("stage", serde_json::json!("planner")),
-                            ("session_id", serde_json::json!(session_id)),
-                            ("goal_id", serde_json::json!(&active_goal.id)),
-                            ("error", serde_json::json!(error)),
-                        ],
-                    );
-                    return Ok(response);
-                }
-            };
-
-            consecutive_continues += 1;
-            let round_num = updated_goal.rounds_started;
-            let goal_msg = crate::agent::goal::build_goal_round_message(
-                &updated_goal.objective,
-                round_num,
-                updated_goal.max_goal_rounds,
-            );
-
-            input = TurnInput {
-                message: goal_msg,
-                session_id: Some(session_id.clone()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                display_message: Some(format!("[goal round {round_num}] 推进目标：{}", updated_goal.objective)),
-                workspace_mode: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_id: None,
-                plan_execution_approval: None,
-                // T7：继承原会话授权事实（缺失时 read_only），绝不回落为 None（=Allow）。
-                tool_authorization_mode: Some(continuation_tool_authorization_mode(
-                    inherited_authorization_mode.as_deref(),
-                )),
-            };
         }
     }
+
 
     fn advance_graph_run_step(
         &self,

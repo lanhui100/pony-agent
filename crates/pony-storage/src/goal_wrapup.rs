@@ -61,8 +61,9 @@ mod tests {
     use super::*;
     use crate::goal::test_support::TempGoalStore;
     use crate::goal::{
-        active_goal_for_session, clear_goal, continuation_goal_for_run, create_goal, get_goal,
-        update_goal, CreateGoalArgs, GetGoalArgs, GoalActivation, UpdateGoalAction, UpdateGoalArgs,
+        active_goal_for_session, advance_goal_round, clear_goal, continuation_goal_for_run,
+        create_goal, get_goal, update_goal, CreateGoalArgs, GetGoalArgs, GoalActivation,
+        UpdateGoalAction, UpdateGoalArgs, GOAL_BLOCK_MIN_ROUNDS,
     };
 
     fn goal_with(phase: &str, blocked_reason: Option<&str>) -> GoalData {
@@ -87,6 +88,12 @@ mod tests {
         })
         .expect("create_goal")
         .goal;
+        // O5（2026-11-27）：`blocked` 现有最小轮次门槛（`GOAL_BLOCK_MIN_ROUNDS`）。本辅助函数
+        // 同时服务 `complete` 与 `blocked`，统一先推到门槛——对 `complete` 无副作用（只关心
+        // 终态相位），对 `blocked` 是满足新硬约束的最小前提。
+        for _ in 0..GOAL_BLOCK_MIN_ROUNDS {
+            advance_goal_round(&created.id).expect("advance to block threshold");
+        }
         update_goal(UpdateGoalArgs {
             session_id: Some(session.to_string()),
             goal_id: created.id,

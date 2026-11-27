@@ -88,12 +88,13 @@ impl GraphPlanner for DefaultGraphPlanner {
     fn decide_after_turn(&self, context: GraphPlanningContext<'_>) -> GraphDecision {
         let assistant_message = context.handoff.assistant_message.trim();
 
-        // 明确向用户提问 = 收口信号：即使存在 armed 目标也必须交还人类。
-        if assistant_requests_user_input(assistant_message) {
-            return wait_for_user_decision();
-        }
-
         // 契约 C1 优先级 1：active + Armed 的会话目标（唯一真值源），与 run.goal / 关键词无关。
+        //
+        // O3（2026-11-27）：armed 目标判定**先于**正文问号启发式。理由：`ask_user` 是唯一的
+        // 人类交互通道，停机必须对应一个可见的 Ask 面板；而「正文以问号结尾」是无 UI 信号的
+        // 暗通道——旧顺序下 goal 轮只要正文以「？」收尾就静默停机，用户只看到「目标不动了」
+        // （审核报告 P0-3）。armed 目标存在时把「我要问用户」收口成工具信号（`ask_user`），
+        // 而不是靠标点猜意图。
         let armed_goal = context
             .session_id
             .map(str::trim)
@@ -101,6 +102,11 @@ impl GraphPlanner for DefaultGraphPlanner {
             .and_then(active_goal_for_session);
         if let Some(goal) = armed_goal {
             return decide_for_armed_goal(&goal, context.handoff);
+        }
+
+        // 无 armed 目标时才走正文提问启发式（保留既有 run 级行为）。
+        if assistant_requests_user_input(assistant_message) {
+            return wait_for_user_decision();
         }
 
         // 契约 C1 优先级 2：回退 run.goal + 关键词启发（保留既有 run 级续行行为）。
@@ -1584,11 +1590,16 @@ mod tests {
         disarm(&goal);
     }
 
+    /// O3（2026-11-27）：armed 目标存在时，正文以问号结尾**不再**静默停机。
+    ///
+    /// 旧行为（B193 之前）：`assistant_requests_user_input` 压过 armed 目标 ⇒ goal 轮只要正文
+    /// 以「？」收尾就 `WaitUser`，且不产生任何 Ask 面板（暗通道，审核报告 P0-3）。新契约：
+    /// 「我要问用户」必须收口成 `ask_user` 工具信号，正文标点不再能停机。
     #[test]
-    fn graph_planner_trailing_question_mark_still_waits_user() {
+    fn graph_planner_armed_goal_beats_trailing_question_mark() {
         let _lock = test_support::lock();
-        let _store = test_support::TempGoalStore::install("planner-trailing-question");
-        let session = "wave1-planner-trailing-question";
+        let _store = test_support::TempGoalStore::install("planner-trailing-question-armed");
+        let session = "wave1-planner-trailing-question-armed";
         let goal = create_test_goal(session, "把报告写完", 10);
 
         let run = run_for_session("无关文本", session);
@@ -1598,12 +1609,36 @@ mod tests {
                 .decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
             assert_eq!(
                 decision.kind,
-                GraphDecisionKind::WaitUser,
-                "末尾问号必须 WaitUser（即使存在 armed 目标）：{assistant_message}"
+                GraphDecisionKind::Continue,
+                "armed 目标下正文问号不得停机（必须由 ask_user 收口）：{assistant_message}"
             );
+            assert_eq!(decision.target_phase, GraphRunPhase::Ready);
         }
 
         disarm(&goal);
+    }
+
+    /// 对照：**无** armed 目标时，正文问号的既有启发式保持有效（不得因 O3 回退）。
+    #[test]
+    fn graph_planner_trailing_question_mark_still_waits_without_goal() {
+        let _lock = test_support::lock();
+        let session = "wave1-planner-trailing-question-no-goal";
+        assert!(
+            crate::agent::goal::active_goal_for_session(session).is_none(),
+            "前置条件：该 session 不应存在目标"
+        );
+
+        let run = run_for_session("无关文本", session);
+        for assistant_message in ["还需要我继续吗？", "May I proceed?"] {
+            let handoff = handoff_for_session(assistant_message, session);
+            let decision = DefaultGraphPlanner
+                .decide_after_turn(GraphPlanningContext::from_run(&run, &handoff));
+            assert_eq!(
+                decision.kind,
+                GraphDecisionKind::WaitUser,
+                "无 armed 目标时末尾问号仍须 WaitUser：{assistant_message}"
+            );
+        }
     }
 
     #[test]

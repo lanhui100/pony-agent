@@ -26,6 +26,11 @@ pub(crate) const GOAL_CHANGED_EVENT: &str = "goal://changed";
 pub(crate) const GOAL_ROUND_EVENT: &str = "goal://round";
 /// B130 additive：`clear_goal` 真删了记录（无墓碑，附带被删 id）。
 pub(crate) const GOAL_CLEARED_EVENT: &str = "goal://cleared";
+/// O6（2026-11-27）：一次自动续轮**停止/暂停**（原因可见）。
+///
+/// 为什么必须新增：旧实现只有 TUI 的 `UiEvent::GoalRoundsStopped`，桌面端零事件面 ⇒
+/// 「目标为什么不动了」在所有桌面停止路径上都不可见（审核报告 P1-3）。
+pub(crate) const GOAL_ROUNDS_STOPPED_EVENT: &str = "goal://rounds_stopped";
 
 /// `goal://changed` 载荷（camelCase，字段集合按 §7 冻结）。
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +69,23 @@ pub(crate) struct GoalRoundPayload {
     pub status: &'static str,
 }
 
+/// `goal://rounds_stopped` 载荷（O6，additive）。
+///
+/// 字段与 TUI `UiEvent::GoalRoundsStopped` 同源同义：`reason` 是
+/// `GoalRoundStopReason::code()`（稳定机器识别码），`visibleLine` 是 `visible_line()`
+/// （用户可见文案的结构化真源）——前端不得自行拼措辞。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoalRoundsStoppedPayload {
+    pub session_id: String,
+    pub goal_id: String,
+    pub reason: String,
+    pub visible_line: String,
+    pub rounds_started: u32,
+    pub max_rounds: u32,
+    pub consecutive_failures: u32,
+}
+
 /// `goal://cleared` 载荷（additive）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +122,29 @@ pub(crate) fn install(app: AppHandle) {
                 GoalClearedPayload {
                     session_id: session_id.clone(),
                     goal_id: goal_id.clone(),
+                },
+            );
+        }
+        GoalEvent::RoundsStopped {
+            session_id,
+            goal_id,
+            reason_code,
+            visible_line,
+            rounds_started,
+            max_rounds,
+            consecutive_failures,
+        } => {
+            emit(
+                &app,
+                GOAL_ROUNDS_STOPPED_EVENT,
+                GoalRoundsStoppedPayload {
+                    session_id: session_id.clone(),
+                    goal_id: goal_id.clone(),
+                    reason: reason_code.clone(),
+                    visible_line: visible_line.clone(),
+                    rounds_started: *rounds_started,
+                    max_rounds: *max_rounds,
+                    consecutive_failures: *consecutive_failures,
                 },
             );
         }
@@ -147,8 +192,10 @@ mod tests {
         assert_eq!(GOAL_CHANGED_EVENT, "goal://changed");
         assert_eq!(GOAL_ROUND_EVENT, "goal://round");
         assert_eq!(GOAL_CLEARED_EVENT, "goal://cleared");
+        assert_eq!(GOAL_ROUNDS_STOPPED_EVENT, "goal://rounds_stopped");
         assert!(GOAL_CHANGED_EVENT.starts_with("goal://"));
         assert!(GOAL_ROUND_EVENT.starts_with("goal://"));
+        assert!(GOAL_ROUNDS_STOPPED_EVENT.starts_with("goal://"));
     }
 
     /// §7 载荷形状锁定：camelCase 键 + 与 GoalData 同步的 round 计数。

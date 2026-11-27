@@ -270,7 +270,13 @@ fn question_heuristic_only_blocks_trailing_question_mark() {
         "正文中间出现 ? 不得判 WaitUser（仅末尾问号才拦截）",
     );
 
-    // Act：末尾问号 → 明确在向用户提问
+    // Act：末尾问号 —— O3（2026-11-27）后**不再**拦 armed 目标
+    //
+    // 契约变更（真源 ADR `.agents/notes/implemented/bug-fix/2026-11-27-goal-round-gate-and-ask-resume.md`
+    // 与 `docs/analysis/goal-ask-blocking-audit-2026-11-26.md` §1.4 / P0-3）：旧断言
+    // 「末尾问号必须 WaitUser（即使存在 armed 目标）」本身就是暗通道缺陷——goal 轮里模型只要
+    // 正文以问号收尾就静默停机，且不产生任何 Ask 面板，用户只看到「目标不动了」。
+    // 新契约：armed 目标存在时「我要问用户」只能由工具信号（`ask_user`）收口，正文标点不再能停机。
     let trailing_question_handoff =
         completed_turn_handoff(&engine, session, "还需要我继续吗？");
     let trailing_decision = engine.decide_after_turn_with_planner(
@@ -280,19 +286,22 @@ fn question_heuristic_only_blocks_trailing_question_mark() {
     );
 
     // Assert
-    assert_wait_user(
+    assert_continue(
         &trailing_decision,
-        "trim 后末尾为 ？时必须 WaitUser（即使存在 armed 目标）",
+        "armed 目标下末尾 ？不得停机（必须由 ask_user 收口，见 O3）",
     );
 
-    // Act + Assert：末尾为半角 ? 亦拦截
+    // Act + Assert：末尾半角 ? 同样不得拦 armed 目标
     let trailing_ascii_handoff = completed_turn_handoff(&engine, session, "May I proceed?");
     let trailing_ascii_decision = engine.decide_after_turn_with_planner(
         &run,
         &trailing_ascii_handoff,
         &DefaultGraphPlanner,
     );
-    assert_wait_user(&trailing_ascii_decision, "末尾半角 ? 同样必须 WaitUser");
+    assert_continue(
+        &trailing_ascii_decision,
+        "armed 目标下末尾半角 ? 不得停机（见 O3）",
+    );
 }
 
 // ===========================================================================
