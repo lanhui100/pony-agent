@@ -2,9 +2,19 @@ use crate::session_types::TurnHistoryMessage;
 
 pub const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
 
-/// 估算文本的 token 数（粗略估算：每 4 字符 ≈ 1 token）。
+/// 估算文本的 token 数：ASCII 按 4 字符 ≈ 1 token，非 ASCII（如中文/全角标点）按 1.5 token/字校准，
+/// 避免纯中文或密集符号载荷被低估 4~6 倍（仍独立于 128 MiB 请求体物理字节闸门）。
 pub fn estimate_text_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(4)
+    let mut ascii_chars = 0usize;
+    let mut non_ascii_chars = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii_chars += 1;
+        } else {
+            non_ascii_chars += 1;
+        }
+    }
+    (ascii_chars + non_ascii_chars * 6).div_ceil(4)
 }
 
 /// 压缩边界推导：`history/squash.base_seq` = 最后一个被压缩掉的折叠消息的 seq。

@@ -1,8 +1,10 @@
 use super::*;
 
-pub(super) const MAX_TURN_IMAGES: usize = 3;
+pub(super) const MAX_TURN_IMAGES: usize = 600;
 
-pub(super) const MAX_TURN_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
+pub(super) const MAX_RECALLED_TURN_IMAGES: usize = 3;
+
+pub(super) const MAX_TURN_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
 pub(super) fn validate_turn_images(images: &[TurnInputImage]) -> Result<(), String> {
     if images.len() > MAX_TURN_IMAGES {
@@ -48,7 +50,7 @@ pub(super) fn recalled_image_limit(user_message: &str) -> usize {
         || user_message.contains("those images")
         || user_message.contains("these images")
     {
-        MAX_TURN_IMAGES
+        MAX_RECALLED_TURN_IMAGES
     } else {
         1
     }

@@ -34,6 +34,11 @@ pub use self::model_catalog::fetch_model_ids;
 mod fallback_body;
 pub use self::fallback_body::{fallback_body_text, local_tool_followup_fallback_response};
 mod openai_wire;
+mod batch_followup_stream;
+use self::batch_followup_stream::{
+    build_openai_followup_stream_messages, build_openai_stream_assistant_message,
+    replay_sync_response_as_deltas,
+};
 mod usage;
 pub use self::openai_wire::openai_safe_tool_name;
 // `extract_chat_delta_text` 在拆分前即无消费者（原文件已挂 `#[allow(dead_code)]`），
@@ -280,24 +285,27 @@ const COOLDOWN_DEFAULT_MS: u64 = 60_000;
 /// 冷却窗口硬上界（C3-P5）：覆盖 Kimi 5 小时窗口，同时防止异常头把 provider 永久冻结。
 const COOLDOWN_MAX_MS: u64 = 6 * 60 * 60 * 1_000;
 
-// ── B1795506800002：请求体字节闸门（传输物理防线，与 token 预算正交） ──────────────────
+// ── 请求体字节闸门（传输物理防线，与 token 预算正交） ──────────────────────────────────
 
-/// 纯文本请求体硬上限（512 KiB）。
+/// 请求体硬上限（128 MiB）：对齐 ponyllm 网关自身上限，**不再按纯文本/含图分档**。
 ///
-/// 存在理由：上下文装配只有 **token** 预算（`compression::estimate_text_tokens` = chars/4），
-/// 而边缘网关（EdgeOne / Cloudflare / Nginx）按**字节**直接 RST/413。两者口径不重叠：
-/// UTF-8 中文 3 字节/字、JSON 转义（`\"`/`\n`/`\uXXXX`）、大型 `tools` schema、base64 图像
-/// 与单轮多 hop 的 `accumulated_messages` 膨胀都不进 token 估算。缺陷现场（B1795488338107）
-/// 就是 300KB+ 请求在发出后被边缘 10~13ms RST，重试还会放大成防刷封禁。
-const MAX_REQUEST_BODY_BYTES: u64 = 512 * 1024;
+/// 历史教训（B1795506800002 → 本次修订）：曾按「纯文本 512 KiB / 含图 10 MiB」分档拦截，
+/// 但 1M 窗口在 80% 压缩线（80 万 token）折算 chars/4 ≈ 320 万字符，中文 3 字节/字符即
+/// 近 10 MB 合法请求体；512 KiB 只有窗口的约 5%，等于把 1M 模型阉割成 5 万 token 可用，
+/// 且请求在本地就被判死、永远走不到压缩路径。见
+/// `.agents/notes/implemented/bug-fix/2026-11-24-native-compaction-split-and-overflow-rescue.md`
+/// 的 Decision 1（明确「不在客户端设 512 KiB 类小体积硬拦截」）。
+///
+/// 保留闸门的唯一理由：序列化异常（例如容器体积爆炸）要 0 HTTP 失败，而不是把畸形容器
+/// 重放成边缘防刷风暴。判据必须**高于**任何真实合法请求，故取网关量级。
+const MAX_REQUEST_BODY_BYTES: u64 = 128 * 1024 * 1024;
 
-/// 含图请求体硬上限（10 MiB）：多模态 base64 天然是 MiB 量级。
-const MAX_MULTIMODAL_REQUEST_BODY_BYTES: u64 = 10 * 1024 * 1024;
+/// 请求体软告警阈值（32 MiB）：只落结构化 warn，不拦截。
+///
+/// 取值依据：1M 窗口满水位文本请求体在数 MB~十余 MB 量级，32 MiB 之上才值得复盘。
+const REQUEST_BODY_WARN_BYTES: u64 = 32 * 1024 * 1024;
 
-/// 纯文本请求体软告警阈值（256 KiB）：只落结构化 warn，不拦截。
-const REQUEST_BODY_WARN_BYTES: u64 = 256 * 1024;
-
-/// 请求体是否含多模态图像块（决定用哪一档字节上限）。
+/// 请求体是否含多模态图像块（只用于日志字段，**不参与上限选择**）。
 ///
 /// 判据只用结构特征（`type` 取值 / `data:image/` 前缀），不做内容嗅探：本函数在 HTTP
 /// 出口热路径上，必须 O(n) 且无分配放大。
@@ -325,7 +333,7 @@ fn request_body_has_images(body: &Value) -> bool {
     has_image_block(body)
 }
 
-/// B1795506800002：序列化请求体并做**字节闸门**（0 HTTP Fail-Closed）。
+/// 序列化请求体并做**字节闸门**（0 HTTP Fail-Closed）。
 ///
 /// 返回 `Ok(bytes)` = 放行（可直接 `.body(bytes)` 发出，与 `.json(body)` 逐字节等价）；
 /// 返回 `Err(message)` = 超硬上限，**一个网络包都不发**。
@@ -338,6 +346,12 @@ fn request_body_has_images(body: &Value) -> bool {
 ///   破坏 `tool_call`/`tool_result` 闭合（Anthropic 400）或误删 `reasoning_content`
 ///   （DeepSeek 400）。要自动救回应由上层捕获 `UpstreamContextOverflow` 后跑一轮受控压缩。
 fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String> {
+    serialize_request_body_with_size_gate_limit(body, MAX_REQUEST_BODY_BYTES)
+}
+
+/// 闸门本体（上限可注入）：生产恒用 [`MAX_REQUEST_BODY_BYTES`]，单测用小上限验证拦截路径
+/// 而不必真的造 128 MiB 请求体（避免测试用 129 MB 内存换取一次断言）。
+fn serialize_request_body_with_size_gate_limit(body: &Value, limit: u64) -> Result<Vec<u8>, String> {
     let bytes = serde_json::to_vec(body).map_err(|error| {
         format!(
             "serialize provider request body failed; payload too large? error={error}"
@@ -347,11 +361,6 @@ fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String
     // `as_conversions` 棘轮（该表禁止新增裸转换）。
     let body_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let has_images = request_body_has_images(body);
-    let limit = if has_images {
-        MAX_MULTIMODAL_REQUEST_BODY_BYTES
-    } else {
-        MAX_REQUEST_BODY_BYTES
-    };
     if body_bytes > limit {
         pony_observability::otel::log::log_json_with_fields(
             "warn",
@@ -368,7 +377,7 @@ fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String
              limit_bytes={limit} has_images={has_images}; 本次未发起请求"
         ));
     }
-    if body_bytes > REQUEST_BODY_WARN_BYTES && !has_images {
+    if body_bytes > REQUEST_BODY_WARN_BYTES {
         pony_observability::otel::log::log_json_with_fields(
             "warn",
             "provider_request_body_large",
@@ -376,6 +385,7 @@ fn serialize_request_body_with_size_gate(body: &Value) -> Result<Vec<u8>, String
             &[
                 ("request_body_bytes", serde_json::json!(body_bytes)),
                 ("warn_bytes", serde_json::json!(REQUEST_BODY_WARN_BYTES)),
+                ("has_images", serde_json::json!(has_images)),
             ],
         );
     }
@@ -894,6 +904,11 @@ impl ProviderManager {
 
     pub fn max_output_tokens(&self) -> u32 {
         self.config.max_output_tokens
+    }
+
+    /// 该 provider 模型是否具备流式输出能力。
+    pub fn supports_streaming(&self) -> bool {
+        self.config.capabilities.supports_streaming
     }
 
     pub fn supports_true_streaming_followup(&self) -> bool {
@@ -1492,110 +1507,20 @@ impl ProviderManager {
                 tool_call,
                 tool_result,
             )?;
-            if let Some(reasoning_content) = response.reasoning_content.clone() {
-                on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
-            }
-            on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
+            replay_sync_response_as_deltas(&response, &mut on_delta);
             return Ok(response);
         }
 
-        provider_log(format!(
-            "followup:start mode=stream requested={} provider={} protocol={} model={} tool={} tool_status={} tool_output_preview={} ",
-            self.config.requested_name,
-            self.config.provider_name,
-            self.protocol_label(),
-            request.model,
-            tool_call.name,
-            tool_result.status,
-            preview_text(&tool_result.output, 160)
-        ));
-        if self.config.api_key.is_none() {
-            let error = format!(
-                "provider {} missing API key; please save a key in the model config page (field: {}).",
-                self.config.provider_name, self.config.api_key_env_var
-            );
-            provider_log(format!("followup:error {}", error));
-            return Err(error);
-        }
-
-        match self.config.protocol {
-            ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
-                // 流式断流/超时等网络瞬态错误允许退避重试；仅在用户显式取消时提前放弃。
-                let on_delta_cell = std::cell::RefCell::new(on_delta);
-                // PA-174 F1 的**流式对偶**（B1795488338107）：与同步 1:1 臂同构——构造器在
-                // **每次尝试内**把「assistant + tool」写回 `accumulated_messages`
-                // （`openai_messages_with_tool_result`）。若重试沿用上次写回结果作 base，
-                // 每次尝试都会在转录尾部再追加一遍 ⇒ 2N 条重复往返、请求体积几何膨胀
-                // （上游按重复内容计费，边缘侧还会因请求体过大/高频重发直接 RST）。
-                // 故每次尝试前重置为进入本入口时的 pristine 快照：成功 = base + 恰好 1 次追加。
-                let base_messages = accumulated_messages.clone();
-                // B1795488338107 评审 B1（blocker）：`StreamState` 的「发出可见增量后禁止
-                // 自动重试」在生产流式循环里**从未被驱动**（`decide` 恒传 `NoDelta`），
-                // 而此处的 `no_more_retries_hint` 只查用户取消（`guard.cancel_requested()`，
-                // 生产路径 `without_cancel()` 恒 false）。于是 SSE 发出可见文本后遇可重试
-                // 传输错误（`unexpected eof` / `connection closed before message completed`）
-                // 仍会重试，并把 attempt 1 的半截增量与 attempt 2 的输出**重复上屏**。
-                // 这里把该信号真正接线：跨 attempt 累计（一旦发出即置位，不随重置清零）。
-                let emitted_visible = std::cell::Cell::new(false);
-                let stream_result = retry_provider_followup_stream_timeout_with_policy(
-                    "followup_stream",
-                    &self.policy,
-                    || {
-                        accumulated_messages.clone_from(&base_messages);
-                        let mut delta_sink = on_delta_cell.borrow_mut();
-                        // 只把 `Text` 计入「可见增量」：`Reasoning` 与 `StreamStart` 按既有
-                        // `StreamState::may_auto_retry` 口径仍允许重试（不改变既有语义）。
-                        let mut record_visible = |chunk: ProviderStreamChunk| {
-                            if matches!(chunk, ProviderStreamChunk::Text(_)) {
-                                emitted_visible.set(true);
-                            }
-                            delta_sink(chunk);
-                        };
-                        match self.config.protocol {
-                            ProviderProtocol::OpenAiResponses => self
-                                .send_responses_tool_followup_stream_request(
-                                    guard,
-                                    request,
-                                    tools,
-                                    accumulated_messages,
-                                    assistant_message,
-                                    tool_call,
-                                    tool_result,
-                                    &mut record_visible,
-                                ),
-                            _ => self.send_openai_tool_followup_stream_request(
-                                guard,
-                                request,
-                                tools,
-                                accumulated_messages,
-                                assistant_message,
-                                tool_call,
-                                tool_result,
-                                &mut record_visible,
-                            ),
-                        }
-                    },
-                    &|| guard.cancel_requested() || emitted_visible.get(),
-                );
-                // B254 C1/C4：流式是唯一通道。策略重试已耗尽时**原样上抛**真实错误，
-                // 不再回退同步 buffered 请求，也不再合成「本地兜底摘要」冒充模型输出。
-                match stream_result {
-                    Ok(response) => Ok(response),
-                    Err(stream_error) => Err(stream_error),
-                }
-            }
-            ProviderProtocol::AnthropicMessages => self
-                .send_anthropic_tool_followup_stream_request(
-                    guard,
-                    request,
-                    tools,
-                    accumulated_messages,
-                    assistant_message,
-                    tool_call,
-                    tool_result,
-                    &mut on_delta,
-                ),
-        }
+        self.dispatch_followup_stream_bounded(
+            guard,
+            request,
+            tools,
+            accumulated_messages,
+            assistant_message,
+            std::slice::from_ref(tool_call),
+            std::slice::from_ref(tool_result),
+            on_delta,
+        )
     }
 
     // ───────────────────── D2（P1-1 切片二）：批量工具结果 followup 入口 ─────────────────────
@@ -1753,60 +1678,81 @@ impl ProviderManager {
         outcome.map_err(|degraded| last_provider_error.unwrap_or(degraded))
     }
 
-    /// D2：批量工具结果 followup（流式入口）。分派顺序与同步入口逐字一致。
-    ///
-    /// N>1 的传输沿用 §6 指定的既有同步 `post_*` 通道（不新写 HTTP 层），整段结果按
-    /// 「reasoning → text」顺序回放为增量——与既有 `!supports_streaming` 分支同一语义
-    /// （`continue_with_tool_result_stream_bounded`），因此批量路径**不是**逐 token 增量。
-    #[allow(clippy::too_many_arguments)]
-    pub fn continue_with_tool_results_stream<F>(
+    /// 基于已更新的 `request` 与当前 turn 前置已闭合工具批次重建干净的 `accumulated_messages`
+    /// （供 ToolFollowup 溢出自救重装配上下文后重发当前批使用）。
+    pub fn rebuild_followup_messages_for_batches(
         &self,
         request: &ProviderRequest,
-        tools: &[ToolDefinition],
-        accumulated_messages: &mut Vec<Value>,
-        assistant_message: Option<&Value>,
-        calls: &[ToolCall],
-        results: &[ToolResult],
-        mut on_delta: F,
-    ) -> Result<ProviderResponse, String>
-    where
-        F: FnMut(ProviderStreamChunk),
-    {
-        if calls.len() != results.len() {
-            return Err(format!(
-                "tool_calls/tool_results length mismatch: calls={} results={}",
-                calls.len(),
-                results.len()
-            ));
+        batches: &[(Option<Value>, Vec<ToolCall>, Vec<ToolResult>)],
+    ) -> Result<Vec<Value>, String> {
+        let mut acc: Vec<Value> = Vec::new();
+        for (assistant_message, calls, results) in batches {
+            if calls.len() != results.len() {
+                return Err(format!(
+                    "tool_calls/tool_results length mismatch: calls={} results={}",
+                    calls.len(),
+                    results.len()
+                ));
+            }
+            if calls.is_empty() {
+                continue;
+            }
+            if calls.len() == 1 {
+                match self.config.protocol {
+                    ProviderProtocol::OpenAiCompletions => {
+                        let messages = normalize_openai_messages(openai_messages_with_tool_result(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            &calls[0],
+                            &results[0],
+                        ));
+                        acc = messages;
+                    }
+                    ProviderProtocol::OpenAiResponses => {
+                        let messages = openai_messages_with_tool_result(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            &calls[0],
+                            &results[0],
+                        );
+                        acc = messages;
+                    }
+                    ProviderProtocol::AnthropicMessages => {
+                        let _ = anthropic_messages_with_tool_result(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            &calls[0],
+                            &results[0],
+                        );
+                    }
+                }
+            } else {
+                match self.config.protocol {
+                    ProviderProtocol::OpenAiCompletions | ProviderProtocol::OpenAiResponses => {
+                        let _ = openai_followup_messages_for_tool_results(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            calls,
+                            results,
+                        )?;
+                    }
+                    ProviderProtocol::AnthropicMessages => {
+                        let _ = anthropic_followup_messages_for_tool_results(
+                            request,
+                            &mut acc,
+                            assistant_message.as_ref(),
+                            calls,
+                            results,
+                        )?;
+                    }
+                }
+            }
         }
-        if calls.is_empty() {
-            return Err("tool_calls/tool_results must not be empty".to_string());
-        }
-        if calls.len() == 1 {
-            return self.continue_with_tool_result_stream(
-                request,
-                tools,
-                accumulated_messages,
-                assistant_message,
-                &calls[0],
-                &results[0],
-                on_delta,
-            );
-        }
-
-        let response = self.continue_with_tool_results(
-            request,
-            tools,
-            accumulated_messages,
-            assistant_message,
-            calls,
-            results,
-        )?;
-        if let Some(reasoning_content) = response.reasoning_content.clone() {
-            on_delta(ProviderStreamChunk::Reasoning(reasoning_content));
-        }
-        on_delta(ProviderStreamChunk::Text(response.output_text.clone()));
-        Ok(response)
+        Ok(acc)
     }
 
     /// D2：OpenAI chat completions 的批量回填（1 assistant + N tool），复用 `post_openai_json`。
@@ -2131,6 +2077,10 @@ impl ProviderManager {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "沿用 provider tool followup 既有签名形状"
+    )]
     fn send_openai_tool_followup_stream_request<F>(
         &self,
         guard: &ProviderStreamGuard<'_>,
@@ -2138,8 +2088,8 @@ impl ProviderManager {
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
+        calls: &[ToolCall],
+        results: &[ToolResult],
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
@@ -2149,25 +2099,45 @@ impl ProviderManager {
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
-        provider_log(format!(
-            "request:openai followup-stream endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
-        let messages = normalize_openai_messages(openai_messages_with_tool_result(
+        if calls.len() == 1 {
+            provider_log(format!(
+                "request:openai followup-stream endpoint={} model={} tool={}",
+                endpoint, request.model, calls[0].name
+            ));
+        } else {
+            provider_log(format!(
+                "request:openai followup-stream endpoint={} model={} calls={}",
+                endpoint,
+                request.model,
+                calls.len()
+            ));
+        }
+        let messages = build_openai_followup_stream_messages(
             request,
             accumulated_messages,
             assistant_message,
-            tool_call,
-            tool_result,
-        ));
-        {
-            let tool_call_id = tool_call
-                .call_id
-                .clone()
-                .unwrap_or_else(|| "tool_call_local".to_string());
+            calls,
+            results,
+        )?;
+        let tool_call_ids = calls
+            .iter()
+            .map(|call| {
+                call.call_id
+                    .clone()
+                    .unwrap_or_else(|| "tool_call_local".to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        if calls.len() == 1 {
             provider_log(format!(
                 "request:openai followup-stream tool_call_id={} messages={}",
-                tool_call_id,
+                tool_call_ids,
+                messages.len(),
+            ));
+        } else {
+            provider_log(format!(
+                "request:openai followup-stream tool_call_ids={} messages={}",
+                tool_call_ids,
                 messages.len(),
             ));
         }
@@ -2269,6 +2239,10 @@ impl ProviderManager {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "沿用 provider tool followup 既有签名形状"
+    )]
     fn send_anthropic_tool_followup_stream_request<F>(
         &self,
         guard: &ProviderStreamGuard<'_>,
@@ -2276,23 +2250,49 @@ impl ProviderManager {
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
+        calls: &[ToolCall],
+        results: &[ToolResult],
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
         F: FnMut(ProviderStreamChunk),
     {
         let endpoint = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
-        provider_log(format!(
-            "request:anthropic followup-stream endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
+        if calls.len() == 1 {
+            provider_log(format!(
+                "request:anthropic followup-stream endpoint={} model={} tool={}",
+                endpoint, request.model, calls[0].name
+            ));
+        } else {
+            provider_log(format!(
+                "request:anthropic followup-stream endpoint={} model={} calls={}",
+                endpoint,
+                request.model,
+                calls.len()
+            ));
+        }
+        let messages = if calls.len() == 1 && results.len() == 1 {
+            anthropic_messages_with_tool_result(
+                request,
+                accumulated_messages,
+                assistant_message,
+                &calls[0],
+                &results[0],
+            )
+        } else {
+            anthropic_followup_messages_for_tool_results(
+                request,
+                accumulated_messages,
+                assistant_message,
+                calls,
+                results,
+            )?
+        };
         let body = with_anthropic_request_options(
             json!({
                 "model": request.model,
                 "system": anthropic_system_text(&request.input),
-                "messages": anthropic_messages_with_tool_result(request, accumulated_messages, assistant_message, tool_call, tool_result),
+                "messages": messages,
                 "temperature": request.temperature,
                 "max_tokens": request.max_output_tokens,
                 "stream": true,
@@ -2499,6 +2499,10 @@ impl ProviderManager {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "沿用 provider tool followup 既有签名形状"
+    )]
     fn send_responses_tool_followup_stream_request<F>(
         &self,
         guard: &ProviderStreamGuard<'_>,
@@ -2506,25 +2510,34 @@ impl ProviderManager {
         tools: &[ToolDefinition],
         accumulated_messages: &mut Vec<Value>,
         assistant_message: Option<&Value>,
-        tool_call: &ToolCall,
-        tool_result: &ToolResult,
+        calls: &[ToolCall],
+        results: &[ToolResult],
         on_delta: &mut F,
     ) -> Result<ProviderResponse, String>
     where
         F: FnMut(ProviderStreamChunk),
     {
         let endpoint = self.responses_endpoint();
-        provider_log(format!(
-            "request:responses followup-stream endpoint={} model={} tool={}",
-            endpoint, request.model, tool_call.name
-        ));
-        let messages = openai_messages_with_tool_result(
+        if calls.len() == 1 {
+            provider_log(format!(
+                "request:responses followup-stream endpoint={} model={} tool={}",
+                endpoint, request.model, calls[0].name
+            ));
+        } else {
+            provider_log(format!(
+                "request:responses followup-stream endpoint={} model={} calls={}",
+                endpoint,
+                request.model,
+                calls.len()
+            ));
+        }
+        let messages = build_openai_followup_stream_messages(
             request,
             accumulated_messages,
             assistant_message,
-            tool_call,
-            tool_result,
-        );
+            calls,
+            results,
+        )?;
         let mut conversion_request = request.clone();
         conversion_request.native_messages = messages;
         let body = build_responses_request_body(&conversion_request, tools, &self.config, true);
@@ -2539,20 +2552,16 @@ impl ProviderManager {
         )?;
         finalize_responses_stream_message(message, "followup", request).map(
             |(output_text, tool_call, reasoning_content, reasoning_content_value, token_usage)| {
-                let assistant_message = match tool_call.as_ref() {
-                    Some(call) => provider_native_assistant_tool_call_message_with_reasoning_value(
-                        text_if_present(&output_text),
-                        reasoning_content_value.as_ref(),
-                        call,
-                    ),
-                    None => provider_native_assistant_message_with_reasoning_value(
-                        &output_text,
-                        reasoning_content_value.as_ref(),
-                    ),
-                };
+                let tool_calls = tool_calls_from_single(&tool_call);
+                let assistant_message = build_openai_stream_assistant_message(
+                    &output_text,
+                    reasoning_content_value.as_ref(),
+                    tool_call.as_ref(),
+                    &tool_calls,
+                );
                 ProviderResponse {
                     output_text,
-                    tool_calls: tool_calls_from_single(&tool_call),
+                    tool_calls,
                     tool_call,
                     reasoning_content,
                     reasoning_content_value,
@@ -2592,20 +2601,12 @@ impl ProviderManager {
             .clone()
             .unwrap_or_else(|| estimate_token_usage(request, &output_text));
         provider_log_token_usage("openai followup-stream", &token_usage);
-        let assistant_message = if let Some(tool_call) = message.tool_call.as_ref() {
-            Some(
-                provider_native_assistant_tool_call_message_with_reasoning_value(
-                    text_if_present(&output_text),
-                    message.reasoning_content_value.as_ref(),
-                    tool_call,
-                ),
-            )
-        } else {
-            Some(provider_native_assistant_message_with_reasoning_value(
-                &output_text,
-                message.reasoning_content_value.as_ref(),
-            ))
-        };
+        let assistant_message = Some(build_openai_stream_assistant_message(
+            &output_text,
+            message.reasoning_content_value.as_ref(),
+            message.tool_call.as_ref(),
+            &message.tool_calls,
+        ));
 
         Ok(ProviderResponse {
             output_text: output_text.clone(),
@@ -2975,20 +2976,12 @@ impl ProviderManager {
             .unwrap_or_else(|| estimate_token_usage(request, &output_text));
         provider_log_token_usage("openai decision-stream", &token_usage);
 
-        let assistant_message = if let Some(tool_call) = tool_call.as_ref() {
-            Some(
-                provider_native_assistant_tool_call_message_with_reasoning_value(
-                    text_if_present(&output_text),
-                    message.reasoning_content_value.as_ref(),
-                    tool_call,
-                ),
-            )
-        } else {
-            Some(provider_native_assistant_message_with_reasoning_value(
-                &output_text,
-                message.reasoning_content_value.as_ref(),
-            ))
-        };
+        let assistant_message = Some(build_openai_stream_assistant_message(
+            &output_text,
+            message.reasoning_content_value.as_ref(),
+            tool_call.as_ref(),
+            &tool_calls,
+        ));
 
         Ok(ProviderDecision {
             output_text,
@@ -4500,12 +4493,21 @@ fn text_if_present(text: &str) -> Option<&str> {
     }
 }
 
+fn is_system_reminder_message(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("<system-reminder>")
+}
+
 fn anthropic_system_text(input: &[ProviderMessage]) -> String {
     input
         .iter()
         .filter(|message| matches!(message.role, ProviderRole::System | ProviderRole::Developer))
-        // 过滤掉 Previous assistant reply，它们应该出现在 messages 数组中作为 assistant 轮次
-        .filter(|message| !message.content.starts_with("Previous assistant reply:"))
+        // 过滤掉 Previous assistant reply（assistant 轮次）与尾部 <system-reminder>（易变提醒进 user 消息，避免打穿 Anthropic system 缓存）
+        .filter(|message| {
+            !message.content.starts_with("Previous assistant reply:")
+                && (!matches!(message.role, ProviderRole::Developer)
+                    || !is_system_reminder_message(&message.content))
+        })
         .map(|message| message.content.clone())
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -4599,8 +4601,14 @@ fn anthropic_conversation_messages(request: &ProviderRequest) -> Vec<Value> {
                         "role": "assistant",
                         "content": reply
                     }));
+                } else if is_system_reminder_message(&message.content) {
+                    // 易变运行时提醒作为 user <system-reminder> 加入对话尾部，避免污染 system 前缀缓存
+                    messages.push(json!({
+                        "role": "user",
+                        "content": message.content
+                    }));
                 }
-                // 其他 Developer 消息继续留在 system text 中（由 anthropic_system_text 处理）
+                // 其他稳定 Developer 消息继续留在 system text 中（由 anthropic_system_text 处理）
             }
             ProviderRole::System => {
                 // System 消息留在 system text 中
@@ -4804,6 +4812,14 @@ fn openai_request_messages(request: &ProviderRequest) -> Vec<Value> {
                     "content": reply
                 });
             }
+            if matches!(message.role, ProviderRole::Developer)
+                && is_system_reminder_message(&message.content)
+            {
+                return json!({
+                    "role": "user",
+                    "content": message.content
+                });
+            }
             json!({
                 "role": to_chat_role(&message.role),
                 "content": openai_message_content(message.content.as_str(), is_last_user_with_images(index, last_user_index, &request.images), &request.images)
@@ -4945,20 +4961,25 @@ pub fn provider_native_assistant_tool_call_message_with_reasoning_value(
     reasoning_content: Option<&Value>,
     tool_call: &ToolCall,
 ) -> Value {
+    provider_native_assistant_tool_calls_message_with_reasoning_value(
+        content,
+        reasoning_content,
+        std::slice::from_ref(tool_call),
+    )
+}
+
+/// 批量版 OpenAI native assistant tool_calls 消息：单条 assistant 承载整批 `tool_calls`，
+/// 不为并行调用克隆 N 份 `content` 与 `reasoning_content`。
+pub fn provider_native_assistant_tool_calls_message_with_reasoning_value(
+    content: Option<&str>,
+    reasoning_content: Option<&Value>,
+    tool_calls: &[ToolCall],
+) -> Value {
     json!({
         "role": "assistant",
         "content": content,
         "reasoning_content": reasoning_content,
-        "tool_calls": [
-            {
-                "id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
-                "type": "function",
-                "function": {
-                    "name": openai_safe_tool_name(&tool_call.name),
-                    "arguments": tool_call.arguments.to_string()
-                }
-            }
-        ]
+        "tool_calls": openai_tool_calls_payload(tool_calls),
     })
 }
 
@@ -4968,11 +4989,28 @@ pub fn provider_native_assistant_tool_call_message_for_protocol(
     reasoning_content: Option<&Value>,
     tool_call: &ToolCall,
 ) -> Value {
+    provider_native_assistant_tool_calls_message_for_protocol(
+        protocol,
+        content,
+        reasoning_content,
+        std::slice::from_ref(tool_call),
+    )
+}
+
+/// 批量版按协议构造 native assistant 工具调用消息：
+/// - OpenAI：`role = "assistant"` + `tool_calls: [...]`；
+/// - Anthropic：`role = "assistant"` + `[thinking?, text?, tool_use...]`。
+pub fn provider_native_assistant_tool_calls_message_for_protocol(
+    protocol: &ProviderProtocol,
+    content: Option<&str>,
+    reasoning_content: Option<&Value>,
+    tool_calls: &[ToolCall],
+) -> Value {
     if !protocol.is_anthropic() {
-        return provider_native_assistant_tool_call_message_with_reasoning_value(
+        return provider_native_assistant_tool_calls_message_with_reasoning_value(
             content,
             reasoning_content,
-            tool_call,
+            tool_calls,
         );
     }
 
@@ -4985,12 +5023,14 @@ pub fn provider_native_assistant_tool_call_message_for_protocol(
             "text": content
         }));
     }
-    blocks.push(json!({
-        "type": "tool_use",
-        "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
-        "name": tool_call.name,
-        "input": tool_call.arguments
-    }));
+    for tool_call in tool_calls {
+        blocks.push(json!({
+            "type": "tool_use",
+            "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+            "name": tool_call.name,
+            "input": tool_call.arguments
+        }));
+    }
     json!({
         "role": "assistant",
         "content": blocks
@@ -5013,19 +5053,45 @@ pub fn provider_native_tool_result_message_for_protocol(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Value {
+    provider_native_tool_results_messages_for_protocol(protocol, &[(tool_call, tool_result)])
+        .into_iter()
+        .next()
+        .unwrap_or(Value::Null)
+}
+
+/// 批量版按协议构造工具结果回填消息：
+/// - OpenAI：每个 `(call, result)` 产出一条 `role = "tool"`；
+/// - Anthropic：同一批所有 `tool_result` 聚合进**单条** `role = "user"` 消息，满足
+///   `1 assistant(N tool_use) -> 1 user(N tool_result)` 配对约束。
+pub fn provider_native_tool_results_messages_for_protocol(
+    protocol: &ProviderProtocol,
+    pairs: &[(&ToolCall, &ToolResult)],
+) -> Vec<Value> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
     if !protocol.is_anthropic() {
-        return provider_native_tool_result_message(tool_call, tool_result);
+        return pairs
+            .iter()
+            .map(|(tool_call, tool_result)| provider_native_tool_result_message(tool_call, tool_result))
+            .collect();
     }
 
-    json!({
+    let blocks: Vec<Value> = pairs
+        .iter()
+        .map(|(tool_call, tool_result)| {
+            json!({
+                "type": "tool_result",
+                "tool_use_id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+                "content": anthropic_tool_result_content(tool_result),
+                "is_error": tool_result.status != "ok"
+            })
+        })
+        .collect();
+    vec![json!({
         "role": "user",
-        "content": [{
-            "type": "tool_result",
-            "tool_use_id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
-            "content": anthropic_tool_result_content(tool_result),
-            "is_error": tool_result.status != "ok"
-        }]
-    })
+        "content": blocks
+    })]
 }
 
 fn anthropic_native_assistant_message(content: &[Value]) -> Value {
@@ -6447,8 +6513,19 @@ fn derive_native_request_observation(messages: &[Value]) -> ProviderRequestObser
         .min(messages.len().saturating_sub(1));
     let volatile_input_start = messages
         .iter()
-        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .unwrap_or(messages.len().saturating_sub(1));
+        .rposition(|message| {
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && !message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_system_reminder_message)
+        })
+        .unwrap_or_else(|| {
+            messages
+                .iter()
+                .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+                .unwrap_or(messages.len().saturating_sub(1))
+        });
 
     ProviderRequestObservation {
         stable_prefix_text: render_native_messages(&messages[..stable_prefix_end]),

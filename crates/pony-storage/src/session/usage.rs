@@ -582,8 +582,8 @@ mod tests {
         assert_eq!(estimate_surface_text_tokens("abcd"), 1);
         assert_eq!(estimate_surface_text_tokens(""), 0);
         assert_eq!(estimate_surface_message_tokens("abcd"), 5);
-        // 中文按字符计（不是按字节）：4 个汉字 = 1 token + 4 开销。
-        assert_eq!(estimate_surface_message_tokens("上下文占"), 5);
+        // 非 ASCII/中文按字符加权估算（约 1.5 token/字，非按字节）：4 个汉字 = 6 token + 4 开销。
+        assert_eq!(estimate_surface_message_tokens("上下文占"), 10);
         // 缺字段不补内容。
         assert_eq!(estimate_tool_roundtrip_surface_tokens(None, None), 0);
         assert_eq!(

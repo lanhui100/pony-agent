@@ -19,7 +19,7 @@
 
 use crate::provider::ProviderManager;
 use pony_protocol::session_types::TurnHistoryMessage;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// 压缩配置
 #[derive(Clone, Debug)]
@@ -97,9 +97,12 @@ pub struct ContextPressure {
 }
 
 impl ContextPressure {
-    /// 会话内两条载体累加的估算值（不含 system / tools）。
+    /// 会话真实上下文载体估算值（不含 system / tools）。
+    ///
+    /// `history` 与 `provider_native_transcript` 是同一段会话的两种表示（native-tool-flow
+    /// 只发后者、plain 会话只发前者），取二者较大值而不是相加，避免重复计价 ~2x 虚高。
     pub fn layered_tokens(&self) -> usize {
-        self.history_tokens + self.transcript_tokens
+        self.history_tokens.max(self.transcript_tokens)
     }
 
     /// 用于阈值比较的压力值。
@@ -328,6 +331,71 @@ pub fn compact_native_transcript(transcript: &[Value], keep_user_turns: usize) -
     transcript[start..].to_vec()
 }
 
+/// 判断原生消息是否为压缩生成的 `<session_summary>` 摘要消息。
+pub fn is_session_summary_message(message: &Value) -> bool {
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let Some(content) = message.get("content").and_then(Value::as_str) else {
+        return false;
+    };
+    content.contains("<session_summary>") && content.contains("</session_summary>")
+}
+
+/// 裁剪原生 transcript 并注入 `<session_summary>` 消息：
+/// 当会话存在原生转录时，压缩/自救后 `provider_native_transcript` 是 `native_tool_flow`
+/// 唯一回放源；若只丢前缀而不注入摘要，模型会在压缩后彻底失忆。
+pub fn compact_native_transcript_with_summary(
+    transcript: &[Value],
+    keep_user_turns: usize,
+    summary_content: Option<&str>,
+) -> Vec<Value> {
+    if transcript.is_empty() {
+        return Vec::new();
+    }
+    let retained = if keep_user_turns == 0 {
+        Vec::new()
+    } else {
+        compact_native_transcript(transcript, keep_user_turns)
+    };
+    let Some(summary_text) = summary_content.map(str::trim).filter(|text| !text.is_empty()) else {
+        return retained;
+    };
+    let mut compacted = Vec::with_capacity(retained.len() + 1);
+    compacted.push(json!({
+        "role": "user",
+        "content": summary_text,
+    }));
+    compacted.extend(retained);
+    compacted
+}
+
+/// 抽取将被本次压缩覆盖的原生 transcript 前缀切片（与 `compact_native_transcript` 严格互补）：
+/// 当保留 `keep_user_turns` 轮时，返回其之前的所有原生消息，供 Prefix-Fork 摘要携带真实工具调用/结果。
+pub fn compressible_native_transcript(transcript: &[Value], keep_user_turns: usize) -> Vec<Value> {
+    if transcript.is_empty() {
+        return Vec::new();
+    }
+    if keep_user_turns == 0 {
+        return transcript.to_vec();
+    }
+    let mut seen = 0usize;
+    let mut start = 0usize;
+    for (index, message) in transcript.iter().enumerate().rev() {
+        if message.get("role").and_then(Value::as_str) == Some("user") {
+            seen += 1;
+            if seen == keep_user_turns {
+                start = index;
+                break;
+            }
+        }
+    }
+    if seen < keep_user_turns {
+        return Vec::new();
+    }
+    transcript[..start].to_vec()
+}
+
 /// 构建压缩系统 prompt
 ///
 /// 这个 prompt 将作为 system 消息发送给 LLM，要求生成结构化摘要。
@@ -466,6 +534,10 @@ pub fn trim_native_transcript_to_token_budget(transcript: &[Value], max_tokens: 
     let anchor_idx = working
         .iter()
         .rposition(|msg| msg.get("role").and_then(Value::as_str) == Some("user"));
+    let existing_summary = match anchor_idx {
+        Some(idx) if idx > 0 && is_session_summary_message(&working[0]) => Some(working[0].clone()),
+        _ => None,
+    };
     let (anchor, tail) = match anchor_idx {
         Some(idx) => (Some(working[idx].clone()), &working[idx + 1..]),
         None => (None, working.as_slice()),
@@ -501,7 +573,15 @@ pub fn trim_native_transcript_to_token_budget(transcript: &[Value], max_tokens: 
     let anchor_tokens = anchor
         .as_ref()
         .map_or(0, estimate_native_message_tokens);
-    let mut remaining = max_tokens.saturating_sub(anchor_tokens);
+    let summary_tokens = existing_summary
+        .as_ref()
+        .map_or(0, estimate_native_message_tokens);
+    let keep_existing_summary = existing_summary.is_some()
+        && summary_tokens + anchor_tokens <= max_tokens
+        && summary_tokens <= (max_tokens / 2).max(512);
+    let mut remaining = max_tokens
+        .saturating_sub(anchor_tokens)
+        .saturating_sub(if keep_existing_summary { summary_tokens } else { 0 });
     let mut kept_units: Vec<Vec<Value>> = Vec::new();
     for unit in units.into_iter().rev() {
         let unit_tokens = estimate_native_transcript_tokens(&unit);
@@ -515,6 +595,11 @@ pub fn trim_native_transcript_to_token_budget(transcript: &[Value], max_tokens: 
     kept_units.reverse();
 
     let mut result = Vec::new();
+    if keep_existing_summary {
+        if let Some(summary_msg) = existing_summary {
+            result.push(summary_msg);
+        }
+    }
     if let Some(user_msg) = anchor {
         result.push(user_msg);
     }
@@ -653,8 +738,8 @@ mod tests {
         assert_eq!(estimate_text_tokens("a"), 1);
         assert_eq!(estimate_text_tokens("abcd"), 1);
         assert_eq!(estimate_text_tokens("abcde"), 2);
-        // 中文按字符计：4 字 = 1 token（按字节会算成 3）。
-        assert_eq!(estimate_text_tokens("压缩上下文"), 2);
+        // 中文按约 1.5 token/字校准：5 字 = (5*6).div_ceil(4) = 8。
+        assert_eq!(estimate_text_tokens("压缩上下文"), 8);
     }
 
     #[test]
@@ -731,13 +816,13 @@ mod tests {
 
     #[test]
     fn test_context_pressure_prefers_larger_side() {
-        // 分层估算 > 真实计量 ⇒ 认分层（还有未发出的新内容）。
+        // 分层估算 > 真实计量 ⇒ 认分层较大载体（避免 history + transcript 双倍叠加）。
         let layered_heavy = ContextPressure {
             history_tokens: 900,
             transcript_tokens: 6_000,
             measured_input_tokens: Some(2_000),
         };
-        assert_eq!(layered_heavy.effective_tokens(), 6_900);
+        assert_eq!(layered_heavy.effective_tokens(), 6_000);
 
         // 真实计量 > 分层（system + 工具面不在分层里）⇒ 认真实。
         let measured_heavy = ContextPressure {
@@ -747,13 +832,13 @@ mod tests {
         };
         assert_eq!(measured_heavy.effective_tokens(), 50_000);
 
-        // 无真实计量 ⇒ 纯分层。
+        // 无真实计量 ⇒ 取 history / transcript 较大者（不重复累加）。
         let blind = ContextPressure {
             history_tokens: 100,
             transcript_tokens: 200,
             measured_input_tokens: None,
         };
-        assert_eq!(blind.effective_tokens(), 300);
+        assert_eq!(blind.effective_tokens(), 200);
     }
 
     #[test]
@@ -841,6 +926,24 @@ Some trailing text"#;
         assert_eq!(compact_native_transcript(&transcript, 9).len(), 2);
         // 空 transcript ⇒ 空。
         assert!(compact_native_transcript(&[], 3).is_empty());
+    }
+
+    #[test]
+    fn test_compact_native_transcript_with_summary_injects_summary_at_head() {
+        let mut transcript = Vec::new();
+        for index in 0..3 {
+            transcript.extend(native_turn(index));
+        }
+        let summary = wrap_summary_to_message("<session_summary>goal: x</session_summary>").content;
+        let compacted = compact_native_transcript_with_summary(&transcript, 1, Some(&summary));
+        assert_eq!(compacted.len(), 5, "summary + 4 messages of latest turn");
+        assert!(is_session_summary_message(&compacted[0]));
+        assert_eq!(compacted[1]["content"], "u2");
+
+        // keep_user_turns == 0 时也只留 summary（不保留被压掉的旧轮次）
+        let summary_only = compact_native_transcript_with_summary(&transcript, 0, Some(&summary));
+        assert_eq!(summary_only.len(), 1);
+        assert!(is_session_summary_message(&summary_only[0]));
     }
 
     #[test]

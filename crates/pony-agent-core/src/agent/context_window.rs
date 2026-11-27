@@ -3,6 +3,12 @@
 //! 这里收纳「把会话历史裁进模型窗口」的纯函数：轮次边界对齐、token 预算截断、
 //! 原生工具转录的确定性修剪、修复与尾部锚定对齐。`context.rs` 只保留分层装配与提示词渲染，
 //! 不再持有窗口裁剪细节。
+//!
+//! 三套历史抽象的单源职责边界（B1795705303626）：
+//! - `TurnHistoryMessage`（`pony_protocol::session_types`）：UI 展示与非原生回放账本（含 `display_message`）。
+//! - `provider_native_transcript`（`Vec<Value>`）：native-tool-flow 唯一协议回放载体；工具配对修复
+//!   单源收口至 `pony_protocol::tool_pruner::repair_and_filter_tool_roundtrips`（`pony-storage` 与本模块共用）。
+//! - `ToolTurnHopRecord`（`runtime::types`）：单轮多跳执行期的在飞暂存，按并行批聚合写入原生转录后丢弃。
 
 use crate::agent::compression::estimate_native_message_tokens;
 use crate::agent::provider::{
@@ -253,13 +259,22 @@ fn align_native_transcript_with_history(
         .map(|(idx, _)| idx)
         .collect();
 
-    if candidates.is_empty() {
-        // 异构会话或深度重写：保守保持 native，绝不追加未验证轮次。
-        return native_messages;
-    }
-
     let anchor_idx = if candidates.len() == 1 {
         candidates[0]
+    } else if candidates.is_empty() {
+        // Goal 轮次等场景：`history` 存 `display_message`（如 `[goal round 1] ...`）而
+        // `provider_native_transcript` 存展开后的 `user_message`，仅靠 user 文本匹配会失败。
+        // 退化为用 native 末条 assistant 正文在 history 尾部消歧锚定，确保后续纯文本轮次不丢失。
+        let Some(expected_assistant) = native_last_assistant_text(&native_messages) else {
+            return native_messages;
+        };
+        let Some(matched_assistant_idx) = history.iter().rposition(|msg| {
+            msg.role == "assistant"
+                && sanitize_dsml_protocol_text(msg.content.trim()) == expected_assistant
+        }) else {
+            return native_messages;
+        };
+        matched_assistant_idx
     } else {
         // 重复文案（如「继续」）必须由 native 末条 assistant 内容二次校验消歧；
         // 无法消歧时保守不动——宁可少追加一轮，也不丢中间轮或重复注入。
@@ -552,5 +567,37 @@ mod tests {
         assert!(!aligned
             .iter()
             .any(|msg| msg.get("content").and_then(Value::as_str) == Some("尾部新提问")));
+    }
+
+    #[test]
+    fn test_align_native_transcript_recovers_goal_display_message_by_assistant_anchor() {
+        let native_messages = vec![
+            json!({ "role": "user", "content": "[展开后的超长 Goal 提示词正文...]" }),
+            json!({ "role": "assistant", "content": "已完成第一步探索" }),
+        ];
+        let history = vec![
+            TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "[goal round 1] 推进目标：重构上下文".to_string(),
+                ..Default::default()
+            },
+            TurnHistoryMessage {
+                role: "assistant".to_string(),
+                content: "已完成第一步探索".to_string(),
+                ..Default::default()
+            },
+            TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "继续第二步".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let aligned = align_native_transcript_with_history(native_messages, &history);
+        assert_eq!(aligned.len(), 3);
+        assert_eq!(
+            aligned[2].get("content").and_then(Value::as_str),
+            Some("继续第二步")
+        );
     }
 }
