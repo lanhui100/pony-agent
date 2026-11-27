@@ -120,12 +120,20 @@ Test-Evidence: lead | cargo check | exit=0
 ")"
 expect_rc 0 "P7 混合证据里有一条独立即放行" "$SHA"
 
-# ---- N1：无法解析 base ⇒ fail-closed exit 2（不得伪装通过）-----------------
+# ---- N1：全零 base 哨兵（新分支首推）⇒ 明确跳过 exit 0（不是「解析失败」）-----
 out="$(cd "$REPO" && node "$CHECK" --base "0000000000000000000000000000000000000000" --head HEAD 2>&1)"; rc=$?
-if [ "$rc" -eq 2 ]; then
-  ok "N1 无法解析 base 时 fail-closed（exit 2）"
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qF 'no-base-sentinel'; then
+  ok "N1 全零 base 哨兵 ⇒ skipping(no-base-sentinel) exit 0"
 else
-  fail "N1 期望 exit 2，实际 $rc；输出：$out"
+  fail "N1 期望 exit 0 且含 no-base-sentinel，实际 exit $rc；输出：$out"
+fi
+
+# ---- N1b：给了 base 但解析不出（坏 ref / 浅克隆）⇒ 仍 fail-closed exit 2 ------
+out="$(cd "$REPO" && node "$CHECK" --base "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" --head HEAD 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "N1b 坏 ref 时 fail-closed（exit 2，不伪装通过）"
+else
+  fail "N1b 期望 exit 2，实际 $rc；输出：$out"
 fi
 
 # ---- N2：未知参数不改变语义但 --help 可用 ---------------------------------
@@ -140,4 +148,4 @@ if [ "$FAIL" -ne 0 ]; then
   echo "== check-independent-test-evidence.spec：FAIL（见上）==" >&2
   exit 1
 fi
-echo "== check-independent-test-evidence.spec：全部通过（P1–P7 正负样本 + N1–N2 边界）=="
+echo "== check-independent-test-evidence.spec：全部通过（P1–P7 正负样本 + N1/N1b/N2 边界）=="

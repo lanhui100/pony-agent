@@ -22,6 +22,9 @@
 // ## 判定（可机械查）
 //
 // 1. **范围**：`--base <sha>..--head <sha>` 内的提交（默认 `HEAD~1..HEAD`）。
+//    `--base` 为**全零 sha** 时是 GitHub 的「无前序提交」哨兵（新分支首次 push 的
+//    `event.before` 即为此值）⇒ 明确跳过并 exit 0，由同一提交的 pull_request 事件
+//    以有效 `base.sha` 复核；只有「给了 ref 却解析不出来」才 fail-closed exit 2。
 // 2. **触发**：范围内存在 dev-team 标记（trailer `Team-Run:` 或提交信息含 `dev-team`）时才判；
 //    无标记 ⇒ 跳过并 exit 0（无可判定项，不打扰普通 PR——与 no-residue 门同一惯例）。
 // 3. **判据**：范围内若改动了代码面（非纯文档/账本路径），必须存在至少一条 `Test-Evidence`，
@@ -62,9 +65,12 @@ function git(args) {
   return execFileSync("git", args, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
 }
 
-/** 解析 base：空/全零/不可解析 ⇒ null（调用方据此判「无法判定」）。 */
+/** base 是全零 sha（GitHub 在「无前序提交」时的哨兵值，如新分支首次 push）。 */
+const ZERO_SHA_RE = /^0+$/;
+
+/** 解析 base：空/不可解析 ⇒ null（调用方据此判「无法判定」）。 */
 function resolveCommit(ref) {
-  if (!ref || /^0+$/.test(ref)) return null;
+  if (!ref || ZERO_SHA_RE.test(ref)) return null;
   try {
     return git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).trim();
   } catch {
@@ -198,9 +204,23 @@ function main() {
   }
 
   const baseRef = args.base || `${args.head}~1`;
+  // 全零 sha 是 GitHub 的「无前序提交」哨兵（新分支首次 push 时 `event.before` 即为此值），
+  // 它表达的是**确定的事实**（这条分支上没有任何更早的提交可比），不是「解析失败」。
+  // 旧实现把它与浅克隆/坏 ref 一并 fail-closed exit 2，于是**每个新分支的首次 push 都红一次**，
+  // 而同一提交的 pull_request 事件用有效 base.sha 照常判定——判定责任没有缺口，只有噪声。
+  // 故此处跳过并 exit 0，真正的「给了 ref 但解析不出来」仍走下方 exit 2。
+  if (baseRef && ZERO_SHA_RE.test(baseRef)) {
+    const report = { verdict: "skipped", reason: "no-base-sentinel", base: baseRef, head };
+    console.log(
+      args.json
+        ? JSON.stringify(report, null, 2)
+        : `[test-evidence] skipped（no-base-sentinel）：base 为全零哨兵（${baseRef}），本分支无前序提交可比；由 pull_request 事件以 base.sha 复核`,
+    );
+    return 0;
+  }
   const base = resolveCommit(baseRef);
   if (!base) {
-    // 无 base（新分支首提交 / 浅克隆）⇒ 无法判定，不假装通过。
+    // 给了 base 却解析不出来（浅克隆 / 坏 ref）⇒ 无法判定，不假装通过。
     const report = { verdict: "unknown", reason: "no-base", base: baseRef, head };
     console.log(args.json ? JSON.stringify(report, null, 2) : `[test-evidence] 跳过判定：无法解析 base ${baseRef}`);
     return 2;
