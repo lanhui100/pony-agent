@@ -452,10 +452,29 @@ fn test_goal_metrics_line_rendering_contract() {
     let buf = screen(&mut state, 100, 30);
     let rendered = buffer_to_string(&buf);
 
-    // 契约：当存在活跃 Goal 时，底部状态行或指标行必须展示 Goal 进度 (例如 [3/8] 或 目标: 3/8轮)
+    // 契约（2026-11-27 修订）：底栏只报**状态图标**（`◎ 目标`），轮次移入抽屉 Goal 页签。
+    // 底栏是常驻窄槽，多一个 `3/8` 会挤占宽度，且在目标卡住时被读成「进度」。
     assert!(
-        rendered.contains("3/8") || rendered.contains("自动化重构验证") || rendered.contains("Goal"),
-        "界面必须展示当前 Goal 的轮次指标或目标信息, 实际内容:\n{}",
+        rendered.contains("◎ 目标"),
+        "底栏必须用状态图标报当前目标, 实际内容:\n{}",
         rendered
+    );
+    assert!(
+        !rendered.contains("3/8"),
+        "底栏不再显示轮次（轮次只属于抽屉 Goal 页签）, 实际内容:\n{}",
+        rendered
+    );
+
+    // 轮次并没有消失：抽屉 Goal 页签仍逐字展示 `3/8 轮`。
+    state.task_center = Some(TaskCenterState::new());
+    let drawer = task_center_lines(&state)
+        .iter()
+        .map(|(text, _)| text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        drawer.contains("3/8 轮"),
+        "抽屉 Goal 页签必须保留轮次信息, 实际内容:\n{}",
+        drawer
     );
 }

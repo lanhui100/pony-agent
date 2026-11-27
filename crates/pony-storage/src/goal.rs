@@ -695,14 +695,24 @@ impl GoalRoundStopReason {
     }
 
     /// 用户可见的简短标题/主说明。
+    ///
+    /// **只描述「自动续轮」这一个事实，不冒认阶段**：目标本身可能仍是 `GoalPhase::Active`
+    /// （目标还在，只是这一轮之后不再自动往下推）。旧措辞「目标已暂停：…」会在 Ctrl+T 的
+    /// Goal 页签里与阶段行「进行中」同屏出现——同一状态被两个结论同时声明，用户只能读到矛盾。
+    /// 阶段措辞的唯一家是 `goal_panel::phase_label` / `task_center::phase_text`；
+    /// 本函数的家是续轮循环的启动/停止。
     pub fn headline(&self) -> &'static str {
         match self {
             Self::LoopAlreadyOwned => "本会话已有续轮循环在运行",
-            Self::FirstRoundNotSucceeded => "目标已暂停：本轮未成功",
-            // O1-B：挂起/待作答是**暂停**而不是终止——作答后宿主会重入续轮，措辞必须一致，
-            // 否则用户看到「续轮已停止」会以为目标已死。
-            Self::TurnSuspended => "目标已暂停：等你作答",
-            _ => "目标已暂停：续轮已停止",
+            // 「未启动」是 `never_started()` 的专属措辞：这三个原因不存在「停下来」这个事实。
+            Self::FirstRoundNotSucceeded => "自动续轮未启动",
+            // O1-B（PR #106）：挂起/待作答是**暂停**而不是终止——作答后宿主会重入续轮，措辞必须一致，
+            // 否则用户看到「续轮已停止」会以为目标已死，于是不去作答，而作答正是唯一的解锁动作。
+            // 两处用词都是刻意的：① 主语只取「续轮」，不写「目标已暂停」——目标此刻可能仍是
+            // `GoalPhase::Active`，冒认阶段会与 Goal 页签的阶段行打脸（B1795767639536 的回归）；
+            // ② 用「续轮暂停」而非「续轮已暂停」，避开 `GoalPhase::Paused` 的既有译词「已暂停」。
+            Self::TurnSuspended => "续轮暂停：等你作答",
+            _ => "自动续轮已停止",
         }
     }
 
@@ -723,7 +733,7 @@ impl GoalRoundStopReason {
             // 撞词避让：「进行中」是 `GoalPhase::Active` 的既有译词（`goal_panel::phase_label`），
             // 这里若沿用「没有进行中的目标」会让横幅的「阶段 进行中」与停止原因互相打脸。
             Self::NoActiveGoal => Some("当前会话没有可续的目标".to_string()),
-            Self::FirstRoundNotSucceeded => Some("首轮失败，自动续轮未启动".to_string()),
+            Self::FirstRoundNotSucceeded => Some("首轮失败".to_string()),
         }
     }
 
@@ -752,8 +762,9 @@ impl GoalRoundStopReason {
     ///
     /// 语义区分是 B193 决策记录的硬约束：`FirstRoundNotSucceeded`（首轮门未过）、
     /// `NoActiveGoal`（本就无轮可续）、`LoopAlreadyOwned`（本线程没推进任何轮）都不存在
-    /// 「停下来」这个事实，任何把它们说成「已停止 / ·停」的展示都是假结论。
-    /// 状态条与面板必须经本判据取措辞，不得各自拼字面量。
+    /// 「停下来」这个事实，任何把它们说成「已停止」的展示都是假结论。
+    /// `headline()` 已按本判据取措辞（「自动续轮未启动」vs「自动续轮已停止」）；
+    /// 底栏自 2026-11-27 起只用图标区分状态，不再派生 `·停` / `·未续` 文字后缀。
     pub fn never_started(&self) -> bool {
         matches!(
             self,

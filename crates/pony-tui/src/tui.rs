@@ -1946,7 +1946,8 @@ impl TuiState {
     /// 一行终态摘要（`本轮完成 · 用时 … · 工具 N 次` / `本轮失败 · 工具 N 次`），停止原因
     /// 紧跟其后就成了第二行——信息与摘要重复（「本轮在等你作答」正是屏幕上方的提问），
     /// 且把「目标已暂停」这个状态事实塞进对话流。可见性由三条既有通道承担：状态栏 goal 段
-    /// （`·停` / `·未续`）、`/goal` 面板的 `visible_line()`、`goal_rounds_stopped` 结构化日志。
+    /// （`◎` 续轮在跑 / `◌` 续轮未在跑）、`/goal` 面板的 `visible_line()`、`goal_rounds_stopped`
+    /// 结构化日志。
     pub fn apply_goal_rounds_stopped(
         &mut self,
         reason: pony_agent_core::agent::goal::GoalRoundStopReason,
@@ -13828,7 +13829,7 @@ fn tui_event_loop(
                     // 后者与前者的信息重复（「本轮在等你作答」正是屏幕上方的提问），且
                     // 把「目标已暂停」这个状态事实塞进对话流，读者只能读到冗余。
                     //
-                    // 可见性不降级：状态栏 goal 段（`·停` / `·未续`）、`/goal` 面板的
+                    // 可见性不降级：状态栏 goal 段（`◎` / `◌` 图标）、`/goal` 面板的
                     // `visible_line()`、以及 `goal_rounds_stopped` 结构化日志三条通道全保留，
                     // `enters_history()` 的历史准入语义仍由 core 与契约测试持有。
                     state.apply_goal_rounds_stopped(reason, status_line);
