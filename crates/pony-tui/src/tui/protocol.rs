@@ -29,6 +29,9 @@ pub struct PermissionRequest {
     /// `command_or_path` 仍保留为**展示**用（它允许回退 `callId`），两者语义不混用。
     #[serde(default)]
     pub approval_path: Option<String>,
+    /// 触发审批的工具描述符 ID（用于非路径类审批的 `AllowSession` 会话级免审批）。
+    #[serde(default)]
+    pub descriptor_id: Option<String>,
     pub timestamp_ms: u64,
 }
 

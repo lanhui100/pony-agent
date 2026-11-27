@@ -7548,9 +7548,14 @@ pub fn render_permission_dialog_stub(f: &mut Frame, state: &TuiState) {
     let choices = &perm.choices;
     for (idx, choice) in choices.iter().enumerate() {
         let selected = idx == perm.selected_choice_index;
+        let session_desc = if perm.request.approval_path.is_some() {
+            "本会话内放行工作区外读取"
+        } else {
+            "本会话内放行该工具"
+        };
         let (label, desc) = match choice {
             PermissionChoice::AllowOnce => ("AllowOnce (允许一次)", "仅允许当前单次工具执行"),
-            PermissionChoice::AllowSession => ("AllowSession (永久允许)", "在此会话中永久放行该工具"),
+            PermissionChoice::AllowSession => ("AllowSession (本会话允许)", session_desc),
             PermissionChoice::Deny => ("Deny (拒绝执行)", "拦截并取消本次工具调用"),
         };
         let row = list_row(selected, label, desc, inner_w);
@@ -8863,9 +8868,13 @@ pub fn approval_continuation_prompt(choice: PermissionChoice) -> &'static str {
 /// wave-65 R2（F3）：一次审批决策的**结构化计划**（纯数据，生产与单测共用同一口径）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalPlan {
-    /// `Some(path)` = 批准前必须先写 `read` 作用域路径授权；`None` = 该审批没有路径，
-    /// 跳过授权直接 CAS（否则「无 path 审批」会因 `authorize_path` 必败而被永久拒批）。
+    /// `Some(path)` = `AllowOnce` 且为路径授权审批时写入单路径 `read` 作用域授权；
+    /// `AllowSession` / 无路径 / `Deny` 均为 `None`。
     pub authorize: Option<String>,
+    /// `AllowSession` 且为路径授权审批时为 `true`：授予本会话工作区外读取权限（仅内存，不持久化）。
+    pub session_external_read: bool,
+    /// `AllowSession` 且为非路径审批时为 `Some(descriptor_id)`：授予本会话该工具免审批（仅内存，不持久化）。
+    pub session_tool_descriptor: Option<String>,
     /// 决策成功后的固定宿主续轮文案。
     pub prompt: &'static str,
 }
@@ -8908,37 +8917,83 @@ pub fn compose_approval_resume_message(context: Option<&SuspendedTurnContext>, p
 
 /// wave-65 R2（F3）：从**待决快照项**推导审批计划（唯一决策口径，纯函数、可单测）。
 ///
-/// - 授权路径**只**取结构化 `options.path`（**不回退** `callId` —— 它不是路径，
-///   `authorize_path` 会 canonicalize 失败，把「无 path 审批」变成永远批不掉）；
-/// - 拒绝（`Deny`）恒 `authorize == None`：被拒绝的路径绝不能被顺手授权放行。
+/// - `AllowOnce`：若存在 `options.path` 则写单路径 `read` 作用域授权（不回退 `callId`）；
+/// - `AllowSession`：
+///   - 若存在 `options.path` ⇒ 授予本会话工作区外读取权限（`session_external_read = true`，不写全局单路径表）；
+///   - 否则 ⇒ 提取 `descriptorId`，授予本会话该工具免审批（`session_tool_descriptor`）；
+/// - `Deny`：所有授权字段均为 `None` / `false`。
 pub fn approval_plan(snapshot: &serde_json::Value, choice: PermissionChoice) -> ApprovalPlan {
     let prompt = approval_continuation_prompt(choice);
+    let path = snapshot
+        .get("options")
+        .and_then(|options| options.get("path"))
+        .and_then(|path| path.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let descriptor_id = snapshot
+        .get("descriptorId")
+        .and_then(|id| id.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     match choice {
-        PermissionChoice::AllowOnce | PermissionChoice::AllowSession => ApprovalPlan {
-            authorize: snapshot
-                .get("options")
-                .and_then(|options| options.get("path"))
-                .and_then(|path| path.as_str())
-                .map(str::to_string),
+        PermissionChoice::AllowOnce => ApprovalPlan {
+            authorize: path,
+            session_external_read: false,
+            session_tool_descriptor: None,
             prompt,
         },
+        PermissionChoice::AllowSession => {
+            if path.is_some() {
+                ApprovalPlan {
+                    authorize: None,
+                    session_external_read: true,
+                    session_tool_descriptor: None,
+                    prompt,
+                }
+            } else {
+                ApprovalPlan {
+                    authorize: None,
+                    session_external_read: false,
+                    session_tool_descriptor: descriptor_id,
+                    prompt,
+                }
+            }
+        }
         PermissionChoice::Deny => ApprovalPlan {
             authorize: None,
+            session_external_read: false,
+            session_tool_descriptor: None,
             prompt,
         },
     }
 }
 
-/// 把已解析出的结构化授权路径（`PermissionRequest::approval_path`）重新投影成快照形状，
+/// 把已解析出的结构化授权路径（`PermissionRequest::approval_path`）与工具描述符重新投影成快照形状，
 /// 让 [`approval_plan`] 成为**唯一**决策口径（生产与单测走同一条路径，避免两套语义）。
 fn approval_snapshot_hint(state: &TuiState) -> serde_json::Value {
-    match state
+    let descriptor_id = state
         .permission_state
         .as_ref()
-        .and_then(|perm| perm.request.approval_path.clone())
-    {
-        Some(path) => serde_json::json!({ "options": { "path": path } }),
-        None => serde_json::json!({ "options": {} }),
+        .and_then(|perm| perm.request.descriptor_id.clone());
+    let path = state
+        .permission_state
+        .as_ref()
+        .and_then(|perm| perm.request.approval_path.clone());
+    match (path, descriptor_id) {
+        (Some(path), Some(desc)) => serde_json::json!({
+            "descriptorId": desc,
+            "options": { "path": path }
+        }),
+        (Some(path), None) => serde_json::json!({
+            "options": { "path": path }
+        }),
+        (None, Some(desc)) => serde_json::json!({
+            "descriptorId": desc,
+            "options": {}
+        }),
+        (None, None) => serde_json::json!({ "options": {} }),
     }
 }
 
@@ -8946,13 +9001,14 @@ fn approval_snapshot_hint(state: &TuiState) -> serde_json::Value {
 ///
 /// 契约 `.dev-team/contract-matrix-approval-resume.md` §2 C4（含 R2 修正）：决策逻辑抽成可测纯函数
 /// （真实 control plane 驱动），返回**续轮文案**。
-/// - `Some(prompt)` = 需要续轮（批准：`authorize_path(path,"read")` → `approve_control_request`；
-///   拒绝：`cancel_approval_request`），由调用方经 [`dispatch_approval_resume`] 投递
-///   `UiEvent::ApprovalResumeTurn { prompt, run_id }`（`run_id` 缺失 ⇒ fail-closed，不投递）；
+/// - `Some(prompt)` = 需要续轮（批准：`AllowOnce` 写单路径 `authorize_path(path,"read")`，
+///   `AllowSession` 写仅内存会话级授权，再 `approve_control_request`；拒绝：`cancel_approval_request`），
+///   由调用方经 [`dispatch_approval_resume`] 投递 `UiEvent::ApprovalResumeTurn { prompt, run_id }`
+///   （`run_id` 缺失 ⇒ fail-closed，不投递）；
 /// - `None` = 不需要/不能续轮（无审批句柄，或失败已上屏中文提示，绝不静默）。
 ///
-/// INV-1：批准**只**写 `read` 作用域路径授权（`store_metadata.path_authorizations.v1`），
-/// 绝不扩大写权限；INV-4：拒绝与批准共用同一 CAS 闸门，先到者终结请求。
+/// INV-1：批准**只**授予读/会话级免审批权限，绝不扩大外部写权限；
+/// INV-4：拒绝与批准共用同一 CAS 闸门，先到者终结请求。
 pub fn apply_approval_decision(
     state: &mut TuiState,
     control_plane: &pony_agent_core::agent::control_plane::HostControlPlane,
@@ -8966,14 +9022,44 @@ pub fn apply_approval_decision(
     // 失败上报要在清句柄之前拿到句柄快照：审批与 Ask 的文案不得互相顶替。
     let report_handle = state.pending_request.clone();
     let plan = approval_plan(&approval_snapshot_hint(state), choice);
-    // 先写 read 作用域授权，再消费审批请求：顺序反了会让「已批准但工具仍被拒绝」。
-    // `authorize == None`（无结构化路径）⇒ 跳过授权直接 CAS，否则该审批永远批不掉（R2 F3）。
+    let session_id = state
+        .permission_state
+        .as_ref()
+        .map(|perm| perm.request.session_id.trim())
+        .filter(|id| !id.is_empty())
+        .unwrap_or(state.session_id.trim())
+        .to_string();
+    // 先写授权，再消费审批请求：顺序反了会让「已批准但工具仍被拒绝」。
     if let Some(path) = plan.authorize.as_deref() {
         if let Err(error) = control_plane.authorize_path(path, "read") {
             report_control_request_error(
                 state,
                 control_plane,
                 "审批授权失败",
+                &error,
+                report_handle.clone(),
+            );
+            return None;
+        }
+    }
+    if plan.session_external_read {
+        if let Err(error) = control_plane.authorize_session_external_read(&session_id) {
+            report_control_request_error(
+                state,
+                control_plane,
+                "会话授权失败",
+                &error,
+                report_handle.clone(),
+            );
+            return None;
+        }
+    }
+    if let Some(descriptor_id) = plan.session_tool_descriptor.as_deref() {
+        if let Err(error) = control_plane.authorize_session_tool(&session_id, descriptor_id) {
+            report_control_request_error(
+                state,
+                control_plane,
+                "会话工具授权失败",
                 &error,
                 report_handle.clone(),
             );

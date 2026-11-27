@@ -334,6 +334,7 @@ fn permission_panel_hides_duplicate_target_when_description_carries_path() {
         description: format!("读取工作区外路径：{path}"),
         command_or_path: Some(path.to_string()),
         approval_path: Some(path.to_string()),
+        descriptor_id: None,
         timestamp_ms: 0,
     };
     let state = PermissionState::new(req);

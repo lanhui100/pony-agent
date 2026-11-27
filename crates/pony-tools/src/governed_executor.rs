@@ -112,6 +112,7 @@ impl GovernedPolicyEvaluator {
         session_id: Option<&str>,
         plan_execution_approval: Option<&crate::dispatcher::PlanExecutionApproval>,
         workspace_root: Option<&str>,
+        tool_authorization_mode: Option<&str>,
         json_arguments: &Value,
     ) -> PermissionDecision {
         let is_ask = descriptor.identity.model_name == "Ask"
@@ -137,11 +138,9 @@ impl GovernedPolicyEvaluator {
                         decision_source: "tool_rule_allow".to_string(),
                         reason: rule.reason.clone(),
                     },
-                    crate::app_settings::RuleAction::Ask => PermissionDecision {
-                        verdict: PermissionVerdict::ApprovalRequired,
-                        decision_source: "tool_rule_ask".to_string(),
-                        reason: rule.reason.clone(),
-                    },
+                    crate::app_settings::RuleAction::Ask => {
+                        self.tool_rule_ask_decision(session_id, descriptor, rule.reason.clone())
+                    }
                     crate::app_settings::RuleAction::Deny => PermissionDecision {
                         verdict: PermissionVerdict::Deny,
                         decision_source: "tool_rule_deny".to_string(),
@@ -240,49 +239,15 @@ impl GovernedPolicyEvaluator {
             }
         }
 
-        // 3. 路径安全门禁（PA-080 / 审批联动）：
-        // 若工具需要读取外部文件（如 Read / ReadDocument / ViewImage），检查路径是否位于工作区之外且未获得授权。
-        // 未获得授权时返回 ApprovalRequired，触发宿主审批流（对话框），而不是直接报错。
-        if let Some(auth_store) = &self.authorize_store {
-            let prim = descriptor.identity.primitive_name.as_str();
-            let model = descriptor.identity.model_name.as_str();
-            let is_file_read_tool = prim == "workspace_read_file"
-                || prim == "workspace_read_file_segment"
-                || prim == "workspace_read_document"
-                || prim == "view_image"
-                || prim == "workspace_gather_context"
-                || model == "Read"
-                || model == "ReadDocument"
-                || model == "ViewImage";
-            if is_file_read_tool {
-                let target_path = json_arguments.get("path")
-                    .or_else(|| json_arguments.get("filePath"))
-                    .or_else(|| json_arguments.get("file_path"))
-                    .and_then(Value::as_str);
-                if let Some(raw_path) = target_path {
-                    let ws_root = workspace_root
-                        .map(PathBuf::from)
-                        .or_else(|| crate::workspace::compute_default_workspace_root())
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    let tmp = ws_root.join(".tmp");
-                    let checker = crate::path_permission::PathPermissionChecker::with_default();
-                    if let Err(err) = checker.classify(
-                        raw_path,
-                        &ws_root,
-                        &tmp,
-                        auth_store,
-                        crate::path_permission::PathPurpose::Read,
-                    ) {
-                        if err.code == crate::path_permission::PermissionErrorCode::RequiresAuthorization {
-                            return PermissionDecision {
-                                verdict: PermissionVerdict::ApprovalRequired,
-                                decision_source: "path_permission_requires_authorization".to_string(),
-                                reason: Some(err.message),
-                            };
-                        }
-                    }
-                }
-            }
+        // 3. 路径安全门禁（PA-080 / 审批联动）：`full_access` 或本会话已授权外部读取时放行。
+        if let Some(decision) = self.path_gate_decision(
+            descriptor,
+            session_id,
+            workspace_root,
+            tool_authorization_mode,
+            json_arguments,
+        ) {
+            return decision;
         }
 
         // 4. 外部来源尊重 `requires_approval`（ADR 0066 decision 5 / T2 裁决，fail-closed）。
@@ -295,6 +260,13 @@ impl GovernedPolicyEvaluator {
         if descriptor.handler_provenance.source_id != "builtin-tools"
             && descriptor.permission_declaration.requires_approval
         {
+            if self.session_tool_approved(session_id, &descriptor.identity.descriptor_id) {
+                return PermissionDecision {
+                    verdict: PermissionVerdict::Allow,
+                    decision_source: "session_tool_approval".to_string(),
+                    reason: None,
+                };
+            }
             return PermissionDecision {
                 verdict: PermissionVerdict::ApprovalRequired,
                 decision_source: "external_requires_approval".to_string(),
@@ -312,6 +284,94 @@ impl GovernedPolicyEvaluator {
             reason: None,
         }
     }
+
+    /// 本会话是否已被授予该工具的免审批（TUI「本会话允许」写入的进程内会话授权表）。
+    fn session_tool_approved(&self, session_id: Option<&str>, descriptor_id: &str) -> bool {
+        self.authorize_store
+            .as_ref()
+            .is_some_and(|store| store.has_session_tool_approval(session_id, descriptor_id))
+    }
+
+    /// 工具规则命中 `Ask` 时的判决：本会话已授权该工具则放行，否则维持 `ApprovalRequired`。
+    fn tool_rule_ask_decision(
+        &self,
+        session_id: Option<&str>,
+        descriptor: &crate::tools::ToolDescriptor,
+        reason: Option<String>,
+    ) -> PermissionDecision {
+        if self.session_tool_approved(session_id, &descriptor.identity.descriptor_id) {
+            PermissionDecision {
+                verdict: PermissionVerdict::Allow,
+                decision_source: "session_tool_approval".to_string(),
+                reason,
+            }
+        } else {
+            PermissionDecision {
+                verdict: PermissionVerdict::ApprovalRequired,
+                decision_source: "tool_rule_ask".to_string(),
+                reason,
+            }
+        }
+    }
+
+    /// 路径安全门禁（PA-080 / 审批联动）：文件读类工具访问工作区外且未获授权时要求审批。
+    ///
+    /// `full_access` 模式或本会话已授予工作区外读取权限时直接放行（返回 `None`）；
+    /// 非文件读类工具、无路径参数、已授权路径同样返回 `None`。
+    fn path_gate_decision(
+        &self,
+        descriptor: &crate::tools::ToolDescriptor,
+        session_id: Option<&str>,
+        workspace_root: Option<&str>,
+        tool_authorization_mode: Option<&str>,
+        json_arguments: &Value,
+    ) -> Option<PermissionDecision> {
+        let auth_store = self.authorize_store.as_ref()?;
+        let allow_external_read = tool_authorization_mode.map(str::trim) == Some("full_access")
+            || auth_store.has_session_external_read(session_id);
+        let prim = descriptor.identity.primitive_name.as_str();
+        let model = descriptor.identity.model_name.as_str();
+        let is_file_read_tool = prim == "workspace_read_file"
+            || prim == "workspace_read_file_segment"
+            || prim == "workspace_read_document"
+            || prim == "view_image"
+            || prim == "workspace_gather_context"
+            || model == "Read"
+            || model == "ReadDocument"
+            || model == "ViewImage";
+        if !is_file_read_tool || allow_external_read {
+            return None;
+        }
+        let raw_path = json_arguments
+            .get("path")
+            .or_else(|| json_arguments.get("filePath"))
+            .or_else(|| json_arguments.get("file_path"))
+            .and_then(Value::as_str)?;
+        let ws_root = workspace_root
+            .map(PathBuf::from)
+            .or_else(crate::workspace::compute_default_workspace_root)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let tmp = ws_root.join(".tmp");
+        let checker = crate::path_permission::PathPermissionChecker::with_default();
+        let err = checker
+            .classify_with_options(
+                raw_path,
+                &ws_root,
+                &tmp,
+                auth_store,
+                crate::path_permission::PathPurpose::Read,
+                allow_external_read,
+            )
+            .err()?;
+        if err.code != crate::path_permission::PermissionErrorCode::RequiresAuthorization {
+            return None;
+        }
+        Some(PermissionDecision {
+            verdict: PermissionVerdict::ApprovalRequired,
+            decision_source: "path_permission_requires_authorization".to_string(),
+            reason: Some(err.message),
+        })
+    }
 }
 
 impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
@@ -323,7 +383,7 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
     ) -> PermissionDecision {
         // 上下文无关的旧 seam（既有单元/集成测试直接调用）：无注入会话事实，
         // 草稿门禁按 fail-closed 规则处理（C-138-4）。旧 seam 无宿主审批（None）。
-        self.decide_with_context(descriptor, None, None, None, final_arguments)
+        self.decide_with_context(descriptor, None, None, None, None, final_arguments)
     }
 
     fn evaluate_with_context(
@@ -377,6 +437,7 @@ impl ToolPolicyEvaluator for GovernedPolicyEvaluator {
             context.session_id.as_deref(),
             context.plan_execution_approval.as_ref(),
             context.workspace_root.as_deref(),
+            context.tool_authorization_mode.as_deref(),
             final_arguments,
         )
     }
@@ -407,6 +468,7 @@ impl PrimitiveToolHandler for RouterPrimitiveHandler {
             // W2：桥接层重建上下文时必须恢复宿主 provider 选择（线程局部作用域由
             // `GovernedToolExecutor::execute_with_context` 建立）。
             provider_selection: crate::dispatcher_composites::current_provider_selection(),
+            tool_authorization_mode: request.tool_authorization_mode.clone(),
             ..Default::default()
         };
         let result = self.router.execute_with_context(
@@ -1370,5 +1432,203 @@ mod tests {
             &read_only_context,
         );
         assert_eq!(allowed.verdict, PermissionVerdict::Allow);
+    }
+
+    #[test]
+    fn governed_executor_full_access_allows_external_read_but_keeps_external_write_denied() {
+        let workspace = temp_workspace();
+        let ext_dir = temp_workspace();
+        let ext_file = ext_dir.join("outside.txt");
+        std::fs::write(&ext_file, "outside-full-access").expect("write external");
+
+        let auth_store = Arc::new(crate::path_permission::AuthorizeStore::new());
+        let governed = build_governed_executor(Some(workspace.clone()), Some(auth_store));
+
+        // 1. workspace_write 读外部文件仍须挂起审批
+        let ws_write = BoundGoverned::new(
+            &governed,
+            crate::dispatcher::DispatchContext {
+                session_id: Some("sess-fa-1".to_string()),
+                run_id: Some("run-1".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                workspace_root: Some(workspace.display().to_string()),
+                tool_authorization_mode: Some("workspace_write".to_string()),
+                ..Default::default()
+            },
+        );
+        let read_call = same_call(
+            "Read",
+            json!({ "path": ext_file.display().to_string(), "description": "test" }),
+        );
+        let ws_write_res = ws_write.execute(&read_call);
+        assert_eq!(ws_write_res.status, "error");
+        assert!(ws_write_res.output.contains("control_outcome_pending"));
+        assert_eq!(ws_write.dispatcher().pending_requests().len(), 1);
+
+        // 2. full_access 读外部文件直接放行且不产生新 pending approval
+        let full_access = BoundGoverned::new(
+            &governed,
+            crate::dispatcher::DispatchContext {
+                session_id: Some("sess-fa-2".to_string()),
+                run_id: Some("run-2".to_string()),
+                turn_id: Some("turn-2".to_string()),
+                workspace_root: Some(workspace.display().to_string()),
+                tool_authorization_mode: Some("full_access".to_string()),
+                ..Default::default()
+            },
+        );
+        let fa_read_res = full_access.execute(&read_call);
+        assert_eq!(
+            fa_read_res.status, "ok",
+            "full_access 读工作区外文件必须直接成功，实际 = {}",
+            fa_read_res.output
+        );
+        assert!(fa_read_res.output.contains("outside-full-access"));
+        assert_eq!(
+            full_access.dispatcher().pending_requests().len(),
+            1,
+            "full_access 不得新增审批请求"
+        );
+
+        // 3. 2A：full_access 写外部文件仍被 outside_workspace_write_denied 拦截
+        let write_call = same_call(
+            "Write",
+            json!({
+                "path": ext_dir.join("blocked_write.txt").display().to_string(),
+                "content": "nope",
+                "description": "test"
+            }),
+        );
+        let fa_write_res = full_access.execute(&write_call);
+        assert_eq!(fa_write_res.status, "error");
+        assert!(
+            fa_write_res.output.contains("outside_workspace_write_denied"),
+            "full_access 下工作区外写仍应被写保护拦截，实际 = {}",
+            fa_write_res.output
+        );
+    }
+
+    #[test]
+    fn governed_executor_session_external_read_allows_other_dirs_and_isolates_sessions() {
+        let workspace = temp_workspace();
+        let ext_dir_1 = temp_workspace();
+        let ext_file_1 = ext_dir_1.join("first.txt");
+        std::fs::write(&ext_file_1, "content-1").expect("write ext 1");
+        let ext_dir_2 = temp_workspace();
+        let ext_file_2 = ext_dir_2.join("second.txt");
+        std::fs::write(&ext_file_2, "content-2").expect("write ext 2");
+
+        let auth_store = Arc::new(crate::path_permission::AuthorizeStore::new());
+        auth_store
+            .grant_session_external_read("sess-allowed")
+            .expect("grant session external read");
+        let governed = build_governed_executor(Some(workspace.clone()), Some(auth_store));
+
+        let ctx_allowed = BoundGoverned::new(
+            &governed,
+            crate::dispatcher::DispatchContext {
+                session_id: Some("sess-allowed".to_string()),
+                run_id: Some("run-a".to_string()),
+                turn_id: Some("turn-a".to_string()),
+                workspace_root: Some(workspace.display().to_string()),
+                tool_authorization_mode: Some("workspace_write".to_string()),
+                ..Default::default()
+            },
+        );
+        for (file, expected) in [(&ext_file_1, "content-1"), (&ext_file_2, "content-2")] {
+            let res = ctx_allowed.execute(&same_call(
+                "Read",
+                json!({ "path": file.display().to_string(), "description": "test" }),
+            ));
+            assert_eq!(res.status, "ok", "已授予会话读权限应放行任意外部文件: {}", res.output);
+            assert!(res.output.contains(expected));
+        }
+        assert!(ctx_allowed.dispatcher().pending_requests().is_empty());
+
+        let ctx_other = BoundGoverned::new(
+            &governed,
+            crate::dispatcher::DispatchContext {
+                session_id: Some("sess-other".to_string()),
+                run_id: Some("run-b".to_string()),
+                turn_id: Some("turn-b".to_string()),
+                workspace_root: Some(workspace.display().to_string()),
+                tool_authorization_mode: Some("workspace_write".to_string()),
+                ..Default::default()
+            },
+        );
+        let res_other = ctx_other.execute(&same_call(
+            "Read",
+            json!({ "path": ext_file_2.display().to_string(), "description": "test" }),
+        ));
+        assert_eq!(res_other.status, "error");
+        assert!(res_other.output.contains("control_outcome_pending"));
+        assert_eq!(ctx_other.dispatcher().pending_requests().len(), 1);
+    }
+
+    #[test]
+    fn governed_policy_session_tool_approval_skips_ask_but_preserves_deny() {
+        use crate::app_settings::{RuleAction, ToolRule, ToolRuleMatcher};
+        use crate::tools::{ToolKind, ToolPermissionScope};
+
+        let ask_desc = gate_descriptor("mcp__demo__ask", ToolKind::Read, &[ToolPermissionScope::WorkspaceRead]);
+        let deny_desc = gate_descriptor("mcp__demo__deny", ToolKind::Read, &[ToolPermissionScope::WorkspaceRead]);
+        let mut ext_desc = gate_descriptor("mcp__demo__ext", ToolKind::Read, &[ToolPermissionScope::WorkspaceRead]);
+        ext_desc.permission_declaration.requires_approval = true;
+
+        let auth_store = Arc::new(crate::path_permission::AuthorizeStore::new());
+        auth_store
+            .grant_session_tool_approval("sess-1", &ask_desc.identity.descriptor_id)
+            .expect("grant session tool");
+        auth_store
+            .grant_session_tool_approval("sess-1", &deny_desc.identity.descriptor_id)
+            .expect("grant deny tool (must still be denied)");
+        auth_store
+            .grant_session_tool_approval("sess-1", &ext_desc.identity.descriptor_id)
+            .expect("grant external requires_approval tool");
+
+        let evaluator = GovernedPolicyEvaluator::new(
+            vec![
+                ToolRule {
+                    matcher: ToolRuleMatcher::Exact("mcp__demo__ask".to_string()),
+                    action: RuleAction::Ask,
+                    reason: Some("ask rule".to_string()),
+                },
+                ToolRule {
+                    matcher: ToolRuleMatcher::Exact("mcp__demo__deny".to_string()),
+                    action: RuleAction::Deny,
+                    reason: Some("deny rule".to_string()),
+                },
+            ],
+            None,
+        )
+        .with_authorize_store(auth_store);
+
+        let ctx_s1 = crate::dispatcher::DispatchContext {
+            session_id: Some("sess-1".to_string()),
+            ..Default::default()
+        };
+        let ctx_s2 = crate::dispatcher::DispatchContext {
+            session_id: Some("sess-2".to_string()),
+            ..Default::default()
+        };
+
+        let d1 = evaluator.evaluate_with_context(&ask_desc, &InvocationOrigin::Model, &json!({}), &ctx_s1);
+        assert_eq!(d1.verdict, PermissionVerdict::Allow);
+        assert_eq!(d1.decision_source, "session_tool_approval");
+
+        let d2 = evaluator.evaluate_with_context(&ask_desc, &InvocationOrigin::Model, &json!({}), &ctx_s2);
+        assert_eq!(d2.verdict, PermissionVerdict::ApprovalRequired);
+
+        // 外部 requires_approval 同样受会话授权免审批，且仅限被授权会话
+        let d_ext_1 = evaluator.evaluate_with_context(&ext_desc, &InvocationOrigin::Model, &json!({}), &ctx_s1);
+        assert_eq!(d_ext_1.verdict, PermissionVerdict::Allow);
+        assert_eq!(d_ext_1.decision_source, "session_tool_approval");
+        let d_ext_2 = evaluator.evaluate_with_context(&ext_desc, &InvocationOrigin::Model, &json!({}), &ctx_s2);
+        assert_eq!(d_ext_2.verdict, PermissionVerdict::ApprovalRequired);
+        assert_eq!(d_ext_2.decision_source, "external_requires_approval");
+
+        // Deny 规则永不被会话授权绕过
+        let d_deny = evaluator.evaluate_with_context(&deny_desc, &InvocationOrigin::Model, &json!({}), &ctx_s1);
+        assert_eq!(d_deny.verdict, PermissionVerdict::Deny);
     }
 }

@@ -301,6 +301,7 @@ fn permission_state() -> PermissionState {
         description: "执行构建".to_string(),
         command_or_path: Some("npm run build".to_string()),
         approval_path: None,
+        descriptor_id: None,
         timestamp_ms: 0,
     };
     let mut state = PermissionState::new(request);

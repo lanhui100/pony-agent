@@ -217,11 +217,11 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 /// 非交互审批策略（v2）。
 ///
 /// 映射到宿主既有 `tool_authorization_mode` 三档（真值源
-/// `crates/pony-agent-core/src/agent/governed_executor.rs:310-333`）：
-/// * `read_only` —— **唯一有实际分支**的一档：写入/执行类工具（`ToolKind::Write`
-///   / `ToolKind::Execute` 及 primitive/model 名命中 write|edit|bash|execute）被判 `Deny`；
-/// * `workspace_write` / `full_access` —— **已知局限**：宿主当前对这两个取值
-///   与 `None` 判定等价（无独立分支），故本档位为**声明性**传递，不额外收紧。
+/// `crates/pony-tools/src/governed_executor.rs`）：
+/// * `read_only` —— 写入/执行类工具（`ToolKind::Write` / `ToolKind::Execute` 或声明
+///   `WorkspaceWrite` / `WorkspaceExecute` scope）被判 `Deny`；
+/// * `workspace_write` —— 允许工作区内写入/执行，读取工作区外路径仍受授权门禁约束（与 `None` 等价）；
+/// * `full_access` —— 放行工作区外读取，工作区外写入仍受既有写边界约束。
 ///
 /// v2（Lead 裁定 D1）删除了 v1 的 `decide()` —— 无头侧无法自行裁决单次工具调用
 /// （无策略求值接缝），只做模式透传，严禁在上层伪造放行结论。

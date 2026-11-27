@@ -93,11 +93,16 @@ pub fn render_permission_inline(f: &mut Frame, area: Rect, state: &TuiState) {
     lines.push(blank());
 
     let inner_w = width.saturating_sub(RAIL);
+    let session_desc = if perm.request.approval_path.is_some() {
+        "本会话内放行工作区外读取"
+    } else {
+        "本会话内放行该工具"
+    };
     for (index, choice) in perm.choices.iter().enumerate() {
         let selected = index == perm.selected_choice_index;
         let (text, desc) = match choice {
             PermissionChoice::AllowOnce => ("AllowOnce (允许一次)", "仅本次工具执行"),
-            PermissionChoice::AllowSession => ("AllowSession (本会话允许)", "本会话内永久放行"),
+            PermissionChoice::AllowSession => ("AllowSession (本会话允许)", session_desc),
             PermissionChoice::Deny => ("Deny (拒绝)", "拦截并取消本次调用"),
         };
         lines.push(list_row(selected, text, desc, inner_w));

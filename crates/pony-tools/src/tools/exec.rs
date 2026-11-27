@@ -56,6 +56,8 @@ pub struct ToolExecutionContext {
     /// 仅同进程运行时句柄（不序列化）；`None` ⇒ `acp_delegate` 回落 `FailClosedPermissionHandler`
     /// （权限请求一律 cancelled，与 B161 前行为一致）。
     pub acp_permission: Option<std::sync::Arc<dyn pony_protocol::acp_protocol::PermissionHandler>>,
+    /// 宿主传入的会话级授权模式（`read_only` | `workspace_write` | `full_access`）。
+    pub tool_authorization_mode: Option<String>,
 }
 
 /// wave-1 C5：工具参数未显式给 session 时回退到执行上下文注入的会话 id。

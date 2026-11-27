@@ -1460,16 +1460,11 @@ impl Inner {
             .cloned()
         {
             return handler
-                .execute(&PrimitiveToolHandlerRequest {
-                    descriptor_id: descriptor.identity.descriptor_id.clone(),
-                    arguments: ready.final_arguments.clone(),
-                    session_id: context.session_id.clone(),
-                    // PA-080 P1-2：会话级 workspace root 透传，工具权限判定锚定会话 workspace。
-                    workspace_root: context.workspace_root.clone(),
-                    // wave-62 A1：把 turn 令牌交给 handler（桥接层再透传给工具上下文），
-                    // 子进程类工具因此能在运行期观测 stop。
-                    cancellation: context.turn_cancellation.clone(),
-                })
+                .execute(&PrimitiveToolHandlerRequest::from_dispatch_context(
+                    descriptor.identity.descriptor_id.clone(),
+                    ready.final_arguments.clone(),
+                    context,
+                ))
                 .map_err(handler_failure);
         }
         if let Some(composite_handler) = self.get_composite_handler(&descriptor.identity.descriptor_id)
@@ -1971,14 +1966,11 @@ impl ChildDispatchRunner for PinnedSurfaceRunner {
             )
             .into_outcome(&request.descriptor_id);
         };
-        match handler.execute(&PrimitiveToolHandlerRequest {
-            descriptor_id: ready.descriptor.identity.descriptor_id.clone(),
-            arguments: ready.final_arguments.clone(),
-            session_id: ctx.context.session_id.clone(),
-            workspace_root: ctx.context.workspace_root.clone(),
-            // wave-62 A1：同一桥接语义（turn 令牌随请求下传，不得在直派路径丢失）。
-            cancellation: ctx.context.turn_cancellation.clone(),
-        }) {
+        match handler.execute(&PrimitiveToolHandlerRequest::from_dispatch_context(
+            ready.descriptor.identity.descriptor_id.clone(),
+            ready.final_arguments.clone(),
+            &ctx.context,
+        )) {
             Ok(value) => {
                 let output = render_output(&value);
                 if let Err(message) = ctx.ledger.reserve_bytes(output.len() as u64) {

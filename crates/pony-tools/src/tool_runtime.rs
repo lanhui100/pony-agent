@@ -51,6 +51,32 @@ pub struct PrimitiveToolHandlerRequest {
     /// 否则子进程类工具（`Run`）在真实 app 里观测不到 stop（wave-60 A9 未清偿）。
     #[serde(skip)]
     pub cancellation: Option<Arc<pony_protocol::budget::CancellationToken>>,
+    /// 宿主传入的会话级授权模式（`read_only` | `workspace_write` | `full_access`），
+    /// 透传给底层执行器以支持 `full_access` 下的工作区外读取放行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_authorization_mode: Option<String>,
+}
+
+impl PrimitiveToolHandlerRequest {
+    /// 从宿主 `DispatchContext` 装配 handler 请求（**单点透传**）。
+    ///
+    /// 会话 / workspace root / turn 取消令牌 / 会话级授权模式都来自运行期注入的上下文，
+    /// 不允许由工具参数提供；两条派发路径（直接 handler 与 pinned surface runner）共用本函数，
+    /// 避免新增字段时只改一处而另一处静默丢失。
+    pub fn from_dispatch_context(
+        descriptor_id: String,
+        arguments: Value,
+        context: &crate::dispatcher::DispatchContext,
+    ) -> Self {
+        Self {
+            descriptor_id,
+            arguments,
+            session_id: context.session_id.clone(),
+            workspace_root: context.workspace_root.clone(),
+            cancellation: context.turn_cancellation.clone(),
+            tool_authorization_mode: context.tool_authorization_mode.clone(),
+        }
+    }
 }
 
 pub trait PrimitiveToolHandler: Send + Sync {

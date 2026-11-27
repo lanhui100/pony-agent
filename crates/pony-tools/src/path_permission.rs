@@ -81,6 +81,20 @@ impl PathPermissionChecker {
         authorizations: &AuthorizeStore,
         purpose: PathPurpose,
     ) -> Result<PathPermission, PermissionError> {
+        self.classify_with_options(raw_path, root, tmp_dir, authorizations, purpose, false)
+    }
+
+    /// 扩展判定入口：`allow_external_read == true` 时（例如 `full_access` 模式或本会话已授权工作区外读取），
+    /// 仅放行工作区外 `PathPurpose::Read`（2A：外部写仍保持现有写边界拒绝）。
+    pub fn classify_with_options(
+        &self,
+        raw_path: &str,
+        root: &Path,
+        tmp_dir: &Path,
+        authorizations: &AuthorizeStore,
+        purpose: PathPurpose,
+        allow_external_read: bool,
+    ) -> Result<PathPermission, PermissionError> {
         let trimmed = raw_path.trim();
         if trimmed.is_empty() {
             return Err(PermissionError::denied("文件路径不能为空。"));
@@ -133,7 +147,7 @@ impl PathPermissionChecker {
             });
         }
 
-        // workspace 外：Read → 显式授权 / 受信技能根；Write → 授权祖先链或拒绝。
+        // workspace 外：Read → 显式授权 / 受信技能根 / 会话或完全访问放行；Write → 授权祖先链或拒绝。
         match purpose {
             PathPurpose::Read => {
                 if let Some(entry) = authorizations.find_authorization(&canonical) {
@@ -151,6 +165,13 @@ impl PathPermissionChecker {
                             matched_authorization: None,
                         });
                     }
+                }
+                if allow_external_read {
+                    return Ok(PathPermission {
+                        zone: PermissionZone::AuthorizedExternal,
+                        canonical,
+                        matched_authorization: None,
+                    });
                 }
                 Err(PermissionError::requires_authorization(format!(
                     "读取路径 {} 位于工作区之外且未获得授权，需要用户显式授权后才能读取。",
@@ -1188,5 +1209,65 @@ mod tests {
             read_within_skill_roots(&lexical, &lexical, &project_policy),
             "canonical 落在根内的技能文件仍应放行"
         );
+    }
+
+    #[test]
+    fn classify_with_options_allows_external_read_but_still_denies_external_write() {
+        let root = test_root("extread-ws");
+        prepare_root(&root);
+        let outside = test_root("extread-out");
+        prepare_root(&outside);
+        let ext_file = outside.join("secret.txt");
+        std::fs::write(&ext_file, "hello").unwrap();
+
+        let checker = PathPermissionChecker::with_default();
+        let tmp = root.join(".tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let auth = no_auth();
+
+        // 默认不放行外部读
+        let err = checker
+            .classify_with_options(
+                &ext_file.display().to_string(),
+                &root,
+                &tmp,
+                &auth,
+                PathPurpose::Read,
+                false,
+            )
+            .expect_err("default external read must require authorization");
+        assert_eq!(err.code, PermissionErrorCode::RequiresAuthorization);
+
+        // allow_external_read = true ⇒ 放行外部读
+        let perm = checker
+            .classify_with_options(
+                &ext_file.display().to_string(),
+                &root,
+                &tmp,
+                &auth,
+                PathPurpose::Read,
+                true,
+            )
+            .expect("allow_external_read=true must allow external read");
+        assert_eq!(perm.zone, PermissionZone::AuthorizedExternal);
+
+        // 2A：allow_external_read = true 时外部写仍必须被拒绝
+        let write_err = checker
+            .classify_with_options(
+                &outside.join("new.txt").display().to_string(),
+                &root,
+                &tmp,
+                &auth,
+                PathPurpose::Write,
+                true,
+            )
+            .expect_err("external write must stay denied even when allow_external_read=true");
+        assert_eq!(
+            write_err.code,
+            PermissionErrorCode::OutsideWorkspaceWriteDenied
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
