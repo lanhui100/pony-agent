@@ -58,6 +58,8 @@ mod capability_commands;
 mod compaction_commands;
 mod title_commands;
 mod graph_projection;
+// O2（2026-11-27）：goal 续轮判据接线独立成文件（mod.rs 已计入文件行数棘轮）。
+mod goal_round_loop;
 mod history_commands;
 mod message_projection;
 mod path_authorization_commands;
@@ -2033,298 +2035,40 @@ impl HostControlPlane {
     ) -> Result<GraphRunTurnResponse, String> {
         // T7：本 run 的授权事实来自原始输入，续轮必须继承它（不能丢成 None）。
         let inherited_authorization_mode = prepared.input.tool_authorization_mode.clone();
-        let mut consecutive_continues = 0;
-        // O2（2026-11-27）：连续失败计数（本循环局部）。旧实现只数「开了几轮」，一次上游
-        // 429 会被重放成 8 轮并烧掉预算——现在失败轮只累加本计数，不写盘。
-        let mut consecutive_failures: u32 = 0;
+        let mut state = goal_round_loop::ContinuationState::new();
         loop {
             let response = self.execute_graph_run_stream_step(sink, prepared)?;
-            let step_outcome = Self::goal_step_outcome(&response);
-            let session_goal =
-                crate::agent::goal::continuation_goal_for_run(response.run.session_id.as_deref());
-
-            if response.decision.kind != GraphDecisionKind::Continue {
-                // `Complete` 是图/模型自己收口，不冒充「续轮已停止」；其余（WaitUser / Fail /
-                // Cancel / Pause）必须给出可见原因，否则用户只看到「这一轮结束了」。
-                if response.decision.kind != GraphDecisionKind::Complete {
-                    if let Some((session_id, goal)) = session_goal.as_ref() {
-                        if let Some(reason) = Self::goal_round_stop_reason_for_step(
-                            step_outcome,
-                            consecutive_continues,
-                            consecutive_failures,
-                        ) {
-                            Self::report_goal_rounds_stopped(
-                                session_id,
-                                goal,
-                                &reason,
-                                consecutive_failures,
-                            );
-                        }
-                    }
-                }
-                return Ok(response);
-            }
-
-            let Some((session_id, active_goal)) = session_goal else {
-                return Ok(response);
-            };
-
-            // 本轮终态归约：失败轮**不推进预算**（C2），挂起轮是「暂停」而不是「终止」。
-            //
-            // `Failed` 的处置与 `goal_round_outcome_gate` 的通用臂有意不同：该 gate 的
-            // `Stop(FirstRoundNotSucceeded)` 文案是「首轮失败，自动续轮未启动」，用于**首轮门**
-            // （本轮还是用户自己的轮次，见上方 `decision.kind != Continue` 分支）。跑到这里的
-            // 失败轮是第 N 个 goal 轮，若照抄该变体会对用户说假话（既不是首轮，续轮也早就启动了）。
-            // 因此循环内失败只**计数**（绝不写盘），由边界 gate 的 `ConsecutiveFailures` 熔断，
-            // 文案才能如实报「连续 N 轮失败」。
-            match crate::agent::goal::goal_round_outcome_gate(step_outcome) {
-                crate::agent::goal::GoalRoundGateDecision::Continue => {
-                    consecutive_failures = 0;
-                    if let Err(error) = crate::agent::goal::advance_goal_round_for_outcome(
-                        &active_goal.id,
-                        crate::agent::goal::GoalRoundOutcome::Succeeded,
-                    ) {
-                        // 预算推进落盘失败 ⇒ 停（不得让「轮次已跑完但预算没记」演变成无限续轮）。
-                        crate::agent::otel::log::log_json_with_fields(
-                            "warn",
-                            "goal_round_advance_failed",
-                            None,
-                            &[
-                                ("stage", serde_json::json!("after_turn")),
-                                ("session_id", serde_json::json!(&session_id)),
-                                ("goal_id", serde_json::json!(&active_goal.id)),
-                                ("error", serde_json::json!(error)),
-                            ],
-                        );
-                        Self::report_goal_rounds_stopped(
-                            &session_id,
-                            &active_goal,
-                            &crate::agent::goal::GoalRoundStopReason::BudgetPersistFailed,
-                            consecutive_failures,
-                        );
+            let pending_session = response.run.session_id.clone();
+            // 判据真值源唯一：见 `goal_round_loop` 模块头注释（O2）。
+            match goal_round_loop::after_goal_round(
+                &response,
+                &mut state,
+                inherited_authorization_mode.as_deref(),
+                move || {
+                    pending_session.as_deref().map_or((0, 0), |session| {
+                        goal_round_loop::pending_host_request_counts(self, session)
+                    })
+                },
+            ) {
+                goal_round_loop::Advance::Stop => return Ok(response),
+                goal_round_loop::Advance::Continue(input) => {
+                    let next_cmd = ContinueGraphRunStreamCommand {
+                        run_id: response.run.id.clone(),
+                        turn_id: format!("{}-turn-{}", response.run.id, response.run.steps.len() + 1),
+                        input: *input,
+                    };
+                    let Ok((_, next_prepared)) = self.prepare_continue_graph_run_stream(next_cmd)
+                    else {
                         return Ok(response);
-                    }
-                }
-                crate::agent::goal::GoalRoundGateDecision::Pause => {
-                    Self::report_goal_rounds_stopped(
-                        &session_id,
-                        &active_goal,
-                        &crate::agent::goal::GoalRoundStopReason::TurnSuspended,
-                        consecutive_failures,
-                    );
-                    return Ok(response);
-                }
-                crate::agent::goal::GoalRoundGateDecision::Stop(reason) => {
-                    // 失败轮：只计数、不写盘，交由下面的边界 gate 决定是否熔断（见上方注释）。
-                    if step_outcome == crate::agent::goal::GoalRoundStepOutcome::Failed {
-                        consecutive_failures = consecutive_failures.saturating_add(1);
-                    } else {
-                        Self::report_goal_rounds_stopped(
-                            &session_id,
-                            &active_goal,
-                            &reason,
-                            consecutive_failures,
-                        );
-                        return Ok(response);
-                    }
+                    };
+                    prepared = next_prepared;
                 }
             }
-
-            // 边界判定走**唯一** gate（含待作答让位 / 连续失败熔断 / 目标预算 / 每线程预算）。
-            let Some(updated_goal) = self.plan_goal_round_continuation(
-                &session_id,
-                &active_goal,
-                consecutive_failures,
-                consecutive_continues,
-            ) else {
-                return Ok(response);
-            };
-
-            consecutive_continues += 1;
-            let round_num = updated_goal.rounds_started;
-            let goal_msg = crate::agent::goal::build_goal_round_message(
-                &updated_goal.objective,
-                round_num,
-                updated_goal.max_goal_rounds,
-            );
-
-            let next_turn_id = format!("{}-turn-{}", response.run.id, response.run.steps.len() + 1);
-            let next_input = TurnInput {
-                message: goal_msg,
-                session_id: Some(session_id.clone()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                display_message: Some(format!("[goal round {round_num}] 推进目标：{}", updated_goal.objective)),
-                workspace_mode: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_id: None,
-                plan_execution_approval: None,
-                // T7：继承原会话授权事实（缺失时 read_only），绝不回落为 None（=Allow）。
-                tool_authorization_mode: Some(continuation_tool_authorization_mode(
-                    inherited_authorization_mode.as_deref(),
-                )),
-            };
-
-            let next_cmd = ContinueGraphRunStreamCommand {
-                run_id: response.run.id.clone(),
-                turn_id: next_turn_id,
-                input: next_input,
-            };
-
-            let Ok((_, next_prepared)) = self.prepare_continue_graph_run_stream(next_cmd) else {
-                return Ok(response);
-            };
-
-            prepared = next_prepared;
         }
     }
 
 
-    /// O2（2026-11-27）：把一次单步响应归约为 [`GoalRoundStepOutcome`]。
-    ///
-    /// 真值来源与 `start_turn_stream_checked` 同源：`turn_stream_outcome_from_terminal`
-    /// （决策真值优先 + 终态 phase 回落），再把 `TurnStreamOutcome` 折叠成 gate 的输入枚举。
-    /// `TurnResult` 无 `error` 字段（与 `RecordedTurnTerminal` 的采集面不同），故 error 传 `None`：
-    /// 失败轮的**分类**不依赖 error 文本，只依赖相位与决策。
-    fn goal_step_outcome(response: &GraphRunTurnResponse) -> crate::agent::goal::GoalRoundStepOutcome {
-        let terminal = turn_stream_outcome_from_terminal(
-            graph_run_phase_wire(&response.run.phase),
-            None,
-            Some(response.decision.kind.clone()),
-        );
-        match terminal {
-            TurnStreamOutcome::Completed => crate::agent::goal::GoalRoundStepOutcome::Completed,
-            TurnStreamOutcome::Failed { .. } => crate::agent::goal::GoalRoundStepOutcome::Failed,
-            TurnStreamOutcome::Suspended => crate::agent::goal::GoalRoundStepOutcome::Suspended,
-            TurnStreamOutcome::Cancelled => crate::agent::goal::GoalRoundStepOutcome::Cancelled,
-            TurnStreamOutcome::Unknown => crate::agent::goal::GoalRoundStepOutcome::Unclassified,
-        }
-    }
 
-    /// O2：循环内停止原因的**文案真值**（`goal_round_outcome_gate` 的一处必要修正）。
-    ///
-    /// `goal_round_outcome_gate(Failed)` 产出 `FirstRoundNotSucceeded`，其文案是「首轮失败，
-    /// 自动续轮未启动」——这只对**首轮门**成立。若本循环已经成功续过轮
-    /// （`consecutive_continues > 0`），说「首轮」就是对用户说假话；此时应报
-    /// `ConsecutiveFailures { failures }`（真实失败计数，含本轮）。
-    fn goal_round_stop_reason_for_step(
-        step_outcome: crate::agent::goal::GoalRoundStepOutcome,
-        consecutive_continues: u32,
-        consecutive_failures: u32,
-    ) -> Option<crate::agent::goal::GoalRoundStopReason> {
-        if step_outcome == crate::agent::goal::GoalRoundStepOutcome::Failed
-            && consecutive_continues > 0
-        {
-            return Some(crate::agent::goal::GoalRoundStopReason::ConsecutiveFailures {
-                failures: consecutive_failures.saturating_add(1),
-            });
-        }
-        crate::agent::goal::goal_round_outcome_gate(step_outcome).stop_reason()
-    }
-
-    /// O2：续轮停止/暂停的**唯一上报点**（领域事件 + 结构化日志；两端 UI 同源消费）。
-    ///
-    /// 为什么不再各自 `return`：旧实现在 core 侧是裸 `return Ok(response)`，桌面上「目标为什么
-    /// 不动了」完全不可见（审核报告 P1-3）。现在每条停止路径都产出 `RoundsStopped` 领域事实。
-    fn report_goal_rounds_stopped(
-        session_id: &str,
-        goal: &crate::agent::goal::GoalData,
-        reason: &crate::agent::goal::GoalRoundStopReason,
-        consecutive_failures: u32,
-    ) {
-        crate::agent::otel::log::log_json_with_fields(
-            "info",
-            "goal_rounds_stopped",
-            None,
-            &[
-                ("session_id", serde_json::json!(session_id)),
-                ("goal_id", serde_json::json!(&goal.id)),
-                ("reason", serde_json::json!(reason.code())),
-                (
-                    "consecutive_failures",
-                    serde_json::json!(consecutive_failures),
-                ),
-                ("rounds_started", serde_json::json!(goal.rounds_started)),
-                ("max_rounds", serde_json::json!(goal.max_goal_rounds)),
-            ],
-        );
-        crate::agent::goal::notify_goal_rounds_stopped(
-            session_id,
-            &goal.id,
-            reason,
-            consecutive_failures,
-            goal.rounds_started,
-            goal.max_goal_rounds,
-        );
-    }
-
-    /// O2：开下一轮之前的**唯一边界判定**（gate + 预算耗尽落 blocked）。
-    ///
-    /// 返回 `Some(goal)` ⇒ 允许开下一轮（`goal` 是 gate 通过后的最新快照）；`None` ⇒ 已上报
-    /// 可见停止原因并落 `blocked`（若因预算耗尽），调用方必须 `return Ok(response)`。
-    fn plan_goal_round_continuation(
-        &self,
-        session_id: &str,
-        goal: &crate::agent::goal::GoalData,
-        consecutive_failures: u32,
-        consecutive_auto_continues: u32,
-    ) -> Option<crate::agent::goal::GoalData> {
-        let (pending_asks, pending_approvals) = self.pending_host_request_counts(session_id);
-        let decision = crate::agent::goal::goal_round_gate(crate::agent::goal::GoalRoundGateInput {
-            has_active_goal: true,
-            cancelled: false,
-            pending_asks,
-            pending_approvals,
-            consecutive_failures,
-            rounds_started: goal.rounds_started,
-            max_rounds: goal.max_goal_rounds,
-            consecutive_auto_continues,
-            // 收窄必须显式且可证：`MAX_CONSECUTIVE_AUTO_CONTINUES` 是 `usize`，`as u32`
-            // 会同时触发 `as_conversions` 与 `cast_possible_truncation`；这里用 try_from，
-            // 溢出（理论上不可能）退化为 `u32::MAX`——语义是「预算极大」，不会多开轮次。
-            max_auto_continues: u32::try_from(
-                crate::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES,
-            )
-            .unwrap_or(u32::MAX),
-        });
-        let reason = decision.stop_reason()?;
-        Self::report_goal_rounds_stopped(session_id, goal, &reason, consecutive_failures);
-        // O5：预算耗尽 ⇒ 落 blocked（否则目标永久 active+Armed，UI 说谎且 `resume` 无解释地拒绝）。
-        if matches!(
-            reason,
-            crate::agent::goal::GoalRoundStopReason::BudgetExhausted { .. }
-        ) {
-            if let Err(error) = crate::agent::goal::block_goal_for_round_limit(&goal.id) {
-                crate::agent::otel::log::log_json_with_fields(
-                    "warn",
-                    "goal_round_block_on_round_limit_failed",
-                    None,
-                    &[
-                        ("session_id", serde_json::json!(session_id)),
-                        ("goal_id", serde_json::json!(&goal.id)),
-                        ("error", serde_json::json!(error)),
-                    ],
-                );
-            }
-        }
-        None
-    }
-
-    /// O2：会话内待作答宿主请求的分量计数 `(asks, approvals)`（gate 的让位输入）。
-    fn pending_host_request_counts(&self, session_id: &str) -> (usize, usize) {
-        let asks = self
-            .list_pending_asks(Some(session_id))
-            .as_array()
-            .map_or(0, Vec::len);
-        let approvals = self
-            .list_pending_approvals(session_id)
-            .as_array()
-            .map_or(0, Vec::len);
-        (asks, approvals)
-    }
 
     /// wave-65 C4（run-bound）：审批挂起没有 Ask wait，`bind_ask_wait` 不会清 active turn ⇒
     /// 先把本轮从 run 上释放（同 run 可续），否则宿主续轮只能另起一轮。Ask 挂起有 wait，
@@ -3119,129 +2863,27 @@ impl HostControlPlane {
         self.note_user_message_entry(&input);
         // T7：同上——续轮/推进继承原会话授权事实（无事实时按 read_only 兜底）。
         let inherited_authorization_mode = input.tool_authorization_mode.clone();
-        let mut consecutive_continues = 0;
-        // O2（2026-11-27）：与 `execute_graph_run_stream` 同一套判据（失败轮不烧预算）。
-        let mut consecutive_failures: u32 = 0;
+        // O2（2026-11-27）：与 `execute_graph_run_stream` 同一套判据（`goal_round_loop` 模块头注释）。
+        let mut state = goal_round_loop::ContinuationState::new();
         loop {
             let response = self.advance_graph_run_step(run_id.clone(), input)?;
-            let step_outcome = Self::goal_step_outcome(&response);
-            let session_goal =
-                crate::agent::goal::continuation_goal_for_run(response.run.session_id.as_deref());
-
-            if response.decision.kind != GraphDecisionKind::Continue {
-                if response.decision.kind != GraphDecisionKind::Complete {
-                    if let Some((session_id, goal)) = session_goal.as_ref() {
-                        if let Some(reason) = Self::goal_round_stop_reason_for_step(
-                            step_outcome,
-                            consecutive_continues,
-                            consecutive_failures,
-                        ) {
-                            Self::report_goal_rounds_stopped(
-                                session_id,
-                                goal,
-                                &reason,
-                                consecutive_failures,
-                            );
-                        }
-                    }
-                }
-                return Ok(response);
+            let pending_session = response.run.session_id.clone();
+            match goal_round_loop::after_goal_round(
+                &response,
+                &mut state,
+                inherited_authorization_mode.as_deref(),
+                move || {
+                    pending_session.as_deref().map_or((0, 0), |session| {
+                        goal_round_loop::pending_host_request_counts(self, session)
+                    })
+                },
+            ) {
+                goal_round_loop::Advance::Stop => return Ok(response),
+                goal_round_loop::Advance::Continue(next_input) => input = *next_input,
             }
-
-            let Some((session_id, active_goal)) = session_goal else {
-                return Ok(response);
-            };
-
-            match crate::agent::goal::goal_round_outcome_gate(step_outcome) {
-                crate::agent::goal::GoalRoundGateDecision::Continue => {
-                    consecutive_failures = 0;
-                    if let Err(error) = crate::agent::goal::advance_goal_round_for_outcome(
-                        &active_goal.id,
-                        crate::agent::goal::GoalRoundOutcome::Succeeded,
-                    ) {
-                        crate::agent::otel::log::log_json_with_fields(
-                            "warn",
-                            "goal_round_advance_failed",
-                            None,
-                            &[
-                                ("stage", serde_json::json!("planner")),
-                                ("session_id", serde_json::json!(&session_id)),
-                                ("goal_id", serde_json::json!(&active_goal.id)),
-                                ("error", serde_json::json!(error)),
-                            ],
-                        );
-                        Self::report_goal_rounds_stopped(
-                            &session_id,
-                            &active_goal,
-                            &crate::agent::goal::GoalRoundStopReason::BudgetPersistFailed,
-                            consecutive_failures,
-                        );
-                        return Ok(response);
-                    }
-                }
-                crate::agent::goal::GoalRoundGateDecision::Pause => {
-                    Self::report_goal_rounds_stopped(
-                        &session_id,
-                        &active_goal,
-                        &crate::agent::goal::GoalRoundStopReason::TurnSuspended,
-                        consecutive_failures,
-                    );
-                    return Ok(response);
-                }
-                crate::agent::goal::GoalRoundGateDecision::Stop(reason) => {
-                    // 与 `execute_graph_run_stream` 同口径：失败轮只计数、不写盘，交由边界
-                    // gate 的 `ConsecutiveFailures` 熔断（理由见该函数的同名注释）。
-                    if step_outcome == crate::agent::goal::GoalRoundStepOutcome::Failed {
-                        consecutive_failures = consecutive_failures.saturating_add(1);
-                    } else {
-                        Self::report_goal_rounds_stopped(
-                            &session_id,
-                            &active_goal,
-                            &reason,
-                            consecutive_failures,
-                        );
-                        return Ok(response);
-                    }
-                }
-            }
-
-            let Some(updated_goal) = self.plan_goal_round_continuation(
-                &session_id,
-                &active_goal,
-                consecutive_failures,
-                consecutive_continues,
-            ) else {
-                return Ok(response);
-            };
-
-            consecutive_continues += 1;
-            let round_num = updated_goal.rounds_started;
-            let goal_msg = crate::agent::goal::build_goal_round_message(
-                &updated_goal.objective,
-                round_num,
-                updated_goal.max_goal_rounds,
-            );
-
-            input = TurnInput {
-                message: goal_msg,
-                session_id: Some(session_id.clone()),
-                node_id: None,
-                history: Vec::new(),
-                images: Vec::new(),
-                display_message: Some(format!("[goal round {round_num}] 推进目标：{}", updated_goal.objective)),
-                workspace_mode: None,
-                provider_id: None,
-                model_id: None,
-                reasoning_effort: None,
-                workspace_id: None,
-                plan_execution_approval: None,
-                // T7：继承原会话授权事实（缺失时 read_only），绝不回落为 None（=Allow）。
-                tool_authorization_mode: Some(continuation_tool_authorization_mode(
-                    inherited_authorization_mode.as_deref(),
-                )),
-            };
         }
     }
+
 
     fn advance_graph_run_step(
         &self,

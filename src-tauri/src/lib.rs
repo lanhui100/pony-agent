@@ -119,6 +119,10 @@ fn continue_graph_run(
     control_plane.continue_graph_run(ContinueGraphRunCommand { run_id, input })
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn continue_graph_run_stream(
     app: AppHandle,
@@ -150,6 +154,10 @@ fn resume_graph_run(
     control_plane.resume_graph_run(ResumeGraphRunCommand { run_id, input })
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn resume_graph_run_stream(
     app: AppHandle,
@@ -302,6 +310,10 @@ fn ask_answer(
 }
 
 /// Approve an Approval control request by stable `request_id` and compare-and-swap `version` (or `expected_version`).
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn control_approve_request(
     app: AppHandle,
@@ -585,6 +597,10 @@ fn graph_bind_ask_wait(
 
 /// Resolve a bound Ask wait, injecting exactly one terminal tool result for the original call id.
 /// A stale `version` is rejected.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn graph_resume_ask(
     app: AppHandle,

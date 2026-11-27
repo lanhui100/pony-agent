@@ -49,13 +49,13 @@ impl SessionAuthorizationModes {
             // 非法/缺失：不登记，读取侧自然回落到 read_only（fail-closed）。
             _ => return,
         };
-        let mut modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut modes = self.modes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         modes.insert(session.to_string(), normalized.to_string());
     }
 
     /// 取该会话最近一次的授权模式；**无记录 ⇒ `read_only`**（绝不回落 Allow）。
     pub(crate) fn mode_for(&self, session_id: &str) -> String {
-        let modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+        let modes = self.modes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         modes
             .get(session_id.trim())
             .cloned()
@@ -110,7 +110,9 @@ pub(crate) fn resume_goal_rounds_after_host_answer(
         rounds_started: active_goal.rounds_started,
         max_rounds: active_goal.max_goal_rounds,
         consecutive_auto_continues: 0,
-        max_auto_continues: MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
+        // 收窄显式且可证：`as u32` 同时触发 `as_conversions` 与 `cast_possible_truncation`；
+        // try_from 溢出（理论上不可能）退化为「预算极大」，不会多开轮次。
+        max_auto_continues: u32::try_from(MAX_CONSECUTIVE_AUTO_CONTINUES).unwrap_or(u32::MAX),
     });
 
     if let Some(reason) = decision.stop_reason() {
@@ -204,9 +206,12 @@ fn log_continuation_failure(stage: &str, session_id: &str, error: &str) {
 }
 
 fn now_ms() -> u64 {
+    // 毫秒戳理论上不会溢出 u64；`as u64` 会触发 `as_conversions` / `cast_possible_truncation`，
+    // 故用 try_from 并在溢出（不可能）时退化为 0——只用于 turn_id 去重后缀，不承载语义。
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
         .unwrap_or(0)
 }
 

@@ -38,6 +38,14 @@ TUI 的 `run_goal_rounds`、core 的 `execute_graph_run_stream` / `advance_graph
 `GoalRoundStopReason::TurnSuspended`（**不新增变体**，`all_variants()` 仍为 10），文案改为
 「目标已暂停：等你作答｜…｜先回答上面的提问，作答后自动继续」——暂停不等于终止，措辞必须一致。
 
+**判据接线的物理落点**：core 两处循环（`execute_graph_run_stream` / `advance_graph_run`）的
+判据接线独立成 `crates/pony-agent-core/src/agent/control_plane/goal_round_loop.rs`
+（`ContinuationState` / `Advance` / `after_goal_round` / `build_continuation_input` /
+`plan_continuation` / `report_stopped`）。理由有两条且都是可机器验收的：①`mod.rs` 已在
+`scripts/file-size-baseline.json` 记账（文件行数棘轮），把新逻辑内联会让 `npm run size:check`
+判红；②两处循环的判据此前各自内联一份，正是 O2 缺陷的成因，物理合并到一个文件后「单一真值源」
+才有结构保证。`mod.rs` 侧只留骨架（取结果 → `Advance::Stop` 返回 / `Advance::Continue(input)` 开下一轮）。
+
 **作答后重入（O1-B）**：
 - 核心层新增 `continue_ask_resume_turn_stream_checked` /
   `continue_approval_resume_turn_stream_checked`（返回 `TurnStreamOutcome`，供宿主判断恢复轮是否
