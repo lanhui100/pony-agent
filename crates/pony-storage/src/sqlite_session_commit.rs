@@ -655,6 +655,23 @@ impl SqliteSessionBackend {
             let Some(state) = sessions.get(session_id.as_str()) else {
                 continue;
             };
+            let is_rewound_to_empty_root = state
+                .history_cursor
+                .visible_node_id
+                .as_deref()
+                .and_then(|vid| state.history_nodes.iter().find(|n| n.node_id == vid))
+                .is_some_and(|node| {
+                    matches!(node.kind, crate::session::HistoryNodeKind::Checkpoint)
+                        && node.turn_count == 0
+                        && node.event_seq_range.is_none()
+                })
+                && state.history_nodes.iter().any(|node| {
+                    matches!(node.kind, crate::session::HistoryNodeKind::TurnRewound)
+                        || node.turn_count > 0
+                });
+            if is_rewound_to_empty_root {
+                continue;
+            }
             // 血缘信息：cursor 的活动分支 + 分支表 + 节点→分支映射（均来自索引行/投影）。
             let active_branch = state.history_cursor.active_branch_id.clone();
             let has_lineage = active_branch.is_some() || !state.history_branches.is_empty();

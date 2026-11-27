@@ -1111,8 +1111,12 @@ pub fn apply_index_projection(indexed: &SessionState, mut state: SessionState) -
             .find(|node| node.node_id == node_id)
             .cloned();
         if let Some(node) = node {
-            if !node.history.is_empty() {
-                // 复用写路径同一份 hydrate 语义（同模块可见），不另造一套投影规则。
+            let is_rewound_root = matches!(node.kind, super::types::HistoryNodeKind::Checkpoint)
+                && node.turn_count == 0
+                && node.event_seq_range.is_none();
+            if !node.history.is_empty() || is_rewound_root {
+                // 复用写路径同一份 hydrate 语义（同模块可见），不另造一套投影规则；
+                // 撤回至根 Checkpoint（turn_count=0）时同样必须覆盖空视图，避免泄漏已撤回消息。
                 hydrate_session_from_node(&mut state, &node);
             }
         }
@@ -2031,7 +2035,7 @@ pub fn persist_graph_projection_commands(
         _ => &[],
     };
     let mut commands: Vec<PersistCommand> =
-        Vec::with_capacity(traces.len() + session.history_nodes.len() + session.history_branches.len() + 1);
+        Vec::with_capacity(traces.len() + session.history_nodes.len() + session.history_branches.len() + 2);
     for (trace_order, trace) in traces.iter().enumerate() {
         commands.push(PersistCommand::AppendTrace {
             epoch: EPOCH,
@@ -2058,6 +2062,19 @@ pub fn persist_graph_projection_commands(
         epoch: EPOCH,
         session_id: session_id.to_string(),
         cursor: session.history_cursor.clone(),
+    });
+    commands.push(PersistCommand::UpdateSessionMeta {
+        epoch: EPOCH,
+        session_id: session_id.to_string(),
+        meta_patch: SessionMetaPatch {
+            title: Some(session.title.clone()),
+            title_override: Some(session.title_override.clone()),
+            archived: Some(session.archived),
+            summary: Some(session.summary.clone()),
+            turn_count: Some(session.turn_count),
+            last_referenced_file: session.last_referenced_file.clone(),
+            updated_at_ms: Some(session.updated_at_ms),
+        },
     });
     backend.persist_commands_batch(commands)
 }

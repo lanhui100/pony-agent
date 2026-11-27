@@ -51,6 +51,9 @@ mod stage0;
 // `store.rs` 已计入文件行数棘轮，状态机与实作落在 `store_sparse.rs`。
 #[path = "store_sparse.rs"]
 mod sparse;
+// B-CTX-LOAD：轮次原子提交、事件物化与分支头解析。
+#[path = "turn_commit.rs"]
+mod turn_commit;
 // B148：附件索引口径（整表重建 / 按会话增量共用同一份函数）。
 #[path = "attachment_index.rs"]
 mod attachment_index;
@@ -307,50 +310,9 @@ impl PersistedStore {
         &self.sessions
     }
 }
-/// PA-095 #2：从事件流物化"最近一个 turn"的消息文本（append_turn 事件源）。
-/// 返回 `(Option<user 文本>, Option<(assistant 文本, reasoning)>)`；外层 None =
-/// 事件流无 turn 归属事件（直连 store 的 legacy 用法，调用方整体回退）；
-/// 内层 None = 该 turn 缺对应事件（如 failed turn 仅 user/message——assistant
-/// 按调用方参数补占位，与 append_failed_turn 语义对齐）。事件按 seq 升序，
-/// 最近 turn 取最后一个带归属的事件之 turn_id。
-pub(super) fn materialize_last_turn_messages(
-    events: &[(u64, String, pony_protocol::turn_event::TurnEvent)],
-    min_watermark: u64,
-) -> Option<(Option<String>, Option<(String, Option<String>)>)> {
-    use pony_protocol::turn_event::TurnEvent;
-    let fresh_events: Vec<&(u64, String, TurnEvent)> = events
-        .iter()
-        .filter(|(seq, _, _)| *seq >= min_watermark)
-        .collect();
-    if fresh_events.is_empty() {
-        return None;
-    }
-    let last_turn_id = fresh_events
-        .iter()
-        .rev()
-        .find_map(|(_, _, event)| event.turn_id().map(str::to_string))?;
-    let mut user_text: Option<String> = None;
-    let mut assistant: Option<(String, Option<String>)> = None;
-    for (_, _, event) in fresh_events {
-        if event.turn_id() != Some(last_turn_id.as_str()) {
-            continue;
-        }
-        match event {
-            TurnEvent::UserMessage { text, .. } => {
-                user_text = Some(text.clone());
-            }
-            TurnEvent::AssistantMessage {
-                text,
-                reasoning_content,
-                ..
-            } => {
-                assistant = Some((text.clone(), reasoning_content.clone()));
-            }
-            _ => {}
-        }
-    }
-    Some((user_text, assistant))
-}
+/// PA-095 #2：从事件流物化"最近一个 turn"的消息文本（委托 `turn_commit`）。
+#[cfg_attr(not(test), expect(unused_imports, reason = "re-exported for session tests"))]
+pub(in crate::session) use turn_commit::{materialize_last_turn_messages, materialize_turn_messages};
 impl SessionStore {
     pub fn new() -> Self {
         use crate::sqlite_session::{default_sqlite_path, SqliteSessionBackend};
@@ -667,199 +629,16 @@ impl SessionStore {
         kind: Option<HistoryMessageKind>,
         turn_id: Option<&str>,
     ) -> Result<SessionSnapshot, SessionError> {
-        let session_key = session_id.unwrap_or(DEFAULT_SESSION_ID).to_string();
-        // B222：按 `turn_id` 幂等 —— 同一轮已写过历史（重放/补写）⇒ 只回快照：不追加第二条
-        // user/assistant，也不覆盖首次写入。判据只认轮次身份，缺失 `turn_id` 的旧用法不拦。
-        let history = self.sessions.get(&session_key).map(|s| s.history.as_slice());
-        if super::history::history_contains_turn(history, turn_id) {
-            return Ok(self.snapshot_for_session(&session_key));
-        }
-        // PA-095 #2：事件源物化——事件能力后端先提交本会话缓冲（commit 先于清空，由注册闭包保证），再按
-        // 事件表物化本 turn 的消息文本（**事件为源**）。回退仅限三类（均记日志）：真无事件后端（Memory/File）、
-        // 无 turn 归属事件（直连 store 的 legacy 用法）、缓冲 flush 失败（不完整提交下整体回退更安全——并行
-        // 测试中全局注册表被外来 control plane 抢占亦落此路径）；事件读取失败（degraded/版本不匹配）fail loud。
-        let (mut event_user, mut event_assistant) = (None, None);
-        let current_watermark = self.sessions.get(&session_key).map(|s| s.event_watermark).unwrap_or(0);
-        if self.backend.supports_turn_events() {
-            match pony_protocol::turn_stream_types::flush_session_buffered_events(&session_key) {
-                Ok(_) => match self.load_turn_events_checked(&session_key, None) {
-                    Ok(events) => match materialize_last_turn_messages(&events, current_watermark) {
-                        Some(materialized) => {
-                            (event_user, event_assistant) = materialized;
-                        }
-                        None => {
-                            eprintln!(
-                                "[pony-agent][session] append_turn: no turn-scoped events for session={session_key} (direct store usage?), falling back to caller text"
-                            );
-                        }
-                    },
-                    Err(error) => {
-                        return Err(SessionError::EventStreamDegraded(format!(
-                            "[pony-agent][session] append_turn materialization: event read failed: {error}"
-                        )));
-                    }
-                },
-                Err(error) => {
-                    eprintln!(
-                        "[pony-agent][session] append_turn: buffered event flush failed ({error}); falling back to caller text"
-                    );
-                }
-            }
-        }
-        let user_content = event_user.unwrap_or_else(|| user_message.to_string());
-        let (assistant_content, assistant_reasoning) =
-            super::history::close_out_assistant_contents(kind, event_assistant, assistant_message);
-        // RC3/C5（L3-C H2）：**落库边界**清洗——历史正文只留已交付正文（协议块整块丢弃、不写占位符）。展示侧
-        // 折叠语义（含 `［工具调用］` 占位）不动；事件载荷的同类清洗在 `control_plane::flush_events` 同口径完成。
-        let assistant_content = pony_protocol::dsml::strip_dsml_protocol_text(&assistant_content);
-        let assistant_reasoning = assistant_reasoning
-            .map(|reasoning| pony_protocol::dsml::strip_dsml_protocol_text(&reasoning));
-        let memory_write_hook_executor = Arc::clone(&self.memory_write_hook_executor);
-        let history_len_before;
-        let mut appended_user: Option<TurnHistoryMessage>;
-        let mut appended_assistant: Option<TurnHistoryMessage>;
-        let meta_patch: Option<SessionMetaPatch>;
-        // 两阶段暂存提交（Staging Commit）：在克隆状态上计算新 turn，持久化成功后才提交到 live
-        let before_state = self.ensure_session(&session_key).clone();
-        let mut staged_session = before_state.clone();
-        let transcript_delta: Vec<Value> = provider_native_transcript.clone().unwrap_or_default();
-        // 合成记录（取消/中断）即「未完成轮」：`TurnCancelled` 是既有分类口径（见 `classify_turn_node_kind`）。
-        let node_kind = match kind {
-            Some(_) => HistoryNodeKind::TurnCancelled,
-            None => HistoryNodeKind::TurnCommitted,
-        };
-        {
-            ensure_history_graph(&mut staged_session);
-            if kind.is_some() {
-                // C3 / RC2：中断收口**不降级成隐式 fork**。`prepare_session_for_new_turn` 会在
-                // `visible ≠ branch_head` 时新建 `…-branch-N` 并置 cursor `HistoricalDirty`（事故现场
-                // `…-branch-2` 的来历）。收口只把本轮闭合事实挂到**当前分支头**：先把漂移的 visible 拉回
-                // head（与 `ensure_history_graph` 的 head 口径一致）再原地续写；只有显式
-                // rewind/checkout/fork 才允许增加分支。
-                let branch_head = staged_session.history_cursor.branch_head_node_id.clone();
-                if branch_head.is_some() {
-                    staged_session.history_cursor.visible_node_id = branch_head;
-                }
-                staged_session.history_cursor.mode = HistoryCursorMode::Live;
-            } else {
-                prepare_session_for_new_turn(&mut staged_session);
-            }
-            history_len_before = staged_session.history.len();
-            staged_session.history.push(TurnHistoryMessage {
-                role: super::host_resume::user_history_role(&user_content).to_string(),
-                content: user_content,
-                attachments,
-                turn_id: turn_id.map(str::to_string),
-                ..Default::default()
-            });
-            staged_session.history.push(TurnHistoryMessage {
-                role: "assistant".to_string(),
-                content: assistant_content,
-                attachments: Vec::new(),
-                reasoning_content: assistant_reasoning,
-                kind,
-                turn_id: turn_id.map(str::to_string),
-                ..Default::default()
-            });
-            if staged_session.history.len() > HISTORY_EMERGENCY_LIMIT {
-                let keep_from = staged_session.history.len() - HISTORY_EMERGENCY_LIMIT;
-                staged_session.history.drain(..keep_from);
-            }
-            if let Some(messages) = provider_native_transcript {
-                staged_session.provider_native_transcript.extend(messages);
-            }
-
-            update_long_term_memory_from_user_message(
-                &mut staged_session,
-                user_message,
-                memory_write_hook_executor.as_ref(),
-            );
-            refresh_session_metadata(&mut staged_session, true);
-            // 合成记录（取消/中断）就是「未完成轮」（与文本嗅探同口径）；成功轮恒为 TurnCommitted。
-            commit_history_node_from_live_state(&mut staged_session, node_kind, None);
-            let window_start = history_len_before.min(staged_session.history.len());
-            appended_user = staged_session.history.get(window_start).cloned();
-            appended_assistant = staged_session.history.get(window_start + 1).cloned();
-            meta_patch = Some(SessionMetaPatch {
-                title: Some(staged_session.title.clone()),
-                title_override: Some(staged_session.title_override.clone()),
-                archived: Some(staged_session.archived),
-                summary: Some(staged_session.summary.clone()),
-                turn_count: Some(staged_session.turn_count),
-                last_referenced_file: staged_session.last_referenced_file.clone(),
-                updated_at_ms: Some(staged_session.updated_at_ms),
-            });
-        }
-
-        let latest_node = staged_session.history_nodes.last().cloned();
-        let latest_cursor = staged_session.history_cursor.clone();
-        // 增量批事务持久化（消除写放大）
-        if self.backend.supports_turn_events() {
-            let mut commands = Vec::new();
-            // ADR 0102：transcript / 记忆并入本批命令流（日志先行不变：日志失败 ⇒ 整批 Failed）。
-            super::fold::append_transcript_command(&mut commands, &session_key, &transcript_delta);
-            super::fold::append_memory_command_if_changed(&mut commands, &session_key, &before_state, &staged_session);
-            for (ordinal, message) in [
-                (history_len_before, appended_user.take()),
-                (history_len_before + 1, appended_assistant.take()),
-            ] {
-                let Some(message) = message else { continue };
-                commands.push(PersistCommand::AppendMessage {
-                    epoch: 1,
-                    session_id: session_key.clone(),
-                    message,
-                    ordinal,
-                });
-            }
-            if let Some(meta_patch) = meta_patch {
-                commands.push(PersistCommand::UpdateSessionMeta {
-                    epoch: 1,
-                    session_id: session_key.clone(),
-                    meta_patch,
-                });
-            }
-            if let Some(node) = latest_node {
-                commands.push(PersistCommand::UpdateHistoryNode {
-                    epoch: 1,
-                    session_id: session_key.clone(),
-                    node,
-                });
-            }
-            commands.push(PersistCommand::UpdateCursor {
-                epoch: 1,
-                session_id: session_key.clone(),
-                cursor: latest_cursor,
-            });
-            for branch in &staged_session.history_branches {
-                commands.push(PersistCommand::UpdateBranch {
-                    epoch: 1,
-                    session_id: session_key.clone(),
-                    branch: branch.clone(),
-                });
-            }
-            let outcome = self.backend.persist_commands_batch(commands);
-            // ADR 0107 §5 P1 / D4：同一会话正被另一进程写 ⇒ 会话级冲突（非数据损坏）。
-            if matches!(outcome, PersistCommandOutcome::WriterBusy) {
-                return Err(SessionError::SessionWriterBusy {
-                    session_id: session_key.clone(),
-                });
-            }
-            if matches!(outcome, PersistCommandOutcome::Failed | PersistCommandOutcome::StaleEpoch) {
-                return Err(SessionError::BackendFailure(format!(
-                    "append_turn batch persist failed: {outcome:?}"
-                )));
-            }
-            // ADR 0107 P0：`LogPersisted` ⇒ 提交内存 live，跳过索引单行落盘。
-            if !report_index_deferred(&session_key, &outcome) {
-                self.save_session_state_to_backend(&session_key, &staged_session);
-            }
-        } else {
-            self.save_session_state_to_backend(&session_key, &staged_session);
-        }
-        // 提交到 live 主内存（`LogPersisted` 时索引滞后，但日志是真源 ⇒ 重启可重建）
-        self.sessions.insert(session_key.clone(), staged_session);
-        self.refresh_attachment_catalog();
-        Ok(self.snapshot_for_session(&session_key))
+        self.append_turn_with_kind_and_trace_fallible(
+            session_id,
+            user_message,
+            assistant_message,
+            provider_native_transcript,
+            attachments,
+            kind,
+            turn_id,
+            None,
+        )
     }
 
     pub fn append_turn(
@@ -1415,19 +1194,20 @@ impl SessionStore {
 
                 for n in &mut session.history_nodes {
                     if n.branch_id == branch_id && !ancestor_ids.contains(&n.node_id) {
-                        n.kind = HistoryNodeKind::TurnCancelled;
+                        n.kind = HistoryNodeKind::TurnRewound;
                     }
                 }
                 // ── Update branch head to point to the target node ──
                 // This makes the truncation permanent: the target node IS now the
                 // branch head, so subsequent restore_branch_head / new turns will
-                // build from here instead of resurrecting the cancelled nodes.
+                // build from here instead of resurrecting the rewound nodes.
                 if let Some(branch) = session
                     .history_branches
                     .iter_mut()
                     .find(|b| b.branch_id == branch_id)
                 {
                     branch.head_node_id = Some(node.node_id.clone());
+                    branch.updated_at_ms = now_timestamp_ms();
                 }
                 // PA-093：引用化节点 → 事件折叠重建视图（水位回退）；legacy → 旧路径。
                 match &fold_result {
@@ -2256,41 +2036,46 @@ impl SessionStore {
         let initial_trace_migration_state = match self.backend.trace_storage_mode() {
             SeparateTraceTableMode::Off => TraceMigrationState::LegacyBlob,
             SeparateTraceTableMode::DualWrite => TraceMigrationState::DualWrite,
-            // PA-088：新会话无旧数据，直接表权威（blob 只存 refs，不膨胀）。
-            // 存量会话（load_store 反序列化）保持其 blob 中的状态，不在此晋升。
             SeparateTraceTableMode::WriteSeparate => TraceMigrationState::TraceTableAuthoritative,
         };
-        self.sessions
-            .entry(session_id.to_string())
-            .or_insert_with(|| SessionState {
-                conversation_id: session_id.to_string(),
-                title: DEFAULT_SESSION_TITLE.to_string(),
-                ai_title: None,
-                summary: DEFAULT_SESSION_SUMMARY.to_string(),
-                history: Vec::new(),
-                provider_native_transcript: Vec::new(),
-                turn_trace_history: Vec::new(),
-                trace_migration_state: initial_trace_migration_state,
-                turn_trace_refs: None,
-                long_term_memory_entries: Vec::new(),
-                memory_write_evidence: Vec::new(),
-                memory_write_hook_trace_records: Vec::new(),
-                history_state_evidence: Vec::new(),
-                turn_count: 0,
-                last_referenced_file: None,
-                updated_at_ms: now_timestamp_ms(),
-                history_nodes: Vec::new(),
-                history_branches: Vec::new(),
-                history_cursor: HistoryCursor {
-                    session_id: session_id.to_string(),
-                    ..HistoryCursor::default()
+        if !self.sessions.contains_key(session_id) {
+            self.mark_session_loaded(session_id);
+            self.sessions.insert(
+                session_id.to_string(),
+                SessionState {
+                    conversation_id: session_id.to_string(),
+                    title: DEFAULT_SESSION_TITLE.to_string(),
+                    ai_title: None,
+                    summary: DEFAULT_SESSION_SUMMARY.to_string(),
+                    history: Vec::new(),
+                    provider_native_transcript: Vec::new(),
+                    turn_trace_history: Vec::new(),
+                    trace_migration_state: initial_trace_migration_state,
+                    turn_trace_refs: None,
+                    long_term_memory_entries: Vec::new(),
+                    memory_write_evidence: Vec::new(),
+                    memory_write_hook_trace_records: Vec::new(),
+                    history_state_evidence: Vec::new(),
+                    turn_count: 0,
+                    last_referenced_file: None,
+                    updated_at_ms: now_timestamp_ms(),
+                    history_nodes: Vec::new(),
+                    history_branches: Vec::new(),
+                    history_cursor: HistoryCursor {
+                        session_id: session_id.to_string(),
+                        ..HistoryCursor::default()
+                    },
+                    event_watermark: 0,
+                    last_commit_watermark: 0,
+                    workspace_id: None,
+                    title_override: None,
+                    archived: false,
                 },
-                event_watermark: 0,
-                last_commit_watermark: 0,
-                workspace_id: None,
-                title_override: None,
-                archived: false,
-            })
+            );
+        }
+        self.sessions
+            .get_mut(session_id)
+            .expect("session inserted above")
     }
 
     /// Workspace 注册表（PA-079）。
@@ -2821,163 +2606,7 @@ impl SessionStore {
         session_id: &str,
         mutation: SessionTraceMutation,
     ) {
-        let Some(session) = self.sessions.get(session_id) else {
-            return;
-        };
-        let prepared = session_state_for_backend(session, self.backend.trace_storage_mode());
-        // PA-090：Authoritative 会话的 ReplaceAll 改用全量 Union——
-        // 否则用顶层 trace（24 行截断）替换表会清空节点 refs 指向的 trace，
-        // 重启 materialize 全部 missing（checkout/restore/fork/switch 均走此路径）。
-        let effective_mutation = if matches!(
-            prepared.trace_migration_state,
-            TraceMigrationState::TraceTableAuthoritative
-        ) && matches!(mutation, SessionTraceMutation::ReplaceAll { .. })
-        {
-            SessionTraceMutation::ReplaceAll {
-                traces: collect_trace_union(session),
-            }
-        } else {
-            mutation.clone()
-        };
-        // PA-089 阶段 3 接线：Authoritative 会话的增量 trace mutation 走 PersistCommand
-        // 增量命令（AppendTrace/UpdateTraceTerminal/AppendHookRecords）——只写变化行，
-        // 替代全量 persist_session_with_trace_mutation（每次全量序列化 blob + 重建表，
-        // 是"生成结束后卡顿"的根因：completed 后全量写 3.77MB blob + 全部 trace 行）。
-        let is_authoritative = matches!(
-            prepared.trace_migration_state,
-            TraceMigrationState::TraceTableAuthoritative
-        );
-        if is_authoritative && session_is_persistable(session) {
-            let command = match &effective_mutation {
-                SessionTraceMutation::UpsertOne { trace, trace_order } => {
-                    Some(PersistCommand::AppendTrace {
-                        epoch: 1,
-                        session_id: session_id.to_string(),
-                        trace: trace.clone(),
-                        trace_order: *trace_order,
-                    })
-                }
-                SessionTraceMutation::UpdateTerminalEvent {
-                    turn_id,
-                    event_id,
-                    event_type,
-                    event_version,
-                    sequence,
-                    emitted_at_ms,
-                    updated_at,
-                    event_watermark,
-                } => Some(PersistCommand::UpdateTraceTerminal {
-                    epoch: 1,
-                    session_id: session_id.to_string(),
-                    turn_id: turn_id.clone(),
-                    terminal_patch: TraceTerminalPatch {
-                        event_id: event_id.clone(),
-                        event_type: event_type.clone(),
-                        event_version: event_version.clone(),
-                        sequence: *sequence,
-                        emitted_at_ms: *emitted_at_ms,
-                        updated_at: *updated_at,
-                        phase: None,
-                        event_watermark: *event_watermark,
-                    },
-                }),
-                SessionTraceMutation::AppendHookRecords {
-                    turn_id,
-                    hook_trace_records,
-                    updated_at,
-                } => Some(PersistCommand::AppendHookRecords {
-                    epoch: 1,
-                    session_id: session_id.to_string(),
-                    turn_id: turn_id.clone(),
-                    hook_trace_records: hook_trace_records.clone(),
-                    updated_at: *updated_at,
-                }),
-                _ => None,
-            };
-            if let Some(command) = command {
-                let outcome = self.backend.persist_command(command);
-                if matches!(outcome, PersistCommandOutcome::Succeeded) {
-                    return;
-                }
-                // ADR 0107 §5 P0：`LogPersisted` 告警（日志已落盘、索引滞后）；仍回退全量路径。
-                report_index_deferred(session_id, &outcome);
-            }
-            // 2-D：`ReplaceAll` 走日志命令流（以前只写 blob ⇒ 停写后图状态会丢）。
-            if matches!(mutation, SessionTraceMutation::ReplaceAll { .. }) {
-                let outcome = super::fold::persist_graph_projection_commands(
-                    self.backend.as_ref(), session_id, session, &effective_mutation,
-                );
-                if matches!(outcome, PersistCommandOutcome::Succeeded) {
-                    return;
-                }
-                // ADR 0107 P0.1 / R6：`ReplaceAll`（失败轮 replace-all 亦经此）的索引失败同样告警。
-                report_index_deferred(session_id, &outcome);
-            }
-        }
-        let result = if session_is_persistable(session) {
-            self.backend.persist_session_with_trace_mutation(
-                session_id,
-                &prepared,
-                effective_mutation,
-            )
-        } else {
-            SessionBackendMutationResult::Unsupported
-        };
-
-        if matches!(result, SessionBackendMutationResult::Succeeded) {
-            if matches!(
-                self.backend.trace_storage_mode(),
-                SeparateTraceTableMode::WriteSeparate
-            ) {
-                if let Some(session) = self.sessions.get_mut(session_id) {
-                    // PA-088：按原状态分派晋升——存量 LegacyBlob 首次写 → DualWrite
-                    // （保留 blob 双写兜底窗口，不直接表权威）；DualWrite 保持；
-                    // 新会话（ensure_session 已置 Authoritative）保持。
-                    session.trace_migration_state = match session.trace_migration_state {
-                        TraceMigrationState::LegacyBlob => TraceMigrationState::DualWrite,
-                        TraceMigrationState::DualWrite => TraceMigrationState::DualWrite,
-                        TraceMigrationState::TraceTableAuthoritative => {
-                            TraceMigrationState::TraceTableAuthoritative
-                        }
-                    };
-                }
-            }
-            self.note_version_from_backend(session_id);
-            return;
-        }
-
-        if matches!(result, SessionBackendMutationResult::NotFound)
-            && matches!(
-                prepared.trace_migration_state,
-                TraceMigrationState::TraceTableAuthoritative
-            )
-        {
-            let replace_all = SessionTraceMutation::ReplaceAll {
-                // PA-090：Authoritative 会话 NotFound 重试同样用全量 Union。
-                traces: collect_trace_union(session),
-            };
-            if matches!(
-                self.backend.persist_session_with_trace_mutation(
-                    session_id,
-                    &prepared,
-                    replace_all
-                ),
-                SessionBackendMutationResult::Succeeded
-            ) {
-                self.note_version_from_backend(session_id);
-                return;
-            }
-        }
-
-        if matches!(result, SessionBackendMutationResult::Failed) {
-            eprintln!(
-                "[pony-agent][session] persist_session_and_trace_change backend write failed for session {}; falling back to separate blob+table writes",
-                session_id
-            );
-        }
-
-        self.persist_trace_change(session_id, trace_action_from_mutation(mutation));
-        self.save_session_to_backend(session_id);
+        self.persist_session_and_trace_change_impl(session_id, mutation);
     }
 
     fn persist_trace_change(&self, session_id: &str, action: TracePersistenceAction) {
@@ -3528,17 +3157,8 @@ pub fn ensure_history_graph(session: &mut SessionState) -> bool {
         .history_nodes
         .last()
         .map(|node| node.node_id.clone());
-    // RC2 单一真源（Lead 裁决 / C10）：分支头 = 该分支**最后一条节点**，`TurnCancelled` 同样
-    // 参与。历史上这里排除 `TurnCancelled`，导致"中断节点成了悬挂兄弟"：`commit` 把 head 指到
-    // 中断节点，而装载/投影时 head 又被回算到上一 `turn_committed` ⇒ `visible ≠ head` 漂移
-    // → 下一次 append 隐式 fork（事故 `…-branch-2`），且重启后中断轮行随悬挂节点一起不可见。
-    // `TurnCancelled` 只作为**分类**保留（`kind` / rewind 目标识别），不再参与"是否推进 head"。
-    let main_branch_head_node_id = session
-        .history_nodes
-        .iter()
-        .rev()
-        .find(|node| node.branch_id == DEFAULT_HISTORY_BRANCH_ID)
-        .map(|node| node.node_id.clone());
+    // 主分支头解析委托 turn_commit：保留非 TurnRewound 的既有头，排除已撤回后缀。
+    let main_branch_head_node_id = turn_commit::resolve_main_branch_head(session);
     let first_node_id = session.history_nodes.first().map(|n| n.node_id.clone());
     let updated_at_ms = session.updated_at_ms;
     let has_legacy_root_node = session

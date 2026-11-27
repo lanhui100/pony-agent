@@ -70,7 +70,12 @@ pub type SessionVersionMap = HashMap<String, SessionVersion>;
 pub enum HistoryNodeKind {
     #[default]
     TurnCommitted,
+    /// Active-chain turn that failed or was cancelled/interrupted (advances branch head,
+    /// remains part of context continuation and rewind candidate list).
     TurnCancelled,
+    /// Suffix node invalidated by `checkout_history_node` / `rewind` (never eligible to
+    /// become branch head again or appear in rewind candidate list).
+    TurnRewound,
     RunPaused,
     Checkpoint,
     ManualSnapshot,
