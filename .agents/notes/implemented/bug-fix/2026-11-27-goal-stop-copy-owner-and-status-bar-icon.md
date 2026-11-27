@@ -23,7 +23,11 @@ Status: implemented
 ## Decision
 
 1. **停止原因的措辞只描述它自己的事实**：`headline()` 改为 `自动续轮已停止` /
-   `自动续轮未启动` / `本会话已有续轮循环在运行`，不再出现「已暂停」二字。
+   `自动续轮未启动` / `本会话已有续轮循环在运行`，不再出现「目标已暂停」。
+   **唯一例外是 `TurnSuspended`**：它表达的「续轮让位等你作答、作答后自动继续」，说成「已停止」
+   会让用户以为目标已死从而不去作答（PR #106 的 O1-B 可见面契约），故取
+   `续轮暂停：等你作答`——主语仍是「续轮」而非「目标」，且用「续轮暂停」避开
+   `GoalPhase::Paused` 的既有译词「已暂停」，不冒认阶段。
    阶段措辞的唯一家仍是 `goal_panel::phase_label` / `task_center::phase_text`；
    `visible_line()` 仍是三段式（`headline｜detail｜action_hint`），因此
    `errors.rs::goal_stop_severity_for_line` 的身份比对、`b193_2` 的

@@ -798,14 +798,28 @@ dsh 的 `GoalBlockReason { code, message }` 结构化收益（跨进程路由、
 **现行逐字（10 变体，仅换前缀）**：把 b193-2 表中每行首段 `目标已暂停：续轮已停止` 读作
 `自动续轮已停止`，`目标已暂停：本轮未成功` 读作 `自动续轮未启动`；`FirstRoundNotSucceeded` 的
 `detail` 由 `首轮失败，自动续轮未启动` 收窄为 `首轮失败`（与 headline 去重），其余 `detail` /
-`action_hint` 逐字不动。例如：
+`action_hint` 逐字不动。**唯一例外 `TurnSuspended`**（见下方「合并 PR #106 后的补充」）。
+例如：
 
 | 变体 | 现行 `visible_line()` |
 |---|---|
 | `Cancelled` | `自动续轮已停止｜用户取消｜发消息可继续` |
-| `TurnSuspended` | `自动续轮已停止｜本轮在等你作答/审批｜先回答上面的提问` |
+| `TurnSuspended` | `续轮暂停：等你作答｜本轮在等你作答/审批｜作答后自动继续` |
 | `NoActiveGoal` | `自动续轮已停止｜当前会话没有可续的目标｜/goal 创建目标` |
 | `FirstRoundNotSucceeded` | `自动续轮未启动｜首轮失败｜发「继续」重试` |
+
+**合并 PR #106 后的补充（2026-11-27，O1-B 可见面契约与本条交汇处）**
+
+PR #106 把 `TurnSuspended` 定为 **Pause** 的唯一可见原因（作答后宿主自动重入续轮），
+其 `action_hint` 为 `作答后自动继续`、`detail` 为 `本轮在等你作答/审批`。若 headline 仍取
+`自动续轮已停止`，用户读到的是「续轮停了」，于是不去作答 —— 而作答正是唯一的解锁动作。
+故 headline 取 `续轮暂停：等你作答`，同时满足两条冻结约束：
+
+- **不冒认阶段**：主语是「续轮」，且用「续轮暂停」而非 `GoalPhase::Paused` 的既有译词「已暂停」
+  （`goal_panel::stopped_reason_never_contradicts_active_phase` 断言阶段 Active 时全量行不含「已暂停」）。
+- **不违反 `never_started()` 区分**：`TurnSuspended` 本就是 `never_started() == false`（它确实跑起来过），
+  只有 `FirstRoundNotSucceeded` / `NoActiveGoal` / `LoopAlreadyOwned` 三个「从未启动」变体
+  才不得说「停」，本条未触碰它们。
 
 **展示层（底栏左槽）**：
 
