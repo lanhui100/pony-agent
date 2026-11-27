@@ -36,6 +36,7 @@ mod storage_stage0_recover_trace;
 mod storage_stage0_tombstone_no_resurrect;
 mod storage_stage0_write_amplification;
 mod targeted_session_load_test;
+mod test_support_data_dir_isolation;
 mod tui_rewind_acceptance;
 mod tui_rewind_capture_seam;
 mod tui_session_resilience_chunk_split;

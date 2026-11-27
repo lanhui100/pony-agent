@@ -22,6 +22,50 @@ pub fn data_dir_override() -> Option<PathBuf> {
         .filter(|override_dir| !override_dir.as_os_str().is_empty())
 }
 
+/// `test-support` 构建（集成 / `[[bin]]` 测试）的兜底数据目录根：进程内一次求值后固定。
+///
+/// 未设置 `PONY_AGENT_DATA_DIR` 时，测试进程一律落进系统临时目录下的
+/// `pony-agent-test-support-<pid>-<nanos>` 沙箱，切断「测试误读用户真实生产库」的回退。
+/// **进程级固定**（而非每次随机）才能让同一进程内的会话库 / 诊断库 / OTel spool
+/// 落在同一个沙箱根下；显式 `PONY_AGENT_DATA_DIR` 仍可逐次覆盖。
+#[cfg(all(not(test), feature = "test-support"))]
+pub fn test_support_fallback_data_dir() -> PathBuf {
+    static SANDBOX_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SANDBOX_ROOT
+        .get_or_init(|| {
+            std::env::temp_dir().join(format!(
+                "pony-agent-test-support-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or_default()
+            ))
+        })
+        .clone()
+}
+
+/// 数据目录根的**单点判决**（会话库 / 诊断库 / 会话 JSON 三处默认路径共用，不各立一套规则）。
+///
+/// 顺序：显式 `PONY_AGENT_DATA_DIR` → （仅 `test-support` 构建）进程级临时沙箱 → `None`。
+/// 生产构建里第二跳恒 `None`，判定链与本函数引入前逐字等价。
+pub fn data_dir_root() -> Option<PathBuf> {
+    data_dir_override().or_else(test_support_sandbox_root)
+}
+
+/// `test-support` 构建（集成 / `[[bin]]` 测试）的沙箱根；其余构建恒 `None`。
+fn test_support_sandbox_root() -> Option<PathBuf> {
+    #[cfg(all(not(test), feature = "test-support"))]
+    {
+        Some(test_support_fallback_data_dir())
+    }
+
+    #[cfg(any(test, not(feature = "test-support")))]
+    {
+        None
+    }
+}
+
 /// Returns the default SQLite database path.
 pub fn default_sqlite_path() -> PathBuf {
     #[cfg(test)]
@@ -32,7 +76,7 @@ pub fn default_sqlite_path() -> PathBuf {
 
     #[cfg(not(test))]
     {
-        data_dir_override()
+        data_dir_root()
             .or_else(dirs::data_local_dir)
             .or_else(dirs::home_dir)
             .or_else(|| std::env::current_dir().ok())

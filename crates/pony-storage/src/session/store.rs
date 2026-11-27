@@ -5338,9 +5338,9 @@ fn default_storage_path() -> PathBuf {
     {
         // 默认工作区分叉收敛：dirs 全失败才回退 cwd；中间加 compute_default_workspace_root
         //（Windows Documents/pony_agent，Unix ~/pony_agent）一跳。
-        // 数据目录旁路（测试注入专用，`PONY_AGENT_DATA_DIR`）最优先：Windows 上
-        // `dirs::data_local_dir()` 不读环境变量，集成测试否则无法隔离真实用户库。
-        crate::sqlite_session::data_dir_override()
+        // `data_dir_root()`：显式 `PONY_AGENT_DATA_DIR` 优先（Windows 上 dirs 不读环境变量），
+        // `test-support` 构建未注入时回落进程级临时沙箱，绝不触碰生产目录。
+        pony_protocol::sqlite_paths::data_dir_root()
             .or_else(dirs::data_local_dir)
             .or_else(dirs::home_dir)
             .or_else(pony_protocol::workspace_types::compute_default_workspace_root)

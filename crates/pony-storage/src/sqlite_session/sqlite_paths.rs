@@ -33,7 +33,9 @@ pub fn default_sqlite_path() -> PathBuf {
 
     #[cfg(not(test))]
     {
-        data_dir_override()
+        // 单点判决（`pony_protocol::sqlite_paths::data_dir_root`）：显式 `PONY_AGENT_DATA_DIR`
+        // 优先，`test-support` 构建下未注入时回落进程级临时沙箱，绝不回落生产库。
+        pony_protocol::sqlite_paths::data_dir_root()
             .or_else(dirs::data_local_dir)
             .or_else(dirs::home_dir)
             .or_else(|| std::env::current_dir().ok())
