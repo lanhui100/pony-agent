@@ -10243,6 +10243,85 @@ pub fn session_pending_host_request_count(
     )
 }
 
+/// O1-B（2026-11-27）：宿主作答（Ask / 审批）之后**重入** goal 自动续轮。
+///
+/// 为什么必须有它：本仓把「人类输入」建模成 turn 终态（`WaitingHost` ⇒ `suspended` ⇒ 循环退出），
+/// 于是 Ask/审批与 goal 续轮在同一维度上互斥。作答后的那次 run-bound 单步跑完若没人把循环重新
+/// 拉起来，目标就永久停在 `active + Armed`，而 UI 仍显示「进行中」（审核报告 P0-1）。
+///
+/// 判定口径（单一 gate，与循环内同源）：
+/// - `Completed` ⇒ 继续推进（先确认该会话仍有 Armed 目标、且**没有**新的待作答请求）；
+/// - `Suspended` ⇒ 链式挂起（作答后又撞审批/提问）：**Pause**，可见原因 `TurnSuspended`，
+///   等人继续作答（下一轮作答会再次走到本函数）；
+/// - 其余 ⇒ 按 gate 的停止原因可见上报（绝不静默）。
+///
+/// 注意：这里**不**重置取消令牌（用户按过 Esc 就该停），由 `goal_round_gate` 的 `cancelled` 判据兜住。
+#[allow(clippy::too_many_arguments)]
+fn resume_goal_rounds_after_host_answer(
+    outcome: &pony_agent_core::agent::control_plane::TurnStreamOutcome,
+    turn_control_plane: &Arc<HostControlPlane>,
+    sink: &Arc<TuiTurnSink>,
+    turn_input: &TurnInput,
+    session_id: &str,
+    cancel: &GoalRoundCancelToken,
+    current_turn: &std::sync::Mutex<Option<String>>,
+    loop_lease: &GoalRoundLoopLeaseRegistry,
+) {
+    use pony_agent_core::agent::control_plane::TurnStreamOutcome;
+    use pony_agent_core::agent::goal::{
+        active_goal_for_session, goal_round_outcome_gate, GoalRoundGateDecision,
+        GoalRoundStepOutcome, GoalRoundStopReason,
+    };
+
+    let step = match outcome {
+        TurnStreamOutcome::Completed => GoalRoundStepOutcome::Completed,
+        TurnStreamOutcome::Failed { .. } => GoalRoundStepOutcome::Failed,
+        TurnStreamOutcome::Suspended => GoalRoundStepOutcome::Suspended,
+        TurnStreamOutcome::Cancelled => GoalRoundStepOutcome::Cancelled,
+        TurnStreamOutcome::Unknown => GoalRoundStepOutcome::Unclassified,
+    };
+
+    // 无 Armed 目标 ⇒ 作答只服务了这一轮，没有可续的目标（不冒充「续轮已停止」）。
+    let Some(goal) = active_goal_for_session(session_id) else {
+        return;
+    };
+
+    match goal_round_outcome_gate(step) {
+        GoalRoundGateDecision::Continue => {
+            run_goal_rounds(
+                turn_control_plane,
+                sink,
+                turn_input,
+                session_id,
+                cancel,
+                current_turn,
+                loop_lease,
+            );
+        }
+        GoalRoundGateDecision::Pause => {
+            // 链式挂起：目标仍 Armed，下一轮作答会再次重入；此处只把「暂停」讲清楚。
+            report_goal_rounds_stopped(
+                sink,
+                session_id,
+                GoalRoundStopReason::TurnSuspended,
+                0,
+                goal.rounds_started,
+                goal.max_goal_rounds,
+            );
+        }
+        GoalRoundGateDecision::Stop(reason) => {
+            report_goal_rounds_stopped(
+                sink,
+                session_id,
+                reason,
+                0,
+                goal.rounds_started,
+                goal.max_goal_rounds,
+            );
+        }
+    }
+}
+
 /// 契约 F-G①/F-G3（ADR 0092）+ PA-171 C1/C2：goal 自动续轮主循环。
 ///
 /// 停止判据（判定顺序冻结于 `.dev-team/contract-matrix-pa171.md` §2.3 C1-T3）：
@@ -10263,7 +10342,7 @@ fn run_goal_rounds(
     loop_lease: &GoalRoundLoopLeaseRegistry,
 ) {
     use pony_agent_core::agent::goal::{
-        advance_goal_round_for_outcome, build_goal_round_message, goal_round_stop_reason,
+        advance_goal_round_for_outcome, build_goal_round_message,
         GoalRoundOutcome, GoalRoundStopReason,
     };
 
@@ -10305,33 +10384,36 @@ fn run_goal_rounds(
             );
             break;
         };
-        // 既有 F-G3 让位：有待作答 Ask/审批时必须先让人回答（状态由既有面板承担，不新增变体）。
-        if session_has_pending_host_requests(turn_control_plane, session_id) {
-            // PA-172 §8 B5：让位语义**不变**（不新增变体，可见原因仍由 Ask/审批面板承担），
-            // 但原先这里是静默 break ⇒ 补结构化日志（矩阵 G5：不得静默跳过）。
-            let (pending_asks, pending_approvals) =
-                session_pending_host_request_count(turn_control_plane, session_id);
+        // O2（2026-11-27）：轮次边界判定走**唯一** gate（与 core 循环同一函数，不再各写一套）。
+        //
+        // 顺序与语义（真源 `pony_storage::goal::goal_round_gate`）：有待作答 Ask/审批 ⇒ **Pause**
+        // （让位，且不计失败、不烧预算；作答后宿主会重入续轮）→ 连续失败熔断 → 目标预算 →
+        // 每线程自动续轮预算。旧实现在这里先手工判让位、再拼两个判据，正是判据漂移的入口。
+        let (pending_asks, pending_approvals) =
+            session_pending_host_request_count(turn_control_plane, session_id);
+        let decision = pony_agent_core::agent::goal::goal_round_gate(
+            pony_agent_core::agent::goal::GoalRoundGateInput {
+                has_active_goal: true,
+                cancelled: cancel.is_cancelled_for(session_id),
+                pending_asks,
+                pending_approvals,
+                consecutive_failures: failures,
+                rounds_started: active_goal.rounds_started,
+                max_rounds: active_goal.max_goal_rounds,
+                consecutive_auto_continues: consecutive,
+                max_auto_continues:
+                    pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
+            },
+        );
+        if decision.is_pause() {
+            // PA-172 §8 B5：让位可见原因由 Ask/审批面板承担，但**必须**留结构化日志
+            // （矩阵 G5：不得静默跳过）。暂停语义：目标仍 Armed，作答后重入续轮。
             log_goal_rounds_yield_pending_requests(
                 session_id,
                 pending_asks.saturating_add(pending_approvals),
             );
-            break;
         }
-        let stop_reason = goal_round_stop_reason(
-            cancel.is_cancelled_for(session_id),
-            failures,
-            active_goal.rounds_started,
-            active_goal.max_goal_rounds,
-        )
-        .or_else(|| {
-            should_abort_goal_rounds(
-                cancel.is_cancelled_for(session_id),
-                consecutive,
-                pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES as u32,
-            )
-            .then_some(GoalRoundStopReason::AutoContinueBudget)
-        });
-        if let Some(reason) = stop_reason {
+        if let Some(reason) = decision.stop_reason() {
             report_goal_rounds_stopped(
                 sink,
                 session_id,
@@ -10490,14 +10572,33 @@ fn report_goal_rounds_stopped(
 fn goal_round_stop_reason_for_outcome(
     outcome: &pony_agent_core::agent::control_plane::TurnStreamOutcome,
 ) -> pony_agent_core::agent::goal::GoalRoundStopReason {
-    use pony_agent_core::agent::control_plane::TurnStreamOutcome;
-    use pony_agent_core::agent::goal::GoalRoundStopReason;
-    match outcome {
-        TurnStreamOutcome::Cancelled => GoalRoundStopReason::Cancelled,
-        TurnStreamOutcome::Suspended => GoalRoundStopReason::TurnSuspended,
-        TurnStreamOutcome::Completed => GoalRoundStopReason::TurnUnclassified,
-        TurnStreamOutcome::Failed { .. } => GoalRoundStopReason::TurnUnclassified,
-        TurnStreamOutcome::Unknown => GoalRoundStopReason::TurnUnclassified,
+    // O2（2026-11-27）：终态 → 停止原因的映射**不再**是本文件自造的第六份真值表，统一走
+    // `goal::goal_round_outcome_gate`（与 core 循环、首轮门同一函数）。
+    //
+    // 语义差别只有一处：旧实现把 `Completed` 映射成 `TurnUnclassified`（因为该分支只会在
+    // 「已确认不是成功收口」时被调用）；新映射对 `Completed` 返回 `Continue`（无停止原因），
+    // 故这里显式保留 `TurnUnclassified` 兜底——调用方只在**非成功**路径上使用本函数。
+    use pony_agent_core::agent::goal::{
+        goal_round_outcome_gate, GoalRoundGateDecision, GoalRoundStepOutcome, GoalRoundStopReason,
+    };
+    let step = match outcome {
+        pony_agent_core::agent::control_plane::TurnStreamOutcome::Cancelled => {
+            GoalRoundStepOutcome::Cancelled
+        }
+        pony_agent_core::agent::control_plane::TurnStreamOutcome::Suspended => {
+            GoalRoundStepOutcome::Suspended
+        }
+        pony_agent_core::agent::control_plane::TurnStreamOutcome::Failed { .. }
+        | pony_agent_core::agent::control_plane::TurnStreamOutcome::Unknown
+        | pony_agent_core::agent::control_plane::TurnStreamOutcome::Completed => {
+            GoalRoundStepOutcome::Unclassified
+        }
+    };
+    match goal_round_outcome_gate(step) {
+        GoalRoundGateDecision::Stop(reason) => reason,
+        // `Pause`（Suspended）在本调用方的契约里读作「续轮让位」的可见原因 ⇒ `TurnSuspended`。
+        GoalRoundGateDecision::Pause => GoalRoundStopReason::TurnSuspended,
+        GoalRoundGateDecision::Continue => GoalRoundStopReason::TurnUnclassified,
     }
 }
 
@@ -13448,6 +13549,11 @@ fn tui_event_loop(
                     let tx_turn = tx.clone();
                     let resume_run_id = run_id.clone();
                     let resume_run_for_turn = resume_run_id.clone();
+                    // O1-B（2026-11-27）：作答后重入 goal 续轮所需的三个句柄（与 composer 提交分支
+                    // 同一套：取消令牌 / 当前 turn 槽 / 单循环租约），必须在本线程内可写。
+                    let cancel_for_rounds = goal_round_cancel.clone();
+                    let current_turn_for_rounds = Arc::clone(&current_turn_id);
+                    let lease_for_rounds = Arc::clone(&goal_round_loop_lease);
                     let turn_thread = std::thread::spawn(move || {
                         // 2026-11-14：本线程是 provider 调用所在线程 ⇒ 在此安装重试观察者
                         // （见 `install_tui_retry_observer`），让真实重试进度直达状态行。
@@ -13473,6 +13579,9 @@ fn tui_event_loop(
                                 turn_loop_in_flight_for_thread,
                                 &session_id,
                             );
+                            // O1-B：续跑用的输入需要保留一份给「重入续轮」当基线
+                            // （`run_goal_rounds` 以它克隆 provider/session/授权事实）。
+                            let reentry_input = turn_input.clone();
                             let cmd = StartTurnStreamCommand {
                                 turn_id: turn_id_str,
                                 input: turn_input,
@@ -13480,11 +13589,30 @@ fn tui_event_loop(
                             // F1：续轮**钉死在这个 run 上**——一次性 Ask 注入
                             // （`take_pending_ask_injection`）只存在于刚被 `resume_ask_wait` 恢复的
                             // 那个 run；重新按「最近可续 run」挑选会落到别的 run，答案被静默丢弃。
-                            turn_control_plane.continue_ask_resume_turn_stream(
+                            //
+                            // O1-B（2026-11-27）：改走 **checked** 入口拿本轮终态。作答后必须
+                            // 把 goal 自动续轮**重新接上**——旧实现只跑这一次单步，作答之后没有
+                            // 任何驱动者重启循环，目标就永久停在 active+Armed（审核报告 P0-1）。
+                            match turn_control_plane.continue_ask_resume_turn_stream_checked(
                                 sink.as_ref(),
                                 &resume_run_for_turn,
                                 cmd,
-                            )
+                            ) {
+                                Ok(outcome) => {
+                                    resume_goal_rounds_after_host_answer(
+                                        &outcome,
+                                        &turn_control_plane,
+                                        &sink,
+                                        &reentry_input,
+                                        &session_id,
+                                        &cancel_for_rounds,
+                                        &current_turn_for_rounds,
+                                        &lease_for_rounds,
+                                    );
+                                    Ok(())
+                                }
+                                Err(error) => Err(error),
+                            }
                         }));
                         // F2：无论 panic 还是「无终态事件」的 Err，都必须补发一条终态 ⇒ 否则
                         // `is_streaming` 永久为真，输入与排队派发彻底卡死（sink guard 只 unregister）。
@@ -13567,6 +13695,10 @@ fn tui_event_loop(
                     let inflight_for_turn = Arc::clone(&inflight_turns);
                     let turn_loop_in_flight_for_thread = Arc::clone(&turn_loop_in_flight);
                     let tx_turn = tx.clone();
+                    // O1-B（2026-11-27）：与 Ask 续轮同一套句柄，供审批决策后重入 goal 续轮。
+                    let cancel_for_rounds = goal_round_cancel.clone();
+                    let current_turn_for_rounds = Arc::clone(&current_turn_id);
+                    let lease_for_rounds = Arc::clone(&goal_round_loop_lease);
                     let turn_thread = std::thread::spawn(move || {
                         // 2026-11-14：本线程是 provider 调用所在线程 ⇒ 在此安装重试观察者
                         // （见 `install_tui_retry_observer`），让真实重试进度直达状态行。
@@ -13592,16 +13724,37 @@ fn tui_event_loop(
                                 turn_loop_in_flight_for_thread,
                                 &session_id,
                             );
+                            // O1-B：保留一份输入作重入续轮的基线（同 Ask 分支）。
+                            let reentry_input = turn_input.clone();
                             let cmd = StartTurnStreamCommand {
                                 turn_id: turn_id_str,
                                 input: turn_input,
                             };
                             // run-bound：同 run 续跑；run 不可续 ⇒ Err（fail-closed，不新起轮次）。
-                            turn_control_plane.continue_approval_resume_turn_stream(
+                            //
+                            // O1-B（2026-11-27）：与 Ask 续轮同构——改走 **checked** 入口拿本轮
+                            // 终态，审批决策后同样要把 goal 自动续轮重新接上（否则批准一次就把
+                            // 目标永久停在 active+Armed，桌面/ TUI 行为不一致）。
+                            match turn_control_plane.continue_approval_resume_turn_stream_checked(
                                 sink.as_ref(),
                                 &resume_run_for_turn,
                                 &cmd,
-                            )
+                            ) {
+                                Ok(outcome) => {
+                                    resume_goal_rounds_after_host_answer(
+                                        &outcome,
+                                        &turn_control_plane,
+                                        &sink,
+                                        &reentry_input,
+                                        &session_id,
+                                        &cancel_for_rounds,
+                                        &current_turn_for_rounds,
+                                        &lease_for_rounds,
+                                    );
+                                    Ok(())
+                                }
+                                Err(error) => Err(error),
+                            }
                         }));
                         // 与 Ask 续轮同纪律：panic 或「无终态」的 Err 都必须补发终态，否则
                         // `is_streaming` 永久为真，输入与排队派发彻底卡死。

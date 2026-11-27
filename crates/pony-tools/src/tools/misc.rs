@@ -255,7 +255,17 @@ impl ToolRouter {
                     duration_ms: 0,
                 }
             }
-            Err(err) => error_result(TOOL_UPDATE_GOAL, "update_goal_failed", err, None),
+            Err(err) => {
+                // O5（2026-11-27）：`blocked` 的最小轮次门槛是**结构性拒绝**（目标还没跑够轮），
+                // 不是工具执行失败——必须给稳定错误码 `goal_block_threshold`，模型/UI 才能据此
+                // 给出「再推进几轮」的指引，而不是当成普通失败盲目重试同一条 blocked 调用。
+                // 前缀契约真源：`pony_storage::goal::update_goal` 的 Blocked 分支。
+                if err.starts_with("goal_block_threshold") {
+                    error_result(TOOL_UPDATE_GOAL, "goal_block_threshold", err, None)
+                } else {
+                    error_result(TOOL_UPDATE_GOAL, "update_goal_failed", err, None)
+                }
+            }
         }
     }
 

@@ -725,6 +725,23 @@ pub fn turn_stream_outcome_from_terminal(
     }
 }
 
+/// O2（2026-11-27）：`GraphRunPhase` → `turn_stream_outcome_from_terminal` 认得的相位字符串。
+///
+/// 为什么不在 `graph.rs` 加 `as_str`：相位→字符串的线缆口径已经由 `serde` 的
+/// `snake_case` 重命名固定，这里只做一次与之一致的映射，避免第二处真值源。
+fn graph_run_phase_wire(phase: &crate::agent::graph::GraphRunPhase) -> &'static str {
+    use crate::agent::graph::GraphRunPhase;
+    match phase {
+        GraphRunPhase::Ready => "ready",
+        GraphRunPhase::Running => "running",
+        GraphRunPhase::WaitingUser => "waiting_user",
+        GraphRunPhase::Paused => "paused",
+        GraphRunPhase::Completed => "completed",
+        GraphRunPhase::Failed => "failed",
+        GraphRunPhase::Cancelled => "cancelled",
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphRunControlResponse {
@@ -805,13 +822,18 @@ struct RecordedTurnTerminal {
     error: Option<String>,
 }
 
-struct RecordingTurnEventSink<'a, S> {
+/// PA-171 C1-A1：终态采集 sink（包住宿主 sink）。
+///
+/// `pub(crate)`：`ask_resume_commands.rs` 的 checked 续轮变体必须用**同一个**采集器与
+/// 同一个归约函数（`turn_graph_decision_for`）判定「本轮是否成功收口」。复制第二套会让
+/// 「首轮门」与「恢复轮」的成败口径分叉——正是 O2 要消灭的缺陷类型。
+pub(crate) struct RecordingTurnEventSink<'a, S> {
     inner: &'a S,
     terminal: Mutex<RecordedTurnTerminal>,
 }
 
 impl<'a, S> RecordingTurnEventSink<'a, S> {
-    fn new(inner: &'a S) -> Self {
+    pub(crate) fn new(inner: &'a S) -> Self {
         Self {
             inner,
             terminal: Mutex::new(RecordedTurnTerminal::default()),
@@ -914,7 +936,7 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
     /// PA-171 C1-A1：终态快照 `(phase, error)`，供宿主归约为 [`TurnStreamOutcome`]。
     ///
     /// `None` ⇒ 本轮**没有可采终态**（视为 `Unknown`，绝不当成功）。
-    fn recorded_terminal_outcome(&self) -> Option<(String, Option<String>)> {
+    pub(crate) fn recorded_terminal_outcome(&self) -> Option<(String, Option<String>)> {
         let terminal = self.terminal.lock().unwrap_or_else(|e| {
             tracing::warn!(target: "control_plane", error = %e, "[pony-agent] recording sink lock poisoned");
             e.into_inner()
@@ -923,7 +945,7 @@ impl<'a, S> RecordingTurnEventSink<'a, S> {
         Some((phase, terminal.error.clone()))
     }
 
-    fn terminal_trace_annotation(
+    pub(crate) fn terminal_trace_annotation(
         &self,
     ) -> Option<(
         Option<String>,
@@ -2012,44 +2034,110 @@ impl HostControlPlane {
         // T7：本 run 的授权事实来自原始输入，续轮必须继承它（不能丢成 None）。
         let inherited_authorization_mode = prepared.input.tool_authorization_mode.clone();
         let mut consecutive_continues = 0;
+        // O2（2026-11-27）：连续失败计数（本循环局部）。旧实现只数「开了几轮」，一次上游
+        // 429 会被重放成 8 轮并烧掉预算——现在失败轮只累加本计数，不写盘。
+        let mut consecutive_failures: u32 = 0;
         loop {
             let response = self.execute_graph_run_stream_step(sink, prepared)?;
+            let step_outcome = Self::goal_step_outcome(&response);
+            let session_goal =
+                crate::agent::goal::continuation_goal_for_run(response.run.session_id.as_deref());
+
             if response.decision.kind != GraphDecisionKind::Continue {
+                // `Complete` 是图/模型自己收口，不冒充「续轮已停止」；其余（WaitUser / Fail /
+                // Cancel / Pause）必须给出可见原因，否则用户只看到「这一轮结束了」。
+                if response.decision.kind != GraphDecisionKind::Complete {
+                    if let Some((session_id, goal)) = session_goal.as_ref() {
+                        if let Some(reason) = Self::goal_round_stop_reason_for_step(
+                            step_outcome,
+                            consecutive_continues,
+                            consecutive_failures,
+                        ) {
+                            Self::report_goal_rounds_stopped(
+                                session_id,
+                                goal,
+                                &reason,
+                                consecutive_failures,
+                            );
+                        }
+                    }
+                }
                 return Ok(response);
             }
 
-            let Some((session_id, active_goal)) =
-                crate::agent::goal::continuation_goal_for_run(response.run.session_id.as_deref())
-            else {
+            let Some((session_id, active_goal)) = session_goal else {
                 return Ok(response);
             };
 
-            if consecutive_continues >= crate::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES {
-                return Ok(response);
-            }
-
-            if active_goal.rounds_started >= active_goal.max_goal_rounds {
-                return Ok(response);
-            }
-
-            let updated_goal = match crate::agent::goal::advance_goal_round(&active_goal.id) {
-                Ok(goal) => goal,
-                Err(error) => {
-                    // PA-172 §8 B6（遗留 #21）：静默吞掉预算推进失败 ⇒ 补结构化 warn。
-                    // **行为不变**：仍返回 `Ok(response)`（不得改调度语义），只是消除静默。
-                    crate::agent::otel::log::log_json_with_fields(
-                        "warn",
-                        "goal_round_advance_failed",
-                        None,
-                        &[
-                            ("stage", serde_json::json!("after_turn")),
-                            ("session_id", serde_json::json!(session_id)),
-                            ("goal_id", serde_json::json!(&active_goal.id)),
-                            ("error", serde_json::json!(error)),
-                        ],
+            // 本轮终态归约：失败轮**不推进预算**（C2），挂起轮是「暂停」而不是「终止」。
+            //
+            // `Failed` 的处置与 `goal_round_outcome_gate` 的通用臂有意不同：该 gate 的
+            // `Stop(FirstRoundNotSucceeded)` 文案是「首轮失败，自动续轮未启动」，用于**首轮门**
+            // （本轮还是用户自己的轮次，见上方 `decision.kind != Continue` 分支）。跑到这里的
+            // 失败轮是第 N 个 goal 轮，若照抄该变体会对用户说假话（既不是首轮，续轮也早就启动了）。
+            // 因此循环内失败只**计数**（绝不写盘），由边界 gate 的 `ConsecutiveFailures` 熔断，
+            // 文案才能如实报「连续 N 轮失败」。
+            match crate::agent::goal::goal_round_outcome_gate(step_outcome) {
+                crate::agent::goal::GoalRoundGateDecision::Continue => {
+                    consecutive_failures = 0;
+                    if let Err(error) = crate::agent::goal::advance_goal_round_for_outcome(
+                        &active_goal.id,
+                        crate::agent::goal::GoalRoundOutcome::Succeeded,
+                    ) {
+                        // 预算推进落盘失败 ⇒ 停（不得让「轮次已跑完但预算没记」演变成无限续轮）。
+                        crate::agent::otel::log::log_json_with_fields(
+                            "warn",
+                            "goal_round_advance_failed",
+                            None,
+                            &[
+                                ("stage", serde_json::json!("after_turn")),
+                                ("session_id", serde_json::json!(&session_id)),
+                                ("goal_id", serde_json::json!(&active_goal.id)),
+                                ("error", serde_json::json!(error)),
+                            ],
+                        );
+                        Self::report_goal_rounds_stopped(
+                            &session_id,
+                            &active_goal,
+                            &crate::agent::goal::GoalRoundStopReason::BudgetPersistFailed,
+                            consecutive_failures,
+                        );
+                        return Ok(response);
+                    }
+                }
+                crate::agent::goal::GoalRoundGateDecision::Pause => {
+                    Self::report_goal_rounds_stopped(
+                        &session_id,
+                        &active_goal,
+                        &crate::agent::goal::GoalRoundStopReason::TurnSuspended,
+                        consecutive_failures,
                     );
                     return Ok(response);
                 }
+                crate::agent::goal::GoalRoundGateDecision::Stop(reason) => {
+                    // 失败轮：只计数、不写盘，交由下面的边界 gate 决定是否熔断（见上方注释）。
+                    if step_outcome == crate::agent::goal::GoalRoundStepOutcome::Failed {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                    } else {
+                        Self::report_goal_rounds_stopped(
+                            &session_id,
+                            &active_goal,
+                            &reason,
+                            consecutive_failures,
+                        );
+                        return Ok(response);
+                    }
+                }
+            }
+
+            // 边界判定走**唯一** gate（含待作答让位 / 连续失败熔断 / 目标预算 / 每线程预算）。
+            let Some(updated_goal) = self.plan_goal_round_continuation(
+                &session_id,
+                &active_goal,
+                consecutive_failures,
+                consecutive_continues,
+            ) else {
+                return Ok(response);
             };
 
             consecutive_continues += 1;
@@ -2094,6 +2182,149 @@ impl HostControlPlane {
         }
     }
 
+
+    /// O2（2026-11-27）：把一次单步响应归约为 [`GoalRoundStepOutcome`]。
+    ///
+    /// 真值来源与 `start_turn_stream_checked` 同源：`turn_stream_outcome_from_terminal`
+    /// （决策真值优先 + 终态 phase 回落），再把 `TurnStreamOutcome` 折叠成 gate 的输入枚举。
+    /// `TurnResult` 无 `error` 字段（与 `RecordedTurnTerminal` 的采集面不同），故 error 传 `None`：
+    /// 失败轮的**分类**不依赖 error 文本，只依赖相位与决策。
+    fn goal_step_outcome(response: &GraphRunTurnResponse) -> crate::agent::goal::GoalRoundStepOutcome {
+        let terminal = turn_stream_outcome_from_terminal(
+            graph_run_phase_wire(&response.run.phase),
+            None,
+            Some(response.decision.kind.clone()),
+        );
+        match terminal {
+            TurnStreamOutcome::Completed => crate::agent::goal::GoalRoundStepOutcome::Completed,
+            TurnStreamOutcome::Failed { .. } => crate::agent::goal::GoalRoundStepOutcome::Failed,
+            TurnStreamOutcome::Suspended => crate::agent::goal::GoalRoundStepOutcome::Suspended,
+            TurnStreamOutcome::Cancelled => crate::agent::goal::GoalRoundStepOutcome::Cancelled,
+            TurnStreamOutcome::Unknown => crate::agent::goal::GoalRoundStepOutcome::Unclassified,
+        }
+    }
+
+    /// O2：循环内停止原因的**文案真值**（`goal_round_outcome_gate` 的一处必要修正）。
+    ///
+    /// `goal_round_outcome_gate(Failed)` 产出 `FirstRoundNotSucceeded`，其文案是「首轮失败，
+    /// 自动续轮未启动」——这只对**首轮门**成立。若本循环已经成功续过轮
+    /// （`consecutive_continues > 0`），说「首轮」就是对用户说假话；此时应报
+    /// `ConsecutiveFailures { failures }`（真实失败计数，含本轮）。
+    fn goal_round_stop_reason_for_step(
+        step_outcome: crate::agent::goal::GoalRoundStepOutcome,
+        consecutive_continues: u32,
+        consecutive_failures: u32,
+    ) -> Option<crate::agent::goal::GoalRoundStopReason> {
+        if step_outcome == crate::agent::goal::GoalRoundStepOutcome::Failed
+            && consecutive_continues > 0
+        {
+            return Some(crate::agent::goal::GoalRoundStopReason::ConsecutiveFailures {
+                failures: consecutive_failures.saturating_add(1),
+            });
+        }
+        crate::agent::goal::goal_round_outcome_gate(step_outcome).stop_reason()
+    }
+
+    /// O2：续轮停止/暂停的**唯一上报点**（领域事件 + 结构化日志；两端 UI 同源消费）。
+    ///
+    /// 为什么不再各自 `return`：旧实现在 core 侧是裸 `return Ok(response)`，桌面上「目标为什么
+    /// 不动了」完全不可见（审核报告 P1-3）。现在每条停止路径都产出 `RoundsStopped` 领域事实。
+    fn report_goal_rounds_stopped(
+        session_id: &str,
+        goal: &crate::agent::goal::GoalData,
+        reason: &crate::agent::goal::GoalRoundStopReason,
+        consecutive_failures: u32,
+    ) {
+        crate::agent::otel::log::log_json_with_fields(
+            "info",
+            "goal_rounds_stopped",
+            None,
+            &[
+                ("session_id", serde_json::json!(session_id)),
+                ("goal_id", serde_json::json!(&goal.id)),
+                ("reason", serde_json::json!(reason.code())),
+                (
+                    "consecutive_failures",
+                    serde_json::json!(consecutive_failures),
+                ),
+                ("rounds_started", serde_json::json!(goal.rounds_started)),
+                ("max_rounds", serde_json::json!(goal.max_goal_rounds)),
+            ],
+        );
+        crate::agent::goal::notify_goal_rounds_stopped(
+            session_id,
+            &goal.id,
+            reason,
+            consecutive_failures,
+            goal.rounds_started,
+            goal.max_goal_rounds,
+        );
+    }
+
+    /// O2：开下一轮之前的**唯一边界判定**（gate + 预算耗尽落 blocked）。
+    ///
+    /// 返回 `Some(goal)` ⇒ 允许开下一轮（`goal` 是 gate 通过后的最新快照）；`None` ⇒ 已上报
+    /// 可见停止原因并落 `blocked`（若因预算耗尽），调用方必须 `return Ok(response)`。
+    fn plan_goal_round_continuation(
+        &self,
+        session_id: &str,
+        goal: &crate::agent::goal::GoalData,
+        consecutive_failures: u32,
+        consecutive_auto_continues: u32,
+    ) -> Option<crate::agent::goal::GoalData> {
+        let (pending_asks, pending_approvals) = self.pending_host_request_counts(session_id);
+        let decision = crate::agent::goal::goal_round_gate(crate::agent::goal::GoalRoundGateInput {
+            has_active_goal: true,
+            cancelled: false,
+            pending_asks,
+            pending_approvals,
+            consecutive_failures,
+            rounds_started: goal.rounds_started,
+            max_rounds: goal.max_goal_rounds,
+            consecutive_auto_continues,
+            // 收窄必须显式且可证：`MAX_CONSECUTIVE_AUTO_CONTINUES` 是 `usize`，`as u32`
+            // 会同时触发 `as_conversions` 与 `cast_possible_truncation`；这里用 try_from，
+            // 溢出（理论上不可能）退化为 `u32::MAX`——语义是「预算极大」，不会多开轮次。
+            max_auto_continues: u32::try_from(
+                crate::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES,
+            )
+            .unwrap_or(u32::MAX),
+        });
+        let reason = decision.stop_reason()?;
+        Self::report_goal_rounds_stopped(session_id, goal, &reason, consecutive_failures);
+        // O5：预算耗尽 ⇒ 落 blocked（否则目标永久 active+Armed，UI 说谎且 `resume` 无解释地拒绝）。
+        if matches!(
+            reason,
+            crate::agent::goal::GoalRoundStopReason::BudgetExhausted { .. }
+        ) {
+            if let Err(error) = crate::agent::goal::block_goal_for_round_limit(&goal.id) {
+                crate::agent::otel::log::log_json_with_fields(
+                    "warn",
+                    "goal_round_block_on_round_limit_failed",
+                    None,
+                    &[
+                        ("session_id", serde_json::json!(session_id)),
+                        ("goal_id", serde_json::json!(&goal.id)),
+                        ("error", serde_json::json!(error)),
+                    ],
+                );
+            }
+        }
+        None
+    }
+
+    /// O2：会话内待作答宿主请求的分量计数 `(asks, approvals)`（gate 的让位输入）。
+    fn pending_host_request_counts(&self, session_id: &str) -> (usize, usize) {
+        let asks = self
+            .list_pending_asks(Some(session_id))
+            .as_array()
+            .map_or(0, Vec::len);
+        let approvals = self
+            .list_pending_approvals(session_id)
+            .as_array()
+            .map_or(0, Vec::len);
+        (asks, approvals)
+    }
 
     /// wave-65 C4（run-bound）：审批挂起没有 Ask wait，`bind_ask_wait` 不会清 active turn ⇒
     /// 先把本轮从 run 上释放（同 run 可续），否则宿主续轮只能另起一轮。Ask 挂起有 wait，
@@ -2377,18 +2608,28 @@ impl HostControlPlane {
         let turn_id = command.turn_id.clone();
         let recording = RecordingTurnEventSink::new(sink);
         match self.start_ask_aware_turn_stream(&recording, command) {
-            Ok(()) => {
-                // 契约矩阵 §3.1 C1-A1：终态 phase + **graph 决策**双真值判定。
-                // 只看 phase 会把「WaitUser（模型挂起等用户）」当成 Completed，进而多开一轮。
-                let decision = self.turn_graph_decision_for(&turn_id);
-                Ok(match recording.recorded_terminal_outcome() {
-                    Some((phase, error)) => {
-                        turn_stream_outcome_from_terminal(&phase, error, decision)
-                    }
-                    None => TurnStreamOutcome::Unknown,
-                })
-            }
+            Ok(()) => Ok(self.reduce_turn_outcome(&recording, &turn_id)),
             Err(error) => Err(error),
+        }
+    }
+
+    /// C4（2026-11-27）：把已采集的终态 + 该轮的 graph 决策归约为 [`TurnStreamOutcome`]。
+    ///
+    /// 单一归约点：`start_turn_stream_checked`（首轮）与 `ask_resume_commands` 的 checked
+    /// 续轮变体（恢复轮）必须逐字共用本函数，否则「首轮成功、恢复轮失败」被判成成功，
+    /// goal 循环会在一次 429 后继续烧预算。
+    ///
+    /// 归约口径（契约矩阵 §3.1 C1-A1）：终态 phase + **graph 决策**双真值判定；只看 phase
+    /// 会把「WaitUser（模型挂起等用户）」当成 `Completed`，进而多开一轮。
+    pub(crate) fn reduce_turn_outcome<S: TurnEventSink>(
+        &self,
+        recording: &RecordingTurnEventSink<'_, S>,
+        turn_id: &str,
+    ) -> TurnStreamOutcome {
+        let decision = self.turn_graph_decision_for(turn_id);
+        match recording.recorded_terminal_outcome() {
+            Some((phase, error)) => turn_stream_outcome_from_terminal(&phase, error, decision),
+            None => TurnStreamOutcome::Unknown,
         }
     }
 
@@ -2396,7 +2637,7 @@ impl HostControlPlane {
     ///
     /// 真值来源：`GraphRun.last_decision`（由 `GraphRunner::apply_turn_result` 按
     /// `decide_after_turn` 落库）+ `last_completed_turn_id` 定位本轮。
-    fn turn_graph_decision_for(&self, turn_id: &str) -> Option<GraphDecisionKind> {
+    pub(crate) fn turn_graph_decision_for(&self, turn_id: &str) -> Option<GraphDecisionKind> {
         let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
             tracing::warn!(target: "control_plane", error = %e, "[pony-agent] graph run lock poisoned");
             e.into_inner()
@@ -2879,44 +3120,98 @@ impl HostControlPlane {
         // T7：同上——续轮/推进继承原会话授权事实（无事实时按 read_only 兜底）。
         let inherited_authorization_mode = input.tool_authorization_mode.clone();
         let mut consecutive_continues = 0;
+        // O2（2026-11-27）：与 `execute_graph_run_stream` 同一套判据（失败轮不烧预算）。
+        let mut consecutive_failures: u32 = 0;
         loop {
             let response = self.advance_graph_run_step(run_id.clone(), input)?;
+            let step_outcome = Self::goal_step_outcome(&response);
+            let session_goal =
+                crate::agent::goal::continuation_goal_for_run(response.run.session_id.as_deref());
+
             if response.decision.kind != GraphDecisionKind::Continue {
+                if response.decision.kind != GraphDecisionKind::Complete {
+                    if let Some((session_id, goal)) = session_goal.as_ref() {
+                        if let Some(reason) = Self::goal_round_stop_reason_for_step(
+                            step_outcome,
+                            consecutive_continues,
+                            consecutive_failures,
+                        ) {
+                            Self::report_goal_rounds_stopped(
+                                session_id,
+                                goal,
+                                &reason,
+                                consecutive_failures,
+                            );
+                        }
+                    }
+                }
                 return Ok(response);
             }
 
-            let Some((session_id, active_goal)) =
-                crate::agent::goal::continuation_goal_for_run(response.run.session_id.as_deref())
-            else {
+            let Some((session_id, active_goal)) = session_goal else {
                 return Ok(response);
             };
 
-            if consecutive_continues >= crate::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES {
-                return Ok(response);
-            }
-
-            if active_goal.rounds_started >= active_goal.max_goal_rounds {
-                return Ok(response);
-            }
-
-            let updated_goal = match crate::agent::goal::advance_goal_round(&active_goal.id) {
-                Ok(goal) => goal,
-                Err(error) => {
-                    // PA-172 §8 B6（遗留 #21）：静默吞掉预算推进失败 ⇒ 补结构化 warn。
-                    // **行为不变**：仍返回 `Ok(response)`（不得改调度语义），只是消除静默。
-                    crate::agent::otel::log::log_json_with_fields(
-                        "warn",
-                        "goal_round_advance_failed",
-                        None,
-                        &[
-                            ("stage", serde_json::json!("planner")),
-                            ("session_id", serde_json::json!(session_id)),
-                            ("goal_id", serde_json::json!(&active_goal.id)),
-                            ("error", serde_json::json!(error)),
-                        ],
+            match crate::agent::goal::goal_round_outcome_gate(step_outcome) {
+                crate::agent::goal::GoalRoundGateDecision::Continue => {
+                    consecutive_failures = 0;
+                    if let Err(error) = crate::agent::goal::advance_goal_round_for_outcome(
+                        &active_goal.id,
+                        crate::agent::goal::GoalRoundOutcome::Succeeded,
+                    ) {
+                        crate::agent::otel::log::log_json_with_fields(
+                            "warn",
+                            "goal_round_advance_failed",
+                            None,
+                            &[
+                                ("stage", serde_json::json!("planner")),
+                                ("session_id", serde_json::json!(&session_id)),
+                                ("goal_id", serde_json::json!(&active_goal.id)),
+                                ("error", serde_json::json!(error)),
+                            ],
+                        );
+                        Self::report_goal_rounds_stopped(
+                            &session_id,
+                            &active_goal,
+                            &crate::agent::goal::GoalRoundStopReason::BudgetPersistFailed,
+                            consecutive_failures,
+                        );
+                        return Ok(response);
+                    }
+                }
+                crate::agent::goal::GoalRoundGateDecision::Pause => {
+                    Self::report_goal_rounds_stopped(
+                        &session_id,
+                        &active_goal,
+                        &crate::agent::goal::GoalRoundStopReason::TurnSuspended,
+                        consecutive_failures,
                     );
                     return Ok(response);
                 }
+                crate::agent::goal::GoalRoundGateDecision::Stop(reason) => {
+                    // 与 `execute_graph_run_stream` 同口径：失败轮只计数、不写盘，交由边界
+                    // gate 的 `ConsecutiveFailures` 熔断（理由见该函数的同名注释）。
+                    if step_outcome == crate::agent::goal::GoalRoundStepOutcome::Failed {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                    } else {
+                        Self::report_goal_rounds_stopped(
+                            &session_id,
+                            &active_goal,
+                            &reason,
+                            consecutive_failures,
+                        );
+                        return Ok(response);
+                    }
+                }
+            }
+
+            let Some(updated_goal) = self.plan_goal_round_continuation(
+                &session_id,
+                &active_goal,
+                consecutive_failures,
+                consecutive_continues,
+            ) else {
+                return Ok(response);
             };
 
             consecutive_continues += 1;

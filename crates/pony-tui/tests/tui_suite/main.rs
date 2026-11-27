@@ -55,3 +55,4 @@ mod pa171_error_copy_contract;
 mod pa171_error_copy_adversarial;
 mod pa172_legacy_closure_contract;
 mod interrupted_turn_ui_contract;
+mod goal_first_round_pause_contract;
