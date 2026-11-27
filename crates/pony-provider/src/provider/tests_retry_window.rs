@@ -416,14 +416,15 @@ fn stream_retry_hint_allows_retry_when_no_visible_delta() {
 }
 
 #[test]
-fn request_body_size_gate_rejects_oversized_plain_text() {
+fn request_body_size_gate_rejects_oversized_body_at_injected_limit() {
+    // 上限注入：断言拦截路径不必造 128 MiB 请求体（旧实现用 600 KiB 撞 512 KiB 硬闸）。
     let oversized = "x".repeat(600 * 1024);
     let body = json!({
         "model": "m",
         "messages": [{ "role": "user", "content": oversized }]
     });
-    let error = serialize_request_body_with_size_gate(&body)
-        .expect_err("超 512KiB 纯文本请求体必须被拦下");
+    let error = serialize_request_body_with_size_gate_limit(&body, 512 * 1024)
+        .expect_err("超注入上限的请求体必须被拦下");
     assert!(
         error.contains("payload too large"),
         "错误文本必须带 `payload too large`，实际={error}"
@@ -431,6 +432,26 @@ fn request_body_size_gate_rejects_oversized_plain_text() {
     assert!(
         error.contains("request_body_bytes="),
         "错误文本必须带真实字节数以便复盘，实际={error}"
+    );
+}
+
+/// 1M 窗口 80% 压缩线折算的合法请求体（约 3.2M 字符 ≈ 3.2 MB 纯 ASCII）**必须放行**。
+///
+/// 这是本条修复的反向锁：旧实现 512 KiB 硬闸会把这种完全合法的长会话在本地判死，
+/// 请求根本走不到压缩路径。任何人把上限调回 MiB 以下，此用例立刻变红。
+#[test]
+fn request_body_size_gate_passes_legitimate_long_context_body() {
+    let long_context = "x".repeat(3_200_000);
+    let body = json!({
+        "model": "m",
+        "messages": [{ "role": "user", "content": long_context }]
+    });
+    let bytes = serialize_request_body_with_size_gate(&body)
+        .expect("3.2MB 合法长会话请求体必须放行（1M 窗口 80% 线折算量级）");
+    assert!(
+        bytes.len() > 3_000_000,
+        "放行不得改变请求体，实际字节={}",
+        bytes.len()
     );
 }
 
@@ -445,12 +466,16 @@ fn request_body_size_gate_passes_normal_body_with_identical_bytes() {
     );
 }
 
+/// 含图请求不再单独享受一档上限：同一 `limit` 对纯文本与含图请求一视同仁。
+///
+/// 旧实现「纯文本 512 KiB / 含图 10 MiB」分档会把纯文本长会话提前判死，而 base64 图像
+/// 天然是 MiB 量级，两档口径互不重叠。现统一为网关量级单档。
 #[test]
-fn request_body_size_gate_uses_multimodal_limit_for_image_payloads() {
+fn request_body_size_gate_applies_one_limit_regardless_of_images() {
     let text_only = json!({ "content": "x".repeat(600 * 1024) });
     assert!(
-        serialize_request_body_with_size_gate(&text_only).is_err(),
-        "600KiB 纯文本必须超纯文本上限"
+        serialize_request_body_with_size_gate_limit(&text_only, 1024 * 1024).is_ok(),
+        "600KiB 纯文本在 1MiB 单档下必须放行"
     );
 
     let with_image = json!({
@@ -460,8 +485,12 @@ fn request_body_size_gate_uses_multimodal_limit_for_image_payloads() {
         ]
     });
     assert!(
-        serialize_request_body_with_size_gate(&with_image).is_ok(),
-        "含图请求必须用 10MiB 档"
+        serialize_request_body_with_size_gate_limit(&with_image, 1024 * 1024).is_ok(),
+        "含图请求使用同一档上限"
+    );
+    assert!(
+        serialize_request_body_with_size_gate_limit(&with_image, 1024).is_err(),
+        "含图请求超同一档上限时同样必须拦截（不再有 10MiB 特例）"
     );
 }
 

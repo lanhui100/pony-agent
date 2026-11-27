@@ -157,8 +157,9 @@ pristine 快照」，**流式 1:1 臂从未加**（`continue_with_tool_result_st
   自然过期 ⇒ 全程不给 `ensure_not_cooling` 开后门。`Decision` 作用域与 `short_circuit`
   来源仍维持「冷却期 0 次 HTTP」的 PA-171 C3 契约。
 - **请求体字节闸门已落地（B1795506800002）**：`serialize_request_body_with_size_gate` 在 4 个
-  HTTP 出口序列化后校验字节硬上限（纯文本 512 KiB / 含图 10 MiB，另 256 KiB 软告警只落
-  warn 不拦截）。超限时**0 HTTP** 返回带 `payload too large` 的错误文本 ⇒ 经既有
+  HTTP 出口序列化后校验字节硬上限（原档位「纯文本 512 KiB / 含图 10 MiB + 256 KiB 软告警」
+  **已被** [2026-11-26-request-body-gate-align-gateway-limit.md](2026-11-26-request-body-gate-align-gateway-limit.md)
+  **取代：单档 128 MiB + 32 MiB 软告警；512 KiB 明确禁止回归**）。超限时**0 HTTP** 返回带 `payload too large` 的错误文本 ⇒ 经既有
   `UPSTREAM_CONTEXT_OVERFLOW_HINTS` 归 `UpstreamContextOverflow`（`NonRetryable`）⇒
   不会把同一超大包重放成边缘防刷风暴。**不在 HTTP 出口静默裁剪**：HTTP 层已脱离会话语义，
   硬剪会破坏 prompt cache 前缀、破坏 `tool_call`/`tool_result` 闭合（Anthropic 400）或
