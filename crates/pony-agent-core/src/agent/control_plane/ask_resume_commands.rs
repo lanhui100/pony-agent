@@ -169,7 +169,12 @@ impl HostControlPlane {
     ) -> Result<TurnStreamOutcome, String> {
         let turn_id = command.turn_id.clone();
         let recording = RecordingTurnEventSink::new(sink);
-        match self.continue_bound_graph_run_stream(&recording, run_id, &command) {
+        match self.continue_bound_graph_run_stream(
+            &recording,
+            run_id,
+            &command,
+            crate::agent::dispatcher::TurnKind::AskResume,
+        ) {
             BoundContinuation::Executed(Ok(response)) => {
                 crate::agent::otel::log::log_json_with_fields(
                     "debug",
@@ -255,7 +260,12 @@ impl HostControlPlane {
     ) -> Result<TurnStreamOutcome, String> {
         let turn_id = command.turn_id.clone();
         let recording = RecordingTurnEventSink::new(sink);
-        match self.continue_bound_graph_run_stream(&recording, run_id, command) {
+        match self.continue_bound_graph_run_stream(
+            &recording,
+            run_id,
+            command,
+            crate::agent::dispatcher::TurnKind::ApprovalResume,
+        ) {
             BoundContinuation::Executed(Ok(response)) => {
                 crate::agent::otel::log::log_json_with_fields(
                     "debug",
@@ -319,6 +329,7 @@ impl HostControlPlane {
         sink: &S,
         run_id: &str,
         command: &StartTurnStreamCommand,
+        turn_kind: crate::agent::dispatcher::TurnKind,
     ) -> BoundContinuation {
         let session_id_for_flush = command
             .input
@@ -332,6 +343,11 @@ impl HostControlPlane {
         };
         match self.prepare_continue_graph_run_stream(continue_command) {
             Ok((_, prepared)) => {
+                // O4：恢复轮的权威类别由**发起方**声明（Ask / 审批），不靠文案嗅探。
+                let prepared = PreparedGraphRunStream {
+                    turn_kind: Some(turn_kind),
+                    ..prepared
+                };
                 let step = self.execute_graph_run_stream_step(sink, prepared);
                 let _ = crate::agent::turn_flow::flush_session_buffered_events(&session_id_for_flush);
                 BoundContinuation::Executed(step)

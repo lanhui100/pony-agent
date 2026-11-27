@@ -978,6 +978,41 @@ pub fn advance_goal_round_for_outcome(
 /// `GOAL_TOOL_BLOCK_THRESHOLD` 是硬拒（`tool-goal/src/index.ts`），这里对齐。
 pub const GOAL_BLOCK_MIN_ROUNDS: u32 = 3;
 
+/// O7（2026-11-27）：**每次用户输入**允许的连续自动续轮上限（双预算之一）。
+///
+/// goal 的轮次预算从来是**两个**数，此前只把目标级那一个展示给用户，于是出现「承诺 50 轮、
+/// 实跑 8 轮」的观感落差（审核报告 P2-1）。两个预算的语义分工（不得相乘、不得合并成单闸门）：
+///
+/// - **本常量（每输入预算）**：一次用户输入触发的自动续轮链最多走 8 轮，随后必须回到人类。
+///   它是「别让一次输入无限自治」的安全阀，归零条件是**人类再次发话**。
+/// - **`GoalData::max_goal_rounds`（目标预算，默认 50）**：目标**跨多次输入**累计的成功轮次上限。
+///   它是「这个目标值不值得继续烧」的预算，归零条件是**目标完成/放弃**。
+///
+/// 两者同时生效、取先到者：8 轮内没推进完 ⇒ 停下等人类（目标仍 Armed，说句话即可继续）；
+/// 累计到 50 轮 ⇒ 目标落 `blocked(round_limit)`（`resume` 会明确拒绝并给出原因）。
+///
+/// 单源约定：`pony_agent_core::agent::planner::MAX_CONSECUTIVE_AUTO_CONTINUES` 必须引用本常量
+/// （core 依赖 storage 的方向合法，反向不合法），禁止另立字面量。
+pub const MAX_AUTO_CONTINUES_PER_INPUT: usize = 8;
+
+/// O7：双预算的**唯一**展示文案（`/goal show` 与桌面 GoalBar 共用，避免两端各写一套说法）。
+///
+/// 返回 `(每输入预算行, 目标预算行)`：
+/// - 每输入行恒定（与具体目标无关），说明「一次输入最多自动续 8 轮」；
+/// - 目标行带当前进度（`rounds_started / max_goal_rounds`）与「跨多次输入累计」的口径。
+#[must_use]
+pub fn budget_summary_lines(goal: &GoalData) -> (String, String) {
+    (
+        format!(
+            "自动续轮: 每次输入最多 {MAX_AUTO_CONTINUES_PER_INPUT} 轮（之后等你发话，目标保持激活）"
+        ),
+        format!(
+            "目标预算: {}/{} 轮（跨多次输入累计；用满后目标转 blocked(round_limit)）",
+            goal.rounds_started, goal.max_goal_rounds
+        ),
+    )
+}
+
 /// O5：预算耗尽时的稳定阻塞原因（`GoalData::blocked_reason` 的取值，UI 与 `resume` 指引共用）。
 pub const GOAL_BLOCKED_REASON_ROUND_LIMIT: &str = "round_limit";
 

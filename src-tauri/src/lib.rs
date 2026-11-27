@@ -473,6 +473,28 @@ fn goal_get(
     serde_json::to_value(res.goal).map_err(|e| e.to_string())
 }
 
+/// O7（2026-11-27）：双预算的**展示文案**（每输入预算 + 目标预算），文案真源在
+/// `pony_storage::goal::budget_summary_lines`（与 TUI `/goal show` 同源）。
+///
+/// 为什么单开命令而不塞进 `goal://changed` 载荷：该载荷的字段集合是 §7 冻结契约
+/// （`goal_events.rs` 的形状测试逐键断言），改它要让桌面端契约门与既有 spec 一起漂移；
+/// 而双预算文案是**纯展示**，与 goal 状态变更事件无关（目标没变也要能读）。
+#[tauri::command]
+fn goal_budget_lines(session_id: String) -> Result<Value, String> {
+    let args = pony_agent_core::agent::goal::GetGoalArgs {
+        session_id: Some(session_id),
+    };
+    let goal = pony_agent_core::agent::goal::get_goal(args)?.goal;
+    let Some(goal) = goal else {
+        return Ok(Value::Null);
+    };
+    let (per_input, target) = pony_agent_core::agent::goal::budget_summary_lines(&goal);
+    Ok(serde_json::json!({
+        "perInputLine": per_input,
+        "targetBudgetLine": target,
+    }))
+}
+
 /// Create a goal for a session.
 #[tauri::command]
 fn goal_create(
@@ -1559,6 +1581,27 @@ fn acp_delegate_cancel(delegation_id: String) -> bool {
     pony_agent_core::acp::host::cancel_delegation(&delegation_id)
 }
 
+/// 进程级 run-event 处理器（Wave-4 C5 退出拦截）。
+///
+/// 抽成具名函数而非内联闭包：`run()` 已在代码规模棘轮上（`scripts/file-size-baseline.json`
+/// 允许 ≤200 行），而这段退出语义自带 4 行注释——内联会把主装配函数挤出预算。
+///
+/// 语义（不得改动）：`ExitRequested` 与 `Exit` 两个分支都必须触发**有界** force_flush
+/// （硬上限 3000ms，对齐 NFR `observability.exporter_flush_timeout_ms`），保证缓冲区中
+/// 尚未发出的 span 在进程退出前完成投递；两条路径幂等，重复触发不得 panic / 死锁。
+fn handle_run_event(_app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
+    match event {
+        tauri::RunEvent::Exit => {
+            flush_otel_on_exit("exit");
+            // NFR resource_release：flush 后释放 OTel provider 及其导出 runtime（幂等）。
+            pony_agent_core::agent::otel::shutdown();
+        }
+        // 退出请求（进程可能继续运行，如托盘常驻）同样有界 flush，但不释放 provider。
+        tauri::RunEvent::ExitRequested { .. } => flush_otel_on_exit("exit_requested"),
+        _ => {}
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -1700,6 +1743,7 @@ pub fn run() {
             plan_get,
             todo_list,
             goal_get,
+            goal_budget_lines,
             goal_create,
             goal_update,
             goal_command,
@@ -1742,20 +1786,5 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build Pony Agent")
-        .run(|_app_handle, event| {
-            // Wave-4 C5：退出拦截——`ExitRequested` 与 `Exit` 两个分支都必须触发
-            // **有界** force_flush（硬上限 3000ms，对齐 NFR
-            // `observability.exporter_flush_timeout_ms`），保证缓冲区中尚未发出的 span
-            // 在进程退出前完成投递；两条路径幂等，重复触发不得 panic / 死锁。
-            match event {
-                tauri::RunEvent::Exit => {
-                    flush_otel_on_exit("exit");
-                    // NFR resource_release：flush 后释放 OTel provider 及其导出 runtime（幂等）。
-                    pony_agent_core::agent::otel::shutdown();
-                }
-                // 退出请求（进程可能继续运行，如托盘常驻）同样有界 flush，但不释放 provider。
-                tauri::RunEvent::ExitRequested { .. } => flush_otel_on_exit("exit_requested"),
-                _ => {}
-            }
-        });
+        .run(handle_run_event);
 }

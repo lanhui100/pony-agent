@@ -450,8 +450,19 @@ impl AgentRuntime {
         } else {
             self.workspace_root.clone()
         };
-        let is_goal_round = crate::agent::goal::is_goal_round_prompt(&input.message);
-        let is_direct_human = !is_goal_round;
+        // O4（2026-11-27）：权威类别优先——宿主显式声明时不再做文案嗅探。
+        //
+        // 旧实现在这里无条件 `is_goal_round_prompt(&input.message)`，于是 Ask/审批恢复轮
+        // （输入是用户原文，不是 `<goal_round ...>` 模板）被判成 `DirectHuman`，模型在恢复轮
+        // 里拿到 `create_goal` / `pause` / `edit` / `resume` 的权威（审核报告 P1-1）。
+        // 现在：宿主声明 ⇒ 用它；未声明 ⇒ 回落嗅探（保持既有调用方行为不变）。
+        let turn_kind = facts.turn_kind.unwrap_or_else(|| {
+            if crate::agent::goal::is_goal_round_prompt(&input.message) {
+                crate::agent::dispatcher::TurnKind::GoalRound
+            } else {
+                crate::agent::dispatcher::TurnKind::DirectHuman
+            }
+        });
         Some(DispatchContext {
             session_id: input.session_id.clone(),
             run_id: facts.run_id.clone(),
@@ -471,8 +482,7 @@ impl AgentRuntime {
                     ),
                 ) as Arc<dyn crate::acp::client::PermissionHandler>
             }),
-            is_goal_round,
-            is_direct_human,
+            turn_kind,
         })
     }
 

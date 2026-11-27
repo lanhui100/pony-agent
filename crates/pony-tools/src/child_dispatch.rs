@@ -408,7 +408,7 @@ fn execute_composite_shared(
     let mut lineage = context.lineage.clone();
     lineage.push(ready.descriptor.identity.descriptor_id.clone());
     let mut child_dispatch_ctx = context.context.clone();
-    child_dispatch_ctx.is_direct_human = false;
+    child_dispatch_ctx.turn_kind = crate::dispatcher::TurnKind::SubAgent;
     let child_context = ChildDispatchContext {
         parent_call_id: request.call_id.clone(),
         parent_descriptor_id: ready.descriptor.identity.descriptor_id.clone(),

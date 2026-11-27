@@ -275,6 +275,11 @@ fn render_show(goal: &GoalData) -> String {
         format!("轮次: {}/{}", goal.rounds_started, goal.max_goal_rounds),
         format!("激活: {}", activation_label(&goal.activation)),
     ];
+    // O7（2026-11-27）：双预算分别展示——此前只展示目标预算，用户读到「50 轮」却只跑 8 轮，
+    // 观感上是「承诺没兑现」。语义真源在 `goal::budget_summary_lines`（桌面 GoalBar 共用）。
+    let (per_input, target_budget) = crate::goal::budget_summary_lines(goal);
+    lines.push(per_input);
+    lines.push(target_budget);
     if goal.phase == "blocked" {
         if let Some(reason) = goal
             .blocked_reason

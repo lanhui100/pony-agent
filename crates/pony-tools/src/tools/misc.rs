@@ -115,11 +115,15 @@ impl ToolRouter {
 
     pub(super) fn execute_create_goal(&self, call: &ToolCall, context: &ToolExecutionContext) -> ToolResult {
         if let Some(dispatch_ctx) = context.dispatch_context.as_ref() {
-            if !dispatch_ctx.is_direct_human {
+            // O4：权威只看结构化类别（`TurnKind::DirectHuman`），不再读推导布尔。
+            if !dispatch_ctx.turn_kind.is_direct_human() {
                 return error_result(
                     TOOL_CREATE_GOAL,
                     "goal_action_unauthorized",
-                    "create_goal requires direct human authority".to_string(),
+                    format!(
+                        "create_goal requires direct human authority (turn kind `{}`)",
+                        dispatch_ctx.turn_kind.code()
+                    ),
                     None,
                 );
             }
@@ -199,33 +203,41 @@ impl ToolRouter {
         if let Some(dispatch_ctx) = context.dispatch_context.as_ref() {
             match args.action {
                 UpdateGoalAction::Pause | UpdateGoalAction::Edit => {
-                    if !dispatch_ctx.is_direct_human {
+                    if !dispatch_ctx.turn_kind.is_direct_human() {
                         return error_result(
                             TOOL_UPDATE_GOAL,
                             "goal_action_unauthorized",
-                            format!("Action '{:?}' requires direct human authority", args.action),
+                            format!(
+                                "Action '{:?}' requires direct human authority (turn kind `{}`)",
+                                args.action,
+                                dispatch_ctx.turn_kind.code()
+                            ),
                             None,
                         );
                     }
                 }
                 UpdateGoalAction::Resume => {
-                    if !dispatch_ctx.is_direct_human {
+                    if !dispatch_ctx.turn_kind.is_direct_human() {
                         return error_result(
                             TOOL_UPDATE_GOAL,
                             "goal_action_unauthorized",
-                            "resume action requires direct human authority (cannot resume without human initiation)".to_string(),
+                            format!(
+                                "resume action requires direct human authority (cannot resume without human initiation; turn kind `{}`)",
+                                dispatch_ctx.turn_kind.code()
+                            ),
                             None,
                         );
                     }
                 }
                 UpdateGoalAction::Complete | UpdateGoalAction::Blocked => {
-                    if !dispatch_ctx.is_direct_human && !dispatch_ctx.is_goal_round {
+                    if !dispatch_ctx.turn_kind.is_direct_human() && !dispatch_ctx.turn_kind.is_goal_round() {
                         return error_result(
                             TOOL_UPDATE_GOAL,
                             "goal_action_unauthorized",
                             format!(
-                                "Action '{:?}' requires direct human authority or an active goal round",
-                                args.action
+                                "Action '{:?}' requires direct human authority or an active goal round (turn kind `{}`)",
+                                args.action,
+                                dispatch_ctx.turn_kind.code()
                             ),
                             None,
                         );

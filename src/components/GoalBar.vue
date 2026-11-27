@@ -10,7 +10,7 @@ import {
   LoaderCircle,
   ChevronRight,
 } from "lucide-vue-next";
-import { safeListen } from "@/lib/tauri";
+import { isTauriAvailable, safeInvoke, safeListen } from "@/lib/tauri";
 import { refreshForTurn, useGoalStore } from "@/stores/goal";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
@@ -79,10 +79,35 @@ function refreshGoal(): void {
 // O6：最近一次续轮停止/暂停的可见原因（成功起一轮或目标变更后清空）。
 const roundsStoppedLine = ref<string | null>(null);
 
+// O7（2026-11-27）：双预算展示文案。真源在 Rust `goal::budget_summary_lines`（与 TUI
+// `/goal show` 同源），前端只负责渲染，**不得**自行拼「8 轮 / 50 轮」措辞。
+const budgetLines = ref<{ perInputLine: string; targetBudgetLine: string } | null>(null);
+
+async function refreshBudgetLines(): Promise<void> {
+  if (!isTauriAvailable()) return;
+  try {
+    const payload = await safeInvoke<{ perInputLine?: unknown; targetBudgetLine?: unknown } | null>(
+      "goal_budget_lines",
+      { sessionId: props.sessionId }
+    );
+    // 形状校验：无目标时后端回 null；调用被 mock/降级成别的载荷时宁可少渲染一行，
+    // 也不要把 undefined 渲染成空 li（那会让「预算说明」看起来像故障）。
+    budgetLines.value =
+      payload && typeof payload.perInputLine === "string" && typeof payload.targetBudgetLine === "string"
+        ? { perInputLine: payload.perInputLine, targetBudgetLine: payload.targetBudgetLine }
+        : null;
+  } catch (error) {
+    // 展示面失败不阻断目标条：预算行缺席比整块报错更可用。
+    console.warn("[goal] budget lines unavailable:", error);
+    budgetLines.value = null;
+  }
+}
+
 let unlistenHandlers: Array<() => void> = [];
 
 onMounted(() => {
   refreshGoal();
+  void refreshBudgetLines();
   void (async () => {
     try {
       unlistenHandlers.push(
@@ -146,6 +171,7 @@ watch(
   () => props.sessionId,
   () => {
     refreshGoal();
+    void refreshBudgetLines();
   }
 );
 
@@ -239,6 +265,15 @@ async function handleComplete() {
           </div>
           <div class="text-[10px] text-stone-400">
             轮次: {{ currentGoal.roundsStarted }} / {{ currentGoal.maxGoalRounds }}
+          </div>
+          <!-- O7：双预算分别展示（文案真源在 Rust `goal::budget_summary_lines`）。 -->
+          <div
+            v-if="budgetLines"
+            class="text-[10px] leading-snug text-stone-400"
+            data-testid="goal-budget-lines"
+          >
+            <div>{{ budgetLines.perInputLine }}</div>
+            <div>{{ budgetLines.targetBudgetLine }}</div>
           </div>
           <!-- O6：续轮停止/暂停的可见原因（文案真源在 Rust `GoalRoundStopReason::visible_line()`）。 -->
           <div
