@@ -239,6 +239,13 @@ pub struct RunTurnFacts {
     pub run_id: Option<String>,
     pub turn_id: Option<String>,
     pub workspace_root: Option<String>,
+    /// O4（2026-11-27）：本轮的**结构化权威类别**，由宿主在构造本轮事实时写入。
+    ///
+    /// `None` ⇒ 宿主未声明，运行时回落文案嗅探（`is_goal_round_prompt`）以保持既有行为；
+    /// `Some` ⇒ **权威优先**，不再看文案。Ask/审批恢复轮必须显式写
+    /// `AskResume` / `ApprovalResume`，否则会被文案嗅探误判为人类直发轮
+    /// （审核报告 P1-1：恢复轮拿到 `create_goal` / `pause` / `edit` / `resume` 权威）。
+    pub turn_kind: Option<crate::agent::dispatcher::TurnKind>,
 }
 
 

@@ -45,6 +45,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+/// O4：`TurnKind` 再导出（定义在 [`crate::turn_kind`]，拆出去只为守住本文件规模棘轮）。
+pub use crate::turn_kind::TurnKind;
+
 // Invocation context
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -80,12 +83,10 @@ pub struct DispatchContext {
     #[serde(skip)]
     pub turn_cancellation: Option<Arc<pony_protocol::budget::CancellationToken>>,
     #[serde(skip)] pub acp_permission: Option<Arc<dyn pony_protocol::acp_protocol::PermissionHandler>>,
-    /// B128：是否为 goal 自动续轮（由 `<goal_round ...>` 消息识别）
+    /// O4：本轮结构化权威类别（goal 元工具授权的唯一真值源，语义见 [`TurnKind`]）。
+    /// 缺省 `DirectHuman`，与旧 `is_direct_human: true` 等价。
     #[serde(default)]
-    pub is_goal_round: bool,
-    /// B128：是否为直接人类发起的顶层轮次（非自动续轮、非子代理）
-    #[serde(default = "default_direct_human")]
-    pub is_direct_human: bool,
+    pub turn_kind: crate::turn_kind::TurnKind,
 }
 
 /// 宿主审批证据（PA-141，C-141-1 serde 形状冻结：camelCase）。
@@ -101,10 +102,6 @@ fn default_host_control_available() -> bool {
     true
 }
 
-fn default_direct_human() -> bool {
-    true
-}
-
 impl Default for DispatchContext {
     fn default() -> Self {
         Self {
@@ -116,8 +113,7 @@ impl Default for DispatchContext {
             plan_execution_approval: None,
             tool_authorization_mode: None,
             turn_cancellation: None, acp_permission: None,
-            is_goal_round: false,
-            is_direct_human: true,
+            turn_kind: crate::turn_kind::TurnKind::DirectHuman,
         }
     }
 }

@@ -20,7 +20,11 @@ const MAX_LOCAL_PLANNER_MESSAGE_CHARS: usize = 120;
 /// 计数由宿主续行循环（`HostControlPlane::advance_graph_run` / TUI 循环）持有：每成功发起一轮
 /// goal-round 递增；用户手动轮次将其归零且不消耗额度。planner 只给出判定与目标级预算
 /// （`rounds_started < max_goal_rounds`），不自行累计系列计数，避免与循环形成 8×8 复合预算。
-pub const MAX_CONSECUTIVE_AUTO_CONTINUES: usize = 8;
+///
+/// O7（2026-11-27）：数值**单源**在 `pony_storage::goal::MAX_AUTO_CONTINUES_PER_INPUT`（领域层
+/// 同时负责把双预算讲清楚），本常量只是 core 侧读面，禁止在此另立字面量。
+pub const MAX_CONSECUTIVE_AUTO_CONTINUES: usize =
+    pony_storage::goal::MAX_AUTO_CONTINUES_PER_INPUT;
 
 /// 兼容读面：与 [`MAX_CONSECUTIVE_AUTO_CONTINUES`] 描述**同一预算**（不得相乘）。
 /// 旧语义（run 级 step 计数）仅保留在无 armed 目标的 `run.goal` 关键词回退路径上。

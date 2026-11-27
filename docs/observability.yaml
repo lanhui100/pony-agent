@@ -1911,3 +1911,30 @@ note: >-
 #     （底栏无轮次、Paused/Blocked 图标）、`crates/pony-tui/src/tui/goal_panel.rs`
 #     （`stopped_reason_never_contradicts_active_phase`：进行中与「已暂停」不得同屏）。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
+# B1795745933210 / B1795745933272 结项（ADR 2026-11-27-goal-turn-kind-and-dual-budget）归属说明：
+# (1) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-observability/src/otel/mod.rs`、
+#     `crates/pony-observability/src/ponysentry/client.rs`）；metrics / logs 维持结构性 N-A
+#     （桌面/TUI 进程随用户启停、无常驻监听地址、无 `/metrics`，Prometheus pull 模型不成立）。
+#     不新增 applicable 判定、不新增 enforcement_point。
+# (2) 本轮 N-A 的结构性理由：两处改动分别是**进程内授权判定**（`DispatchContext.turn_kind`
+#     取代 `is_goal_round` / `is_direct_human` 两布尔，类别由宿主经 `RunTurnFacts` 显式声明，
+#     文案嗅探降为「宿主未声明」的兜底）与**纯展示文案**（`goal::budget_summary_lines` 双预算两行 +
+#     additive 只读命令 `goal_budget_lines`）。两者都不产生新的遥测事实：不新增指标、
+#     不新增日志字段、不新增 Loki 上送路径、不改任何落盘格式。
+# (3) 变更性质（仅登记，非遥测变更）：新增枚举 `pony_tools::dispatcher::TurnKind`（五变体，
+#     serde `snake_case`，缺省 `DirectHuman` 与旧默认值等价 ⇒ 向后兼容）；`DispatchContext`
+#     删两布尔加一枚举（进程内结构：无 TS 声明、无 `from_value::<DispatchContext>` 反序列化点，
+#     已检索确认）；`RunTurnFacts` / `PreparedGraphRunStream` 各增 `turn_kind` 载荷（additive）；
+#     新增常量 `goal::MAX_AUTO_CONTINUES_PER_INPUT = 8`（`planner::MAX_CONSECUTIVE_AUTO_CONTINUES`
+#     改为引用它，数值单源）与唯一文案函数 `budget_summary_lines`；新增 Tauri 只读命令
+#     `goal_budget_lines`（无副作用、无网络出口）；`/goal show` 追加两行。
+# (4) 收口点：不新增 enforcement_point（无新的网络出口或异常边界可机械拦截）；既有
+#     `error_boundary` / `http_client` 本次未改动。行为门的机械收口落在测试层——
+#     `crates/pony-agent-core/tests/runtime_suite/goal_o4_turn_kind_authority_contract.rs`
+#     （8 例：变体集合冻结、授权矩阵、Ask/审批恢复轮拒绝 create/pause/resume/edit、
+#     DirectHuman 放行、GoalRound 放行 complete 但拒绝 pause）、
+#     `crates/pony-agent-core/tests/runtime_suite/goal_o7_dual_budget_contract.rs`
+#     （7 例：常量冻结、core 读面单源一致、两预算不等、文案含双预算与进度、`/goal show` 双行共存）、
+#     `tests/GoalBar-budget.spec.ts`（7 例：请求/逐字渲染/旧行共存/空载荷/畸形载荷/失败降级/会话切换）。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。

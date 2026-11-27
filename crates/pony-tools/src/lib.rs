@@ -33,6 +33,7 @@ pub mod terminal;
 pub mod tool_runtime;
 pub mod tool_search_elevation;
 pub mod tools;
+pub mod turn_kind;
 pub mod web_access;
 pub mod workspace;
 pub mod workspace_hotloader;

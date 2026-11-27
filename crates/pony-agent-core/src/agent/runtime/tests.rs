@@ -9889,6 +9889,7 @@ fn governed_ask_suspends_turn_and_binds_waiting_user_without_provider_followup()
             run_id: Some("run-ask-loop".to_string()),
             turn_id: Some("turn-ask-1".to_string()),
             workspace_root: Some(workspace.display().to_string()),
+            turn_kind: None,
         },
     );
 
@@ -9983,6 +9984,7 @@ fn governed_ask_host_answer_resumes_injects_unique_terminal_result_with_original
             run_id: Some("run-ask-resume".to_string()),
             turn_id: Some("turn-ask-resume-1".to_string()),
             workspace_root: Some(workspace.display().to_string()),
+            turn_kind: None,
         },
     );
     assert_eq!(result.phase, SUSPENDED_TURN_PHASE);
@@ -10110,6 +10112,7 @@ fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context()
             run_id: Some("run-ask-inject".to_string()),
             turn_id: Some("turn-ask-inject-1".to_string()),
             workspace_root: Some(workspace.display().to_string()),
+            turn_kind: None,
         },
     );
     assert_eq!(suspended.phase, SUSPENDED_TURN_PHASE);
@@ -10179,6 +10182,7 @@ fn governed_ask_resume_injects_terminal_result_into_next_turn_provider_context()
             run_id: Some("run-ask-inject".to_string()),
             turn_id: Some("turn-ask-inject-2".to_string()),
             workspace_root: Some(workspace.display().to_string()),
+            turn_kind: None,
         },
     );
     assert_ne!(
@@ -10382,6 +10386,7 @@ fn governed_ask_stream_suspends_turn_and_binds_waiting_user_without_provider_fol
             run_id: Some("run-ask-stream".to_string()),
             turn_id: Some("turn-ask-stream-1".to_string()),
             workspace_root: Some(workspace.display().to_string()),
+            turn_kind: None,
         },
     );
 
@@ -10502,6 +10507,7 @@ fn governed_stream_normal_glob_tool_turn_completes() {
             run_id: Some("run-repro-glob".to_string()),
             turn_id: Some("turn-repro-glob-1".to_string()),
             workspace_root: Some(workspace.display().to_string()),
+            turn_kind: None,
         },
     );
     let events = sink.events.borrow();
@@ -10582,6 +10588,7 @@ fn governed_ask_stream_host_answer_resumes_injects_unique_terminal_result_with_o
             run_id: Some("run-ask-stream-resume".to_string()),
             turn_id: Some("turn-ask-stream-resume-1".to_string()),
             workspace_root: Some(workspace.display().to_string()),
+            turn_kind: None,
         },
     );
     assert!(

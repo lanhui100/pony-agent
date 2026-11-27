@@ -514,8 +514,7 @@ fn goal_tools_authority_gate_b128() {
         session_id: Some(session.to_string()),
         dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
             session_id: Some(session.to_string()),
-            is_direct_human: false,
-            is_goal_round: false,
+            turn_kind: crate::agent::dispatcher::TurnKind::SubAgent,
             ..Default::default()
         }),
         ..Default::default()
@@ -536,8 +535,7 @@ fn goal_tools_authority_gate_b128() {
         session_id: Some(session.to_string()),
         dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
             session_id: Some(session.to_string()),
-            is_direct_human: true,
-            is_goal_round: false,
+            turn_kind: crate::agent::dispatcher::TurnKind::DirectHuman,
             ..Default::default()
         }),
         ..Default::default()
@@ -604,8 +602,7 @@ fn goal_tools_authority_gate_b128() {
         session_id: Some(session.to_string()),
         dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
             session_id: Some(session.to_string()),
-            is_direct_human: false,
-            is_goal_round: true,
+            turn_kind: crate::agent::dispatcher::TurnKind::GoalRound,
             ..Default::default()
         }),
         ..Default::default()
@@ -641,8 +638,7 @@ fn terminal_goal_wrapup_is_injected_into_tool_result_b129() {
         session_id: Some(session.to_string()),
         dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
             session_id: Some(session.to_string()),
-            is_direct_human: true,
-            is_goal_round: false,
+            turn_kind: crate::agent::dispatcher::TurnKind::DirectHuman,
             ..Default::default()
         }),
         ..Default::default()
@@ -652,8 +648,7 @@ fn terminal_goal_wrapup_is_injected_into_tool_result_b129() {
         session_id: Some(session.to_string()),
         dispatch_context: Some(crate::agent::dispatcher::DispatchContext {
             session_id: Some(session.to_string()),
-            is_direct_human: false,
-            is_goal_round: true,
+            turn_kind: crate::agent::dispatcher::TurnKind::GoalRound,
             ..Default::default()
         }),
         ..Default::default()

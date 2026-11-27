@@ -27,7 +27,7 @@ use crate::agent::hooks::{
 use crate::agent::plan_state::PlanStore;
 use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
 use crate::agent::runtime::{
-    AgentRuntime, AgentRuntimeBuilder, RunTurnFacts, TurnInput, TurnResult, TurnStreamEvent,
+    AgentRuntime, AgentRuntimeBuilder, TurnInput, TurnResult, TurnStreamEvent,
     SUSPENDED_TURN_PHASE,
 };
 use crate::agent::session::{
@@ -787,6 +787,30 @@ pub struct PreparedGraphRunStream {
     pub run_id: String,
     pub turn_id: String,
     pub input: TurnInput,
+    /// O4（2026-11-27）：本轮**结构化权威类别**，由发起方显式声明。
+    ///
+    /// `None` ⇒ 未声明，运行时回落文案嗅探（既有行为）；恢复轮入口
+    /// （Ask/审批续跑）与 goal 续轮循环必须显式写入对应类别，否则恢复轮会被嗅探误判为
+    /// 人类直发轮并拿到 ghost 类 goal 工具权威（审核报告 P1-1）。
+    pub turn_kind: Option<crate::agent::dispatcher::TurnKind>,
+}
+
+/// O4：本 run 一轮的 `RunTurnFacts`（含发起方声明的结构化权威类别）。
+///
+/// 抽成函数而非内联：`execute_graph_run_stream_step` 与 `advance_graph_run_step` 两处
+/// 逐字同构，且该函数已在代码规模棘轮上（`scripts/file-size-baseline.json`）——
+/// 内联 5 行只为拼一个结构体不值得。
+fn graph_run_turn_facts(
+    run_id: &str,
+    turn_id: &str,
+    turn_kind: Option<crate::agent::dispatcher::TurnKind>,
+) -> crate::agent::runtime::RunTurnFacts {
+    crate::agent::runtime::RunTurnFacts {
+        run_id: Some(run_id.to_string()),
+        turn_id: Some(turn_id.to_string()),
+        workspace_root: None,
+        turn_kind,
+    }
 }
 
 #[derive(Default)]
@@ -2036,7 +2060,11 @@ impl HostControlPlane {
                     else {
                         return Ok(response);
                     };
-                    prepared = next_prepared;
+                    // O4：自动续轮显式声明类别（不靠文案嗅探）。
+                    prepared = PreparedGraphRunStream {
+                        turn_kind: Some(crate::agent::dispatcher::TurnKind::GoalRound),
+                        ..next_prepared
+                    };
                 }
             }
         }
@@ -2101,11 +2129,11 @@ impl HostControlPlane {
                 &self.execution_control,
                 prepared.turn_id.clone(),
                 prepared.input.clone(),
-                RunTurnFacts {
-                    run_id: Some(prepared.run_id.clone()),
-                    turn_id: Some(prepared.turn_id.clone()),
-                    workspace_root: None,
-                },
+                graph_run_turn_facts(
+                    &prepared.run_id,
+                    &prepared.turn_id,
+                    prepared.turn_kind,
+                ),
             );
             if let Some((
                 session_id,
@@ -2832,6 +2860,8 @@ impl HostControlPlane {
             run_id,
             turn_id,
             input,
+            // 新建/继续/恢复 run 的默认类别：未声明 ⇒ 运行时按文案嗅探兜底。
+            turn_kind: None,
         };
 
         Ok((response, prepared))
@@ -2850,8 +2880,11 @@ impl HostControlPlane {
         let inherited_authorization_mode = input.tool_authorization_mode.clone();
         // O2（2026-11-27）：与 `execute_graph_run_stream` 同一套判据（`goal_round_loop` 模块头注释）。
         let mut state = goal_round_loop::ContinuationState::new();
+        // O4：首轮沿用调用方声明（人类直发轮为 `None` ⇒ 文案嗅探兜底）；一旦进入自动续轮，
+        // 后续轮次恒为 `GoalRound`（只允许 complete/blocked，不授予 ghost 权威）。
+        let mut turn_kind: Option<crate::agent::dispatcher::TurnKind> = None;
         loop {
-            let response = self.advance_graph_run_step(run_id.clone(), input)?;
+            let response = self.advance_graph_run_step(run_id.clone(), input, turn_kind)?;
             let pending_session = response.run.session_id.clone();
             match goal_round_loop::after_goal_round(
                 &response,
@@ -2864,7 +2897,10 @@ impl HostControlPlane {
                 },
             ) {
                 goal_round_loop::Advance::Stop => return Ok(response),
-                goal_round_loop::Advance::Continue(next_input) => input = *next_input,
+                goal_round_loop::Advance::Continue(next_input) => {
+                    input = *next_input;
+                    turn_kind = Some(crate::agent::dispatcher::TurnKind::GoalRound);
+                }
             }
         }
     }
@@ -2874,6 +2910,7 @@ impl HostControlPlane {
         &self,
         run_id: String,
         input: TurnInput,
+        turn_kind: Option<crate::agent::dispatcher::TurnKind>,
     ) -> Result<GraphRunTurnResponse, String> {
         let turn_id = {
             let next_turn_id = {
@@ -2906,11 +2943,7 @@ impl HostControlPlane {
             let runtime = self.runtime.read().expect("runtime lock poisoned");
             let mut turn_result = runtime.run_turn_with_facts(
                 input.clone(),
-                RunTurnFacts {
-                    run_id: Some(run_id.clone()),
-                    turn_id: Some(turn_id.clone()),
-                    workspace_root: None,
-                },
+                graph_run_turn_facts(&run_id, &turn_id, turn_kind),
             );
             let run = {
                 let graph_runs = self.graph_runs.lock().unwrap_or_else(|e| {
