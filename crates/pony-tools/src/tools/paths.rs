@@ -110,6 +110,28 @@ impl ToolRouter {
 }
 
 impl ToolRouter {
+    /// 判断当前工具执行上下文是否允许工作区外读取（`full_access` 模式或本会话已授权工作区外读取）。
+    /// 2A：仅作用于读取路径，写入路径仍受工作区边界与 `read-write` 显式授权约束。
+    fn allow_external_read(&self, context: &ToolExecutionContext) -> bool {
+        let effective_mode = context.tool_authorization_mode.as_deref().or_else(|| {
+            context
+                .dispatch_context
+                .as_ref()
+                .and_then(|d| d.tool_authorization_mode.as_deref())
+        });
+        if effective_mode.map(str::trim) == Some("full_access") {
+            return true;
+        }
+        let effective_session = context.session_id.as_deref().or_else(|| {
+            context
+                .dispatch_context
+                .as_ref()
+                .and_then(|d| d.session_id.as_deref())
+        });
+        self.authorize_store
+            .has_session_external_read(effective_session)
+    }
+
     /// 统一路径权限判定（PA-080）：读/写工具一律经 `classify_path`。
     /// 返回 `(错误码, 消息)` 结构化信封：权限错误码（`requires_authorization` /
     /// `outside_workspace_write_denied` / `permission_denied`）作为顶层错误码透出，
@@ -125,6 +147,7 @@ impl ToolRouter {
         let ws_id = workspace_id.or(context.workspace_id.as_deref());
         let root = self.resolved_workspace_root(context, ws_id)?;
         let tmp_dirs = self.controlled_tmp_dirs(&root, ws_id);
+        let allow_external_read = self.allow_external_read(context);
         // 依次对 root + 各受控 tmp 区域判定：命中任一即放行（组件级比较，无 IO 副作用）。
         // 全部未命中时，最后一次判定的错误码（requires_authorization / outside_workspace_write_denied）透出。
         let mut last_error: Option<(String, String)> = None;
@@ -132,10 +155,14 @@ impl ToolRouter {
         zones.extend(tmp_dirs.iter().cloned());
         for zone_root in &zones {
             let tmp = zone_root.join(".tmp");
-            match self
-                .path_checker
-                .classify(raw_path, &root, &tmp, &self.authorize_store, purpose)
-            {
+            match self.path_checker.classify_with_options(
+                raw_path,
+                &root,
+                &tmp,
+                &self.authorize_store,
+                purpose,
+                allow_external_read,
+            ) {
                 Ok(permission) => {
                     if matches!(
                         permission.zone,
@@ -294,7 +321,7 @@ impl ToolRouter {
                 // canonicalize 直接失败（越过卷根或逃逸目标不存在），使下方逃逸判定分支
                 // 不可达而误落 invalid_path。先做词法逃逸判定：词法折叠后已不在 root 内 →
                 // 按 PA-080 意图返回 requires_authorization（宿主审批语义），不吞成 invalid_path。
-                if !lexically_within_root(&root, &candidate) {
+                if !self.allow_external_read(context) && !lexically_within_root(&root, &candidate) {
                     let display = candidate.display().to_string();
                     return Err((
                         "requires_authorization".to_string(),

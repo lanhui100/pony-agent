@@ -467,10 +467,10 @@ fn run_single_turn(
     // 裁定 B5（v5 收窄）：只有用户**显式**指定了非 read_only 档位时才外显已知局限 ——
     // text 模式默认传 `None`（向后兼容），为它刷 WARN 会误导；jsonl/sse 默认 read_only，
     // 也不该刷屏。禁止静默的是「显式声明了未生效的收紧档位」这一种情况。
-    if args.permission_mode_explicit && args.permission_mode != PermissionMode::ReadOnly {
+    if args.permission_mode_explicit && args.permission_mode == PermissionMode::WorkspaceWrite {
         let mode = args.permission_mode.tool_authorization_mode();
         eprintln!(
-            "WARN permission-mode={mode}: workspace_write/full_access 与「不传」在运行时限内判定等价（已知局限，见 PA-167）"
+            "WARN permission-mode={mode}: workspace_write 与「不传」在运行时限内判定等价（已知局限，见 PA-167）"
         );
     }
 

@@ -34,6 +34,7 @@ fn test_adversarial_super_long_payload_rendering() {
         description: huge_desc,
         command_or_path: Some(huge_cmd),
         approval_path: None,
+        descriptor_id: None,
         timestamp_ms: 12345678,
     };
 

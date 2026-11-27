@@ -772,6 +772,7 @@ mod tests {
             workspace_root: None,
             // wave-62 A1（derivative 字段填充）：新增字段在本用例无需取消语义。
             cancellation: None,
+            tool_authorization_mode: None,
         }
     }
 

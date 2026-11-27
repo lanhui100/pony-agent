@@ -77,6 +77,16 @@ pub fn view_workspace_image(
     options: &ImageReadOptions,
     authorizations: &crate::path_permission::AuthorizeStore,
 ) -> Result<ImageArtifact, String> {
+    view_workspace_image_with_options(path, root, options, authorizations, false)
+}
+
+fn view_workspace_image_with_options(
+    path: &str,
+    root: &Path,
+    options: &ImageReadOptions,
+    authorizations: &crate::path_permission::AuthorizeStore,
+    allow_external_read: bool,
+) -> Result<ImageArtifact, String> {
     let raw_path = path.trim();
     if raw_path.is_empty() {
         return Err("image path cannot be empty".to_string());
@@ -85,7 +95,7 @@ pub fn view_workspace_image(
         return Err("image read byte budget cannot be zero".to_string());
     }
 
-    let canonical = resolve_inside_workspace(raw_path, root, authorizations)?;
+    let canonical = resolve_inside_workspace(raw_path, root, authorizations, allow_external_read)?;
     let metadata = std::fs::metadata(&canonical)
         .map_err(|error| format!("cannot read image metadata for `{raw_path}`: {error}"))?;
     if !metadata.is_file() {
@@ -134,6 +144,7 @@ fn resolve_inside_workspace(
     raw_path: &str,
     root: &Path,
     authorizations: &crate::path_permission::AuthorizeStore,
+    allow_external_read: bool,
 ) -> Result<PathBuf, String> {
     use crate::path_permission::{PathPermissionChecker, PathPurpose};
     let input = PathBuf::from(raw_path);
@@ -149,15 +160,16 @@ fn resolve_inside_workspace(
         .canonicalize()
         .map_err(|error| format!("cannot resolve workspace root `{}`: {error}", root.display()))?;
     if !canonical.starts_with(&canonical_root) {
-        // workspace 外：授权清单命中放行，否则 `requires_authorization`（审批语义入口）。
+        // workspace 外：授权清单 / 会话或完全访问放行，否则 `requires_authorization`（审批语义入口）。
         let checker = PathPermissionChecker::with_default();
         let tmp = root.join(".tmp");
-        return match checker.classify(
+        return match checker.classify_with_options(
             &canonical.display().to_string(),
             &canonical_root,
             &tmp,
             authorizations,
             PathPurpose::Read,
+            allow_external_read,
         ) {
             Ok(permission) => Ok(permission.canonical),
             Err(error) => Err(format!("{}: {}", error.code.as_str(), error.message)),
@@ -413,7 +425,23 @@ impl PrimitiveToolHandler for ViewImageHandler {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(self.default_options.max_bytes),
         };
-        let artifact = view_workspace_image(path, &self.root, &options, &self.authorizations)?;
+        let allow_external_read = request.tool_authorization_mode.as_deref().map(str::trim)
+            == Some("full_access")
+            || self
+                .authorizations
+                .has_session_external_read(request.session_id.as_deref());
+        let workspace_root = request
+            .workspace_root
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(&self.root);
+        let artifact = view_workspace_image_with_options(
+            path,
+            workspace_root,
+            &options,
+            &self.authorizations,
+            allow_external_read,
+        )?;
         serde_json::to_value(&artifact)
             .map_err(|e| format!("handler_error: view_image artifact serialization failed: {e}"))
     }
@@ -769,6 +797,7 @@ mod tests {
             workspace_root: None,
             // wave-62 A1（derivative 字段填充）：本用例不涉及取消语义。
             cancellation: None,
+            tool_authorization_mode: None,
         }
     }
 
@@ -848,5 +877,44 @@ mod tests {
             .execute(&handler_request(serde_json::json!({ "path": "notes.txt" })))
             .expect_err("non-image extension must fail closed");
         assert!(error.contains("unsupported image extension"), "{error}");
+    }
+
+    #[test]
+    fn handler_full_access_and_session_grant_allow_external_image_read() {
+        let workspace = TempWorkspace::new("handler_ext_ws");
+        let outside = TempWorkspace::new("handler_ext_out");
+        let ext_img = outside.path().join("ext.png");
+        write_png(&ext_img, 12, 12);
+
+        let auth = Arc::new(crate::path_permission::AuthorizeStore::new());
+        let handler = ViewImageHandler::new(workspace.path().to_path_buf())
+            .with_authorizations(Arc::clone(&auth));
+
+        let make_req = |session: Option<&str>, mode: Option<&str>| {
+            crate::tool_runtime::PrimitiveToolHandlerRequest {
+                descriptor_id: "builtin:view_image".to_string(),
+                arguments: serde_json::json!({ "path": ext_img.display().to_string() }),
+                session_id: session.map(str::to_string),
+                workspace_root: Some(workspace.path().display().to_string()),
+                cancellation: None,
+                tool_authorization_mode: mode.map(str::to_string),
+            }
+        };
+
+        let denied = handler
+            .execute(&make_req(Some("s1"), Some("workspace_write")))
+            .expect_err("default mode must require authorization");
+        assert!(denied.contains("requires_authorization"), "{denied}");
+
+        let ok_fa = handler
+            .execute(&make_req(Some("s1"), Some("full_access")))
+            .expect("full_access must allow external image read");
+        assert_eq!(ok_fa["width"], 12);
+
+        auth.grant_session_external_read("s-granted").unwrap();
+        let ok_sess = handler
+            .execute(&make_req(Some("s-granted"), Some("workspace_write")))
+            .expect("session external read grant must allow external image read");
+        assert_eq!(ok_sess["width"], 12);
     }
 }

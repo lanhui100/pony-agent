@@ -6,6 +6,13 @@ edition = "2021"
 [lib]
 name = "pony_protocol"
 
+[features]
+default = []
+# 测试兜底数据目录隔离的编译期门（集成 / `[[bin]]` 测试构建）。
+# 启用方 = `pony-test-support`（各 crate 的 dev-dependency，构建测试时经 feature 统一传递），
+# 生产构建永不启用。真源：.agents/notes/implemented/bug-fix/2026-11-26-test-support-default-data-dir-isolation.md
+test-support = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

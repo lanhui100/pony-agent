@@ -57,4 +57,32 @@ impl HostControlPlane {
             })
             .list_authorizations()
     }
+
+    /// 授予指定会话读取工作区外路径的会话级权限（仅内存，不持久化）。
+    pub fn authorize_session_external_read(&self, session_id: &str) -> Result<(), String> {
+        self.sessions_rwlock
+            .read()
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
+                e.into_inner()
+            })
+            .path_authorizations()
+            .grant_session_external_read(session_id)
+    }
+
+    /// 授予指定会话某个工具的会话级免审批权限（仅内存，不持久化）。
+    pub fn authorize_session_tool(
+        &self,
+        session_id: &str,
+        descriptor_id: &str,
+    ) -> Result<(), String> {
+        self.sessions_rwlock
+            .read()
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
+                e.into_inner()
+            })
+            .path_authorizations()
+            .grant_session_tool_approval(session_id, descriptor_id)
+    }
 }

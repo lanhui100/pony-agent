@@ -1178,3 +1178,144 @@ fn t6_approval_continuation_fails_closed_when_the_bound_run_is_not_continuable()
         sink.names()
     );
 }
+
+// ---------------------------------------------------------------------------
+// T7：full_access 模式下读工作区外文件直接完成，不挂起审批
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t7_full_access_allows_outside_workspace_read_without_approval_suspension() {
+    let _serial = serial_guard();
+
+    let outside = outside_workspace_probe_file("t7-full-access");
+    let outside_path = outside.display().to_string();
+    let server = MockProviderServer::start(vec![
+        MockReply::ReadToolCall(outside_path),
+        MockReply::Text(CONTINUATION_TEXT.to_string()),
+    ]);
+    let workspace = isolated_workspace("t7-full-access");
+    let control_plane = control_plane_with_approval_resume(server.base_url.clone(), &workspace);
+    let sink = RecordingSink::new();
+    let session_id = "session-approval-e2e-t7";
+
+    let mut input = test_turn_input(session_id, "请直接读取工作区外的文件");
+    input.tool_authorization_mode = Some("full_access".to_string());
+    let outcome = control_plane.start_ask_aware_turn_stream(
+        &sink,
+        StartTurnStreamCommand {
+            turn_id: "turn-approval-e2e-t7-1".to_string(),
+            input,
+        },
+    );
+    expect_ok(outcome, "T7：full_access 下读工作区外文件必须正常完成");
+    assert!(
+        pending_approvals(&control_plane, session_id).is_empty(),
+        "T7：full_access 不得产生待决审批"
+    );
+    assert_eq!(
+        sink.events_named("turn:suspended").len(),
+        0,
+        "T7：full_access 不得挂起轮次，实际事件 = {:?}",
+        sink.names()
+    );
+    assert_eq!(
+        sink.events_named("turn:completed").len(),
+        1,
+        "T7：full_access 必须产出恰好一条 turn:completed，实际事件 = {:?}",
+        sink.names()
+    );
+    assert!(
+        server
+            .bodies_from(1)
+            .iter()
+            .any(|body| body.contains(PROBE_CONTENT.trim())),
+        "T7：探针文件内容必须已返回模型面，实际 = {:?}",
+        server.bodies_from(1)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T8：authorize_session_external_read（AllowSession 路径）同会话跨目录放行且隔离他会话
+// ---------------------------------------------------------------------------
+
+#[test]
+fn t8_session_external_read_allows_other_external_files_and_isolates_sessions() {
+    let _serial = serial_guard();
+
+    let outside_1 = outside_workspace_probe_file("t8-first");
+    let outside_2 = outside_workspace_probe_file("t8-second");
+    let server = MockProviderServer::start(vec![
+        MockReply::ReadToolCall(outside_1.display().to_string()),
+        MockReply::ReadToolCall(outside_2.display().to_string()),
+        MockReply::Text(CONTINUATION_TEXT.to_string()),
+        MockReply::ReadToolCall(outside_2.display().to_string()),
+    ]);
+    let workspace = isolated_workspace("t8-session");
+    let control_plane = control_plane_with_approval_resume(server.base_url.clone(), &workspace);
+    let sink = RecordingSink::new();
+    let session_a = "session-approval-e2e-t8-a";
+    let session_b = "session-approval-e2e-t8-b";
+
+    // 1. session_a 首次读 outside_1 挂起审批
+    let approval = run_turn_until_approval_suspension(
+        &control_plane,
+        &sink,
+        session_a,
+        "turn-approval-e2e-t8-1",
+        "T8",
+    );
+    let request_id = json_str(&approval, "requestId", "T8");
+    let version = json_u64(&approval, "version", "T8");
+    let run_id = require_run_id(&approval, "T8");
+
+    // 2. 模拟 TUI AllowSession：授予 session_a 会话级工作区外读取权限（不写持久化单路径表）
+    let auths_before = control_plane.list_authorizations();
+    expect_ok(
+        control_plane.authorize_session_external_read(session_a),
+        "T8：authorize_session_external_read 必须成功",
+    );
+    assert_eq!(
+        control_plane.list_authorizations(),
+        auths_before,
+        "T8：AllowSession 不得污染持久化路径授权清单"
+    );
+    expect_ok(
+        control_plane.approve_control_request(&request_id, version),
+        "T8：approve_control_request 必须成功消费待决审批",
+    );
+
+    // 3. 续轮读取另一个工作区外文件 outside_2 ⇒ 直接放行完成，不再弹窗
+    run_bound_approval_continuation_turn(
+        &control_plane,
+        &sink,
+        session_a,
+        &run_id,
+        "turn-approval-e2e-t8-2",
+        CONTINUATION_PROMPT,
+        "T8：AllowSession 后续轮读另一外部文件必须直接完成",
+    );
+    assert!(
+        pending_approvals(&control_plane, session_a).is_empty(),
+        "T8：session_a 不得再次产生审批请求"
+    );
+    assert_eq!(
+        sink.events_named("turn:completed").len(),
+        1,
+        "T8：session_a 续轮必须完成"
+    );
+
+    // 4. 隔离性：session_b 读 outside_2 仍必须挂起审批
+    let sink_b = RecordingSink::new();
+    let approval_b = run_turn_until_approval_suspension(
+        &control_plane,
+        &sink_b,
+        session_b,
+        "turn-approval-e2e-t8-b-1",
+        "T8-isolation",
+    );
+    assert_eq!(
+        approval_b["options"]["path"].as_str(),
+        Some(outside_2.display().to_string().as_str()),
+        "T8：session_b 仍须对工作区外文件弹出审批"
+    );
+}

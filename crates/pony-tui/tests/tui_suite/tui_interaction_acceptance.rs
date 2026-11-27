@@ -77,6 +77,7 @@ fn test_permission_state_machine_and_choices() {
         description: "Execute cargo test".to_string(),
         command_or_path: Some("cargo test --workspace".to_string()),
         approval_path: None,
+        descriptor_id: None,
         timestamp_ms: 1000,
     };
 
@@ -107,6 +108,7 @@ fn test_permission_dialog_rendering_contract() {
         description: "Delete obsolete temp files".to_string(),
         command_or_path: Some("rm -rf /tmp/test-trash".to_string()),
         approval_path: None,
+        descriptor_id: None,
         timestamp_ms: 1000,
     };
     state.start_permission_approval(req);
@@ -143,6 +145,7 @@ fn test_permission_keys_and_transitions() {
         description: "Overwrite critical config".to_string(),
         command_or_path: Some("src/main.rs".to_string()),
         approval_path: None,
+        descriptor_id: None,
         timestamp_ms: 2000,
     };
     state.start_permission_approval(req);

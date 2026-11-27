@@ -18,7 +18,7 @@
 //! key=`path_authorizations.v1` 完成；本模块保持纯数据 + 判定逻辑。
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -224,9 +224,15 @@ pub struct AuthorizedPathEntry {
 
 /// 授权存储：内存 `RwLock<HashMap>`，祖先链查找 O(depth)。
 /// 持久化由调用方注入的 `persist` 回调完成（每次变更即写）。
+/// 会话级允许（`session_external_read_all` / `session_allowed_descriptors`）仅驻留内存、按 `session_id` 隔离，
+/// 不进入持久化清单。
 pub struct AuthorizeStore {
     entries: RwLock<HashMap<PathBuf, AuthorizedPathEntry>>,
     persist: Option<Arc<dyn Fn(&HashMap<PathBuf, AuthorizedPathEntry>) -> Result<(), String> + Send + Sync>>,
+    /// 本会话内允许读取所有工作区外路径（仅内存，不持久化）。
+    session_external_read_all: RwLock<HashSet<String>>,
+    /// 本会话内免审批的工具描述符 `(session_id, descriptor_id)`（仅内存，不持久化）。
+    session_allowed_descriptors: RwLock<HashSet<(String, String)>>,
 }
 
 impl std::fmt::Debug for AuthorizeStore {
@@ -243,6 +249,8 @@ impl AuthorizeStore {
         Self {
             entries: RwLock::new(HashMap::new()),
             persist: None,
+            session_external_read_all: RwLock::new(HashSet::new()),
+            session_allowed_descriptors: RwLock::new(HashSet::new()),
         }
     }
 
@@ -253,6 +261,8 @@ impl AuthorizeStore {
         Self {
             entries: RwLock::new(HashMap::new()),
             persist: Some(persist),
+            session_external_read_all: RwLock::new(HashSet::new()),
+            session_allowed_descriptors: RwLock::new(HashSet::new()),
         }
     }
 
@@ -269,6 +279,8 @@ impl AuthorizeStore {
                     .collect(),
             ),
             persist,
+            session_external_read_all: RwLock::new(HashSet::new()),
+            session_allowed_descriptors: RwLock::new(HashSet::new()),
         }
     }
 
@@ -362,6 +374,93 @@ impl AuthorizeStore {
             }
         }
         None
+    }
+
+    /// 授予本会话读取所有工作区外路径的权限（仅内存，不持久化）。
+    pub fn grant_session_external_read(&self, session_id: &str) -> Result<(), String> {
+        let trimmed = session_id.trim();
+        if trimmed.is_empty() {
+            return Err("session_id 不能为空。".to_string());
+        }
+        let mut guard = self
+            .session_external_read_all
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.insert(trimmed.to_string());
+        Ok(())
+    }
+
+    /// 查询指定会话是否已被授予工作区外读取权限。
+    pub fn has_session_external_read(&self, session_id: Option<&str>) -> bool {
+        let Some(trimmed) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        let guard = self
+            .session_external_read_all
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.contains(trimmed)
+    }
+
+    /// 授予本会话指定工具描述符的免审批权限（仅内存，不持久化）。
+    pub fn grant_session_tool_approval(
+        &self,
+        session_id: &str,
+        descriptor_id: &str,
+    ) -> Result<(), String> {
+        let s = session_id.trim();
+        let d = descriptor_id.trim();
+        if s.is_empty() || d.is_empty() {
+            return Err("session_id 与 descriptor_id 均不能为空。".to_string());
+        }
+        let mut guard = self
+            .session_allowed_descriptors
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.insert((s.to_string(), d.to_string()));
+        Ok(())
+    }
+
+    /// 查询指定会话是否已被授予某个工具描述符的免审批权限。
+    pub fn has_session_tool_approval(
+        &self,
+        session_id: Option<&str>,
+        descriptor_id: &str,
+    ) -> bool {
+        let Some(s) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        let d = descriptor_id.trim();
+        if d.is_empty() {
+            return false;
+        }
+        let guard = self
+            .session_allowed_descriptors
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.contains(&(s.to_string(), d.to_string()))
+    }
+
+    /// 撤销指定会话的全部内存会话级授权。
+    pub fn revoke_session_grants(&self, session_id: &str) {
+        let trimmed = session_id.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        {
+            let mut guard = self
+                .session_external_read_all
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.remove(trimmed);
+        }
+        {
+            let mut guard = self
+                .session_allowed_descriptors
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            guard.retain(|(s, _)| s != trimmed);
+        }
     }
 }
 
@@ -458,5 +557,64 @@ pub fn component_eq(left: &Component<'_>, right: &Component<'_>) -> bool {
             }
         }
         (left, right) => left == right,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn session_external_read_is_isolated_non_persistent_and_revokable() {
+        let persist_calls = Arc::new(AtomicUsize::new(0));
+        let persist_counter = Arc::clone(&persist_calls);
+        let store = AuthorizeStore::with_persist(Arc::new(move |_| {
+            persist_counter.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }));
+
+        assert!(store
+            .grant_session_external_read("   ")
+            .is_err(), "空白 session_id 必须 fail-closed");
+        assert!(!store.has_session_external_read(None));
+        assert!(!store.has_session_external_read(Some("")));
+
+        store
+            .grant_session_external_read("sess-a")
+            .expect("grant session-a");
+        assert!(store.has_session_external_read(Some("sess-a")));
+        assert!(!store.has_session_external_read(Some("sess-b")));
+        assert!(
+            store.entries().is_empty(),
+            "会话级授权不得进入持久化 entries()"
+        );
+        assert_eq!(
+            persist_calls.load(Ordering::Relaxed),
+            0,
+            "会话级授权不得触发持久化回调"
+        );
+
+        store.revoke_session_grants("sess-a");
+        assert!(!store.has_session_external_read(Some("sess-a")));
+    }
+
+    #[test]
+    fn session_tool_approval_is_isolated_and_validates_inputs() {
+        let store = AuthorizeStore::new();
+        assert!(store.grant_session_tool_approval("", "builtin:read").is_err());
+        assert!(store.grant_session_tool_approval("sess-a", " ").is_err());
+        assert!(!store.has_session_tool_approval(None, "builtin:read"));
+
+        store
+            .grant_session_tool_approval("sess-a", "mcp:github:create_issue")
+            .expect("grant tool");
+        assert!(store.has_session_tool_approval(Some("sess-a"), "mcp:github:create_issue"));
+        assert!(!store.has_session_tool_approval(Some("sess-a"), "mcp:github:other"));
+        assert!(!store.has_session_tool_approval(Some("sess-b"), "mcp:github:create_issue"));
+        assert!(store.entries().is_empty());
+
+        store.revoke_session_grants("sess-a");
+        assert!(!store.has_session_tool_approval(Some("sess-a"), "mcp:github:create_issue"));
     }
 }

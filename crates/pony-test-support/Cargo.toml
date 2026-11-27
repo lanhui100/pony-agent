@@ -6,3 +6,9 @@ publish = false
 
 [dependencies]
 pony-storage = { path = "../pony-storage" }
+# 本 crate 是各 crate 的 dev-dependency（仅测试构建入图），因此在这里启用
+# `pony-protocol/test-support` 就等于「测试构建启用、生产构建不启用」的编译期门：
+# feature 统一会把该特性带给同一次构建里的 pony-protocol / pony-storage / pony-observability。
+# 替代的自引用 `[dev-dependencies] 自己 = { features = [...] }` 已被
+# 2026-11-25-build-test-layering-and-workspace-crate-split 移除（触发核心库二次编译）。
+pony-protocol = { path = "../pony-protocol", features = ["test-support"] }

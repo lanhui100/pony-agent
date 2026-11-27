@@ -511,7 +511,9 @@ pub fn default_frontend_diagnostics_sqlite_path() -> PathBuf {
 
     #[cfg(not(test))]
     {
-        resolve_frontend_diagnostics_sqlite_path(pony_protocol::sqlite_paths::data_dir_override())
+        // `data_dir_root()`：显式旁路优先，`test-support` 构建下未注入时回落进程级临时沙箱；
+        // 生产构建与引入前逐字等价。
+        resolve_frontend_diagnostics_sqlite_path(pony_protocol::sqlite_paths::data_dir_root())
     }
 }
 

@@ -205,6 +205,8 @@ impl AgentRuntime {
             provider_selection: provider_selection.cloned(),
             // B161：turn 级 ACP 权限句柄随治理事实透传给工具层。
             acp_permission: governed_context.and_then(|context| context.acp_permission.clone()),
+            tool_authorization_mode: governed_context
+                .and_then(|context| context.tool_authorization_mode.clone()),
             ..Default::default()
         };
         let (result, invocation_record, capability_hook_trace_records) =

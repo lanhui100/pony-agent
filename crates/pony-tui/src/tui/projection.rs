@@ -602,6 +602,10 @@ pub fn permission_request_from_pending(
             .and_then(|options| options.get("path"))
             .and_then(|path| path.as_str())
             .map(str::to_string),
+        descriptor_id: value
+            .get("descriptorId")
+            .and_then(|id| id.as_str())
+            .map(str::to_string),
         timestamp_ms: value
             .get("expiresAtMs")
             .and_then(|ms| ms.as_u64())

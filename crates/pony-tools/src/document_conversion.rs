@@ -76,6 +76,16 @@ pub fn read_workspace_document(
     options: &DocumentReadOptions,
     authorizations: &crate::path_permission::AuthorizeStore,
 ) -> Result<DocumentConversion, String> {
+    read_workspace_document_with_options(path, root, options, authorizations, false)
+}
+
+fn read_workspace_document_with_options(
+    path: &str,
+    root: &Path,
+    options: &DocumentReadOptions,
+    authorizations: &crate::path_permission::AuthorizeStore,
+    allow_external_read: bool,
+) -> Result<DocumentConversion, String> {
     let raw_path = path.trim();
     if raw_path.is_empty() {
         return Err("document path cannot be empty".to_string());
@@ -84,7 +94,7 @@ pub fn read_workspace_document(
         return Err("document read byte budgets cannot be zero".to_string());
     }
 
-    let canonical = resolve_inside_workspace(raw_path, root, authorizations)?;
+    let canonical = resolve_inside_workspace(raw_path, root, authorizations, allow_external_read)?;
     let metadata = std::fs::metadata(&canonical)
         .map_err(|error| format!("cannot read document metadata for `{raw_path}`: {error}"))?;
     if !metadata.is_file() {
@@ -176,6 +186,7 @@ fn resolve_inside_workspace(
     raw_path: &str,
     root: &Path,
     authorizations: &crate::path_permission::AuthorizeStore,
+    allow_external_read: bool,
 ) -> Result<PathBuf, String> {
     use crate::path_permission::{PathPermissionChecker, PathPurpose};
     let input = PathBuf::from(raw_path);
@@ -191,15 +202,16 @@ fn resolve_inside_workspace(
         .canonicalize()
         .map_err(|error| format!("cannot resolve workspace root `{}`: {error}", root.display()))?;
     if !canonical.starts_with(&canonical_root) {
-        // workspace 外：授权清单命中放行，否则 `requires_authorization`（审批语义入口）。
+        // workspace 外：授权清单 / 会话或完全访问放行，否则 `requires_authorization`（审批语义入口）。
         let checker = PathPermissionChecker::with_default();
         let tmp = root.join(".tmp");
-        return match checker.classify(
+        return match checker.classify_with_options(
             &canonical.display().to_string(),
             &canonical_root,
             &tmp,
             authorizations,
             PathPurpose::Read,
+            allow_external_read,
         ) {
             Ok(permission) => Ok(permission.canonical),
             Err(error) => Err(format!("{}: {}", error.code.as_str(), error.message)),
@@ -259,7 +271,23 @@ impl PrimitiveToolHandler for ReadDocumentHandler {
                 .unwrap_or(self.default_options.max_output_bytes),
             max_input_bytes: self.default_options.max_input_bytes,
         };
-        let conversion = read_workspace_document(path, &self.root, &options, &self.authorizations)?;
+        let allow_external_read = request.tool_authorization_mode.as_deref().map(str::trim)
+            == Some("full_access")
+            || self
+                .authorizations
+                .has_session_external_read(request.session_id.as_deref());
+        let workspace_root = request
+            .workspace_root
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(&self.root);
+        let conversion = read_workspace_document_with_options(
+            path,
+            workspace_root,
+            &options,
+            &self.authorizations,
+            allow_external_read,
+        )?;
         serde_json::to_value(&conversion).map_err(|e| {
             format!("handler_error: workspace_read_document serialization failed: {e}")
         })
@@ -457,6 +485,7 @@ mod tests {
             workspace_root: None,
             // wave-62 A1（derivative 字段填充）：本用例不涉及取消语义。
             cancellation: None,
+            tool_authorization_mode: None,
         };
         let value = handler.execute(&request).expect("handler should convert");
         assert_eq!(value["format"], serde_json::json!("csv"));
@@ -469,8 +498,45 @@ mod tests {
             session_id: None,
             workspace_root: None,
             cancellation: None,
+            tool_authorization_mode: None,
         };
         let error = handler.execute(&missing).expect_err("missing path must fail");
         assert!(error.contains("missing_argument"), "{error}");
+    }
+
+    #[test]
+    fn handler_full_access_and_session_grant_allow_external_document_read() {
+        let root = temp_workspace();
+        let outside = temp_workspace();
+        let ext_csv = outside.join("external.csv");
+        fs::write(&ext_csv, csv_bytes()).expect("write external csv");
+
+        let auth = Arc::new(crate::path_permission::AuthorizeStore::new());
+        let handler = ReadDocumentHandler::new(root.clone()).with_authorizations(Arc::clone(&auth));
+
+        let base_req = |session: Option<&str>, mode: Option<&str>| PrimitiveToolHandlerRequest {
+            descriptor_id: "builtin:workspace_read_document".to_string(),
+            arguments: serde_json::json!({ "path": ext_csv.display().to_string() }),
+            session_id: session.map(str::to_string),
+            workspace_root: Some(root.display().to_string()),
+            cancellation: None,
+            tool_authorization_mode: mode.map(str::to_string),
+        };
+
+        let denied = handler
+            .execute(&base_req(Some("s1"), Some("workspace_write")))
+            .expect_err("default mode must require authorization");
+        assert!(denied.contains("requires_authorization"), "{denied}");
+
+        let ok_fa = handler
+            .execute(&base_req(Some("s1"), Some("full_access")))
+            .expect("full_access must allow external document read");
+        assert_eq!(ok_fa["format"], serde_json::json!("csv"));
+
+        auth.grant_session_external_read("s-granted").unwrap();
+        let ok_sess = handler
+            .execute(&base_req(Some("s-granted"), Some("workspace_write")))
+            .expect("session external read grant must allow external document read");
+        assert_eq!(ok_sess["format"], serde_json::json!("csv"));
     }
 }
