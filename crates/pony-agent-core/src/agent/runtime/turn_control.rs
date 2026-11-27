@@ -501,6 +501,20 @@ impl AgentRuntime {
     /// Build the `TurnResult` returned when a turn pauses on a control outcome. `phase` is
     /// `SUSPENDED_TURN_PHASE` ("suspended") so the host control plane can react to the Ask wait
     /// without mistaking the turn for a failure or a completion.
+    pub(super) fn suspended_turn_texts(suspension: &ToolTurnSuspension) -> (String, String) {
+        let assistant_message = suspension
+            .pending_request
+            .as_ref()
+            .map(|request| format!("Ask `{}` awaits a host answer before the run resumes.", request.request_id))
+            .unwrap_or_else(|| "工具调用进入控制请求状态，等待宿主应答后继续。".to_string());
+        let session_summary = suspension
+            .pending_request
+            .as_ref()
+            .map(|request| request.request_id.clone())
+            .unwrap_or_else(|| SUSPENDED_TURN_PHASE.to_string());
+        (assistant_message, session_summary)
+    }
+
     pub(super) fn build_suspended_turn_result(
         &self,
         provider_meta: Option<&ProviderEventMeta>,
@@ -510,23 +524,7 @@ impl AgentRuntime {
         hook_trace_records: Vec<HookTraceRecord>,
         suspension: &ToolTurnSuspension,
     ) -> TurnResult {
-        let assistant_message = suspension
-            .pending_request
-            .as_ref()
-            .map(|request| {
-                format!(
-                    "Ask `{}` awaits a host answer before the run resumes.",
-                    request.request_id
-                )
-            })
-            .unwrap_or_else(|| {
-                "工具调用进入控制请求状态，等待宿主应答后继续。".to_string()
-            });
-        let session_summary = suspension
-            .pending_request
-            .as_ref()
-            .map(|request| request.request_id.clone())
-            .unwrap_or_else(|| SUSPENDED_TURN_PHASE.to_string());
+        let (assistant_message, session_summary) = Self::suspended_turn_texts(suspension);
         TurnResult {
             event_id: None,
             event_type: None,

@@ -363,16 +363,25 @@ fn t_c_truncated_native_transcript_keeps_tool_roundtrip_paired() {
         "每个 tool_call 必须恰好配一条 tool 结果（不多不少），tool_calls 数: {expected_call_ids}，messages: {serialized}"
     );
 
-    // Assert 6：当前轮用户输入仍位于最后一条（截断不得吞掉本轮输入）
-    let last = messages.last().expect("messages 非空已在上文断言");
+    // Assert 6：当前轮用户输入位于尾部 `<system-reminder>`（若有）紧邻之前，不得被截断吞掉
+    let non_reminder_last = messages
+        .iter()
+        .rev()
+        .find(|message| {
+            !message
+                .get("content")
+                .and_then(|c| c.as_str())
+                .is_some_and(|text| text.trim_start().starts_with("<system-reminder>"))
+        })
+        .expect("截断后必须保留非 system-reminder 消息");
     assert_eq!(
-        last.get("role").and_then(|r| r.as_str()),
+        non_reminder_last.get("role").and_then(|r| r.as_str()),
         Some("user"),
-        "截断后最后一条必须是当前轮用户输入"
+        "截断后尾部实际用户输入必须是 user 角色"
     );
     assert_eq!(
-        last.get("content").and_then(|c| c.as_str()),
+        non_reminder_last.get("content").and_then(|c| c.as_str()),
         Some(user_message),
-        "截断后最后一条内容必须是当前轮用户输入原文"
+        "截断后实际用户输入内容必须是当前轮用户输入原文"
     );
 }

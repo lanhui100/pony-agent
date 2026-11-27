@@ -29,6 +29,7 @@ impl AgentRuntime {
         first_token_latency_ms: Option<u64>,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
         governed_context: Option<&DispatchContext>,
+        ask_resume_native_pair: Option<&(Value, Value)>,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
         let session_id = input.session_id.as_deref();
         let mut active_provider_meta = provider_meta.clone();
@@ -183,42 +184,28 @@ impl AgentRuntime {
                     if let Some(request) = &suspension.pending_request {
                         runtime_log(format!(
                             "turn:ask-suspend hop={} request={} kind={:?} call_id={} bound_run={:?}",
-                            completed_hops,
-                            request.request_id,
-                            request.request_kind,
-                            request.call_id,
-                            suspension.bound_run_id
+                            completed_hops, request.request_id, request.request_kind, request.call_id, suspension.bound_run_id
                         ));
                     }
-                    // W1b：治理路径已产出挂起标记，却匹配不到可恢复的待处理请求 ⇒
-                    // 不得只发一条裸 `suspended`（用户永远等不到恢复），以可读失败终态收口。
                     if self.suspension_without_recoverable_request(&suspension) {
-                        // F3（NFR）：日志 code 必须与终态错误码一致（首段），见 turn_control。
-                        let unrecoverable_error =
-                            super::turn_control::build_unrecoverable_suspension_error(&suspension);
+                        let unrecoverable_error = super::turn_control::build_unrecoverable_suspension_error(&suspension);
                         runtime_log(format!(
                             "turn:control-suspend-unrecoverable hop={} name={} code={}",
-                            completed_hops,
-                            tool_call.name,
-                            super::turn_control::suspension_error_code(&unrecoverable_error)
+                            completed_hops, tool_call.name, super::turn_control::suspension_error_code(&unrecoverable_error)
                         ));
                         return Err(self.fail_sync_turn_result(
-                            Some(provider_meta),
-                            display_message,
-                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                            tool_activities,
-                            hook_trace_records,
-                            unrecoverable_error,
+                            Some(provider_meta), display_message, self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                            tool_activities, hook_trace_records, unrecoverable_error,
                         ));
                     }
-                    return Err(self.build_suspended_turn_result(
-                        Some(provider_meta),
-                        display_message,
-                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                        tool_activities,
-                        hook_trace_records,
-                        &suspension,
-                    ));
+                    let suspended_result = self.build_suspended_turn_result(
+                        Some(provider_meta), display_message.clone(), self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                        tool_activities.clone(), hook_trace_records, &suspension,
+                    );
+                    self.persist_pre_suspend_tool_hops(&PreSuspendHops {
+                        session_id, turn_id: None, user_message: &user_message, display_message: &display_message, provider_meta: Some(provider_meta), protocol: provider.protocol(), workspace_mode: None, partial_text: "", hop_records: &hop_records, tool_activities: &tool_activities, suspend_note: &suspended_result.assistant_message, ask_resume_native_pair,
+                    });
+                    return Err(suspended_result);
                 }
 
                 // Only abort the turn if the tool was intentionally stopped (e.g. user cancellation).
@@ -561,11 +548,14 @@ impl AgentRuntime {
             return Ok(SyncToolTurnOutcome {
                 assistant_message: response.output_text.clone(),
                 assistant_reasoning_content: response.reasoning_content.clone(),
-                provider_native_transcript: native_transcript_for_tool_turn(
-                    provider.protocol(),
-                    &user_message,
-                    &hop_records,
-                    &response,
+                provider_native_transcript: prepend_ask_resume_native_pair(
+                    native_transcript_for_tool_turn(
+                        provider.protocol(),
+                        &user_message,
+                        &hop_records,
+                        &response,
+                    ),
+                    ask_resume_native_pair,
                 ),
                 provider_source: response.provider_source,
                 provider_mode: response.provider_mode,
@@ -834,8 +824,10 @@ impl AgentRuntime {
             tools,
             planning_request,
             build_context_observation,
+            ask_resume_native_pair,
             ..
         } = prepared;
+        let ask_pair = ask_resume_native_pair;
         let mut provider_call_records = vec![build_provider_call_cache_record(
             ProviderRequestKind::InitialRequest,
             Some(first_decision.provider_source.as_str()),
@@ -902,7 +894,7 @@ impl AgentRuntime {
                 &input, ask_injection.as_ref(), user_message.clone(), display_message.clone(),
                 &provider, &provider_meta, &tools, planning_request, &first_decision, tool_calls,
                 planning_hook_trace_records.clone(), initial_visible_first_token_latency_ms,
-                &mut provider_call_records, governed_context.as_ref(),
+                &mut provider_call_records, governed_context.as_ref(), ask_pair.as_ref(),
             ) {
                 Ok(outcome) => (
                     outcome.assistant_message,
@@ -946,10 +938,13 @@ impl AgentRuntime {
             (
                 first_decision.output_text.clone(),
                 first_decision.reasoning_content.clone(),
-                native_transcript_for_completed_turn(
-                    &user_message,
-                    &first_decision,
-                    provider.persists_native_tool_transcript(),
+                prepend_ask_resume_native_pair(
+                    native_transcript_for_completed_turn(
+                        &user_message,
+                        &first_decision,
+                        provider.persists_native_tool_transcript(),
+                    ),
+                    ask_pair.as_ref(),
                 ),
                 first_decision.provider_source.clone(),
                 first_decision.provider_mode.clone(),

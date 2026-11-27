@@ -92,3 +92,120 @@ fn test_prefix_mutation_reasons_real_collection() {
     assert!(reasons.contains(&PrefixMutationReason::RunGoalChanged), "必须捕获 RunGoalChanged");
     assert!(reasons.contains(&PrefixMutationReason::HistoryBoundaryShifted), "必须捕获 HistoryBoundaryShifted");
 }
+
+#[test]
+fn test_cross_turn_native_prefix_is_byte_identical_with_trailing_system_reminder() {
+    use pony_agent_core::agent::compression::{
+        compact_native_transcript_with_summary, wrap_summary_to_message,
+    };
+    use pony_agent_core::agent::config::{
+        ProviderModelCapabilities, ResolvedProviderSelection, ThinkingParamPattern,
+    };
+    use pony_agent_core::agent::context::{DefaultTurnContextBuilder, TurnContextBuilder};
+    use pony_agent_core::agent::provider::{ProviderAuthType, ProviderManager, ProviderProtocol};
+    use pony_agent_core::agent::session::{EnvironmentInfo, SessionStore, TurnHistoryMessage};
+    use serde_json::json;
+
+    let provider = ProviderManager::new(ResolvedProviderSelection {
+        requested_name: "deepseek".to_string(),
+        provider_name: "deepseek".to_string(),
+        protocol: ProviderProtocol::OpenAiCompletions,
+        base_url: "https://example.invalid/v1".to_string(),
+        auth_type: ProviderAuthType::Auto,
+        api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
+        api_key: Some("test-key".to_string()),
+        model: "deepseek-chat".to_string(),
+        temperature: 0.2,
+        max_output_tokens: 4096,
+        reasoning_effort: None,
+        reasoning_budget_tokens: None,
+        capabilities: ProviderModelCapabilities {
+            context_window_tokens: Some(128_000),
+            supports_tools: true,
+            supports_streaming: true,
+            supports_image_input: false,
+            supports_reasoning: true,
+            ..Default::default()
+        },
+        thinking_param_pattern: ThinkingParamPattern::EffortStandard,
+    });
+    let builder = DefaultTurnContextBuilder;
+    let sid = "cache-stability-e2e";
+    let store = SessionStore::memory_only();
+
+    // 模拟 Turn 1（已带环境变量）：[System..., User_1, <system-reminder>_1]
+    {
+        let mut snap = store.snapshot_at_readonly(Some(sid), None, &[]);
+        snap.env_info = Some(EnvironmentInfo {
+            cwd: "/tmp/ws".to_string(),
+            platform: "linux".to_string(),
+            shell: Some("bash".to_string()),
+            os_version: None,
+            current_date: "2026-11-27".to_string(),
+            timezone: Some("UTC".to_string()),
+            is_git_repo: true,
+            git_branch: Some("main".to_string()),
+        });
+        snap.turn_count = 1;
+        snap.last_referenced_file = Some("a.rs".to_string());
+        let r1 = builder.retrieve_context_state("第一步读配置", &[], Some("coding"), &snap, None, None);
+        let req1 = builder.build_request("coding", &provider, &r1, &[]);
+        let u1_pos = req1
+            .native_messages
+            .iter()
+            .position(|m| m["content"] == "第一步读配置")
+            .unwrap();
+        let prefix1 = &req1.native_messages[..=u1_pos];
+
+        // 模拟 Turn 1 落盘 + 切换瞬态上下文进入 Turn 2
+        snap.history = vec![
+            TurnHistoryMessage {
+                role: "user".to_string(),
+                content: "第一步读配置".to_string(),
+                ..Default::default()
+            },
+            TurnHistoryMessage {
+                role: "assistant".to_string(),
+                content: "配置已读取".to_string(),
+                ..Default::default()
+            },
+        ];
+        snap.provider_native_transcript = vec![
+            json!({ "role": "user", "content": "第一步读配置" }),
+            json!({ "role": "assistant", "content": "配置已读取", "reasoning_content": "ok" }),
+        ];
+        snap.turn_count = 2;
+        snap.last_referenced_file = Some("b.rs".to_string());
+        let r2 = builder.retrieve_context_state("第二步改代码", &[], Some("coding"), &snap, None, None);
+        let req2 = builder.build_request("coding", &provider, &r2, &[]);
+
+        // Turn 2 中到 User_1 为止的原生前缀必须与 Turn 1 到 User_1 逐消息全等（KV Cache 命中前提）
+        assert_eq!(
+            &req2.native_messages[..=u1_pos],
+            prefix1,
+            "Turn 2 的 [System + User_1] 前缀必须与 Turn 1 字节级完全一致"
+        );
+        // Volatile 必须作为 role=user 的 <system-reminder> 在尾部，对话中后部绝无 role=system
+        let last = req2.native_messages.last().unwrap();
+        assert_eq!(last["role"], "user");
+        assert!(last["content"].as_str().unwrap().starts_with("<system-reminder>"));
+        assert!(!req2.native_messages[u1_pos..]
+            .iter()
+            .any(|m| m["role"] == "system"));
+
+        // 验证压缩注入 <session_summary> 后 native_tool_flow 请求能直接读到摘要
+        let wrapped_summary = wrap_summary_to_message("<session_summary>goal: keep ctx</session_summary>");
+        snap.provider_native_transcript = compact_native_transcript_with_summary(
+            &snap.provider_native_transcript,
+            1,
+            Some(&wrapped_summary.content),
+        );
+        let r3 = builder.retrieve_context_state("第三步验收", &[], Some("coding"), &snap, None, None);
+        let req3 = builder.build_request("coding", &provider, &r3, &[]);
+        assert!(req3.native_messages.iter().any(|m| {
+            m["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("<session_summary>"))
+        }));
+    }
+}
