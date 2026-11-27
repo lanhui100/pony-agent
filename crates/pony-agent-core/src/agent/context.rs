@@ -512,8 +512,14 @@ fn build_layered_turn_context(
         (raw_history, 0)
     };
     let history_truncation_note = truncation_note(history_truncated_count, "history messages");
-    let volatile_context_messages =
-        vec![ProviderMessage::developer(content.volatile.render(history_truncation_note.as_deref()))];
+    let volatile_wrapped = super::turn_prompt_content::wrap_system_reminder(
+        &content.volatile.render(history_truncation_note.as_deref()),
+    );
+    let volatile_context_messages = if volatile_wrapped.is_empty() {
+        Vec::new()
+    } else {
+        vec![ProviderMessage::developer(volatile_wrapped)]
+    };
     let volatile_input_messages = vec![current_user_message];
     let volatile_input_observation_text = render_turn_input_for_observation(
         &retrieved.turn_context.user_message,
@@ -627,10 +633,10 @@ fn flatten_layered_input_messages(context: &LayeredTurnContext) -> Vec<ProviderM
     messages.extend(context.memory_messages.clone());
     // 单调历史对话 (Append-only Conversation Carry) 先行，确保长对话 KV Cache 稳定命中
     messages.extend(context.conversation_carry_messages.clone());
-    // 易变上下文 (Volatile Context: 时间/Git分支/Focus/Goal/Skills) 移至历史之后，防止前缀断崖
-    messages.extend(context.volatile_context_messages.clone());
-    // 当前轮次用户易变输入 (Volatile User Input)
+    // 当前轮次用户易变输入先于瞬态 <system-reminder>，确保 User_N 在下一轮落盘后仍复用前缀缓存
     messages.extend(context.volatile_input_messages.clone());
+    // 易变上下文 (Volatile Context: 时间/Git分支/Focus/Goal/Skills) 作为尾部 <system-reminder>
+    messages.extend(context.volatile_context_messages.clone());
     messages
 }
 
@@ -643,11 +649,36 @@ fn flatten_layered_native_messages(context: &LayeredTurnContext) -> Vec<Value> {
     messages.extend(context.native_memory_messages.clone());
     // 单调历史对话 (Append-only Conversation Carry) 先行，确保长对话 KV Cache 稳定命中
     messages.extend(context.native_conversation_carry_messages.clone());
-    // 易变上下文 (Volatile Context: 时间/Git分支/Focus/Goal/Skills) 移至历史之后，防止前缀断崖
-    messages.extend(context.native_volatile_context_messages.clone());
-    // 当前轮次用户易变输入 (Volatile User Input)
+    // 当前轮次用户易变输入先于瞬态 <system-reminder>，确保 User_N 与协议 system 前缀唯一性均不被破坏
     messages.extend(context.native_volatile_input_messages.clone());
+    // 易变上下文 (Volatile Context) 以 role=user <system-reminder> 置于请求尾部
+    messages.extend(context.native_volatile_context_messages.clone());
     messages
+}
+
+/// 为 Prefix-Fork 上下文压缩构建会话的稳定系统前缀（与主对话 KV 前缀一致，不含易变提醒与当前用户输入）。
+pub(crate) fn stable_compaction_prefix(
+    graph_name: &str,
+    provider: &ProviderManager,
+    session: &SessionSnapshot,
+) -> (Vec<ProviderMessage>, Vec<Value>) {
+    let retrieved = DefaultTurnContextBuilder.retrieve_context_state("", &[], None, session, None, None);
+    let layered = build_layered_turn_context(graph_name, provider, &retrieved, &[]);
+    let input_prefix = [
+        layered.base_system_messages,
+        layered.domain_profile_messages,
+        layered.project_instruction_messages,
+        layered.memory_messages,
+    ]
+    .concat();
+    let native_prefix = [
+        layered.native_base_system_messages,
+        layered.native_domain_profile_messages,
+        layered.native_project_instruction_messages,
+        layered.native_memory_messages,
+    ]
+    .concat();
+    (input_prefix, native_prefix)
 }
 
 fn build_request_observation_from_layered_context(
@@ -2590,33 +2621,19 @@ mod tests {
         );
         let request = builder.build_request("coding", &provider, &retrieved, &[]);
 
-        // 验证拓扑顺序：稳定前缀 -> 历史消息 -> 易变上下文 -> 当前输入
+        // 验证拓扑顺序：稳定前缀 -> 历史消息 -> 当前用户输入 -> 尾部瞬态 <system-reminder>
         let messages = &request.input;
-        let history_idx = messages
-            .iter()
-            .position(|m| m.content.contains("previous question"))
-            .expect("must contain previous question");
-        let volatile_idx = messages
-            .iter()
-            .position(|m| m.content.contains("Environment:"))
-            .expect("must contain Environment volatile note");
-        let user_idx = messages
-            .iter()
-            .position(|m| m.content == "current user input")
-            .expect("must contain current user input");
-
-        assert!(
-            history_idx < volatile_idx,
-            "History ({}) must precede volatile context ({}) for stable prefix KV cache",
-            history_idx,
-            volatile_idx
-        );
-        assert!(
-            volatile_idx < user_idx,
-            "Volatile context ({}) must precede current user input ({})",
-            volatile_idx,
-            user_idx
-        );
+        let history_idx = messages.iter().position(|m| m.content.contains("previous question")).unwrap();
+        let user_idx = messages.iter().position(|m| m.content == "current user input").unwrap();
+        let volatile_idx = messages.iter().position(|m| m.content.contains("Environment:")).unwrap();
+        assert!(history_idx < user_idx && user_idx < volatile_idx);
+        assert!(messages[volatile_idx].content.starts_with("<system-reminder>"));
+        let nh = request.native_messages.iter().position(|m| m["content"] == "native user history").unwrap();
+        let nu = request.native_messages.iter().position(|m| m["content"] == "current user input").unwrap();
+        let nv = request.native_messages.iter().position(|m| m["content"].as_str().is_some_and(|c| c.contains("Environment:"))).unwrap();
+        assert!(nh < nu && nu < nv);
+        assert_eq!(request.native_messages[nv]["role"], "user");
+        assert!(!request.native_messages[nh..].iter().any(|m| m["role"] == "system"));
     }
 
     #[test]

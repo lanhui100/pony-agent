@@ -75,6 +75,7 @@ impl AgentRuntime {
         turn_started_at: &Instant,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
         governed_context: Option<&DispatchContext>,
+        ask_resume_native_pair: Option<&(Value, Value)>,
     ) {
         let context_observation = build_context_observation(planning_request, tools);
         let mut hop_records = Vec::new();
@@ -551,28 +552,14 @@ impl AgentRuntime {
                         );
                         return;
                     }
-                    let assistant_message = suspension
-                        .pending_request
-                        .as_ref()
-                        .map(|request| {
-                            format!(
-                                "Ask `{}` awaits a host answer before the run resumes.",
-                                request.request_id
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            "工具调用进入控制请求状态，等待宿主应答后继续。".to_string()
-                        });
-                    let session_summary = suspension
-                        .pending_request
-                        .as_ref()
-                        .map(|request| request.request_id.clone())
-                        .unwrap_or_else(|| SUSPENDED_TURN_PHASE.to_string());
-                    let suspended_trace_steps =
-                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
+                    let (assistant_message, session_summary) = Self::suspended_turn_texts(&suspension);
+                    let suspended_trace_steps = self.telemetry_builder.failed_trace_after_tool(all_tools_ok);
                     if let Some(lease) = injection_lease {
                         self.ack_pending_ask_injection(lease, "suspended");
                     }
+                    self.persist_pre_suspend_tool_hops(&PreSuspendHops {
+                        session_id: input.session_id.as_deref(), turn_id: Some(turn_id), user_message, display_message, provider_meta: Some(provider_meta), protocol: provider.protocol(), workspace_mode: input.workspace_mode.as_deref(), partial_text: accumulated_turn_text.as_str(), hop_records: &hop_records, tool_activities: &tool_activities, suspend_note: &assistant_message, ask_resume_native_pair,
+                    });
                     emit_stream_event(
                         sink,
                         "turn:suspended",
@@ -882,6 +869,7 @@ impl AgentRuntime {
             // 限流退避），不共源就会被算进 dur。
             let provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
             // PA-095 #4：本次 followup call 的 hop 索引（Copy 捕获进 delta 闭包）。
+            maybe_soft_trim_accumulated_followup_messages(provider, &mut accumulated_messages);
             let followup_step = completed_hops as u32;
             let response = match provider_followup_stream_with_calls(
                 provider,
@@ -1376,11 +1364,14 @@ impl AgentRuntime {
                 provider.name(),
                 &completed_mode,
                 accumulated_token_usage.as_ref(),
-                native_transcript_for_tool_turn(
-                    provider.protocol(),
-                    user_message,
-                    &hop_records,
-                    &response,
+                prepend_ask_resume_native_pair(
+                    native_transcript_for_tool_turn(
+                        provider.protocol(),
+                        user_message,
+                        &hop_records,
+                        &response,
+                    ),
+                    ask_resume_native_pair,
                 ),
                 attachments,
                 input.workspace_mode.as_deref(),
@@ -2783,6 +2774,7 @@ impl AgentRuntime {
             tools,
             planning_request,
             build_context_observation,
+            ask_resume_native_pair,
             ..
         } = prepared;
         let provider_meta = provider_event_meta(&provider);
@@ -2931,6 +2923,7 @@ impl AgentRuntime {
                 &turn_started_at,
                 &mut provider_call_records,
                 governed_context.as_ref(),
+                ask_resume_native_pair.as_ref(),
             );
             // 工具子轮的成功/失败/取消都在 handle_stream_tool_turn 内部发射终态，外层拿不到
             // 返回值；这里按终态 checkpoint.status 回读相位（不改 helper 签名）。
@@ -3133,10 +3126,13 @@ impl AgentRuntime {
             provider.name(),
             &completed_mode,
             first_decision.token_usage.as_ref(),
-            native_transcript_for_completed_turn(
-                &user_message,
-                &first_decision,
-                provider.persists_native_tool_transcript(),
+            prepend_ask_resume_native_pair(
+                native_transcript_for_completed_turn(
+                    &user_message,
+                    &first_decision,
+                    provider.persists_native_tool_transcript(),
+                ),
+                ask_resume_native_pair.as_ref(),
             ),
             attachments,
             input.workspace_mode.as_deref(),

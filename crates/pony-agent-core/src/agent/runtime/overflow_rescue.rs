@@ -7,12 +7,13 @@ use super::{
     PreparedTurn, ProviderEventMeta, ProviderManager, SessionStore, TurnInput,
 };
 use crate::agent::compression::{
-    apply_compression, estimate_history_tokens, estimate_native_transcript_tokens,
+    apply_compression, estimate_history_tokens, estimate_native_message_tokens,
+    estimate_native_transcript_tokens, is_session_summary_message,
     trim_native_transcript_to_token_budget, wrap_summary_to_message,
 };
 use crate::agent::retry::{BackoffConfig, ProviderRetryPolicy};
 use crate::agent::session::TurnHistoryMessage;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::{Arc, RwLock};
 
 const FALLBACK_TRIM_SUMMARY_XML: &str =
@@ -162,8 +163,46 @@ pub(super) fn rescue_session_after_context_overflow(
     if !base.provider_native_transcript.is_empty() {
         let before_tokens = estimate_native_transcript_tokens(&base.provider_native_transcript);
         let target_tokens = (before_tokens / 2).max(2_048);
-        let trimmed =
+        let fallback_summary_message = wrap_summary_to_message(FALLBACK_TRIM_SUMMARY_XML);
+        let fallback_summary_for_log = fallback_summary_message.content.clone();
+        let fallback_summary_native = json!({
+            "role": "user",
+            "content": fallback_summary_for_log,
+        });
+        let had_multi_user_turns = base
+            .provider_native_transcript
+            .iter()
+            .filter(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
+            .count()
+            > 1;
+
+        let mut trimmed =
             trim_native_transcript_to_token_budget(&base.provider_native_transcript, target_tokens);
+        if had_multi_user_turns
+            && !trimmed.first().is_some_and(is_session_summary_message)
+        {
+            let summary_tokens = estimate_native_message_tokens(&fallback_summary_native);
+            let tail_budget = target_tokens.saturating_sub(summary_tokens).max(512);
+            let tail =
+                trim_native_transcript_to_token_budget(&base.provider_native_transcript, tail_budget);
+            let mut with_summary = Vec::with_capacity(tail.len() + 1);
+            with_summary.push(fallback_summary_native);
+            with_summary.extend(tail);
+            if estimate_native_transcript_tokens(&with_summary) < before_tokens {
+                trimmed = with_summary;
+            }
+        }
+        let target_history = if had_multi_user_turns {
+            let compressed = apply_compression(base.history.clone(), fallback_summary_message, 0);
+            if compressed.compressed_count > 0 {
+                compressed.history
+            } else {
+                base.history.clone()
+            }
+        } else {
+            base.history.clone()
+        };
+
         let after_tokens = estimate_native_transcript_tokens(&trimmed);
         if trimmed.len() < base.provider_native_transcript.len() || after_tokens < before_tokens {
             commit_fallback_trim(
@@ -171,9 +210,9 @@ pub(super) fn rescue_session_after_context_overflow(
                 session_id,
                 &base.history,
                 &base.provider_native_transcript,
-                base.history.clone(),
+                target_history,
                 trimmed,
-                FALLBACK_TRIM_SUMMARY_XML.to_string(),
+                fallback_summary_for_log,
             )?;
             runtime_log(format!(
                 "overflow_rescue:session={session_id} mode=transcript_trim \
@@ -502,6 +541,14 @@ mod tests {
             "retried payload ({}) must be strictly smaller than initial overflowed payload ({})",
             bodies[2],
             bodies[0]
+        );
+        let rescued_snapshot = read_session_snapshot(&sessions, sid);
+        assert!(
+            rescued_snapshot
+                .provider_native_transcript
+                .iter()
+                .any(is_session_summary_message),
+            "compacted/rescued native transcript must retain <session_summary> so native_tool_flow does not lose earlier context"
         );
     }
 }

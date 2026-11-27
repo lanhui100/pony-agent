@@ -10,8 +10,9 @@
 use super::*;
 use crate::agent::compression::{
     apply_compression_with_transcript, build_compression_system_prompt, build_summary_prefix,
-    build_summary_suffix, compact_native_transcript, estimate_history_tokens,
-    estimate_native_transcript_tokens, retain_tokens_for, should_compress_pressure,
+    build_summary_suffix, compact_native_transcript_with_summary, compressible_native_transcript,
+    estimate_history_tokens, estimate_native_message_tokens, estimate_native_transcript_tokens,
+    retain_tokens_for, retained_user_turns as count_retained_user_turns, should_compress_pressure,
     split_history_with_transcript, wrap_summary_to_message, CompressionConfig, ContextPressure,
 };
 use crate::agent::provider::ProviderStreamGuard;
@@ -81,6 +82,7 @@ pub fn compact_outcome_message(result: &Result<ManualCompactionOutcome, String>)
             let reason = match outcome.reason.as_str() {
                 "history_too_short" => "历史过短，无需压缩",
                 "below_threshold" => "上下文未达到压缩阈值，无需压缩",
+                "summary_not_smaller" => "摘要体积未小于原文，无需压缩",
                 _ => "无需压缩",
             };
             format!("{reason}（保留 {} 条）", outcome.kept_count)
@@ -175,8 +177,26 @@ pub(super) fn compact_session_with_retain_override(
         ));
     }
 
-    // 4) 无锁段：发起摘要调用（带墙钟上界，见 `summarize_with_deadline`）。
-    let request = build_compaction_request(&provider, &to_compress);
+    // 4) 摘要前置 Pruner + Prefix-Fork 摘要请求（复用对话前缀，保留真实角色与工具往返）。
+    let keep_turns_preview = count_retained_user_turns(&to_keep);
+    let mut compressible_native =
+        compressible_native_transcript(&base_transcript, keep_turns_preview);
+    if !compressible_native.is_empty() {
+        crate::agent::tool_pruner::prune_native_messages_in_place(&mut compressible_native);
+        compressible_native =
+            crate::agent::tool_pruner::repair_and_filter_tool_roundtrips(&compressible_native).0;
+    }
+    let pre_tokens = if compressible_native.is_empty() {
+        estimate_history_tokens(&to_compress)
+    } else {
+        estimate_native_transcript_tokens(&compressible_native)
+    };
+    let request = build_compaction_request(
+        &provider,
+        &base,
+        &to_compress,
+        &compressible_native,
+    );
     let summary_text = summarize_with_deadline(provider, request)?;
     let summary_message = wrap_summary_to_message(&summary_text);
     // F3：空摘要（空串/仅空白/仅有 `<session_summary></session_summary>` 壳）一律中止，
@@ -184,6 +204,22 @@ pub(super) fn compact_session_with_retain_override(
     if summary_body(&summary_message.content).is_empty() {
         return Err(format!(
             "{COMPACTION_EMPTY_SUMMARY_ERROR_CODE}: compaction aborted (model returned an empty summary)"
+        ));
+    }
+    // 体积收敛校验：当待压缩文本超过基础阈值（>=512 tokens）时，摘要不得大于等于原文。
+    let summary_tokens = estimate_native_message_tokens(&serde_json::json!({
+        "role": "user",
+        "content": summary_message.content.as_str(),
+    }));
+    if pre_tokens >= 512 && summary_tokens >= pre_tokens {
+        runtime_log(format!(
+            "compact:session={session_id} skipped reason=summary_not_smaller \
+             pre_tokens={pre_tokens} summary_tokens={summary_tokens}"
+        ));
+        return Ok(ManualCompactionOutcome::untouched(
+            "summary_not_smaller",
+            before_tokens,
+            to_keep.len(),
         ));
     }
     // 日志命令要留摘要原文（审计/重放可读），在消息被移入压缩结果前取出。
@@ -221,9 +257,14 @@ pub(super) fn compact_session_with_retain_override(
     let kept_count = result.kept_count + appended_history.len();
     let mut new_history = result.history;
     new_history.extend(appended_history);
-    // **双写**：原生 transcript 按同一轮数裁剪。native-tool-flow 会话的上下文只看
-    // transcript，只改 history 等于没压缩（下一请求照旧把全部工具往返发上去）。
-    let mut new_transcript = compact_native_transcript(&base_transcript, retained_user_turns);
+    // **双写 + 摘要注入**：原生 transcript 按同一轮数裁剪，并在首部写入 `<session_summary>` 消息。
+    // `native_tool_flow` 会话只消费 `provider_native_transcript`；若只裁剪前缀而不注入摘要，
+    // 压缩后模型将彻底丢失早期上下文。
+    let mut new_transcript = compact_native_transcript_with_summary(
+        &base_transcript,
+        retained_user_turns,
+        Some(&summary_for_log),
+    );
     new_transcript.extend(appended_transcript);
     let transcript_after_len = new_transcript.len();
     let after_tokens =
@@ -268,21 +309,56 @@ pub(super) fn read_session_snapshot(
     store.snapshot_at_readonly(Some(session_id), None, &[])
 }
 
-/// 构建摘要请求（与 `runtime/turn_prep.rs` 的自动压缩口径一致：
-/// system prompt + 待压缩消息逐条 user、temperature 0.3、max_output_tokens 2048）。
+/// 构建 Prefix-Fork 摘要请求：
+/// - 若存在原生 transcript（且已先经过 ToolResultPruner 修剪与配对修复），在 `native_messages` 中复用
+///   稳定系统前缀 + 真实 `user`/`assistant`/`tool` 往返，并在尾部以 `user` 消息追加压缩指令以复用 KV Cache；
+/// - 非原生路径在 `input` 中保留 `user` 与 `Previous assistant reply:` 角色区分（不再混为纯 `user`）。
 fn build_compaction_request(
     provider: &ProviderManager,
+    session: &crate::agent::session::SessionSnapshot,
     to_compress: &[TurnHistoryMessage],
+    compressible_native: &[Value],
 ) -> ProviderRequest {
-    let mut messages = vec![ProviderMessage::system(build_compression_system_prompt())];
+    let compaction_prompt = build_compression_system_prompt();
+    let (stable_input_prefix, stable_native_prefix) =
+        crate::agent::context::stable_compaction_prefix("coding", provider, session);
+
+    let mut input_messages = Vec::with_capacity(stable_input_prefix.len() + to_compress.len() + 1);
+    input_messages.extend(stable_input_prefix);
     for message in to_compress {
-        messages.push(ProviderMessage::user(&message.content));
+        if message.role == "assistant" {
+            input_messages.push(ProviderMessage::developer(format!(
+                "Previous assistant reply: {}",
+                message.content
+            )));
+        } else {
+            input_messages.push(ProviderMessage::user(&message.content));
+        }
     }
+    input_messages.push(ProviderMessage::user(compaction_prompt.clone()));
+
+    let native_messages = if compressible_native.is_empty()
+        || !provider.supports_native_tool_transcript_replay()
+    {
+        Vec::new()
+    } else {
+        let mut native = Vec::with_capacity(
+            stable_native_prefix.len() + compressible_native.len() + 1,
+        );
+        native.extend(stable_native_prefix);
+        native.extend_from_slice(compressible_native);
+        native.push(serde_json::json!({
+            "role": "user",
+            "content": compaction_prompt,
+        }));
+        native
+    };
+
     ProviderRequest {
         model: provider.model().to_string(),
-        input: messages,
+        input: input_messages,
         images: Vec::new(),
-        native_messages: Vec::new(),
+        native_messages,
         observation: ProviderRequestObservation::default(),
         temperature: 0.3,
         max_output_tokens: 2048,
@@ -471,5 +547,62 @@ mod tests {
         let rewritten = vec![turn("user", "a"), turn("assistant", "ZZZ")];
         let error = concurrent_suffix(&base, &rewritten, "history").expect_err("rewritten must fail");
         assert!(error.contains(COMPACTION_HISTORY_CHANGED_ERROR_CODE), "{error}");
+    }
+
+    #[test]
+    fn prefix_fork_compaction_request_preserves_roles_and_pruned_native_transcript() {
+        let selection = crate::agent::config::ResolvedProviderSelection {
+            requested_name: "deepseek".to_string(),
+            provider_name: "deepseek".to_string(),
+            protocol: crate::agent::provider::ProviderProtocol::OpenAiCompletions,
+            base_url: "https://example.invalid/v1".to_string(),
+            auth_type: crate::agent::provider::ProviderAuthType::Auto,
+            api_key_env_var: "DEEPSEEK_API_KEY".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: "deepseek-chat".to_string(),
+            temperature: 0.2,
+            max_output_tokens: 1024,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: crate::agent::config::ProviderModelCapabilities {
+                supports_tools: true,
+                ..Default::default()
+            },
+            thinking_param_pattern: crate::agent::config::ThinkingParamPattern::EffortStandard,
+        };
+        let provider = ProviderManager::new(selection);
+        let session = crate::agent::session::SessionStore::memory_only()
+            .snapshot_at_readonly(Some("prefix-fork-test"), None, &[]);
+        let to_compress = vec![turn("user", "请读文件"), turn("assistant", "已读取")];
+        let mut compressible_native = vec![
+            serde_json::json!({ "role": "user", "content": "请读文件" }),
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{ "id": "c1", "type": "function", "function": { "name": "read", "arguments": "{}" } }]
+            }),
+            serde_json::json!({ "role": "tool", "tool_call_id": "c1", "content": "k".repeat(12_000) }),
+            serde_json::json!({ "role": "assistant", "content": "已读取" }),
+        ];
+        crate::agent::tool_pruner::prune_native_messages_in_place(&mut compressible_native);
+
+        let request =
+            build_compaction_request(&provider, &session, &to_compress, &compressible_native);
+        assert!(
+            !request.native_messages.is_empty(),
+            "native-tool-flow 压缩请求必须走 prefix-fork native_messages"
+        );
+        assert!(request
+            .native_messages
+            .iter()
+            .any(|msg| msg.get("role").and_then(Value::as_str) == Some("tool")
+                && msg
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|c| c.contains(crate::agent::tool_pruner::PRUNE_MARKER))));
+        assert!(request.input.iter().any(|m| {
+            matches!(m.role, crate::agent::provider::ProviderRole::Developer)
+                && m.content.starts_with("Previous assistant reply:")
+        }));
     }
 }

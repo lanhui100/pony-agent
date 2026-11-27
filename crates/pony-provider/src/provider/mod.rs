@@ -4500,12 +4500,21 @@ fn text_if_present(text: &str) -> Option<&str> {
     }
 }
 
+fn is_system_reminder_message(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("<system-reminder>")
+}
+
 fn anthropic_system_text(input: &[ProviderMessage]) -> String {
     input
         .iter()
         .filter(|message| matches!(message.role, ProviderRole::System | ProviderRole::Developer))
-        // 过滤掉 Previous assistant reply，它们应该出现在 messages 数组中作为 assistant 轮次
-        .filter(|message| !message.content.starts_with("Previous assistant reply:"))
+        // 过滤掉 Previous assistant reply（assistant 轮次）与尾部 <system-reminder>（易变提醒进 user 消息，避免打穿 Anthropic system 缓存）
+        .filter(|message| {
+            !message.content.starts_with("Previous assistant reply:")
+                && (!matches!(message.role, ProviderRole::Developer)
+                    || !is_system_reminder_message(&message.content))
+        })
         .map(|message| message.content.clone())
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -4599,8 +4608,14 @@ fn anthropic_conversation_messages(request: &ProviderRequest) -> Vec<Value> {
                         "role": "assistant",
                         "content": reply
                     }));
+                } else if is_system_reminder_message(&message.content) {
+                    // 易变运行时提醒作为 user <system-reminder> 加入对话尾部，避免污染 system 前缀缓存
+                    messages.push(json!({
+                        "role": "user",
+                        "content": message.content
+                    }));
                 }
-                // 其他 Developer 消息继续留在 system text 中（由 anthropic_system_text 处理）
+                // 其他稳定 Developer 消息继续留在 system text 中（由 anthropic_system_text 处理）
             }
             ProviderRole::System => {
                 // System 消息留在 system text 中
@@ -4804,6 +4819,14 @@ fn openai_request_messages(request: &ProviderRequest) -> Vec<Value> {
                     "content": reply
                 });
             }
+            if matches!(message.role, ProviderRole::Developer)
+                && is_system_reminder_message(&message.content)
+            {
+                return json!({
+                    "role": "user",
+                    "content": message.content
+                });
+            }
             json!({
                 "role": to_chat_role(&message.role),
                 "content": openai_message_content(message.content.as_str(), is_last_user_with_images(index, last_user_index, &request.images), &request.images)
@@ -4945,20 +4968,25 @@ pub fn provider_native_assistant_tool_call_message_with_reasoning_value(
     reasoning_content: Option<&Value>,
     tool_call: &ToolCall,
 ) -> Value {
+    provider_native_assistant_tool_calls_message_with_reasoning_value(
+        content,
+        reasoning_content,
+        std::slice::from_ref(tool_call),
+    )
+}
+
+/// 批量版 OpenAI native assistant tool_calls 消息：单条 assistant 承载整批 `tool_calls`，
+/// 不为并行调用克隆 N 份 `content` 与 `reasoning_content`。
+pub fn provider_native_assistant_tool_calls_message_with_reasoning_value(
+    content: Option<&str>,
+    reasoning_content: Option<&Value>,
+    tool_calls: &[ToolCall],
+) -> Value {
     json!({
         "role": "assistant",
         "content": content,
         "reasoning_content": reasoning_content,
-        "tool_calls": [
-            {
-                "id": tool_call.call_id.clone().unwrap_or_else(|| "tool_call_local".to_string()),
-                "type": "function",
-                "function": {
-                    "name": openai_safe_tool_name(&tool_call.name),
-                    "arguments": tool_call.arguments.to_string()
-                }
-            }
-        ]
+        "tool_calls": openai_tool_calls_payload(tool_calls),
     })
 }
 
@@ -4968,11 +4996,28 @@ pub fn provider_native_assistant_tool_call_message_for_protocol(
     reasoning_content: Option<&Value>,
     tool_call: &ToolCall,
 ) -> Value {
+    provider_native_assistant_tool_calls_message_for_protocol(
+        protocol,
+        content,
+        reasoning_content,
+        std::slice::from_ref(tool_call),
+    )
+}
+
+/// 批量版按协议构造 native assistant 工具调用消息：
+/// - OpenAI：`role = "assistant"` + `tool_calls: [...]`；
+/// - Anthropic：`role = "assistant"` + `[thinking?, text?, tool_use...]`。
+pub fn provider_native_assistant_tool_calls_message_for_protocol(
+    protocol: &ProviderProtocol,
+    content: Option<&str>,
+    reasoning_content: Option<&Value>,
+    tool_calls: &[ToolCall],
+) -> Value {
     if !protocol.is_anthropic() {
-        return provider_native_assistant_tool_call_message_with_reasoning_value(
+        return provider_native_assistant_tool_calls_message_with_reasoning_value(
             content,
             reasoning_content,
-            tool_call,
+            tool_calls,
         );
     }
 
@@ -4985,12 +5030,14 @@ pub fn provider_native_assistant_tool_call_message_for_protocol(
             "text": content
         }));
     }
-    blocks.push(json!({
-        "type": "tool_use",
-        "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
-        "name": tool_call.name,
-        "input": tool_call.arguments
-    }));
+    for tool_call in tool_calls {
+        blocks.push(json!({
+            "type": "tool_use",
+            "id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+            "name": tool_call.name,
+            "input": tool_call.arguments
+        }));
+    }
     json!({
         "role": "assistant",
         "content": blocks
@@ -5013,19 +5060,45 @@ pub fn provider_native_tool_result_message_for_protocol(
     tool_call: &ToolCall,
     tool_result: &ToolResult,
 ) -> Value {
+    provider_native_tool_results_messages_for_protocol(protocol, &[(tool_call, tool_result)])
+        .into_iter()
+        .next()
+        .unwrap_or(Value::Null)
+}
+
+/// 批量版按协议构造工具结果回填消息：
+/// - OpenAI：每个 `(call, result)` 产出一条 `role = "tool"`；
+/// - Anthropic：同一批所有 `tool_result` 聚合进**单条** `role = "user"` 消息，满足
+///   `1 assistant(N tool_use) -> 1 user(N tool_result)` 配对约束。
+pub fn provider_native_tool_results_messages_for_protocol(
+    protocol: &ProviderProtocol,
+    pairs: &[(&ToolCall, &ToolResult)],
+) -> Vec<Value> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
     if !protocol.is_anthropic() {
-        return provider_native_tool_result_message(tool_call, tool_result);
+        return pairs
+            .iter()
+            .map(|(tool_call, tool_result)| provider_native_tool_result_message(tool_call, tool_result))
+            .collect();
     }
 
-    json!({
+    let blocks: Vec<Value> = pairs
+        .iter()
+        .map(|(tool_call, tool_result)| {
+            json!({
+                "type": "tool_result",
+                "tool_use_id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
+                "content": anthropic_tool_result_content(tool_result),
+                "is_error": tool_result.status != "ok"
+            })
+        })
+        .collect();
+    vec![json!({
         "role": "user",
-        "content": [{
-            "type": "tool_result",
-            "tool_use_id": tool_call.call_id.clone().unwrap_or_else(|| "toolu_local".to_string()),
-            "content": anthropic_tool_result_content(tool_result),
-            "is_error": tool_result.status != "ok"
-        }]
-    })
+        "content": blocks
+    })]
 }
 
 fn anthropic_native_assistant_message(content: &[Value]) -> Value {
@@ -6447,8 +6520,19 @@ fn derive_native_request_observation(messages: &[Value]) -> ProviderRequestObser
         .min(messages.len().saturating_sub(1));
     let volatile_input_start = messages
         .iter()
-        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .unwrap_or(messages.len().saturating_sub(1));
+        .rposition(|message| {
+            message.get("role").and_then(Value::as_str) == Some("user")
+                && !message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_system_reminder_message)
+        })
+        .unwrap_or_else(|| {
+            messages
+                .iter()
+                .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+                .unwrap_or(messages.len().saturating_sub(1))
+        });
 
     ProviderRequestObservation {
         stable_prefix_text: render_native_messages(&messages[..stable_prefix_end]),

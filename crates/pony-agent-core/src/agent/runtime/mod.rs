@@ -33,7 +33,9 @@ use crate::agent::provider::{
     provider_native_assistant_tool_call_message,
     provider_native_assistant_tool_call_message_for_protocol,
     provider_native_assistant_tool_call_message_with_reasoning_value,
-    provider_native_tool_result_message_for_protocol, provider_native_user_message,
+    provider_native_assistant_tool_calls_message_for_protocol,
+    provider_native_tool_result_message_for_protocol,
+    provider_native_tool_results_messages_for_protocol, provider_native_user_message,
     BuildContextObservation, ProviderDecision, ProviderManager, ProviderMessage, ProviderRequest,
     ProviderRequestObservation, ProviderResponse, ProviderStreamChunk, TokenUsage,
 };

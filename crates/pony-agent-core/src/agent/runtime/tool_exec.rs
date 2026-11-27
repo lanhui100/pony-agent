@@ -4,12 +4,25 @@ use super::*;
 
 impl AgentRuntime {
     pub(crate) fn resolve_provider(&self, input: &TurnInput) -> ProviderManager {
+        self.resolve_provider_for(
+            input.provider_id.as_deref(),
+            input.model_id.as_deref(),
+            input.reasoning_effort.clone(),
+        )
+    }
+
+    pub(crate) fn resolve_provider_for(
+        &self,
+        provider_id: Option<&str>,
+        model_id: Option<&str>,
+        reasoning_effort: Option<ProviderReasoningEffort>,
+    ) -> ProviderManager {
         let mut selection = self
             .provider_resolver
-            .resolve_provider_selection(input.provider_id.as_deref(), input.model_id.as_deref());
+            .resolve_provider_selection(provider_id, model_id);
 
         if selection.capabilities.supports_reasoning {
-            selection.reasoning_effort = input.reasoning_effort.clone();
+            selection.reasoning_effort = reasoning_effort;
         } else {
             selection.reasoning_effort = None;
         }

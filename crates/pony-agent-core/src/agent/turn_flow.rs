@@ -39,6 +39,9 @@ pub struct PreparedTurn {
     pub planner_skills: Vec<SkillDescriptor>,
     pub planning_request: ProviderRequest,
     pub build_context_observation: BuildContextObservation,
+    /// B1795705303234: Consumed Ask resume `(assistant_tool_call, tool_result)` pair so completed
+    /// turns can persist the resumed Q&A into `provider_native_transcript`.
+    pub ask_resume_native_pair: Option<(serde_json::Value, serde_json::Value)>,
 }
 
 pub struct PlannedTurn {

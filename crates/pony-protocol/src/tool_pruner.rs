@@ -114,20 +114,92 @@ pub fn prune_tool_result_default<'a>(content: &'a str) -> Cow<'a, str> {
 
 /// 就地修剪原生消息列表中的工具消息：仅超阈值消息发生替换，
 /// 未超阈值消息零复制（避免每轮对全量 transcript 重复 clone）。
+/// 同时支持 OpenAI `role == "tool"` 与 Anthropic `role == "user"` 内嵌 `tool_result` 块。
 pub fn prune_native_messages_in_place(messages: &mut [Value]) {
+    let _ = prune_native_messages_with_budget(messages, PruneBudget::TRANSCRIPT);
+}
+
+/// 轮内多跳 Soft-Trim：只修剪**早于尾部保护窗口**的历史工具结果，保留最近几条原始输出，
+/// 返回实际被修剪的工具结果数量。
+pub fn prune_older_tool_results_in_place(
+    messages: &mut [Value],
+    protect_tail_messages: usize,
+    budget: PruneBudget,
+) -> usize {
+    let prune_end = messages.len().saturating_sub(protect_tail_messages);
+    if prune_end == 0 {
+        return 0;
+    }
+    prune_native_messages_with_budget(&mut messages[..prune_end], budget)
+}
+
+fn prune_native_messages_with_budget(messages: &mut [Value], budget: PruneBudget) -> usize {
+    let mut pruned_count = 0usize;
     for message in messages {
-        if message.get("role").and_then(Value::as_str) != Some("tool") {
+        match message.get("role").and_then(Value::as_str) {
+            Some("tool") => {
+                if let Some(content_str) = message.get("content").and_then(Value::as_str) {
+                    if let Cow::Owned(pruned) = prune_tool_result_with_budget(content_str, budget) {
+                        if let Some(map) = message.as_object_mut() {
+                            map.insert("content".to_string(), Value::String(pruned));
+                            pruned_count += 1;
+                        }
+                    }
+                }
+            }
+            Some("user") => {
+                pruned_count += prune_anthropic_user_tool_results(message, budget);
+            }
+            _ => {}
+        }
+    }
+    pruned_count
+}
+
+fn prune_anthropic_user_tool_results(message: &mut Value, budget: PruneBudget) -> usize {
+    let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut pruned_count = 0usize;
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
             continue;
         }
-        let Some(content_str) = message.get("content").and_then(Value::as_str) else {
-            continue;
-        };
-        let Cow::Owned(pruned) = prune_tool_result_default(content_str) else {
-            continue;
-        };
-        if let Some(map) = message.as_object_mut() {
-            map.insert("content".to_string(), Value::String(pruned));
+        pruned_count += usize::from(prune_anthropic_tool_result_block(block, budget));
+    }
+    pruned_count
+}
+
+fn prune_anthropic_tool_result_block(block: &mut Value, budget: PruneBudget) -> bool {
+    match block.get("content") {
+        Some(Value::String(text)) => {
+            if let Cow::Owned(pruned) = prune_tool_result_with_budget(text, budget) {
+                block["content"] = Value::String(pruned);
+                return true;
+            }
+            false
         }
+        Some(Value::Array(items)) => {
+            let mut changed = false;
+            let mut updated = items.clone();
+            for item in &mut updated {
+                if item.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                let Some(text) = item.get("text").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Cow::Owned(pruned) = prune_tool_result_with_budget(text, budget) {
+                    item["text"] = Value::String(pruned);
+                    changed = true;
+                }
+            }
+            if changed {
+                block["content"] = Value::Array(updated);
+            }
+            changed
+        }
+        _ => false,
     }
 }
 
@@ -135,6 +207,28 @@ pub fn prune_native_messages_in_place(messages: &mut [Value]) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_prune_older_tool_results_protects_tail_and_supports_anthropic() {
+        let big = "x".repeat(10_000);
+        let mut messages = vec![
+            json!({ "role": "tool", "tool_call_id": "c1", "content": big }),
+            json!({
+                "role": "user",
+                "content": [{ "type": "tool_result", "tool_use_id": "tu1", "content": big }]
+            }),
+            json!({ "role": "tool", "tool_call_id": "c2", "content": big }),
+        ];
+        let pruned = prune_older_tool_results_in_place(&mut messages, 1, PruneBudget::TRANSCRIPT);
+        assert_eq!(pruned, 2);
+        assert!(messages[0]["content"].as_str().unwrap().contains(PRUNE_MARKER));
+        assert!(messages[1]["content"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(PRUNE_MARKER));
+        // 受保护的最新一条工具输出不得被修剪
+        assert_eq!(messages[2]["content"].as_str().unwrap().len(), 10_000);
+    }
 
     #[test]
     fn test_prune_below_threshold_returns_borrowed() {
