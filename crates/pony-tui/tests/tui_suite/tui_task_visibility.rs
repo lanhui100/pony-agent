@@ -119,22 +119,48 @@ fn summary_lists_goal_plan_tasks_agents_jobs_in_order() {
         positions.windows(2).all(|pair| pair[0] < pair[1]),
         "摘要段顺序必须是 目标 → 计划 → 任务 → 智能体 → 后台，实际 {summary:?}"
     );
-    assert!(summary.contains("3/5"), "目标段必须带轮次：{summary:?}");
+    assert!(
+        summary.contains("◎ 目标"),
+        "目标段必须出现且带状态图标：{summary:?}"
+    );
+    assert!(
+        !summary.contains("3/5"),
+        "底栏目标段不再显示轮次（轮次只属于抽屉 Goal 页签）：{summary:?}"
+    );
     assert!(summary.contains("2/5"), "计划段必须带完成比：{summary:?}");
     assert!(summary.contains("⛔1"), "任务段必须标阻塞数：{summary:?}");
 }
 
 #[test]
-fn summary_reports_stopped_goal_alongside_active_phase() {
+fn summary_marks_goal_without_auto_rounds_by_icon_only() {
     let mut state = TuiState::default();
     state.set_goal(goal(2, Some(5), GoalPhase::Active));
-    state.goal_rounds_stopped =
-        Some(pony_agent_core::agent::goal::GoalRoundStopReason::Cancelled);
+    state.goal_rounds_stopped = Some(pony_agent_core::agent::goal::GoalRoundStopReason::Cancelled);
     let summary = tui::task_summary(&state).expect("摘要必须存在");
     assert!(
-        summary.contains("·停"),
-        "自动续轮已停时必须与「进行中」共存可见，实际 {summary:?}"
+        summary.contains("◌ 目标"),
+        "续轮未在跑时目标段必须换状态图标，实际 {summary:?}"
     );
+    assert!(
+        !summary.contains("轮") && !summary.contains("停"),
+        "底栏不再用文字/轮次表达续轮状态，只用图标：{summary:?}"
+    );
+}
+
+#[test]
+fn summary_marks_paused_and_blocked_goal_by_icon() {
+    for (phase, glyph) in [
+        (GoalPhase::Paused, "⏸ 目标"),
+        (GoalPhase::Blocked, "⛔ 目标"),
+    ] {
+        let mut state = TuiState::default();
+        state.set_goal(goal(1, Some(5), phase));
+        let summary = tui::task_summary(&state).expect("摘要必须存在");
+        assert!(
+            summary.contains(glyph),
+            "{phase:?} 阶段必须用 {glyph} 图标表达，实际 {summary:?}"
+        );
+    }
 }
 
 #[test]

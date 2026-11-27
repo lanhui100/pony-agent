@@ -117,32 +117,31 @@ pub(crate) fn sync_task_glance(state: &mut TuiState, control_plane: &HostControl
     projection::sync_goal_state_lossless(state);
 }
 
-/// Goal 摘要段（决策 3A）：`◎ 目标 {round}/{max}{状态后缀}`。
+/// Goal 摘要段（决策 3A，2026-11-27 修订）：`{状态图标} 目标`。
 ///
-/// 完成态（`GoalPhase::Completed`）不出段 —— 抽屉 Goal 页签仍可回看；常驻左槽只报活跃/需关注态。
+/// 只报**状态**，不报轮次：轮次属于抽屉 Goal 页签（那里有空间写 `轮次 3 / 5`），
+/// 常驻底栏多一个数字只会挤占宽度，且在目标卡住时被读成「进度」。
+/// 状态一律由图标承担（`◎` 续轮在跑 / `◌` 续轮不在跑 / `⏸` 阶段暂停 / `⛔` 阻塞），
+/// 与抽屉的阶段词（`phase_text`）不重复占词。
 fn goal_segment(state: &TuiState) -> Option<String> {
     let goal = state.goal_state.as_ref()?;
-    if goal.phase == GoalPhase::Completed {
-        return None;
-    }
-    let rounds = match goal.max_rounds {
-        Some(max) => format!("{}/{}", goal.round_count, max),
-        None => format!("{}", goal.round_count),
+    let glyph = match goal.phase {
+        // 完成态不出段 —— 抽屉 Goal 页签仍可回看；常驻左槽只报活跃/需关注态。
+        GoalPhase::Completed => return None,
+        // 「续轮不在跑」必须与「进行中」区分：否则横幅会谎称还在自动续轮。
+        // 图标保持中性（「未在跑」），既不说「停」也不说「未续」——B193 的语义区分
+        // （从未启动 ≠ 跑起来后停下）由抽屉的 `visible_line()` 逐字承担，底栏不复制。
+        GoalPhase::Active => {
+            if state.goal_rounds_stopped.is_some() {
+                "◌"
+            } else {
+                "◎"
+            }
+        }
+        GoalPhase::Paused => "⏸",
+        GoalPhase::Blocked => "⛔",
     };
-    let suffix = match goal.phase {
-        GoalPhase::Active => match state.goal_rounds_stopped.as_ref() {
-            // 「已停止」与「进行中」必须共存可见：否则横幅会谎称还在自动续轮。
-            // 但**从未启动**的情形（首轮门未过 / 无轮可续 / 本线程让位）说「停」同样是假结论，
-            // 措辞改由 `never_started()` 唯一决定（B193 的语义区分不能在横幅这一层被抹掉）。
-            Some(reason) if reason.never_started() => "·未续",
-            Some(_) => "·停",
-            None => "",
-        },
-        GoalPhase::Paused => "·暂停",
-        GoalPhase::Blocked => "·阻塞",
-        GoalPhase::Completed => "",
-    };
-    Some(format!("◎ 目标 {rounds}{suffix}"))
+    Some(format!("{glyph} 目标"))
 }
 
 /// Plan 摘要段（决策 3A）：`▤ 计划 {done}/{total}{·待批}`。
@@ -179,18 +178,21 @@ fn tasks_segment(glance: &TaskGlance) -> Option<String> {
     }
 }
 
-/// 智能体摘要段（决策 3A）：`⚡ 智能体 {running}`（有失败补 `✘N`）。
+/// 智能体摘要段（决策 3A）：`⚡ 智能体 {running}`（需关注补 `(⚠N)`）。
 ///
 /// 合并三类运行态：Teammate driving + 运行中子代理 + 活跃 ACP 委派；失败数只取
 /// Teammate 与子代理（ACP 委派失败即返回，不在注册表留痕）。
+///
+/// 2026-11-27 修订：需关注数不再以 `✘N` 直接粘在运行数后面（`2·✘1` 会被读成一个数字串，
+/// 且 `✘` 与「失败」的语义权重过高）。改与任务段同语法：括号里挂图标计数 `(⚠1)`。
 fn agents_segment(glance: &TaskGlance) -> Option<String> {
     let running = glance.agents_running + glance.subagents_running + glance.acp_running;
     let attention = glance.agents_attention + glance.subagents_attention;
     match (running, attention) {
         (0, 0) => None,
         (running, 0) => Some(format!("⚡ 智能体 {running}")),
-        (0, attention) => Some(format!("⚡ 智能体 ✘{attention}")),
-        (running, attention) => Some(format!("⚡ 智能体 {running}·✘{attention}")),
+        (0, attention) => Some(format!("⚡ 智能体 (⚠{attention})")),
+        (running, attention) => Some(format!("⚡ 智能体 {running}(⚠{attention})")),
     }
 }
 

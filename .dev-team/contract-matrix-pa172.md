@@ -342,16 +342,23 @@ pub fn turn_stream_outcome_from_terminal(terminal: /* 既有入参 */) -> TurnSt
 
 | 条目 | 旧逐字（作废） | 现行逐字 |
 |---|---|---|
-| B4 `BudgetPersistFailed` | `goal 续轮已停止（本轮预算推进落盘失败，已暂停自动续轮）` | `目标已暂停：续轮已停止｜本轮预算推进写盘失败｜检查磁盘后发「继续」` |
-| B5 `NoActiveGoal` | `goal 续轮已停止（当前会话无进行中的目标）` | `目标已暂停：续轮已停止｜当前会话没有可续的目标｜/goal 创建目标` |
+| B4 `BudgetPersistFailed` | `goal 续轮已停止（本轮预算推进落盘失败，已暂停自动续轮）` | `目标已暂停：续轮已停止｜本轮预算推进写盘失败｜检查磁盘后发「继续」` ⚠️ **首段已再改为 `自动续轮已停止`，见下方「再修正」** |
+| B5 `NoActiveGoal` | `goal 续轮已停止（当前会话无进行中的目标）` | `目标已暂停：续轮已停止｜当前会话没有可续的目标｜/goal 创建目标` ⚠️ **首段已再改为 `自动续轮已停止`，见下方「再修正」** |
 
 **同时修正 B2 的读取点描述**：横幅不再派生「已停止（{visible_line}）」这样的拼接串。
 状态条只取短后缀 `·停` / `·未续`（由 `GoalRoundStopReason::never_started()` 决定），
+—— **该后缀自 2026-11-27 起废止**，改状态图标（见下方「再修正」）。
 `visible_line()` 只进状态行与消息区 —— 同一事实不在一处以上重复陈述。
 
 理由与全表见 pa171 契约矩阵 `Amendment: b193-2`（一条字符串服务四种消费者 ⇒ 拆成
 `code`/`severity`/`headline`/`detail`/`action_hint`/`enters_history`/`never_started` 七个访问器，
 严重级由枚举给而非关键词猜）。
+
+**再修正（2026-11-27，`Amendment: goal-stop-copy-owner`）**：上表 B4/B5 的「现行逐字」首段
+`目标已暂停：续轮已停止` 再被改为 `自动续轮已停止`（停止原因不冒认阶段），且状态条**不再**
+派生 `·停` / `·未续` 文字后缀 —— 底栏 goal 段改为状态图标（`◎`/`◌`/`⏸`/`⛔`）且不显示轮次。
+理由、全表与机器凭证见 `.dev-team/contract-matrix-pa171.md` 的 `Amendment: goal-stop-copy-owner`；
+变体集合、`code()`、`severity()`、`enters_history()`、`never_started()` 语义**一律不变**。
 
 ## 9. 写域、依赖与合并顺序
 

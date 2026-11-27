@@ -211,12 +211,44 @@ mod tests {
         // 提示行用 faint、停止行按枚举严重级、元信息用 INK_SOFT、objective 用 INK。
         assert_eq!(row_style(GOAL_PANEL_HINT, None), faint());
         assert_eq!(
-            row_style("目标已暂停：续轮已停止", Some(SystemMessageSeverity::Error)).fg,
+            row_style(
+                &GoalRoundStopReason::Cancelled.visible_line(),
+                Some(SystemMessageSeverity::Error)
+            )
+            .fg,
             Some(theme::DANGER)
         );
         assert_eq!(row_style("阶段 进行中", None).fg, Some(theme::INK_SOFT));
         assert_eq!(row_style("轮次 1 / 2", None).fg, Some(theme::INK_SOFT));
         assert_eq!(row_style("目标正文", None).fg, Some(theme::INK));
+    }
+
+    /// 阶段行与停止原因行不得互相打脸：阶段是「进行中」时，停止原因**不许**再说「已暂停」。
+    ///
+    /// 回归 `目标已暂停：续轮已停止` 撞 `阶段 进行中`（Ctrl+T Goal 页签同屏两个结论）。
+    /// 阶段措辞的唯一家是 `phase_label`，续轮停止原因的家是 `headline()`。
+    #[test]
+    fn stopped_reason_never_contradicts_active_phase() {
+        for phase in [GoalPhase::Active, GoalPhase::Paused, GoalPhase::Blocked] {
+            let mut state = TuiState::default();
+            state.goal_state = Some(TuiGoal::new(
+                "goal-x".to_string(),
+                "不撞词".to_string(),
+                Some(3),
+            ));
+            if let Some(goal) = state.goal_state.as_mut() {
+                goal.phase = phase;
+            }
+            state.goal_rounds_stopped = Some(GoalRoundStopReason::Cancelled);
+            let joined = render_lines(&state).join("\n");
+            if phase == GoalPhase::Active {
+                assert!(joined.contains("阶段 进行中"), "阶段行必须仍在：{joined}");
+                assert!(
+                    !joined.contains("已暂停"),
+                    "阶段「进行中」时停止原因不得自称「已暂停」：{joined}"
+                );
+            }
+        }
     }
 
     #[test]

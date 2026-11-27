@@ -726,7 +726,7 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String;
 | `detail() -> Option<String>` | 可核对的原因细节（计数/轮次） | `visible_line()` 中段 |
 | `action_hint() -> Option<&'static str>` | 下一步动作 | `visible_line()` 末段 |
 | `enters_history() -> bool` | 是否值得写入会话可见历史（core 语义；TUI 侧自 2026-11-22 起**本轮一条都不进消息区**，见 ADR `2026-11-22-turn-end-status-noise`） | 契约判据 / 后续消费方 |
-| `never_started() -> bool` | 续轮是否**从未启动**（非「跑起来后停下」） | 状态条措辞（`·未续` vs `·停`）、面板 |
+| `never_started() -> bool` | 续轮是否**从未启动**（非「跑起来后停下」） | 状态条措辞（`·未续` vs `·停`）、面板 —— **底栏措辞自 2026-11-27 起废止，改状态图标；见 §Amendment: goal-stop-copy-owner** |
 | `visible_line()` | 三段式拼接（`headline｜detail｜action_hint`，`None` 段省略） | 状态行 + Ctrl+G 面板 |
 
 **逐字文案表（十变体，冻结）**
@@ -769,6 +769,7 @@ pub fn user_facing_error_summary_at(error: &str, now_unix_ms: u64) -> String;
   `system_message_severity` 前置枚举短路。
 - `crates/pony-agent-core/src/bin/tui/goal_panel.rs`：删除 `已停止：` 前缀；`row_style` 按枚举严重级着色。
 - `crates/pony-agent-core/src/bin/tui/status_bar.rs`：`·停` 拆为 `·停` / `·未续`（由 `never_started()` 决定）。
+  —— **已被 §Amendment: goal-stop-copy-owner 取代**：底栏 goal 段改状态图标（`◎`/`◌`/`⏸`/`⛔`）且不显示轮次。
 - `crates/pony-agent-core/src/bin/tui.rs`：`goal_round_stop_reason_tag` **删除**（日志 tag 收敛到 `code()`）；
   `GoalRoundsStopped` 处理经 `TuiState::apply_goal_rounds_stopped` 只写状态行与结构化原因，
   **不再 push 消息区**（2026-11-22 修订，ADR `2026-11-22-turn-end-status-noise`：轮末已由
@@ -781,3 +782,49 @@ serde 持久化格式 / 桌面端 `src/types/` / 工具 JSON schema（`agent/too
 改动面远超「停止原因可见性」这一最小必要闭包；且本轮所有缺陷都能在 TUI 投影层闭合。
 dsh 的 `GoalBlockReason { code, message }` 结构化收益（跨进程路由、模型可读）在本仓尚无消费者，
 提前引入等于为「以后可能用得上」立法。
+
+---
+
+### Amendment: goal-stop-copy-owner（2026-11-27，停止原因不冒认阶段 · 底栏 goal 段图标化）
+
+> 只**追加**登记，不改写 §2–§5 与 b193-2 任何冻结断言文字。**本条 supersedes b193-2 的「逐字文案表」
+> 与「`·停` / `·未续`」两处展示层描述**：变体集合、`code()` / `severity()` / `enters_history()` /
+> `never_started()` 四项语义**全部不变**，只换 `headline()` / 一处 `detail()` 的字面量。
+
+**问题**：`headline()` 对 9 个变体返回 `目标已暂停：…`，但目标此时通常仍是 `GoalPhase::Active`
+（续轮循环停了，目标没有被暂停）。Ctrl+T 抽屉的 Goal 页签同屏渲染「阶段 进行中」+「目标已暂停：…」，
+同一状态被两个结论同时声明。
+
+**现行逐字（10 变体，仅换前缀）**：把 b193-2 表中每行首段 `目标已暂停：续轮已停止` 读作
+`自动续轮已停止`，`目标已暂停：本轮未成功` 读作 `自动续轮未启动`；`FirstRoundNotSucceeded` 的
+`detail` 由 `首轮失败，自动续轮未启动` 收窄为 `首轮失败`（与 headline 去重），其余 `detail` /
+`action_hint` 逐字不动。例如：
+
+| 变体 | 现行 `visible_line()` |
+|---|---|
+| `Cancelled` | `自动续轮已停止｜用户取消｜发消息可继续` |
+| `TurnSuspended` | `自动续轮已停止｜本轮在等你作答/审批｜先回答上面的提问` |
+| `NoActiveGoal` | `自动续轮已停止｜当前会话没有可续的目标｜/goal 创建目标` |
+| `FirstRoundNotSucceeded` | `自动续轮未启动｜首轮失败｜发「继续」重试` |
+
+**展示层（底栏左槽）**：
+
+- goal 段由 `◎ 目标 {round}/{max}{·停|·未续|·暂停|·阻塞}` 改为 `{状态图标} 目标`：
+  `◎` 续轮在跑 / `◌` 续轮未在跑 / `⏸` 阶段暂停 / `⛔` 阻塞。轮次只保留在抽屉 Goal 页签。
+  **B193 的 `never_started()` 语义区分不再由底栏派生文字**，其唯一消费者是 `headline()` 与
+  `never_started_covers_the_three_non_stopped_reasons` 契约测试。
+- 智能体段由 `⚡ 智能体 {running}·✘{attention}` 改为 `⚡ 智能体 {running}(⚠{attention})`，
+  与任务段 `☑ 任务 N(⛔M)` 同语法。
+
+**仍成立的硬约束**（`b193_2_goal_stop_visibility_contract.rs` 9 条判据一字未改且全绿）：
+`FirstRoundNotSucceeded` 含「未启动」且不含「已停止」、十变体以 `headline()` 开头、不含「进行中」、
+不含 `收口`/`落盘`、严重级由枚举给。
+
+**机器凭证**
+
+- `cargo test -p pony-storage --lib goal::` → 18 passed（`goal::b130_event_tests` 全绿）
+- `cargo test -p pony-agent-core --test tools_stop_suite b193_2` → 9 passed
+- `cargo test -p pony-tui --lib` → 298 passed；`cargo test -p pony-tui --test tui_suite` → 487 passed
+- `cargo clippy -p pony-tui -p pony-storage --all-targets` → 通过（存量 warning 未新增）
+
+**决策记录**：`.agents/notes/implemented/bug-fix/2026-11-27-goal-stop-copy-owner-and-status-bar-icon.md`

@@ -203,7 +203,9 @@ fn visible_line_is_three_part_and_actionable() {
     }
 }
 
-/// 7. `never_started()` 决定措辞：状态条据此在 `·停` / `·未续` 之间选，不得各自拼字面量。
+/// 7. `never_started()` 是措辞的唯一判据（`headline()` 据此在「自动续轮未启动」/「自动续轮已停止」之间选），
+///    各自拼字面量即违例。底栏自 2026-11-27 起不再派生 `·停` / `·未续` 文字后缀
+///    （见 pa171 矩阵 `Amendment: goal-stop-copy-owner`），本判据的消费者收敛到 `headline()`。
 #[test]
 fn never_started_covers_the_three_non_stopped_reasons() {
     let mut never: Vec<&str> = GoalRoundStopReason::all_variants()
