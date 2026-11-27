@@ -205,7 +205,7 @@ export async function refreshForTurn(sessionId: string): Promise<void>;
 | 语义 | `plan.ts` 版 = `list(sessionId)` + `listTodos(sessionId)`；`goal.ts` 版 = `fetchGoal(sessionId)`（空 sessionId 直接返回，不抛错） |
 | 空桩期 | 抛 `NotImplemented: wave-1`，不得被生产路径调用（挂载前由 executor 接线） |
 | PlanPanel | `HomeSidebar` 的 PlanPanel **常驻**渲染，空态显示“暂无计划”，挂载即拉取（不得以“已有数据”为渲染前提） |
-| PlanStore 单例 | `HostControlPlane` 与 runtime 的 `governed_executor` 共享**同一** `PlanStore` 实例（生产构造必须注入；测试注入路径保持） |
+| Plan 模式单例 | Plan 状态是**进程级**注册表（`pony_tools::plan_mode`），控制面与 `governed_executor` 门禁读同一份；`PlanStore` 步骤机已于 2026-11-27 下线 |
 
 前端事件订阅统一走 `src/lib/tauri.ts::safeListen`（非 Tauri 环境返回空 `unlisten`，不得直接 `listen`）。
 

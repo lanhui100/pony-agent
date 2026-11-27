@@ -1,6 +1,6 @@
 # Agent Note: Plan 语义对齐 DeepSeek Harness 协作模式，任务计数统一为 x/x
 
-Status: proposed
+Status: implemented
 
 ## Problem
 
@@ -13,9 +13,9 @@ Status: proposed
    - 但 `crates/pony-tools/src/system_prompt_template.rs` 与 `prompt_contract.rs` 把 `TodoWrite` 称为 `Implementation planning`，而 `crates/pony-agent-core/src/agent/context.rs` 每轮回灌给模型的动态上下文更是将 `todo_list` 直接标成 `Plan: {completed}/{total} completed; in_progress: ...`。
    - 对照 DeepSeek Harness（`packages/plan/plan-mode/src/index.ts` 与 `packages/todo/README.md`）：`dsh` 中的 **Plan Mode** 是一种纯粹的**会话级协作模式（`active: boolean`）**——用 `/plan` / `/plan off` 切换、激活时注入 `plan:policy` 提示词、完成后通过 `exit_plan_mode(plan: markdown)` 经交互通道请用户批准退出；所有步骤进度追踪均归口 `todo_write`，`Plan` 不再参与任何任务清单与 `x/x` 进度语义。
 
-## Proposal
+## Decision
 
-将「目标 / 计划模式 / 待办 / 团队任务」四套概念彻底正交化，并同步对齐 TUI、桌面端与 Agent 提示词面（已获用户确认按 `1A + 2A` 方案推进）：
+「目标 / 计划模式 / 待办 / 团队任务」四套概念彻底正交化，并同步对齐 TUI、桌面端与 Agent 提示词面（按 `1A + 2A` 方案落地）：
 
 ### 1. 概念边界定义（四者正交）
 
@@ -28,7 +28,7 @@ Status: proposed
 
 ### 2. Core：Plan 收敛为协作模式（对齐 DSH + 硬禁写门禁）
 
-- **会话级 Plan 模式状态**：以会话级 `plan_mode` 布尔状态（`active` + 轮内切换 `pending`，跨恢复/重启可重建）取代原有的 `PlanStore` 多步骤清单状态机（`steps[]`、`complete_step`、`plan_execution_approve` 等一步替换下线）。
+- **会话级 Plan 模式状态**：会话级 `plan_mode` 布尔状态（`active` + 轮内切换 `pending`，跨恢复/重启可重建；进程级注册表 + JSON sidecar 原子写）取代原有的 `PlanStore` 多步骤清单状态机（`steps[]`、`complete_step`、`plan_execution_approve` 等已一并下线）。
 - **进入与退出机制**：
   - 用户通过 `/plan`、`/plan <指令>` 或前端开关进入 Plan 模式，通过 `/plan off` 直接退出；
   - 仅在 Plan 模式激活时，于动态上下文层（`crates/pony-agent-core/src/agent/context.rs::volatile_context_notes`）注入 `plan:policy` 策略段（保持稳定系统提示词 `BASE_PROMPT_TEMPLATE` 前缀缓存不失效）；
@@ -56,14 +56,14 @@ Status: proposed
 - **先切界面与提示词、底层旧 `PlanStore` 暂留兼容**：否决。双套 Plan 状态机并存会拉长维护债并迫使前后端长期维护两套 IPC 与契约，一步替换清理更干净。
 - **底栏任务计数采用“仅显示团队或拆成两段”**：否决。单人场景只用 `TodoWrite`、团队场景才用 `team_task_*` 语义理清后，合算 `done/total` 既紧凑又不会重复计数。
 
-## Acceptance criteria
+## Verification
 
 1. **Core 语义与提示词**：`context.rs` 动态上下文不再将 `todo_list` 标注为 `Plan:`；`Plan` 工具/模式与 `TodoWrite`、`team_task_*`、`create_goal` 边界在系统提示词、工具 schema 与 `docs/architecture/plan-goal-contract.md` 中完全对齐，`prompt_tool_consistency` / `tool_surface_order_contract` / `tool_surface_singularity` 与新 `PlanMode` 门禁测试全绿。
 2. **Plan 模式闭环**：TUI 与桌面端均可通过 `/plan` 进入 Plan 模式（写入/执行工具被门禁拦截）、提交 Markdown 方案走用户审查批准退出并自动恢复写权限，或通过 `/plan off` 直接退出；状态跨恢复持久化。
 3. **TUI 底栏与抽屉**：`tasks_segment` 以 `☑ 任务 {done}/{total}` 显示合并进度并在全完成时隐藏；`plan_segment` 无 `x/x` 数字且仅在 Plan 模式激活时显示；抽屉 `Plan` 页签与 `Tasks` 页签职责清晰。
 4. **桌面端**：`PlanPanel` 不再存在 `plans.length + todos.length` 混加；任务进度准确显示 `x/x`；Plan 模式开关与方案审查 UI 正常可用，`npm run verify` 全绿。
 
-## Risks
+## Consequences and risks
 
 - **工具面缓存与冻结契约**：改动 `builtin_tools()` 名称或 schema 会影响 `crates/pony-agent-core/tests/tools_stop_suite/tool_surface_singularity.rs`（golden hash）与 `tool_surface_order_contract.rs`（工具顺序），实施时需在原槽位替换或显式同步冻结表与契约说明。
 - **存量测试与 IPC 迁移面**：`wave36_draft_gate_session.rs`、`wave36_plan_execution_approval.rs`、`wave23_governance_and_plan_sync_contract.rs` 以及 `src-tauri/src/lib.rs` 的 `plan_*` 命令需按新 `PlanMode` 契约同步重构，避免遗留死引用。
@@ -77,3 +77,20 @@ Status: proposed
 - 提示词工具一致性与工具自注册条款：`.agents/notes/implemented/process/2026-11-13-prompt-tool-consistency-gate.md`、`.agents/notes/implemented/architecture/2026-11-13-tool-owned-prompt-guidelines-and-templates.md`
 - DeepSeek Harness 参考实现：`/home/dm/deepseek-harness/packages/plan/plan-mode/src/index.ts`、`/home/dm/deepseek-harness/packages/todo/README.md`
 - 差距分析矩阵：`docs/audit/agent-core-gap-matrix.md`（A12 / C10）
+
+## Implementation notes（2026-11-27 落地）
+
+按 1A + 2A 方案全部落地，四条 backlog 任务同批闭环：
+
+| 任务 | 落地要点 |
+|---|---|
+| B1795774426483 | 新增 `crates/pony-tools/src/plan_mode.rs`（会话级 `active`/`pending` + 方案正文 + sidecar 原子写）与 `exit_plan_mode.rs`；`governed_executor` 的 Draft 步骤机门禁改为 `plan_mode_gate`（按权限事实拦写/执行，`ExitPlanMode` 自豁免）；`PlanStore`/`PlanControlHandler`/`plan_execution_approve`/`plan_*` 控制面与 IPC 一步下线，改为 `plan_mode_get`/`set`/`commit`/`review`；工具面 `plan_control` 槽位模型名 `Plan` → `ExitPlanMode`，schema 收敛为单 `plan` 入参（`[decl-change-approved]`，golden 同步）。 |
+| B1795774426544 | `context.rs` 回灌标签 `Plan:` → `Todos:`（新增单列回归测试 `context/tests/todo_label_tests.rs`）；`prompt_contract.rs` 新增 `plan_mode_scope` 条款，`schema.rs` 补齐 Plan/Todo/Goal/TeamTask 描述边界；提示词契约升级 v2.4.0（§2 全文 + §6 字节数 3886B）。 |
+| B1795774426604 | `TaskGlance` 增 `todos_done/total` 与 `team_done/total`，底栏 `☑ 任务 {done}/{total}(⛔N)` 全完成隐藏；`plan_segment` 去掉数字、仅激活时显示 `▤ Plan 模式`；抽屉 Plan 页签改为模式状态 + 方案正文；`/plan`、`/plan off` 接入模式开关，`/approve` 批准已提交方案。 |
+| B1795774426666 | `PlanPanel.vue` 移除 `plans.length + todos.length` 混加，折叠头只显示任务 `x/x`，卡片拆为「Plan 模式（状态 + 方案正文 + 批准执行/继续规划）」与「任务（独立 x/x）」；`src/stores/plan.ts` 改为模式 store；`/plan` 与 UI 入口走 `plan_mode_set`，审批复用 `plan_mode_review`。 |
+
+**与 Proposal 的偏差（均已在代码注释中说明理由）**：
+
+1. `ExitPlanMode` 走的是**宿主 Ask 通道的既有 `WaitingHost` 控制请求面**，没有新增独立工具槽位——沿用原 `plan_control` 槽位保持内建工具数 46 与工具面顺序不变（KV-cache 前缀稳定）。
+2. `plan_execution_approval` 形参保留在 `decide_with_context` 签名上但**不再参与判定**（惰性数据），以避免 `DispatchContext` 线缆与 26 个调用点的大面积改动；语义已由 `plan_mode_review` 取代。
+3. 底栏任务段在「全部完成」时整段隐藏（方案 A 原文），而不是显示 `n/n`。

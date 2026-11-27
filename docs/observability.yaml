@@ -1938,3 +1938,29 @@ note: >-
 #     （7 例：常量冻结、core 读面单源一致、两预算不等、文案含双预算与进度、`/goal show` 双行共存）、
 #     `tests/GoalBar-budget.spec.ts`（7 例：请求/逐字渲染/旧行共存/空载荷/畸形载荷/失败降级/会话切换）。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+
+# Plan 语义对齐 DSH 协作模式 + 任务计数统一 x/x（ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）归属说明：
+# (1) 变更面：`crates/pony-tools/src/plan_mode.rs`（新增：会话级 Plan 模式注册表 + sidecar 原子写）、
+#     `crates/pony-tools/src/exit_plan_mode.rs`（新增：ExitPlanMode handler，只登记方案并请求审核）、
+#     `crates/pony-tools/src/governed_executor.rs`（Draft 步骤机门禁 → plan_mode_gate）、
+#     `crates/pony-agent-core/src/agent/control_plane/ask_plan_commands.rs`（plan_* 控制面 → plan_mode_*）、
+#     `src-tauri/src/lib.rs`（plan_* IPC → plan_mode_*）、TUI 底栏/抽屉/`/plan`、
+#     桌面 `PlanPanel.vue` / `src/stores/plan.ts` / `HomeWorkspace.vue`。
+#     **无**新增网络出口、常驻后台线程、LLM 调用或新依赖。
+# (2) 新增**本地取证面**（非遥测出口）：
+#     - sidecar `plan_mode_store.json`（`PONY_AGENT_PLAN_MODE_STORE_PATH` 可覆盖；`*.tmp` + rename 原子写，
+#       内容为 session → {active, pending, plan, planApproved, revision}，**不含**用户消息正文）；
+#     - 宿主错误码（结构化、fail-closed）：`plan_mode_inactive` / `invalid_plan` / `missing_session` /
+#       `plan_scope_required` / `plan_review_no_plan`；
+#     - 门禁拒绝来源可追溯：`PermissionDecision.decision_source = "plan_mode_gate"`。
+# (3) ⇒ 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-observability/src/otel/mod.rs`
+#     与 `.../ponysentry/client.rs`）；metrics / logs 维持结构性 N-A（桌面/TUI 无常驻监听地址、无 `/metrics`、
+#     Prometheus pull 模型不成立）。不新增 applicable 判定、不新增 enforcement_point。
+# (4) 行为门（机械收口在测试层）：
+#     `crates/pony-tools/src/plan_mode.rs`（pending/commit、批准退出、继续规划、sidecar 落盘 5 例）、
+#     `crates/pony-tools/src/exit_plan_mode.rs`（非激活/无会话/非法方案/登记回执 4 例）、
+#     `tests/wave36_draft_gate_session.rs`（写/执行拦截、跨会话不误锁、读放行、退出解锁、ExitPlanMode 豁免 9 例）、
+#     `tests/wave36_plan_execution_approval.rs`（审批只能宿主产生、一次性、会话隔离 7 例）、
+#     `tests/runtime_suite/wave23_governance_and_plan_sync_contract.rs`（控制面与门禁共享同一状态）、
+#     `tests/tools_stop_suite/wave30b_policy_rules_and_plan_gate_test.rs`（Plan 模式门禁口径）。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
