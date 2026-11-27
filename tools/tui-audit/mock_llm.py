@@ -160,6 +160,19 @@ ASK_TOOL_ARGS = {
 }
 
 
+def last_user_text(messages: list[dict]) -> str:
+    fallback = ""
+    for m in reversed(messages):
+        if str(m.get("role")) != "user":
+            continue
+        text = message_text(m)
+        if not fallback:
+            fallback = text
+        if not text.lstrip().startswith("<system-reminder>"):
+            return text
+    return fallback
+
+
 def scenario_for(
     messages: list[dict], forced: str | None, tool_override: str | None = None
 ) -> str:
@@ -170,11 +183,7 @@ def scenario_for(
         return "final" if has_tool else "ask"
     if forced:
         return forced
-    last_user = ""
-    for m in reversed(messages):
-        if str(m.get("role")) == "user":
-            last_user = message_text(m)
-            break
+    last_user = last_user_text(messages)
     low = last_user.lower()
     if "401" in low or "unauthorized" in low or "认证失败" in last_user:
         return "401"
@@ -276,9 +285,7 @@ class Handler(BaseHTTPRequestHandler):
                 "stream": stream,
                 "authorization": self.headers.get("Authorization", ""),
                 "msg_roles": [m.get("role") for m in messages],
-                "last_user": next(
-                    (message_text(m) for m in reversed(messages) if m.get("role") == "user"), ""
-                )[:200],
+                "last_user": last_user_text(messages)[:200],
                 "n_tool_messages": sum(1 for m in messages if m.get("role") == "tool"),
                 # ask-resume：物证 —— 宿主把 Ask 答案回灌成工具结果后，第 2 次请求里
                 # role=tool 的正文必须带用户作答，且**不得**是挂起标记 control_outcome_pending。

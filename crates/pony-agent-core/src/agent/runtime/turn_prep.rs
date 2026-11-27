@@ -21,55 +21,7 @@ impl AgentRuntime {
 
         let provider = self.resolve_provider(input);
         let workspace_mode = input.workspace_mode.as_deref();
-
-        // 上下文压缩：在构建上下文前检查是否需要压缩。
-        //
-        // 锁纪律（契约 C-1 / 审查 F2a）：摘要调用是**网络 IO**，绝不能在持有 `sessions`
-        // 读写锁时发生。因此这里只做一次短读判定，真正的压缩交给
-        // `compact_session_with_sessions` 的三段式（短读快照 → 无锁摘要 → 短写回写），
-        // 与手动 `/compact` 共用**同一实现**：两个入口若各写一套，阈值/切分/双写口径
-        // 迟早分叉。
-        let compression_candidate = {
-            let sessions = self.sessions.read().unwrap_or_else(|e| {
-                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
-                e.into_inner()
-            });
-            let current = sessions.snapshot_at_readonly(
-                input.session_id.as_deref(),
-                input.node_id.as_deref(),
-                &input.history,
-            );
-            let config = crate::agent::compression::CompressionConfig::default();
-            // 计量必须覆盖两条记忆载体：native-tool-flow 会话的上下文只看 transcript，
-            // 只估 history 会让「一轮 90 个工具 hop」的增长永不触发压缩。
-            let pressure = crate::agent::compression::ContextPressure::from_layers(
-                &current.history,
-                &current.provider_native_transcript,
-            )
-            .with_measured_input_tokens(
-                crate::agent::session::last_context_input_tokens(&current)
-                    .map(|tokens| tokens as usize),
-            );
-            crate::agent::compression::should_compress_pressure(pressure, &provider, &config)
-                .then(|| current.conversation_id.clone())
-        };
-        if let Some(session_id) = compression_candidate {
-            // `force = true`：水位已在此判定过，让压缩入口再判一次只会引入第二套口径。
-            match compact_session_with_sessions(&self.sessions, provider.clone(), &session_id, true)
-            {
-                Ok(outcome) if outcome.compacted => eprintln!(
-                    "[pony-agent] auto compaction completed: compressed {} messages, kept {}",
-                    outcome.compressed_count, outcome.kept_count
-                ),
-                Ok(outcome) => eprintln!(
-                    "[pony-agent] auto compaction skipped: {} (not splittable at retain budget)",
-                    outcome.reason
-                ),
-                Err(error) => eprintln!(
-                    "[pony-agent] session compression failed: {error}, continuing without compression"
-                ),
-            }
-        }
+        self.auto_compact_before_turn(input, &provider);
 
         // 获取最终（可能已压缩）的快照
         let session = {
@@ -98,6 +50,7 @@ impl AgentRuntime {
         //（MCP/插件），外部条目按 (source_id, model_name) 稳定追加、会话内冻结；
         // MCP 未配置或连接失败时该入口只返回内建面（fail-soft，不阻断会话启动）。
         let tools = crate::agent::mcp_config::surface_tool_definitions();
+        Self::freeze_turn_request_header(&preliminary_retrieved, &provider, &tools);
         let planner_skills = self.capability_registry.read().unwrap_or_else(|e| e.into_inner()).list_skills_for_planner();
         let retrieved = if effective_images.is_empty() {
             preliminary_retrieved
@@ -134,9 +87,9 @@ impl AgentRuntime {
         // completed assistant tool-call + terminal tool-result pair (design.md Decision 5). The
         // pair is inserted immediately before the current user message so the model sees the
         // answer and continues instead of a fresh user turn.
-        if let Some(injection) = ask_injection {
-            inject_ask_resume_into_planning_request(&provider, injection, &mut planning_request);
-        }
+        let ask_resume_native_pair = ask_injection.map(|injection| {
+            inject_ask_resume_into_planning_request(&provider, injection, &mut planning_request)
+        });
 
         Ok(PreparedTurn {
             user_message,
@@ -147,7 +100,121 @@ impl AgentRuntime {
             planner_skills,
             planning_request,
             build_context_observation,
+            ask_resume_native_pair,
         })
+    }
+
+    /// 当会话发生模型切换且新模型窗口严格更小时，解析上一轮使用的较大窗口 provider，
+    /// 以便先用原模型完成摘要预压，避免新小模型在压缩请求本身溢出。
+    fn auto_compact_before_turn(&self, input: &TurnInput, provider: &ProviderManager) {
+        let snapshot = {
+            let sessions = self.sessions.read().unwrap_or_else(|e| {
+                tracing::warn!(target: "control_plane", error = %e, "[pony-agent] sessions rwlock poisoned");
+                e.into_inner()
+            });
+            sessions.snapshot_at_readonly(
+                input.session_id.as_deref(),
+                input.node_id.as_deref(),
+                &input.history,
+            )
+        };
+        let config = crate::agent::compression::CompressionConfig::default();
+        let pressure = crate::agent::compression::ContextPressure::from_layers(
+            &snapshot.history,
+            &snapshot.provider_native_transcript,
+        )
+        .with_measured_input_tokens(
+            crate::agent::session::last_context_input_tokens(&snapshot)
+                .map(|tokens| tokens as usize),
+        );
+        if !crate::agent::compression::should_compress_pressure(pressure, provider, &config) {
+            return;
+        }
+        let session_id = snapshot.conversation_id.clone();
+        let outcome = match self.previous_larger_window_provider(&snapshot, provider) {
+            Some(larger_provider) => match compact_session_with_sessions(
+                &self.sessions,
+                larger_provider,
+                &session_id,
+                true,
+            ) {
+                Ok(outcome) => Ok(outcome),
+                Err(first_err) => {
+                    runtime_log(format!(
+                        "compact:model_switch_fallback session={session_id} err={first_err}"
+                    ));
+                    compact_session_with_sessions(&self.sessions, provider.clone(), &session_id, true)
+                }
+            },
+            None => compact_session_with_sessions(&self.sessions, provider.clone(), &session_id, true),
+        };
+        match outcome {
+            Ok(outcome) if outcome.compacted => eprintln!(
+                "[pony-agent] auto compaction completed: compressed {} messages, kept {}",
+                outcome.compressed_count, outcome.kept_count
+            ),
+            Ok(outcome) => eprintln!(
+                "[pony-agent] auto compaction skipped: {} (not splittable at retain budget)",
+                outcome.reason
+            ),
+            Err(error) => eprintln!(
+                "[pony-agent] session compression failed: {error}, continuing without compression"
+            ),
+        }
+    }
+
+    fn freeze_turn_request_header(
+        retrieved: &RetrievedContextState,
+        provider: &ProviderManager,
+        tools: &[ToolDefinition],
+    ) {
+        let Some(workspace_root) = retrieved
+            .session_context
+            .env_info
+            .as_ref()
+            .map(|env| env.cwd.as_str())
+            .filter(|cwd| !cwd.trim().is_empty())
+        else {
+            return;
+        };
+        let header = crate::agent::workspace_hotloader::SessionRequestHeaderSnapshot {
+            model: provider.model().to_string(),
+            protocol: provider.protocol_label().to_string(),
+            tool_names: tools.iter().map(|tool| tool.name.to_string()).collect(),
+        };
+        let frozen = crate::agent::workspace_hotloader::get_global_workspace_hotloader()
+            .freeze_or_load_request_header(
+                workspace_root,
+                &retrieved.session_context.conversation_id,
+                &header,
+            );
+        if frozen != header {
+            runtime_log(format!(
+                "context:header-drift session={} frozen_model={} current_model={} frozen_tools={} current_tools={}",
+                retrieved.session_context.conversation_id,
+                frozen.model,
+                header.model,
+                frozen.tool_names.len(),
+                header.tool_names.len(),
+            ));
+        }
+    }
+
+    fn previous_larger_window_provider(
+        &self,
+        snapshot: &crate::agent::session::SessionSnapshot,
+        new_provider: &ProviderManager,
+    ) -> Option<ProviderManager> {
+        let new_window = new_provider.context_window_tokens()?;
+        let last_trace = snapshot.turn_trace_history.last()?;
+        let prev_provider_name = last_trace.provider_name.as_deref()?;
+        let prev_model = last_trace.provider_model.as_deref()?;
+        if prev_provider_name == new_provider.name() && prev_model == new_provider.model() {
+            return None;
+        }
+        let candidate = self.resolve_provider_for(Some(prev_provider_name), Some(prev_model), None);
+        let prev_window = candidate.context_window_tokens()?;
+        (prev_window > new_window).then_some(candidate)
     }
 
     pub(crate) fn plan_turn(&self, prepared: &PreparedTurn) -> Result<PlannedTurn, String> {
@@ -683,6 +750,12 @@ impl AgentRuntime {
                 .load_recent_images(input.session_id.as_deref(), recall_limit);
         }
 
+        let images = if images.is_empty() {
+            images
+        } else {
+            super::image_normalization::normalize_turn_images(images)
+        };
+
         validate_turn_images(&images)?;
         Ok(images)
     }
@@ -696,7 +769,7 @@ fn inject_ask_resume_into_planning_request(
     provider: &ProviderManager,
     injection: &GraphAskResumeInjection,
     request: &mut ProviderRequest,
-) {
+) -> (Value, Value) {
     let tool_call = ToolCall {
         call_id: Some(injection.call_id.clone()),
         name: injection.tool_name.clone(),
@@ -719,19 +792,39 @@ fn inject_ask_resume_into_planning_request(
     let tool_result_message =
         provider_native_tool_result_message_for_protocol(protocol, &tool_call, &tool_result);
 
+    // 若原请求 native_messages 为空（非 native_tool_flow 或首轮恢复），先从 request.input
+    // 物化完整上下文（system + history + User_N + reminder），再插入 Ask 问答对，
+    // 防止 provider/mod.rs 因 native_messages 非空而丢弃整个 request.input。
+        if request.native_messages.is_empty() && !request.input.is_empty() {
+            request.native_messages =
+                crate::agent::turn_prompt_content::native_messages_from_provider_input(
+                    &request.input,
+                );
+        }
+
     let insert_at = request
         .native_messages
         .iter()
-        .rposition(is_native_user_message)
+        .rposition(|message| {
+            is_native_user_message(message) && !is_native_system_reminder_message(message)
+        })
         .unwrap_or(request.native_messages.len());
     request
         .native_messages
-        .insert(insert_at, assistant_message);
+        .insert(insert_at, assistant_message.clone());
     request
         .native_messages
-        .insert(insert_at + 1, tool_result_message);
+        .insert(insert_at + 1, tool_result_message.clone());
+    (assistant_message, tool_result_message)
 }
 
 fn is_native_user_message(message: &Value) -> bool {
     message.get("role").and_then(Value::as_str) == Some("user")
+}
+
+fn is_native_system_reminder_message(message: &Value) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(crate::agent::turn_prompt_content::is_system_reminder_message)
 }

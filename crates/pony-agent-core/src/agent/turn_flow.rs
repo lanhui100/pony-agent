@@ -39,6 +39,9 @@ pub struct PreparedTurn {
     pub planner_skills: Vec<SkillDescriptor>,
     pub planning_request: ProviderRequest,
     pub build_context_observation: BuildContextObservation,
+    /// B1795705303234: Consumed Ask resume `(assistant_tool_call, tool_result)` pair so completed
+    /// turns can persist the resumed Q&A into `provider_native_transcript`.
+    pub ask_resume_native_pair: Option<(serde_json::Value, serde_json::Value)>,
 }
 
 pub struct PlannedTurn {
@@ -3135,15 +3138,15 @@ pub fn provider_followup_with_calls(
     result
 }
 
-/// 整批 followup 的传输口径：**恒为** [`crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED`]。
+/// 整批 followup 的传输口径：随 `provider.supports_streaming()` 与实际 wire 一致。
 ///
-/// r2-dim1 attempt 2 / F7：本函数对应的分支（`N > 1`）不走 SSE，而是
-/// `ProviderManager::continue_with_tool_results_stream` 内部的同步
-/// `continue_with_tool_results`（`provider/mod.rs:1278-1288`），结果一次性回放为增量。
-/// 抽成纯函数是为了让「批量 ≠ 流式」这条 wire 事实可被无线程/无网络的单测锁定：
-/// 该分支曾硬编码 `STREAM`，导致 L3 把批量调用误判为「流式首包测量丢包」。
-pub fn batch_followup_transport() -> &'static str {
-    crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED
+/// 流式 provider 走 SSE（`stream`）；非流式 provider 仍走同步 HTTP 并整段回放（`buffered`）。
+pub fn batch_followup_transport_for(provider: &ProviderManager) -> &'static str {
+    if provider.supports_streaming() {
+        crate::agent::otel::LLM_REQUEST_TRANSPORT_STREAM
+    } else {
+        crate::agent::otel::LLM_REQUEST_TRANSPORT_BUFFERED
+    }
 }
 
 /// D3b（P1-1 / B018）：**整批**工具结果的流式 followup（与 [`provider_followup_with_calls`] 的
@@ -3152,12 +3155,8 @@ pub fn batch_followup_transport() -> &'static str {
 /// 分派（与 D2 的 `continue_with_tool_results_stream` 同序，双层保险）：
 /// - `N == 1` ⇒ **逐字委派** [`provider_followup_stream_with_mode`]（既有 1:1 流式入口与其
 ///   `llm.chat` span / ttft / 速度口径零改动，单调用回归靠既有用例锁住）；
-/// - `N > 1` ⇒ 本函数的 `llm.chat` span 只做「已解析用量」记账后走
-///   [`ProviderManager::continue_with_tool_results_stream`]。
-///
-/// **已知偏差（设计 §7 / executor2 声明）**：`N > 1` 的传输沿用既有同步 `post_*` 通道，结果按
-/// 「reasoning → text」一次性回放为增量，**不是**逐 token 真增量（`on_delta` 仍会被调用，UI 形状
-/// 与「非流式 provider」分支一致）。真增量留作后续波次。
+/// - `N > 1` ⇒ 经 [`ProviderManager::continue_with_tool_results_stream`] 发起批量请求：
+///   `supports_streaming` 为真时走真流式 SSE 并记录 `ttft_ms`，否则走同步 `buffered` 通道。
 #[allow(clippy::too_many_arguments)]
 pub fn provider_followup_stream_with_calls<F>(
     provider: &ProviderManager,
@@ -3167,7 +3166,7 @@ pub fn provider_followup_stream_with_calls<F>(
     assistant_message: Option<&Value>,
     calls: &[ToolCall],
     results: &[ToolResult],
-    on_delta: F,
+    mut on_delta: F,
     request_mode: LlmRequestMode,
 ) -> Result<crate::agent::provider::ProviderResponse, String>
 where
@@ -3199,14 +3198,11 @@ where
         request_mode.as_str(),
         request_messages,
         request_has_system_prefix,
-        // r2-dim1 attempt 2 / F7：N > 1 分支**不是**流式通道。
-        // `continue_with_tool_results_stream` 在 N > 1 时直接走同步 `continue_with_tool_results`
-        // （provider/mod.rs:1278-1288），结果一次性回放为增量；此处曾硬编码 STREAM，
-        // 使批量调用在 wire 上被标成流式、进而被 L3 归入「首包测量丢包」而非「缓冲本无首包」
-        // （实测 s3-t01 第 3 次调用日志 `mode=sync-batch`，其 span 却写 transport=stream）。
-        batch_followup_transport(),
+        batch_followup_transport_for(provider),
     );
+    let stream_ttft_enabled = provider.supports_streaming();
     let start = std::time::Instant::now();
+    let mut first_token_time: Option<std::time::Instant> = None;
     let result = provider.continue_with_tool_results_stream(
         request,
         tools,
@@ -3214,9 +3210,19 @@ where
         assistant_message,
         calls,
         results,
-        on_delta,
+        |chunk| {
+            if stream_ttft_enabled && first_token_time.is_none() {
+                first_token_time = Some(std::time::Instant::now());
+            }
+            on_delta(chunk);
+        },
     );
     let elapsed_ms = start.elapsed().as_millis() as u64;
+    let ttft_ms = if stream_ttft_enabled {
+        first_token_time.map(|t| u64::try_from(t.duration_since(start).as_millis()).unwrap_or(u64::MAX))
+    } else {
+        None
+    };
     if let Ok(response) = result.as_ref() {
         if let Some(usage) = response.token_usage.as_ref() {
             llm_span.record_usage(usage.input_tokens, usage.output_tokens);
@@ -3224,9 +3230,8 @@ where
                 usage.reasoning_tokens,
                 cache_reportable_input_tokens(provider.protocol_label(), usage),
             );
-            // 批量路径没有真增量 ⇒ 无 ttft 可比，速度分母退化为整段耗时（与 D2 同步批量一致）。
-            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, None);
-            llm_span.record_call_timing(Some(elapsed_ms), None);
+            let speed = calculate_call_generation_speed(usage.output_tokens, elapsed_ms, ttft_ms);
+            llm_span.record_call_timing(Some(elapsed_ms), ttft_ms);
             llm_span.record_usage_origin(usage.origin);
             llm_span
                 .record_speed_and_context(speed, provider.context_window_tokens().map(u64::from));

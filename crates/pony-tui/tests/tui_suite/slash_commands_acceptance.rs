@@ -461,7 +461,9 @@ fn t3_command_token_matching_is_case_insensitive_and_tolerates_trailing_args() {
 /// （128k 窗口 × 0.16 ≈ 19.8k token），否则压缩入口会因「无可压缩段」提前返回
 /// `history_too_short`，把用例变成**假绿**（precondition 断言是为了防这个）。
 fn long_half_turn(prefix: &str, round: usize) -> String {
-    let filler = "上下文压缩阈值与保留预算的语义说明。".repeat(70);
+    // 18 汉字 × 15 ≈ 270 汉字（新非 ASCII 估算 ≈ 410 token/半轮），80 条约 33k token：
+    // 稳在 retain_tokens (~19.8k) 之上，同时低于 128k 压缩触发水位（约 96k）。
+    let filler = "上下文压缩阈值与保留预算的语义说明。".repeat(15);
     format!("{prefix} 第 {round} 轮：{filler}")
 }
 

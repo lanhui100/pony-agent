@@ -292,3 +292,355 @@ use super::*;
             "同一轮重复记账必须幂等（只留一条）"
         );
     }
+
+    // ============================================================
+    // B1795746927199：批量工具回填（N > 1）真流式 SSE 验收
+    // ============================================================
+
+    fn spawn_scripted_http_server(
+        responses: Vec<String>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted http server");
+        let address = listener.local_addr().expect("local addr");
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies_clone = std::sync::Arc::clone(&bodies);
+        let handle = thread::spawn(move || {
+            for raw_response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut raw = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let mut header_end: Option<usize> = None;
+                let mut content_length = 0usize;
+                loop {
+                    let Ok(read) = stream.read(&mut chunk) else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&chunk[..read]);
+                    if header_end.is_none() {
+                        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            header_end = Some(pos + 4);
+                            let headers = String::from_utf8_lossy(&raw[..pos + 4]).to_lowercase();
+                            for line in headers.lines() {
+                                if let Some(val) = line.strip_prefix("content-length:") {
+                                    content_length = val.trim().parse::<usize>().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(end) = header_end {
+                        if raw.len().saturating_sub(end) >= content_length {
+                            break;
+                        }
+                    }
+                }
+                let body_start = header_end.unwrap_or(raw.len());
+                let body = String::from_utf8_lossy(&raw[body_start..]).to_string();
+                bodies_clone.lock().expect("lock recorded bodies").push(body);
+                let _ = stream.write_all(raw_response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{address}/v1"), bodies, handle)
+    }
+
+    fn batch_stream_selection(
+        base_url: String,
+        protocol: ProviderProtocol,
+        supports_streaming: bool,
+    ) -> ResolvedProviderSelection {
+        ResolvedProviderSelection {
+            requested_name: "batch-stream-test".to_string(),
+            provider_name: "batch-stream-test".to_string(),
+            protocol,
+            base_url,
+            auth_type: ProviderAuthType::Auto,
+            api_key_env_var: "BATCH_STREAM_TEST_KEY".to_string(),
+            api_key: Some("dummy-key".to_string()),
+            model: "test-model".to_string(),
+            temperature: 0.0,
+            max_output_tokens: 256,
+            reasoning_effort: None,
+            reasoning_budget_tokens: None,
+            capabilities: ProviderModelCapabilities {
+                context_window_tokens: Some(32_768),
+                supports_tools: true,
+                supports_streaming,
+                supports_image_input: false,
+                supports_reasoning: false,
+                ..Default::default()
+            },
+            thinking_param_pattern: ThinkingParamPattern::None,
+        }
+    }
+
+    fn batch_stream_probe_calls() -> (Vec<ToolCall>, Vec<ToolResult>) {
+        let calls = vec![
+            ToolCall {
+                call_id: Some("call_a".to_string()),
+                name: "Search".to_string(),
+                arguments: json!({ "query": "alpha" }),
+                plan: None,
+            },
+            ToolCall {
+                call_id: Some("call_b".to_string()),
+                name: "Read".to_string(),
+                arguments: json!({ "path": "Cargo.toml" }),
+                plan: None,
+            },
+        ];
+        let results = vec![
+            ToolResult {
+                tool_name: "Search".to_string(),
+                status: "ok".to_string(),
+                output: "{\"matches\":1}".to_string(),
+                duration_ms: 4,
+            },
+            ToolResult {
+                tool_name: "Read".to_string(),
+                status: "ok".to_string(),
+                output: "{\"ok\":true}".to_string(),
+                duration_ms: 5,
+            },
+        ];
+        (calls, results)
+    }
+
+    #[test]
+    fn batch_followup_stream_uses_sse_and_preserves_multi_tool_assistant_message() {
+        let _guard = pony_protocol::runtime_helper::TestRuntimeGuard::new();
+        let sse_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"分析\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"next_1\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"next_2\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"b.rs\\\"}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let http_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            sse_body.len(),
+            sse_body
+        );
+        let (base_url, bodies, handle) = spawn_scripted_http_server(vec![http_response]);
+        let manager = ProviderManager::new(batch_stream_selection(
+            base_url,
+            ProviderProtocol::OpenAiCompletions,
+            true,
+        ));
+        let request = ProviderRequest {
+            model: "test-model".to_string(),
+            input: vec![ProviderMessage::user("并发执行两个工具".to_string())],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: Default::default(),
+            temperature: 0.0,
+            max_output_tokens: 256,
+        };
+        let (calls, results) = batch_stream_probe_calls();
+        let mut accumulated = Vec::new();
+        let mut deltas = Vec::new();
+
+        let response = manager
+            .continue_with_tool_results_stream(
+                &request,
+                &[],
+                &mut accumulated,
+                None,
+                &calls,
+                &results,
+                |chunk| deltas.push(chunk),
+            )
+            .expect("N>1 流式 followup 应走 SSE 并成功");
+        handle.join().expect("server thread join");
+
+        let recorded = bodies.lock().expect("lock bodies");
+        assert_eq!(recorded.len(), 1, "成功路径应恰好发 1 次请求");
+        let sent: Value = serde_json::from_str(&recorded[0]).expect("request body json");
+        assert_eq!(
+            sent.get("stream").and_then(Value::as_bool),
+            Some(true),
+            "N>1 在 supports_streaming=true 时必须发送 stream:true"
+        );
+        let sent_messages = sent
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages array");
+        assert_eq!(sent_messages.len(), 4, "user + 1 assistant + 2 tool");
+        assert_eq!(response.provider_source, "provider_followup_stream");
+        assert_eq!(response.tool_calls.len(), 2, "SSE 返回的 2 个 tool_calls 须全保留");
+        let next_assistant = response
+            .assistant_message
+            .as_ref()
+            .expect("assistant_message 必须存在");
+        let assistant_tool_calls = next_assistant
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .expect("assistant_message.tool_calls 须为数组");
+        assert_eq!(
+            assistant_tool_calls.len(),
+            2,
+            "assistant_message 必须保留全部 2 个流式工具调用，否则下一跳回填会丢调用"
+        );
+        assert_eq!(
+            deltas,
+            vec![ProviderStreamChunk::Reasoning("分析".to_string())],
+            "SSE 应逐块实时回调增量"
+        );
+    }
+
+    #[test]
+    fn batch_followup_stream_retries_truncated_sse_without_polluting_transcript() {
+        let _guard = pony_protocol::runtime_helper::TestRuntimeGuard::new();
+        let truncated_sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half";
+        let truncated_http = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n{truncated_sse}"
+        );
+        let ok_sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"汇总完成。\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let ok_http = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            ok_sse.len(),
+            ok_sse
+        );
+        let (base_url, bodies, handle) =
+            spawn_scripted_http_server(vec![truncated_http, ok_http]);
+        let manager = ProviderManager::new(batch_stream_selection(
+            base_url,
+            ProviderProtocol::OpenAiCompletions,
+            true,
+        ))
+        .with_policy(crate::config::UpstreamPolicy {
+            decision_max_attempts: 2,
+            retry_budget_ms: 5_000,
+            ..Default::default()
+        });
+        let request = ProviderRequest {
+            model: "test-model".to_string(),
+            input: vec![ProviderMessage::user("批量重试".to_string())],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: Default::default(),
+            temperature: 0.0,
+            max_output_tokens: 256,
+        };
+        let (calls, results) = batch_stream_probe_calls();
+        let mut accumulated = Vec::new();
+        let mut deltas = Vec::new();
+
+        let response = manager
+            .continue_with_tool_results_stream(
+                &request,
+                &[],
+                &mut accumulated,
+                None,
+                &calls,
+                &results,
+                |chunk| deltas.push(chunk),
+            )
+            .expect("断流后重试应恢复成功");
+        handle.join().expect("server thread join");
+
+        assert_eq!(response.output_text, "汇总完成。");
+        assert_eq!(
+            accumulated.len(),
+            4,
+            "重试不得向 accumulated_messages 重复追加，实际 {}",
+            accumulated.len()
+        );
+        let recorded = bodies.lock().expect("lock bodies");
+        assert_eq!(recorded.len(), 2, "应发生 1 次断流重试共 2 次 HTTP");
+        for body in recorded.iter() {
+            let parsed: Value = serde_json::from_str(body).expect("request body json");
+            assert_eq!(parsed.get("stream").and_then(Value::as_bool), Some(true));
+        }
+    }
+
+    #[test]
+    fn batch_followup_stream_anthropic_and_non_streaming_paths() {
+        let _guard = pony_protocol::runtime_helper::TestRuntimeGuard::new();
+        let anthropic_sse = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Anthropic批量流完成\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let anthropic_http = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            anthropic_sse.len(),
+            anthropic_sse
+        );
+        let (anthropic_url, anthropic_bodies, anthropic_handle) =
+            spawn_scripted_http_server(vec![anthropic_http]);
+        let anthropic_manager = ProviderManager::new(batch_stream_selection(
+            anthropic_url,
+            ProviderProtocol::AnthropicMessages,
+            true,
+        ));
+        let request = ProviderRequest {
+            model: "claude-test".to_string(),
+            input: vec![ProviderMessage::user("批量".to_string())],
+            images: Vec::new(),
+            native_messages: Vec::new(),
+            observation: Default::default(),
+            temperature: 0.0,
+            max_output_tokens: 256,
+        };
+        let (calls, results) = batch_stream_probe_calls();
+        let mut acc = Vec::new();
+        let resp = anthropic_manager
+            .continue_with_tool_results_stream(&request, &[], &mut acc, None, &calls, &results, |_| {})
+            .expect("Anthropic N>1 流式应成功");
+        anthropic_handle.join().expect("anthropic server join");
+        assert_eq!(resp.provider_source, "provider_followup_stream");
+        assert_eq!(resp.output_text, "Anthropic批量流完成");
+        let sent_anthropic: Value = serde_json::from_str(&anthropic_bodies.lock().expect("lock")[0])
+            .expect("anthropic request json");
+        assert_eq!(sent_anthropic.get("stream").and_then(Value::as_bool), Some(true));
+
+        let sync_json = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "非流式回放完成"
+                }
+            }]
+        })
+        .to_string();
+        let sync_http = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            sync_json.len(),
+            sync_json
+        );
+        let (sync_url, sync_bodies, sync_handle) = spawn_scripted_http_server(vec![sync_http]);
+        let sync_manager = ProviderManager::new(batch_stream_selection(
+            sync_url,
+            ProviderProtocol::OpenAiCompletions,
+            false,
+        ));
+        let mut sync_acc = Vec::new();
+        let mut sync_deltas = Vec::new();
+        let sync_resp = sync_manager
+            .continue_with_tool_results_stream(
+                &request,
+                &[],
+                &mut sync_acc,
+                None,
+                &calls,
+                &results,
+                |chunk| sync_deltas.push(chunk),
+            )
+            .expect("!supports_streaming 走同步回放");
+        sync_handle.join().expect("sync server join");
+        assert_eq!(sync_resp.provider_source, "provider_followup_sync");
+        assert_eq!(sync_deltas, vec![ProviderStreamChunk::Text("非流式回放完成".to_string())]);
+        let sent_sync: Value =
+            serde_json::from_str(&sync_bodies.lock().expect("lock")[0]).expect("sync request json");
+        assert_eq!(sent_sync.get("stream").and_then(Value::as_bool), Some(false));
+    }

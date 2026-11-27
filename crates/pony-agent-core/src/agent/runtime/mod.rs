@@ -33,7 +33,9 @@ use crate::agent::provider::{
     provider_native_assistant_tool_call_message,
     provider_native_assistant_tool_call_message_for_protocol,
     provider_native_assistant_tool_call_message_with_reasoning_value,
-    provider_native_tool_result_message_for_protocol, provider_native_user_message,
+    provider_native_assistant_tool_calls_message_for_protocol,
+    provider_native_tool_result_message_for_protocol,
+    provider_native_tool_results_messages_for_protocol, provider_native_user_message,
     BuildContextObservation, ProviderDecision, ProviderManager, ProviderMessage, ProviderRequest,
     ProviderRequestObservation, ProviderResponse, ProviderStreamChunk, TokenUsage,
 };
@@ -82,6 +84,9 @@ use std::time::Instant;
 pub mod turn_runner;
 
 mod compaction_ops;
+mod image_normalization;
+#[cfg(test)]
+mod image_normalization_tests;
 mod overflow_rescue;
 mod title_ops;
 mod ingress_mediation;

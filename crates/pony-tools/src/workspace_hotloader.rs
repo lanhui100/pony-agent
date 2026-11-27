@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 use crate::skill_body::{trust_skill_file, SkillTrustRejection};
 
 /// 指令文档候选文件名的**单一来源**（wave-58 契约 F3-3 / 审查缺陷 P1-4）。
@@ -59,7 +61,7 @@ pub const PONY_AGENT_HOME_ENV: &str = "PONY_AGENT_HOME";
 pub const PONY_AGENT_SKILL_DIRS_ENV: &str = "PONY_AGENT_SKILL_DIRS";
 
 /// 指令与技能的作用域（用户级全局 / 项目级）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AgentScope {
     Global,
     Project,
@@ -76,7 +78,7 @@ impl AgentScope {
 }
 
 /// 文件元数据与指纹（用于判断是否需要重新读取与编译）
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFingerprint {
     pub path: PathBuf,
     pub mtime: Option<SystemTime>,
@@ -136,7 +138,7 @@ pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
 }
 
 /// 热加载解析后的 Skill 摘要（支持 YAML Frontmatter 标准字段）
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotloadedSkill {
     pub name: String,
     pub description: String,
@@ -157,7 +159,7 @@ pub struct HotloadedSkill {
 /// 存在的意义：把「静默消失」变成可观测标记 `omitted skill:<name> (<reason>)`，
 /// 让模型与用户都能知道哪些技能存在但不可用、以及为什么不可用。
 /// `as_str` 的输出是稳定契约字面量（测试与提示词直接消费），禁止随意改名。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SkillOmissionReason {
     /// 符号链接 / 路径逃逸出受信根。项目级根保持严格 canonical 包含判定（D1）。
     OutsideRoot,
@@ -185,7 +187,7 @@ impl SkillOmissionReason {
 }
 
 /// 单条技能扫描跳过记录（wave-58 契约 F2-6）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillOmission {
     /// 技能名（D3 去重键：`frontmatter.name`，缺省回落目录名）。
     pub name: String,
@@ -245,7 +247,7 @@ impl SkillScanReport {
 }
 
 /// 指令注入预算上限（wave-42 契约桩）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionBudget {
     pub max_bytes: usize,
     pub max_source_bytes: usize,
@@ -398,7 +400,7 @@ fn utf8_safe_prefix_len(bytes: &[u8], max_bytes: usize) -> Result<usize, usize> 
 }
 
 /// 会话级已固化的静态基线（用于保障历史 KV Cache 不被截断冲刷）
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionBaselineSnapshot {
     pub constitution_hash: u64,
     pub constitution_content: String,
@@ -406,6 +408,15 @@ pub struct SessionBaselineSnapshot {
     pub skills: Vec<HotloadedSkill>,
     /// 固化基线时使用的注入预算（wave-42 契约字段）。
     pub budget: InstructionBudget,
+}
+
+/// 会话首轮请求头快照（对齐 DSH `request/header`）：固化首轮模型/协议与工具名列表，
+/// 跨重启恢复时可检测前缀漂移。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRequestHeaderSnapshot {
+    pub model: String,
+    pub protocol: String,
+    pub tool_names: Vec<String>,
 }
 
 /// 针对会话的增量规则变更记录（DSH 风格的 Append-Only 变动事件）
@@ -441,7 +452,7 @@ struct SessionBaselineRegistry {
     sequence: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionBaselineEntry {
     snapshot: SessionBaselineSnapshot,
     /// 首轮固化时使用的技能清单预算（wave-58 D5' / L3-裁决 A）。
@@ -587,7 +598,7 @@ impl SkillCacheRegistry {
 }
 
 /// 统一热加载与 KV-Cache 保护管理器
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WorkspaceHotloader {
     constitution: RwLock<Option<ConstitutionCache>>,
     /// 逐文件 Skill 缓存，键为 `{canonical_workspace_root}:{scope}:{rank}:{folder}`。
@@ -600,6 +611,14 @@ pub struct WorkspaceHotloader {
     skills: RwLock<SkillCacheRegistry>,
     /// 会话基线注册表（Wave-58 F2-7：有界 LRU，容量 [`MAX_SESSION_BASELINES`]）。
     session_baselines: RwLock<SessionBaselineRegistry>,
+    /// B1795705303550: 跨重启/LRU 淘汰后的会话基线与请求头快照落盘目录（`None` = 仅内存）。
+    persistence_dir: Option<PathBuf>,
+}
+
+impl Default for WorkspaceHotloader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 static GLOBAL_HOTLOADER: std::sync::OnceLock<WorkspaceHotloader> = std::sync::OnceLock::new();
@@ -751,9 +770,98 @@ pub fn constitution_source_paths(workspace_root: &Path, global_homes: &[PathBuf]
     paths
 }
 
+fn default_baseline_persistence_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        pony_protocol::sqlite_paths::data_dir_override()
+            .or_else(dirs::data_local_dir)
+            .map(|root| root.join("PonyAgent").join("session_baselines"))
+    }
+}
+
 impl WorkspaceHotloader {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_persistence_dir(default_baseline_persistence_dir())
+    }
+
+    pub fn with_persistence_dir(persistence_dir: Option<PathBuf>) -> Self {
+        Self {
+            constitution: RwLock::new(None),
+            skill_files: RwLock::new(BTreeMap::new()),
+            skills: RwLock::new(SkillCacheRegistry::default()),
+            session_baselines: RwLock::new(SessionBaselineRegistry::default()),
+            persistence_dir,
+        }
+    }
+
+    fn baseline_artifact_path(&self, key: &SessionBaselineKey, kind: &str) -> Option<PathBuf> {
+        let dir = self.persistence_dir.as_ref()?;
+        let digest = fnv1a_hash(format!("{}\0{}\0{kind}", key.0, key.1).as_bytes());
+        Some(dir.join(format!("{kind}-{digest:016x}.json")))
+    }
+
+    fn load_persisted_baseline(&self, key: &SessionBaselineKey) -> Option<SessionBaselineEntry> {
+        let path = self.baseline_artifact_path(key, "baseline")?;
+        let raw = fs::read_to_string(&path).ok()?;
+        serde_json::from_str::<SessionBaselineEntry>(&raw).ok()
+    }
+
+    fn save_persisted_baseline(&self, key: &SessionBaselineKey, entry: &SessionBaselineEntry) {
+        let Some(path) = self.baseline_artifact_path(key, "baseline") else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                eprintln!("[pony-agent][hotloader] create baseline dir failed: {err}");
+                return;
+            }
+        }
+        let Ok(payload) = serde_json::to_string(entry) else {
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, payload).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
+
+    /// 固化或读取会话首轮请求头快照（模型/协议/工具名列表），跨重启不漂移。
+    pub fn freeze_or_load_request_header<P: AsRef<Path>>(
+        &self,
+        workspace_root: P,
+        session_id: &str,
+        current: &SessionRequestHeaderSnapshot,
+    ) -> SessionRequestHeaderSnapshot {
+        let root = workspace_root.as_ref();
+        let key: SessionBaselineKey = (
+            root.canonicalize()
+                .unwrap_or_else(|_| root.to_path_buf())
+                .display()
+                .to_string(),
+            session_id.to_string(),
+        );
+        let Some(path) = self.baseline_artifact_path(&key, "header") else {
+            return current.clone();
+        };
+        if let Ok(raw) = fs::read_to_string(&path) {
+            if let Ok(existing) = serde_json::from_str::<SessionRequestHeaderSnapshot>(&raw) {
+                return existing;
+            }
+        }
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(payload) = serde_json::to_string(current) {
+            let tmp = path.with_extension("json.tmp");
+            if fs::write(&tmp, payload).is_ok() {
+                let _ = fs::rename(&tmp, &path);
+            }
+        }
+        current.clone()
     }
 
     /// 热重载/缓存命中感知：加载工作区宪法文档（遵循 AGENTS.md / CLAUDE.md 标准）
@@ -1350,15 +1458,34 @@ impl WorkspaceHotloader {
             session_id.to_string(),
         );
 
-        // 快路径：锁内只取快照（渲染一律在锁外，L3-A4）。
+        // 快路径：锁内只取快照（渲染一律在锁外，L3-A4）；若内存淘汰或进程重启导致未命中，
+        // 先尝试从磁盘基线恢复并回填 LRU，避免整段前缀失效重建。
         let replayed = if turn_count <= 1 {
             None
         } else {
-            let mut baselines = self
-                .session_baselines
-                .write()
-                .unwrap_or_else(|poison| poison.into_inner());
-            baselines.touch_entry(&baseline_key)
+            let in_memory = {
+                let mut baselines = self
+                    .session_baselines
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                baselines.touch_entry(&baseline_key)
+            };
+            match in_memory {
+                Some(entry) => Some(entry),
+                None => self.load_persisted_baseline(&baseline_key).inspect(|loaded| {
+                    let mut baselines = self
+                        .session_baselines
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    baselines.insert_entry(
+                        baseline_key.clone(),
+                        loaded.snapshot.clone(),
+                        loaded.catalog_budget,
+                        loaded.omitted.clone(),
+                        loaded.prefix.clone(),
+                    );
+                }),
+            }
         };
 
         if let Some(entry) = replayed {
@@ -1424,19 +1551,27 @@ impl WorkspaceHotloader {
             skills: current_skills,
             budget,
         };
+        let persisted_entry = SessionBaselineEntry {
+            snapshot: baseline.clone(),
+            catalog_budget,
+            omitted: report.omitted.clone(),
+            prefix: static_prefix.clone(),
+            last_used: 0,
+        };
         {
             let mut baselines = self
                 .session_baselines
                 .write()
-                .unwrap_or_else(|poison| poison.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             baselines.insert_entry(
-                baseline_key,
+                baseline_key.clone(),
                 baseline,
                 catalog_budget,
                 report.omitted.clone(),
                 static_prefix.clone(),
             );
         }
+        self.save_persisted_baseline(&baseline_key, &persisted_entry);
         (static_prefix, notice)
     }
 
@@ -1667,7 +1802,7 @@ impl WorkspaceHotloader {
 /// 技能清单预算（wave-58 D5'）：字节上限 + 条目上限。
 ///
 /// `unlimited()` 表示不裁剪（既有 [`WorkspaceHotloader::build_cached_prompt_prefix`] 语义）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillCatalogBudget {
     /// 技能清单段允许占用的最大字节数（含标题与 `omitted` 标记行）。
     pub max_bytes: usize,
@@ -3716,5 +3851,70 @@ allowed-tools: Bash, Read
             truncated.original_bytes
         );
         assert!(text.contains("truncated project.md"), "模型可见文本仍须保留截断标记");
+    }
+
+    #[test]
+    fn session_baseline_and_request_header_survive_instance_restart() {
+        let root = std::env::temp_dir().join(format!(
+            "hotloader-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let workspace = root.join("ws");
+        let cache_dir = root.join("baselines");
+        fs::create_dir_all(&workspace).expect("create workspace");
+        fs::write(workspace.join("AGENTS.md"), "# Stable Policy v1").expect("write AGENTS.md");
+
+        let loader1 = WorkspaceHotloader::with_persistence_dir(Some(cache_dir.clone()));
+        let (prefix1, notice1) = loader1.resolve_session_prompt_context_with_budget_and_catalog(
+            "sess-restart",
+            1,
+            &workspace,
+            &[],
+            InstructionBudget::default(),
+            SkillCatalogBudget::unlimited(),
+        );
+        assert!(notice1.is_none());
+        let h1 = loader1.freeze_or_load_request_header(
+            &workspace,
+            "sess-restart",
+            &SessionRequestHeaderSnapshot {
+                model: "deepseek-chat".to_string(),
+                protocol: "openai-completions".to_string(),
+                tool_names: vec!["Read".to_string(), "Bash".to_string()],
+            },
+        );
+        assert_eq!(h1.tool_names.len(), 2);
+
+        // 模拟重启并修改磁盘 AGENTS.md
+        fs::write(workspace.join("AGENTS.md"), "# Modified Policy v2").expect("update AGENTS.md");
+        let loader2 = WorkspaceHotloader::with_persistence_dir(Some(cache_dir));
+        let (prefix2, notice2) = loader2.resolve_session_prompt_context_with_budget_and_catalog(
+            "sess-restart",
+            2,
+            &workspace,
+            &[],
+            InstructionBudget::default(),
+            SkillCatalogBudget::unlimited(),
+        );
+        assert_eq!(
+            prefix1, prefix2,
+            "跨进程重启后第 2 轮仍应命中持久化基线，头部前缀字节级一致"
+        );
+        assert!(notice2.is_some(), "工作区变更应通过 delta notice 上报");
+        let h2 = loader2.freeze_or_load_request_header(
+            &workspace,
+            "sess-restart",
+            &SessionRequestHeaderSnapshot {
+                model: "other-model".to_string(),
+                protocol: "openai-completions".to_string(),
+                tool_names: vec!["Read".to_string()],
+            },
+        );
+        assert_eq!(h2, h1, "首轮请求头快照跨重启应冻结保持一致");
+        let _ = fs::remove_dir_all(&root);
     }
 }

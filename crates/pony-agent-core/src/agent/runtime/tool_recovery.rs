@@ -535,16 +535,115 @@ pub(super) fn native_transcript_for_tool_turn(
     final_response: &ProviderResponse,
 ) -> Option<Vec<Value>> {
     let mut transcript = vec![provider_native_user_message(user_message)];
-    for hop in hop_records {
-        transcript.push(tool_request_assistant_message(protocol, hop));
-        transcript.push(provider_native_tool_result_message_for_protocol(
-            protocol,
-            &hop.tool_call,
-            &hop.tool_result,
-        ));
-    }
+    append_hop_batches_to_transcript(&mut transcript, protocol, hop_records);
     transcript.push(final_assistant_message(final_response));
     Some(transcript)
+}
+
+/// 将本次消费的 Ask 恢复问答对 `[assistant(tool_call), tool(answer)]` 前置于本轮落盘的
+/// `provider_native_transcript`（位于本轮 `user_message` 之前），使下一轮原生回放保留完整问诊轨迹。
+pub(super) fn prepend_ask_resume_native_pair(
+    transcript: Option<Vec<Value>>,
+    ask_pair: Option<&(Value, Value)>,
+) -> Option<Vec<Value>> {
+    let Some((assistant_msg, tool_result_msg)) = ask_pair else {
+        return transcript;
+    };
+    let mut messages = transcript?;
+    messages.insert(0, assistant_msg.clone());
+    messages.insert(1, tool_result_msg.clone());
+    Some(messages)
+}
+
+/// Ask / Approval 挂起前已闭环工具往返的原生转录片段（不包含尚未得到宿主结果的 pending hop）。
+pub(super) fn native_transcript_for_suspended_turn(
+    protocol: &crate::agent::provider::ProviderProtocol,
+    user_message: &str,
+    hop_records: &[ToolTurnHopRecord],
+    suspend_note: &str,
+) -> Option<Vec<Value>> {
+    native_transcript_with_interrupt_note(protocol, user_message, hop_records, suspend_note)
+}
+
+pub(super) struct PreSuspendHops<'a> {
+    pub(super) session_id: Option<&'a str>,
+    pub(super) turn_id: Option<&'a str>,
+    pub(super) user_message: &'a str,
+    pub(super) display_message: &'a str,
+    pub(super) provider_meta: Option<&'a ProviderEventMeta>,
+    pub(super) protocol: &'a crate::agent::provider::ProviderProtocol,
+    pub(super) workspace_mode: Option<&'a str>,
+    pub(super) partial_text: &'a str,
+    pub(super) hop_records: &'a [ToolTurnHopRecord],
+    pub(super) tool_activities: &'a [TurnToolActivity],
+    pub(super) suspend_note: &'a str,
+    pub(super) ask_resume_native_pair: Option<&'a (Value, Value)>,
+}
+
+impl AgentRuntime {
+    pub(super) fn persist_pre_suspend_tool_hops(&self, ctx: &PreSuspendHops<'_>) {
+        let pre_suspend_hops = &ctx.hop_records[..ctx.hop_records.len().saturating_sub(1)];
+        if pre_suspend_hops.is_empty() || ctx.session_id.is_none() {
+            return;
+        }
+        let pre_suspend_activities =
+            ctx.tool_activities[..ctx.tool_activities.len().saturating_sub(1)].to_vec();
+        let suspend_transcript = prepend_ask_resume_native_pair(
+            native_transcript_for_suspended_turn(
+                ctx.protocol,
+                ctx.user_message,
+                pre_suspend_hops,
+                ctx.suspend_note,
+            ),
+            ctx.ask_resume_native_pair,
+        );
+        let _ = self.persist_cancelled_turn_outcome(
+            ctx.session_id,
+            ctx.turn_id,
+            ctx.display_message,
+            ctx.provider_meta,
+            Vec::new(),
+            ctx.workspace_mode,
+            ctx.partial_text,
+            pre_suspend_activities,
+            Vec::new(),
+            suspend_transcript,
+        );
+    }
+}
+
+/// 轮内多跳 Soft-Trim 预剪枝（B1795705303352）：
+/// 仅当 `accumulated_messages` 估算 token 超过模型压缩高水位时才对更早 hop 的工具输出执行
+/// `PruneBudget::TRANSCRIPT` 首尾修剪（保护尾部最近一跳不改写），在阈值之下保持字节级 KV Cache 命中，
+/// 在接近上下文窗口或单轮多跳爆仓前提前瘦身（不涉及 512 KiB 类小字节拦截）。
+pub(super) fn maybe_soft_trim_accumulated_followup_messages(
+    provider: &ProviderManager,
+    accumulated_messages: &mut [Value],
+) {
+    if accumulated_messages.len() <= 2 {
+        return;
+    }
+    let config = crate::agent::compression::CompressionConfig::default();
+    let Some(threshold) =
+        crate::agent::compression::compression_threshold_tokens(provider, &config)
+    else {
+        return;
+    };
+    let current_tokens =
+        crate::agent::compression::estimate_native_transcript_tokens(accumulated_messages);
+    if current_tokens <= threshold {
+        return;
+    }
+    let pruned = crate::agent::tool_pruner::prune_older_tool_results_in_place(
+        accumulated_messages,
+        2,
+        crate::agent::tool_pruner::PruneBudget::TRANSCRIPT,
+    );
+    if pruned > 0 {
+        runtime_log(format!(
+            "turn:followup-soft-trim pruned_results={pruned} current_tokens={current_tokens} threshold={threshold}"
+        ));
+    }
 }
 
 /// 失败轮的 native transcript 片段：用户原话 + **已闭合**的工具往返 + 中断标记。
@@ -604,14 +703,7 @@ fn native_transcript_with_interrupt_note(
         return None;
     }
     let mut transcript = vec![provider_native_user_message(user_message)];
-    for hop in hop_records {
-        transcript.push(tool_request_assistant_message(protocol, hop));
-        transcript.push(provider_native_tool_result_message_for_protocol(
-            protocol,
-            &hop.tool_call,
-            &hop.tool_result,
-        ));
-    }
+    append_hop_batches_to_transcript(&mut transcript, protocol, hop_records);
     transcript.push(provider_native_assistant_message_with_reasoning_value(
         interrupt_note,
         Some(&Value::String(interrupt_note.to_string())),
@@ -619,31 +711,85 @@ fn native_transcript_with_interrupt_note(
     Some(transcript)
 }
 
+fn hops_share_parallel_batch(prev: &ToolTurnHopRecord, curr: &ToolTurnHopRecord) -> bool {
+    let (Some(prev_msg), Some(curr_msg)) = (
+        prev.assistant_message.as_ref(),
+        curr.assistant_message.as_ref(),
+    ) else {
+        return false;
+    };
+    if prev_msg != curr_msg {
+        return false;
+    }
+    !(prev.tool_call.call_id.is_some() && prev.tool_call.call_id == curr.tool_call.call_id)
+}
 
-pub(super) fn tool_request_assistant_message(
+fn append_hop_batches_to_transcript(
+    transcript: &mut Vec<Value>,
     protocol: &crate::agent::provider::ProviderProtocol,
-    hop: &ToolTurnHopRecord,
+    hop_records: &[ToolTurnHopRecord],
+) {
+    let mut start = 0usize;
+    while start < hop_records.len() {
+        let mut end = start + 1;
+        while end < hop_records.len()
+            && hops_share_parallel_batch(&hop_records[end - 1], &hop_records[end])
+        {
+            end += 1;
+        }
+        let batch = &hop_records[start..end];
+        transcript.push(tool_batch_assistant_message(protocol, batch));
+        let pairs: Vec<(&ToolCall, &crate::agent::tools::ToolResult)> = batch
+            .iter()
+            .map(|hop| (&hop.tool_call, &hop.tool_result))
+            .collect();
+        transcript.extend(provider_native_tool_results_messages_for_protocol(
+            protocol, &pairs,
+        ));
+        start = end;
+    }
+}
+
+fn tool_batch_assistant_message(
+    protocol: &crate::agent::provider::ProviderProtocol,
+    batch: &[ToolTurnHopRecord],
 ) -> Value {
+    let first = &batch[0];
+    let calls: Vec<ToolCall> = batch.iter().map(|hop| hop.tool_call.clone()).collect();
     if protocol.is_anthropic() {
-        if let Some(message) = hop.assistant_message.as_ref() {
-            if message.get("role").and_then(Value::as_str) == Some("assistant")
-                && message.get("content").and_then(Value::as_array).is_some()
-            {
-                return message.clone();
+        if let Some(message) = first.assistant_message.as_ref() {
+            if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                if let Some(blocks) = message.get("content").and_then(Value::as_array) {
+                    let declared_ids: Vec<&str> = blocks
+                        .iter()
+                        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                        .filter_map(|block| block.get("id").and_then(Value::as_str))
+                        .collect();
+                    let all_executed_match = declared_ids.len() == calls.len()
+                        && calls.iter().all(|call| {
+                            call.call_id
+                                .as_deref()
+                                .is_some_and(|id| declared_ids.contains(&id))
+                        });
+                    if all_executed_match {
+                        return message.clone();
+                    }
+                }
             }
         }
     }
 
-    let reasoning_value = hop.assistant_reasoning_content_value.clone().or_else(|| {
-        hop.assistant_reasoning_content
+    let reasoning_value = first.assistant_reasoning_content_value.clone().or_else(|| {
+        first
+            .assistant_reasoning_content
             .as_ref()
             .map(|reasoning| Value::String(reasoning.clone()))
     });
-    provider_native_assistant_tool_call_message_for_protocol(
+    provider_native_assistant_tool_calls_message_for_protocol(
         protocol,
-        text_if_present(&hop.assistant_output_text),
+        text_if_present(&first.assistant_output_text),
         reasoning_value.as_ref(),
-        &hop.tool_call,
+        &calls,
     )
 }
 
@@ -838,5 +984,109 @@ mod failed_turn_transcript_tests {
 
         // 无往返 ⇒ 不写（由文本检查点兜底）。
         assert!(native_transcript_for_cancelled_turn(&protocol, "hi", &[]).is_none());
+    }
+
+    #[test]
+    fn parallel_tool_batch_merges_into_single_assistant_for_openai_and_anthropic() {
+        let shared_openai_assistant = json!({
+            "role": "assistant",
+            "content": "reading both files",
+            "reasoning_content": "need a and b together",
+            "tool_calls": [
+                { "id": "call-a", "type": "function", "function": { "name": "workspace_read_file", "arguments": "{\"path\":\"a.rs\"}" } },
+                { "id": "call-b", "type": "function", "function": { "name": "workspace_read_file", "arguments": "{\"path\":\"b.rs\"}" } }
+            ]
+        });
+        let openai_hops = vec![
+            ToolTurnHopRecord {
+                assistant_message: Some(shared_openai_assistant.clone()),
+                assistant_output_text: "reading both files".to_string(),
+                assistant_reasoning_content: Some("need a and b together".to_string()),
+                assistant_reasoning_content_value: Some(Value::String("need a and b together".to_string())),
+                tool_call: ToolCall {
+                    call_id: Some("call-a".to_string()),
+                    name: "workspace_read_file".to_string(),
+                    arguments: json!({"path": "a.rs"}),
+                    plan: None,
+                },
+                tool_result: crate::agent::tools::ToolResult {
+                    tool_name: "workspace_read_file".to_string(),
+                    status: "ok".to_string(),
+                    output: "A".to_string(),
+                    duration_ms: 1,
+                },
+            },
+            ToolTurnHopRecord {
+                assistant_message: Some(shared_openai_assistant),
+                assistant_output_text: "reading both files".to_string(),
+                assistant_reasoning_content: Some("need a and b together".to_string()),
+                assistant_reasoning_content_value: Some(Value::String("need a and b together".to_string())),
+                tool_call: ToolCall {
+                    call_id: Some("call-b".to_string()),
+                    name: "workspace_read_file".to_string(),
+                    arguments: json!({"path": "b.rs"}),
+                    plan: None,
+                },
+                tool_result: crate::agent::tools::ToolResult {
+                    tool_name: "workspace_read_file".to_string(),
+                    status: "ok".to_string(),
+                    output: "B".to_string(),
+                    duration_ms: 1,
+                },
+            },
+        ];
+
+        let openai_transcript = native_transcript_for_failed_turn(
+            &crate::agent::provider::ProviderProtocol::OpenAiCompletions,
+            "check a and b",
+            &openai_hops,
+        )
+        .unwrap();
+        // user + 1 assistant(2 tool_calls) + 2 tool + 1 interrupt assistant = 5
+        assert_eq!(openai_transcript.len(), 5);
+        assert_eq!(openai_transcript[1]["role"], "assistant");
+        assert_eq!(openai_transcript[1]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(openai_transcript[2]["role"], "tool");
+        assert_eq!(openai_transcript[3]["role"], "tool");
+
+        let shared_anthropic_assistant = json!({
+            "role": "assistant",
+            "content": [
+                { "type": "thinking", "thinking": "parallel read" },
+                { "type": "tool_use", "id": "tu-1", "name": "workspace_read_file", "input": {"path": "a.rs"} },
+                { "type": "tool_use", "id": "tu-2", "name": "workspace_read_file", "input": {"path": "b.rs"} }
+            ]
+        });
+        let anthropic_hops = vec![
+            ToolTurnHopRecord {
+                assistant_message: Some(shared_anthropic_assistant.clone()),
+                tool_call: ToolCall {
+                    call_id: Some("tu-1".to_string()),
+                    ..openai_hops[0].tool_call.clone()
+                },
+                ..openai_hops[0].clone()
+            },
+            ToolTurnHopRecord {
+                assistant_message: Some(shared_anthropic_assistant),
+                tool_call: ToolCall {
+                    call_id: Some("tu-2".to_string()),
+                    ..openai_hops[1].tool_call.clone()
+                },
+                ..openai_hops[1].clone()
+            },
+        ];
+        let anthropic_transcript = native_transcript_for_failed_turn(
+            &crate::agent::provider::ProviderProtocol::AnthropicMessages,
+            "check a and b",
+            &anthropic_hops,
+        )
+        .unwrap();
+        // user + 1 assistant(2 tool_use) + 1 user(2 tool_result) + 1 interrupt assistant = 4
+        assert_eq!(anthropic_transcript.len(), 4);
+        assert_eq!(anthropic_transcript[1]["role"], "assistant");
+        assert_eq!(anthropic_transcript[2]["role"], "user");
+        assert_eq!(anthropic_transcript[2]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(anthropic_transcript[2]["content"][0]["type"], "tool_result");
+        assert_eq!(anthropic_transcript[2]["content"][1]["type"], "tool_result");
     }
 }

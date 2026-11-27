@@ -291,10 +291,11 @@ describe("待发送附件", () => {
     expect(harness.backend().callsFor("import_attachment")).toHaveLength(1);
   });
 
-  it("addPendingAttachments：图片已达 3 张上限 → 拒绝并记 errors", async () => {
+  it("addPendingAttachments：图片已达 MAX_TURN_IMAGES 上限 → 拒绝并记 errors", async () => {
+    const { MAX_TURN_IMAGES } = await import("@/lib/runtime/file-attachments");
     const store = harness.getStore();
     seedStore(store, {
-      pendingAttachments: Array.from({ length: 3 }, (_, index) => ({
+      pendingAttachments: Array.from({ length: MAX_TURN_IMAGES }, (_, index) => ({
         id: `pending-image-${index}`,
         name: `image-${index}.png`,
         sizeBytes: 8,
@@ -309,8 +310,10 @@ describe("待发送附件", () => {
     ]);
 
     expect(result.added).toBe(0);
-    expect(result.errors.some((error) => error.includes("最多添加 3 张图片"))).toBe(true);
-    expect(store.pendingAttachments).toHaveLength(3);
+    expect(
+      result.errors.some((error) => error.includes(`最多添加 ${MAX_TURN_IMAGES} 张图片`))
+    ).toBe(true);
+    expect(store.pendingAttachments).toHaveLength(MAX_TURN_IMAGES);
   });
 
   it("removePendingAttachment：按 id 移除，其余保持", () => {

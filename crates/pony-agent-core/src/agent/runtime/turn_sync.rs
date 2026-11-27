@@ -12,23 +12,28 @@ impl AgentRuntime {
     ///   其后调用不执行（Ask 的 `control_outcome_pending` 直接挂起本轮，剩余调用留给恢复后的
     ///   下一 hop 重新规划）；
     /// - **批长 1**（绝大多数场景）逐字走既有 1:1 路径：同一执行入口 + 同一 `provider_followup_with_mode`。
+    #[expect(clippy::too_many_arguments, reason = "sync tool turn loop carries turn input, telemetry, provider state, and governed context")]
     fn handle_sync_tool_turn(
         &self,
-        session_id: Option<&str>,
+        input: &TurnInput,
+        ask_injection: Option<&GraphAskResumeInjection>,
         user_message: String,
         display_message: String,
         provider: &ProviderManager,
         provider_meta: &ProviderEventMeta,
         tools: &[ToolDefinition],
-        planning_request: &ProviderRequest,
+        mut planning_request: ProviderRequest,
         first_decision: &ProviderDecision,
         tool_calls: Vec<ToolCall>,
         initial_model_hook_trace_records: Vec<HookTraceRecord>,
         first_token_latency_ms: Option<u64>,
         provider_call_records: &mut Vec<ProviderCallCacheRecord>,
         governed_context: Option<&DispatchContext>,
+        ask_resume_native_pair: Option<&(Value, Value)>,
     ) -> Result<SyncToolTurnOutcome, TurnResult> {
-        let context_observation = build_context_observation(planning_request, tools);
+        let session_id = input.session_id.as_deref();
+        let mut active_provider_meta = provider_meta.clone();
+        let mut context_observation = build_context_observation(&planning_request, tools);
         let mut hop_records = Vec::new();
         let mut tool_activities = Vec::new();
         let mut current_tool_calls = tool_calls;
@@ -48,6 +53,8 @@ impl AgentRuntime {
         let mut same_signatures = SameSignatureTracker::new();
         let mut consecutive_failures = ConsecutiveFailureTracker::new();
         let mut accumulated_messages: Vec<Value> = Vec::new();
+        let mut prior_batches: Vec<(Option<Value>, Vec<ToolCall>, Vec<ToolResult>)> = Vec::new();
+        let mut followup_overflow_rescued = false;
         // D4（W28b / B018 后续）：批内执行段规划见 `batch_plan`；开关 `PONY_AGENT_PARALLEL_TOOLS`
         // 默认关 ⇒ 每段都是「预阶段 → 执行 → 后阶段」的单调用段，逐调用交织语义与本波之前逐字一致。
         let mut executed_calls: Vec<ToolCall> = Vec::new();
@@ -177,42 +184,28 @@ impl AgentRuntime {
                     if let Some(request) = &suspension.pending_request {
                         runtime_log(format!(
                             "turn:ask-suspend hop={} request={} kind={:?} call_id={} bound_run={:?}",
-                            completed_hops,
-                            request.request_id,
-                            request.request_kind,
-                            request.call_id,
-                            suspension.bound_run_id
+                            completed_hops, request.request_id, request.request_kind, request.call_id, suspension.bound_run_id
                         ));
                     }
-                    // W1b：治理路径已产出挂起标记，却匹配不到可恢复的待处理请求 ⇒
-                    // 不得只发一条裸 `suspended`（用户永远等不到恢复），以可读失败终态收口。
                     if self.suspension_without_recoverable_request(&suspension) {
-                        // F3（NFR）：日志 code 必须与终态错误码一致（首段），见 turn_control。
-                        let unrecoverable_error =
-                            super::turn_control::build_unrecoverable_suspension_error(&suspension);
+                        let unrecoverable_error = super::turn_control::build_unrecoverable_suspension_error(&suspension);
                         runtime_log(format!(
                             "turn:control-suspend-unrecoverable hop={} name={} code={}",
-                            completed_hops,
-                            tool_call.name,
-                            super::turn_control::suspension_error_code(&unrecoverable_error)
+                            completed_hops, tool_call.name, super::turn_control::suspension_error_code(&unrecoverable_error)
                         ));
                         return Err(self.fail_sync_turn_result(
-                            Some(provider_meta),
-                            display_message,
-                            self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                            tool_activities,
-                            hook_trace_records,
-                            unrecoverable_error,
+                            Some(provider_meta), display_message, self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                            tool_activities, hook_trace_records, unrecoverable_error,
                         ));
                     }
-                    return Err(self.build_suspended_turn_result(
-                        Some(provider_meta),
-                        display_message,
-                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
-                        tool_activities,
-                        hook_trace_records,
-                        &suspension,
-                    ));
+                    let suspended_result = self.build_suspended_turn_result(
+                        Some(provider_meta), display_message.clone(), self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                        tool_activities.clone(), hook_trace_records, &suspension,
+                    );
+                    self.persist_pre_suspend_tool_hops(&PreSuspendHops {
+                        session_id, turn_id: None, user_message: &user_message, display_message: &display_message, provider_meta: Some(provider_meta), protocol: provider.protocol(), workspace_mode: None, partial_text: "", hop_records: &hop_records, tool_activities: &tool_activities, suspend_note: &suspended_result.assistant_message, ask_resume_native_pair,
+                    });
+                    return Err(suspended_result);
                 }
 
                 // Only abort the turn if the tool was intentionally stopped (e.g. user cancellation).
@@ -375,49 +368,30 @@ impl AgentRuntime {
             // wave-acp-delegate C6.1：step 边界增量落盘（上一 hop 已闭合，先落盘再发下一跳；
             // drain-on-success：失败保留缓冲可重试，终态 flush 仍负责剩余事件）。
             let _ = flush_step_boundary_events(session_id);
-            // F2（重试窗口纯净）：账本起点即 per-call 计时起点，重试/退避在
-            // `provider_followup_with_mode` 内部，不共源就会被算进 dur。
-            let provider_call_started_at = crate::agent::retry::begin_provider_attempt_window();
-            let followup_result = if executed_calls.len() == 1 {
-                provider_followup_with_mode(
-                    provider,
-                    planning_request,
-                    tools,
-                    &mut accumulated_messages,
-                    current_assistant_message.as_ref(),
-                    &executed_calls[0],
-                    &executed_results[0],
-                    crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
-                )
-            } else {
-                provider_followup_with_calls(
-                    provider,
-                    planning_request,
-                    tools,
-                    &mut accumulated_messages,
-                    current_assistant_message.as_ref(),
-                    &executed_calls,
-                    &executed_results,
-                    crate::agent::turn_flow::LlmRequestMode::ToolFollowup,
-                )
-            };
-            let response = match followup_result {
-                Ok(response) => response,
-                Err(error) => {
+            let (mut response, pure_call_window) = match self.run_sync_tool_followup_with_rescue(
+                input, ask_injection, &prior_batches, provider, &mut planning_request,
+                &mut active_provider_meta, &mut context_observation, tools,
+                &mut accumulated_messages, current_assistant_message.as_ref(),
+                &executed_calls, &executed_results, &mut followup_overflow_rescued,
+            ) {
+                Ok(pair) => pair,
+                Err((error, true)) => {
+                    return Err(self.fail_sync_turn_result(
+                        Some(provider_meta), display_message,
+                        self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
+                        tool_activities, hook_trace_records, error,
+                    ));
+                }
+                Err((error, false)) => {
                     return Err(build_failed_turn_result(
-                        Some(provider_meta),
-                        display_message,
-                        error,
+                        Some(provider_meta), display_message, error,
                         self.telemetry_builder.failed_trace_after_tool(all_tools_ok),
                         tool_activities,
                     ));
                 }
             };
-            let mut response = response;
             // F2：per-call dur 收敛为「只覆盖最后一次成功 attempt」（同步 followup 无首包观测）。
             // wave-acp-delegate C5.1：账本（window）整体下传，重试元数据不得在中途被丢掉。
-            let pure_call_window =
-                crate::agent::retry::take_pure_call_window(provider_call_started_at, None);
             push_buffered_followup_call_record(
                 provider_call_records,
                 provider,
@@ -500,7 +474,7 @@ impl AgentRuntime {
                 if completed_hops >= max_tool_followups_per_turn() {
                     let recovery = recover_tool_followup_completion(
                         provider,
-                        planning_request,
+                        &planning_request,
                         &mut accumulated_messages,
                         &hop_records,
                         &next_tool_call,
@@ -534,7 +508,7 @@ impl AgentRuntime {
                         let occurrences = same_signatures.occurrence_count(&next_signature) + 1;
                         let recovery = recover_tool_followup_completion(
                             provider,
-                            planning_request,
+                            &planning_request,
                             &mut accumulated_messages,
                             &hop_records,
                             &next_tool_call,
@@ -555,6 +529,11 @@ impl AgentRuntime {
                             );
                         response = recovery.response;
                     } else {
+                        prior_batches.push((
+                            current_assistant_message.clone(),
+                            executed_calls.clone(),
+                            executed_results.clone(),
+                        ));
                         current_assistant_message = response.assistant_message.clone();
                         current_assistant_output_text = response.output_text.clone();
                         current_assistant_reasoning = response.reasoning_content.clone();
@@ -569,11 +548,14 @@ impl AgentRuntime {
             return Ok(SyncToolTurnOutcome {
                 assistant_message: response.output_text.clone(),
                 assistant_reasoning_content: response.reasoning_content.clone(),
-                provider_native_transcript: native_transcript_for_tool_turn(
-                    provider.protocol(),
-                    &user_message,
-                    &hop_records,
-                    &response,
+                provider_native_transcript: prepend_ask_resume_native_pair(
+                    native_transcript_for_tool_turn(
+                        provider.protocol(),
+                        &user_message,
+                        &hop_records,
+                        &response,
+                    ),
+                    ask_resume_native_pair,
                 ),
                 provider_source: response.provider_source,
                 provider_mode: response.provider_mode,
@@ -842,8 +824,10 @@ impl AgentRuntime {
             tools,
             planning_request,
             build_context_observation,
+            ask_resume_native_pair,
             ..
         } = prepared;
+        let ask_pair = ask_resume_native_pair;
         let mut provider_call_records = vec![build_provider_call_cache_record(
             ProviderRequestKind::InitialRequest,
             Some(first_decision.provider_source.as_str()),
@@ -907,19 +891,10 @@ impl AgentRuntime {
             // D3a：首个 hop 的整批调用 = planner 修补后的首个调用 + 上游响应的余下调用（保序）。
             let tool_calls = sync_tool_batch(tool_call, &first_decision.tool_calls);
             match self.handle_sync_tool_turn(
-                input.session_id.as_deref(),
-                user_message.clone(),
-                display_message.clone(),
-                &provider,
-                &provider_meta,
-                &tools,
-                &planning_request,
-                &first_decision,
-                tool_calls,
-                planning_hook_trace_records.clone(),
-                initial_visible_first_token_latency_ms,
-                &mut provider_call_records,
-                governed_context.as_ref(),
+                &input, ask_injection.as_ref(), user_message.clone(), display_message.clone(),
+                &provider, &provider_meta, &tools, planning_request, &first_decision, tool_calls,
+                planning_hook_trace_records.clone(), initial_visible_first_token_latency_ms,
+                &mut provider_call_records, governed_context.as_ref(), ask_pair.as_ref(),
             ) {
                 Ok(outcome) => (
                     outcome.assistant_message,
@@ -963,10 +938,13 @@ impl AgentRuntime {
             (
                 first_decision.output_text.clone(),
                 first_decision.reasoning_content.clone(),
-                native_transcript_for_completed_turn(
-                    &user_message,
-                    &first_decision,
-                    provider.persists_native_tool_transcript(),
+                prepend_ask_resume_native_pair(
+                    native_transcript_for_completed_turn(
+                        &user_message,
+                        &first_decision,
+                        provider.persists_native_tool_transcript(),
+                    ),
+                    ask_pair.as_ref(),
                 ),
                 first_decision.provider_source.clone(),
                 first_decision.provider_mode.clone(),
