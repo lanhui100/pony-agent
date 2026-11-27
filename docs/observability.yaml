@@ -1862,3 +1862,15 @@ note: >-
 #     `crates/pony-agent-core/src/agent/runtime/overflow_rescue.rs`（sync/stream followup 自救、非溢出 400、取消态 5 例）
 #     及 `src/stores/runtime/__tests__/equivalence-wave2a.spec.ts`（前端对齐 600 上限）。
 # 注：本文件随本批改动，提交信息须带 [decl-change-approved]。
+
+# B1795746927199（ADR 2026-11-27-batch-tool-followup-true-streaming）归属说明：
+# (1) 变更面：`continue_with_tool_results_stream` 对 `supports_streaming=true` 的模型改走真流式 SSE
+#     通道，`turn_flow::batch_followup_transport_for` 依 `supports_streaming()` 将 `llm.request.transport`
+#     在流式模型上置为 `stream`（非流式维持 `buffered`），并采集 `llm.call.ttft_ms`；不新增 span/属性键/
+#     网络导出端点/后台任务，现有 `followup_sync_batch` 本地日志仅留在非流式或同步入口。
+# (2) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-observability/src/otel/mod.rs`、
+#     `crates/pony-observability/src/ponysentry/client.rs`）；metrics / logs 维持结构性 N-A（桌面/TUI
+#     无常驻监听地址、无 `/metrics`、Prometheus pull 模型不成立）。不新增 applicable 判定、不新增 enforcement_point。
+# (3) 行为门落在测试层：`crates/pony-agent-core/src/agent/runtime/tests.rs`（`batch_followup_transport_matches_streaming_capability`）
+#     与 `crates/pony-agent-core/tests/session_storage_suite/b254_stream_only_followup.rs`（批量 `N>1` 流式断流重试与真增量验收）。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
