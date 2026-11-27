@@ -94,3 +94,9 @@ Status: implemented
 1. `ExitPlanMode` 走的是**宿主 Ask 通道的既有 `WaitingHost` 控制请求面**，没有新增独立工具槽位——沿用原 `plan_control` 槽位保持内建工具数 46 与工具面顺序不变（KV-cache 前缀稳定）。
 2. `plan_execution_approval` 形参保留在 `decide_with_context` 签名上但**不再参与判定**（惰性数据），以避免 `DispatchContext` 线缆与 26 个调用点的大面积改动；语义已由 `plan_mode_review` 取代。
 3. 底栏任务段在「全部完成」时整段隐藏（方案 A 原文），而不是显示 `n/n`。
+
+**收口补录（2026-11-28，rebase 到 main `2db72111` 后）**：
+
+1. `crates/pony-tools/src/plan_state.rs`（1308 行、17 个内部测试）在首轮改造里只下线了调用面，文件本体与其 `pub mod` 导出仍在仓内但零消费者（`grep -rn "plan_state::"` 除自身外为空）。本次整文件删除并清掉 `pony-tools/src/lib.rs` 与 `agent/mod.rs` 的两处导出，兑现本文「一步下线 `PlanStore`」的承诺。
+2. `contract_view_tests` 的两张模型可见名单仍冻结为旧名 `Plan`（与 `names.rs` 的 `ExitPlanMode` 冲突），本次同步为 `ExitPlanMode`——属本文已批准的改名收尾，非新契约。
+3. `PlanExecutionApproval` 线缆字段（166 触点 / 35 文件）确认为**有意留手**并登记账本 `B1795821777375`（P2 Debt）：删除需一次收敛 `DispatchContext`/`TurnInput`/前端 `runtime.ts`/契约快照，不宜与本次主改造同 PR 放大评审面。

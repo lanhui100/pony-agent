@@ -66,7 +66,6 @@ pub mod planner;
 pub use pony_tools::plugin_host;
 pub use pony_tools::exit_plan_mode;
 pub use pony_tools::plan_mode;
-pub use pony_tools::plan_state;
 pub use pony_observability::ponysentry;
 pub use pony_tools::path_permission;
 pub use pony_protocol::present;
