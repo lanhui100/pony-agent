@@ -8,8 +8,7 @@
 use super::*;
 
 /// 底部操作提示：面板是只读的，所有变更都回到 `/goal` 命令（逐字冻结，勿改字面量）。
-pub const GOAL_PANEL_HINT: &str =
-    "/goal pause · resume · edit <目标> · complete · blocked <理由> · clear";
+pub const GOAL_PANEL_HINT: &str = "/goal pause · resume · edit <目标> · complete · clear";
 
 /// `GoalPhase` → 中文短语（与 goal 横幅同一套译词，避免同一状态两处说法）。
 fn phase_label(phase: &GoalPhase) -> &'static str {

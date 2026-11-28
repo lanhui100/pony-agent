@@ -2,13 +2,15 @@
 //!
 //! 桌面（Tauri `goal_command`）与 TUI（`bin/tui/goal_command.rs`）只做接线与渲染，
 //! 解析口径、状态迁移与回执文案全部落在本模块，禁止两端各写一份。
-//! 本模块只读写 goal store：不读会话历史、不发起 turn、不消耗模型轮次。
+//! 空参 `/goal`（show）、`pause`、`complete`、`clear` 与非 completed `edit` 只读写 goal store，
+//! 不发起模型轮次；`create`（含 completed 态 `edit`）与 `resume` 产出 `next_round_prompt`
+//! 供宿主层自动拉起首轮/续轮（对齐 DSH `command-goal` + `goal-round-driver`）。
 
 use serde::Serialize;
 
 use super::goal::{
-    clear_goal, create_goal, get_goal, update_goal, CreateGoalArgs, GetGoalArgs, GoalActivation,
-    GoalData, UpdateGoalAction, UpdateGoalArgs,
+    build_goal_round_message, clear_goal, create_goal, get_goal, update_goal, CreateGoalArgs,
+    GetGoalArgs, GoalActivation, GoalData, UpdateGoalAction, UpdateGoalArgs,
 };
 
 /// 帮助文案真值源（桌面 / TUI / 错误回执共用，禁止两端各写一份）。
@@ -36,6 +38,54 @@ pub struct GoalCommandOutcome {
     pub message: String,
     /// 变更后的目标快照；`clear` 与「无目标」的 show 为 None。
     pub goal: Option<GoalData>,
+    /// 需要自动拉起首轮/续轮时的提示词（仅 `create` / `resume` 且处于 `active + armed` 且预算未耗尽）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_round_prompt: Option<String>,
+    /// 对应 `next_round_prompt` 的单行展示标题。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_round_display: Option<String>,
+}
+
+impl GoalCommandOutcome {
+    /// 本命令是否应由宿主自动启动首轮/续轮执行（对齐 DSH `command-goal` + `goal-round-driver`）。
+    pub fn should_auto_drive(&self) -> bool {
+        matches!(self.action.as_str(), "create" | "resume") && self.next_round_prompt.is_some()
+    }
+
+    /// 本命令是否要求中止当前正在运行的轮次（`pause` / `clear` / `complete`）。
+    pub fn should_cancel_in_flight(&self) -> bool {
+        matches!(self.action.as_str(), "pause" | "clear" | "complete")
+    }
+}
+
+fn next_round_fields(action: &str, goal: Option<&GoalData>) -> (Option<String>, Option<String>) {
+    if !matches!(action, "create" | "resume") {
+        return (None, None);
+    }
+    let Some(goal) = goal else {
+        return (None, None);
+    };
+    if goal.phase != "active"
+        || goal.activation != GoalActivation::Armed
+        || goal.rounds_started >= goal.max_goal_rounds
+    {
+        return (None, None);
+    }
+    let round = goal.rounds_started.saturating_add(1);
+    let prompt = build_goal_round_message(&goal.objective, round, goal.max_goal_rounds);
+    let display = format!("[goal round {round}] 推进目标：{}", goal.objective.trim());
+    (Some(prompt), Some(display))
+}
+
+fn build_outcome(action: &str, message: String, goal: Option<GoalData>) -> GoalCommandOutcome {
+    let (next_round_prompt, next_round_display) = next_round_fields(action, goal.as_ref());
+    GoalCommandOutcome {
+        action: action.to_string(),
+        message,
+        goal,
+        next_round_prompt,
+        next_round_display,
+    }
 }
 
 /// 契约 C-1：解析 `/goal` 之后的剩余文本（调用方负责剥离命令 token）。
@@ -93,11 +143,7 @@ pub fn execute_goal_command(session_id: &str, args: &str) -> Result<GoalCommandO
                 Some(goal) => render_show(goal),
                 None => format!("当前会话未设置目标。\n{GOAL_COMMAND_USAGE}"),
             };
-            Ok(GoalCommandOutcome {
-                action: "show".to_string(),
-                message,
-                goal,
-            })
+            Ok(build_outcome("show", message, goal))
         }
         GoalCommandRequest::Create { objective } => {
             let existing = current_goal(session)?;
@@ -116,11 +162,11 @@ pub fn execute_goal_command(session_id: &str, args: &str) -> Result<GoalCommandO
                 max_goal_rounds: existing.as_ref().map(|goal| goal.max_goal_rounds),
             })?
             .goal;
-            Ok(GoalCommandOutcome {
-                action: "create".to_string(),
-                message: render_change("目标已创建。自动续轮已启动。", &created),
-                goal: Some(created),
-            })
+            Ok(build_outcome(
+                "create",
+                render_change("目标已创建。", &created),
+                Some(created),
+            ))
         }
         GoalCommandRequest::Edit { objective } => {
             let current = require_goal(session, "edit")?;
@@ -132,11 +178,11 @@ pub fn execute_goal_command(session_id: &str, args: &str) -> Result<GoalCommandO
                     max_goal_rounds: Some(current.max_goal_rounds),
                 })?
                 .goal;
-                return Ok(GoalCommandOutcome {
-                    action: "create".to_string(),
-                    message: render_change("目标已创建。自动续轮已启动。", &created),
-                    goal: Some(created),
-                });
+                return Ok(build_outcome(
+                    "create",
+                    render_change("目标已创建。", &created),
+                    Some(created),
+                ));
             }
 
             let updated = update_goal(UpdateGoalArgs {
@@ -149,11 +195,11 @@ pub fn execute_goal_command(session_id: &str, args: &str) -> Result<GoalCommandO
                 max_goal_rounds: None,
             })?
             .goal;
-            Ok(GoalCommandOutcome {
-                action: "edit".to_string(),
-                message: render_change("目标已更新。", &updated),
-                goal: Some(updated),
-            })
+            Ok(build_outcome(
+                "edit",
+                render_change("目标已更新。", &updated),
+                Some(updated),
+            ))
         }
         GoalCommandRequest::Pause => {
             let current = require_goal(session, "pause")?;
@@ -167,11 +213,11 @@ pub fn execute_goal_command(session_id: &str, args: &str) -> Result<GoalCommandO
                 max_goal_rounds: None,
             })?
             .goal;
-            Ok(GoalCommandOutcome {
-                action: "pause".to_string(),
-                message: render_change("目标已暂停。自动续轮已停止。", &updated),
-                goal: Some(updated),
-            })
+            Ok(build_outcome(
+                "pause",
+                render_change("目标已暂停。自动续轮已停止。", &updated),
+                Some(updated),
+            ))
         }
         GoalCommandRequest::Resume => {
             let current = require_goal(session, "resume")?;
@@ -185,11 +231,11 @@ pub fn execute_goal_command(session_id: &str, args: &str) -> Result<GoalCommandO
                 max_goal_rounds: None,
             })?
             .goal;
-            Ok(GoalCommandOutcome {
-                action: "resume".to_string(),
-                message: render_change("目标已恢复。自动续轮已启动。", &updated),
-                goal: Some(updated),
-            })
+            Ok(build_outcome(
+                "resume",
+                render_change("目标已恢复。", &updated),
+                Some(updated),
+            ))
         }
         GoalCommandRequest::Complete => {
             let current = require_goal(session, "complete")?;
@@ -203,23 +249,20 @@ pub fn execute_goal_command(session_id: &str, args: &str) -> Result<GoalCommandO
                 max_goal_rounds: None,
             })?
             .goal;
-            Ok(GoalCommandOutcome {
-                action: "complete".to_string(),
-                message: render_change("目标已完成。自动续轮已停止。", &updated),
-                goal: Some(updated),
-            })
+            Ok(build_outcome(
+                "complete",
+                render_change("目标已完成。自动续轮已停止。", &updated),
+                Some(updated),
+            ))
         }
         GoalCommandRequest::Clear => {
             let removed = clear_goal(session)?;
-            Ok(GoalCommandOutcome {
-                action: "clear".to_string(),
-                message: if removed {
-                    "目标已清除。".to_string()
-                } else {
-                    "当前没有可清除的目标。".to_string()
-                },
-                goal: None,
-            })
+            let message = if removed {
+                "目标已清除。".to_string()
+            } else {
+                "当前没有可清除的目标。".to_string()
+            };
+            Ok(build_outcome("clear", message, None))
         }
     }
 }
@@ -258,12 +301,16 @@ fn activation_label(activation: &GoalActivation) -> &'static str {
     }
 }
 
-/// 按相位的可执行命令建议。
-fn phase_commands(phase: &str) -> &'static str {
-    match phase {
-        "active" => "/goal edit <目标> | /goal pause | /goal complete | /goal clear",
-        "paused" | "blocked" => "/goal resume | /goal edit <目标> | /goal clear",
-        "completed" => "/goal <新目标> | /goal clear",
+/// 按相位与激活态的可执行命令建议（对齐 DSH `commandHint`）。
+fn phase_commands(phase: &str, activation: &GoalActivation) -> &'static str {
+    match (phase, activation) {
+        ("active", GoalActivation::Armed) => {
+            "/goal edit <目标> | /goal pause | /goal complete | /goal clear"
+        }
+        ("active", GoalActivation::Disarmed) | ("paused" | "blocked", _) => {
+            "/goal resume | /goal edit <目标> | /goal clear"
+        }
+        ("completed", _) => "/goal <新目标> | /goal clear",
         _ => GOAL_COMMAND_USAGE,
     }
 }
@@ -290,7 +337,10 @@ fn render_show(goal: &GoalData) -> String {
             lines.push(format!("阻塞原因: {reason}"));
         }
     }
-    lines.push(format!("可执行命令: {}", phase_commands(&goal.phase)));
+    lines.push(format!(
+        "可执行命令: {}",
+        phase_commands(&goal.phase, &goal.activation)
+    ));
     lines.join("\n")
 }
 
@@ -300,7 +350,7 @@ fn render_change(prefix: &str, goal: &GoalData) -> String {
         goal.objective.trim(),
         goal.rounds_started,
         goal.max_goal_rounds,
-        phase_commands(&goal.phase)
+        phase_commands(&goal.phase, &goal.activation)
     )
 }
 
@@ -612,5 +662,82 @@ mod tests {
         assert_eq!(cleared.message, "目标已清除。");
         assert!(current_goal(session).expect("get_goal").is_none());
         assert!(active_goal_for_session(session).is_none());
+    }
+
+    #[test]
+    fn outcome_auto_drive_and_cancel_flags_match_dsh_contract() {
+        let _lock = crate::goal::test_support::lock();
+        let (_env, _path) = StoreEnvGuard::install("auto-drive-flags");
+        let session = "goal-cmd-auto-drive";
+
+        let empty_show = execute_goal_command(session, "").expect("empty show");
+        assert!(!empty_show.should_auto_drive());
+        assert!(!empty_show.should_cancel_in_flight());
+        assert!(empty_show.next_round_prompt.is_none());
+
+        let created = execute_goal_command(session, "完成修复").expect("create");
+        assert!(created.should_auto_drive());
+        assert!(!created.should_cancel_in_flight());
+        let prompt = created
+            .next_round_prompt
+            .as_deref()
+            .expect("create must carry next_round_prompt");
+        assert!(crate::goal::is_goal_round_prompt(prompt));
+        assert_eq!(
+            created.next_round_display.as_deref(),
+            Some("[goal round 1] 推进目标：完成修复")
+        );
+
+        let shown = execute_goal_command(session, "").expect("show active");
+        assert!(!shown.should_auto_drive());
+        assert!(!shown.should_cancel_in_flight());
+
+        let edited = execute_goal_command(session, "edit 更新修复").expect("edit active");
+        assert!(!edited.should_auto_drive());
+        assert!(!edited.should_cancel_in_flight());
+
+        let paused = execute_goal_command(session, "pause").expect("pause");
+        assert!(!paused.should_auto_drive());
+        assert!(paused.should_cancel_in_flight());
+
+        let resumed = execute_goal_command(session, "resume").expect("resume");
+        assert!(resumed.should_auto_drive());
+        assert!(!resumed.should_cancel_in_flight());
+        assert!(crate::goal::is_goal_round_prompt(
+            resumed.next_round_prompt.as_deref().unwrap()
+        ));
+
+        let completed = execute_goal_command(session, "complete").expect("complete");
+        assert!(!completed.should_auto_drive());
+        assert!(completed.should_cancel_in_flight());
+
+        let recreated = execute_goal_command(session, "edit 第二轮目标").expect("edit completed");
+        assert!(recreated.should_auto_drive());
+        assert!(!recreated.should_cancel_in_flight());
+        assert!(crate::goal::is_goal_round_prompt(
+            recreated.next_round_prompt.as_deref().unwrap()
+        ));
+
+        let cleared = execute_goal_command(session, "clear").expect("clear");
+        assert!(!cleared.should_auto_drive());
+        assert!(cleared.should_cancel_in_flight());
+    }
+
+    #[test]
+    fn active_disarmed_goal_hints_resume_instead_of_pause() {
+        let goal = GoalData {
+            id: "goal-disarmed".to_string(),
+            session_id: "sess".to_string(),
+            objective: "重启恢复".to_string(),
+            phase: "active".to_string(),
+            activation: GoalActivation::Disarmed,
+            revision: 1,
+            rounds_started: 2,
+            max_goal_rounds: 10,
+            blocked_reason: None,
+        };
+        let rendered = render_show(&goal);
+        assert!(rendered.contains("激活: disarmed"));
+        assert!(rendered.contains("可执行命令: /goal resume | /goal edit <目标> | /goal clear"));
     }
 }
