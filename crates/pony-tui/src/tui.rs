@@ -1,7 +1,7 @@
 //! pony-tui: Claude Code 风格的终端全屏 Agent 交互界面
 //! 基于 ratatui + crossterm 构建，支持对话历史、流式输出、工具状态与多行输入。
 
-// ponylint:file-size-exempt [until 2026-12-31] tui.rs 结构庞大正在实施模块化重构拆分
+// ponylint:file-size-exempt until 2026-12-31 tui.rs 结构庞大正在实施模块化重构拆分（B1795831357716 修正方括号写法）
 
 use crossterm::{
     event::{

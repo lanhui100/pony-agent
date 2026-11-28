@@ -13,6 +13,12 @@ const coreCargoFiles = [
   "crates/pony-agent-core/Cargo.toml",
   "crates/pony-tui/Cargo.toml",
   "crates/pony-cli/Cargo.toml",
+  "crates/pony-protocol/Cargo.toml",
+  "crates/pony-observability/Cargo.toml",
+  "crates/pony-provider/Cargo.toml",
+  "crates/pony-storage/Cargo.toml",
+  "crates/pony-tools/Cargo.toml",
+  "crates/pony-acp/Cargo.toml",
 ];
 const tauriCargo = path.join(repoRoot, "src-tauri/Cargo.toml");
 const packageJson = path.join(repoRoot, "package.json");

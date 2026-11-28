@@ -38,6 +38,9 @@ jobs:
           npm run contract:cli
           npm run ext:check
           npm run size:check
+          npm run size:check:selftest
+          npm run lock-scope:selftest
+          npm run lock-scope:check
           npm run portable:ps1
           npm run portable:ps1:selftest
           npm run git:prune:selftest

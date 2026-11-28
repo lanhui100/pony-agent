@@ -1,4 +1,4 @@
-// ponylint:file-size-exempt [until 2026-12-31] 需保留作为 hotloader 核心逻辑单文件以便维护
+// ponylint:file-size-exempt until 2026-12-31 需保留作为 hotloader 核心逻辑单文件以便维护（B1795831357716 修正方括号写法）
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
