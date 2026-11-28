@@ -377,6 +377,8 @@ pub enum UiEvent {
     UpdateCheckFinished {
         result: Result<UpdateCheckOutcome, String>,
     },
+    /// `/goal` 自动启动续轮线程未进入真实 turn 就提前退出（防 `is_streaming` 永真）。
+    GoalAutoStartAborted { session_id: String },
 }
 
 /// wave-40 R1: Composer 中 Enter 键语义 (重构抽离至 core::agent::tui_enter_action 纯函数层)
@@ -10295,7 +10297,7 @@ fn resume_goal_rounds_after_host_answer(
 
     match goal_round_outcome_gate(step) {
         GoalRoundGateDecision::Continue => {
-            run_goal_rounds(
+            let _ = run_goal_rounds(
                 turn_control_plane,
                 sink,
                 turn_input,
@@ -10339,6 +10341,8 @@ fn resume_goal_rounds_after_host_answer(
 ///
 /// 停止必须**可见**（`UiEvent::GoalRoundsStopped` → 状态行 + 消息区），绝不静默 `break`。
 /// 独立成函数，避免继续把 `tui_event_loop` 撑大（规模门禁是只许降不许升的棘轮）。
+/// 返回 `needs_streaming_reset`：`true` 表示未产生任何终态事件就退出（调用方若预先置了
+/// `is_streaming = true`，须发 `GoalAutoStartAborted` 复位）。
 fn run_goal_rounds(
     turn_control_plane: &Arc<HostControlPlane>,
     sink: &Arc<TuiTurnSink>,
@@ -10347,7 +10351,7 @@ fn run_goal_rounds(
     cancel: &GoalRoundCancelToken,
     current_turn: &std::sync::Mutex<Option<String>>,
     loop_lease: &GoalRoundLoopLeaseRegistry,
-) {
+) -> bool {
     use pony_agent_core::agent::goal::{
         advance_goal_round_for_outcome, build_goal_round_message,
         GoalRoundOutcome, GoalRoundStopReason,
@@ -10369,12 +10373,13 @@ fn run_goal_rounds(
             rounds_started,
             max_rounds,
         );
-        return;
+        return true;
     };
 
     let mut consecutive: u32 = 0;
     // C1：连续失败计数（本循环局部，随循环消亡；旧实现只数「开了几轮」）。
     let mut failures: u32 = 0;
+    let mut awaiting_terminal = true;
     loop {
         let Some(active_goal) = pony_agent_core::agent::goal::active_goal_for_session(session_id)
         else {
@@ -10453,10 +10458,12 @@ fn run_goal_rounds(
             input: next_input,
         };
         consecutive += 1;
+        awaiting_terminal = true;
         // C1 真值：只拿 `Result` 不够 —— 429 轮是「执行成功 + failed 终态」，
         // 故走检查版入口拿终态归约；`Err` = 该轮已执行过但收口失败（不重跑，按失败轮计）。
         match turn_control_plane.start_turn_stream_checked(sink.as_ref(), next_cmd) {
             Ok(pony_agent_core::agent::control_plane::TurnStreamOutcome::Completed) => {
+                awaiting_terminal = false;
                 failures = 0;
                 // C2：只有成功轮推进 `rounds_started`。
                 match advance_goal_round_for_outcome(&active_goal.id, GoalRoundOutcome::Succeeded) {
@@ -10498,11 +10505,18 @@ fn run_goal_rounds(
             }
             // C2：失败轮**不推进预算**，只累计连续失败。
             Ok(pony_agent_core::agent::control_plane::TurnStreamOutcome::Failed { .. }) => {
+                awaiting_terminal = false;
                 failures = failures.saturating_add(1);
             }
             // 取消 / 挂起 / 无可采终态：本轮不成功 ⇒ 停止续轮（不烧预算、不计失败），
             // 并把自己作为**同一个停止上报路径**（状态行 + 消息区 + 结构化日志），不留静默 break。
             Ok(outcome) => {
+                if !matches!(
+                    outcome,
+                    pony_agent_core::agent::control_plane::TurnStreamOutcome::Unknown
+                ) {
+                    awaiting_terminal = false;
+                }
                 report_goal_rounds_stopped(
                     sink,
                     session_id,
@@ -10538,6 +10552,7 @@ fn run_goal_rounds(
             }
         }
     }
+    awaiting_terminal
 }
 
 // PA-172 §7.1（遗留 #7/#12）：`GoalRoundLoopLease` / `GoalRoundLoopLeaseRegistry` 与
@@ -12400,11 +12415,20 @@ fn tui_event_loop(
                                     continue;
                                 }
 
-                                // C-6：`/goal` 是唯一「允许带参数且仍算命令」的斜杠命令，
-                                // 故在**整串匹配**的 `known_command` 之前判定；解析/执行/回执全在
-                                // `tui::goal_command`（真值源为 core `agent::goal_command`），
-                                // 不消耗模型轮次、不发起 turn。
-                                if goal_command::handle_goal_command(&mut state, &input) {
+                                // C-6：`/goal` 允许带参数且在流式期可执行；解析/状态机在 core，
+                                // 宿主驱动（`create`/`resume` 自动起轮，`pause`/`clear`/`complete` 中止在飞轮次）
+                                // 由 `tui::goal_command::handle_goal_command_with_driver` 承担。
+                                if goal_command::handle_goal_command_with_driver(
+                                    &mut state,
+                                    &input,
+                                    &control_plane,
+                                    &tx,
+                                    &goal_round_cancel,
+                                    &current_turn_id,
+                                    &goal_round_loop_lease,
+                                    &inflight_turns,
+                                    &turn_loop_in_flight,
+                                ) {
                                     dirty = true;
                                     continue;
                                 }
@@ -12975,7 +12999,7 @@ fn tui_event_loop(
 
                                     // 契约 F-G①/F-G3（ADR 0092）+ PA-171 C1/C2：Esc / 连续失败 /
                                     // 轮次预算 / 待作答宿主请求，任一即停止续轮（并回写可见原因）。
-                                    run_goal_rounds(
+                                    let _ = run_goal_rounds(
                                         &turn_control_plane,
                                         &sink,
                                         &turn_input,
@@ -13840,6 +13864,17 @@ fn tui_event_loop(
                     // B220：挂起期在等**用户**，不是在等上游 ⇒ 静默窗口退出（否则会误报上游告警）。
                     state.upstream_idle.reset();
                     let _ = sync_pending_control_request(&mut state, &control_plane);
+                }
+                UiEvent::GoalAutoStartAborted { session_id } => {
+                    if session_id == state.session_id {
+                        state.is_streaming = false;
+                        state.stopping_turn_id = None;
+                        state.streaming_turn_id = None;
+                        state.status_dwell.reset();
+                        state.upstream_idle.reset();
+                        stop_sequence.reset();
+                        state.transition_runtime_mode(RuntimeMode::Ready);
+                    }
                 }
                 }
             }

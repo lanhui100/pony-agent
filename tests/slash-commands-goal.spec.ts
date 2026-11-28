@@ -12,6 +12,8 @@ import {
   describeGoalOutcome,
   goalCommandArgs,
   parseSlashCommand,
+  shouldAutoStartGoalRound,
+  shouldCancelGoalInFlight,
   type GoalCommandOutcome
 } from "@/lib/chat/slash-commands";
 
@@ -90,5 +92,52 @@ describe("describeGoalOutcome: 单行状态条渲染", () => {
     expect(describeGoalOutcome({ action: "show", message: "   ", goal: null })).toBe(
       "目标命令已执行，但未返回结果"
     );
+  });
+});
+
+describe("shouldAutoStartGoalRound / shouldCancelGoalInFlight", () => {
+  it("仅 create/resume 且带非空 nextRoundPrompt 时自动起轮", () => {
+    expect(
+      shouldAutoStartGoalRound({
+        action: "create",
+        message: "目标已创建。",
+        goal: null,
+        nextRoundPrompt: "<goal_round round=\"1\" max=\"50\">...</goal_round>"
+      })
+    ).toBe(true);
+    expect(
+      shouldAutoStartGoalRound({
+        action: "resume",
+        message: "目标已恢复。",
+        goal: null,
+        nextRoundPrompt: "<goal_round round=\"2\" max=\"50\">...</goal_round>"
+      })
+    ).toBe(true);
+    expect(
+      shouldAutoStartGoalRound({
+        action: "create",
+        message: "目标已创建。",
+        goal: null,
+        nextRoundPrompt: "   "
+      })
+    ).toBe(false);
+    expect(
+      shouldAutoStartGoalRound({
+        action: "show",
+        message: "目标状态",
+        goal: null,
+        nextRoundPrompt: "<goal_round>ignored</goal_round>"
+      })
+    ).toBe(false);
+    expect(shouldAutoStartGoalRound(null)).toBe(false);
+  });
+
+  it("pause/clear/complete 要求中止在飞轮次", () => {
+    expect(shouldCancelGoalInFlight({ action: "pause", message: "", goal: null })).toBe(true);
+    expect(shouldCancelGoalInFlight({ action: "clear", message: "", goal: null })).toBe(true);
+    expect(shouldCancelGoalInFlight({ action: "complete", message: "", goal: null })).toBe(true);
+    expect(shouldCancelGoalInFlight({ action: "show", message: "", goal: null })).toBe(false);
+    expect(shouldCancelGoalInFlight({ action: "create", message: "", goal: null })).toBe(false);
+    expect(shouldCancelGoalInFlight(undefined)).toBe(false);
   });
 });

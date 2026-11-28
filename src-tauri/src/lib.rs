@@ -87,15 +87,21 @@ fn start_graph_run(
     })
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri 命令入参由 IPC 反序列化注入（AppHandle/State 必须按值接收），函数内只借用"
+)]
 #[tauri::command]
 fn start_graph_run_stream(
     app: AppHandle,
     control_plane: State<'_, HostControlPlane>,
+    authorization_modes: State<'_, goal_resume::SessionAuthorizationModes>,
     turn_id: String,
     run_id: Option<String>,
     goal: String,
     input: TurnInput,
 ) -> Result<GraphRunStreamStartResponse, String> {
+    authorization_modes.record(input.session_id.as_deref(), input.tool_authorization_mode.as_deref());
     let (response, prepared) =
         control_plane.prepare_start_graph_run_stream(StartGraphRunStreamCommand {
             turn_id,

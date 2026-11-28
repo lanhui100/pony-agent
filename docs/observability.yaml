@@ -2117,3 +2117,24 @@ note: >-
 #     `planExecutionApproval` 已是**惰性线缆字段**（`governed_executor::decide_with_context` 形参改名
 #     `_plan_execution_approval` 且不参与判定）。清理横跨 35 文件 / 166 触点，登记为 P2 Debt
 #     `B1795821777375`，本轮不做；不影响本轮任何遥测事实与门禁语义。
+
+# `/goal` 斜杠命令自动起轮与运行中控制对齐 DSH（ADR 2026-11-28-goal-slash-command-auto-drive）归属说明：
+# (1) 变更面：`crates/pony-storage/src/goal_command.rs`（`GoalCommandOutcome` 新增可选 `next_round_prompt`/
+#     `next_round_display` 及判定方法，`phase_commands` 区分 `activation`）、
+#     `crates/pony-tui/src/tui/{goal_command.rs,goal_panel.rs}` + `tui.rs`（`/goal` 自动拉起 `run_goal_rounds`
+#     及运行中 `pause`/`clear`/`complete` 调 `stop_turn`，新增 `UiEvent::GoalAutoStartAborted` 防假流式卡死）、
+#     `src-tauri/src/lib.rs`（`start_graph_run_stream` 登记 `SessionAuthorizationModes`）、
+#     `src/lib/chat/slash-commands.ts`、`src/stores/runtime/orchestration.ts`（独立导出 `startGoalRound(store, ...)`，不改变 83/18/97 冻结 store 表面）、
+#     `src/components/HomeWorkspace.vue`（放行运行中 `/goal` 并联动 `stopTurn` / `startGoalRound`）。
+#     **无**新增网络出口、常驻监控端点、新依赖或新遥测字段；自动起轮复用的均为既有 `start_turn_stream_checked` /
+#     `*_graph_run_stream` 与 `goal_round_loop` 通道。
+# (2) 四维归属不变：tracing / issues 仍 applicable（落点不变 `crates/pony-observability/src/otel/mod.rs`
+#     与 `crates/pony-agent-core/src/agent/ponysentry/client.rs`）；metrics / logs 维持结构性 N-A
+#     （桌面/TUI 无常驻监听地址、无 `/metrics`、Prometheus pull 模型不成立）。不新增 enforcement_point。
+# (3) 行为门（机械收口在测试层）：
+#     - `crates/pony-storage/src/goal_command.rs`（`outcome_auto_drive_and_cancel_flags_match_dsh_contract`、
+#       `active_disarmed_goal_hints_resume_instead_of_pause`）；
+#     - `crates/pony-tui/src/tui/goal_command.rs`（`evaluate_tui_auto_drive_covers_all_gates`、
+#       `handle_goal_command_with_driver_defers_when_streaming_and_cancels_on_pause`）；
+#     - `tests/slash-commands-goal.spec.ts`、`tests/workspace-goal-shortcuts.spec.ts`、`tests/slash-commands.spec.ts`。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
