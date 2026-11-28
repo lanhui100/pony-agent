@@ -33,7 +33,7 @@
 | 语法解析 | `crates/pony-agent-core/src/agent/goal_command.rs:50` `parse_goal_command` | 大小写不敏感、首 token 切分；`show/create/edit/pause/resume/complete/clear` |
 | 状态机执行 | `goal_command.rs:83` `execute_goal_command` | 文案与相位建议均在 core；`clear` 后 `active_goal_for_session` 立即 `None` |
 | 用法真源 | `goal_command.rs:15` `GOAL_COMMAND_USAGE` | 桌面 / TUI 共用，禁止两端各写一份 |
-| Tauri 接入面 | `src-tauri/src/lib.rs:468` `goal_command`（注册于 `:1535`） | 返回 `{action, message, goal}`（camelCase） |
+| Tauri 接入面 | `src-tauri/src/commands/goal.rs` `goal_command`（注册于 `src-tauri/src/lib.rs` 的 `generate_handler!`） | 返回 `{action, message, goal}`（camelCase） |
 | 桌面分发 | `src/lib/chat/slash-commands.ts` `goalCommandArgs` / `describeGoalOutcome`；`src/components/HomeWorkspace.vue`（`executeSlashCommand` 内 `command === "goal"` 分支） | 命中即清草稿、不透传模型；回执走 `/compact` 同一条 info 通道（单行折叠） |
 | TUI 分发 | `crates/pony-agent-core/src/bin/tui/goal_command.rs`（`goal_command_args` / `handle_goal_command`）、`bin/tui.rs` 命令表 `"/goal"` 与分发点、`bin/tui/queue.rs` `is_local_control_command` | 带参仍算命令；流式期就地执行（不拆在飞轮次、不入队） |
 
@@ -103,7 +103,7 @@
 5. **目标同步改事件推送**（对位 `goal/src/client.ts`）
    - 现状：`/goal` 后 `fetchGoal` 拉一次；其他端变更（模型工具改目标）桌面不感知。
    - 建议：goal 变更后经 Tauri 事件广播，前端订阅刷新。
-   - 落点：`src-tauri/src/lib.rs`（emit）+ `src/stores/goal.ts`（listen）。
+   - 落点：`src-tauri/src/goal_events.rs`（emit）+ `src/stores/goal.ts`（listen）。
    - **采纳**：是（P1），需先有 observability 归属登记。
 
 ### P2（记录不落地）

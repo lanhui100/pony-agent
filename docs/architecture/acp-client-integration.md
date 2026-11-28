@@ -202,7 +202,7 @@ Pony 模型通过工具 `acp_delegate` 把一段任务交给外部 ACP agent，c
 |---|---|---|
 | `crates/pony-agent-core/src/bin/cli.rs` | 改 | `SubCommand` 加 `Acp`；`parse_cli_args` 识别 `acp`（在 `run_maintenance_subcommand_if_requested` 之后、常规解析之前拦截，照 `sessions`/`config` 的既有做法）；新增 `run_acp_client_mode()`：连外部 agent，REPL 交互，事件走 `JsonlSink`/`SseSink` |
 | `crates/pony-agent-core/src/acp/host.rs` | 新增（B163） | 宿主桥：`list_agents` / `run_delegation` / `cancel_delegation`（唯一宿主编排点；结果复用工具面 `ToolResult`/`error_result`） |
-| `src-tauri/src/lib.rs` | 改（B163） | `acp_list_agents` / `acp_delegate_start` / `acp_delegate_cancel` 三命令 + `invoke_handler` 注册（只透传，协议逻辑留在核心） |
+| `src-tauri/src/commands/acp.rs` | 改（B163；B1795831358336 Phase 1 后按域迁出 `lib.rs`） | `acp_list_agents` / `acp_delegate_start` / `acp_delegate_cancel` 三命令实现（注册仍在 `src-tauri/src/lib.rs` 的 `invoke_handler`；只透传，协议逻辑留在核心） |
 | `src-tauri/src/tauri_adapter.rs` | 改（B163） | `TauriAcpDelegateSink` + `acp://delegate` 事件（负载带 `delegationId` 归属） |
 | `src/types/acp.ts` | 新增（B163） | 前端 `AcpAgentSpec` / `AcpAgentSummary` / `AcpDelegateOutcome` / `AcpSessionView` / `AcpDelegateEvent` |
 
