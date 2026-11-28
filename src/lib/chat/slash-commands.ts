@@ -47,6 +47,36 @@ export interface GoalCommandOutcome {
   action: string;
   message: string;
   goal: GoalData | null;
+  nextRoundPrompt?: string | null;
+  nextRoundDisplay?: string | null;
+}
+
+/** 是否应由前端宿主自动拉起目标首轮/续轮（对齐 Rust `GoalCommandOutcome::should_auto_drive`）。 */
+export function shouldAutoStartGoalRound(
+  outcome: GoalCommandOutcome | null | undefined
+): boolean {
+  if (!outcome) {
+    return false;
+  }
+  return (
+    (outcome.action === "create" || outcome.action === "resume") &&
+    typeof outcome.nextRoundPrompt === "string" &&
+    outcome.nextRoundPrompt.trim().length > 0
+  );
+}
+
+/** 是否要求中止当前正在运行的轮次（对齐 Rust `GoalCommandOutcome::should_cancel_in_flight`）。 */
+export function shouldCancelGoalInFlight(
+  outcome: GoalCommandOutcome | null | undefined
+): boolean {
+  if (!outcome) {
+    return false;
+  }
+  return (
+    outcome.action === "pause" ||
+    outcome.action === "clear" ||
+    outcome.action === "complete"
+  );
 }
 
 const KNOWN_COMMAND_NAMES: ReadonlySet<string> = new Set(

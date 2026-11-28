@@ -5,9 +5,11 @@ import { storeToRefs } from "pinia";
 import { ArrowDown, RotateCcw } from "lucide-vue-next";
 import type { ChatMessage, ConversationCheckpointEntry, HistoryNode, TraceTimelineEntry } from "@/types/runtime";
 import { useRuntimeStore } from "@/stores/runtime";
+import { startGoalRound } from "@/stores/runtime/orchestration";
 import { usePlanStore } from "@/stores/plan";
 import { useGoalStore } from "@/stores/goal";
 import { useTeamStore } from "@/stores/team";
+import { useAskStore } from "@/stores/ask";
 import { useWorkspacePanelsStore } from "@/stores/workspace-panels";
 import { safeInvoke } from "@/lib/tauri";
 import {
@@ -16,6 +18,8 @@ import {
   goalCommandArgs,
   parseSlashCommand,
   planCommandArgs,
+  shouldAutoStartGoalRound,
+  shouldCancelGoalInFlight,
   type DesktopSlashCommand,
   type GoalCommandOutcome,
   type ManualCompactionOutcome
@@ -55,6 +59,7 @@ const runtimeStore = useRuntimeStore();
 const planStore = usePlanStore();
 const goalStore = useGoalStore();
 const teamStore = useTeamStore();
+const askStore = useAskStore();
 const workspacePanelsStore = useWorkspacePanelsStore();
 const runtimeStoreSessionList = storeToRefs(runtimeStore).sessionList;
 const showShortcutsModal = ref(false);
@@ -1547,11 +1552,12 @@ async function executeSlashCommand(command: DesktopSlashCommand) {
   // `/goal` 是唯一带语义参数的命令：必须在清空草稿**之前**留住原文（其余命令不用参数）。
   const commandInput = runtimeStore.draftMessage;
 
-  if (isSubmitting.value) {
+  if (isSubmitting.value && command !== "goal") {
     runtimeStore.setSessionNotice(SLASH_COMMAND_BUSY_NOTICE);
     return;
   }
 
+  const wasSubmitting = isSubmitting.value;
   runtimeStore.draftMessage = "";
   runtimeStore.setSessionNotice(null);
 
@@ -1584,8 +1590,7 @@ async function executeSlashCommand(command: DesktopSlashCommand) {
     return;
   }
 
-  // /goal：目标命令（语法/状态机真值源在 Rust `agent::goal_command`，前端只接线与渲染）。
-  // 不消耗模型轮次、不写会话历史：草稿已清空且不调用 submitTurn。
+  // /goal：目标命令（语法/状态机真值源在 Rust `agent::goal_command`，前端接线渲染与自动起轮）。
   if (command === "goal") {
     try {
       const args = goalCommandArgs(commandInput);
@@ -1593,12 +1598,32 @@ async function executeSlashCommand(command: DesktopSlashCommand) {
         sessionId: runtimeStore.sessionId,
         args
       });
-      runtimeStore.setSessionNotice(describeGoalOutcome(outcome));
+      const baseNotice = describeGoalOutcome(outcome);
+      runtimeStore.setSessionNotice(baseNotice);
       // 目标条以后端快照为准（`clear` 后必须归零，续轮随之停止）。
       await goalStore.fetchGoal(runtimeStore.sessionId);
       // 若是查看目标（无参数）或创建/编辑目标，自动展开目标面板
       if (!args || outcome.goal) {
         workspacePanelsStore.activePanel = "goal";
+      }
+      if (shouldCancelGoalInFlight(outcome) && runtimeStore.isSubmitting) {
+        await runtimeStore.stopTurn();
+      } else if (shouldAutoStartGoalRound(outcome)) {
+        if (wasSubmitting || runtimeStore.isSubmitting) {
+          runtimeStore.setSessionNotice(`${baseNotice} · 将在当前轮次结束后继续推进`);
+        } else if (askStore.hasPending) {
+          runtimeStore.setSessionNotice(`${baseNotice} · 请先回答当前提问后继续`);
+        } else {
+          timelineAutoScroll.setAutoFollowEnabled();
+          const started = await startGoalRound(
+            runtimeStore,
+            outcome.nextRoundPrompt!,
+            outcome.nextRoundDisplay ?? null
+          );
+          if (started) {
+            runtimeStore.setSessionNotice(`${baseNotice} · 自动续轮已启动`);
+          }
+        }
       }
     } catch (error) {
       const reason = extractErrorMessage(String(error)) ?? String(error);

@@ -333,4 +333,142 @@ describe("/goal 斜杠命令：执行后自动展开 Goal 面板", () => {
     expect(panelsStore.activePanel).toBe("goal");
     expect(runtimeStore.draftMessage).toBe("");
   });
+
+  it("/goal <目标> 执行后自动拉起目标轮次且不调用 submitTurn", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({ sessionId: SESSION_ID, messages: [] });
+    const submitSpy = vi.spyOn(runtimeStore, "submitTurn").mockResolvedValue(true);
+    const panelsStore = useWorkspacePanelsStore();
+    const goalPrompt = "<goal_round round=\"1\" max=\"50\">继续推进目标：完成报告</goal_round>";
+    const goalDisplay = "[goal round 1] 推进目标：完成报告";
+    const startCalls: Array<Record<string, unknown>> = [];
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "goal_command") {
+        return {
+          action: "create",
+          message: "目标已创建。",
+          goal: {
+            id: "goal-created-1",
+            session_id: SESSION_ID,
+            objective: "完成报告",
+            phase: "active",
+            activation: "armed",
+            revision: 1,
+            roundsStarted: 0,
+            maxGoalRounds: 50,
+            blocked_reason: null
+          },
+          nextRoundPrompt: goalPrompt,
+          nextRoundDisplay: goalDisplay
+        };
+      }
+      if (command === "resolve_graph_run_submission_plan") {
+        return { command: "start_graph_run_stream", runId: null };
+      }
+      if (command === "start_graph_run_stream") {
+        if (args) startCalls.push(args);
+        return { run: { id: "run-goal-1" }, turnId: "turn-goal-1" };
+      }
+      return undefined;
+    });
+
+    const wrapper = mountWorkspace();
+    await flushAsyncWork();
+
+    runtimeStore.draftMessage = "/goal 完成报告";
+    await nextTick();
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", shiftKey: false });
+    await flushAsyncWork();
+
+    expect(panelsStore.activePanel).toBe("goal");
+    expect(submitSpy).not.toHaveBeenCalled();
+    expect(startCalls).toHaveLength(1);
+    const startPayload = startCalls[0]!;
+    expect(startPayload.goal).toBe(goalDisplay);
+    expect((startPayload.input as { message?: string; displayMessage?: string } | undefined)?.message).toBe(goalPrompt);
+    expect((startPayload.input as { message?: string; displayMessage?: string } | undefined)?.displayMessage).toBe(goalDisplay);
+    expect(runtimeStore.messages).toHaveLength(0);
+    expect(runtimeStore.sessionNotice).toContain("自动续轮已启动");
+    runtimeStore.clearSubmissionWatchdog();
+  });
+
+  it("运行中执行 /goal 与 /goal pause 不被忙碌提示拦截，pause 会调用 stopTurn", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({ sessionId: SESSION_ID, messages: [], isSubmitting: true, activeTurnId: "turn-1" });
+    const stopSpy = vi.spyOn(runtimeStore, "stopTurn").mockResolvedValue(true);
+    const graphRunCommands: string[] = [];
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (
+        command === "start_graph_run_stream" ||
+        command === "continue_graph_run_stream" ||
+        command === "resume_graph_run_stream"
+      ) {
+        graphRunCommands.push(command);
+      }
+      if (command === "goal_command" && args?.args === "") {
+        return { action: "show", message: "目标状态: 进行中", goal: null };
+      }
+      if (command === "goal_command" && args?.args === "pause") {
+        return { action: "pause", message: "目标已暂停。自动续轮已停止。", goal: null };
+      }
+      return undefined;
+    });
+
+    const wrapper = mountWorkspace();
+    await flushAsyncWork();
+
+    runtimeStore.draftMessage = "/goal";
+    await nextTick();
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", shiftKey: false });
+    await flushAsyncWork();
+    expect(runtimeStore.sessionNotice).not.toContain("当前正在运行，请等待本轮结束后再执行斜杠命令");
+    expect(graphRunCommands).toEqual([]);
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    runtimeStore.draftMessage = "/goal pause";
+    await nextTick();
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", shiftKey: false });
+    await flushAsyncWork();
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(graphRunCommands).toEqual([]);
+  });
+
+  it("运行中执行 /goal <目标> 不并发拉起目标轮次", async () => {
+    const runtimeStore = useRuntimeStore();
+    runtimeStore.$patch({ sessionId: SESSION_ID, messages: [], isSubmitting: true, activeTurnId: "turn-1" });
+    const graphRunCommands: string[] = [];
+
+    tauriMocks.mockSafeInvoke.mockImplementation(async (command: string) => {
+      if (
+        command === "start_graph_run_stream" ||
+        command === "continue_graph_run_stream" ||
+        command === "resume_graph_run_stream"
+      ) {
+        graphRunCommands.push(command);
+      }
+      if (command === "goal_command") {
+        return {
+          action: "create",
+          message: "目标已创建。",
+          goal: null,
+          nextRoundPrompt: "<goal_round round=\"1\" max=\"50\">...</goal_round>",
+          nextRoundDisplay: "[goal round 1] 推进目标：新目标"
+        };
+      }
+      return undefined;
+    });
+
+    const wrapper = mountWorkspace();
+    await flushAsyncWork();
+
+    runtimeStore.draftMessage = "/goal 新目标";
+    await nextTick();
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", shiftKey: false });
+    await flushAsyncWork();
+
+    expect(graphRunCommands).toEqual([]);
+    expect(runtimeStore.sessionNotice).toContain("将在当前轮次结束后继续推进");
+  });
 });

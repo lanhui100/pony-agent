@@ -140,6 +140,233 @@ import {
 import { SUBMISSION_WATCHDOG_TIMEOUT_MS } from "./turn-execution";
 import type { OrchestrationActions, OrchestrationGetters, RuntimeStoreThis } from "./types";
 
+async function resolveSubmissionForStore(store: RuntimeStoreThis): Promise<GraphRunSubmission> {
+  let submission: GraphRunSubmission | null = null;
+  if (store.sessionId) {
+    try {
+      const plan = await safeInvoke<GraphRunSubmissionPlan>("resolve_graph_run_submission_plan", {
+        sessionId: store.sessionId,
+        nodeId: store.visibleNodeId,
+        runId: store.activeRunId
+      });
+      submission = resolveGraphRunSubmissionFromPlan(plan);
+    } catch (planError) {
+      debugLog("submit:resolve-plan:error", {
+        sessionId: store.sessionId,
+        runId: store.activeRunId,
+        error: String(planError)
+      });
+    }
+  }
+
+  if (!submission) {
+    submission = resolveGraphRunSubmissionFromPlan(store.latestGraphRunSubmissionPlan);
+  }
+
+  if (!submission) {
+    submission = resolveGraphRunSubmissionFromRunState(store.retrievedContext?.runState);
+    submission = reconcileSubmissionWithRecoveryCheckpoint(submission, store.latestExecutionCheckpoint);
+    submission ??= resolveGraphRunSubmissionFromCheckpoint(
+      store.latestExecutionCheckpoint,
+      store.activeRunId
+    );
+  }
+
+  if (!submission && store.sessionId) {
+    await store.resolveDerivedSessionRun({
+      sessionId: store.sessionId,
+      runId: store.activeRunId,
+      preferRefresh: true,
+      nodeId: store.visibleNodeId
+    });
+    submission = resolveGraphRunSubmissionFromRunState(store.retrievedContext?.runState);
+    submission = reconcileSubmissionWithRecoveryCheckpoint(submission, store.latestExecutionCheckpoint);
+    submission ??= resolveGraphRunSubmissionFromCheckpoint(
+      store.latestExecutionCheckpoint,
+      store.activeRunId
+    );
+  }
+
+  return submission ?? { command: "start_graph_run_stream" as const, runId: null };
+}
+
+function applyStreamStartOutcome(
+  store: RuntimeStoreThis,
+  response: GraphRunStreamStartResponse,
+  fallbackRunId: string | null
+): void {
+  store.activeRunId = resolvedStreamStartRunId(response, fallbackRunId);
+  store.latestGraphRunControlBoundaryEvidence = cloneGraphRunControlBoundaryEvidence(
+    response.controlBoundaryEvidence ? [response.controlBoundaryEvidence] : null
+  );
+  store.latestRunControlAuditSummary = cloneRunControlAuditSummary(
+    response.runControlAuditSummary ?? null
+  );
+}
+
+/**
+ * 由 `/goal <目标>` 或 `/goal resume` 自动触发的目标首轮/续轮入口。
+ * 作为模块独立 helper 导出而非挂进 Pinia `orchestrationActions`，以保持 store 冻结表面（83/18/97）不变。
+ */
+export async function startGoalRound(
+  store: RuntimeStoreThis,
+  prompt: string,
+  displayMessage?: string | null
+): Promise<boolean> {
+  const normalizedPrompt = prompt.trim();
+  if (store.isSubmitting || !normalizedPrompt || !isTauriAvailable()) {
+    return false;
+  }
+
+  store.sessionNotice = null;
+  store.isSubmitting = true;
+  await store.initializeTurnEvents();
+
+  const providerStore = useProviderStore();
+  const settingsStore = useSettingsStore();
+  const selectedProvider = providerStore.currentProvider;
+  const selectedModel = providerStore.currentModel;
+  const selectedProviderName = selectedProvider?.name ?? null;
+  const selectedProviderProtocol = selectedProvider?.protocol ?? null;
+  const selectedModelName = selectedModel?.model ?? selectedModel?.name ?? null;
+  const selectedProviderTracePatch = {
+    providerName: selectedProviderName,
+    providerProtocol: selectedProviderProtocol,
+    providerModel: selectedModelName
+  };
+
+  store.historyCursorMode = "live";
+  store.initialRollbackActive = false;
+
+  const requestId = `turn-goal-${Date.now()}`;
+  const goalDisplay = displayMessage?.trim() || normalizedPrompt;
+  const payload: TurnInput = {
+    message: normalizedPrompt,
+    displayMessage: goalDisplay,
+    providerId: selectedProvider?.id ?? null,
+    modelId: selectedModel?.id ?? null,
+    reasoningEffort: providerStore.currentReasoningEffort ?? null,
+    workspaceMode: settingsStore.workspaceMode,
+    toolAuthorizationMode: store.toolAuthorizationMode ?? "workspace_write",
+    sessionId: store.sessionId,
+    nodeId: store.visibleNodeId,
+    history: buildTurnHistory(store.messages),
+    images: [],
+    workspaceId:
+      store.sessionWorkspaceId ||
+      store.sessionList.find((session) => session.conversationId === store.sessionId)?.workspaceId?.trim() ||
+      store.activeWorkspaceId ||
+      DEFAULT_WORKSPACE_ID
+  };
+
+  store.activeTurnStartedAtMs = Date.now();
+  store.activeStreamKind = null;
+  store.startSubmissionWatchdog(requestId);
+  bindFrontendRecorderSession(store.sessionId);
+  bindFrontendRecorderTurn(requestId);
+  store.error = null;
+  store.phase = "calling_model";
+  store.activeTurnId = requestId;
+  store.providerRequestedName = selectedProviderName ?? "";
+  store.providerName = selectedProviderName ?? "";
+  store.providerProtocol = selectedProviderProtocol ?? "";
+  store.providerModel = selectedModelName ?? "";
+  store.providerSource = "";
+  store.providerMode = "";
+  store.fallbackReason = null;
+  store.inputTokens = null;
+  store.outputTokens = null;
+  store.totalTokens = null;
+  store.firstTokenLatencyMs = null;
+  store.liveMetrics = null;
+  store.activeProviderCallRecords = [];
+  store.traceSteps = createSubmitTraceSteps();
+  store.publishTraceTimeline(applyProviderPatchToTraceTimeline(
+    createDefaultTraceTimeline(),
+    selectedProviderTracePatch
+  ));
+  store.toolActivities = [];
+  store.commitTurnTraceTimeline(requestId, store.traceTimeline, {
+    phase: "calling_model",
+    traceSteps: store.traceSteps,
+    toolActivities: [],
+    providerRequestedName: selectedProviderName,
+    providerName: selectedProviderName,
+    providerProtocol: selectedProviderProtocol,
+    providerModel: selectedModelName,
+    providerSource: null,
+    providerMode: null,
+    fallbackReason: null,
+    error: null
+  }, false);
+  store.scheduleDeferredPersist();
+
+  try {
+    const submission = await resolveSubmissionForStore(store);
+    if (submission.command === "start_graph_run_stream") {
+      const response = await safeInvoke<GraphRunStreamStartResponse>("start_graph_run_stream", {
+        turnId: requestId,
+        runId: null,
+        goal: goalDisplay,
+        input: payload
+      });
+      applyStreamStartOutcome(store, response, null);
+      return true;
+    }
+    if (submission.command === "resume_graph_run_stream") {
+      const response = await safeInvoke<GraphRunStreamStartResponse>("resume_graph_run_stream", {
+        turnId: requestId,
+        runId: submission.runId,
+        input: payload
+      });
+      applyStreamStartOutcome(store, response, submission.runId);
+      return true;
+    }
+    const response = await safeInvoke<GraphRunStreamStartResponse>("continue_graph_run_stream", {
+      turnId: requestId,
+      runId: submission.runId,
+      input: payload
+    });
+    applyStreamStartOutcome(store, response, submission.runId);
+    return true;
+  } catch (error) {
+    const assistantMessage = store.ensureAssistantMessage(
+      requestId,
+      buildAssistantModelLabel(selectedProviderName, selectedModelName)
+    );
+    assistantMessage.reasoningContent = null;
+    assistantMessage.status = "error";
+    assistantMessage.errorDetail = `目标自动推进失败：${String(error)}`;
+    assistantMessage.modelName = buildAssistantModelLabel(selectedProviderName, selectedModelName);
+    store.error = `目标自动推进失败：${String(error)}`;
+    store.phase = "failed";
+    store.activeTurnId = null;
+    store.activeRunId = null;
+    store.clearSubmissionWatchdog();
+    store.traceSteps = createSubmitFailureTraceSteps();
+    store.publishTraceTimeline(applyProviderPatchToTraceTimeline(
+      createSubmitFailureTraceTimeline(),
+      selectedProviderTracePatch
+    ));
+    store.commitTurnTraceTimeline(requestId, store.traceTimeline, {
+      phase: "failed",
+      traceSteps: store.traceSteps,
+      toolActivities: store.toolActivities,
+      providerRequestedName: selectedProviderName,
+      providerName: selectedProviderName,
+      providerProtocol: selectedProviderProtocol,
+      providerModel: selectedModelName,
+      error: store.error
+    });
+    store.persistHistory();
+    return false;
+  } finally {
+    if (store.phase === "failed") {
+      store.isSubmitting = false;
+    }
+  }
+}
+
 /** 跨域事务入口（0 键 / 0 getters / 21 actions，事实图 §4） getters（键清单见 `types.ts` 的 `OrchestrationGetters` 与事实图 §2）。 */
 export const orchestrationGetters = {} as OrchestrationGetters;
 
@@ -548,52 +775,7 @@ export const orchestrationActions = {
         return true;
       }
 
-      let submission: GraphRunSubmission | null = null;
-      if (this.sessionId) {
-        try {
-          const plan = await safeInvoke<GraphRunSubmissionPlan>("resolve_graph_run_submission_plan", {
-            sessionId: this.sessionId,
-            nodeId: this.visibleNodeId,
-            runId: this.activeRunId
-          });
-          submission = resolveGraphRunSubmissionFromPlan(plan);
-        } catch (planError) {
-          debugLog("submit:resolve-plan:error", {
-            sessionId: this.sessionId,
-            runId: this.activeRunId,
-            error: String(planError)
-          });
-        }
-      }
-
-      if (!submission) {
-        submission = resolveGraphRunSubmissionFromPlan(this.latestGraphRunSubmissionPlan);
-      }
-
-      if (!submission) {
-        submission = resolveGraphRunSubmissionFromRunState(this.retrievedContext?.runState);
-        submission = reconcileSubmissionWithRecoveryCheckpoint(submission, this.latestExecutionCheckpoint);
-        submission ??= resolveGraphRunSubmissionFromCheckpoint(
-          this.latestExecutionCheckpoint,
-          this.activeRunId
-        );
-      }
-
-      if (!submission && this.sessionId) {
-        await this.resolveDerivedSessionRun({
-          sessionId: this.sessionId,
-          runId: this.activeRunId,
-          preferRefresh: true,
-          nodeId: this.visibleNodeId
-        });
-        submission = resolveGraphRunSubmissionFromRunState(this.retrievedContext?.runState);
-        submission = reconcileSubmissionWithRecoveryCheckpoint(submission, this.latestExecutionCheckpoint);
-        submission ??= resolveGraphRunSubmissionFromCheckpoint(
-          this.latestExecutionCheckpoint,
-          this.activeRunId
-        );
-      }
-      submission ??= { command: "start_graph_run_stream" as const, runId: null };
+      const submission = await resolveSubmissionForStore(this);
 
       if (submission.command === "start_graph_run_stream") {
         const response = await safeInvoke<GraphRunStreamStartResponse>("start_graph_run_stream", {
@@ -602,13 +784,7 @@ export const orchestrationActions = {
           goal: displayMessage,
           input: payload
         });
-        this.activeRunId = resolvedStreamStartRunId(response, null);
-        this.latestGraphRunControlBoundaryEvidence = cloneGraphRunControlBoundaryEvidence(
-          response.controlBoundaryEvidence ? [response.controlBoundaryEvidence] : null
-        );
-        this.latestRunControlAuditSummary = cloneRunControlAuditSummary(
-          response.runControlAuditSummary ?? null
-        );
+        applyStreamStartOutcome(this, response, null);
         return true;
       }
 
@@ -618,13 +794,7 @@ export const orchestrationActions = {
           runId: submission.runId,
           input: payload
         });
-        this.activeRunId = resolvedStreamStartRunId(response, submission.runId);
-        this.latestGraphRunControlBoundaryEvidence = cloneGraphRunControlBoundaryEvidence(
-          response.controlBoundaryEvidence ? [response.controlBoundaryEvidence] : null
-        );
-        this.latestRunControlAuditSummary = cloneRunControlAuditSummary(
-          response.runControlAuditSummary ?? null
-        );
+        applyStreamStartOutcome(this, response, submission.runId);
         return true;
       }
 
@@ -633,13 +803,7 @@ export const orchestrationActions = {
         runId: submission.runId,
         input: payload
       });
-      this.activeRunId = resolvedStreamStartRunId(response, submission.runId);
-      this.latestGraphRunControlBoundaryEvidence = cloneGraphRunControlBoundaryEvidence(
-        response.controlBoundaryEvidence ? [response.controlBoundaryEvidence] : null
-      );
-      this.latestRunControlAuditSummary = cloneRunControlAuditSummary(
-        response.runControlAuditSummary ?? null
-      );
+      applyStreamStartOutcome(this, response, submission.runId);
       return true;
     } catch (error) {
       const assistantMessage = this.ensureAssistantMessage(

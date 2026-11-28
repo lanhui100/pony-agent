@@ -6,6 +6,7 @@ Status: implemented
 - 交付面：Rust core（`agent/goal_command.rs`、`agent/goal.rs::clear_goal`）、Tauri（`goal_command`）、桌面（`slash-commands.ts` + `HomeWorkspace.vue`）、TUI（`bin/tui/goal_command.rs` + 命令表/队列裁决）
 - 契约真源：`.dev-team/contract-matrix-goal-command.md`（C-1..C-7，FROZEN）
 - 差距与取舍分析：`docs/architecture/plan-goal-dsh-gap.md`
+- 后续局部更新：[2026-11-28-goal-slash-command-auto-drive.md](../bug-fix/2026-11-28-goal-slash-command-auto-drive.md)（`create`/`resume` 自动起轮与运行中 `pause`/`clear`/`complete` 中止在飞轮次，局部取代下文「永不发起 turn」限制；`show`/`pause`/`complete`/`clear` 仍不发起 turn）
 
 ## Problem
 
