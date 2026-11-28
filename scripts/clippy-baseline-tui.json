@@ -846,7 +846,7 @@
         {
           "lint": "clippy::as_conversions",
           "path": "crates/pony-tui/src/tui.rs",
-          "count": 115
+          "count": 113
         },
         {
           "lint": "clippy::as_conversions",
@@ -892,6 +892,11 @@
           "lint": "clippy::as_conversions",
           "path": "crates/pony-tui/src/tui/rewind.rs",
           "count": 4
+        },
+        {
+          "lint": "clippy::as_conversions",
+          "path": "crates/pony-tui/src/tui/scroll_motion.rs",
+          "count": 2
         },
         {
           "lint": "clippy::as_conversions",
@@ -1121,7 +1126,12 @@
         {
           "lint": "clippy::cast_lossless",
           "path": "crates/pony-tui/src/tui.rs",
-          "count": 4
+          "count": 3
+        },
+        {
+          "lint": "clippy::cast_lossless",
+          "path": "crates/pony-tui/src/tui/scroll_motion.rs",
+          "count": 1
         },
         {
           "lint": "clippy::cast_lossless",
@@ -1446,7 +1456,7 @@
         {
           "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-tui/src/tui.rs",
-          "count": 17
+          "count": 16
         },
         {
           "lint": "clippy::cast_possible_truncation",
@@ -1477,6 +1487,11 @@
           "lint": "clippy::cast_possible_truncation",
           "path": "crates/pony-tui/src/tui/rewind.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::cast_possible_truncation",
+          "path": "crates/pony-tui/src/tui/scroll_motion.rs",
+          "count": 1
         },
         {
           "lint": "clippy::cast_possible_truncation",
@@ -1952,11 +1967,6 @@
           "lint": "clippy::doc_lazy_continuation",
           "path": "crates/pony-tools/src/process_range.rs",
           "count": 4
-        },
-        {
-          "lint": "clippy::doc_lazy_continuation",
-          "path": "crates/pony-tui/src/tui.rs",
-          "count": 2
         },
         {
           "lint": "clippy::doc_link_with_quotes",
@@ -3216,7 +3226,7 @@
         {
           "lint": "clippy::map_unwrap_or",
           "path": "crates/pony-tui/src/tui.rs",
-          "count": 17
+          "count": 16
         },
         {
           "lint": "clippy::map_unwrap_or",
@@ -3247,6 +3257,11 @@
           "lint": "clippy::map_unwrap_or",
           "path": "crates/pony-tui/src/tui/persistence_status.rs",
           "count": 2
+        },
+        {
+          "lint": "clippy::map_unwrap_or",
+          "path": "crates/pony-tui/src/tui/render_text.rs",
+          "count": 1
         },
         {
           "lint": "clippy::map_unwrap_or",
@@ -3846,7 +3861,7 @@
         {
           "lint": "clippy::needless_pass_by_value",
           "path": "crates/pony-tui/src/tui.rs",
-          "count": 10
+          "count": 6
         },
         {
           "lint": "clippy::needless_pass_by_value",
@@ -3857,6 +3872,11 @@
           "lint": "clippy::needless_pass_by_value",
           "path": "crates/pony-tui/src/tui/markdown.rs",
           "count": 1
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "crates/pony-tui/src/tui/render_text.rs",
+          "count": 4
         },
         {
           "lint": "clippy::needless_range_loop",
@@ -5201,12 +5221,17 @@
         {
           "lint": "clippy::uninlined_format_args",
           "path": "crates/pony-tui/src/tui.rs",
-          "count": 31
+          "count": 29
         },
         {
           "lint": "clippy::uninlined_format_args",
           "path": "crates/pony-tui/src/tui/markdown.rs",
           "count": 1
+        },
+        {
+          "lint": "clippy::uninlined_format_args",
+          "path": "crates/pony-tui/src/tui/render_text.rs",
+          "count": 2
         },
         {
           "lint": "clippy::uninlined_format_args",

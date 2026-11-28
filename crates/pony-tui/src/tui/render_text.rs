@@ -6,7 +6,7 @@
 //!
 //! 切出契约：函数名、签名、可见性语义逐字保留（`pub(crate)` 用于跨 `tui` 模块调用）。
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::tui::text::{char_width, is_no_line_start, line_display_width};

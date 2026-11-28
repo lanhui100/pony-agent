@@ -640,7 +640,11 @@ pub use self::view_models::*;
 // 消息区渲染的纯排版层（B1795831358336 Phase 2）：无状态纯函数，跨 `tui` 模块调用。
 #[path = "tui/render_text.rs"]
 mod render_text;
-use self::render_text::*;
+use self::render_text::{
+    blank, blank_rail, faint, hairline, ink, ink_soft, is_markdown_heading_line, layout_input,
+    muted, pad_line_with_bg, push_blank, push_gap, push_prefixed, push_user_block, push_wrapped,
+    tool_line_spans, wrap_line, CARET, GLYPH_DONE, GLYPH_FAIL, GLYPH_RUNNING,
+};
 // 滚动几何与状态动效字形（B1795831358336 Phase 2）：无状态纯函数。
 #[path = "tui/scroll_motion.rs"]
 mod scroll_motion;
