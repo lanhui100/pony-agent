@@ -22,6 +22,15 @@ export const useWorkspacePanelsStore = defineStore("workspacePanels", {
     activePanel: ""
   }),
   actions: {
+    /**
+     * 幂等展开（斜杠命令进入 Plan 模式时用）。
+     *
+     * 与 `togglePanel` 的区别只在"已是该面板时不动"：模式切换每次都必须把方案正文
+     * 摆到用户眼前，再点一次收起会让「进入模式」看起来没有反馈。
+     */
+    openPanel(panel: WorkspacePanel) {
+      this.activePanel = panel;
+    },
     togglePanel(panel: WorkspacePanel) {
       this.activePanel = this.activePanel === panel ? "" : panel;
     },

@@ -172,12 +172,17 @@ wins.
 
 ## Phase 4: Plan and Ask Control Tools
 
-- `plan_state.rs`: session-owned, revisioned `Plan` control state. `PlanStore`
-  holds plans with stable `plan_id`, `revision`, kind/summary, ordered steps
-  (stable `step_id`), and a `Draft / Executing / Completed / Aborted` lifecycle.
-  `PlanControlHandler` exposes create/replace/merge/complete-step mutations,
-  all compare-and-swap on the revision. `Plan` is a state control — it never
-  accepts a generic `calls` array or executes arbitrary child calls.
+- `plan_mode.rs` / `exit_plan_mode.rs` (2026-11-27): Plan is a **session-level
+  collaboration mode**, not a task list. `plan_mode` keeps `{active, pending,
+  plan, planApproved, revision}` per session (process registry + JSON sidecar
+  with `*.tmp` + rename atomic write); `ExitPlanModeHandler` (model name
+  `ExitPlanMode`, primitive `plan_control`) validates a Markdown plan
+  (`# ` heading required), registers it, and returns `awaitingReview` — the
+  approval itself can only come from the host (`plan_mode_review`). While the
+  mode is active, `governed_executor` denies write/execute descriptors by
+  permission facts (`decision_source = "plan_mode_gate"`), with `ExitPlanMode`
+  exempted so the mode can never deadlock. The former `PlanStore` step machine
+  (`steps[]`, `complete_step`, `Draft → Executing` approval) is retired.
 - `ask_control.rs`: host-facing `Ask` (`Interaction`) control adapter over a
   `GovernedDispatcher`. It shares the `PendingControlRequest` lifecycle with
   approvals but is distinguished by `PendingControlRequestKind::Interaction`;
@@ -191,9 +196,10 @@ wins.
   terminal tool result for the original call id.
 - Control-plane surface: `control_plane/ask_plan_commands.rs` exposes
   `list_pending_asks`, `answer_ask`, `cancel_ask`, `expire_asks`,
-  `plan_create`, `plan_replace`, `plan_merge`, `plan_complete_step`,
-  `plan_list`, `plan_get`, `graph_list_ask_waits`, `graph_bind_ask_wait`, and
-  `graph_resume_ask` — 13 Tauri commands in `src-tauri/src/lib.rs`.
+  `plan_mode_get`, `plan_mode_set`, `plan_mode_commit`, `plan_mode_review`,
+  `graph_list_ask_waits`, `graph_bind_ask_wait`, and `graph_resume_ask` — 11
+  Tauri commands in `src-tauri/src/lib.rs` (the seven `plan_*` step-machine
+  commands were retired on 2026-11-27).
 - Frontend: `src/stores/ask.ts`, `src/stores/plan.ts`,
   `src/components/AskPanel.vue`, `src/components/PlanPanel.vue`, and the shared
   contract types in `src/types/ask-plan.ts` (with vitest suites
@@ -374,7 +380,7 @@ no provider-consumable result, so `into_legacy_result` fails closed with
 | `crates/pony-agent-core/src/agent/child_dispatch.rs` | Bounded child dispatch context (lineage, depth, shared budget, cycle rejection) |
 | `crates/pony-agent-core/src/agent/dispatcher_composites.rs` | Governed `workspace_batch` / `workspace_gather_context` composites + `GovernedToolExecutor` |
 | `crates/pony-agent-core/src/agent/governed_executor.rs` | `build_governed_executor` — the runtime's default tool executor |
-| `crates/pony-agent-core/src/agent/plan_state.rs` | `PlanStore` / `PlanControlHandler` (phase 4) |
+| `crates/pony-tools/src/plan_mode.rs` · `exit_plan_mode.rs` | 会话级 Plan 模式注册表 + `ExitPlanMode` handler（2026-11-27；原 `plan_state.rs` 步骤机已退役） |
 | `crates/pony-agent-core/src/agent/ask_control.rs` | Host-facing Ask adapter over `PendingControlRequest` (phase 4) |
 | `crates/pony-agent-core/src/agent/process.rs` | `ProcessManager` — session-scoped process lifecycle (phase 5) |
 | `crates/pony-agent-core/src/agent/sandbox.rs` | `SandboxSupportMatrix`, `NoSandboxBackend`, `TestSandboxBackend` (phase 5) |

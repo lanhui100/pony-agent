@@ -24,7 +24,6 @@ use crate::agent::hooks::{
     build_submission_plan_run_control_hook_envelope, CanonicalGraphRunEventType,
     RunControlCheckpointContext, RunControlHookEnvelope,
 };
-use crate::agent::plan_state::PlanStore;
 use crate::agent::planner::{DefaultGraphPlanner, GraphPlanner};
 use crate::agent::runtime::{
     AgentRuntime, AgentRuntimeBuilder, TurnInput, TurnResult, TurnStreamEvent,
@@ -1029,8 +1028,6 @@ pub struct HostControlPlane {
     /// the host wired a non-SQLite session backend and the dispatcher in-memory mirror is the only
     /// source (degraded, never silently claimed as persisted).
     ask_store: Option<Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>>,
-    /// Session-owned revisioned plan store backing the Plan control surface (Decision 6).
-    plan_store: PlanStore,
     /// PA-095 #3：本控制面的事件持久化通道句柄（会话绑定路由用）。
     /// 生产路径经 turn_flow 全局注册表消费；字段本身仅由下方测试面 getter 读取。
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1068,7 +1065,6 @@ pub struct HostControlPlaneBuilder {
     graph_planner: Option<Box<dyn GraphPlanner>>,
     ask_dispatcher: Option<Arc<GovernedDispatcher>>,
     ask_store: Option<Arc<dyn crate::agent::ask_persistence::AskPersistenceStore>>,
-    plan_store: Option<PlanStore>,
     /// wave-60 C5：宽限期收口参数/监督者注入（缺省 2000/250 ms + 共享 registry）。
     stop_escalation: Option<Arc<crate::agent::stop_escalation::StopEscalation>>,
 }
@@ -1083,7 +1079,6 @@ impl HostControlPlaneBuilder {
             graph_planner: None,
             ask_dispatcher: None,
             ask_store: None,
-            plan_store: None,
             stop_escalation: None,
         }
     }
@@ -1138,11 +1133,6 @@ impl HostControlPlaneBuilder {
         self
     }
 
-    pub fn plan_store(mut self, plan_store: PlanStore) -> Self {
-        self.plan_store = Some(plan_store);
-        self
-    }
-
     /// wave-60 C5：注入宽限期收口监督者（测试用毫秒级小值；生产用缺省 2000/250 ms）。
     pub fn stop_escalation(
         mut self,
@@ -1153,10 +1143,9 @@ impl HostControlPlaneBuilder {
     }
 
     pub fn build(self) -> HostControlPlane {
-        let plan_store = self.plan_store.unwrap_or_else(PlanStore::new);
         let mut runtime = match self.runtime {
             Some(rt) => rt,
-            None => AgentRuntimeBuilder::new().plan_store(plan_store.clone()).build(),
+            None => AgentRuntimeBuilder::new().build(),
         };
         let capability_registry = runtime.capability_registry_handle();
         let sessions_rwlock = runtime.sessions_handle();
@@ -1338,7 +1327,6 @@ impl HostControlPlaneBuilder {
             ),
             ask_dispatcher,
             ask_store,
-            plan_store,
             // PA-095 #3：块内必然赋值（通道注册无条件执行）。
             event_persist_channel,
             event_flush_channel,
@@ -10049,75 +10037,87 @@ mod tests {
         );
     }
 
+    /// Plan 模式控制面：进入 → 提交方案 → 审核批准 → 退出（ADR 2026-11-27）。
+    ///
+    /// 旧用例覆盖的是「create/merge/complete_step/replace」步骤机；步骤进度已归 TodoWrite，
+    /// 这里改为覆盖模式四动作，并锁住「批准后写权限解锁、继续规划保持锁定」两条语义。
     #[test]
-    fn plan_control_plane_surface_creates_reads_mutates_and_lists() {
+    fn plan_mode_control_plane_surface_toggles_and_reviews_the_submitted_plan() {
         let _cp_lock = control_plane_test_lock();
-        let control_plane = HostControlPlaneBuilder::new().runtime(AgentRuntimeBuilder::new().session_store(SessionStore::memory_only()).build()).build();
-
-        let created = control_plane
-            .plan_create(
-                "session-1",
-                json!({
-                    "kind": "implement",
-                    "summary": "Implement the feature",
-                    "steps": [{ "name": "a", "summary": "sa" }, { "name": "b", "summary": "sb" }],
-                }),
+        let control_plane = HostControlPlaneBuilder::new()
+            .runtime(
+                AgentRuntimeBuilder::new()
+                    .session_store(SessionStore::memory_only())
+                    .build(),
             )
-            .expect("create");
-        assert_eq!(created["planId"].as_str(), Some("plan-1"));
-        assert_eq!(created["revision"].as_u64(), Some(1));
-        assert_eq!(created["lifecycle"].as_str(), Some("draft"));
-        assert_eq!(created["steps"].as_array().map(Vec::len), Some(2));
+            .build();
+        // 每例唯一会话 id：`plan_mode` 是**进程级注册表 + 持久 sidecar**，固定 id 会让
+        // 同一进程内其它用例/上一次运行留下的 `plan` 正文污染首断言（"初始无方案"）。
+        let session = format!("session-plan-mode-surface-{}", uuid::Uuid::new_v4());
+        let session = session.as_str();
 
-        let merged = control_plane
-            .plan_merge(
-                "session-1",
-                "plan-1",
-                1,
-                json!({ "name": "c", "summary": "sc" }),
+        // 1. 初始未激活。
+        let initial = control_plane.plan_mode_get(session);
+        assert_eq!(initial["active"].as_bool(), Some(false));
+        assert!(initial["plan"].is_null());
+
+        // 2. 进入（写 pending，未 commit 前 active 已按用户意图回答）。
+        let entered = control_plane.plan_mode_set(session, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
+        assert_eq!(entered["active"].as_bool(), Some(true));
+        assert_eq!(entered["committedActive"].as_bool(), Some(false));
+
+        // 3. commit 后正式生效。
+        let committed = control_plane.plan_mode_commit(session);
+        assert_eq!(committed["committedActive"].as_bool(), Some(true));
+        assert!(committed["pending"].is_null());
+
+        // 4. 无方案时审核必须 fail-closed（不许空批准解锁写权限）。
+        let no_plan = control_plane
+            .plan_mode_review(session, pony_tools::plan_mode::PlanReviewDecision::Approve)
+            .expect_err("没有提交方案时不得批准");
+        assert!(no_plan.starts_with("plan_review_no_plan:"), "{no_plan}");
+
+        // 5. 模型提交方案（ExitPlanMode handler 的落点）。
+        pony_tools::plan_mode::submit_plan(session, "# 方案\n- 步骤");
+        let submitted = control_plane.plan_mode_get(session);
+        assert_eq!(submitted["plan"].as_str(), Some("# 方案\n- 步骤"));
+        assert_eq!(submitted["planApproved"].as_bool(), Some(false));
+
+        // 6. 批准 → 退出模式并标记方案已批准。
+        let approved = control_plane
+            .plan_mode_review(session, pony_tools::plan_mode::PlanReviewDecision::Approve)
+            .expect("approve");
+        assert_eq!(approved["active"].as_bool(), Some(false));
+        assert_eq!(approved["planApproved"].as_bool(), Some(true));
+
+        // 7. 空会话作用域一律 fail-closed（否则状态会落到空键上无法回读）。
+        assert!(control_plane.plan_mode_set("  ", pony_tools::plan_mode::ModeToggle::Enter).is_err());
+        assert!(control_plane.plan_mode_review("  ", pony_tools::plan_mode::PlanReviewDecision::Approve).is_err());
+    }
+
+    /// 「继续规划」必须保持模式激活且方案仍未批准（默认不放大权限）。
+    #[test]
+    fn plan_mode_review_keep_planning_keeps_the_mode_active() {
+        let _cp_lock = control_plane_test_lock();
+        let control_plane = HostControlPlaneBuilder::new()
+            .runtime(
+                AgentRuntimeBuilder::new()
+                    .session_store(SessionStore::memory_only())
+                    .build(),
             )
-            .expect("merge");
-        assert_eq!(merged["revision"].as_u64(), Some(2));
-        assert_eq!(merged["steps"].as_array().map(Vec::len), Some(3));
+            .build();
+        // 同上：固定 id 会读到 sidecar 里上一轮残留的 `plan`，导致 KeepPlanning 断言不稳。
+        let session = format!("session-plan-mode-keep-{}", uuid::Uuid::new_v4());
+        let session = session.as_str();
+        control_plane.plan_mode_set(session, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
+        control_plane.plan_mode_commit(session);
+        pony_tools::plan_mode::submit_plan(session, "# 方案");
 
-        let step_id = merged["steps"][0]["stepId"]
-            .as_str()
-            .expect("step id")
-            .to_string();
-        let completed = control_plane
-            .plan_complete_step("session-1", "plan-1", 2, &step_id)
-            .expect("complete step");
-        assert_eq!(completed["steps"][0]["status"].as_str(), Some("completed"));
-        assert_eq!(completed["lifecycle"].as_str(), Some("executing"));
-
-        let replaced = control_plane
-            .plan_replace(
-                "session-1",
-                "plan-1",
-                3,
-                json!({ "kind": "refactor", "summary": "Refactor", "steps": [] }),
-            )
-            .expect("replace");
-        assert_eq!(replaced["planId"].as_str(), Some("plan-1"));
-        assert_eq!(replaced["kind"].as_str(), Some("refactor"));
-        assert_eq!(replaced["revision"].as_u64(), Some(4));
-
-        assert_eq!(
-            control_plane
-                .plan_list("session-1")
-                .as_array()
-                .map(Vec::len),
-            Some(1)
-        );
-        let got = control_plane.plan_get("session-1", "plan-1").expect("get");
-        assert_eq!(got["planId"].as_str(), Some("plan-1"));
-
-        // Cross-session and stale mutations fail closed.
-        assert!(control_plane.plan_get("session-2", "plan-1").is_err());
-        let stale = control_plane
-            .plan_merge("session-1", "plan-1", 1, json!({ "name": "x" }))
-            .expect_err("stale merge must fail closed");
-        assert!(stale.starts_with("stale_revision:"), "{stale}");
+        let kept = control_plane
+            .plan_mode_review(session, pony_tools::plan_mode::PlanReviewDecision::KeepPlanning)
+            .expect("keep planning");
+        assert_eq!(kept["active"].as_bool(), Some(true));
+        assert_eq!(kept["planApproved"].as_bool(), Some(false));
     }
 
     #[test]

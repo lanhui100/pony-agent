@@ -1121,7 +1121,7 @@ fn volatile_context_notes(
                 in_progress.join(", ")
             };
             body.push(format!(
-                "Plan: {}/{} completed; in_progress: {}.",
+                "Todos: {}/{} completed; in_progress: {}.",
                 completed, total, in_progress_str
             ));
         }
@@ -2829,10 +2829,11 @@ mod tests {
         // v1 已废弃表述必须缺席。
         assert!(!base_system_prompt().contains("2-3 lines"));
         assert!(!base_system_prompt().contains("Initialize pending items"));
-        // 契约 §6 实测：v2 全文 3790 字节（含尾部换行）。
-        assert_eq!(base_system_prompt().len(), 3790);
+        // 契约 §6 实测：v2.4.0 全文 3886 字节（含尾部换行；Plan 模式边界条款）。
+        assert_eq!(base_system_prompt().len(), 3886);
     }
 
+    mod todo_label_tests; // B1795774426544：Todo 回灌标签 `Todos:` 回归（单列文件，免抬行数基线）
     /// P1-2b：环境事实必须同时给出 `shell` 与平台命令口径。
     ///
     /// 真实 trace（session `pa_01a19b48` turn-3）里连续 3 次 `Run` 失败，其中 exit 9009 就是
@@ -2996,3 +2997,4 @@ mod tests {
 /// B235：宿主续轮历史行（`host` 角色）的 provider 投影回归（独立文件，避免撑大本文件）。
 #[cfg(test)]
 mod host_history_tests;
+

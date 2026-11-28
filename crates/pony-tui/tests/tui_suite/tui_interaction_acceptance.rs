@@ -284,72 +284,64 @@ fn test_ask_user_resume_version_resolution_logic() {
 }
 
 // -----------------------------------------------------------------------------
-// 3. Plan 交互与展示测试 (Plan Steps & /plan Mode)
+// 3. Plan 模式交互与展示（会话级协作模式，不是步骤清单）
 // -----------------------------------------------------------------------------
 
+/// Plan 覆盖层只展示**模式状态与方案正文**；步骤进度归 Tasks 页签。
 #[test]
-fn test_plan_state_step_transitions() {
-    let mut plan = PlanState::new("plan-101".to_string(), "重构核心通信总线".to_string());
-    plan.steps = vec![
-        PlanStep {
-            step_id: "s1".to_string(),
-            name: "设计契约".to_string(),
-            summary: "定义 protobuf 与状态接口".to_string(),
-            status: PlanStepStatus::Pending,
-        },
-        PlanStep {
-            step_id: "s2".to_string(),
-            name: "编写红相测试".to_string(),
-            summary: "编写端到端验收用例".to_string(),
-            status: PlanStepStatus::Pending,
-        },
-    ];
-
-    assert_eq!(plan.steps[0].status, PlanStepStatus::Pending);
-
-    // 状态推进
-    plan.steps[0].status = PlanStepStatus::InProgress;
-    assert_eq!(plan.steps[0].status, PlanStepStatus::InProgress);
-
-    plan.steps[0].status = PlanStepStatus::Completed;
-    assert_eq!(plan.steps[0].status, PlanStepStatus::Completed);
-}
-
-#[test]
-fn test_plan_mode_toggle_and_rendering_contract() {
+fn plan_overlay_renders_mode_state_and_plan_body() {
     let mut state = TuiState::default();
-    let mut plan = PlanState::new("plan-102".to_string(), "实施 TUI 全屏增强".to_string());
-    plan.steps.push(PlanStep {
-        step_id: "step-1".to_string(),
-        name: "实现权限审批面板".to_string(),
-        summary: "包含快捷键和状态机".to_string(),
-        status: PlanStepStatus::InProgress,
+    state.update_plan(PlanModeState {
+        active: true,
+        plan: Some("# 实施 TUI 全屏增强\n- 实现权限审批面板".to_string()),
+        plan_approved: false,
+        revision: 1,
     });
-    state.update_plan(plan);
 
-    // 触发 /plan 模式切换
     state.toggle_plan_mode();
     assert_eq!(state.mode, InteractionMode::PlanMode);
-    assert!(state.plan_state.as_ref().unwrap().is_active_plan_mode);
 
     let buf = screen(&mut state, 100, 30);
     let rendered = buffer_to_string(&buf);
-
+    assert!(
+        rendered.contains("规划中"),
+        "激活且未批准时必须显示「规划中」, 实际渲染内容:\n{rendered}"
+    );
     assert!(
         rendered.contains("实施 TUI 全屏增强"),
-        "Plan 视图必须渲染计划总纲, 实际渲染内容:\n{}",
-        rendered
-    );
-    assert!(
-        rendered.contains("实现权限审批面板"),
-        "Plan 视图必须渲染各步骤名称, 实际渲染内容:\n{}",
-        rendered
+        "Plan 视图必须渲染方案正文, 实际渲染内容:\n{rendered}"
     );
 
-    // 再次切换退出
+    // 覆盖层开关与模式开关解耦：关掉覆盖层不等于退出 Plan 模式。
     state.toggle_plan_mode();
     assert_eq!(state.mode, InteractionMode::Normal);
-    assert!(!state.plan_state.as_ref().unwrap().is_active_plan_mode);
+    assert!(
+        state.plan_state.as_ref().unwrap().active,
+        "关掉覆盖层不得改变 Plan 模式本身"
+    );
+}
+
+/// 底栏 Plan 段：仅模式激活时出现，且**不带数字**。
+#[test]
+fn plan_segment_shows_mode_marker_without_numbers() {
+    let mut state = TuiState::default();
+    assert!(
+        tui::task_summary(&state).is_none(),
+        "未进入 Plan 模式时底栏不得出现 Plan 段"
+    );
+
+    state.update_plan(PlanModeState {
+        active: true,
+        plan: None,
+        plan_approved: false,
+        revision: 1,
+    });
+    let summary = tui::task_summary(&state).expect("激活后必须出现 Plan 段");
+    assert!(summary.contains("▤ Plan"), "{summary}");
+    assert!(
+        !summary.chars().any(|c| c.is_ascii_digit()),
+        "Plan 段不得含任何数字（步骤进度归任务段）：{summary}"
+    );
 }
 
 // -----------------------------------------------------------------------------

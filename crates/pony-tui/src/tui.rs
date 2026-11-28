@@ -324,8 +324,8 @@ pub enum UiEvent {
     /// `run_id` 缺失时**不投递本事件**（决策侧 fail-closed，绝不静默回落新轮）。
     /// 同样**不得** `add_user_message`：这不是用户发言，不能产生用户气泡。
     ApprovalResumeTurn { prompt: String, run_id: String },
-    /// Plan 计划更新通知
-    PlanUpdated(PlanState),
+    /// Plan 模式状态更新通知（模式开关 + 方案正文，不含步骤清单）
+    PlanUpdated(PlanModeState),
     /// 任务看板更新通知
     TaskBoardUpdated(Vec<TuiTask>),
     /// Goal 状态更新通知
@@ -717,9 +717,9 @@ pub const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("/thinking", "设置思考强度 (Reasoning Effort)"),
     ("/permission", "查看或切换工具执行权限级别"),
     ("/settings", "设置 TUI 显示与交互偏好"),
-    ("/plan", "切换/查看 Plan 面板（不限制工具执行）"),
+    ("/plan", "进入 Plan 模式：写/执行锁定，出方案后 /approve 批准；/plan off 直接退出"),
     ("/goal", "设置或查看当前会话目标"),
-    ("/approve", "批准当前会话的草稿计划（解除写保护）"),
+    ("/approve", "批准当前会话已提交的 Plan 方案（退出 Plan 模式，解锁写/执行）"),
     ("/panel", "打开任务抽屉：Goal / Plan / Tasks / Agents / Jobs（同 Ctrl+T）"),
     ("/tasks", "切换/查看完整 Team 任务看板（Ctrl+T 打开任务抽屉）"),
     ("/agents", "查看 Team 角色与状态"),
@@ -1650,7 +1650,8 @@ pub struct TuiState {
     // 进阶交互状态
     pub permission_state: Option<PermissionState>,
     pub ask_user_state: Option<AskUserState>,
-    pub plan_state: Option<PlanState>,
+    /// 会话级 Plan 模式投影（模式开关 + 方案正文；步骤进度在 `todos_state`）。
+    pub plan_state: Option<PlanModeState>,
     pub task_board_state: Option<TaskBoardState>,
     /// 当前会话的 **todo 快照**（`todo_write` 工具写入；抽屉 Tasks 页签的唯一数据源）。
     ///
@@ -2910,18 +2911,17 @@ impl TuiState {
         self.end_overlay();
     }
 
+    /// 切换 **Plan 模式覆盖层**（`InteractionMode::PlanMode`，纯视图层）。
+    ///
+    /// 注意：真正的 Plan 模式开关在控制面（`/plan` / `/plan off` → `plan_mode_set`），
+    /// 这里只决定是否把方案正文以覆盖层铺开——两者刻意解耦，避免「关掉覆盖层」
+    /// 被误读成「退出 Plan 模式」。
     pub fn toggle_plan_mode(&mut self) {
-        if self.mode == InteractionMode::PlanMode {
-            self.mode = InteractionMode::Normal;
-            if let Some(ref mut plan) = self.plan_state {
-                plan.is_active_plan_mode = false;
-            }
+        self.mode = if self.mode == InteractionMode::PlanMode {
+            InteractionMode::Normal
         } else {
-            self.mode = InteractionMode::PlanMode;
-            if let Some(ref mut plan) = self.plan_state {
-                plan.is_active_plan_mode = true;
-            }
-        }
+            InteractionMode::PlanMode
+        };
     }
 
     /// Ctrl+T：任务抽屉开关（非模态覆盖层，不改 `mode`）。
@@ -2988,8 +2988,13 @@ impl TuiState {
             .map(|entry| entry.target.clone())
     }
 
-    pub fn update_plan(&mut self, plan: PlanState) {
+    pub fn update_plan(&mut self, plan: PlanModeState) {
         self.plan_state = Some(plan);
+    }
+
+    /// 用控制面投影刷新 Plan 模式状态；无状态（未激活且无方案）时清空。
+    pub fn update_plan_from_projection(&mut self, value: &serde_json::Value) {
+        self.plan_state = PlanModeState::from_projection(value);
     }
 
     pub fn update_task_board(&mut self, tasks: Vec<TuiTask>) {
@@ -4048,58 +4053,41 @@ fn sync_state_with_registry(state: &mut TuiState) {
     }
 }
 
-/// PA-141 / C-141-3 宿主盖章面（TUI 侧唯一合法入口）：把会话内最早的 `draft` 计划推进到
-/// `executing`。
+/// `/approve`：批准当前会话**已提交待审**的 Plan 方案（宿主盖章面，ADR 2026-11-27）。
 ///
-/// 为什么需要它：`draft` 计划存在时，所有写类/执行类工具都会被 `plan_draft_gate` 拒绝，而
-/// 解锁只有两条路——`start_execution`（需要宿主注入 `PlanExecutionApproval`）或 `abort`。
-/// TUI 此前把 `plan_execution_approval` 写死为 `None`，于是用户只能看着模型反复请求批准，
-/// 永远解不开锁。`/approve` 就是那句"宿主盖章"：只有用户显式执行它才会发生，
-/// 模型工具参数永远无法伪造（C-141-3）。
+/// Plan 模式下写/执行工具被硬拦截，唯一解锁路径是「用户批准 ExitPlanMode 提交的方案」
+/// 或 `/plan off`。本函数就是那句"宿主盖章"：只有用户显式执行它才会发生，
+/// 模型工具参数永远无法伪造。
 ///
 /// 返回写入状态行的一次性提示文案（失败也不 panic：面板照常可用）。
-pub fn approve_earliest_draft_plan(control_plane: &HostControlPlane, session_id: &str) -> String {
-    let plans_value = control_plane.plan_list(session_id);
-    let Some(draft) = plans_value.as_array().and_then(|plans| {
-        plans.iter().find(|plan| {
-            plan.get("lifecycle").and_then(|value| value.as_str()) == Some("draft")
-        })
-    }) else {
-        return "当前会话没有待批准的草稿计划（/plan 查看）".to_string();
-    };
-    let plan_id = draft
-        .get("planId")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let revision = draft
-        .get("revision")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    if plan_id.is_empty() {
-        return "计划投影缺少 planId，无法批准".to_string();
+pub fn approve_pending_plan(control_plane: &HostControlPlane, session_id: &str) -> String {
+    let state = control_plane.plan_mode_get(session_id);
+    let active = state.get("active").and_then(serde_json::Value::as_bool) == Some(true);
+    let has_plan = state
+        .get("plan")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|plan| !plan.trim().is_empty());
+    if !active {
+        return "当前会话不在 Plan 模式（/plan 进入）".to_string();
     }
-    match control_plane.plan_execution_approve(session_id, plan_id, revision) {
-        Ok(approved) => {
-            let next_revision = approved
-                .get("revision")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(revision);
-            format!(
-                "已批准执行计划 {plan_id}（revision {revision} → {next_revision}）：写文件/跑命令已解锁"
-            )
-        }
-        Err(error) => format!("批准计划失败：{error}"),
+    if !has_plan {
+        return "当前会话还没有提交待审方案（模型调用 ExitPlanMode 后即可批准）".to_string();
+    }
+    match control_plane.plan_mode_review(
+        session_id,
+        pony_agent_core::agent::plan_mode::PlanReviewDecision::Approve,
+    ) {
+        Ok(_) => "已批准方案：Plan 模式已退出，写文件/跑命令已解锁".to_string(),
+        Err(error) => format!("批准方案失败：{error}"),
     }
 }
 
-/// `/approve` 的落地实现：先盖宿主章，再把最新计划投影推给面板（失败也不 panic）。
+/// `/approve` 的落地实现：先批准方案，再把最新模式状态推给面板（失败也不 panic）。
 fn handle_approve_command(control_plane: &HostControlPlane, state: &mut TuiState) {
-    let notice = approve_earliest_draft_plan(control_plane, &state.session_id);
+    let notice = approve_pending_plan(control_plane, &state.session_id);
     state.set_status_notice(notice);
-    let plans_val = control_plane.plan_list(&state.session_id);
-    if let Some(plan_state) = tui_plan_from_value(&plans_val) {
-        state.update_plan(plan_state);
-    }
+    let projection = control_plane.plan_mode_get(&state.session_id);
+    state.update_plan_from_projection(&projection);
 }
 
 /// wave-38 R1.4 可测接缝：由 `TuiState` 组装发送给 `start_turn_stream` 的唯一 `TurnInput`。
@@ -7693,19 +7681,8 @@ pub fn render_ask_user_dialog_stub(f: &mut Frame, state: &TuiState) {
     );
 }
 
+/// Plan 模式覆盖层：只展示**模式状态与方案正文**（步骤进度看 Todos 页签）。
 pub fn render_plan_panel_stub(f: &mut Frame, state: &TuiState) {
-    let plan = match &state.plan_state {
-        Some(p) => p,
-        None => {
-            render_pending_empty_state(
-                f,
-                "Plan 计划模式与步骤展示",
-                "当前会话还没有计划；模型调用 Plan 后会实时显示步骤进度",
-                "/plan 或 Esc 退出计划模式",
-            );
-            return;
-        }
-    };
     let area = f.area();
     let pw = 80u16.min(area.width.saturating_sub(4)).max(20);
     let ph = 18u16.min(area.height.saturating_sub(2)).max(6);
@@ -7718,39 +7695,52 @@ pub fn render_plan_panel_stub(f: &mut Frame, state: &TuiState) {
     let body = draw_panel(
         f,
         rect,
-        "Plan 计划模式与步骤展示",
-        "/plan 或 Esc 退出计划模式",
+        "Plan 模式",
+        "/plan off 退出 · /approve 批准方案 · Esc 关闭",
     );
     let inner_w = body.width as usize;
-
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // 计划概要/总纲
+    let Some(plan) = state.plan_state.as_ref() else {
+        lines.push(Line::from(Span::styled(
+            "  当前会话未启用 Plan 模式",
+            Style::default().fg(theme::INK),
+        )));
+        lines.push(blank());
+        lines.push(Line::from(Span::styled(
+            "  /plan 进入：先出方案，批准后才解锁写/执行",
+            faint(),
+        )));
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme::SURFACE)),
+            body,
+        );
+        return;
+    };
+
+    let (state_label, state_style) = if plan.plan_approved {
+        ("已批准", Style::default().fg(theme::ACCENT))
+    } else if plan.active {
+        ("规划中 · 写/执行已锁定", Style::default().fg(theme::WARN))
+    } else {
+        ("未激活", Style::default().fg(theme::MUTED))
+    };
     lines.push(Line::from(vec![
-        Span::styled(
-            format!("  实施计划: {}", plan.summary),
-            Style::default().fg(theme::INK).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("  状态：" , faint()),
+        Span::styled(state_label, state_style.add_modifier(Modifier::BOLD)),
     ]));
     lines.push(blank());
-
-    // 渲染各步骤
-    if plan.steps.is_empty() {
-        lines.push(Line::from(Span::styled("  尚无正在执行的步骤", faint())));
-    } else {
-        for (idx, step) in plan.steps.iter().enumerate() {
-            let is_focused = idx == plan.selected_step_index;
-            let (icon, _icon_style) = match step.status {
-                PlanStepStatus::Completed => ("✔", Style::default().fg(theme::ACCENT)),
-                PlanStepStatus::InProgress => ("●", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-                PlanStepStatus::Pending => ("○", Style::default().fg(theme::MUTED)),
-                PlanStepStatus::Failed => ("✘", Style::default().fg(theme::MUTED)),
-            };
-
-            let left = format!("  {} {}. {}", icon, idx + 1, step.name);
-            let right = step.summary.as_str();
-            lines.push(list_row(is_focused, &left, right, inner_w));
+    lines.push(Line::from(Span::styled("  方案：", faint())));
+    match plan.plan.as_deref().map(str::trim) {
+        Some(plan_text) if !plan_text.is_empty() => {
+            for line in plan_text.lines().take(ph.saturating_sub(6) as usize) {
+                lines.push(list_row(false, &format!("  {line}"), "", inner_w));
+            }
         }
+        _ => lines.push(Line::from(Span::styled(
+            "  模型尚未提交方案（ExitPlanMode 后出现在这里）",
+            faint(),
+        ))),
     }
 
     f.render_widget(
@@ -9375,6 +9365,64 @@ fn refresh_session_selector(
         SelectionReset::Reset => 0,
         SelectionReset::Keep => previous.min(state.session_list.len().saturating_sub(1)),
     };
+}
+
+/// `/plan` 的参数提取：返回 `Some("")`（进入模式）或 `Some("off")`（退出模式）。
+///
+/// `/plan` 允许带参数（`/plan off`），故与 `/goal`、`/archive` 一样必须在**整串匹配**的
+/// `known_command` 分发之前判定。未知参数按「进入模式」处理并原样回传，由
+/// [`apply_plan_mode_switch`] 明确提示（不静默吞掉用户的意图）。
+fn plan_command_arg(input: &str) -> Option<String> {
+    if match_command_token(input) != Some("/plan") {
+        return None;
+    }
+    Some(
+        input
+            .trim()
+            .split_once(char::is_whitespace)
+            .map(|(_, rest)| rest.trim().to_string())
+            .unwrap_or_default(),
+    )
+}
+
+/// `/plan` 的落地实现：切模式 + 同步投影 + 铺开/收起覆盖层 + 状态行回执。
+///
+/// Plan 模式是**会话级协作模式**（写/执行硬拦截），覆盖层只是视图：进入时铺开，
+/// 退出时收起，两者刻意解耦（Esc 关掉覆盖层不等于退出 Plan 模式）。
+fn apply_plan_mode_switch(
+    state: &mut TuiState,
+    control_plane: &HostControlPlane,
+    arg: &str,
+) {
+    let turn_off = arg.trim().eq_ignore_ascii_case("off");
+    match control_plane.plan_mode_set(
+        &state.session_id,
+        if turn_off {
+            pony_agent_core::agent::plan_mode::ModeToggle::Exit
+        } else {
+            pony_agent_core::agent::plan_mode::ModeToggle::Enter
+        },
+    ) {
+        Ok(projection) => {
+            state.update_plan_from_projection(&projection);
+            let entering = state.mode != InteractionMode::PlanMode && !turn_off;
+            let leaving = state.mode == InteractionMode::PlanMode && turn_off;
+            if entering || leaving {
+                state.toggle_plan_mode();
+            }
+            state.set_status_notice(if turn_off {
+                "已退出 Plan 模式：写/执行工具已解锁".to_string()
+            } else if arg.trim().is_empty() {
+                "已进入 Plan 模式：写/执行工具锁定，出方案后 /approve 批准".to_string()
+            } else {
+                format!(
+                    "已进入 Plan 模式（忽略未知参数 `{}`）：出方案后 /approve 批准",
+                    arg.trim()
+                )
+            });
+        }
+        Err(error) => state.set_status_notice(format!("Plan 模式切换失败：{error}")),
+    }
 }
 
 /// C6：`/archive` 的参数提取（`match_command_token` 与命令表同源；`/archivex` 不是命令）。
@@ -11715,29 +11763,9 @@ fn tui_event_loop(
                     // **其余按键必须继续落到通用处理链**（流式裁决 / 普通输入 / Enter 提交）。
                     // 旧实现 `_ => {}` 之后无脑 `continue` ⇒ 计划面板打开时输入框整段失效。
                     if state.mode == InteractionMode::PlanMode && plan_mode_consumes_key(&key) {
-                        match key.code {
-                            KeyCode::Esc => {
-                                state.toggle_plan_mode();
-                            }
-                            KeyCode::Down => {
-                                if let Some(ref mut plan) = state.plan_state {
-                                    if !plan.steps.is_empty() {
-                                        plan.selected_step_index = (plan.selected_step_index + 1) % plan.steps.len();
-                                    }
-                                }
-                            }
-                            KeyCode::Up => {
-                                if let Some(ref mut plan) = state.plan_state {
-                                    if !plan.steps.is_empty() {
-                                        if plan.selected_step_index == 0 {
-                                            plan.selected_step_index = plan.steps.len() - 1;
-                                        } else {
-                                            plan.selected_step_index -= 1;
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
+                        // Plan 覆盖层只展示模式与方案正文（无步骤列表 ⇒ 无需 ↑↓ 选择）。
+                        if key.code == KeyCode::Esc {
+                            state.toggle_plan_mode();
                         }
                         continue;
                     }
@@ -12405,6 +12433,15 @@ fn tui_event_loop(
                                     continue;
                                 }
 
+                                // `/plan` 与 `/plan off`：真正的 Plan 模式开关（写/执行硬拦截）。
+                                // 与 `/goal`、`/archive` 同因允许带参数，故在**整串匹配**的
+                                // `known_command` 分发之前判定。
+                                if let Some(arg) = plan_command_arg(&input) {
+                                    apply_plan_mode_switch(&mut state, &control_plane, &arg);
+                                    dirty = true;
+                                    continue;
+                                }
+
                                 // C-6：`/goal` 是唯一「允许带参数且仍算命令」的斜杠命令，
                                 // 故在**整串匹配**的 `known_command` 之前判定；解析/执行/回执全在
                                 // `tui::goal_command`（真值源为 core `agent::goal_command`），
@@ -12544,11 +12581,6 @@ fn tui_event_loop(
                                     || input_is_alias(&input, "/effort")
                                 {
                                     state.open_reasoning_effort_selector();
-                                    continue;
-                                }
-                                if known_command == Some("/plan") {
-                                    projection::sync_plan_from_store(&mut state, &control_plane);
-                                    state.toggle_plan_mode();
                                     continue;
                                 }
                                 // `/approve`：宿主盖章入口（PA-141），无 Draft 时如实汇报。
@@ -14623,9 +14655,9 @@ mod b254_plain_copy;
 #[path = "tui/tests/cli_self_update_tests.rs"]
 mod cli_self_update_tests;
 
-/// ADR 0092 单测：`/approve` 宿主盖章入口（Draft 计划解锁的 TUI 侧唯一合法通道）。
+/// ADR 2026-11-27 单测：`/approve` 宿主盖章入口（Plan 模式方案审批的 TUI 侧唯一合法通道）。
 ///
-/// 纪律：用**真实** `HostControlPlane` + 真实 `PlanStore` 驱动（不 mock 成功），
+/// 纪律：用**真实** `HostControlPlane` + 真实 `plan_mode` 注册表驱动（不 mock 成功），
 /// 并先把 HOME/XDG 重定向到临时沙箱，保证单测不读写用户的 `sessions.db`。
 #[cfg(test)]
 #[path = "tui/tests/plan_approve_tests.rs"]

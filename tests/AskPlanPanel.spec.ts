@@ -5,7 +5,7 @@ import AskPanel from "@/components/AskPanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
 import { useAskStore } from "@/stores/ask";
 import { usePlanStore } from "@/stores/plan";
-import type { PendingAsk, Plan } from "@/types/ask-plan";
+import type { PendingAsk } from "@/types/ask-plan";
 
 const tauriMocks = vi.hoisted(() => ({
   mockSafeInvoke: vi.fn(),
@@ -37,20 +37,6 @@ function createPendingAsk(partial: Partial<PendingAsk> = {}): PendingAsk {
     state: partial.state ?? "pending",
     prompt: partial.prompt ?? "继续执行?",
     options: partial.options ?? null
-  };
-}
-
-function createPlan(partial: Partial<Plan> = {}): Plan {
-  return {
-    planId: partial.planId ?? "plan-1",
-    sessionId: partial.sessionId ?? "session-1",
-    revision: partial.revision ?? 1,
-    kind: partial.kind ?? "plan",
-    summary: partial.summary ?? "接入 Ask/Plan 面板",
-    lifecycle: partial.lifecycle ?? "draft",
-    steps: partial.steps ?? [
-      { stepId: "step-1", name: "调研方案", summary: "梳理接入点", status: "pending" }
-    ]
   };
 }
 
@@ -166,7 +152,7 @@ describe("AskPanel", () => {
   });
 });
 
-describe("PlanPanel", () => {
+describe("PlanPanel（Plan 模式 + 独立任务进度）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setActivePinia(createPinia());
@@ -174,84 +160,53 @@ describe("PlanPanel", () => {
     tauriMocks.mockSafeListen.mockResolvedValue(() => {});
   });
 
-  it("lists a session's plans and shows the selected plan's steps", async () => {
-    const plan = createPlan({
-      planId: "plan-1",
-      summary: "接入面板",
-      lifecycle: "executing",
-      steps: [
-        { stepId: "step-1", name: "调研", summary: "梳理接入点", status: "pending" },
-        { stepId: "step-2", name: "实现", summary: "编写代码", status: "completed" }
-      ]
-    });
-    tauriMocks.mockSafeInvoke.mockResolvedValue([plan]);
-
-    const wrapper = mount(PlanPanel, { props: { sessionId: "session-1", open: true } });
-    await flushAsync();
-    await vi.waitFor(() => {
-      expect(usePlanStore().plans).toHaveLength(1);
-    });
-
-    expect(wrapper.text()).toContain("接入面板");
-    expect(wrapper.text()).toContain("执行中");
-    expect(wrapper.get('[data-testid="plan-steps"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="plan-step-step-1"]').text()).toContain("调研");
-    expect(wrapper.get('[data-testid="plan-step-step-2"]').text()).toContain("实现");
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_list", {
-      sessionId: "session-1"
-    });
-    wrapper.unmount();
-  });
-
-  it("completes a pending step through the store using the listed revision", async () => {
-    const plan = createPlan({
-      planId: "plan-1",
-      revision: 3,
-      lifecycle: "executing",
-      steps: [{ stepId: "step-1", name: "调研", summary: "梳理接入点", status: "pending" }]
-    });
+  const mockMode = (mode: Record<string, unknown>) => {
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "plan_list") {
-        return Promise.resolve([plan]);
+      if (command === "plan_mode_get") {
+        return Promise.resolve({
+          sessionId: "session-1",
+          active: false,
+          plan: null,
+          planApproved: false,
+          revision: 0,
+          ...mode
+        });
       }
-      if (command === "plan_complete_step") {
-        return Promise.resolve(
-          createPlan({
-            planId: "plan-1",
-            revision: 4,
-            lifecycle: "executing",
-            steps: [{ stepId: "step-1", name: "调研", summary: "梳理接入点", status: "completed" }]
-          })
-        );
+      if (command === "todo_list") {
+        return Promise.resolve([]);
       }
       return Promise.resolve(null);
     });
+  };
+
+  it("读取 Plan 模式并渲染方案正文（不再有步骤清单）", async () => {
+    mockMode({ active: true, plan: "# 接入面板\n- 梳理接入点", revision: 3 });
 
     const wrapper = mount(PlanPanel, { props: { sessionId: "session-1", open: true } });
     await flushAsync();
-    const store = usePlanStore();
     await vi.waitFor(() => {
-      expect(store.selectedPlan?.revision).toBe(3);
+      expect(usePlanStore().mode.active).toBe(true);
     });
 
-    await wrapper.get('[data-testid="plan-step-complete"]').trigger("click");
-    await flushAsync();
-
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_complete_step", {
-      sessionId: "session-1",
-      planId: "plan-1",
-      revision: 3,
-      stepId: "step-1"
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_mode_get", {
+      sessionId: "session-1"
     });
-    expect(store.selectedPlan?.revision).toBe(4);
-    expect(store.selectedPlan?.steps[0]?.status).toBe("completed");
+    expect(wrapper.get('[data-testid="plan-mode-card"]').text()).toContain("规划中");
+    expect(wrapper.get('[data-testid="plan-mode-body"]').text()).toContain("接入面板");
+    expect(wrapper.find('[data-testid="plan-steps"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
-  it("renders todo tasks when present in session", async () => {
+  it("折叠头只显示任务 x/x（不与 Plan 混加）", async () => {
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "plan_list") {
-        return Promise.resolve([]);
+      if (command === "plan_mode_get") {
+        return Promise.resolve({
+          sessionId: "session-1",
+          active: true,
+          plan: "# 方案",
+          planApproved: false,
+          revision: 1
+        });
       }
       if (command === "todo_list") {
         return Promise.resolve([
@@ -265,38 +220,37 @@ describe("PlanPanel", () => {
 
     const wrapper = mount(PlanPanel, { props: { sessionId: "session-1", open: true } });
     await flushAsync();
+    await vi.waitFor(() => {
+      expect(usePlanStore().todos).toHaveLength(3);
+    });
 
-    expect(wrapper.get('[data-testid="todo-panel"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="todo-summary"]').text()).toContain("1 已完成 · 1 进行中 · 1 待处理");
-    expect(wrapper.get('[data-testid="todo-item-0"]').text()).toContain("编写单元测试");
-    expect(wrapper.get('[data-testid="todo-item-1"]').text()).toContain("实现任务面板");
-    expect(wrapper.get('[data-testid="todo-item-2"]').text()).toContain("验证样式表现");
-
+    expect(wrapper.get('[data-testid="plan-panel-task-progress"]').text()).toBe("1/3");
+    expect(wrapper.get('[data-testid="plan-todos"]').text()).toContain("实现任务面板");
     wrapper.unmount();
   });
 
-  it("approves execution of a draft plan when clicking approve execution button", async () => {
-    const draftPlan = createPlan({
-      planId: "plan-draft-1",
-      revision: 1,
-      lifecycle: "draft",
-      summary: "草稿计划",
-      steps: [{ stepId: "step-1", name: "步骤 1", summary: "首步", status: "pending" }]
-    });
+  it("待审方案可点「批准执行」，走 plan_mode_review 并退出模式", async () => {
     tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "plan_list") {
-        return Promise.resolve([draftPlan]);
+      if (command === "plan_mode_get") {
+        return Promise.resolve({
+          sessionId: "session-1",
+          active: true,
+          plan: "# 草稿方案",
+          planApproved: false,
+          revision: 1
+        });
       }
-      if (command === "plan_execution_approve") {
-        return Promise.resolve(
-          createPlan({
-            planId: "plan-draft-1",
-            revision: 2,
-            lifecycle: "executing",
-            summary: "草稿计划",
-            steps: [{ stepId: "step-1", name: "步骤 1", summary: "首步", status: "pending" }]
-          })
-        );
+      if (command === "plan_mode_review") {
+        return Promise.resolve({
+          sessionId: "session-1",
+          active: false,
+          plan: "# 草稿方案",
+          planApproved: true,
+          revision: 2
+        });
+      }
+      if (command === "todo_list") {
+        return Promise.resolve([]);
       }
       return Promise.resolve(null);
     });
@@ -305,23 +259,75 @@ describe("PlanPanel", () => {
     await flushAsync();
     const store = usePlanStore();
     await vi.waitFor(() => {
-      expect(store.selectedPlan?.lifecycle).toBe("draft");
+      expect(store.mode.active).toBe(true);
     });
 
-    const approveBtn = wrapper.find('[data-testid="plan-approve-execution"]');
-    expect(approveBtn.exists()).toBe(true);
+    const approveBtn = wrapper.get('[data-testid="plan-approve-execution"]');
     expect(approveBtn.text()).toContain("批准执行");
-
     await approveBtn.trigger("click");
     await flushAsync();
 
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_execution_approve", {
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_mode_review", {
       sessionId: "session-1",
-      planId: "plan-draft-1",
-      revision: 1
+      approved: true
     });
-    expect(store.selectedPlan?.lifecycle).toBe("executing");
-    expect(store.selectedPlan?.revision).toBe(2);
+    expect(store.mode.active).toBe(false);
+    expect(store.mode.planApproved).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("「继续规划」保持模式激活且方案未批准", async () => {
+    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
+      if (command === "plan_mode_get") {
+        return Promise.resolve({
+          sessionId: "session-1",
+          active: true,
+          plan: "# 草稿方案",
+          planApproved: false,
+          revision: 1
+        });
+      }
+      if (command === "plan_mode_review") {
+        return Promise.resolve({
+          sessionId: "session-1",
+          active: true,
+          plan: "# 草稿方案",
+          planApproved: false,
+          revision: 2
+        });
+      }
+      if (command === "todo_list") {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(null);
+    });
+
+    const wrapper = mount(PlanPanel, { props: { sessionId: "session-1", open: true } });
+    await flushAsync();
+    await vi.waitFor(() => {
+      expect(usePlanStore().mode.active).toBe(true);
+    });
+
+    await wrapper.get('[data-testid="plan-keep-planning"]').trigger("click");
+    await flushAsync();
+
+    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("plan_mode_review", {
+      sessionId: "session-1",
+      approved: false
+    });
+    expect(usePlanStore().mode.active).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("未进入模式时给出进入入口，且不渲染审批按钮", async () => {
+    mockMode({ active: false, plan: null });
+
+    const wrapper = mount(PlanPanel, { props: { sessionId: "session-1", open: true } });
+    await flushAsync();
+
+    expect(wrapper.get('[data-testid="plan-mode-card"]').text()).toContain("未激活");
+    expect(wrapper.get('[data-testid="plan-mode-toggle"]').text()).toBe("进入");
+    expect(wrapper.find('[data-testid="plan-review-actions"]').exists()).toBe(false);
     wrapper.unmount();
   });
 });

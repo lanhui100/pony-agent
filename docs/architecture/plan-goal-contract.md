@@ -142,11 +142,25 @@ pub fn advance_goal_round(goal_id: &str) -> Result<GoalData, String>; // rounds_
 - `active_goal_for_session(conversation_id)` 命中时：
   `Active goal: {objective} (phase={phase}, round={rounds_started}/{max_goal_rounds}).`
 - `todo::todo_list(session)` 非空时：
-  `Plan: {completed}/{total} completed; in_progress: {content, …}.`（`in_progress` 列表以 `, ` 连接，空则省略该子句）
+  `Todos: {completed}/{total} completed; in_progress: {content, …}.`（`in_progress` 列表以 `, ` 连接，空则省略该子句）
+  > 2026-11-27 修订：标签由 `Plan:` 改为 `Todos:`。旧标签把 `TodoWrite` 的步骤清单冒名为 Plan，导致模型在「Plan 模式 / Todo / team_task / goal」之间持续串名（ADR `2026-11-27-plan-mode-dsh-alignment-and-task-count`）。
 
 注入位置不变：developer 动态层，位于稳定层之后；必须保持 `prompt_layers_are_ordered` 通过（`context.rs` / `crates/pony-agent-core/tests/system_prompt_contract.rs`）。
 
 session 键统一为 `session_context.conversation_id`（= session id）；工具参数缺省 session 时由 runtime 注入当前 session id。
+
+---
+
+## 4.1 四概念边界（2026-11-27，四者正交）
+
+| 概念 | 工具 / 入口 | 唯一职责 | 是否含步骤清单 |
+|---|---|---|---|
+| **Plan（计划模式）** | `/plan`、`/plan off`、`ExitPlanMode` | 会话级协作模式：先出方案，审批通过才解锁写/执行 | **否**（只有模式开关 + Markdown 方案审查） |
+| **Todo（个人步骤）** | `TodoWrite` / `TodoList` | 单智能体会话内的步骤拆解与打勾 | **是**（无写锁、无需审批） |
+| **Team Task（团队任务）** | `team_task_create` / `team_task_update` / `team_task_list` | 多智能体共享看板（认领人、写域、依赖阻塞） | **是**（团队协同专用） |
+| **Goal（持久目标）** | `create_goal` / `get_goal` / `update_goal`、`/goal` | 跨多轮自动续行的顶层验收目标 | **否**（只管目标阶段与续轮上限） |
+
+机械判据：`context.rs` 回灌只出现 `Todos:` / `Active goal:` 两种前缀，不出现 `Plan:`；稳定层提示词由 `tools::prompt_contract::GUIDELINES` 的 `plan_mode_scope` 条款声明该边界（`prompt_tool_consistency` PT1–PT6 校验）。
 
 ---
 
@@ -191,7 +205,7 @@ export async function refreshForTurn(sessionId: string): Promise<void>;
 | 语义 | `plan.ts` 版 = `list(sessionId)` + `listTodos(sessionId)`；`goal.ts` 版 = `fetchGoal(sessionId)`（空 sessionId 直接返回，不抛错） |
 | 空桩期 | 抛 `NotImplemented: wave-1`，不得被生产路径调用（挂载前由 executor 接线） |
 | PlanPanel | `HomeSidebar` 的 PlanPanel **常驻**渲染，空态显示“暂无计划”，挂载即拉取（不得以“已有数据”为渲染前提） |
-| PlanStore 单例 | `HostControlPlane` 与 runtime 的 `governed_executor` 共享**同一** `PlanStore` 实例（生产构造必须注入；测试注入路径保持） |
+| Plan 模式单例 | Plan 状态是**进程级**注册表（`pony_tools::plan_mode`），控制面与 `governed_executor` 门禁读同一份；`PlanStore` 步骤机已于 2026-11-27 下线 |
 
 前端事件订阅统一走 `src/lib/tauri.ts::safeListen`（非 Tauri 环境返回空 `unlisten`，不得直接 `listen`）。
 

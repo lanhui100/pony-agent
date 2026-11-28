@@ -116,22 +116,18 @@ pub fn sync_todos_from_store(state: &mut TuiState) {
     }
 }
 
-/// control plane 计划存储 → `TuiState::plan_state`（抽屉 Plan 页签）。
+/// 控制面的 **Plan 模式**投影 → `TuiState::plan_state`（抽屉 Plan 页签 / 底栏模式标识）。
 ///
-/// 旧实现只有 `/plan` / `/approve` 两条命令会投影计划——模型在轮内 `plan_control` 建/改的计划
-/// 在抽屉里**永远不可见**。本函数是打开抽屉与轮末的统一同步点；无计划 ⇒ 清空，避免把上一会话
-/// 的计划残留成当前会话的实施计划。
+/// 打开抽屉与 500ms 常驻刷新共用本函数；无模式且无方案 ⇒ 清空，避免把上一会话的方案
+/// 残留成当前会话的待批方案（跨会话隔离与 goal/todo 同口径）。
 pub fn sync_plan_from_store(state: &mut TuiState, control_plane: &HostControlPlane) {
-    let plans = control_plane.plan_list(&state.session_id);
-    match tui_plan_from_value(&plans) {
-        Some(plan) => state.update_plan(plan),
-        None => state.plan_state = None,
-    }
+    let projection = control_plane.plan_mode_get(&state.session_id);
+    state.update_plan_from_projection(&projection);
 }
 
 /// 抽屉数据源的**常驻**刷新（500ms 与状态条摘要同周期）：todo + plan + team tasks。
 ///
-/// 三者都是进程内注册表（todo 是 HashMap，plan 是 PlanStore，team task 是静态表），
+/// 三者都是进程内注册表（todo 是 HashMap，plan 是 Plan 模式注册表，team task 是静态表），
 /// 不含网络/磁盘，可安全节流刷新。goal 不在此列：读取失败会 fail-closed 清横幅，
 /// 不宜每 500ms 触发（它的安全刷新在 [`sync_goal_state_lossless`]）。
 pub fn sync_drawer_live_sources(state: &mut TuiState, control_plane: &HostControlPlane) {
@@ -174,14 +170,6 @@ pub fn sync_drawer_sources(state: &mut TuiState, control_plane: &HostControlPlan
     sync_drawer_live_sources(state, control_plane);
     jobs_panel::sync_jobs_from_registry(state);
     hydrate_goal_state(state, &state.session_id.clone());
-}
-
-/// 计划是否已终态（`completed` / `aborted`）：终态计划只在「没有未终态计划」时兜底展示。
-fn is_terminal_plan(plan: &serde_json::Value) -> bool {
-    matches!(
-        plan.get("lifecycle").and_then(|lifecycle| lifecycle.as_str()),
-        Some("completed" | "aborted")
-    )
 }
 
 
@@ -392,74 +380,6 @@ pub fn tui_goal_from_goal(goal: &GoalData) -> TuiGoal {
         max_rounds: Some(goal.max_goal_rounds),
         revision: goal.revision,
     }
-}
-
-/// `control_plane.plan_list(session)` 的 JSON 投影 → PlanState。空数组/格式不符返回 `None`。
-///
-/// 版本选择口径（2026-11-22）：优先**最新一份未终态**计划（`draft` / `executing`）；
-/// 该会话所有计划都已终态时退回**最新一份**。旧实现固定取 `first()`——会话产生第二份计划后
-/// 抽屉会一直显示最早那份，新计划永远不出现（用户侧表现为「plan 从没显示过」）。
-pub fn tui_plan_from_value(value: &serde_json::Value) -> Option<PlanState> {
-    let plans = value.as_array()?;
-    let plan = plans
-        .iter()
-        .rev()
-        .find(|plan| !is_terminal_plan(plan))
-        .or_else(|| plans.last())?;
-    let steps = plan
-        .get("steps")
-        .and_then(|steps| steps.as_array())
-        .map(|steps| {
-            steps
-                .iter()
-                .enumerate()
-                .map(|(index, step)| PlanStep {
-                    step_id: step
-                        .get("stepId")
-                        .and_then(|id| id.as_str())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("step-{}", index + 1)),
-                    name: step
-                        .get("name")
-                        .and_then(|name| name.as_str())
-                        .unwrap_or("未命名步骤")
-                        .to_string(),
-                    summary: step
-                        .get("summary")
-                        .and_then(|summary| summary.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    status: match step.get("status").and_then(|status| status.as_str()) {
-                        Some("completed") => PlanStepStatus::Completed,
-                        Some("in_progress") => PlanStepStatus::InProgress,
-                        Some("failed") => PlanStepStatus::Failed,
-                        _ => PlanStepStatus::Pending,
-                    },
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Some(PlanState {
-        plan_id: plan
-            .get("planId")
-            .and_then(|id| id.as_str())
-            .unwrap_or("plan")
-            .to_string(),
-        revision: plan.get("revision").and_then(|rev| rev.as_u64()).unwrap_or(0),
-        summary: plan
-            .get("summary")
-            .and_then(|summary| summary.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        steps,
-        is_active_plan_mode: true,
-        selected_step_index: 0,
-        awaiting_approval: plan
-            .get("lifecycle")
-            .and_then(|lifecycle| lifecycle.as_str())
-            .is_some_and(|lifecycle| lifecycle == "draft"),
-        is_terminal: is_terminal_plan(plan),
-    })
 }
 
 /// `list_pending_asks` 数组项 → TUI 句柄。缺 `requestId`/`version` 视为不可消费，返回 `None`。

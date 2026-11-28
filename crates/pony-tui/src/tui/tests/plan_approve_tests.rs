@@ -1,13 +1,15 @@
-//! 单测：`/approve` 宿主盖章入口（ADR 0092 §Decision 3）。
+//! 单测：`/approve` 宿主审查入口（ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）。
 //!
-//! 回归面：`Draft` 计划会锁死所有写/执行类工具，解锁只能靠「宿主盖章
-//! `plan_execution_approve`」或「模型 `abort`」。TUI 此前没有任何盖章入口，
-//! 于是用户只看到模型反复请求批准。这里锁住 `/approve` 的三个可观测行为：
-//! 没有 Draft 时说清现状、有 Draft 时真的把计划推进到 `executing`、批准后不再残留 Draft。
+//! 回归面：Plan 模式会锁死所有写/执行类工具，解锁只能靠「用户批准模型通过 `ExitPlanMode`
+//! 提交的方案」或「`/plan off`」。TUI 此前没有任何审查入口，用户只能看着模型反复请求批准。
+//!
+//! 本文件锁住 `/approve` 的四个可观测行为：
+//! 1. 不在 Plan 模式 ⇒ 如实说清现状（不是错误、不是空白）；
+//! 2. 在 Plan 模式但方案还没提交 ⇒ 说清「等模型提交方案」；
+//! 3. 有已提交方案 ⇒ 真的批准并退出模式（写权限解锁）；
+//! 4. 批准后再次执行 ⇒ 状态行不再声称「已批准」（幂等且如实）。
 
 use super::*;
-use pony_agent_core::agent::plan_state::PlanStore;
-use serde_json::json;
 
 /// 隔离进程级数据目录（`Once` 保证只做一次，且早于任何 control plane 构造）。
 fn isolate_process_data_dir() {
@@ -33,99 +35,95 @@ fn isolated_control_plane() -> HostControlPlane {
     HostControlPlane::new()
 }
 
-/// 需要同时驱动「模型侧 `abort`」时留住 `PlanStore` 句柄（`PlanStore` 克隆共享同一状态）。
-fn isolated_control_plane_with_store() -> (HostControlPlane, PlanStore) {
-    isolate_process_data_dir();
-    let plan_store = PlanStore::new();
-    let control_plane = HostControlPlaneBuilder::new()
-        .plan_store(plan_store.clone())
-        .build();
-    (control_plane, plan_store)
+/// 每例唯一会话 id（Plan 模式注册表是进程级单例，靠会话键隔离）。
+fn session(label: &str) -> String {
+    format!("{label}-{}", uuid::Uuid::new_v4())
 }
 
-fn create_draft(control_plane: &HostControlPlane, session_id: &str) -> String {
-    let created = control_plane
-        .plan_create(
-            session_id,
-            json!({
-                "kind": "task",
-                "summary": "待批准的草稿计划",
-                "steps": [{ "name": "第一步", "summary": "" }]
-            }),
-        )
-        .expect("create draft plan");
-    assert_eq!(created["lifecycle"], "draft", "fixture 必须是 Draft：{created}");
-    created["planId"]
-        .as_str()
-        .expect("planId")
-        .to_string()
+/// 让会话进入 Plan 模式并提交一份方案（模拟模型调用 `ExitPlanMode`）。
+fn enter_plan_mode_with_plan(control_plane: &HostControlPlane, session_id: &str) {
+    control_plane
+        .plan_mode_set(session_id, pony_agent_core::agent::plan_mode::ModeToggle::Enter)
+        .expect("enter plan mode");
+    control_plane.plan_mode_commit(session_id);
+    pony_agent_core::agent::plan_mode::submit_plan(session_id, "# 待批准的方案\n- 第一步");
 }
 
 #[test]
-fn approve_without_draft_reports_current_state_instead_of_failing() {
+fn approve_outside_plan_mode_reports_state_instead_of_failing() {
     let control_plane = isolated_control_plane();
-    let session = "session-approve-no-draft";
+    let session = session("approve-outside");
 
-    let notice = approve_earliest_draft_plan(&control_plane, session);
+    let notice = approve_pending_plan(&control_plane, &session);
 
     // 空会话是常态（用户随时可能敲 /approve）：必须是可读的现状说明，而不是错误或空白。
     assert!(
-        notice.contains("没有待批准的草稿计划"),
-        "/approve 在无 Draft 时必须说清现状，实际 = {notice:?}"
+        notice.contains("不在 Plan 模式"),
+        "/approve 在非 Plan 模式时必须说清现状，实际 = {notice:?}"
     );
     assert!(
         !notice.contains("失败"),
-        "/approve 在无 Draft 时不得报「失败」（那不是错误），实际 = {notice:?}"
+        "/approve 在非 Plan 模式时不得报「失败」（那不是错误），实际 = {notice:?}"
     );
 }
 
 #[test]
-fn approve_moves_earliest_draft_plan_to_executing() {
+fn approve_without_a_submitted_plan_reports_state_instead_of_failing() {
     let control_plane = isolated_control_plane();
-    let session = "session-approve-draft";
-    let plan_id = create_draft(&control_plane, session);
+    let session = session("approve-no-plan");
+    control_plane
+        .plan_mode_set(&session, pony_agent_core::agent::plan_mode::ModeToggle::Enter)
+        .expect("enter plan mode");
+    control_plane.plan_mode_commit(&session);
 
-    let notice = approve_earliest_draft_plan(&control_plane, session);
+    let notice = approve_pending_plan(&control_plane, &session);
 
     assert!(
-        notice.contains(&plan_id),
-        "/approve 的回执必须点名被批准的计划，实际 = {notice:?}"
+        notice.contains("还没有提交待审方案"),
+        "方案未提交时必须说清「等模型提交」，实际 = {notice:?}"
     );
+    assert!(
+        !notice.contains("失败"),
+        "方案未提交不是错误，不得报「失败」，实际 = {notice:?}"
+    );
+}
+
+#[test]
+fn approve_exits_plan_mode_and_unlocks_writes() {
+    let control_plane = isolated_control_plane();
+    let session = session("approve-ok");
+    enter_plan_mode_with_plan(&control_plane, &session);
+
+    let notice = approve_pending_plan(&control_plane, &session);
+
     assert!(
         notice.contains("已批准"),
         "/approve 必须报告成功，实际 = {notice:?}"
     );
-
-    let plans = control_plane.plan_list(session);
-    let plan = plans
-        .as_array()
-        .and_then(|plans| plans.iter().find(|plan| plan["planId"] == plan_id.as_str()))
-        .expect("approved plan must stay listed");
-    // 盖章的唯一语义就是 Draft -> Executing；写工具解锁依赖 `has_active_draft_plan() == false`。
+    let state = control_plane.plan_mode_get(&session);
     assert_eq!(
-        plan["lifecycle"], "executing",
-        "宿主盖章后计划必须进入 executing：{plan}"
+        state["active"].as_bool(),
+        Some(false),
+        "批准后必须退出 Plan 模式（写/执行解锁）：{state}"
     );
     assert_eq!(
-        plan["revision"], 2,
-        "start_execution 是一次 CAS 迁移，revision 必须从 1 递增到 2：{plan}"
+        state["planApproved"].as_bool(),
+        Some(true),
+        "批准后方案必须标记为已批准：{state}"
     );
 }
 
 #[test]
-fn approve_reports_failure_when_no_draft_remains_after_abort() {
-    let (control_plane, plan_store) = isolated_control_plane_with_store();
-    let session = "session-approve-after-abort";
-    let plan_id = create_draft(&control_plane, session);
+fn approve_is_not_reported_twice_after_the_mode_is_left() {
+    let control_plane = isolated_control_plane();
+    let session = session("approve-twice");
+    enter_plan_mode_with_plan(&control_plane, &session);
+    approve_pending_plan(&control_plane, &session);
 
-    // 模型侧自助退出（ADR 0092 §Decision 3）：撤销后 `/approve` 不得再假装有事可做。
-    plan_store
-        .abort(session, &plan_id, 1)
-        .expect("abort draft");
+    let notice = approve_pending_plan(&control_plane, &session);
 
-    let notice = approve_earliest_draft_plan(&control_plane, session);
     assert!(
-        notice.contains("没有待批准的草稿计划"),
-        "Draft 已被撤销后 /approve 必须如实汇报「无事可批」，实际 = {notice:?}"
+        notice.contains("不在 Plan 模式"),
+        "批准后再次 /approve 必须如实说明已不在模式内（不得重复声称批准），实际 = {notice:?}"
     );
 }

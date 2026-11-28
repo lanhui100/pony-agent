@@ -54,7 +54,8 @@ pony-agent/
 | `governed_executor` | `build_governed_executor()`：内置工具面桥接到 dispatcher，runtime 默认执行器 |
 | `image_artifact` | `view_workspace_image`：workspace 图片 → reference-based 规范化 artifact（MIME/尺寸/字节上限） |
 | `mcp_resources` | MCP resource list/template/read：source-bound transport、untrusted 内容约束、args 回显拒绝 |
-| `plan_state` | `PlanStore`/`PlanControlHandler`：session-owned 版本化 Plan（create/replace/merge/complete_step + CAS） |
+| `plan_mode` | 会话级 Plan 模式注册表：`active`/`pending` + 方案正文 + sidecar 原子写（2026-11-27 取代旧 `plan_state` 步骤机） |
+| `exit_plan_mode` | `ExitPlanMode` 工具 handler：提交 Markdown 方案 → 宿主 Ask 审查批准后退出 Plan 模式并解锁写/执行 |
 | `process` | `ProcessManager`：opaque session-bound handle、并发 drain 有界缓冲、truncation 证据、最小环境 |
 | `sandbox` | `SandboxSupportMatrix`/`NoSandboxBackend`/`TestSandboxBackend`：sandbox 支持矩阵与 fail-closed 门禁 |
 | `search` | `SearchEngine`：regex/globset/ignore 标准语义、确定性排序、扫描预算 + 诚实截断 |

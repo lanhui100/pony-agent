@@ -350,26 +350,23 @@ describe("HomeSidebar", () => {
     expect(wrapper.find('[data-testid="trace-panel-toggle"]').exists()).toBe(false);
     wrapper.unmount();
 
-    // 当 plans > 0 时，显示计划
+    // 当 Plan 模式激活时，显示计划段
     tauriMocks.mockSafeInvoke.mockImplementation(async (cmd) => {
-      if (cmd === "plan_list") {
-        return [
-          {
-            planId: "p1",
-            kind: "plan",
-            summary: "测试计划",
-            lifecycle: "active",
-            steps: [],
-            revision: 1
-          }
-        ];
+      if (cmd === "plan_mode_get") {
+        return {
+          sessionId: "session-plan-1",
+          active: true,
+          plan: "# 测试计划",
+          planApproved: false,
+          revision: 1
+        };
       }
       return null;
     });
     const runtimeStore = useRuntimeStore();
     runtimeStore.$patch({ sessionId: "session-plan-1" });
     const planStore = (await import("@/stores/plan")).usePlanStore();
-    await planStore.list("session-plan-1");
+    await planStore.fetchMode("session-plan-1");
 
     const wrapperWithPlan = mount(HomeSidebar, {
       global: {
@@ -741,15 +738,14 @@ describe("HomeSidebar", () => {
           maxGoalRounds: 10
         };
       }
-      if (cmd === "plan_list") {
-        return [
-          {
-            planId: "p1",
-            revision: 1,
-            lifecycle: "executing",
-            steps: []
-          }
-        ];
+      if (cmd === "plan_mode_get") {
+        return {
+          sessionId: "graph-session",
+          active: true,
+          plan: "# 方案",
+          planApproved: false,
+          revision: 1
+        };
       }
       return null;
     });

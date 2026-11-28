@@ -215,7 +215,9 @@
                 "Write".to_string(),
                 "Edit".to_string(),
                 "BatchExecute".to_string(),
-                "Plan".to_string(),
+                // ADR 2026-11-27：`Plan` 收敛为会话级协作模式，该槽位模型可见名改为
+                // `ExitPlanMode`（工具面顺序/位置不变，仅名字与 schema 收敛）。
+                "ExitPlanMode".to_string(),
                 "ViewImage".to_string(),
                 // Wave-61 C1：9 项团队工具进入模型可见面（按 builtin_tools 定义序插在
                 // ViewImage 之后、TodoWrite 之前；`workflow` 桩实现保持 Internal）。
@@ -329,7 +331,9 @@
                 "Write".to_string(),
                 "Edit".to_string(),
                 "BatchExecute".to_string(),
-                "Plan".to_string(),
+                // ADR 2026-11-27：`Plan` 收敛为会话级协作模式，该槽位模型可见名改为
+                // `ExitPlanMode`（工具面顺序/位置不变，仅名字与 schema 收敛）。
+                "ExitPlanMode".to_string(),
                 "ViewImage".to_string(),
                 // Wave-61 C1：9 项团队工具进入模型可见面（按 builtin_tools 定义序插在
                 // ViewImage 之后、TodoWrite 之前；`workflow` 桩实现保持 Internal）。

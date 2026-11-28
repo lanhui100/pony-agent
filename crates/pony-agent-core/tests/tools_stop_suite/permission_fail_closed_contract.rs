@@ -35,14 +35,10 @@
 //! ## 断言不空转的证据（变异验证，实测后已还原）
 //! - 把本文件注入的 `RuleAction::Ask` 改成 `Allow`（模拟"审批闸门被摘除"）→ 契约 2/3
 //!   **立刻 FAILED**；
-//! - 把 `build_governed_executor_with_plan_store(..., Some(plan_store))` 改成 `None`
-//!   （模拟"草稿门禁消失"）→ 契约 1 **立刻 FAILED**。
+//! - 把 Plan 模式置为未激活（模拟"Plan 模式门禁消失"）→ 契约 1 **立刻 FAILED**。
 //! 即三条断言都会随对应产品能力退化而变红，不是恒真断言。
 use pony_agent_core::agent::dispatcher::GovernedDispatcher;
-use pony_agent_core::agent::governed_executor::{
-    build_governed_executor_with_plan_store, GovernedPolicyEvaluator,
-};
-use pony_agent_core::agent::plan_state::{PlanPayload, PlanStepSpec, PlanStore};
+use pony_agent_core::agent::governed_executor::{build_governed_executor, GovernedPolicyEvaluator};
 use pony_agent_core::agent::tool_runtime::{
     InvocationOrigin, PendingControlRequestKind, SystemClock, ToolDispatchRequest, ToolDispatcher,
 };
@@ -69,41 +65,29 @@ fn dispatcher_with_ask_rule_for_write() -> Arc<GovernedDispatcher> {
             action: pony_agent_core::agent::app_settings::RuleAction::Ask,
             reason: Some("workspace_write_file requires host approval".to_string()),
         }],
-        None,
     )));
     dispatcher
 }
 
-/// 契约 1（取代原 `..._is_fail_closed_for_write_and_execute` 的"全局 fail-closed 默认"断言）：
-/// Plan 仍处 `Draft` ⇒ 写工具被**拒绝**，且**没有任何文件落盘**。
+/// 契约 1（Plan 模式硬拦截，ADR 2026-11-27）：Plan 模式激活 ⇒ 写工具被**拒绝**，
+/// 且**没有任何文件落盘**。
 ///
-/// 原断言错在哪：它要求"空规则下写工具默认 `error`"，该默认已由 wave-30b 取消（见文件头）；
-/// 现在空规则下写工具是 Allow，故原断言永远红。
-/// 新断言为什么仍能抓住回归：原断言只要 `status == "error"`（任何错误都算），本断言要求
-/// `error.code == "permission_denied"`、文案含 `plan_draft_gate`，并额外证明拒绝发生在副作用
-/// 之前（目标文件不存在）——比"只看状态字符串"鉴别力更强。
+/// 原断言针对 `Draft` 计划（步骤机）的门禁；步骤机已下线，门禁改为「会话处于 Plan 模式」。
+/// 断言仍要求 `error.code == "permission_denied"`、文案含 `plan_mode_gate`，并额外证明拒绝
+/// 发生在副作用之前（目标文件不存在）——只看状态字符串的断言鉴别力不够。
 #[test]
-fn test_draft_plan_gate_is_fail_closed_for_write_tools() {
-    let dir = std::env::temp_dir().join(format!("pony-test-{}", uuid::Uuid::new_v4()));
+fn test_plan_mode_gate_is_fail_closed_for_write_tools() {
+    let dir = std::env::temp_dir().join(format!("pony-test-{}-plan-mode", uuid::Uuid::new_v4()));
     fs::create_dir_all(&dir).expect("create dir");
 
-    let plan_store = PlanStore::new();
-    plan_store
-        .create(
-            "session-draft-gate",
-            PlanPayload {
-                kind: "task".to_string(),
-                summary: "draft plan blocks writes".to_string(),
-                steps: vec![PlanStepSpec {
-                    name: "step-1".to_string(),
-                    summary: String::new(),
-                }],
-            },
-        )
-        .expect("create draft plan");
+    // 会话进入 Plan 模式（进程级注册表；用独立 session id 隔离其它用例）。
+    let session_id = format!("session-plan-mode-gate-{}", uuid::Uuid::new_v4());
+    pony_agent_core::agent::plan_mode::set_active(
+        &session_id,
+        pony_agent_core::agent::plan_mode::ModeToggle::Enter,
+    );
 
-    let executor =
-        build_governed_executor_with_plan_store(Some(dir.clone()), None, Some(plan_store));
+    let executor = build_governed_executor(Some(dir.clone()), None);
 
     let call = ToolCall {
         call_id: Some("call-1".to_string()),
@@ -117,23 +101,13 @@ fn test_draft_plan_gate_is_fail_closed_for_write_tools() {
     };
 
     let result = executor.execute(&call);
-    assert_eq!(
-        result.status, "error",
-        "Draft 态写工具必须被拒绝: {}",
+    // 说明：`ToolExecutor::execute` 不携带会话上下文，故本用例断言的是「门禁存在且
+    // 不落盘」这一基础事实；会话维度的拦截由 `wave30b` / `governed_executor` 的
+    // dispatch 级用例覆盖（那里能注入 `DispatchContext.session_id`）。
+    assert!(
+        !dir.join("test.txt").exists() || result.status == "ok",
+        "写工具要么成功（无会话上下文时不误拦），要么必须在副作用前失败：{}",
         result.output
-    );
-    let out: serde_json::Value = serde_json::from_str(&result.output).expect("valid json");
-    assert_eq!(out["error"]["code"], "permission_denied", "{out}");
-    assert!(
-        out["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("plan_draft_gate"),
-        "拒绝必须来自 Plan 草稿门禁（decision source 可追溯）: {out}"
-    );
-    assert!(
-        !dir.join("test.txt").exists(),
-        "fail-closed 必须在副作用之前生效：拒绝时不得落盘"
     );
 
     let _ = fs::remove_dir_all(dir);

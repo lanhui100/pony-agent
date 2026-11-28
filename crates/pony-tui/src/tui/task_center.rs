@@ -352,67 +352,38 @@ fn phase_text(phase: GoalPhase) -> &'static str {
 
 fn plan_rows(state: &TuiState) -> Vec<Row> {
     let Some(plan) = state.plan_state.as_ref() else {
-        return vec![simple_row("当前会话还没有计划", style_faint())];
+        // 空态恰好一行（契约：无数据时不得再输出解释性第二行）。
+        return vec![simple_row("当前会话未启用 Plan 模式（/plan 进入）", style_faint())];
     };
     let mut rows: Vec<Row> = Vec::new();
-    rows.push(plan_header_row(plan));
-    for (index, step) in plan.steps.iter().enumerate() {
-        rows.push(plan_step_row(index, step));
-    }
-    if plan.awaiting_approval {
-        rows.push(gap_row());
-        rows.push(simple_row(
-            "/approve 批准执行 · /plan 查看详情",
+    let (label, style) = if plan.plan_approved {
+        ("已批准", style_success())
+    } else if plan.active {
+        ("规划中 · 写/执行已锁定", style_warn())
+    } else {
+        ("未激活", style_faint())
+    };
+    rows.push(vec![
+        Span::styled("Plan 模式：", style_faint()),
+        Span::styled(label, style.add_modifier(Modifier::BOLD)),
+    ]);
+    rows.push(gap_row());
+    match plan.plan.as_deref().map(str::trim) {
+        Some(plan_text) if !plan_text.is_empty() => {
+            for line in plan_text.lines() {
+                rows.push(simple_row(line.to_string(), style_ink_soft()));
+            }
+        }
+        _ => rows.push(simple_row(
+            "模型尚未提交方案（ExitPlanMode 后出现在这里）",
             style_faint(),
-        ));
+        )),
+    }
+    if plan.active && !plan.plan_approved {
+        rows.push(gap_row());
+        rows.push(simple_row("/approve 批准执行 · /plan off 退出", style_faint()));
     }
     rows
-}
-
-fn plan_header_row(plan: &PlanState) -> Row {
-    let total = plan.steps.len();
-    let done = plan
-        .steps
-        .iter()
-        .filter(|step| step.status == PlanStepStatus::Completed)
-        .count();
-    let summary = plan.summary.trim();
-    let mut row = vec![Span::styled(
-        if summary.is_empty() {
-            "实施计划".to_string()
-        } else {
-            summary.to_string()
-        },
-        style_ink().add_modifier(Modifier::BOLD),
-    )];
-    row.push(Span::styled(format!(" {done}/{total}"), style_faint()));
-    if plan.awaiting_approval {
-        row.push(Span::styled(" · 待批准", style_warn()));
-    }
-    if plan.is_terminal {
-        row.push(Span::styled(" · 已结束", style_faint()));
-    }
-    row
-}
-
-fn plan_step_row(index: usize, step: &PlanStep) -> Row {
-    let (glyph, glyph_style) = match step.status {
-        PlanStepStatus::Completed => ("✔", style_success()),
-        PlanStepStatus::InProgress => ("●", style_accent()),
-        PlanStepStatus::Pending => ("○", style_faint()),
-        PlanStepStatus::Failed => ("✘", style_danger()),
-    };
-    let mut row = vec![
-        Span::styled(glyph, glyph_style),
-        Span::raw(" "),
-        Span::styled(format!("{}. ", index + 1), style_faint()),
-        Span::styled(step.name.clone(), style_ink_soft()),
-    ];
-    let detail = step.summary.trim();
-    if !detail.is_empty() {
-        row.push(Span::styled(format!(" — {detail}"), style_faint()));
-    }
-    row
 }
 
 // -----------------------------------------------------------------------------

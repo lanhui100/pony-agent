@@ -1,66 +1,142 @@
 import { defineStore } from "pinia";
 import { isTauriAvailable, safeInvoke } from "@/lib/tauri";
-import type { Plan, PlanPayload, PlanStepSpec, TodoItem } from "@/types/ask-plan";
+import type { PlanModeState, TodoItem } from "@/types/ask-plan";
 
-type PlanState = {
-  plans: Plan[];
+type PlanStoreState = {
+  /** 会话级 Plan 模式投影（模式开关 + 方案正文，无步骤清单）。 */
+  mode: PlanModeState;
   todos: TodoItem[];
   loading: boolean;
   todosLoading: boolean;
   error: string | null;
-  selectedPlanId: string | null;
-  /** `${planId}:${stepId}` while a step completion is in flight. */
-  completingStepKey: string | null;
 };
 
+/**
+ * Plan 模式 store（ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count）。
+ *
+ * Plan 是**会话级协作模式**，不是任务清单：这里只有模式开关与一份 Markdown 方案正文。
+ * 步骤进度归 `todos`（TodoWrite），团队分工归 team_task_*，长程目标归 goal store。
+ */
 export const usePlanStore = defineStore("plan", {
-  state: (): PlanState => ({
-    plans: [],
+  state: (): PlanStoreState => ({
+    mode: {
+      sessionId: "",
+      active: false,
+      plan: null,
+      planApproved: false,
+      revision: 0
+    },
     todos: [],
     loading: false,
     todosLoading: false,
-    error: null,
-    selectedPlanId: null,
-    completingStepKey: null
+    error: null
   }),
   getters: {
-    selectedPlan(state): Plan | null {
-      return (
-        state.plans.find((plan) => plan.planId === state.selectedPlanId) ??
-        state.plans[0] ??
-        null
-      );
+    /** 模式是否生效（含未 commit 的 pending 意图）。 */
+    isPlanModeActive(state): boolean {
+      return state.mode.active;
     },
-    isCompletingStep(state) {
-      return (planId: string, stepId: string) =>
-        state.completingStepKey === `${planId}:${stepId}`;
+    /** 方案正文（未提交时为空串，便于模板直接渲染）。 */
+    planBody(state): string {
+      return state.mode.plan ?? "";
     },
+    /** 是否有待审方案（激活 + 已提交 + 未批准）。 */
+    hasPendingPlan(state): boolean {
+      return state.mode.active && Boolean(state.mode.plan) && !state.mode.planApproved;
+    },
+    /**
+     * Todo 任务进度（**独立计数**，不与 Plan 混加）。
+     *
+     * 旧实现把 `plans.length + todos.length` 混在一起当角标，两个量纲相加没有意义；
+     * 这里只回答「本会话的待办做到第几条」。
+     */
     todoProgress(state): { completed: number; inProgress: number; pending: number; total: number } {
       const completed = state.todos.filter((t) => t.status === "completed").length;
       const inProgress = state.todos.filter((t) => t.status === "in_progress").length;
       const pending = state.todos.filter((t) => t.status === "pending").length;
       return { completed, inProgress, pending, total: state.todos.length };
+    },
+    /** `x/x` 形式的任务进度文案；没有任务时为空串（调用方据此隐藏角标）。 */
+    todoProgressLabel(): string {
+      const { completed, total } = this.todoProgress;
+      return total === 0 ? "" : `${completed}/${total}`;
     }
   },
   actions: {
-    /** Every plan owned by a session, in creation order. */
-    async list(sessionId: string): Promise<Plan[]> {
+    /** 读取会话的 Plan 模式状态。 */
+    async fetchMode(sessionId: string): Promise<PlanModeState> {
       if (!isTauriAvailable() || !sessionId.trim()) {
-        return [];
+        return this.mode;
       }
 
       this.loading = true;
       this.error = null;
       try {
-        const plans = await safeInvoke<Plan[] | null>("plan_list", { sessionId });
-        this.plans = Array.isArray(plans) ? plans : [];
-        this.reconcileSelection();
-        return this.plans;
+        const mode = await safeInvoke<PlanModeState | null>("plan_mode_get", { sessionId });
+        this.mode = normalizeMode(mode, sessionId);
+        return this.mode;
       } catch (error) {
-        this.error = `加载计划失败：${String(error)}`;
-        return [];
+        this.error = `加载 Plan 模式失败：${String(error)}`;
+        return this.mode;
       } finally {
         this.loading = false;
+      }
+    },
+
+    /** 进入（`active = true`）/ 退出（`active = false`）Plan 模式。 */
+    async setMode(sessionId: string, active: boolean): Promise<PlanModeState> {
+      if (!isTauriAvailable() || !sessionId.trim()) {
+        return this.mode;
+      }
+
+      this.error = null;
+      try {
+        const mode = await safeInvoke<PlanModeState | null>("plan_mode_set", {
+          sessionId,
+          active
+        });
+        this.mode = normalizeMode(mode, sessionId);
+        return this.mode;
+      } catch (error) {
+        this.error = `切换 Plan 模式失败：${String(error)}`;
+        return this.mode;
+      }
+    },
+
+    /** 把上一轮的切换意图落地（宿主在每次 pre-step 前调用；幂等）。 */
+    async commitMode(sessionId: string): Promise<PlanModeState> {
+      if (!isTauriAvailable() || !sessionId.trim()) {
+        return this.mode;
+      }
+      try {
+        const mode = await safeInvoke<PlanModeState | null>("plan_mode_commit", { sessionId });
+        this.mode = normalizeMode(mode, sessionId);
+      } catch (error) {
+        console.warn("[plan-mode] commit failed:", error);
+      }
+      return this.mode;
+    },
+
+    /**
+     * 方案审核决定：`approved = true` 退出模式并解锁写/执行；
+     * `false` 表示「继续规划」，模式保持激活。
+     */
+    async reviewPlan(sessionId: string, approved: boolean): Promise<PlanModeState> {
+      if (!isTauriAvailable() || !sessionId.trim()) {
+        return this.mode;
+      }
+
+      this.error = null;
+      try {
+        const mode = await safeInvoke<PlanModeState | null>("plan_mode_review", {
+          sessionId,
+          approved
+        });
+        this.mode = normalizeMode(mode, sessionId);
+        return this.mode;
+      } catch (error) {
+        this.error = `方案审核失败：${String(error)}`;
+        return this.mode;
       }
     },
 
@@ -83,220 +159,46 @@ export const usePlanStore = defineStore("plan", {
       }
     },
 
-    /** Read a single plan by stable id. */
-    async get(sessionId: string, planId: string): Promise<Plan | null> {
-      if (!isTauriAvailable() || !sessionId.trim() || !planId.trim()) {
-        return null;
-      }
-
-      this.error = null;
-      try {
-        const plan = await safeInvoke<Plan | null>("plan_get", { sessionId, planId });
-        if (plan) {
-          this.upsertPlan(plan);
-          this.selectedPlanId = plan.planId;
-        }
-        return plan;
-      } catch (error) {
-        this.error = `读取计划失败：${String(error)}`;
-        return null;
-      }
-    },
-
-    /** Create a session-owned `Draft` plan. */
-    async create(sessionId: string, payload: PlanPayload): Promise<Plan | null> {
-      if (!isTauriAvailable() || !sessionId.trim()) {
-        return null;
-      }
-
-      this.error = null;
-      try {
-        const plan = await safeInvoke<Plan | null>("plan_create", { sessionId, payload });
-        if (plan) {
-          this.upsertPlan(plan);
-          this.selectedPlanId = plan.planId;
-        }
-        return plan;
-      } catch (error) {
-        this.error = `创建计划失败：${String(error)}`;
-        return null;
-      }
-    },
-
-    /** Replace a plan's content, preserving its `plan_id`, via compare-and-swap. */
-    async replace(
-      sessionId: string,
-      planId: string,
-      revision: number,
-      payload: PlanPayload
-    ): Promise<Plan | null> {
-      if (!isTauriAvailable() || !sessionId.trim() || !planId.trim()) {
-        return null;
-      }
-
-      this.error = null;
-      try {
-        const plan = await safeInvoke<Plan | null>("plan_replace", {
-          sessionId,
-          planId,
-          revision,
-          payload
-        });
-        if (plan) {
-          this.upsertPlan(plan);
-        }
-        return plan;
-      } catch (error) {
-        this.error = `替换计划失败：${String(error)}`;
-        return null;
-      }
-    },
-
-    /** Append a single step to a plan via compare-and-swap. */
-    async mergeStep(
-      sessionId: string,
-      planId: string,
-      revision: number,
-      step: PlanStepSpec
-    ): Promise<Plan | null> {
-      if (!isTauriAvailable() || !sessionId.trim() || !planId.trim()) {
-        return null;
-      }
-
-      this.error = null;
-      try {
-        const plan = await safeInvoke<Plan | null>("plan_merge", {
-          sessionId,
-          planId,
-          revision,
-          step
-        });
-        if (plan) {
-          this.upsertPlan(plan);
-        }
-        return plan;
-      } catch (error) {
-        this.error = `追加步骤失败：${String(error)}`;
-        return null;
-      }
-    },
-
-    /**
-     * Mark a plan step completed. The compare-and-swap `revision` is the one
-     * from the listed plan; the response is the updated plan (with a bumped
-     * revision) which replaces the local copy so later mutations stay fresh.
-     */
-    async completeStep(
-      sessionId: string,
-      planId: string,
-      revision: number,
-      stepId: string
-    ): Promise<Plan | null> {
-      const stepKey = `${planId}:${stepId}`;
-      if (this.completingStepKey) {
-        return null;
-      }
-      if (!isTauriAvailable() || !sessionId.trim() || !planId.trim() || !stepId.trim()) {
-        return null;
-      }
-
-      this.completingStepKey = stepKey;
-      this.error = null;
-      try {
-        const plan = await safeInvoke<Plan | null>("plan_complete_step", {
-          sessionId,
-          planId,
-          revision,
-          stepId
-        });
-        if (plan) {
-          this.upsertPlan(plan);
-        }
-        return plan;
-      } catch (error) {
-        this.error = `标记步骤完成失败：${String(error)}`;
-        return null;
-      } finally {
-        this.completingStepKey = null;
-      }
-    },
-
-    /**
-     * Approve execution of a Draft plan from host (PA-141).
-     * Transitions lifecycle from `draft` to `executing`.
-     */
-    async approveExecution(
-      sessionId: string,
-      planId: string,
-      revision: number
-    ): Promise<Plan | null> {
-      if (!isTauriAvailable() || !sessionId.trim() || !planId.trim()) {
-        return null;
-      }
-
-      this.error = null;
-      try {
-        const plan = await safeInvoke<Plan | null>("plan_execution_approve", {
-          sessionId,
-          planId,
-          revision
-        });
-        if (plan) {
-          this.upsertPlan(plan);
-        }
-        return plan;
-      } catch (error) {
-        this.error = `批准执行失败：${String(error)}`;
-        return null;
-      }
-    },
-
-    upsertPlan(plan: Plan): void {
-      const index = this.plans.findIndex((item) => item.planId === plan.planId);
-      if (index >= 0) {
-        this.plans[index] = plan;
-      } else {
-        this.plans.push(plan);
-      }
-    },
-
-    select(planId: string): void {
-      if (this.plans.some((plan) => plan.planId === planId)) {
-        this.selectedPlanId = planId;
-      }
-    },
-
-    reconcileSelection(): void {
-      if (
-        this.selectedPlanId &&
-        !this.plans.some((plan) => plan.planId === this.selectedPlanId)
-      ) {
-        this.selectedPlanId = null;
-      }
-      if (!this.selectedPlanId && this.plans.length > 0) {
-        this.selectedPlanId = this.plans[0]!.planId;
-      }
-    },
-
     reset(): void {
-      this.plans = [];
+      this.mode = {
+        sessionId: "",
+        active: false,
+        plan: null,
+        planApproved: false,
+        revision: 0
+      };
       this.todos = [];
       this.loading = false;
       this.todosLoading = false;
       this.error = null;
-      this.selectedPlanId = null;
-      this.completingStepKey = null;
     }
   }
 });
 
+/** 把 IPC 返回的空值/缺字段补成完整投影（前端不因后端少键而崩）。 */
+function normalizeMode(mode: PlanModeState | null, sessionId: string): PlanModeState {
+  if (!mode || typeof mode !== "object") {
+    return { sessionId, active: false, plan: null, planApproved: false, revision: 0 };
+  }
+  return {
+    sessionId: mode.sessionId || sessionId,
+    active: Boolean(mode.active),
+    plan: mode.plan ?? null,
+    planApproved: Boolean(mode.planApproved),
+    revision: Number(mode.revision ?? 0),
+    pending: mode.pending ?? null,
+    committedActive: mode.committedActive,
+    policy: mode.policy,
+    reviewOptions: mode.reviewOptions
+  };
+}
+
 // ===========================================================================
-// Wave-1 C6：turn 结束后的计划面板刷新（docs/architecture/plan-goal-contract.md §6）
+// Wave-1 C6：turn 结束后的面板刷新（docs/architecture/plan-goal-contract.md §6）
 // ===========================================================================
 
 /**
- * C6：turn 结束（`turn:completed` / graph 流结束）后，以真实 sessionId 刷新计划面板数据
- * （`list(sessionId)` + `listTodos(sessionId)`）。
+ * C6：turn 结束（`turn:completed` / graph 流结束）后，以真实 sessionId 刷新 Plan 模式与待办。
  *
  * 契约约束：
  * - 以真实 sessionId 为键，禁止 `"default"` 兜底；
@@ -312,7 +214,7 @@ export async function refreshForTurn(sessionId: string): Promise<void> {
   const planStore = usePlanStore();
   try {
     await Promise.all([
-      planStore.list(normalizedSessionId),
+      planStore.fetchMode(normalizedSessionId),
       planStore.listTodos(normalizedSessionId)
     ]);
   } catch (error) {

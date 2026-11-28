@@ -116,7 +116,7 @@ const EXPECTED_39: [&str; 39] = [
     "Write",
     "Edit",
     "BatchExecute",
-    "Plan",
+    "ExitPlanMode",
     "ViewImage",
     "subagent",
     "spawn_teammate",

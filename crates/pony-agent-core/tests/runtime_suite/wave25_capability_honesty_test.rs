@@ -90,7 +90,7 @@ const EXPECTED_MODEL_VISIBLE_TOOLS: [&str; 39] = [
     "Write",
     "Edit",
     "BatchExecute",
-    "Plan",
+    "ExitPlanMode",
     "ViewImage",
     "subagent",
     "spawn_teammate",

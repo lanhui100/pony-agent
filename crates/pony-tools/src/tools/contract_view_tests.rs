@@ -37,7 +37,7 @@ fn builtin_tool_contract_views_deduplicate_to_model_surface() {
             "Write",
             "Edit",
             "BatchExecute",
-            "Plan",
+            "ExitPlanMode",
             "ViewImage",
             // Wave-61 C1：9 项团队工具进入模型可见面（插在 ViewImage 之后、TodoWrite 之前，
             // 与本文件 `characterization_product_surface_...` 的 39 项清单同序；
@@ -208,7 +208,7 @@ fn characterization_product_surface_keeps_unique_names_and_json_object_schemas()
             "Write",
             "Edit",
             "BatchExecute",
-            "Plan",
+            "ExitPlanMode",
             "ViewImage",
             // Wave-61 C1：9 项团队工具按 builtin_tools() 定义序插入 ViewImage 之后
             //（product 名 == primitive 小写原名；`workflow` 因桩实现保持 Internal）。
@@ -307,8 +307,10 @@ fn characterization_legacy_ask_and_plan_mappings_are_migration_removal_baselines
     // stop dispatching batches.
     assert_eq!(canonical_tool_name("Ask"), Some("ask_user"));
     assert_eq!(canonical_tool_name("BatchExecute"), Some("workspace_batch"));
-    // PA-076: Plan now resolves to its own state-control handler rather than workspace_batch.
+    // 2026-11-27：模型可见名收敛为 `ExitPlanMode`，`Plan` 仅保留为历史别名
+    //（旧会话/旧日志/外部 MCP 注册名仍要能解析回同一 primitive）。
     assert_eq!(canonical_tool_name("Plan"), Some("plan_control"));
+    assert_eq!(canonical_tool_name("ExitPlanMode"), Some("plan_control"));
 }
 
 #[test]
