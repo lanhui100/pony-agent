@@ -297,8 +297,8 @@ fn goal_tab_suspended_row_is_self_explanatory_once() {
         .join("\n");
 
     assert!(
-        joined.contains("等你作答/审批"),
-        "挂起行必须说清在等什么（Ask 与审批共用本信号）：{joined}"
+        joined.contains("等你作答"),
+        "挂起行必须说清在等什么：{joined}"
     );
     assert!(
         joined.contains("作答后自动继续"),
@@ -308,6 +308,11 @@ fn goal_tab_suspended_row_is_self_explanatory_once() {
         joined.matches("等你作答").count(),
         1,
         "「等你作答」只允许出现一次（旧实现 headline + detail 各说一遍）：{joined}"
+    );
+    // 不再枚举挂起入口：用户此刻只面对屏幕上那一个待回应面板，Ask 与审批的公共动作都是「作答」。
+    assert!(
+        !joined.contains("审批"),
+        "Goal 页签不再枚举挂起入口（作答即两者的公共动作）：{joined}"
     );
     assert!(
         !joined.contains("续轮"),

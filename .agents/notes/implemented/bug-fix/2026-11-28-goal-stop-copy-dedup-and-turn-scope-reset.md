@@ -30,10 +30,12 @@ Status: implemented
 
 ## Decision
 
-1. `TurnSuspended` 的文案收敛为 `暂停中：等你作答/审批｜作答后自动继续`：
+1. `TurnSuspended` 的文案收敛为 `暂停中，等你作答｜作答后自动继续`：
    - 「等什么」只由 `headline()` 说一次，`detail()` 归 `None`（该变体没有第二层原因可讲）；
-   - 去掉实现词「续轮」，改用用户已在别处见过的「暂停」+「作答/审批」+「作答后自动继续」；
-   - Ask 与审批共用同一信号 ⇒ 「作答/审批」必须写全，不得只说作答；
+   - 去掉实现词「续轮」，改用用户已在别处见过的「暂停」+「等你作答」+「作答后自动继续」；
+   - **不枚举挂起入口**（原为「等你作答/审批」）：本变体同时服务 Ask 与审批，但用户此刻只面对
+     屏幕上那一个待回应面板；把两种入口都写进一行，会让用户去找「另一个审批在哪」。两者的
+     公共动作就是「作答」，故只说「等你作答」（19 字 → 13 字）；
    - 仍**不**使用 `GoalPhase::Paused` 的既有译词「已暂停」（`goal_panel` 的
      `stopped_reason_never_contradicts_active_phase` 仍锁这条）。
 2. `action_hint()` 保持 `作答后自动继续` 不变：它与 `headline()` 一起构成 O1-B 的可见面契约
@@ -43,7 +45,7 @@ Status: implemented
    派发点与 `spawn_goal_auto_rounds` 里的两行重复赋值。语义是「任一轮次起点 ⇒ 上一轮那句
    停止原因作废」，因此 Ask 作答 / 审批恢复 / goal 自动续轮三条入口自动被覆盖。
 4. 回归钉子：`goal::b130_event_tests::suspended_line_states_each_fact_once`（逐字冻结 +
-   「等你作答」只出现一次 + 不含「续轮」+ 含「审批」）、
+   「等你作答」只出现一次 + 不含「续轮」+ 不含「审批」）、
    `tui::turn_end_status_noise_tests::new_turn_start_clears_stale_goal_stop_reason`、
    `tui::turn_end_status_noise_tests::stop_reason_survives_until_next_turn`、
    `tui::task_center_panel_tests::goal_tab_suspended_row_is_self_explanatory_once`
