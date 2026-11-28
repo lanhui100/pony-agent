@@ -45,7 +45,10 @@ Status: implemented
 4. 回归钉子：`goal::b130_event_tests::suspended_line_states_each_fact_once`（逐字冻结 +
    「等你作答」只出现一次 + 不含「续轮」+ 含「审批」）、
    `tui::turn_end_status_noise_tests::new_turn_start_clears_stale_goal_stop_reason`、
-   `tui::turn_end_status_noise_tests::stop_reason_survives_until_next_turn`。
+   `tui::turn_end_status_noise_tests::stop_reason_survives_until_next_turn`、
+   `tui::task_center_panel_tests::goal_tab_suspended_row_is_self_explanatory_once`
+   （锁**用户实际所见的那一屏**：Ctrl+T → Goal 页签的行内容，而不是只锁文案函数；含「作答后
+   该行消失」的前后对照，防「状态字段已清但抽屉仍渲染旧值」的回归）。
 
 ## Alternatives considered
 

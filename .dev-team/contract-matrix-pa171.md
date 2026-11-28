@@ -892,11 +892,16 @@ goal 自动续轮都经此，`turn:started` 事件也落在这里）。原 compo
 **机器凭证**
 
 - `bash scripts/cargo-lane.sh test -p pony-storage --lib` → 353 passed
-- `bash scripts/cargo-lane.sh test -p pony-tui --lib` → 303 passed
+- `bash scripts/cargo-lane.sh test -p pony-tui --lib` → **304** passed（含抽屉层新增钉子）
 - `bash scripts/cargo-lane.sh test -p pony-agent-core --test tools_stop_suite -- b193_2` → 9 passed
+- `bash scripts/cargo-lane.sh test -p pony-agent-core --test runtime_suite -- goal_round_gate_contract goal_rounds_stopped_event` → 22 passed
 - `bash scripts/cargo-lane.sh test -p pony-tui --test tui_suite -- goal_first_round_pause_contract pa172_legacy_closure tui_task_visibility` → 33 passed
+- `bash scripts/cargo-lane.sh check -p pony-tui -p pony-storage --all-targets` → 0 error
+- `npm run size:check` → 0 new violation；`npm run rust:lint` → 无新增债；`npm run adr:check` → 全通过
+- 前端（同一文案经 `visibleLine` 透传给 GoalBar）：`npx vitest run tests/GoalBar-events.spec.ts` → 6 passed
 - 新增钉子：`goal::b130_event_tests::suspended_line_states_each_fact_once`（逐字冻结 + 「等你作答」
-  只出现一次 + 不含「续轮」）、`tui::turn_end_status_noise_tests::new_turn_start_clears_stale_goal_stop_reason`
-  与 `stop_reason_survives_until_next_turn`
+  只出现一次 + 不含「续轮」）、`tui::turn_end_status_noise_tests::new_turn_start_clears_stale_goal_stop_reason`、
+  `stop_reason_survives_until_next_turn`、`tui::task_center_panel_tests::goal_tab_suspended_row_is_self_explanatory_once`
+  （锁 Ctrl+T → Goal 页签的**实际渲染行**，含「作答后该行消失」的前后对照）
 
 **决策记录**：`.agents/notes/implemented/bug-fix/2026-11-28-goal-stop-copy-dedup-and-turn-scope-reset.md`
