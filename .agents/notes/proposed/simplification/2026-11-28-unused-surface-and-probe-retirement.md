@@ -6,7 +6,8 @@ Status: proposed
 > 本文件**仍留在 `proposed/`**直到代码在同一提交里落地——批准 ≠ 实现，提前迁 `implemented/` 即假闭环。
 >
 > **落地进度（一档已完成，B1795831358623）**：Rust 3 个未挂载孤立死文件（`pty/windows.rs`、`skills/watchdog.rs`、`test_utils/data_isolation.rs`）与 `examples/w61_e2e_probe.rs` 已删除，`file-size-baseline.json` 条目 56→55，`.meta/gates/no-residue.manifest` 首次启用并登记 5 个被删符号（范围限生产树 `crates/`，决策史/账本按设计保留名字）。
-> **未落地**：前端 `AskPanel.vue`（4 个测试共 1,147 行需迁移断言到 `AskUserToolCallCard.vue`）、`event-bus.ts` 见 `backlog:B1795831359003`；二档探针/示例二进制与 `non_tauri_harness` 去留、24 条悬空 IPC 收口仍待二档裁决（本 ADR 的 Proposal 第 2/3 条未获批执行范围）。
+> **落地进度（一档前端部分已完成，B1795831359003）**：`AskPanel.vue` 与 `event-bus.ts` 已删除；ADR 0074「无墙钟过期态」契约迁到 `tests/acceptance/stage-1-ask-user.spec.ts`（生产载体 `AskUserToolCallCard.vue`），`AskPlanPanel.spec.ts` 裁剪后更名 `PlanPanel.spec.ts`，`tabular-nums-contract` 只删 C2-4 段、`workspace-width-alignment` 只删 AskPanel 用例。
+> **未落地**：二档探针/示例二进制与 `non_tauri_harness` 去留、24 条悬空 IPC 收口仍待二档裁决（本 ADR 的 Proposal 第 2/3 条未获批执行范围）。
 
 ## Problem
 

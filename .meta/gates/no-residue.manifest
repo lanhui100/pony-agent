@@ -14,3 +14,14 @@ PonyAgentTestContext	crates/
 
 # B1795831358623 一档：一次性 wave-61 举证 example（证据已归档，232 行超限函数基线同步删除）
 w61_e2e_probe	crates/
+
+# B1795831359003 一档：前端 0 生产引用的通用事件总线（只有它自己的单测消费；Rust 侧的
+# `pony-protocol/event_bus.rs` 是同名不同物的 IPC 事件环，不受影响，故字面串取模块路径而非类型名）
+@/lib/event-bus	src/
+src/lib/event-bus	tests/
+
+# B1795831359003 一档：前端 0 生产引用死组件（作答面已由 AskUserToolCallCard.vue 承载；
+# ADR 0074「无墙钟过期态」的有效断言已迁到 tests/acceptance/stage-1-ask-user.spec.ts）
+@/components/AskPanel	src/
+@/components/AskPanel	tests/
+data-testid="ask-panel"	tests/

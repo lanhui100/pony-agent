@@ -188,6 +188,33 @@ describe("PA-114 Stage 1 ask_user acceptance (F1)", () => {
     wrapper.unmount();
   });
 
+  // 从退役的 `AskPanel.vue`（0 生产引用，B1795831359003 一档）迁入的有效断言：
+  // ADR 0074「无墙钟过期态」在**生产载体**上同样成立——是否可作答由宿主生命周期/CAS 判定，
+  // 渲染层不读本地时钟。原断言随死组件一起消失就等于契约失去看守，故迁到唯一生产组件。
+  it("F1-3 无墙钟过期态：expiresAtMs 早已过去也不得禁用任何提交控件（ADR 0074）", () => {
+    const store = useAskStore();
+    store.pendingAsks = [
+      createPendingAsk({
+        requestId: "ask-1",
+        prompt: "继续？",
+        options: ["是", "否"],
+        expiresAtMs: Date.now() - 60_000
+      })
+    ];
+    const tool = createAskToolCall({ callId: "call-1", runId: "run-1" });
+
+    const wrapper = mount(AskUserToolCallCard, { props: { tool } });
+
+    for (const button of wrapper.findAll('[data-testid="ask-user-option"]')) {
+      expect(button.attributes("disabled")).toBeUndefined();
+    }
+    expect(wrapper.get('[data-testid="ask-user-typed-input"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-testid="ask-user-cancel"]').attributes("disabled")).toBeUndefined();
+    // 不得出现「过期」态文案（无已过期提示、无倒计时）
+    expect(wrapper.text()).not.toContain("过期");
+    wrapper.unmount();
+  });
+
   it("F1-3 clicking an option calls store.answer with the option value", async () => {
     const store = useAskStore();
     store.pendingAsks = [
