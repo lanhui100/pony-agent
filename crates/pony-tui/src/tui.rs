@@ -14655,9 +14655,9 @@ mod b254_plain_copy;
 #[path = "tui/tests/cli_self_update_tests.rs"]
 mod cli_self_update_tests;
 
-/// ADR 0092 单测：`/approve` 宿主盖章入口（Draft 计划解锁的 TUI 侧唯一合法通道）。
+/// ADR 2026-11-27 单测：`/approve` 宿主盖章入口（Plan 模式方案审批的 TUI 侧唯一合法通道）。
 ///
-/// 纪律：用**真实** `HostControlPlane` + 真实 `PlanStore` 驱动（不 mock 成功），
+/// 纪律：用**真实** `HostControlPlane` + 真实 `plan_mode` 注册表驱动（不 mock 成功），
 /// 并先把 HOME/XDG 重定向到临时沙箱，保证单测不读写用户的 `sessions.db`。
 #[cfg(test)]
 #[path = "tui/tests/plan_approve_tests.rs"]

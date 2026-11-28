@@ -307,8 +307,10 @@ fn characterization_legacy_ask_and_plan_mappings_are_migration_removal_baselines
     // stop dispatching batches.
     assert_eq!(canonical_tool_name("Ask"), Some("ask_user"));
     assert_eq!(canonical_tool_name("BatchExecute"), Some("workspace_batch"));
-    // PA-076: Plan now resolves to its own state-control handler rather than workspace_batch.
+    // 2026-11-27：模型可见名收敛为 `ExitPlanMode`，`Plan` 仅保留为历史别名
+    //（旧会话/旧日志/外部 MCP 注册名仍要能解析回同一 primitive）。
     assert_eq!(canonical_tool_name("Plan"), Some("plan_control"));
+    assert_eq!(canonical_tool_name("ExitPlanMode"), Some("plan_control"));
 }
 
 #[test]

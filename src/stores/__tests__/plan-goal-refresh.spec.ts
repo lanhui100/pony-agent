@@ -42,7 +42,7 @@ describe("wave-1 C6: turn 结束后的 plan / goal 刷新", () => {
     tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
   });
 
-  it("plan.ts::refreshForTurn 以真实 sessionId 拉取 plan_list 与 todo_list", async () => {
+  it("plan.ts::refreshForTurn 以真实 sessionId 拉取 plan_mode_get 与 todo_list", async () => {
     // Arrange
     tauriMocks.mockSafeInvoke.mockResolvedValue([]);
     const sessionId = "sess-1";
