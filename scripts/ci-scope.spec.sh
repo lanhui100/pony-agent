@@ -124,8 +124,23 @@ assert_scope "G CI 定义触发 Rust（改门禁必须自验）" "$BASE_SHA" tru
 HEAD_META="$(commit_case meta-md .meta/lints/README.md)"
 assert_scope "H .meta 下的 markdown 仍触发 Rust" "$BASE_SHA" true code "$HEAD_META"
 
+# 前端纯 UI 面（src/ 下除 src/types/）不进入任何 Rust 编译单元 ⇒ 只跑前端 job。
+# 这条曾经判 needs_rust=true，代价是每次改一个 .vue/.ts 都付 Windows 近 30min + 三平台矩阵。
 HEAD_FRONT="$(commit_case frontend src/lib/open-external-url.ts)"
-assert_scope "I 前端源码触发 Rust（含 typecheck 之外的编译面）" "$BASE_SHA" true code "$HEAD_FRONT"
+assert_scope "I1 纯前端 UI 改动跳过 Rust" "$BASE_SHA" false frontend-only "$HEAD_FRONT"
+assert_flag "I2 纯前端 UI 改动 needs_frontend=true" "$BASE_SHA" "$HEAD_FRONT" needs_frontend true
+assert_flag "I3 纯前端 UI 改动 needs_core=false" "$BASE_SHA" "$HEAD_FRONT" needs_core false
+assert_flag "I4 纯前端 UI 改动 needs_tauri=false" "$BASE_SHA" "$HEAD_FRONT" needs_tauri false
+
+# src/types/ 是 Rust serde 线缆键的 TS 镜像，漏改即前端静默丢字段 ⇒ 必须跑 Rust。
+HEAD_TYPES="$(commit_case frontend-types src/types/runtime.ts)"
+assert_scope "I5 src/types 改动仍触发 Rust" "$BASE_SHA" true code "$HEAD_TYPES"
+
+# docs/contracts 是 Rust 侧 conformance / ts_contract_snapshot 测试的读盘事实源，
+# 虽在 docs/ 下也不得被「纯文档」白名单放行。
+HEAD_CONTRACTS="$(commit_case contracts docs/contracts/hooks.v1.schema.json)"
+assert_scope "I6 docs/contracts 改动仍触发 Rust" "$BASE_SHA" true code "$HEAD_CONTRACTS"
+assert_flag "I7 docs/contracts 改动 needs_core=true" "$BASE_SHA" "$HEAD_CONTRACTS" needs_core true
 
 # ---------- fail-safe 分支 ----------
 assert_scope "J base 不可解析时回落全量" "0000000000000000000000000000000000000000" true no-base

@@ -7,11 +7,17 @@
  * `docs/architecture/extension-points.md` 的**唯一真值来源**。
  *
  * 事实源（全部读源码，不读人工维护的第二份清单）：
- *   - crates/pony-agent-core/src/agent/tools/contract.rs → `ToolDescriptorSource` 枚举变体
- *   - crates/pony-agent-core/src/agent/tool_runtime.rs → 已定义的运行期端口 trait
- *   - crates/pony-agent-core/src/agent/hooks.rs        → `TurnHookPoint` 钩子点数量
- *   - docs/contracts/*.v1.schema.json                  → 五份契约版本串
+ *   - crates/pony-protocol/src/tool_contract/contract.rs → `ToolDescriptorSource` 枚举变体
+ *   - crates/pony-tools/src/tool_runtime.rs              → 已定义的运行期端口 trait
+ *   - crates/pony-protocol/src/hooks.rs                  → `TurnHookPoint` 钩子点数量
+ *   - docs/contracts/*.v1.schema.json                    → 五份契约版本串
  *   - 各扩展点载体的**存在性**与 MCP 配置面关键词命中 → 状态列
+ *
+ * 载体路径必须随 crate 拆分（2026-11-25 6 层 10-crate 拆分）同步迁移：本脚本曾查
+ * `crates/pony-agent-core/src/agent/governed_executor.rs`（拆分前路径），文件搬走
+ * 后 `exists()` 恒 false，生成物把已落地的 governed_executor 误报成「载体未落地」。
+ * `--check` 只比对生成物与仓库内文件、不校验事实源是否新鲜 ⇒ 该类漂移会静默假绿，
+ * 故新增/移动载体时必须同步本文件（靠 review，无机械门禁）。
  *
  * 用法：
  *   node scripts/gen-extension-points.mjs            # 打印到 stdout（不落盘）
@@ -29,7 +35,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
 const TARGET = join(ROOT, 'docs/architecture/extension-points.md');
 
-const SRC = 'crates/pony-agent-core/src/agent';
+// 载体探测根：内建工具执行器与 MCP 配置解析都已随 6 层拆分迁入 pony-tools。
+const TOOLS_SRC = 'crates/pony-tools/src';
 const CONTRACTS = [
   ['tool-descriptor', 'docs/contracts/tool-descriptor.v1.schema.json'],
   ['hooks', 'docs/contracts/hooks.v1.schema.json'],
@@ -111,7 +118,7 @@ function main() {
 
   const pluginHost = 'crates/pony-tools/src/plugin_host/mod.rs';
   const acpModule = 'crates/pony-acp/src/lib.rs';
-  const mcpConfigLoader = sourceContains(SRC, 'mcpServers');
+  const mcpConfigLoader = sourceContains(TOOLS_SRC, 'mcpServers');
 
   const rows = [
     {
@@ -120,7 +127,7 @@ function main() {
       how: '改 Rust：实现 handler + 注册 descriptor',
       contract: 'pony-tool-descriptor-v1',
       carrier: '`governed_executor.rs`',
-      status: exists(`${SRC}/governed_executor.rs`) ? '载体已存在（`governed_executor.rs`）' : '载体未落地',
+      status: exists(`${TOOLS_SRC}/governed_executor.rs`) ? '载体已存在（`governed_executor.rs`）' : '载体未落地',
     },
     {
       point: 'MCP server',

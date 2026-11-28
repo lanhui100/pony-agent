@@ -39,7 +39,7 @@
 ## 3. 本地与 CI 门禁命令速查
 
 - **全量合规自检**：`npm run verify`（依次校验版本同步、决策记录、账本门、前端单测、构建、Rust 检查）
-- **CI 变更面分流**：`.github/workflows/ci.yml` 的 `changes` job 用 `scripts/ci-scope.mjs` 判定——纯文档/账本 PR（`docs/`、`backlog/`、`openspec/`、`.agents/notes/`、`.agents/skills/`、根级 `*.md`）跳过 Rust 全量步骤，其余路径照旧全量跑。口径 fail-safe 到「跑全量」（`.meta/` 下的 markdown 也算代码面）。负样本自检 `bash scripts/ci-scope.spec.sh`，真源 ADR `2026-11-20-ci-scope-split`。
+- **CI 变更面分流**：`.github/workflows/ci.yml` 的 `changes` job 用 `scripts/ci-scope.mjs` 判定——纯文档/账本 PR（`docs/`、`backlog/`、`openspec/`、`.agents/notes/`、`.agents/skills/`、根级 `*.md`）与**纯前端 UI 面 PR**（`src/**` 除 `src/types/`）跳过 Rust 全量步骤，其余路径照旧全量跑。口径 fail-safe 到「跑全量」（`.meta/` 下的 markdown 也算代码面；`src/types/` 是 Rust 线缆的 TS 镜像、`docs/contracts/` 是 Rust 测试的读盘事实源，两者刻意留在代码面）。负样本自检 `bash scripts/ci-scope.spec.sh`，真源 ADR `2026-11-20-ci-scope-split` 与 `2026-11-28-ci-frontend-scope-and-tauri-host-tests`。
 - **决策记录校验**：`npm run adr:check`（判定真源 `.agents/skills/write-adr/verify-note.sh`，pre-commit 调 `adr-verify.sh`）
 - **非执行者测试证据门（dev-team 批次）**：`npm run contract:test-evidence -- --base <sha> --head <sha>`——判「dev-team 标记的提交范围改动了代码面时，提交信息里是否有一条产出者 ≠ 代码作者的 `Test-Evidence: <producer> | <command> | exit=<code>` trailer」；退出码 0 通过/跳过、1 违例、2 无法判定（给了 base 却解析不出，fail-closed）。`--base` 为**全零 sha**（GitHub「无前序提交」哨兵，新分支首次 push 的 `event.before` 即此值）时明确跳过并 exit 0，由同一提交的 pull_request 事件以有效 `base.sha` 复核。自检 `npm run contract:test-evidence:selftest`（P1–P7 正负样本 + N1/N1b/N2 边界），接线 CI `ponygo-governance`，真源 ADR `2026-11-25-independent-test-evidence-gate`、`2026-11-27-governance-zero-base-sentinel`。
 - **版本同步校验**：`npm run version:check`

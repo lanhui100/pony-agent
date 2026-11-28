@@ -172,9 +172,13 @@ jobs:
         if: needs.changes.outputs.needs_tui == 'true' || needs.changes.outputs.needs_cli == 'true'
         run: node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-tui -p pony-cli --no-fail-fast
 
-      - name: Tauri 宿主回归测试（session/provider/tool_router/stop_registry）
-        if: needs.changes.outputs.needs_core == 'true'
-        run: node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-agent-core --test session_storage_suite --test runtime_suite --test tools_stop_suite --no-fail-fast
+      # 曾经的「Tauri 宿主回归测试」名不副实：它重跑的是 -p pony-agent-core 的三个 suite
+      # （与上一步 Core 全包 nextest 完全重复，零增量信号），而 src-tauri 自身的 lib 单测与
+      # tests/ 下 5 个集成测试（session/provider/tool_router/stop_registry/command_surface）
+      # 全文零执行点 ⇒ 桌面宿主的回归面在 CI 上等于不存在。现按包名跑真正的宿主测试。
+      - name: Tauri 宿主测试（src-tauri lib 单测 + 5 个集成回归）
+        if: needs.changes.outputs.needs_tauri == 'true'
+        run: node scripts/invoke-rust-target.mjs test nextest run --profile ci -p pony-agent --no-fail-fast
 
   core-platform-check:
     needs: changes
@@ -244,6 +248,14 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
         run: node scripts/invoke-rust-target.mjs test test -p pony-tui -p pony-cli --lib
+
+      # 桌面宿主的 lib 单测（platform/goal_events/goal_resume/tauri_adapter 四个 #[cfg(test)] 模块）
+      # 原先在 CI 上零执行点：verify job 只跑 core 七 crate，这里也只跑 core 七 crate。
+      - name: Tauri 宿主 lib 单元测试（Linux-only）
+        if: runner.os == 'Linux' && needs.changes.outputs.needs_tauri == 'true'
+        env:
+          RUSTFLAGS: -D warnings
+        run: node scripts/invoke-rust-target.mjs test test -p pony-agent --lib
 
       # PTY 族 4 例在 Windows 上已被 #[cfg_attr(windows, ignore)] 平台 gating（Windows 无
       # PTY 驱动，缺口 B067）⇒ 若 Linux 侧没有执行点，gating 直接等于「覆盖消失」。
