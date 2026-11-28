@@ -873,10 +873,12 @@ PR #106 把 `TurnSuspended` 定为 **Pause** 的唯一可见原因（作答后�
 
 | 变体 | 现行 `visible_line()` |
 |---|---|
-| `TurnSuspended` | `暂停中：等你作答/审批｜作答后自动继续` |
+| `TurnSuspended` | `暂停中，等你作答｜作答后自动继续` |
 
-- `headline()` 改为 `暂停中：等你作答/审批`：①「等什么」只说一次（`detail()` 归 `None`）；
-  ② Ask 与审批共用本信号，故「作答/审批」写全；③ 仍**不**用 `GoalPhase::Paused` 的既有译词
+- `headline()` 改为 `暂停中，等你作答`：①「等什么」只说一次（`detail()` 归 `None`）；
+  ② 去掉实现词「续轮」；③ **不枚举入口**——本变体同时服务 Ask 与审批，但用户此刻只面对
+  屏幕上那一个待回应面板，把两种入口都写进一行会让人去找「另一个审批在哪」；两者的公共动作
+  就是「作答」（同日二次简化：19 字 → 13 字）；④ 仍**不**用 `GoalPhase::Paused` 的既有译词
   「已暂停」（`goal_panel::stopped_reason_never_contradicts_active_phase` 仍全绿）。
 - `action_hint()` 保持 `作答后自动继续`（承诺不解锁就不作答，O1-B 的可见面不变）。
 

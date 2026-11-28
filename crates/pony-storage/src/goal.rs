@@ -713,10 +713,12 @@ impl GoalRoundStopReason {
             // 且旧文案把「等什么」说了两遍——headline「续轮暂停：等你作答」+ detail
             // 「本轮在等你作答/审批」，同一行里「等你作答」出现两次，读起来像一句自我复述。
             // 现在：①「等什么」只在 headline 说一次，detail 归 `None`（无第二层原因可讲）；
-            // ② 去掉只有实现者才懂的「续轮」一词——用户看到「暂停中」+「等你作答/审批」
-            // +「作答后自动继续」即可自解释；③ 仍**不**写「已暂停」，避开 `GoalPhase::Paused`
-            // 的既有译词（`goal_panel::stopped_reason_never_contradicts_active_phase` 会判红）。
-            Self::TurnSuspended => "暂停中：等你作答/审批",
+            // ② 去掉只有实现者才懂的「续轮」一词；③ 不再枚举「/审批」——本变体同时服务 Ask
+            // 与审批两种挂起，但用户此刻面对的是**屏幕上那一个待回应面板**，把两种入口都写进
+            // 一行只会让人去找「另一个审批在哪」；两者的公共动作就是「作答」。
+            // ④ 仍**不**写「已暂停」，避开 `GoalPhase::Paused` 的既有译词
+            // （`goal_panel::stopped_reason_never_contradicts_active_phase` 会判红）。
+            Self::TurnSuspended => "暂停中，等你作答",
             _ => "自动续轮已停止",
         }
     }
@@ -2415,7 +2417,7 @@ mod b130_event_tests {
     fn suspended_line_states_each_fact_once() {
         let line = GoalRoundStopReason::TurnSuspended.visible_line();
         assert_eq!(
-            line, "暂停中：等你作答/审批｜作答后自动继续",
+            line, "暂停中，等你作答｜作答后自动继续",
             "挂起原因的单行文案被冻结；改文案必须同改本断言与 pa171 契约矩阵"
         );
         // 「等什么」只出现一次（旧实现 headline + detail 各说一遍）。
@@ -2429,8 +2431,12 @@ mod b130_event_tests {
             !line.contains("续轮"),
             "挂起原因不得对用户说「续轮」（内部机制词）：{line}"
         );
-        // 审批与 Ask 共用本信号 ⇒ 「等什么」必须写全，不能只说作答。
-        assert!(line.contains("审批"), "Ask 与审批共用本信号，必须写全：{line}");
+        // 不再枚举挂起入口：用户此刻只面对屏幕上那一个待回应面板，Ask 与审批的公共动作
+        // 都是「作答」。枚举入口会让用户去找「另一个审批在哪」。
+        assert!(
+            !line.contains("审批"),
+            "挂起原因不再枚举入口（作答即两种入口的公共动作）：{line}"
+        );
     }
 }
 
