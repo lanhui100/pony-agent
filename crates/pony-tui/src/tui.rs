@@ -14300,25 +14300,16 @@ fn run_doctor() -> i32 {
 /// - **上报门禁默认关闭**（`agentTraceReporting` 缺省 `false`），需用户在设置里显式开启
 ///   （写入 `~/.config/pony-agent/settings.json`）才会产生 span 与导出；关闭态零 span 零 egress；
 /// - 失败只降级为 `log_json("warn", ...)`：绝不 panic、绝不阻塞启动（trace 不可用不阻断业务）。
-/// CLI/TUI 的运行日志落盘路径（与 Tauri 的 `<app_data_dir>/logs/pony-agent.log` 同口径）。
 ///
-/// 取舍：**统一**落到 `logs/pony-agent.log`，不复用 TUI 既有的 `~/.pony-agent/tui-logs/` ——
-/// 后者是会话调试产物（整屏 dump），把结构化 JSON 运行日志混进去会让取证面变脏。
-/// 优先级：`dirs::state_dir()`（Linux = `$XDG_STATE_HOME` 或 `~/.local/state`）
-/// > `$HOME/.local/state`；都不可得时返回 `None`（仅 stdout，不阻塞启动）。
-/// 轮转（512KiB）/ 降级 / 脱敏全部复用 `otel::log` 既有实现。
-fn bin_log_file_path() -> Option<std::path::PathBuf> {
-    let base = dirs::state_dir()
-        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))?;
-    Some(base.join("pony-agent").join("logs").join("pony-agent.log"))
-}
+/// 日志落盘路径取 `otel::log::bin_log_file_path()` 单源（轮转 512KiB / 降级 / 脱敏同样复用
+/// `otel::log` 既有实现），本文件不再自持一份路径规则。
 struct ObservabilityBootstrap;
 
 impl ObservabilityBootstrap {
     fn install() -> Self {
         pony_agent_core::agent::ponysentry::install_panic_hook();
         // Wave-5 P0-A：日志落盘（复用 otel::log 的 512KiB 轮转 / 降级 / 脱敏实现，不另写一套）。
-        if let Some(log_path) = bin_log_file_path() {
+        if let Some(log_path) = pony_agent_core::agent::otel::log::bin_log_file_path() {
             pony_agent_core::agent::otel::log::set_log_file_path(log_path);
         }
         // Wave-5 P0-B：仅 CLI/TUI 打开 core 侧 turn 失败上报（桌面端由前端 `TurnExecutionFailed`
