@@ -29,7 +29,12 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '..');
 const TARGET = join(ROOT, 'docs/architecture/extension-points.md');
 
-const SRC = 'crates/pony-agent-core/src/agent';
+// B1795831357829（2026-11-28）：10-crate 拆分后工具侧源码已迁出 pony-agent-core。
+// 旧值 'crates/pony-agent-core/src/agent' 让这里的 exists() 恒为 false，于是生成物永久
+// 报「内建工具 · 载体未落地」，而 ext:check 只比「生成物 == 重新生成的结果」——
+// 两边一致地错，门禁照样绿（假绿）。改指 pony-tools：governed_executor.rs 与
+// mcp_config.rs（`mcpServers` 读取面）都在那里。
+const SRC = 'crates/pony-tools/src';
 const CONTRACTS = [
   ['tool-descriptor', 'docs/contracts/tool-descriptor.v1.schema.json'],
   ['hooks', 'docs/contracts/hooks.v1.schema.json'],
@@ -171,7 +176,7 @@ function main() {
   lines.push('');
   lines.push('> 本文件由 `scripts/gen-extension-points.mjs` 从源码事实生成，**禁止手改**（手写副本即第二真值源，ADR 0068 决策 3 已否决）。');
   lines.push('> 重生成：`node scripts/gen-extension-points.mjs --write`；一致性校验：`node scripts/gen-extension-points.mjs --check`。');
-  lines.push('> 事实源：`agent/tools/contract.rs`（registry source 枚举）、`tool_runtime.rs`（已定义 trait 端口）、`hooks.rs`（钩子点）、`docs/contracts/*.v1.schema.json`（契约版本）、各载体文件是否存在。');
+  lines.push('> 事实源：`crates/pony-protocol/src/tool_contract/contract.rs`（registry source 枚举）、`crates/pony-tools/src/tool_runtime.rs`（trait 端口）、`crates/pony-protocol/src/hooks.rs`（钩子点）、`docs/contracts/*.v1.schema.json`（契约版本）、各载体文件是否存在。');
   lines.push('');
   lines.push('## 1. 想加什么，该挂哪（ADR 0064 三层模型）');
   lines.push('');

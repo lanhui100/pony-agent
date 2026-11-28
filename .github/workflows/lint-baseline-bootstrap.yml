@@ -39,10 +39,20 @@ jobs:
       - name: 生成 src-tauri 分册（首建，允许存量）
         run: node scripts/check-clippy-baseline.mjs --package pony-agent --baseline scripts/clippy-baseline-src-tauri.json --update-baseline --allow-growth
 
+      # B1795831357716：10-crate 拆分后 pony-tui / pony-cli 的告警面脱管，两份新基线同样
+      # 必须**各平台分别生成**（cfg(windows)/cfg(unix) 让违例集合不同，套用别平台口径必然假红）。
+      - name: 生成 pony-tui 分册（首建，允许存量）
+        run: node scripts/check-clippy-baseline.mjs --package pony-tui --baseline scripts/clippy-baseline-tui.json --update-baseline --allow-growth
+
+      - name: 生成 pony-cli 分册（首建，允许存量）
+        run: node scripts/check-clippy-baseline.mjs --package pony-cli --baseline scripts/clippy-baseline-cli.json --update-baseline --allow-growth
+
       - uses: actions/upload-artifact@v4
         with:
           name: clippy-baselines-${{ runner.os }}
           path: |
             scripts/clippy-baseline.json
             scripts/clippy-baseline-src-tauri.json
+            scripts/clippy-baseline-tui.json
+            scripts/clippy-baseline-cli.json
           if-no-files-found: error
