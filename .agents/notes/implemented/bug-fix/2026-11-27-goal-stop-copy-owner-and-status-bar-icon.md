@@ -28,6 +28,10 @@ Status: implemented
    会让用户以为目标已死从而不去作答（PR #106 的 O1-B 可见面契约），故取
    `续轮暂停：等你作答`——主语仍是「续轮」而非「目标」，且用「续轮暂停」避开
    `GoalPhase::Paused` 的既有译词「已暂停」，不冒认阶段。
+   > **部分被取代（2026-11-28）**：该逐字文案已改为 `暂停中：等你作答/审批｜作答后自动继续`
+   > （同一行里「等你作答」重复 + 实现词「续轮」外泄），见
+   > `.agents/notes/implemented/bug-fix/2026-11-28-goal-stop-copy-dedup-and-turn-scope-reset.md`。
+   > 本条其余决策（不冒认阶段、底栏图标化、智能体段括号计数）仍成立。
    阶段措辞的唯一家仍是 `goal_panel::phase_label` / `task_center::phase_text`；
    `visible_line()` 仍是三段式（`headline｜detail｜action_hint`），因此
    `errors.rs::goal_stop_severity_for_line` 的身份比对、`b193_2` 的

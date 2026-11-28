@@ -2138,3 +2138,19 @@ note: >-
 #       `handle_goal_command_with_driver_defers_when_streaming_and_cancels_on_pause`）；
 #     - `tests/slash-commands-goal.spec.ts`、`tests/workspace-goal-shortcuts.spec.ts`、`tests/slash-commands.spec.ts`。
 # 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。
+# Goal 挂起文案去重与续轮停止留痕复位点收敛（ADR 2026-11-28-goal-stop-copy-dedup-and-turn-scope-reset）归属说明：
+# (1) 变更面全在**本地 TUI 呈现层与视图状态**：`crates/pony-storage/src/goal.rs`（`TurnSuspended` 的
+#     `headline()` 字面量与 `detail()` 归 None）、`crates/pony-tui/src/tui.rs`（`begin_turn_usage()`
+#     新增 `goal_rounds_stopped = None`，删除 composer 派发点与 `spawn_goal_auto_rounds` 的两行重复赋值）。
+#     **无**新增对外接口、网络 IO、后台任务、LLM 调用与新依赖；`goal_rounds_stopped` 结构化日志
+#     字段与事件名一字未动（唯一落点仍是 `tui.rs::log_goal_rounds_stopped`）。
+# (2) 四维归属不变：tracing / issues 仍 applicable（落点不变）；metrics / logs 维持结构性 N-A
+#     （桌面/TUI 无常驻监听地址、无 `/metrics`、Prometheus pull 模型不成立）。不新增 enforcement_point。
+# (3) 行为门（机械收口在测试层）：
+#     - `crates/pony-storage/src/goal.rs`（`suspended_line_states_each_fact_once`、
+#       `pause_reason_reads_as_paused_not_dead`、`pause_reason_is_turn_suspended_with_resume_copy`）；
+#     - `crates/pony-tui/src/tui/tests/turn_end_status_noise_tests.rs`
+#       （`new_turn_start_clears_stale_goal_stop_reason`、`stop_reason_survives_until_next_turn`）；
+#     - `crates/pony-agent-core/tests/tools_stop_suite/b193_2_goal_stop_visibility_contract.rs`、
+#       `crates/pony-tui/tests/tui_suite/goal_first_round_pause_contract.rs`（判据未改，全绿）。
+# 注：本文件随本卡改动，提交信息须带 [decl-change-approved]。

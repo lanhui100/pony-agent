@@ -1675,7 +1675,8 @@ pub struct TuiState {
     /// PA-171 C1-T4：本会话最近一次「goal 续轮停止」的结构化原因（`None` = 未停止）。
     ///
     /// 与 `status_text`（瞬时文案）互补：状态行会被下一轮进度短语覆盖，本字段是
-    /// 「为什么不再自动续轮」的权威留痕，复位点与 `goal_round_cancel.reset()` 同处。
+    /// 「为什么不再自动续轮」的权威留痕。复位点**只有** `begin_turn_usage()`（轮次起点公共锚，
+    /// 覆盖用户提交 / Ask 作答 / 审批恢复 / goal 自动续轮）与 `reset_session_scope()`（换会话）。
     pub goal_rounds_stopped: Option<pony_agent_core::agent::goal::GoalRoundStopReason>,
     /// 波次 43：当前处于待决状态的宿主控制请求（真实 `list_pending_asks` 快照）。
     /// `None` = 没有待决请求；`Some` 时对话框提交/拒绝会回写控制面。
@@ -2336,6 +2337,10 @@ impl TuiState {
     }
 
     /// wave-39 R3：发送新消息前清空本轮 usage 回执（跨轮由累计字段承载）。
+    ///
+    /// 2026-11-28：本方法同时是**续轮停止原因的唯复位点**（见方法体末段）。任一轮次起点
+    /// （用户提交 / Ask 作答 / 审批恢复 / goal 自动续轮）都经此，故「上一轮那句停止原因」
+    /// 在这里一次性作废，不需要每个开轮入口各自复制一行。
     pub fn begin_turn_usage(&mut self) {
         self.turn_usage = None;
         self.turn_cache_hit_tokens = 0;
@@ -2353,6 +2358,14 @@ impl TuiState {
         // 本轮开始的唯一复位点（含 goal 自动续轮等绕过派发点的入口）⇒
         // 上一轮的等待窗口立即失效，本轮要等到真实的 `calling_model` 事件才重新点亮。
         self.upstream_idle.reset();
+        // PA-171 C1-T4（2026-11-28 修正）：续轮停止原因同属**轮次**作用域 —— 任一轮次起点都
+        // 意味着「上一轮那句停止原因」不再成立（新一轮已经开跑）。
+        //
+        // 为什么必须收在这里：旧实现只在「用户提交消息」与「goal 自动起轮」两处置空，
+        // 而 Ask 作答与审批恢复走的是 `UiEvent::AskResumeTurn` / `ApprovalResumeTurn` 分支，
+        // 两者都不经那两处 ⇒ 作答后面板仍挂着「暂停中：等你作答/审批」，与「已经重新开跑」
+        // 的事实互相打脸（底栏图标也还停在 `◌` 续轮未在跑）。
+        self.goal_rounds_stopped = None;
     }
 
     /// P0：应用一条指标结算快照（`TurnStreamEvent.metrics` → `UiEvent::StreamMetrics`）。
@@ -12938,8 +12951,8 @@ fn tui_event_loop(
                                 state.streaming_turn_id = Some(turn_id_str.clone());
                                 // 契约 F-G④：新一轮用户消息 = 新的取消周期，重置 Esc 令牌。
                                 goal_round_cancel.reset_for(&state.session_id);
-                                // PA-171 C1-T4：同一复位点清空上一轮的「续轮停止」留痕。
-                                state.goal_rounds_stopped = None;
+                                // PA-171 C1-T4：上一轮的「续轮停止」留痕已由上方
+                                // `begin_turn_usage()`（唯一复位点）清空，此处不再重复赋值。
 
                                 let mdl_id = state.model.clone();
                                 // wave-38 R1.4：唯一发送点改用 build_turn_input（携带

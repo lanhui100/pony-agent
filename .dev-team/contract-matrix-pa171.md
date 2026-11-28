@@ -842,3 +842,61 @@ PR #106 把 `TurnSuspended` 定为 **Pause** 的唯一可见原因（作答后�
 - `cargo clippy -p pony-tui -p pony-storage --all-targets` → 通过（存量 warning 未新增）
 
 **决策记录**：`.agents/notes/implemented/bug-fix/2026-11-27-goal-stop-copy-owner-and-status-bar-icon.md`
+
+---
+
+### Amendment: suspended-copy-dedup-and-reset（2026-11-28，挂起文案去重 + 停止留痕复位点收敛）
+
+> 只**追加**登记，不改写 §2–§5、b193-2 与上一条 Amendment 的任何冻结断言文字。
+> 本条 supersedes 上一条 Amendment 中 `TurnSuspended` 的**逐字文案一行**与「`detail` 为
+> `本轮在等你作答/审批`」这一处描述；变体集合、`code()` / `severity()` / `enters_history()` /
+> `never_started()` / `action_hint()` 全部不变。
+
+**问题（用户现场，Ctrl+T → Goal 页签）**：同屏读到
+
+```
+◎ 进行中 · 2/5 轮
+续轮暂停：等你作答｜本轮在等你作答/审批｜作答后自动继续
+```
+
+两处缺陷：
+
+1. **同一行自我复述**：`headline` 的「等你作答」与 `detail` 的「本轮在等你作答/审批」说的是
+   同一件事，三段式把「等什么」说了两遍；且「续轮」是只有实现者才懂的内部机制词
+   （用户侧并无「续轮」这个概念），这句文案因此读不出设计意图。
+2. **作答后留痕不失效**：`TuiState.goal_rounds_stopped` 原先只在「用户提交消息」
+   （`tui.rs` composer 派发点）与「`/goal` 自动起轮」两处置空，而 `UiEvent::AskResumeTurn` /
+   `UiEvent::ApprovalResumeTurn` 两条续轮入口都不经那两处 ⇒ 用户已作答、目标已重新开跑，
+   面板仍宣称「等你作答」，底栏图标也停在 `◌`（续轮未在跑）。
+
+**现行逐字（仅 `TurnSuspended` 一行变更）**：
+
+| 变体 | 现行 `visible_line()` |
+|---|---|
+| `TurnSuspended` | `暂停中：等你作答/审批｜作答后自动继续` |
+
+- `headline()` 改为 `暂停中：等你作答/审批`：①「等什么」只说一次（`detail()` 归 `None`）；
+  ② Ask 与审批共用本信号，故「作答/审批」写全；③ 仍**不**用 `GoalPhase::Paused` 的既有译词
+  「已暂停」（`goal_panel::stopped_reason_never_contradicts_active_phase` 仍全绿）。
+- `action_hint()` 保持 `作答后自动继续`（承诺不解锁就不作答，O1-B 的可见面不变）。
+
+**复位点收敛（`TuiState`）**：`goal_rounds_stopped = None` 的唯一写点移入
+`begin_turn_usage()` —— 它是「任一轮次起点」的公共锚（用户提交 / Ask 作答 / 审批恢复 /
+goal 自动续轮都经此，`turn:started` 事件也落在这里）。原 composer 派发点与
+`spawn_goal_auto_rounds` 里的两行重复赋值删除。
+
+**仍成立的硬约束**（一字未改且全绿）：`b193_2_goal_stop_visibility_contract.rs` 9 条判据；
+`goal_first_round_pause_contract.rs` 的「含『等你作答』『作答后自动继续』『暂停』、不含
+『首轮失败』『未成功』」；`pa172_legacy_closure_contract.rs` 的 B4/B5 逐字冻结。
+
+**机器凭证**
+
+- `bash scripts/cargo-lane.sh test -p pony-storage --lib` → 353 passed
+- `bash scripts/cargo-lane.sh test -p pony-tui --lib` → 303 passed
+- `bash scripts/cargo-lane.sh test -p pony-agent-core --test tools_stop_suite -- b193_2` → 9 passed
+- `bash scripts/cargo-lane.sh test -p pony-tui --test tui_suite -- goal_first_round_pause_contract pa172_legacy_closure tui_task_visibility` → 33 passed
+- 新增钉子：`goal::b130_event_tests::suspended_line_states_each_fact_once`（逐字冻结 + 「等你作答」
+  只出现一次 + 不含「续轮」）、`tui::turn_end_status_noise_tests::new_turn_start_clears_stale_goal_stop_reason`
+  与 `stop_reason_survives_until_next_turn`
+
+**决策记录**：`.agents/notes/implemented/bug-fix/2026-11-28-goal-stop-copy-dedup-and-turn-scope-reset.md`
