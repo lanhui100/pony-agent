@@ -2,10 +2,8 @@ import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import WorkspaceComposer from "@/components/chat/WorkspaceComposer.vue";
-import AskPanel from "@/components/AskPanel.vue";
 import { TooltipProvider } from "reka-ui";
 import { useRuntimeStore } from "@/stores/runtime";
-import { useAskStore } from "@/stores/ask";
 
 describe("Workspace Width Alignment", () => {
   it("ensures WorkspaceComposer shell has max-w-[46.4rem] matching the message flow column", () => {
@@ -39,33 +37,4 @@ describe("Workspace Width Alignment", () => {
     wrapper.unmount();
   });
 
-  it("ensures AskPanel has max-w-[46.4rem] matching the message flow column", () => {
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    const askStore = useAskStore();
-
-    // mock an ask
-    askStore.pendingAsks = [
-      {
-        requestId: "ask-1",
-        prompt: "测试问题",
-        options: ["A", "B"],
-        sessionId: "sess-1",
-        runId: "run-1",
-        createdAtMs: Date.now()
-      }
-    ];
-
-    const wrapper = mount(AskPanel, {
-      global: {
-        plugins: [pinia]
-      }
-    });
-
-    const askPanel = wrapper.find('[data-testid="ask-panel"]');
-    expect(askPanel.exists()).toBe(true);
-    expect(askPanel.classes()).toContain("max-w-[46.4rem]");
-    expect(askPanel.classes()).not.toContain("max-w-[38.4rem]");
-    wrapper.unmount();
-  });
 });

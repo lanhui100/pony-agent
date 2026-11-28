@@ -47,7 +47,6 @@ import type { Component } from "vue";
 import { TooltipProvider } from "reka-ui";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import HomeTracePanel from "@/components/HomeTracePanel.vue";
-import AskPanel from "@/components/AskPanel.vue";
 import { useAskStore } from "@/stores/ask";
 import type { PendingAsk } from "@/types/ask-plan";
 import type { TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
@@ -317,104 +316,6 @@ describe("wave-17 C2-3：HomeTracePanel 指标行 tabular-nums class 契约", ()
     for (const carrier of durationCarriers) {
       expect(carrier.text()).toMatch(/^[\d.]+\s*(s|ms)$/);
     }
-
-    wrapper.unmount();
-  });
-});
-
-// ── C2-4：AskPanel 过期倒计时位 ─────────────────────────────────────────────
-
-describe("wave-17 C2-4：AskPanel 过期倒计时位 tabular-nums class 契约", () => {
-  function createPendingAsk(partial: Partial<PendingAsk> = {}): PendingAsk {
-    return {
-      requestId: partial.requestId ?? "ask-1",
-      requestKind: partial.requestKind ?? "interaction",
-      sessionId: partial.sessionId ?? "session-1",
-      runId: partial.runId ?? "run-1",
-      turnId: partial.turnId ?? "turn-1",
-      callId: partial.callId ?? "call-1",
-      descriptorSnapshotId: partial.descriptorSnapshotId ?? "snapshot-1",
-      descriptorId: partial.descriptorId ?? "builtin:ask_user",
-      finalArgsDigest: partial.finalArgsDigest ?? "args-digest",
-      policyDigest: partial.policyDigest ?? "policy-digest",
-      nonce: partial.nonce ?? "nonce-1",
-      version: partial.version ?? 1,
-      expiresAtMs: partial.expiresAtMs ?? Date.now() + 30_000,
-      state: partial.state ?? "pending",
-      prompt: partial.prompt ?? "继续执行？",
-      options: partial.options ?? ["是", "否"]
-    };
-  }
-
-  async function mountAskPanel(ask: PendingAsk) {
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "ask_list_pending") {
-        return Promise.resolve([ask]);
-      }
-      return Promise.resolve(null);
-    });
-    const wrapper = mount(AskPanel, { global: { stubs: { teleport: true } } });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await vi.waitFor(() => {
-      expect(useAskStore().pendingAsks).toHaveLength(1);
-    });
-    await nextTick();
-    return wrapper;
-  }
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    setActivePinia(createPinia());
-    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
-    tauriMocks.mockSafeListen.mockResolvedValue(() => {});
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  // ── ADR 0074 重冻 ────────────────────────────────────────────────────────────────────────
-  // 旧契约：`formatExpiry` 倒计时 span（「30s 后过期」/「已过期」）必须含 tabular-nums。
-  // 新契约（`.dev-team/contract-matrix-ask-persistence.md` §6.1）：**无倒计时、无已过期态**。
-  // 等宽数字契约因此迁移到「提问时间」位（`ask-created-at`，展示用），倒计时位必须消失。
-
-  it("C2-4（重冻）：ask-card 内不得渲染任何倒计时 span / 已过期提示", async () => {
-    // Arrange：旧语义下 30s 档是最剧烈的逐秒抖动位——新语义下根本不应存在该位点。
-    const ask = createPendingAsk({ requestId: "ask-c2-4", expiresAtMs: Date.now() + 30_000 });
-
-    // Act
-    const wrapper = await mountAskPanel(ask);
-
-    // Assert：不得出现倒计时结构、不得出现任何倒计时/过期文案。
-    expect(wrapper.find('[data-testid="ask-card"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="ask-expiry-countdown"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="ask-expired-hint"]').exists()).toBe(false);
-    expect(wrapper.text()).not.toMatch(/\d+\s*(s|m)\s*后过期/);
-    expect(wrapper.text()).not.toContain("已过期");
-
-    wrapper.unmount();
-  });
-
-  it("C2-4（重冻）：提问时间位（ask-created-at）必须由自身或 ≤2 层祖先承载 tabular-nums", async () => {
-    // Arrange：时间位是替代倒计时的展示位（contract §6：展示提问时间，不展示截止时间）。
-    const createdAtMs = new Date(2026, 10, 6, 9, 30).getTime();
-    const ask = createPendingAsk({ requestId: "ask-c2-4b" });
-    (ask as { createdAtMs?: number }).createdAtMs = createdAtMs;
-
-    // Act
-    const wrapper = await mountAskPanel(ask);
-
-    // Assert（结构锚点 + 语义）
-    const createdAt = wrapper.get('[data-testid="ask-created-at"]');
-    expect(createdAt.text()).toContain("提问于");
-    expect(wrapper.find('[data-testid="ask-expiry-countdown"]').exists()).toBe(false);
-
-    // Assert（class 契约，等价迁移自旧倒计时位）
-    expect(
-      hasTabularNumsAtOrAbove(createdAt.element),
-      `提问时间位必须由自身或 ≤2 层祖先承载 tabular-nums；实际链路：${tabularNumsFailureDetail(createdAt.element)}`
-    ).toBe(true);
 
     wrapper.unmount();
   });

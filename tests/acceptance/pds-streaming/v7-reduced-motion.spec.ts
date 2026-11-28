@@ -170,7 +170,7 @@ describe("wave-pds-3 V7：reduced-motion 降级（jsdom）", () => {
     const candidates = ["src/styles.css", "src/main.ts", "src/App.vue"];
     const references = candidates
       .map((path) => ({ path, code: stripJsComments(safeSource(path)) }))
-      .filter((entry) => /streaming-motion\/(primitives|tokens)\.css/.test(entry.code))
+      .filter((entry) => /styles\/motion\/(primitives|tokens)\.css/.test(entry.code))
       .map((entry) => entry.path);
 
     // Act + Assert

@@ -2,8 +2,8 @@
 @import "./assets/misans-font.css";
 /* wave-pds-3 V7-4：PDS-SM 原语层必须被真正引用，否则契约 §3 的动效与 §3.5 的降级规则全都不生效。
    tokens 必须先于 primitives（后者消费前者的 --pds-* 变量）。 */
-@import "../.agents/skills/streaming-motion/tokens.css";
-@import "../.agents/skills/streaming-motion/primitives.css";
+@import "./styles/motion/tokens.css";
+@import "./styles/motion/primitives.css";
 
 :root {
   color-scheme: light;

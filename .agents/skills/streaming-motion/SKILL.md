@@ -10,7 +10,7 @@ description: 何时用：在实现或评审大模型流式输出的前端动效�
 
 ## 真相源
 
-- 本文件是规范正文；`tokens.css`（L2 令牌）、`primitives.css`（L3 原语）、`logic/budget.ts` 与 `logic/intent.ts`（L4 reducer）是实现真相源。
+- 本文件是规范正文；`logic/budget.ts` 与 `logic/intent.ts`（L4 reducer）随本 skill 存放，`tokens.css`（L2 令牌）与 `primitives.css`（L3 原语）在本仓的实现落位是 `src/styles/motion/`（见下方「本仓落位」）。
 - 验收指标与命令见 `conformance.md`；踩坑与反例见 `anti-patterns.md`；设计依据见 `docs/archive/decisions/0057-streaming-motion-framework-agnostic-spec.md`。
 - 参数以本文件「参数校准记录」为准；上游/宿主差异必须写明前提，不得静默改常量。
 
@@ -35,11 +35,19 @@ description: 何时用：在实现或评审大模型流式输出的前端动效�
 | 层 | 职责 | 文件 | 可移植性 |
 |---|---|---|---|
 | L1 语义 | 阶段划分与"每阶段允许什么动效" | 本文件 §阶段模型 | 100% |
-| L2 令牌 | 缓动、时长、位移、视口常量 | [`tokens.css`](tokens.css) | 100% |
-| L3 原语 | `@keyframes` + `data-pds-*` 属性驱动，零 JS | [`primitives.css`](primitives.css) | 100% |
+| L2 令牌 | 缓动、时长、位移、视口常量 | `src/styles/motion/tokens.css` | 100% |
+| L3 原语 | `@keyframes` + `data-pds-*` 属性驱动，零 JS | `src/styles/motion/primitives.css` | 100% |
 | L4 逻辑 | 两个零依赖 reducer | [`logic/budget.ts`](logic/budget.ts) · [`logic/intent.ts`](logic/intent.ts) | 100% |
 | L5 门禁 | 七条可机器断言指标 | [`conformance.md`](conformance.md) | 规范可移植；命令需改路径 |
 | L6 胶水 | 挂 tick / 挂监听 / 写属性（**不在本规范内**） | [`adapters/vue.md`](adapters/vue.md) · [`adapters/react.md`](adapters/react.md) | 每框架重写 |
+
+### 本仓落位（B1795831358893）
+
+CSS 资产（L2/L3）**放在 `src/styles/motion/` 而不是本 skill 目录**：
+前端生产构建不得反向依赖 `.agents/`（开发期治理目录），否则删除/重构任何 skill 都会打断
+`vite build`。本 skill 保留规范正文、L4 reducer 与门禁命令；`src/styles/motion/` 是本仓实现落位。
+两者的一致性靠 `tests/acceptance/pds-streaming/` 的 CSS 断言看守（读的是 `src/styles/motion/`），
+不靠"两份文件内容相同"——同内容双份本身就是第二真值源。
 
 配套：[`anti-patterns.md`](anti-patterns.md) —— 八条踩过的坑，动手前先读。
 决策依据：[`docs/archive/decisions/0057`](../../../docs/archive/decisions/0057-streaming-motion-framework-agnostic-spec.md)。
@@ -58,7 +66,7 @@ description: 何时用：在实现或评审大模型流式输出的前端动效�
 
 ## 步骤（接入流程四步）
 
-1. **引入资源**：`@import tokens.css` + `primitives.css`（全局一次）。
+1. **引入资源**：`@import "src/styles/motion/tokens.css"` + `primitives.css`（全局一次；本仓已在 `src/styles.css` 引用）。
 2. **接释放节奏**：用 `budget.ts` 的 `stepReveal` 驱动可见文本游标。上游 content 长度进，游标出。
    - tick 周期 60ms 为默认；**`charsPerTick` 必须保证一帧配额消化后仍有"落后感"但不积压**。
 3. **接视口意图**：用 `intent.ts` 的 `reduceScrollIntent`。三类事件必须投递：

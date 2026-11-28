@@ -9,7 +9,7 @@ import {
   providerReturnedCacheHitInputTokens,
   useCopyFeedback,
   useTraceProjection
-} from "@/lib/runtime/useTraceProjection";
+} from "@/composables/useTraceProjection";
 
 /**
  * PA-096：观测页 Trace tab 的自包含宿主。

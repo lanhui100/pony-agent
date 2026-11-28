@@ -33,7 +33,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { useRuntimeStore } from "@/stores/runtime";
-import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
+import { useTraceProjection } from "@/composables/useTraceProjection";
 import { countTurnProviderCalls, resolveCallGenerationSpeed, resolveCurrentContextInputTokens } from "@/lib/runtime/token-metrics";
 import type { ProviderCallCacheRecord, TraceTimelineEntry, TurnTraceRecord } from "@/types/runtime";
 

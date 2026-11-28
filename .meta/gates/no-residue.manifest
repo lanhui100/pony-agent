@@ -1,0 +1,42 @@
+# no-residue 清单（A8 零残留门）：<被删名字的字面串>\t<检索范围>
+#
+# 范围口径：只登记**生产树**（crates/ src/ src-tauri/），不登记 `.agents/`、`backlog/`、`.dev-team/`——
+# 那些是决策史与账本，按设计会保留被删名字（ADR 的 Problem 段必须能写出"删了什么"）。
+# 全树登记会把"记录删除"与"删除不彻底"混成同一条判据，门就只能逼人改历史。
+#
+# 校验：bash .meta/gates/no-residue.sh（已接入 .meta/gates/ci-verify.sh 第 4 段）
+
+# B1795831358623 一档：Rust 未挂载孤立死文件（无 mod.rs 挂载、全仓零引用）
+ConPtyDriver	crates/
+WindowsPtyDriver	crates/
+SkillWatchdog	crates/
+PonyAgentTestContext	crates/
+
+# B1795831358623 一档：一次性 wave-61 举证 example（证据已归档，232 行超限函数基线同步删除）
+w61_e2e_probe	crates/
+
+# B1795831359003 一档：前端 0 生产引用的通用事件总线（只有它自己的单测消费；Rust 侧的
+# `pony-protocol/event_bus.rs` 是同名不同物的 IPC 事件环，不受影响，故字面串取模块路径而非类型名）
+@/lib/event-bus	src/
+src/lib/event-bus	tests/
+
+# B1795831359003 一档：前端 0 生产引用死组件（作答面已由 AskUserToolCallCard.vue 承载；
+# ADR 0074「无墙钟过期态」的有效断言已迁到 tests/acceptance/stage-1-ask-user.spec.ts）
+@/components/AskPanel	src/
+@/components/AskPanel	tests/
+data-testid="ask-panel"	tests/
+# B1795831359338：根目录双根冲突文件与一次性报告/二进制产物
+# （AGENT.md 与 AGENTS.md 正面冲突：前者声称事实写 AGENT.md / 使用 OpenSpec / docs/decisions/，
+#  后者是本仓真源。索引与 CI 注释改指向 AGENTS.md；hello.rs 源文件保留，只删其编译产物）
+# 范围收窄到生产树：AGENT.md 在 openspec/ 与 docs/archive/ 的历史快照里按设计仍被引用
+# （历史归档只读区不篡改，见 ADR Risks 节）。
+AGENT.md	src/
+AGENT.md	src-tauri/
+AGENT.md	crates/
+AGENT.md	.github/
+AGENT.md	scripts/
+# 一次性报告 JSON（purity_*/test_report/test_sample/fake_failed_report/red-purity-report）不登记：
+# 它们零代码消费面（引用只在彼此之间自环，已随文件消失），而名字过于通用 ——
+# `purity_report` 同时是 .dev-team 历史回执里的 JSON 字段键，登记只会制造假阳性。
+# 这类文件由根目录白名单门看守（新增游离文件直接拒），不需要零残留门重复看守。
+file-size-baseline.json.bak	scripts/

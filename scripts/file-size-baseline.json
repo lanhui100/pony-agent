@@ -8,13 +8,6 @@
   },
   "entries": [
     {
-      "path": "crates/pony-agent-core/examples/w61_e2e_probe.rs",
-      "kind": "fn-lines",
-      "name": "main",
-      "occurrence": 0,
-      "value": 232
-    },
-    {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
       "kind": "file-lines",
       "name": null,

@@ -4,6 +4,7 @@ import { MotionPlugin } from "motion-v";
 import App from "./App.vue";
 import "./styles.css";
 import { reportError, addBreadcrumb, isNetworkNoise } from "./lib/telemetry";
+import { configureTauriRuntimeContext } from "./lib/tauri";
 import { useRuntimeStore } from "@/stores/runtime";
 
 const mountCount = Number(window.sessionStorage.getItem("pony-agent.mount-count") || "0") + 1;
@@ -32,6 +33,9 @@ function getActiveTraceId(): string | undefined {
     return undefined;
   }
 }
+
+// lib 层不得反向依赖 stores：由装配层（本文件）把 trace id 能力注入给 IPC 遥测。
+configureTauriRuntimeContext({ getActiveTraceId });
 
 // 全局 Vue 组件渲染及生命周期错误捕获 (PonySentry A1)
 app.config.errorHandler = (err: unknown, instance, info: string) => {

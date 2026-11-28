@@ -13,7 +13,7 @@ import TeamRosterPanel from "@/components/team/TeamRosterPanel.vue";
 import TeamTaskBoardPanel from "@/components/team/TeamTaskBoardPanel.vue";
 import ScrollArea from "@/components/ui/ScrollArea.vue";
 import { clearTraceProjectionMemo } from "@/lib/runtime/trace-projection";
-import { useCopyFeedback, useTraceProjection } from "@/lib/runtime/useTraceProjection";
+import { useCopyFeedback, useTraceProjection } from "@/composables/useTraceProjection";
 
 /**
  * PA-096：右侧栏为纯对话过程面板（状态 / 计划）。

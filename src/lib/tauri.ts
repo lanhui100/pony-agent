@@ -9,6 +9,26 @@ declare global {
   }
 }
 
+/**
+ * 宿主在启动期注入的运行时上下文（ADR 2026-11-28-frontend-layering-and-design-system-convergence）。
+ *
+ * 为什么是回调注入而不是 `await import("@/stores/runtime")`：
+ * 全部 store 都依赖本文件，本文件再反向 import store 就是环（`vite build` 报
+ * `INEFFECTIVE_DYNAMIC_IMPORT`，且让 lib 层无法单独测试）。装配方向只允许
+ * 「上层（main.ts / store）向 lib 注册能力」，lib 不知道 store 的存在。
+ */
+export type TauriRuntimeContext = {
+  /** 当前活动 trace id（遥测关联用）；返回 undefined 表示无活动 trace。 */
+  getActiveTraceId?: () => string | undefined;
+};
+
+let runtimeContext: TauriRuntimeContext = {};
+
+/** 启动期注册运行时上下文（幂等覆盖；`main.ts` 在 pinia 装配后调用一次）。 */
+export function configureTauriRuntimeContext(context: TauriRuntimeContext) {
+  runtimeContext = context;
+}
+
 export function isTauriAvailable() {
   if (typeof window === "undefined") {
     return false;
@@ -73,6 +93,15 @@ export function sanitizeIpcArgsForTelemetry(args?: Record<string, unknown>): unk
   return redacted;
 }
 
+/** 读宿主注入的活动 trace id；未注入或回调抛错 ⇒ undefined（遥测退化为无 trace）。 */
+function readActiveTraceId(): string | undefined {
+  try {
+    return runtimeContext.getActiveTraceId?.();
+  } catch {
+    return undefined;
+  }
+}
+
 export async function safeInvoke<T>(command: string, args?: Record<string, unknown>) {
   if (!isTauriAvailable()) {
     throw new Error("当前运行在浏览器预览模式，Tauri 后端不可用。");
@@ -94,13 +123,7 @@ export async function safeInvoke<T>(command: string, args?: Record<string, unkno
         throw err;
       }
 
-      let activeTraceId: string | undefined;
-      try {
-        const { useRuntimeStore } = await import("@/stores/runtime");
-        activeTraceId = useRuntimeStore().activeTraceId;
-      } catch {
-        // ignore
-      }
+      const activeTraceId = readActiveTraceId();
 
       // 捕获 IPC 失败异常到 PonySentry (fire-and-forget)
       reportError({

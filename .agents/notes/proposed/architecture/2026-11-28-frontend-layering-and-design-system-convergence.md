@@ -4,6 +4,9 @@ Status: proposed
 
 > **人工已批准（2026-11-28）**：方案照此执行，阻塞解除；落地进度见 `backlog:B1795831358893 / B1795831359003`。
 > 本文件**仍留在 `proposed/`**直到代码在同一提交里落地——批准 ≠ 实现，提前迁 `implemented/` 即假闭环。
+>
+> **落地进度（子批 1，B1795831358893）**：①动效 Token/原语已下沉 `src/styles/motion/`，`src/styles.css` 不再 import `.agents/`；②`src/lib/tauri.ts` 的 `await import("@/stores/runtime")` 改为启动期 `configureTauriRuntimeContext({ getActiveTraceId })` 注入（`main.ts` 装配），`vite build` 的 `INEFFECTIVE_DYNAMIC_IMPORT`（tauri.ts、ask.ts 两处）已清零；③`useTraceProjection` 从 `src/lib/runtime/` 迁入 `src/composables/`，`src/lib/` 下零 `@/stores/` 导入。
+> **未落地（子批 2 承接）**：L4 reducer（`logic/budget.ts`、`logic/intent.ts`）仍在 `.agents/skills/streaming-motion/`，因其消费方含 V10 冻结的 `tests/pds-integration-parity.spec.ts`，迁移须同步重锚该冻结哈希（需显式授权）；组件越界写状态与 InfoTip/Tooltip 合并见 `backlog:B1795831359003`。
 
 ## Problem
 

@@ -58,12 +58,12 @@
 ```bash
 # ① @keyframes 体内
 awk '/@keyframes/{inblock=1} inblock{print FILENAME":"FNR":"$0} inblock&&/^}/{inblock=0}' \
-  .agents/skills/streaming-motion/primitives.css \
+  src/styles/motion/primitives.css \
   | grep -E '\b(width|height|top|left|right|bottom|margin|padding)\s*:'
 # 期望：无输出
 
 # ② transition 目标属性（排除降级块里的 `transition: none`）
-grep -nE 'transition\s*:' .agents/skills/streaming-motion/primitives.css \
+grep -nE 'transition\s*:' src/styles/motion/primitives.css \
   | grep -vE 'grid-template-rows|:\s*none'
 # 期望：无输出
 ```

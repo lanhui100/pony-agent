@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { mount } from "@vue/test-utils";
-import AskPanel from "@/components/AskPanel.vue";
 import PlanPanel from "@/components/PlanPanel.vue";
 import { useAskStore } from "@/stores/ask";
 import { usePlanStore } from "@/stores/plan";
@@ -44,113 +43,6 @@ async function flushAsync() {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
-
-describe("AskPanel", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    setActivePinia(createPinia());
-    tauriMocks.mockIsTauriAvailable.mockReturnValue(true);
-    tauriMocks.mockSafeListen.mockResolvedValue(() => {});
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("renders nothing when there are no pending asks", async () => {
-    tauriMocks.mockSafeInvoke.mockResolvedValue([]);
-
-    const wrapper = mount(AskPanel);
-    await flushAsync();
-
-    expect(wrapper.find('[data-testid="ask-panel"]').exists()).toBe(false);
-    wrapper.unmount();
-  });
-
-  it("renders a pending ask prompt, options, and answer controls", async () => {
-    const ask = createPendingAsk({
-      requestId: "ask-1",
-      prompt: "确认继续运行？",
-      options: ["继续", "暂停"]
-    });
-    tauriMocks.mockSafeInvoke.mockResolvedValue([ask]);
-
-    const wrapper = mount(AskPanel);
-    await flushAsync();
-    await vi.waitFor(() => {
-      expect(useAskStore().pendingAsks).toHaveLength(1);
-    });
-
-    expect(wrapper.get('[data-testid="ask-panel"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="ask-prompt"]').text()).toContain("确认继续运行？");
-    expect(wrapper.get('[data-testid="ask-options"]').text()).toContain("继续");
-    expect(wrapper.get('[data-testid="ask-options"]').text()).toContain("暂停");
-    expect(wrapper.get('[data-testid="ask-answer-submit"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="ask-ignore-submit"]').exists()).toBe(true);
-    wrapper.unmount();
-  });
-
-  it("answers through the store using the listed version and removes the card", async () => {
-    const ask = createPendingAsk({ requestId: "ask-1", version: 4, options: ["继续"] });
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "ask_list_pending") {
-        return Promise.resolve([ask]);
-      }
-      if (command === "ask_answer") {
-        return Promise.resolve({ ok: true });
-      }
-      return Promise.resolve(null);
-    });
-
-    const wrapper = mount(AskPanel);
-    await flushAsync();
-    const store = useAskStore();
-    await vi.waitFor(() => {
-      expect(store.pendingAsks).toHaveLength(1);
-    });
-
-    await wrapper.get('[data-testid="ask-options"] button').trigger("click");
-    await flushAsync();
-
-    expect(tauriMocks.mockSafeInvoke).toHaveBeenCalledWith("ask_answer", {
-      requestId: "ask-1",
-      expectedVersion: 4,
-      version: 4,
-      answer: "继续"
-    });
-    expect(store.pendingAsks).toHaveLength(0);
-    wrapper.unmount();
-  });
-
-  it("disables the answer and cancel buttons while a request is being answered", async () => {
-    const ask = createPendingAsk({ requestId: "ask-1" });
-    tauriMocks.mockSafeInvoke.mockImplementation((command: string) => {
-      if (command === "ask_list_pending") {
-        return Promise.resolve([ask]);
-      }
-      if (command === "ask_answer") {
-        return new Promise((resolve) => {
-          setTimeout(() => resolve({ ok: true }), 15);
-        });
-      }
-      return Promise.resolve(null);
-    });
-
-    const wrapper = mount(AskPanel);
-    await flushAsync();
-
-    const store = useAskStore();
-    await vi.waitFor(() => {
-      expect(store.pendingAsks).toHaveLength(1);
-    });
-    store.answeringRequestId = "ask-1";
-    await wrapper.vm.$nextTick();
-
-    expect(wrapper.get('[data-testid="ask-answer-submit"]').attributes("disabled")).toBeDefined();
-    expect(wrapper.get('[data-testid="ask-ignore-submit"]').attributes("disabled")).toBeDefined();
-    wrapper.unmount();
-  });
-});
 
 describe("PlanPanel（Plan 模式 + 独立任务进度）", () => {
   beforeEach(() => {

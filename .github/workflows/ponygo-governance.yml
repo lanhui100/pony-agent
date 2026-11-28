@@ -39,6 +39,10 @@ jobs:
           npm run ext:check
           npm run size:check
           npm run size:check:selftest
+          npm run placeholder:selftest
+          npm run placeholder:check
+          npm run root:allowlist:selftest
+          npm run root:allowlist:check
           npm run lock-scope:selftest
           npm run lock-scope:check
           npm run portable:ps1
