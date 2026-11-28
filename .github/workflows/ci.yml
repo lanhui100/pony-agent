@@ -116,6 +116,14 @@ jobs:
         if: needs.changes.outputs.needs_frontend == 'true'
         run: npm run test:unit
 
+      # B1795831357586：V10-3「全量里再跑一遍全量」已从默认 test:unit 摘出（默认 skip，
+      # 单例实测 231.6s / 占该文件 244.2s 的 94.8%，且与外层 run 的信号完全重合）。
+      # 判据强度不变，只是把这份成本从「每次本地全量」挪到「CI 付一次」。
+      # 开关走 scripts/v10-freeze.mjs 注入（不写 `VAR=1 cmd` 前缀：Windows cmd.exe 不认）。
+      - name: V10 冻结基线校验（含全量重跑，显式 opt-in）
+        if: needs.changes.outputs.needs_frontend == 'true'
+        run: npm run test:v10-freeze
+
       - name: 前后端及 CLI 契约与扩展点一致性
         run: |
           npm run contract:check

@@ -64,6 +64,7 @@
     "schemas:watch": "node scripts/run-portable.mjs schemas:watch",
     "test": "npm run test:unit",
     "test:unit": "vitest run",
+    "test:v10-freeze": "node scripts/v10-freeze.mjs",
     "test:l0": "npm run check:fast",
     "test:l1": "node scripts/run-test-layer.mjs l1",
     "test:l2": "node scripts/run-test-layer.mjs l2",

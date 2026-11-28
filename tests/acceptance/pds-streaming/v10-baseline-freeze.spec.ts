@@ -53,6 +53,23 @@ const NESTED_GUARD_ENV = "PDS_V10_NESTED";
 const NESTED_RUN = process.env[NESTED_GUARD_ENV] === "1";
 
 /**
+ * 全量重跑开关（B1795831357586，2026-11-28）：**默认关闭**。
+ *
+ * V10-3 的语义是「在 vitest 里再跑一遍全量 vitest」。它产出的信号与外层这次 run 本身
+ * 完全重合——同一份代码、同一批用例、同一套断言，跑第二遍没有增量信息，
+ * 却把 `npm run test:unit` 从 ~54s 抬到 ~350s（本机实测：V10-3 单例 231.6s，
+ * 占该文件 244.2s 的 94.8%）。日常反馈回路被这条「自我复读」阻塞，属净损失。
+ *
+ * 处置：V10-3 降级为显式命令 `npm run test:v10-freeze`（scripts/v10-freeze.mjs 置本开关后
+ * 只跑本文件），并由 CI 在 needs_frontend 时执行一次。判据强度不变（仍是真实子进程
+ * exit 0 + 用例计数自检），只是把「每次本地全量都付」改为「CI 付一次」。
+ *
+ * 开关必须显式置 `1` 才生效：默认路径上宁可显式 skip（输出可见），也不静默降级。
+ */
+const FULL_SUITE_ENV = "PDS_V10_FULL_SUITE";
+const FULL_SUITE_RUN = process.env[FULL_SUITE_ENV] === "1";
+
+/**
  * 时间预算（2026-11-17 环境门修复）：
  * V10-3 的子进程是「全量套件里再跑一遍全量套件」（`--no-file-parallelism` 串行 167 文件），
  * 实测单跑约 600s；原 600_000ms 预算正好压在实测值上，满载机器必然被 SIGTERM 打死，
@@ -232,7 +249,16 @@ describe("wave-pds-3 V10：既有基线不回归", () => {
     360_000
   );
 
-  it(
+  // 默认 skip：全量重跑的增量信号为零却占 94.8% 耗时，见文件头 FULL_SUITE_ENV 说明。
+  // 显式启用：`npm run test:v10-freeze`（CI 的 needs_frontend 步骤亦执行一次）。
+  if (!FULL_SUITE_RUN) {
+    console.log(
+      `[V10-3] 默认跳过「全量里再跑一遍全量」（0 增量信号 / 单例 ~231s）；`
+        + `需要时执行 ${FULL_SUITE_ENV}=1 或 npm run test:v10-freeze`
+    );
+  }
+
+  it.skipIf(!FULL_SUITE_RUN)(
     "V10-3: 实跑既有全量单测（排除本波新增验收目录）—— exit code 0",
     () => {
       // Arrange
