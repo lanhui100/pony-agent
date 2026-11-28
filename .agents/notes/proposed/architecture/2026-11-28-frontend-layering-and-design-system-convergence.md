@@ -2,6 +2,9 @@
 
 Status: proposed
 
+> **人工已批准（2026-11-28）**：方案照此执行，阻塞解除；落地进度见 `backlog:B1795831358893 / B1795831359003`。
+> 本文件**仍留在 `proposed/`**直到代码在同一提交里落地——批准 ≠ 实现，提前迁 `implemented/` 即假闭环。
+
 ## Problem
 
 前端代码库（`src/` 160 文件 / 48,540 行）虽已开展 `stores/runtime/` 拆分与流式事件收口（参见 [2026-11-22-stream-sink-nonblocking-emit-contract.md](../../implemented/architecture/2026-11-22-stream-sink-nonblocking-emit-contract.md)），但仍存在严重的分层倒置、环依赖、状态越界写入与设计系统分裂问题：

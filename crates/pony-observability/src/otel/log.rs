@@ -68,6 +68,22 @@ pub fn log_file_path() -> Option<PathBuf> {
     log_file_slot().clone()
 }
 
+/// CLI/TUI 形态的运行日志落盘路径（与桌面端 `<app_data_dir>/logs/pony-agent.log` 同口径）。
+///
+/// 取舍：**统一**落到 `logs/pony-agent.log`，不复用 TUI 既有的 `~/.pony-agent/tui-logs/`——
+/// 后者是会话调试产物（整屏 dump），把结构化 JSON 运行日志混进去会让取证面变脏。
+/// 优先级：`dirs::state_dir()`（Linux = `$XDG_STATE_HOME` 或 `~/.local/state`）>
+/// `$HOME/.local/state`；都不可得时返回 `None`（仅 stdout，不阻塞启动）。
+///
+/// 曾经 `crates/pony-tui/src/tui.rs` 与 `crates/pony-cli/src/main.rs` 各有一份逐字相同的
+/// 副本（2026-11-28 收敛到本处）：两处同时演化时 CLI 与 TUI 会把日志写进不同目录，
+/// 而这类漂移没有任何测试会红。
+pub fn bin_log_file_path() -> Option<PathBuf> {
+    let base = dirs::state_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))?;
+    Some(base.join("pony-agent").join("logs").join("pony-agent.log"))
+}
+
 /// 输出一行 JSON 日志。
 ///
 /// 调用方：trace 装配与导出失败降级路径（例如导出错误时 `warn` 一条）。

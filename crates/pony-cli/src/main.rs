@@ -14,8 +14,7 @@
 //!   权限档位默认 `read_only`（fail-closed）。
 
 use pony_agent_core::agent::config::{
-    ProviderModelCapabilities, ProviderRegistryStore, ProviderSelectionResolver,
-    ResolvedProviderSelection, ThinkingParamPattern, UpstreamPolicy,
+    ProviderRegistryStore, ProviderSelectionResolver, ResolvedProviderSelection, UpstreamPolicy,
 };
 use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand,
@@ -25,7 +24,6 @@ use pony_agent_core::agent::headless::{
     self, ExitCode, HeadlessOptions, HeadlessOutcome, OutputFormat, PermissionMode, ResultEnvelope,
     ToolCallSummary, TurnStatus, UsageSummary, RESULT_ENVELOPE_SCHEMA,
 };
-use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::runtime::{
     compact_outcome_message, AgentRuntimeBuilder, TurnInput, TurnStreamEvent,
 };
@@ -90,36 +88,14 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
         _provider_id: Option<&str>,
         _model_id: Option<&str>,
     ) -> ResolvedProviderSelection {
-        let mut base = self.gateway_url.trim_end_matches('/').to_string();
-        if !base.ends_with("/v1") {
-            base.push_str("/v1");
-        }
-
-        ResolvedProviderSelection {
-            requested_name: "ponyllm".to_string(),
-            provider_name: "ponyllm".to_string(),
-            protocol: ProviderProtocol::OpenAiCompletions,
-            base_url: base,
-            auth_type: ProviderAuthType::Auto,
-            api_key_env_var: "PONYLLM_API_KEY".to_string(),
-            api_key: self.api_key.clone(),
-            model: self.model.clone(),
-            temperature: 0.2,
-            max_output_tokens: 4096,
-            reasoning_effort: None,
-            reasoning_budget_tokens: None,
-            capabilities: ProviderModelCapabilities {
-                supports_tools: true,
-                supports_streaming: true,
-                supports_image_input: true,
-                supports_reasoning: false,
-                context_window_tokens: Some(
-                    pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
-                ),
-                ..Default::default()
-            },
-            thinking_param_pattern: ThinkingParamPattern::None,
-        }
+        // 兜底形状单源在 `pony_agent_core::agent::config::gateway_fallback_selection`
+        // （与 TUI 共用）。注意本 bin 仍**恒走**网关（忽略 provider_id/model_id），
+        // 与 TUI 的「注册表优先」不同——该语义差异见 backlog B1795839268766，改动需人工裁决。
+        pony_agent_core::agent::config::gateway_fallback_selection(
+            &self.gateway_url,
+            self.api_key.clone(),
+            &self.model,
+        )
     }
 
     /// PA-172 §3.5 W1（生产注入闭环，无头形态）：上游时限/重试策略必须由注册表真实提供。
@@ -1198,22 +1174,14 @@ fn compose_final_prompt(args: &CliArgs, piped_input: Option<String>) -> Option<S
 /// - **上报门禁默认关闭**（`agentTraceReporting` 缺省 `false`），需用户在设置里显式开启
 ///   （写入 `~/.config/pony-agent/settings.json`）才会产生 span 与导出；关闭态零 span 零 egress；
 /// - 失败只降级为 `log_json("warn", ...)`：绝不 panic、绝不阻塞启动（trace 不可用不阻断业务）。
-/// CLI/TUI 的运行日志落盘路径（与 Tauri 的 `<app_data_dir>/logs/pony-agent.log` 同口径）。
+/// 可观测性装配前置说明（路径规则不在此处）。
 ///
 /// wave-59（契约 C1）：`jsonl`/`sse` 模式下 stdout 只承载事件，故本装配点先把 JSON
 /// 日志的缺省输出目标改道 stderr（`otel::log::set_stderr_output`）——text 模式行为不变；
 /// TUI 在自己的 stderr 成功重定向到运行日志后也调用同一开关（ADR 0063），Tauri 不调用。
 ///
-/// 取舍：**统一**落到 `logs/pony-agent.log`，不复用 TUI 既有的 `~/.pony-agent/tui-logs/` ——
-/// 后者是会话调试产物（整屏 dump），把结构化 JSON 运行日志混进去会让取证面变脏。
-/// 优先级：`dirs::state_dir()`（Linux = `$XDG_STATE_HOME` 或 `~/.local/state`）
-/// > `$HOME/.local/state`；都不可得时返回 `None`（仅 stdout，不阻塞启动）。
-/// 轮转（512KiB）/ 降级 / 脱敏全部复用 `otel::log` 既有实现。
-fn bin_log_file_path() -> Option<std::path::PathBuf> {
-    let base = dirs::state_dir()
-        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")))?;
-    Some(base.join("pony-agent").join("logs").join("pony-agent.log"))
-}
+/// 日志落盘路径取 `otel::log::bin_log_file_path()` 单源（轮转 512KiB / 降级 / 脱敏同样复用
+/// `otel::log` 既有实现），本文件不再自持一份路径规则。
 struct ObservabilityBootstrap;
 
 impl ObservabilityBootstrap {
@@ -1223,7 +1191,7 @@ impl ObservabilityBootstrap {
             pony_agent_core::agent::otel::log::set_stderr_output(true);
         }
         // Wave-5 P0-A：日志落盘（复用 otel::log 的 512KiB 轮转 / 降级 / 脱敏实现，不另写一套）。
-        if let Some(log_path) = bin_log_file_path() {
+        if let Some(log_path) = pony_agent_core::agent::otel::log::bin_log_file_path() {
             pony_agent_core::agent::otel::log::set_log_file_path(log_path);
         }
         // Wave-5 P0-B：仅 CLI/TUI 打开 core 侧 turn 失败上报（桌面端由前端 `TurnExecutionFailed`

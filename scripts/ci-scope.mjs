@@ -33,6 +33,17 @@ const GLOBAL_UNSAFE_PREFIXES = [
   "rust-toolchain.toml",
 ];
 
+// 纯前端面：只影响 Vite/TS 构建与 vitest，**不进入任何 Rust 编译单元**，
+// 故不需要 Rust 全量门（省下 Windows 近 30min + 三平台矩阵）。
+// 例外口径（必须仍判 needs_rust=true）：
+//   - `src/types/`：Rust serde 线缆键的 TS 镜像，由 `docs/contracts/ts-contract.snapshot.json`
+//     与 `npm run contract:check` 双向核对；
+//   - `docs/contracts/`：Rust conformance / ts_contract_snapshot 测试的事实源（见下方分支）。
+// 新增 src 子目录默认落在这里（fail-open 到「前端面」）——前端树里出现 Rust 依赖前的
+// 结构性前提是「它得先被 Rust 编译单元引用」，那种改动必然同时落在 crates/ 或 src-tauri/。
+const FRONTEND_ONLY_PREFIX = "src/";
+const FRONTEND_ONLY_EXCLUDE_PREFIXES = ["src/types/"];
+
 // 与 Rust 侧核心编译面（含其传递下游）对齐；用于保证旧契约 needs_rust 的保守边界。
 const FRONTEND_CODE_PREFIXES = [
   "src/",
@@ -74,6 +85,9 @@ const SAFE_PREFIXES = ["docs/", "backlog/", "openspec/", ".agents/notes/", ".age
 
 function isDocsOnlyFile(file) {
   if (UNSAFE_PREFIXES.some((p) => file.startsWith(p))) return false;
+  // docs/contracts 虽在 docs/ 下，却是 Rust 侧 conformance / ts_contract_snapshot 测试的
+  // 事实源（schema 与 ts-contract.snapshot.json 都被 include/读盘断言）⇒ 不算纯文档。
+  if (file.startsWith("docs/contracts/")) return false;
   if (SAFE_PREFIXES.some((p) => file.startsWith(p))) return true;
   // 根级 markdown（README.md / AGENTS.md…）是纯文案；子目录里未列入 SAFE 树的
   // markdown 一律保守判代码面——「看起来像文档」不是证据，路径白名单才是。
@@ -105,6 +119,16 @@ function classifyFiles(files) {
     if (isDocsOnlyFile(file)) {
       continue;
     }
+
+    // 纯前端面短路：不置 needs_rust，只置 needs_frontend。
+    if (
+      file.startsWith(FRONTEND_ONLY_PREFIX) &&
+      !FRONTEND_ONLY_EXCLUDE_PREFIXES.some((p) => file.startsWith(p))
+    ) {
+      needs_frontend = true;
+      continue;
+    }
+
     needs_rust = true;
 
     if (GLOBAL_UNSAFE_PREFIXES.some((p) => file.startsWith(p))) {
@@ -132,6 +156,14 @@ function classifyFiles(files) {
       needs_tui = true;
       needs_cli = true;
       needs_tauri = true;
+      continue;
+    }
+
+    // Rust 侧测试直接读 docs/contracts 下的 schema 与 ts-contract 快照
+    // （crates/pony-agent-core/tests/runtime_suite/{conformance,ts_contract_snapshot}.rs），
+    // 故它不属于「只改 docs/ 就不用跑 Rust」的安全面。
+    if (file.startsWith("docs/contracts/")) {
+      needs_core = true;
       continue;
     }
 
@@ -172,7 +204,7 @@ function classifyFiles(files) {
     needs_tui,
     needs_cli,
     needs_tauri,
-    scope_reason: needs_rust ? "code" : "docs-only",
+    scope_reason: needs_rust ? "code" : needs_frontend ? "frontend-only" : "docs-only",
   };
 }
 

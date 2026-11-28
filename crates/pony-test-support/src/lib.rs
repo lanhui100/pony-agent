@@ -1,8 +1,7 @@
 //! 共享测试夹具与内存存储桩（供工作区各 crate 集成测试复用，避免 `pony-agent-core`
 //! 通过 dev-dependencies 自引用 `test-support` 特性触发二次编译）。
 
-use pony_storage::session::{PersistedStore, SessionBackend, SessionStore};
-use std::fs;
+use pony_storage::session::SessionStore;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -36,52 +35,14 @@ pub fn exact_filter(module_path: &str, fn_name: &str) -> String {
     }
 }
 
-/// 纯内存会话后端（仅保留临时附件目录并在 Drop 时回收）。
-pub struct MemorySessionBackend {
-    attachment_root: PathBuf,
-}
-
-impl MemorySessionBackend {
-    pub fn new(attachment_root: PathBuf) -> Self {
-        Self { attachment_root }
-    }
-}
-
-impl SessionBackend for MemorySessionBackend {
-    fn load_store(&self) -> Option<PersistedStore> {
-        None
-    }
-
-    fn save_store(&self, _store: &PersistedStore) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn attachment_root(&self) -> Option<PathBuf> {
-        Some(self.attachment_root.clone())
-    }
-}
-
-impl Drop for MemorySessionBackend {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.attachment_root);
-    }
-}
-
-fn unique_test_session_dir(prefix: &str) -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_nanos();
-    std::env::temp_dir()
-        .join(format!("{prefix}-{stamp}"))
-        .join("sessions")
-}
-
 /// 构造隔离的内存会话存储（不落盘、不触及真实用户会话库）。
+///
+/// 内存后端本体只有一份：`pony_storage::session::SessionStore::memory_only()`
+/// （`#[doc(hidden)]`，仅测试形态使用）。本 crate 曾经自带一份逐字相同的
+/// `MemorySessionBackend` + 临时附件目录回收逻辑，2026-11-28 收敛到单源 —— 两份
+/// 各自演化时「测试是否真的不落盘」这条前提会悄悄分叉，而不会有任何用例变红。
 pub fn memory_only_session_store() -> SessionStore {
-    SessionStore::with_backend(Box::new(MemorySessionBackend::new(
-        unique_test_session_dir("pony-agent-memory-attachments"),
-    )))
+    SessionStore::memory_only()
 }
 
 /// 解析 `ponycli` 可执行文件路径（供跨 crate 集成测试复用，避免 `env!("CARGO_BIN_EXE_ponycli")` 编译期绑定）。

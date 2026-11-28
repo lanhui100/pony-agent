@@ -2,6 +2,9 @@
 
 Status: proposed
 
+> **人工已批准（2026-11-28）**：方案照此执行，阻塞解除；落地进度见 `backlog:B1795831358623 / B1795831359003`。
+> 本文件**仍留在 `proposed/`**直到代码在同一提交里落地——批准 ≠ 实现，提前迁 `implemented/` 即假闭环。
+
 ## Problem
 
 全仓静态搜索（`rg --fixed-strings`）与代码盘点显示，多次架构拆分与功能迭代（见 [2026-11-25-build-test-layering-and-workspace-crate-split.md](../../implemented/architecture/2026-11-25-build-test-layering-and-workspace-crate-split.md) 与 [2026-11-24-test-hygiene-and-cli-lib-extraction.md](../../implemented/architecture/2026-11-24-test-hygiene-and-cli-lib-extraction.md)）后，仓内累积了四类零生产消费者的遗留代码，持续污染文件规模/Clippy 基线、增加编译与维护认知负担：

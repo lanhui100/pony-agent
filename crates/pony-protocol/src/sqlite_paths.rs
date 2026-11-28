@@ -22,6 +22,23 @@ pub fn data_dir_override() -> Option<PathBuf> {
         .filter(|override_dir| !override_dir.as_os_str().is_empty())
 }
 
+/// 生产会话库路径（**不含**测试隔离分支）：`PONY_AGENT_DATA_DIR` > 平台数据目录 >
+/// `$HOME` > cwd，末级回退 `.`；统一追加 `PonyAgent/sessions.db`。
+///
+/// 独立成一个函数是为了让「路径规则」只有一份：`cfg(test)` 只作用于**正在编译的 crate**，
+/// 依赖方的测试构建拿到的是本 crate 的 `cfg(not(test))` 分支，因此测试隔离必须由各 crate
+/// 自己的薄包装决定（见 [`default_sqlite_path`] 与 `pony-storage` 的同名 re-export），
+/// 而目录选择规则不再各写一份。
+pub fn production_sqlite_path() -> PathBuf {
+    data_dir_override()
+        .or_else(dirs::data_local_dir)
+        .or_else(dirs::home_dir)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("PonyAgent")
+        .join("sessions.db")
+}
+
 /// Returns the default SQLite database path.
 pub fn default_sqlite_path() -> PathBuf {
     #[cfg(test)]
@@ -32,13 +49,7 @@ pub fn default_sqlite_path() -> PathBuf {
 
     #[cfg(not(test))]
     {
-        data_dir_override()
-            .or_else(dirs::data_local_dir)
-            .or_else(dirs::home_dir)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("PonyAgent")
-            .join("sessions.db")
+        production_sqlite_path()
     }
 }
 

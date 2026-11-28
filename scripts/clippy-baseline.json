@@ -4965,11 +4965,6 @@
         },
         {
           "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/agent/orchestration.rs",
-          "count": 28
-        },
-        {
-          "lint": "clippy::unwrap_used",
           "path": "crates/pony-agent-core/src/agent/recovery.rs",
           "count": 1
         },
@@ -10687,11 +10682,6 @@
         },
         {
           "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/agent/orchestration.rs",
-          "count": 28
-        },
-        {
-          "lint": "clippy::unwrap_used",
           "path": "crates/pony-agent-core/src/agent/recovery.rs",
           "count": 1
         },
@@ -16406,11 +16396,6 @@
           "lint": "clippy::unwrap_or_default",
           "path": "crates/pony-tools/src/governed_executor.rs",
           "count": 1
-        },
-        {
-          "lint": "clippy::unwrap_used",
-          "path": "crates/pony-agent-core/src/agent/orchestration.rs",
-          "count": 28
         },
         {
           "lint": "clippy::unwrap_used",

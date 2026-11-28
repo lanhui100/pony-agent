@@ -1,10 +1,151 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::agent::config::{ProviderRegistryStore, ResolvedProviderSelection};
+
+/// 团队编排进程内状态的**唯一持有者**（B1795831358484）。
+///
+/// 为什么是「一个结构体」而不是 11 个散落 `static Mutex`：
+/// - **单一归属**：此前团队/子代理状态分散在 11 个独立 `static Mutex`，读代码时无法回答
+///   「进程里到底有哪些团队状态、谁改它们」；散落声明必然伴随散落的锁中毒策略
+///   （`.unwrap()` 会 panic、`.ok()` 会静默吞掉状态、`PoisonError::into_inner` 又恢复 ——
+///   同一次 panic 在三条路径上结果不同）。
+/// - **锁策略单点**：所有字段经访问器取锁，中毒统一走 `into_inner` 恢复（团队状态是进程内
+///   缓存，恢复比让后续调用全部 panic 安全）。
+/// - **可整体复位**：状态聚成一个值后，[`reset_for_tests`] 才有唯一实现点。
+///
+/// **锁粒度刻意保持字段级**（不是一把大锁包住所有字段）：现有调用路径普遍「取 A、释放、
+/// 再取 B」，且 `is_driving()` 等判定会在取另一把锁之前被调用；合并成一把锁会把顺序依赖
+/// 变成自锁死。故本结构只收敛**归属与策略**，不改变并发语义。
+pub(crate) struct TeamState {
+    /// 正在被驱动的 target 集合（进程级单飞标记）。
+    ///
+    /// 语义：同一 target 同时最多只有**一个**驱动循环；后续 `send_message` 只入队，由在跑的
+    /// 循环消费（detached fan-out 会让同 target 并发多驱动、状态抖动）。
+    driving: Mutex<Option<HashSet<String>>>,
+    /// 被 `interrupt_agent` 标记为中断的 target（一次性消费）。
+    ///
+    /// 中断语义不能用「status == Inactive」表达：收口（turn 正常结束）同样会把状态置回
+    /// `Inactive`，两者混用会让驱动循环把「本轮刚结束」误判成「被中断」而提前退出，导致 turn
+    /// 在途期间到达的消息滞留（C10-A2 缺陷）。故用独立的一次性标记。
+    interrupted: Mutex<Option<HashSet<String>>>,
+    tasks: Mutex<Option<HashMap<String, TeamTaskItem>>>,
+    teammates: Mutex<Option<HashMap<String, TeammateMember>>>,
+    /// 每个 Teammate 对应的优先级双端信箱（双端队列支持普通排队 `push_back` 与插队
+    /// `push_front`）。
+    inboxes: Mutex<Option<HashMap<String, VecDeque<QueuedMessage>>>>,
+    /// 每个 teammate target 派生时解析出的 provider 选择（驱动其 turn 时消费）。
+    ///
+    /// 与名册/信箱同源：派生即登记，重生（同名 target 再次派生）即覆盖；无条目 ⇒ 旧行为
+    /// （`run_turn_in`，由引擎自行解析 provider）。
+    teammate_providers: Mutex<Option<HashMap<String, ResolvedProviderSelection>>>,
+    /// 每个 teammate target **最近一次成功 turn** 产生的子会话 id。
+    ///
+    /// 纯进程内可见性缓存（不改 session schema、不新建子会话）：`drive_teammate_turn_in` 在队友
+    /// turn 成功返回后写入；TUI `/agents` 面板据此展示会话尾号，并允许进入该队友子会话。
+    teammate_sessions: Mutex<Option<HashMap<String, String>>>,
+    /// 每个 teammate target 派生于哪个宿主会话（`None` 值不写入）。
+    ///
+    /// 为什么需要：`teammates` / `tasks` 是进程全局表，同一进程里的多个 TUI 会话会互相看到
+    /// 对方的队友与任务（跨会话串话）。本表记录归属，TUI 侧据此过滤。
+    teammate_host_sessions: Mutex<Option<HashMap<String, String>>>,
+    /// 每个 team task 由哪个宿主会话创建（`None` 值不写入）。
+    team_task_host_sessions: Mutex<Option<HashMap<String, String>>>,
+    /// 每个 teammate target 派发时捕获的**宿主 turn traceparent**。
+    ///
+    /// 用途：`drive_teammate_turn_in`（在后台线程/另一 turn 上执行）已经离开宿主 turn 的活动
+    /// 上下文，必须靠这份快照把宿主 trace 延续到队友 turn（否则队友 trace 会另起 root）。
+    teammate_traceparents: Mutex<Option<HashMap<String, String>>>,
+    subagent_runs: Mutex<Option<VecDeque<SubagentRunRecord>>>,
+}
+
+impl TeamState {
+    const fn new() -> Self {
+        Self {
+            driving: Mutex::new(None),
+            interrupted: Mutex::new(None),
+            tasks: Mutex::new(None),
+            teammates: Mutex::new(None),
+            inboxes: Mutex::new(None),
+            teammate_providers: Mutex::new(None),
+            teammate_sessions: Mutex::new(None),
+            teammate_host_sessions: Mutex::new(None),
+            team_task_host_sessions: Mutex::new(None),
+            teammate_traceparents: Mutex::new(None),
+            subagent_runs: Mutex::new(None),
+        }
+    }
+
+    fn driving(&self) -> MutexGuard<'_, Option<HashSet<String>>> {
+        recover(&self.driving)
+    }
+
+    fn interrupted(&self) -> MutexGuard<'_, Option<HashSet<String>>> {
+        recover(&self.interrupted)
+    }
+
+    fn tasks(&self) -> MutexGuard<'_, Option<HashMap<String, TeamTaskItem>>> {
+        recover(&self.tasks)
+    }
+
+    fn teammates(&self) -> MutexGuard<'_, Option<HashMap<String, TeammateMember>>> {
+        recover(&self.teammates)
+    }
+
+    fn inboxes(&self) -> MutexGuard<'_, Option<HashMap<String, VecDeque<QueuedMessage>>>> {
+        recover(&self.inboxes)
+    }
+
+    fn teammate_providers(
+        &self,
+    ) -> MutexGuard<'_, Option<HashMap<String, ResolvedProviderSelection>>> {
+        recover(&self.teammate_providers)
+    }
+
+    fn teammate_sessions(&self) -> MutexGuard<'_, Option<HashMap<String, String>>> {
+        recover(&self.teammate_sessions)
+    }
+
+    fn teammate_host_sessions(&self) -> MutexGuard<'_, Option<HashMap<String, String>>> {
+        recover(&self.teammate_host_sessions)
+    }
+
+    fn team_task_host_sessions(&self) -> MutexGuard<'_, Option<HashMap<String, String>>> {
+        recover(&self.team_task_host_sessions)
+    }
+
+    fn teammate_traceparents(&self) -> MutexGuard<'_, Option<HashMap<String, String>>> {
+        recover(&self.teammate_traceparents)
+    }
+
+    fn subagent_runs(&self) -> MutexGuard<'_, Option<VecDeque<SubagentRunRecord>>> {
+        recover(&self.subagent_runs)
+    }
+
+    /// 把**本实例**复位为「全新未建表」。
+    ///
+    /// 语义是整值替换（`*self = TeamState::new()`）而不是逐字段置 `None`：逐字段写法要求
+    /// 未来每加一张表都记得来补一行，漏一行的后果是同进程测试互染（最难查的一类失败）；
+    /// 整值替换天然覆盖新增字段，零遗漏。
+    ///
+    /// 为什么挂在**实例**上而不是全局函数：清空的是进程级状态，全局清零函数一旦被某条用例
+    /// 调用，就会与 `cargo test --lib` 同进程并行运行的其他用例互染。挂在实例上则只有
+    /// 局部 `TeamState::new()` 能被复位，生产路径（`static TEAM_STATE`，不可变借用）不暴露该能力。
+    #[cfg(test)]
+    fn reset_fields(&mut self) {
+        *self = TeamState::new();
+    }
+}
+
+/// 锁中毒策略的**唯一实现点**：团队状态是进程内缓存，恢复比 panic 安全。
+fn recover<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+static TEAM_STATE: TeamState = TeamState::new();
 
 // ==========================================
 // 1. Subagent (子智能体) 契约
@@ -83,7 +224,7 @@ pub struct TeammateMember {
     pub role: String,
     pub status: TeammateStatus,
     pub description: String,
-    /// 读时快照：是否有后台驱动线程正在跑该 target（真值源是 `DRIVING` 单飞标记）。
+    /// 读时快照：是否有后台驱动线程正在跑该 target（真值源是 [`TeamState::driving`] 单飞标记）。
     ///
     /// 只由 `list_agents` 在返回前填充；成员表里恒为 `false`，不参与持久化语义。
     #[serde(default)]
@@ -167,28 +308,21 @@ pub const DELIVERY_STATE_NOT_STARTED: &str = "not_started";
 /// 派生阶段投递报错（成员已登记，但初始 prompt 没进收件箱）。
 pub const DELIVERY_STATE_FAILED: &str = "failed";
 
-/// Wave-61 C10.1：正在被驱动的 target 集合（进程级单飞标记）。
-///
-/// 语义：同一 target 同时最多只有**一个**驱动循环；后续 `send_message` 只入队，
-/// 由在跑的循环消费（detached fan-out 会让同 target 并发多驱动、状态抖动）。
-static DRIVING: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
-
 /// 单飞标记的 RAII 句柄：**任何**退出路径（成功 / 引擎错误 / panic 展开）都会清除标记。
 struct DrivingGuard(String);
 
 impl Drop for DrivingGuard {
     fn drop(&mut self) {
-        if let Ok(mut lock) = DRIVING.lock() {
-            if let Some(set) = lock.as_mut() {
-                set.remove(&self.0);
-            }
+        let mut lock = TEAM_STATE.driving();
+        if let Some(set) = lock.as_mut() {
+            set.remove(&self.0);
         }
     }
 }
 
 /// 尝试占据 target 的单飞标记；返回 `Some(guard)` 表示本次调用负责驱动。
 fn begin_driving(target: &str) -> Option<DrivingGuard> {
-    let mut lock = DRIVING.lock().ok()?;
+    let mut lock = TEAM_STATE.driving();
     let set = lock.get_or_insert_with(std::collections::HashSet::new);
     if !set.insert(target.to_string()) {
         return None;
@@ -196,49 +330,34 @@ fn begin_driving(target: &str) -> Option<DrivingGuard> {
     Some(DrivingGuard(target.to_string()))
 }
 
-/// Wave-61 C10-A2 配套：被 `interrupt_agent` 标记为中断的 target（一次性消费）。
-///
-/// 中断语义不能用「status == Inactive」表达：收口（turn 正常结束）同样会把状态置回
-/// `Inactive`，两者混用会让驱动循环把「本轮刚结束」误判成「被中断」而提前退出，
-/// 导致 turn 在途期间到达的消息滞留（C10-A2 缺陷）。故用独立的一次性标记。
-static INTERRUPTED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
-
 /// 标记某队友被中断（由 `interrupt_agent` 调用）。
 fn mark_interrupted(target: &str) {
-    if let Ok(mut lock) = INTERRUPTED.lock() {
-        lock.get_or_insert_with(std::collections::HashSet::new)
-            .insert(target.to_string());
-    }
+    TEAM_STATE
+        .interrupted()
+        .get_or_insert_with(std::collections::HashSet::new)
+        .insert(target.to_string());
 }
 
 /// 消费中断标记：返回 `true` 表示该 target 已被中断且标记 hereby 清除。
 fn take_interrupted(target: &str) -> bool {
-    INTERRUPTED
-        .lock()
-        .ok()
-        .and_then(|mut lock| lock.as_mut().map(|set| set.remove(target)))
-        .unwrap_or(false)
+    TEAM_STATE
+        .interrupted()
+        .as_mut()
+        .is_some_and(|set| set.remove(target))
 }
 
 /// 该 target 是否已有驱动在跑（观测用）。
 pub fn is_driving(target: &str) -> bool {
-    DRIVING
-        .lock()
-        .ok()
-        .and_then(|lock| {
-            lock.as_ref()
-                .map(|set| set.contains(target))
-        })
-        .unwrap_or(false)
+    TEAM_STATE
+        .driving()
+        .as_ref()
+        .is_some_and(|set| set.contains(target))
 }
 
 /// Wave-61 C10.2：把整批消息按**原顺序**放回收件箱队首（失败补偿，绝不丢消息）。
 fn requeue_messages(target: &str, messages: &[QueuedMessage]) {
-    let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
-    if inbox_lock.is_none() {
-        *inbox_lock = Some(HashMap::new());
-    }
-    let inbox_map = inbox_lock.as_mut().unwrap();
+    let mut inbox_lock = TEAM_STATE.inboxes();
+    let inbox_map = inbox_lock.get_or_insert_with(HashMap::new);
     let deque = inbox_map
         .entry(target.to_string())
         .or_insert_with(VecDeque::new);
@@ -450,44 +569,23 @@ fn wait_on_team_activity(activity: &TeamActivity, baseline: u64, timeout: Durati
     }
 }
 
-static TEAM_TASKS: Mutex<Option<HashMap<String, TeamTaskItem>>> = Mutex::new(None);
-
 /// 子代理 turn 超时（NFR 基线：subagent_turn_timeout_ms=120000）。
 const SUBAGENT_TURN_TIMEOUT_MS: u64 = 120_000;
 /// 名册里的 Lead 伪成员 target（与 `list_agents` / `spawn_teammate` 建队时同源）。
 const LEAD_TARGET: &str = "lead";
-static TEAMMATES: Mutex<Option<HashMap<String, TeammateMember>>> = Mutex::new(None);
-/// 每个 Teammate 对应的优先级双端信箱 (双端队列支持普通排队 push_back 与插队 push_front)
-static TEAMMATE_INBOXES: Mutex<Option<HashMap<String, VecDeque<QueuedMessage>>>> = Mutex::new(None);
-/// W2：每个 teammate target 派生时解析出的 provider 选择（驱动其 turn 时消费）。
-///
-/// 与名册/信箱同源：派生即登记，重生（同名 target 再次派生）即覆盖；无条目 ⇒ 旧行为
-/// （`run_turn_in`，由引擎自行解析 provider）。
-static TEAMMATE_PROVIDERS: Mutex<Option<HashMap<String, ResolvedProviderSelection>>> =
-    Mutex::new(None);
-
 /// W2：登记某 teammate 实际生效的 provider 选择（派生阶段调用）。
 fn set_teammate_provider(target: &str, selection: ResolvedProviderSelection) {
-    let mut lock = TEAMMATE_PROVIDERS.lock().unwrap();
-    if lock.is_none() {
-        *lock = Some(HashMap::new());
-    }
-    lock.as_mut()
-        .unwrap()
+    TEAM_STATE
+        .teammate_providers()
+        .get_or_insert_with(HashMap::new)
         .insert(target.to_string(), selection);
 }
 
 /// W2：读取某 teammate 的 provider 选择（驱动阶段调用）；无登记 ⇒ `None`（旧行为）。
 pub(crate) fn teammate_provider_selection(target: &str) -> Option<ResolvedProviderSelection> {
-    let lock = TEAMMATE_PROVIDERS.lock().unwrap();
+    let lock = TEAM_STATE.teammate_providers();
     lock.as_ref()?.get(target).cloned()
 }
-
-/// W3：每个 teammate target **最近一次成功 turn** 产生的子会话 id。
-///
-/// 纯进程内可见性缓存（不改 session schema、不新建子会话）：`drive_teammate_turn_in` 在队友
-/// turn 成功返回后写入；TUI `/agents` 面板据此展示会话尾号，并允许进入该队友子会话。
-static TEAMMATE_SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 /// W3：登记 teammate 最近成功 turn 的子会话 id（`lead` 与空 id 一律忽略）。
 ///
@@ -498,12 +596,9 @@ fn set_teammate_session(target: &str, session_id: &str) {
     if target == LEAD_TARGET || session_id.is_empty() {
         return;
     }
-    let mut lock = TEAMMATE_SESSIONS.lock().unwrap();
-    if lock.is_none() {
-        *lock = Some(HashMap::new());
-    }
-    lock.as_mut()
-        .unwrap()
+    TEAM_STATE
+        .teammate_sessions()
+        .get_or_insert_with(HashMap::new)
         .insert(target.to_string(), session_id.to_string());
 }
 
@@ -515,7 +610,7 @@ pub fn teammate_session_id(target: &str) -> Option<String> {
     if target == LEAD_TARGET {
         return None;
     }
-    let lock = TEAMMATE_SESSIONS.lock().unwrap();
+    let lock = TEAM_STATE.teammate_sessions();
     lock.as_ref()?.get(&target).cloned()
 }
 
@@ -528,7 +623,7 @@ pub fn teammate_target_for_session(session_id: &str) -> Option<String> {
     if session_id.is_empty() {
         return None;
     }
-    let lock = TEAMMATE_SESSIONS.lock().ok()?;
+    let lock = TEAM_STATE.teammate_sessions();
     let map = lock.as_ref()?;
     map.iter()
         .find(|(_, registered)| registered.as_str() == session_id)
@@ -539,15 +634,6 @@ pub fn teammate_target_for_session(session_id: &str) -> Option<String> {
 // 1a. 会话隔离：teammate / team task 的宿主会话归属
 // ==========================================
 
-/// 每个 teammate target 派生于哪个宿主会话（`None` 值不写入）。
-///
-/// 为什么需要：`TEAMMATES` / `TEAM_TASKS` 是进程全局静态表，同一进程里的多个 TUI 会话
-/// 会互相看到对方的队友与任务（跨会话串话）。本表记录归属，TUI 侧据此过滤。
-static TEAMMATE_HOST_SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
-
-/// 每个 team task 由哪个宿主会话创建（`None` 值不写入）。
-static TEAM_TASK_HOST_SESSIONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
-
 /// 登记 teammate 的宿主会话归属（派生阶段调用；空 host 忽略）。
 pub fn set_teammate_host_session(target: &str, host_session_id: &str) {
     let target = normalize_target(target);
@@ -555,9 +641,7 @@ pub fn set_teammate_host_session(target: &str, host_session_id: &str) {
     if target.is_empty() || host_session_id.is_empty() || target == LEAD_TARGET {
         return;
     }
-    let mut lock = TEAMMATE_HOST_SESSIONS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut lock = TEAM_STATE.teammate_host_sessions();
     let map = lock.get_or_insert_with(HashMap::new);
     map.insert(target, host_session_id.to_string());
 }
@@ -565,7 +649,7 @@ pub fn set_teammate_host_session(target: &str, host_session_id: &str) {
 /// 读取 teammate 的宿主会话；无登记 ⇒ `None`（旧记录 / 库层直调）。
 pub fn teammate_host_session(target: &str) -> Option<String> {
     let target = normalize_target(target);
-    let lock = TEAMMATE_HOST_SESSIONS.lock().ok()?;
+    let lock = TEAM_STATE.teammate_host_sessions();
     lock.as_ref()?.get(&target).cloned()
 }
 
@@ -589,16 +673,14 @@ pub fn set_team_task_host_session(task_id: &str, host_session_id: &str) {
     if task_id.is_empty() || host_session_id.is_empty() {
         return;
     }
-    let mut lock = TEAM_TASK_HOST_SESSIONS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut lock = TEAM_STATE.team_task_host_sessions();
     let map = lock.get_or_insert_with(HashMap::new);
     map.insert(task_id.to_string(), host_session_id.to_string());
 }
 
 /// 某宿主会话名下的 teammate 名册（过滤掉伪成员 `lead` 与其他会话的队友）。
 ///
-/// 与 [`list_agents`] 同源（同一 `TEAMMATES` 表与 `is_driving` 判定），只是多一道归属过滤。
+/// 与 [`list_agents`] 同源（同一 `TEAM_STATE.teammates` 表与 `is_driving` 判定），只是多一道归属过滤。
 pub fn list_agents_for_session(host_session_id: &str) -> Result<ListAgentsResult, String> {
     let host_session_id = host_session_id.trim();
     if host_session_id.is_empty() {
@@ -614,32 +696,23 @@ pub fn list_agents_for_session(host_session_id: &str) -> Result<ListAgentsResult
 
 /// 某宿主会话名下的 team task 列表（过滤掉其他会话创建的任务）。
 ///
-/// 与 [`team_task_list`] 同源（同一 `TEAM_TASKS` 表与 `deleted` 过滤），只多一道归属过滤。
+/// 与 [`team_task_list`] 同源（同一 `TEAM_STATE.tasks` 表与 `deleted` 过滤），只多一道归属过滤。
 pub fn team_task_list_for_session(host_session_id: &str) -> Result<TeamTaskListResult, String> {
     let host_session_id = host_session_id.trim();
     if host_session_id.is_empty() {
         return team_task_list();
     }
     let mut list = team_task_list()?;
-    let lock = TEAM_TASK_HOST_SESSIONS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = TEAM_STATE.team_task_host_sessions();
     if let Some(map) = lock.as_ref() {
-        list.tasks.retain(|task| {
-            map.get(&task.task_id).map(String::as_str) == Some(host_session_id)
-        });
+        list.tasks
+            .retain(|task| map.get(&task.task_id).map(String::as_str) == Some(host_session_id));
     } else {
         // 没有任何归属登记：严格隔离 —— 不把无主任务串给任意会话。
         list.tasks.clear();
     }
     Ok(list)
 }
-
-/// W3 trace：每个 teammate target 派发时捕获的**宿主 turn traceparent**。
-///
-/// 用途：`drive_teammate_turn_in`（在后台线程/另一 turn 上执行）已经离开宿主 turn 的
-/// 活动上下文，必须靠这份快照把宿主 trace 延续到队友 turn（否则队友 trace 会另起 root）。
-static TEAMMATE_TRACEPARENTS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 /// W3 trace：登记 target 的宿主 traceparent（`lead`/空值/非法值忽略 —— fail-closed 保持 root）。
 fn set_teammate_traceparent(target: &str, traceparent: Option<&str>) {
@@ -649,12 +722,9 @@ fn set_teammate_traceparent(target: &str, traceparent: Option<&str>) {
     if target == LEAD_TARGET {
         return;
     }
-    let mut lock = TEAMMATE_TRACEPARENTS.lock().unwrap();
-    if lock.is_none() {
-        *lock = Some(HashMap::new());
-    }
-    lock.as_mut()
-        .unwrap()
+    TEAM_STATE
+        .teammate_traceparents()
+        .get_or_insert_with(HashMap::new)
         .insert(target.to_string(), traceparent.to_string());
 }
 
@@ -663,7 +733,7 @@ pub(crate) fn teammate_traceparent(target: &str) -> Option<String> {
     if target == LEAD_TARGET {
         return None;
     }
-    let lock = TEAMMATE_TRACEPARENTS.lock().unwrap();
+    let lock = TEAM_STATE.teammate_traceparents();
     lock.as_ref()?.get(target).cloned()
 }
 
@@ -717,14 +787,8 @@ pub struct SubagentRunRecord {
 /// 运行中记录永不淘汰（否则「在跑的子代理」会从界面上凭空消失）。
 const MAX_SUBAGENT_RUNS: usize = 64;
 
-static SUBAGENT_RUNS: Mutex<Option<VecDeque<SubagentRunRecord>>> = Mutex::new(None);
-
 /// 登记一次「开始运行」的子代理（入口预分配 id 之后立即调用）。
-pub fn register_subagent_run(
-    session_id: &str,
-    description: &str,
-    parent_session_id: Option<&str>,
-) {
+pub fn register_subagent_run(session_id: &str, description: &str, parent_session_id: Option<&str>) {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return;
@@ -740,9 +804,7 @@ pub fn register_subagent_run(
         started_at_ms: now_unix_ms(),
         error: None,
     };
-    let mut lock = SUBAGENT_RUNS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut lock = TEAM_STATE.subagent_runs();
     let runs = lock.get_or_insert_with(VecDeque::new);
     runs.push_back(record);
     // 淘汰：只在超过上限时移除**最早的终态**记录；全是运行中则保留（宁可多留几行）。
@@ -757,18 +819,12 @@ pub fn register_subagent_run(
 }
 
 /// 更新一次子代理运行的终态（`Completed` / `Failed`）；未知 id 静默忽略。
-pub fn finish_subagent_run(
-    session_id: &str,
-    status: SubagentRunStatus,
-    error: Option<&str>,
-) {
+pub fn finish_subagent_run(session_id: &str, status: SubagentRunStatus, error: Option<&str>) {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return;
     }
-    let mut lock = SUBAGENT_RUNS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut lock = TEAM_STATE.subagent_runs();
     let Some(runs) = lock.as_mut() else {
         return;
     };
@@ -788,9 +844,7 @@ pub fn rebind_subagent_run(from_session_id: &str, to_session_id: &str) {
     if from.is_empty() || to.is_empty() || from == to {
         return;
     }
-    let mut lock = SUBAGENT_RUNS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut lock = TEAM_STATE.subagent_runs();
     let Some(runs) = lock.as_mut() else {
         return;
     };
@@ -808,9 +862,7 @@ pub fn list_subagent_runs_for_session(parent_session_id: &str) -> Vec<SubagentRu
     if target.is_empty() {
         return Vec::new();
     }
-    let lock = SUBAGENT_RUNS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = TEAM_STATE.subagent_runs();
     lock.as_ref()
         .map(|runs| {
             runs.iter()
@@ -897,7 +949,9 @@ pub fn subagent_in_workspace_with_context(
     let gate = if engine.gates_concurrency_internally() {
         None
     } else {
-        Some(crate::agent::subagent_runtime::subagent_gate_enter(&args.prompt)?)
+        Some(crate::agent::subagent_runtime::subagent_gate_enter(
+            &args.prompt,
+        )?)
     };
     // P2：会话 id 只在这里生成一次，引擎必须复用；后台路径无 outcome 时也返回同一个 id。
     let subagent_id = format!("subagent-{}", Uuid::new_v4());
@@ -1088,7 +1142,7 @@ pub fn spawn_teammate_in_workspace(
 ///
 /// 与 [`spawn_teammate_in_workspace`] 的唯一差别是**先解析 provider 选择**：
 /// - 解析失败 ⇒ 直接 `Err`，**不登记成员、不投递、不起后台驱动**（失败前置）；
-/// - 解析成功 ⇒ 登记成员后把选择写入 [`TEAMMATE_PROVIDERS`]，后续
+/// - 解析成功 ⇒ 登记成员后把选择写入 [`TeamState::teammate_providers`]，后续
 ///   [`drive_teammate_turn_in`] 驱动该队友时按同一选择建栈；
 /// - `host_selection=None` 且 `args` 无覆盖 ⇒ legacy（不写选择，引擎自行解析）。
 pub fn spawn_teammate_in_workspace_with_provider(
@@ -1211,10 +1265,10 @@ fn register_teammate(
         last_error: None,
     };
 
-    // 1. 在独立的作用域内先完成 TEAMMATES 登记，立即释放锁
+    // 1. 在独立的作用域内先完成 `TEAM_STATE.teammates` 登记，立即释放锁
     {
-        let mut lock = TEAMMATES.lock().unwrap();
-        if lock.is_none() {
+        let mut lock = TEAM_STATE.teammates();
+        let map = lock.get_or_insert_with(|| {
             let mut map = HashMap::new();
             map.insert(
                 "lead".to_string(),
@@ -1224,22 +1278,18 @@ fn register_teammate(
                     role: "lead".to_string(),
                     status: TeammateStatus::Running,
                     description: "Team Lead Orchestrator".to_string(),
-                is_driving: false,
-                last_error: None,
+                    is_driving: false,
+                    last_error: None,
                 },
             );
-            *lock = Some(map);
-        }
-        let map = lock.as_mut().unwrap();
+            map
+        });
         if map.contains_key(&target) {
             return Err(format!(
                 "teammate `{target}` already exists; names are not silently replaced"
             ));
         }
-        let teammate_count = map
-            .keys()
-            .filter(|key| key.as_str() != LEAD_TARGET)
-            .count();
+        let teammate_count = map.keys().filter(|key| key.as_str() != LEAD_TARGET).count();
         if teammate_count >= MAX_TEAM_MEMBERS {
             return Err(format!(
                 "team member limit {MAX_TEAM_MEMBERS} reached; interrupt an existing teammate first"
@@ -1252,11 +1302,8 @@ fn register_teammate(
     //    Wave-61 C7：同时为 `lead` 建箱 —— 队友 turn 的回执与错误都要投递到 lead 收件箱，
     //    `lead` 是建队时必定存在的伪成员（与 `list_agents` 同源），其收件箱必须同源初始化。
     {
-        let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
-        if inbox_lock.is_none() {
-            *inbox_lock = Some(HashMap::new());
-        }
-        let inbox_map = inbox_lock.as_mut().unwrap();
+        let mut inbox_lock = TEAM_STATE.inboxes();
+        let inbox_map = inbox_lock.get_or_insert_with(HashMap::new);
         inbox_map
             .entry(LEAD_TARGET.to_string())
             .or_insert_with(VecDeque::new);
@@ -1285,7 +1332,7 @@ fn register_teammate(
 }
 
 pub fn list_agents() -> Result<ListAgentsResult, String> {
-    let mut lock = TEAMMATES.lock().unwrap();
+    let mut lock = TEAM_STATE.teammates();
     if lock.is_none() {
         let mut map = HashMap::new();
         map.insert(
@@ -1296,14 +1343,18 @@ pub fn list_agents() -> Result<ListAgentsResult, String> {
                 role: "lead".to_string(),
                 status: TeammateStatus::Running,
                 description: "Team Lead Orchestrator".to_string(),
-            is_driving: false,
-            last_error: None,
+                is_driving: false,
+                last_error: None,
             },
         );
         *lock = Some(map);
     }
-    let mut agents: Vec<TeammateMember> = lock.as_ref().unwrap().values().cloned().collect();
-    // 锁已在此作用域结束后释放（下面 `drop`），避免与 `DRIVING` 形成嵌套。
+    let mut agents: Vec<TeammateMember> = lock
+        .get_or_insert_with(HashMap::new)
+        .values()
+        .cloned()
+        .collect();
+    // 锁已在此作用域结束后释放（下面 `drop`），避免与 `TEAM_STATE.driving` 形成嵌套。
     drop(lock);
     agents.sort_by(|left, right| left.target.cmp(&right.target));
     for member in &mut agents {
@@ -1359,18 +1410,15 @@ pub fn send_message_in_workspace(
 /// `loop { drain → 空则退出 → run_turn → 投递回执 }`，直到收件箱为空才结束；失败由
 /// [`drive_teammate_turn_in`] 做「放回队首 + 置 Inactive + 投递错误回执」补偿后返回 Err，
 /// 本循环随即停止（把剩下的工作留给下一次 `send_message` 触发）。
-fn drive_loop_in(
-    target: &str,
-    workspace_root: Option<&std::path::Path>,
-) -> Result<(), String> {
+fn drive_loop_in(target: &str, workspace_root: Option<&std::path::Path>) -> Result<(), String> {
     // Wave-61 C10-A2：以「收件箱为空」为**唯一**正常退出条件。
-    // - 成功：处理完一批后继续 drain —— turn 在途期间新到的消息（因 `DRIVING` 单飞不会
+    // - 成功：处理完一批后继续 drain —— turn 在途期间新到的消息（因 `TEAM_STATE.driving` 单飞不会
     //   另起驱动）由此被同一循环消费，绝不滞留；
     // - 失败：`drive_teammate_turn_in` 已按 C10.2 把整批原序放回队首并置 `Inactive`，
     //   这里立即 `?` 退出（避免 `subagent_busy` / `prompt_too_large` 这类确定性失败自旋），
     //   消息留在收件箱等待下一次 `send_message` 或外部驱动；
     // - 中断：`take_interrupted` 命中时单批驱动返回 `Ok(None)`，循环随之结束；
-    // - `DRIVING` 标记由调用方持有的 `DrivingGuard` 清除，覆盖成功/失败/panic 全部路径。
+    // - `TEAM_STATE.driving` 标记由调用方持有的 `DrivingGuard` 清除，覆盖成功/失败/panic 全部路径。
     loop {
         match drive_teammate_turn_in(target, workspace_root)? {
             Some(_reply) => continue,
@@ -1398,9 +1446,9 @@ pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, Stri
     let mode = args.mode.unwrap_or(MessageDeliveryMode::Queue);
     let msg_id = format!("msg-{}", Uuid::new_v4());
 
-    // 1. 检验目标并更新状态，立即释放 TEAMMATES 锁
+    // 1. 检验目标并更新状态，立即释放 `TEAM_STATE.teammates` 锁
     {
-        let mut lock = TEAMMATES.lock().unwrap();
+        let mut lock = TEAM_STATE.teammates();
         let map = lock.as_mut().ok_or_else(|| "No active team".to_string())?;
         let member = map
             .get_mut(&args.target)
@@ -1428,14 +1476,13 @@ pub fn enqueue_message(args: SendMessageArgs) -> Result<(SendMessageResult, Stri
         }
     }
 
-    // 2. 独立获取 TEAMMATE_INBOXES 锁并推入队列，绝不与 TEAMMATES 双重嵌套
+    // 2. 独立获取 `TEAM_STATE.inboxes` 锁并推入队列，绝不与 `TEAM_STATE.teammates` 双重嵌套
     let len = {
-        let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
-        if inbox_lock.is_none() {
-            *inbox_lock = Some(HashMap::new());
-        }
-        let inbox_map = inbox_lock.as_mut().unwrap();
-        let deque = inbox_map.entry(args.target.clone()).or_insert_with(VecDeque::new);
+        let mut inbox_lock = TEAM_STATE.inboxes();
+        let inbox_map = inbox_lock.get_or_insert_with(HashMap::new);
+        let deque = inbox_map
+            .entry(args.target.clone())
+            .or_insert_with(VecDeque::new);
 
         let queued_msg = QueuedMessage {
             id: msg_id.clone(),
@@ -1495,11 +1542,9 @@ fn set_teammate_error(target: &str, error: Option<String>) {
 /// （`wait_agent` 的边沿等待依赖它）。
 fn update_teammate(target: &str, mutate: impl FnOnce(&mut TeammateMember) -> bool) {
     let mut changed = false;
-    if let Ok(mut lock) = TEAMMATES.lock() {
-        if let Some(map) = lock.as_mut() {
-            if let Some(member) = map.get_mut(target) {
-                changed = mutate(member);
-            }
+    if let Some(map) = TEAM_STATE.teammates().as_mut() {
+        if let Some(member) = map.get_mut(target) {
+            changed = mutate(member);
         }
     }
     if changed {
@@ -1507,15 +1552,12 @@ fn update_teammate(target: &str, mutate: impl FnOnce(&mut TeammateMember) -> boo
     }
 }
 
-/// 成员读时快照：克隆成员表里的登记项，并按 `DRIVING` 单飞标记填充 `is_driving`。
+/// 成员读时快照：克隆成员表里的登记项，并按 `TEAM_STATE.driving` 单飞标记填充 `is_driving`。
 ///
-/// 锁序：先取 `TEAMMATES` 克隆后**释放**，再取 `DRIVING` —— 与
-/// `interrupt_agent_as`「先 is_driving 再 TEAMMATES」的既有顺序一起保证永不嵌套。
+/// 锁序：先取 `TEAM_STATE.teammates` 克隆后**释放**，再取 `TEAM_STATE.driving` —— 与
+/// `interrupt_agent_as`「先 is_driving 再 teammates」的既有顺序一起保证永不嵌套。
 fn teammate_snapshot(target: &str) -> Option<TeammateMember> {
-    let mut member = TEAMMATES
-        .lock()
-        .ok()
-        .and_then(|lock| lock.as_ref().and_then(|map| map.get(target).cloned()))?;
+    let mut member = TEAM_STATE.teammates().as_ref()?.get(target).cloned()?;
     member.is_driving = is_driving(target);
     Some(member)
 }
@@ -1543,12 +1585,12 @@ pub fn interrupt_agent_as(
     // - 在跑：置一次性中断标记，驱动循环会在下一次 drain 边界前停下（C7.4）；
     // - 空闲：**只**翻状态位，不写标记 —— 否则残留标记会被下一次 `send_message` 派生的
     //   驱动在检查点 #1 误消费，导致消息滞留、成员永久卡 `Running`。
-    // 说明：`is_driving` 使用独立的 `DRIVING` 锁，且在取 `TEAMMATES` 锁**之前**调用，
+    // 说明：`is_driving` 使用独立的 `driving` 字段锁，且在取 `teammates` 字段锁**之前**调用，
     // 避免与驱动线程形成锁嵌套（无锁序反转）。
     let inflight_drive = is_driving(&args.target);
 
     let (prev, new_status) = {
-        let mut lock = TEAMMATES.lock().unwrap();
+        let mut lock = TEAM_STATE.teammates();
         let map = lock.as_mut().ok_or_else(|| "No active team".to_string())?;
         let member = map
             .get_mut(&args.target)
@@ -1579,16 +1621,17 @@ pub fn drain_inbox(args: ReadInboxArgs) -> Result<ReadInboxResult, String> {
     // 建箱），此时惰性建空箱并返回空结果，而不是把「团队健在但某人还没收过信」误报成错误。
     // 完全不认识的 target 仍保持原错误语义（fail-closed，不放宽到任意字符串）。
     let known_member = {
-        // 独立作用域持 TEAMMATES 锁，绝不与收件箱锁嵌套（防锁序反转）。
-        TEAMMATES
-            .lock()
-            .ok()
-            .and_then(|lock| lock.as_ref().map(|map| map.contains_key(&args.target)))
-            .unwrap_or(false)
+        // 独立作用域持 `teammates` 字段锁，绝不与收件箱锁嵌套（防锁序反转）。
+        TEAM_STATE
+            .teammates()
+            .as_ref()
+            .is_some_and(|map| map.contains_key(&args.target))
     };
 
-    let mut inbox_lock = TEAMMATE_INBOXES.lock().unwrap();
-    let inbox_map = inbox_lock.as_mut().ok_or_else(|| "No inboxes".to_string())?;
+    let mut inbox_lock = TEAM_STATE.inboxes();
+    let inbox_map = inbox_lock
+        .as_mut()
+        .ok_or_else(|| "No inboxes".to_string())?;
     if !inbox_map.contains_key(&args.target) {
         if !known_member {
             return Err(format!("No inbox for {}", args.target));
@@ -1615,13 +1658,10 @@ pub fn drain_inbox(args: ReadInboxArgs) -> Result<ReadInboxResult, String> {
 /// 供外部观察者（测试 / UI / 观测）等待"收件箱已空"而**不**像 [`drain_inbox`] 那样
 /// 破坏性消费消息 —— 后者会把驱动循环应消费的消息抢走（C7d 的竞态根因）。
 pub fn inbox_pending_len(target: &str) -> usize {
-    TEAMMATE_INBOXES
-        .lock()
-        .ok()
-        .and_then(|lock| {
-            lock.as_ref()
-                .and_then(|map| map.get(target).map(|deque| deque.len()))
-        })
+    TEAM_STATE
+        .inboxes()
+        .as_ref()
+        .and_then(|map| map.get(target).map(|deque| deque.len()))
         .unwrap_or(0)
 }
 
@@ -1720,7 +1760,11 @@ fn validate_dependencies(
 }
 
 /// 依赖环检测：从候选任务出发，沿 blocked_by 深度优先，回到自身即为环。
-fn has_dependency_cycle(map: &HashMap<String, TeamTaskItem>, task_id: &str, deps: &[String]) -> bool {
+fn has_dependency_cycle(
+    map: &HashMap<String, TeamTaskItem>,
+    task_id: &str,
+    deps: &[String],
+) -> bool {
     fn visit(
         map: &HashMap<String, TeamTaskItem>,
         root: &str,
@@ -1758,8 +1802,7 @@ fn has_dependency_cycle(map: &HashMap<String, TeamTaskItem>, task_id: &str, deps
 fn task_ready(map: &HashMap<String, TeamTaskItem>, task: &TeamTaskItem) -> bool {
     task.blocked_by.iter().all(|dep| {
         map.get(dep)
-            .map(|blocker| blocker.status == "completed")
-            .unwrap_or(false)
+            .is_some_and(|blocker| blocker.status == "completed")
     })
 }
 
@@ -1794,11 +1837,8 @@ pub fn team_task_create_as(
     let write_scopes = normalize_write_scopes(args.write_scopes.unwrap_or_default())?;
     let blocked_by = args.blocked_by.unwrap_or_default();
 
-    let mut lock = TEAM_TASKS.lock().unwrap();
-    if lock.is_none() {
-        *lock = Some(HashMap::new());
-    }
-    let map = lock.as_mut().unwrap();
+    let mut lock = TEAM_STATE.tasks();
+    let map = lock.get_or_insert_with(HashMap::new);
 
     let active = map.values().filter(|task| task.status != "deleted").count();
     if active >= MAX_TEAM_TASKS {
@@ -1829,9 +1869,11 @@ pub fn team_task_create_as(
 }
 
 pub fn team_task_get(args: TeamTaskGetArgs) -> Result<TeamTaskItem, String> {
-    let lock = TEAM_TASKS.lock().unwrap();
+    let lock = TEAM_STATE.tasks();
     let map = lock.as_ref().ok_or_else(|| "No tasks exist".to_string())?;
-    let task = map.get(&args.task_id).ok_or_else(|| format!("Task not found: {}", args.task_id))?;
+    let task = map
+        .get(&args.task_id)
+        .ok_or_else(|| format!("Task not found: {}", args.task_id))?;
     Ok(task.clone())
 }
 
@@ -1844,7 +1886,7 @@ pub fn team_task_update_as(
     args: TeamTaskUpdateArgs,
     caller: &TeamCaller,
 ) -> Result<TeamTaskItem, String> {
-    let mut lock = TEAM_TASKS.lock().unwrap();
+    let mut lock = TEAM_STATE.tasks();
     let map = lock.as_mut().ok_or_else(|| "No tasks exist".to_string())?;
     let snapshot = map
         .get(&args.task_id)
@@ -1971,12 +2013,9 @@ pub fn wait_agent(args: WaitAgentArgs) -> Result<WaitAgentResult, String> {
 }
 
 /// 以显式调用者身份等待团队边沿：调用者自己不计入「活跃同伴」。
-pub fn wait_agent_as(
-    args: WaitAgentArgs,
-    caller: &TeamCaller,
-) -> Result<WaitAgentResult, String> {
+pub fn wait_agent_as(args: WaitAgentArgs, caller: &TeamCaller) -> Result<WaitAgentResult, String> {
     let has_active_peer = {
-        let lock = TEAMMATES.lock().unwrap();
+        let lock = TEAM_STATE.teammates();
         if let Some(ref map) = *lock {
             map.iter().any(|(target, member)| {
                 target != "lead"
@@ -2071,7 +2110,8 @@ pub fn drive_teammate_turn_in(
     for msg in &result.messages {
         combined_prompt.push_str(&format!("- {}\n", msg.content));
     }
-    combined_prompt.push_str("\nProcess these messages and provide your response or action report.");
+    combined_prompt
+        .push_str("\nProcess these messages and provide your response or action report.");
 
     // 如果挂载了真实模型引擎，则执行真实 Turn（C8：以父会话工作区根建栈）。
     let engine = crate::agent::subagent_runtime::subagent_engine();
@@ -2156,7 +2196,7 @@ pub fn drive_teammate_turn_in(
     );
     set_teammate_error(target, None);
 
-    // 将产出的答复作为回执发送给 lead（经既有 TEAMMATE_INBOXES 投递，`drain_inbox` 可取）。
+    // 将产出的答复作为回执发送给 lead（经既有 `TEAM_STATE.inboxes` 投递，`drain_inbox` 可取）。
     if target != "lead" {
         let _ = send_message(SendMessageArgs {
             target: "lead".to_string(),
@@ -2169,7 +2209,7 @@ pub fn drive_teammate_turn_in(
 }
 
 pub fn team_task_list() -> Result<TeamTaskListResult, String> {
-    let lock = TEAM_TASKS.lock().unwrap();
+    let lock = TEAM_STATE.tasks();
     // D3 修复：软删除（delete ⇒ status="deleted"）任务不得再出现在看板 ——
     // TUI 投影对未知状态一律降级 Pending，泄漏的 deleted 任务会伪装成待办
     //（2026-11-08 live 实证：两条已删除探针任务仍列在 /tasks）。
@@ -2291,14 +2331,19 @@ mod team_activity_and_task_tests {
         assert!(validate_dependencies(&map, "task-c", &["task-missing".to_string()]).is_err());
 
         // task-b → task-a 无环；task-a → task-b 成环。
-        assert!(!has_dependency_cycle(&map, "task-c", &["task-b".to_string()]));
-        assert!(has_dependency_cycle(&map, "task-a", &["task-b".to_string()]));
+        assert!(!has_dependency_cycle(
+            &map,
+            "task-c",
+            &["task-b".to_string()]
+        ));
+        assert!(has_dependency_cycle(
+            &map,
+            "task-a",
+            &["task-b".to_string()]
+        ));
 
         let mut ready_map: HashMap<String, TeamTaskItem> = HashMap::new();
-        ready_map.insert(
-            "task-a".to_string(),
-            task("task-a", "completed", None, &[]),
-        );
+        ready_map.insert("task-a".to_string(), task("task-a", "completed", None, &[]));
         assert!(task_ready(
             &ready_map,
             &task("task-b", "pending", None, &["task-a"])
@@ -2353,7 +2398,10 @@ mod subagent_and_host_session_tests {
 
         let listed = list_subagent_runs_for_session(mine);
         let ids: Vec<&str> = listed.iter().map(|run| run.session_id.as_str()).collect();
-        assert!(ids.contains(&"subagent-mine-1"), "本会话子代理必须可见：{ids:?}");
+        assert!(
+            ids.contains(&"subagent-mine-1"),
+            "本会话子代理必须可见：{ids:?}"
+        );
         assert!(
             !ids.contains(&"subagent-other-1"),
             "别的会话的子代理不得串入：{ids:?}"
@@ -2362,11 +2410,7 @@ mod subagent_and_host_session_tests {
             !ids.contains(&"subagent-orphan"),
             "无宿主归属的子代理不归任何会话：{ids:?}"
         );
-        assert_eq!(
-            listed[0].status,
-            SubagentRunStatus::Running,
-            "登记即运行中"
-        );
+        assert_eq!(listed[0].status, SubagentRunStatus::Running, "登记即运行中");
 
         // 空宿主会话 ⇒ 空列表（不把「无归属」读成「全量」）。
         assert!(list_subagent_runs_for_session("  ").is_empty());
@@ -2409,7 +2453,7 @@ mod subagent_and_host_session_tests {
     #[test]
     fn teammate_host_session_round_trips_and_resolves_team_caller() {
         let host = "host-team-owner";
-        // 队友子会话 → 宿主会话的反查依赖 TEAMMATE_SESSIONS（登记 teammate 时写入）。
+        // 队友子会话 → 宿主会话的反查依赖 `TEAM_STATE.teammate_sessions`（登记 teammate 时写入）。
         set_teammate_session("worker-host-test", "team-worker-host-test-0001");
         set_teammate_host_session("worker-host-test", host);
 
@@ -2445,7 +2489,7 @@ mod subagent_and_host_session_tests {
             last_error: None,
         };
         {
-            let mut lock = TEAMMATES.lock().unwrap();
+            let mut lock = TEAM_STATE.teammates();
             let map = lock.get_or_insert_with(HashMap::new);
             map.insert(member.target.clone(), member.clone());
             member.target = "agent-host-other".to_string();
@@ -2457,7 +2501,10 @@ mod subagent_and_host_session_tests {
 
         let mine = list_agents_for_session(host).expect("名册读取必须成功");
         let targets: Vec<&str> = mine.agents.iter().map(|m| m.target.as_str()).collect();
-        assert!(targets.contains(&"agent-host-test"), "本会话队友必须可见：{targets:?}");
+        assert!(
+            targets.contains(&"agent-host-test"),
+            "本会话队友必须可见：{targets:?}"
+        );
         assert!(
             !targets.contains(&"agent-host-other"),
             "别的会话队友不得串入：{targets:?}"
@@ -2488,10 +2535,82 @@ mod subagent_and_host_session_tests {
 
         let listed = team_task_list_for_session(host).expect("任务列表必须成功");
         let ids: Vec<&str> = listed.tasks.iter().map(|t| t.task_id.as_str()).collect();
-        assert!(ids.contains(&mine.task_id.as_str()), "本会话任务必须可见：{ids:?}");
+        assert!(
+            ids.contains(&mine.task_id.as_str()),
+            "本会话任务必须可见：{ids:?}"
+        );
         assert!(
             !ids.contains(&foreign.task_id.as_str()),
             "别的会话任务不得串入：{ids:?}"
         );
+    }
+}
+
+/// `TeamState` 作为「唯一持有者」的自证：复位真的把**每一张表**都清掉。
+///
+/// 用**局部实例**而不是进程全局状态：全局 `TEAM_STATE` 在 `cargo test --lib` 里被同进程
+/// 并行用例共享，任何全局清零都会造成互染；局部实例既验证了复位覆盖面，又不碰生产状态。
+#[cfg(test)]
+mod team_state_holder_tests {
+    use super::*;
+
+    #[test]
+    fn reset_fields_clears_every_team_state_field() {
+        // Arrange：把全部表写成非空（用字段访问器直写，避免依赖其他公开 API 的副作用）。
+        let mut state = TeamState::new();
+        state
+            .driving()
+            .get_or_insert_with(HashSet::new)
+            .insert("reset-target".to_string());
+        state
+            .interrupted()
+            .get_or_insert_with(HashSet::new)
+            .insert("reset-target".to_string());
+        state.tasks().get_or_insert_with(HashMap::new);
+        state.teammates().get_or_insert_with(HashMap::new);
+        state.inboxes().get_or_insert_with(HashMap::new);
+        state.teammate_providers().get_or_insert_with(HashMap::new);
+        state.teammate_sessions().get_or_insert_with(HashMap::new);
+        state
+            .teammate_host_sessions()
+            .get_or_insert_with(HashMap::new);
+        state
+            .team_task_host_sessions()
+            .get_or_insert_with(HashMap::new);
+        state
+            .teammate_traceparents()
+            .get_or_insert_with(HashMap::new);
+        state.subagent_runs().get_or_insert_with(VecDeque::new);
+
+        // Act
+        state.reset_fields();
+
+        // Assert：全部字段回到 `None`（复位语义是「回到未建表」，不是「清成空表」）。
+        assert!(state.driving().is_none(), "driving 必须清空");
+        assert!(state.interrupted().is_none(), "interrupted 必须清空");
+        assert!(state.tasks().is_none(), "tasks 必须清空");
+        assert!(state.teammates().is_none(), "teammates 必须清空");
+        assert!(state.inboxes().is_none(), "inboxes 必须清空");
+        assert!(
+            state.teammate_providers().is_none(),
+            "teammate_providers 必须清空"
+        );
+        assert!(
+            state.teammate_sessions().is_none(),
+            "teammate_sessions 必须清空"
+        );
+        assert!(
+            state.teammate_host_sessions().is_none(),
+            "teammate_host_sessions 必须清空"
+        );
+        assert!(
+            state.team_task_host_sessions().is_none(),
+            "team_task_host_sessions 必须清空"
+        );
+        assert!(
+            state.teammate_traceparents().is_none(),
+            "teammate_traceparents 必须清空"
+        );
+        assert!(state.subagent_runs().is_none(), "subagent_runs 必须清空");
     }
 }

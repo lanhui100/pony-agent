@@ -2,6 +2,9 @@
 
 Status: proposed
 
+> **人工已批准（2026-11-28）**：方案照此执行，阻塞解除；落地进度见 `backlog:B1795831358054`。
+> 本文件**仍留在 `proposed/`**直到代码在同一提交里落地——批准 ≠ 实现，提前迁 `implemented/` 即假闭环。
+
 ## Problem
 
 在 [2026-11-25-build-test-layering-and-workspace-crate-split.md](../../implemented/architecture/2026-11-25-build-test-layering-and-workspace-crate-split.md) 完成 6 层 10-crate 拆分后，名义上作为纯契约/类型底座的 L0 `pony-protocol` 仍残留大量运行时、全局可变状态与反向服务定位器：

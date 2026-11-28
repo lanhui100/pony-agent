@@ -3445,8 +3445,68 @@
         },
         {
           "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/ask.rs",
+          "count": 12
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/capability.rs",
+          "count": 9
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/diagnostics.rs",
+          "count": 4
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/goal.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/history.rs",
+          "count": 14
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/host.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/plan.rs",
+          "count": 8
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/session.rs",
+          "count": 7
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/settings.rs",
+          "count": 8
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/system.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/turn.rs",
+          "count": 14
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/workspace.rs",
+          "count": 21
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
           "path": "src-tauri/src/lib.rs",
-          "count": 128
+          "count": 1
         },
         {
           "lint": "clippy::needless_pass_by_value",
@@ -4420,7 +4480,7 @@
         },
         {
           "lint": "clippy::too_many_arguments",
-          "path": "src-tauri/src/lib.rs",
+          "path": "src-tauri/src/commands/host.rs",
           "count": 1
         },
         {
@@ -4760,8 +4820,13 @@
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "src-tauri/src/lib.rs",
-          "count": 2
+          "path": "src-tauri/src/commands/diagnostics.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::uninlined_format_args",
+          "path": "src-tauri/src/commands/goal.rs",
+          "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
@@ -4905,8 +4970,13 @@
         },
         {
           "lint": "clippy::unnecessary_wraps",
-          "path": "src-tauri/src/lib.rs",
-          "count": 2
+          "path": "src-tauri/src/commands/settings.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::unnecessary_wraps",
+          "path": "src-tauri/src/commands/system.rs",
+          "count": 1
         },
         {
           "lint": "clippy::unnested_or_patterns",
@@ -9352,8 +9422,68 @@
         },
         {
           "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/ask.rs",
+          "count": 12
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/capability.rs",
+          "count": 9
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/diagnostics.rs",
+          "count": 4
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/goal.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/history.rs",
+          "count": 14
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/host.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/plan.rs",
+          "count": 8
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/session.rs",
+          "count": 7
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/settings.rs",
+          "count": 8
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/system.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/turn.rs",
+          "count": 14
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/workspace.rs",
+          "count": 21
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
           "path": "src-tauri/src/lib.rs",
-          "count": 128
+          "count": 1
         },
         {
           "lint": "clippy::needless_pass_by_value",
@@ -10337,7 +10467,7 @@
         },
         {
           "lint": "clippy::too_many_arguments",
-          "path": "src-tauri/src/lib.rs",
+          "path": "src-tauri/src/commands/host.rs",
           "count": 1
         },
         {
@@ -10677,8 +10807,13 @@
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "src-tauri/src/lib.rs",
-          "count": 2
+          "path": "src-tauri/src/commands/diagnostics.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::uninlined_format_args",
+          "path": "src-tauri/src/commands/goal.rs",
+          "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
@@ -10837,8 +10972,13 @@
         },
         {
           "lint": "clippy::unnecessary_wraps",
-          "path": "src-tauri/src/lib.rs",
-          "count": 2
+          "path": "src-tauri/src/commands/settings.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::unnecessary_wraps",
+          "path": "src-tauri/src/commands/system.rs",
+          "count": 1
         },
         {
           "lint": "clippy::unnested_or_patterns",
@@ -15279,8 +15419,68 @@
         },
         {
           "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/ask.rs",
+          "count": 12
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/capability.rs",
+          "count": 9
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/diagnostics.rs",
+          "count": 4
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/goal.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/history.rs",
+          "count": 14
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/host.rs",
+          "count": 3
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/plan.rs",
+          "count": 8
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/session.rs",
+          "count": 7
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/settings.rs",
+          "count": 8
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/system.rs",
+          "count": 2
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/turn.rs",
+          "count": 14
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
+          "path": "src-tauri/src/commands/workspace.rs",
+          "count": 21
+        },
+        {
+          "lint": "clippy::needless_pass_by_value",
           "path": "src-tauri/src/lib.rs",
-          "count": 128
+          "count": 1
         },
         {
           "lint": "clippy::needless_pass_by_value",
@@ -16244,7 +16444,7 @@
         },
         {
           "lint": "clippy::too_many_arguments",
-          "path": "src-tauri/src/lib.rs",
+          "path": "src-tauri/src/commands/host.rs",
           "count": 1
         },
         {
@@ -16584,8 +16784,13 @@
         },
         {
           "lint": "clippy::uninlined_format_args",
-          "path": "src-tauri/src/lib.rs",
-          "count": 2
+          "path": "src-tauri/src/commands/diagnostics.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::uninlined_format_args",
+          "path": "src-tauri/src/commands/goal.rs",
+          "count": 1
         },
         {
           "lint": "clippy::uninlined_format_args",
@@ -16729,8 +16934,13 @@
         },
         {
           "lint": "clippy::unnecessary_wraps",
-          "path": "src-tauri/src/lib.rs",
-          "count": 2
+          "path": "src-tauri/src/commands/settings.rs",
+          "count": 1
+        },
+        {
+          "lint": "clippy::unnecessary_wraps",
+          "path": "src-tauri/src/commands/system.rs",
+          "count": 1
         },
         {
           "lint": "clippy::unnested_or_patterns",
