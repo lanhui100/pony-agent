@@ -14,8 +14,7 @@
 //!   权限档位默认 `read_only`（fail-closed）。
 
 use pony_agent_core::agent::config::{
-    ProviderModelCapabilities, ProviderRegistryStore, ProviderSelectionResolver,
-    ResolvedProviderSelection, ThinkingParamPattern, UpstreamPolicy,
+    ProviderRegistryStore, ProviderSelectionResolver, ResolvedProviderSelection, UpstreamPolicy,
 };
 use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand,
@@ -25,7 +24,6 @@ use pony_agent_core::agent::headless::{
     self, ExitCode, HeadlessOptions, HeadlessOutcome, OutputFormat, PermissionMode, ResultEnvelope,
     ToolCallSummary, TurnStatus, UsageSummary, RESULT_ENVELOPE_SCHEMA,
 };
-use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
 use pony_agent_core::agent::runtime::{
     compact_outcome_message, AgentRuntimeBuilder, TurnInput, TurnStreamEvent,
 };
@@ -90,36 +88,14 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
         _provider_id: Option<&str>,
         _model_id: Option<&str>,
     ) -> ResolvedProviderSelection {
-        let mut base = self.gateway_url.trim_end_matches('/').to_string();
-        if !base.ends_with("/v1") {
-            base.push_str("/v1");
-        }
-
-        ResolvedProviderSelection {
-            requested_name: "ponyllm".to_string(),
-            provider_name: "ponyllm".to_string(),
-            protocol: ProviderProtocol::OpenAiCompletions,
-            base_url: base,
-            auth_type: ProviderAuthType::Auto,
-            api_key_env_var: "PONYLLM_API_KEY".to_string(),
-            api_key: self.api_key.clone(),
-            model: self.model.clone(),
-            temperature: 0.2,
-            max_output_tokens: 4096,
-            reasoning_effort: None,
-            reasoning_budget_tokens: None,
-            capabilities: ProviderModelCapabilities {
-                supports_tools: true,
-                supports_streaming: true,
-                supports_image_input: true,
-                supports_reasoning: false,
-                context_window_tokens: Some(
-                    pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
-                ),
-                ..Default::default()
-            },
-            thinking_param_pattern: ThinkingParamPattern::None,
-        }
+        // 兜底形状单源在 `pony_agent_core::agent::config::gateway_fallback_selection`
+        // （与 TUI 共用）。注意本 bin 仍**恒走**网关（忽略 provider_id/model_id），
+        // 与 TUI 的「注册表优先」不同——该语义差异见 backlog B1795839268766，改动需人工裁决。
+        pony_agent_core::agent::config::gateway_fallback_selection(
+            &self.gateway_url,
+            self.api_key.clone(),
+            &self.model,
+        )
     }
 
     /// PA-172 §3.5 W1（生产注入闭环，无头形态）：上游时限/重试策略必须由注册表真实提供。

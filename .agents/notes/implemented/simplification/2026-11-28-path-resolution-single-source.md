@@ -1,4 +1,4 @@
-# Agent Note: 路径类平行实现收敛为单源（sqlite 路径与 CLI/TUI 日志路径）
+# Agent Note: 路径与配置类平行实现收敛为单源（sqlite 路径 / 日志路径 / 网关 key 与兜底选择 / 内存会话后端）
 
 Status: implemented
 
@@ -31,6 +31,17 @@ Status: implemented
    512KiB 轮转、降级与脱敏），`tui.rs` 与 `cli/main.rs` 的私有副本删除，两处调用点改为直接调用单源。
    TUI 的 `ObservabilityBootstrap` 注释保留其**语义契约**（settings > env > 默认端点、上报默认关闭），
    但不再复述路径规则。
+3. **网关 API Key 解析链单源化**：`pony_provider::config::gateway_api_key_from_env_or_legacy_config()`
+   固化 `PONYLLM_API_KEY` > `PONY_API_KEY` > 遗留 `~/.config/ponyllm/ponyllm.toml` 的读取顺序；
+   `tui::build_control_plane` 与 `pony-cli` 的 `CliArgs::default` 改调它。
+4. **网关兜底选择形状单源化**：`pony_provider::config::gateway_fallback_selection(gateway_url, api_key, model)`
+   固化「注册表未命中时的兜底形状」（base_url 补 `/v1`、固定 `ponyllm` 命名、温度/输出上限、能力位）。
+   两处 `DynamicProviderResolver` 的 `resolve_provider_selection` 改调它，**选择策略仍各自持有**：
+   TUI 是注册表优先（wave-36b 修过 401），CLI 当前恒走网关。二者语义差异已单独立项
+   `B1795839268766`（`--provider` 旗标被 CLI 忽略），改语义需人工裁决，本记录不动它。
+5. **内存会话后端单源化**：`pony_test_support::memory_only_session_store()` 改为直接返回
+   `pony_storage::session::SessionStore::memory_only()`，删除测试支持 crate 里逐字重复的
+   `MemorySessionBackend` 实现与临时附件目录回收逻辑。
 
 ## Alternatives considered
 
@@ -38,12 +49,21 @@ Status: implemented
 - **方案 B：整段 re-export `pony_protocol::sqlite_paths::default_sqlite_path`**。落选：`cfg(test)` 不跨 crate 传播，storage 单元测试会读写真实用户库 —— 这是既有 `PONY_AGENT_DATA_DIR` 旁路与 `unique_test_sqlite_path()` 存在的全部理由，退回去等于重开"测试污染生产库"的缺陷。
 - **方案 C：把 `pony-storage` 的路径解析改成显式入参（每个调用点传 `PathBuf`）**。落选：`default_sqlite_path()` 有 6 个生产调用点（`SessionStore::new` / `open_lazy` / `startup_meta` / `goal` / tui `persistence_status`），改成显式入参是把"数据放哪"这条规则复制 6 份，正好与本次目标相反。
 - **方案 D：把日志路径规则放进 `pony-protocol`**。落选：`pony-protocol` 是纯契约/类型层（见 `2026-11-28-protocol-decouple-and-bridge-inversion.md` 对它的净化方向），日志落盘是运行期 IO 关注点，归 `pony-observability` 更贴合分层；且该模块已持有日志 sink 的全部实现。
+- **方案 E：把网关 key 解析与兜底选择形状整体搬进一个新 crate（如 `pony-gateway`）**。落选：两者都只服务"注册表未命中"这一条退路，逻辑不到 100 行；新 crate 要付 `Cargo.toml`、workspace member、发布面同步三份成本，Deletion Test 不过（删掉新 crate 复杂度不会扩散，因为本来就只有两个调用点）。
+- **方案 F：顺手把 CLI 的 resolver 改成「注册表优先」，与 TUI 完全一致**。落选：这是 CLI 的**对外行为变更**（`--provider` 从被忽略变成生效、默认 base_url 从硬编码网关变成注册表配置），属常载禁区的"需要产品拍板的业务行为"，且已有证据表明 TUI 侧改这条曾修过 401 事故。按红线只做形状单源化 + 登记 `B1795839268766` 待裁决。
+- **方案 G：把 `MemorySessionBackend` 保留在 `pony-test-support`，让 `pony-storage` 反依赖测试支持 crate**。落选：生产 crate 反依赖测试 crate 会形成倒置依赖；正确方向是测试支持 crate 复用生产的 `#[doc(hidden)]` 测试形态入口。
 
 ## Removed surface
 
 - `crates/pony-storage/src/sqlite_session/sqlite_paths.rs`：删除 `data_dir_override()` 与
   `unique_test_sqlite_path()` 的本地实现（改为单源引用）。
 - `crates/pony-tui/src/tui.rs`、`crates/pony-cli/src/main.rs`：删除私有 `fn bin_log_file_path()`。
+- `crates/pony-tui/src/tui.rs`：删除 `PONYLLM_API_KEY` 三级别解析的内联实现（改调 provider 单源）。
+- `crates/pony-cli/src/lib.rs`：同上（`CliArgs::default` 内的内联实现）。
+- `crates/pony-tui/src/tui.rs` / `crates/pony-cli/src/main.rs`：删除两处 `ResolvedProviderSelection`
+  字面量构造（改调 `gateway_fallback_selection`）。
+- `crates/pony-test-support/src/lib.rs`：删除 `MemorySessionBackend` 结构体及其 `SessionBackend` /
+  `Drop` 实现、`unique_test_session_dir` 辅助函数。
 
 检索收据（确认无外部消费者、只有这两处私有副本）：
 
@@ -56,6 +76,14 @@ crates/pony-observability/src/otel/spool.rs:173
 crates/pony-observability/src/otel/spool.rs:175
 crates/pony-observability/src/frontend_diagnostics.rs:514
 crates/pony-tools/src/workspace_hotloader.rs:780
+$ rg -n 'ponyllm\.toml' crates src-tauri          # 收敛后
+crates/pony-provider/src/config.rs:586
+$ rg -n 'MemorySessionBackend' crates           # 收敛后
+crates/pony-storage/src/session/file_backend.rs:14
+crates/pony-storage/src/session/file_backend.rs:239
+crates/pony-storage/src/session/file_backend.rs:253
+crates/pony-storage/src/session/store.rs:7
+crates/pony-storage/src/session/store.rs:371
 ```
 
 ## Reintroduction conditions
@@ -73,10 +101,15 @@ crates/pony-tools/src/workspace_hotloader.rs:780
 ## Consequences
 
 - 改"数据放哪"只需动 `pony-protocol/src/sqlite_paths.rs`；改"日志放哪"只需动
-  `pony-observability/src/otel/log.rs::bin_log_file_path`。
-- 净删除约 75 行重复实现（`sqlite_paths.rs` 59→31 行、两处 `bin_log_file_path` 各 6 行），
-  新增 57 行（含单源函数与解释 `cfg` 不跨 crate 的注释）。
+  `pony-observability/src/otel/log.rs::bin_log_file_path`；改"网关 key 从哪读"或"兜底选择长什么样"
+  只需动 `pony-provider/src/config.rs`。
+- 三个提交合计净删除 ~100 行重复实现；新增的单源函数都带「为什么不能整段 re-export / 为什么只抽形状不抽策略」的注释。
 - 该收敛的机械看守仍是 review 级（无门禁能判"两个函数是否语义重复"）；上面的 `rg` 判定式已写进
   本文，可作为评审时的一次性检查。
-- 同批未收敛、已单独立项的部分：`DynamicProviderResolver` 在 TUI 与 CLI 的**语义**差异（TUI 注册表优先、
-  CLI 硬编码 `ponyllm`）涉及 CLI 对外行为，按红线留待人工裁决，见 `[NEEDS_HUMAN]` 记录。
+- **刻意不收敛的部分**：五处 `reqwest::Client::builder()`（`tui.rs` 更新检查 5s / `updater.rs`
+  控制面与下载两套超时 / `ponysentry/client.rs` 上报超时）差异全在**参数**（超时、user-agent、
+  redirect policy）。抽一个参数转发工厂只是浅模块（Deletion Test：删掉它复杂度不会扩散，只是把
+  参数搬个位置），故保留各自构造。
+- **同批未收敛、已单独立项**：`DynamicProviderResolver` 在 TUI 与 CLI 的**选择策略**差异
+  （TUI 注册表优先、CLI 恒走网关并忽略 `--provider`）涉及 CLI 对外行为，按红线留待人工裁决，
+  见 `B1795839268766`（`[DISCOVERED]`）。

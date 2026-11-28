@@ -8,10 +8,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod capabilities;
+/// 网关兜底面的单源：key 解析链与「注册表未命中」时的选择形状。
+///
+/// 拆成子模块是为了让 `config.rs` 守住文件规模棘轮（≤3000 行），同时把
+/// "只能有一个家"的两个函数物理隔开——它们各自只有一处实现，调用点在 TUI 与 CLI。
+mod gateway_defaults;
 pub use capabilities::{
     ProviderCapabilityPreset, ProviderModelCapabilities, ProviderReasoningEffort,
 };
 pub use capabilities::{undeclared_model_capabilities, CAPABILITY_CATALOG};
+pub use gateway_defaults::{gateway_api_key_from_env_or_legacy_config, gateway_fallback_selection};
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const LEGACY_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1200;

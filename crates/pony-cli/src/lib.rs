@@ -73,28 +73,9 @@ pub struct CliArgs {
 
 impl Default for CliArgs {
     fn default() -> Self {
-        let env_key = std::env::var("PONYLLM_API_KEY")
-            .or_else(|_| std::env::var("PONY_API_KEY"))
-            .ok()
-            .or_else(|| {
-                // 读取本地 ~/.config/ponyllm/ponyllm.toml 中配置的 api_key
-                let cfg_path = dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".config")
-                    .join("ponyllm")
-                    .join("ponyllm.toml");
-                let content = std::fs::read_to_string(cfg_path).ok()?;
-                content.lines().find_map(|line| {
-                    let trimmed = line.trim();
-                    if !trimmed.starts_with("api_key") {
-                        return None;
-                    }
-                    trimmed
-                        .split('=')
-                        .nth(1)
-                        .map(|val| val.trim().trim_matches('"').to_string())
-                })
-            });
+        // 网关 key 解析链（env > env 别名 > 遗留 ponyllm.toml）单源在 pony-provider：
+        // 与 TUI 共用同一条链，避免两个 bin 同机同配置拿到不同的 key。
+        let env_key = pony_agent_core::agent::config::gateway_api_key_from_env_or_legacy_config();
 
         let env_gateway = std::env::var("PONYLLM_GATEWAY_URL")
             .unwrap_or_else(|_| "http://10.42.0.67:8080".to_string());

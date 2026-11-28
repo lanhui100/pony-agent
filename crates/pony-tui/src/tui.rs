@@ -14,9 +14,8 @@ use crossterm::{
 use std::io::Write;
 use pony_agent_core::agent::ask_persistence::AskLifecycleState;
 use pony_agent_core::agent::config::{
-    ProviderCapabilityPreset, ProviderModelCapabilities, ProviderModelConfig, ProviderReasoningEffort,
-    ProviderRegistryStore, ProviderRegistryView, ProviderSelectionResolver, ResolvedProviderSelection,
-    ThinkingParamPattern, UpstreamPolicy,
+    ProviderCapabilityPreset, ProviderModelConfig, ProviderReasoningEffort, ProviderRegistryStore,
+    ProviderRegistryView, ProviderSelectionResolver, ResolvedProviderSelection, UpstreamPolicy,
 };
 use pony_agent_core::agent::control_plane::{
     HostControlPlane, HostControlPlaneBuilder, StartTurnStreamCommand, StopTurnCommand,
@@ -43,7 +42,7 @@ use pony_agent_core::agent::orchestration::{
     list_subagent_runs_for_session, team_task_list, team_task_list_for_session,
     teammate_session_id, TeamTaskItem, TeammateMember, TeammateStatus,
 };
-use pony_agent_core::agent::provider::{ProviderAuthType, ProviderProtocol};
+use pony_agent_core::agent::provider::ProviderProtocol;
 use pony_agent_core::agent::todo::{TodoItem, TodoStatus as StoreTodoStatus};
 use pony_agent_core::agent::runtime::{
     compact_outcome_message, AgentRuntimeBuilder, ManualCompactionOutcome, SessionTitleOutcome,
@@ -3562,36 +3561,13 @@ impl ProviderSelectionResolver for DynamicProviderResolver {
             return self.registry.resolve_selection(None, model_id);
         }
 
-        let mut base = self.gateway_url.trim_end_matches('/').to_string();
-        if !base.ends_with("/v1") {
-            base.push_str("/v1");
-        }
-
-        ResolvedProviderSelection {
-            requested_name: "ponyllm".to_string(),
-            provider_name: "ponyllm".to_string(),
-            protocol: ProviderProtocol::OpenAiCompletions,
-            base_url: base,
-            auth_type: ProviderAuthType::Auto,
-            api_key_env_var: "PONYLLM_API_KEY".to_string(),
-            api_key: self.api_key.clone(),
-            model: model_id.unwrap_or(&self.model).to_string(),
-            temperature: 0.2,
-            max_output_tokens: 4096,
-            reasoning_effort: None,
-            reasoning_budget_tokens: None,
-            capabilities: ProviderModelCapabilities {
-                supports_tools: true,
-                supports_streaming: true,
-                supports_image_input: true,
-                supports_reasoning: false,
-                context_window_tokens: Some(
-                    pony_agent_core::agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
-                ),
-                ..Default::default()
-            },
-            thinking_param_pattern: ThinkingParamPattern::None,
-        }
+        // 兜底形状单源在 `pony_agent_core::agent::config::gateway_fallback_selection`
+        // （与 CLI 共用）；本处只决定「是否走到兜底」这一策略。
+        pony_agent_core::agent::config::gateway_fallback_selection(
+            &self.gateway_url,
+            self.api_key.clone(),
+            model_id.unwrap_or(&self.model),
+        )
     }
 
     /// PA-172 §3.5 W1（生产注入闭环）：上游时限/重试策略**必须**由注册表真实提供。
@@ -4180,27 +4156,9 @@ pub fn resolve_resumed_workspace_binding(
 fn build_control_plane(workspace: &std::path::Path, gateway_url: &str, model: &str) -> HostControlPlane {
     // 彻底复用桌面端体系：直接使用与桌面端相同的生产环境默认 SessionStore（默认加载与写入 ~/.pony-agent/sessions.sqlite 或 sessions.json）
     // 使得 TUI 创建和更新的会话在桌面端无缝可见与互通。
-    let api_key = std::env::var("PONYLLM_API_KEY")
-        .or_else(|_| std::env::var("PONY_API_KEY"))
-        .ok()
-        .or_else(|| {
-            let cfg_path = dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config")
-                .join("ponyllm")
-                .join("ponyllm.toml");
-            if let Ok(content) = std::fs::read_to_string(cfg_path) {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("api_key") {
-                        if let Some(val) = trimmed.split('=').nth(1) {
-                            return Some(val.trim().trim_matches('"').to_string());
-                        }
-                    }
-                }
-            }
-            None
-        });
+    // 网关 key 解析链（env > env 别名 > 遗留 ponyllm.toml）单源在 pony-provider：
+    // 与 `ponycli` 共用同一条链，避免两个 bin 同机同配置拿到不同的 key。
+    let api_key = pony_agent_core::agent::config::gateway_api_key_from_env_or_legacy_config();
 
     let resolver = DynamicProviderResolver {
         gateway_url: gateway_url.to_string(),
