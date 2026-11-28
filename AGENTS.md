@@ -43,7 +43,7 @@
 - **决策记录校验**：`npm run adr:check`（判定真源 `.agents/skills/write-adr/verify-note.sh`，pre-commit 调 `adr-verify.sh`）
 - **非执行者测试证据门（dev-team 批次）**：`npm run contract:test-evidence -- --base <sha> --head <sha>`——判「dev-team 标记的提交范围改动了代码面时，提交信息里是否有一条产出者 ≠ 代码作者的 `Test-Evidence: <producer> | <command> | exit=<code>` trailer」；退出码 0 通过/跳过、1 违例、2 无法判定（给了 base 却解析不出，fail-closed）。`--base` 为**全零 sha**（GitHub「无前序提交」哨兵，新分支首次 push 的 `event.before` 即此值）时明确跳过并 exit 0，由同一提交的 pull_request 事件以有效 `base.sha` 复核。自检 `npm run contract:test-evidence:selftest`（P1–P7 正负样本 + N1/N1b/N2 边界），接线 CI `ponygo-governance`，真源 ADR `2026-11-25-independent-test-evidence-gate`、`2026-11-27-governance-zero-base-sentinel`。
 - **版本同步校验**：`npm run version:check`
-- **前端测试**：`npm test`（=`vitest run`，不含覆盖率门）
+- **前端测试**：`npm test`（=`vitest run`，不含覆盖率门）——`V10-3`「全量里再跑一遍全量」已默认 skip（B1795831357586：零增量信号却占 ~231s/次），需要时跑 `npm run test:v10-freeze` 显式启用（CI 在 needs_frontend 时执行一次）
 - **前端覆盖率门**：`npm run test:coverage`——include 覆盖 `src/stores/runtime/**`（7176 行主体）与三个 UI 文件，阈值 87/79/87/88 按新口径锚定；`npm run test:ui-guard` 是 3 个 UI spec 的子集口径（独立 include + 阈值，不套用全量阈值）。
 - **Rust 编译检查**：`npm run cargo:check:shared`
 - **Rust lint 棘轮（clippy 表在册）**：`npm run rust:lint`——存量在 `scripts/clippy-baseline.json` **按平台分册**冻结，新增/恶化非零退出；**四份扫描面**：`pony-agent-core`（`clippy-baseline.json`）、`pony-agent`（`-src-tauri`）、`pony-tui`（`-tui`，B1795831357716 新建）、`pony-cli`（`-cli`，同上），各自 `npm run rust:lint:tui` / `rust:lint:cli`，拆 crate 必须同步确认新 crate 落在哪份基线（否则 lint 面静默脱管）；改表/改 `clippy.toml` 阈值必须重基线（`npm run rust:lint:update`，检出上涨时须显式 `--allow-growth`）；门自检 `npm run rust:lint:selftest`。平台分册缺失时门 exit 2（在该平台跑一次 update 即可，勿套用别平台口径）。口径与波次见 [`.meta/lints/README.md`](.meta/lints/README.md)
