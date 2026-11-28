@@ -10051,7 +10051,10 @@ mod tests {
                     .build(),
             )
             .build();
-        let session = "session-plan-mode-surface";
+        // 每例唯一会话 id：`plan_mode` 是**进程级注册表 + 持久 sidecar**，固定 id 会让
+        // 同一进程内其它用例/上一次运行留下的 `plan` 正文污染首断言（"初始无方案"）。
+        let session = format!("session-plan-mode-surface-{}", uuid::Uuid::new_v4());
+        let session = session.as_str();
 
         // 1. 初始未激活。
         let initial = control_plane.plan_mode_get(session);
@@ -10103,7 +10106,9 @@ mod tests {
                     .build(),
             )
             .build();
-        let session = "session-plan-mode-keep";
+        // 同上：固定 id 会读到 sidecar 里上一轮残留的 `plan`，导致 KeepPlanning 断言不稳。
+        let session = format!("session-plan-mode-keep-{}", uuid::Uuid::new_v4());
+        let session = session.as_str();
         control_plane.plan_mode_set(session, pony_tools::plan_mode::ModeToggle::Enter).expect("enter");
         control_plane.plan_mode_commit(session);
         pony_tools::plan_mode::submit_plan(session, "# 方案");
