@@ -33,10 +33,13 @@ Status: implemented
 
 `fn recover<T>(slot: &Mutex<T>) -> MutexGuard<'_, T>` 是全模块唯一的取锁入口，中毒一律
 `PoisonError::into_inner` 恢复。理由：这些表是**进程内缓存/可见性状态**，不是持久化真值；
-恢复后继续比让宿主里所有后续团队调用 panic 更安全。全部 8 处 `.unwrap()`、5 处 `.ok()?`、
-3 处 `.ok().and_then(...)` 一并清零——`scripts/clippy-baseline.json` 中
-`clippy::unwrap_used @ orchestration.rs` 由 **28 → 0**（三平台分册同步删除该条，该文件无
-`#[cfg(windows/unix)]`，三册条目集合逐字相同）。
+恢复后继续比让宿主里所有后续团队调用 panic 更安全。取锁侧的宽松解析一并清零，实测口径
+（`git show e8907724 -- .../orchestration.rs | grep '^-'` 逐行统计）：
+`.unwrap()` **29 处**（20 处单行 `.lock().unwrap()` + 3 处跨行 `.lock()` 换行 `.unwrap()` +
+6 处链式 `.as_mut()/.as_ref().unwrap()`）、`.ok()?` **3 处**、`.ok()`（不带 `?`）**5 处**。
+对应 `scripts/clippy-baseline.json` 中 `clippy::unwrap_used @ orchestration.rs` 由 **28 → 0**
+（clippy 按 lint 触发点计数，与上列源码调用点数因跨行/链式写法略有差异；三平台分册同步删除该条，
+该文件无 `#[cfg(windows/unix)]`，三册条目集合逐字相同）。
 
 **3) 锁粒度刻意保持字段级，不合并成大锁**
 
@@ -81,7 +84,7 @@ Status: implemented
 
 - 新增一张团队状态表：改 `TeamState` 一个结构体（字段 + 访问器 + `reset_for_tests` 一行），
   不再有「随手加 static」的路径。这是有意的摩擦，代价换来状态清单唯一可见。
-- `.lock().ok()?` 的 5 处改为 `recover` 后，**中毒时会继续使用可能半更新的表**而非返回 `None`。
+- `.lock().ok()?` 的 3 处（及 `.lock().ok().and_then(...)` 的 5 处）改为 `recover` 后，**中毒时会继续使用可能半更新的表**而非返回 `None`/`false`/`0`。
   这是语义变化：此前「中毒 ⇒ 视为无表」，现为「中毒 ⇒ 恢复并继续」。判断依据是这些表都是
   内存缓存（队友名册、信箱、traceparent 快照），半更新最多导致一次可见性信息缺失，
   而「视为无表」会把团队健在误读成无队友。**靠 review**：中毒路径无自动化测试
