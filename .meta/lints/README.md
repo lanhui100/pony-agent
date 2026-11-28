@@ -50,6 +50,18 @@
 | **棘轮基线（实际扫描面 `--lib --bins`，`platforms.linux`）** | **3,870 条 / 1,336 键 / 119 种 lint** |
 | 其中 lib 面 / bin 面 | 3,072 条（1,117 键）/ 798 条（219 键） |
 
+**扫描面清册（B1795831357716 起四份，各按平台分册）**：
+
+| 基线文件 | `--package` | linux 实测（键 / 违例） | 覆盖 |
+|---|---|---|---|
+| `scripts/clippy-baseline.json` | `pony-agent-core` | 1,336 / 3,870 | core 主体 |
+| `scripts/clippy-baseline-src-tauri.json` | `pony-agent` | — | Tauri 宿主 |
+| `scripts/clippy-baseline-tui.json` | `pony-tui` | 1,310 / 3,743 | TUI（10-crate 拆分后新建） |
+| `scripts/clippy-baseline-cli.json` | `pony-cli` | 1,132 / 3,056 | CLI（同上） |
+
+拆分前这 6,799 条告警与 `pony-agent-core` 同在一个扫描面；拆成独立 crate 后没有任何门再看它们，
+增量从 0 变成「无限」——本仓最大的一块 lint 脱管就是这样静默发生的。
+
 探针与基线**不可逐项对账**（探针未启用本仓 `clippy.toml` 的 `max-fn-params-bools=0`、未含 bins、
 未按 allow 表裁剪），故基线是唯一可复算真值：`scripts/clippy-baseline.json` 的
 `platforms.linux.entries` 逐条可查、可复算上表。
@@ -98,8 +110,11 @@ CLIPPY_CONF_DIR=.meta/lints cargo clippy -p pony-agent-core --lib --bins
 - 禁止套用别平台口径（否则 Windows 一跑必假红，或 Linux 基线被 Windows 存量污染）；
 - B244 起 `linux` / `win32` / `darwin` 三分册齐备（各由 `lint-baseline-bootstrap` 工作流在
   对应平台生成、维护者 review 后合入），CI 三分支各自执行本平台分册；
-- 新增平台/新增扫描面（如 `src-tauri` 第二份基线 `scripts/clippy-baseline-src-tauri.json`）
-  也必须走 bootstrap 生成，禁止手抄或套用别平台口径。
+- 新增平台/新增扫描面（如 `src-tauri` 第二份基线 `scripts/clippy-baseline-src-tauri.json`、
+  B1795831357716 的 `clippy-baseline-tui.json` / `clippy-baseline-cli.json`）也必须走 bootstrap
+  生成，禁止手抄或套用别平台口径；
+- 判据面同理：**拆 crate 不是拆账**。任何 crate 被拆出/新增后，必须同步确认它落在哪份基线里，
+  否则它的 lint 面从拆解那天起就不再被机械看守（本条即 2026-11-28 事故的规则化）。
 
 **路径归一化**：`(lint, 文件)` 的路径先统一分隔符再按**大小写不敏感**前缀剥离仓根（Windows 盘符
 `c:` vs `C:` 不会让存量整体变成"新增/消失"），剥不掉的前缀才保留为绝对路径。

@@ -19,6 +19,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -255,6 +256,16 @@ pub struct AcpTransport {
     /// reader 线程记录的 fail-closed 原因（协议错乱 / agent 退出），让挂起的 `request`
     /// 立即返回真源错误码而不是塌缩成 `acp_unavailable`。
     fatal: Arc<Mutex<Option<AcpTransportError>>>,
+    /// stdout 读线程句柄（B177 ADVISORY ②）。
+    ///
+    /// 旧实现 `spawn` 后直接丢弃句柄，`close()` 只终止子进程不 join——于是分发线程可能
+    /// 活到 handler 返回之后（进程已死、线程仍在跑 handler），既拿不到「关闭完成」的确定性，
+    /// 也让资源回收时机不可测。现在三组线程句柄都随结构体持有，`close()` 统一 join。
+    reader: Option<JoinHandle<()>>,
+    /// stderr 排空线程句柄（同上）。
+    stderr_reader: Option<JoinHandle<()>>,
+    /// 入站请求分发 worker 句柄（同上）。
+    inbound_workers: Vec<JoinHandle<()>>,
 }
 
 impl AcpTransport {
@@ -336,6 +347,7 @@ impl AcpTransport {
         // 取任务时短暂持锁（`recv` 立即返回），处理在锁外 ⇒ 一个慢 handler 不再挡住其它 worker 取活。
         let request_receiver = Arc::new(Mutex::new(request_receiver));
         let mut spawn_error = None;
+        let mut inbound_workers: Vec<JoinHandle<()>> = Vec::with_capacity(ACP_INBOUND_WORKERS);
         for worker in 0..ACP_INBOUND_WORKERS {
             let stdin = Arc::clone(&stdin);
             let handler = Arc::clone(&handler);
@@ -377,9 +389,20 @@ impl AcpTransport {
                 spawn_error = Some(error);
                 break;
             }
+            if let Ok(handle) = spawned {
+                inbound_workers.push(handle);
+            }
         }
         if let Some(error) = spawn_error {
             reap_child_and_tree(child, tree);
+            // 先关发送端再 join：worker 的循环只在 `recv()` 返回 Err 时退出，而 Err 来自
+            // 「sender 全 drop」。此时 reader 线程尚未启动（`request_sender` 仍在本作用域），
+            // 直接 join 会永久阻塞——所以必须显式 drop 后再 join（B177 ADVISORY ② 的同口径）。
+            drop(request_sender);
+            drop(request_receiver);
+            for handle in inbound_workers {
+                let _ = handle.join();
+            }
             return Err(AcpTransportError::Spawn(format!(
                 "启动入站请求分发线程失败：{error}。"
             )));
@@ -427,14 +450,21 @@ impl AcpTransport {
                     }
                 }
             });
-        if let Err(error) = stderr_reader {
-            // 读线程已就绪但诊断通道起不来：按启动失败处理，同步回收子进程（不泄漏）。
-            reap_child_and_tree(child, tree);
-            let _ = reader.join();
-            return Err(AcpTransportError::Spawn(format!(
-                "启动 stderr 读线程失败：{error}。"
-            )));
-        }
+        let stderr_reader = match stderr_reader {
+            Ok(handle) => handle,
+            Err(error) => {
+                // 读线程已就绪但诊断通道起不来：按启动失败处理，同步回收子进程（不泄漏）。
+                reap_child_and_tree(child, tree);
+                let _ = reader.join();
+                drop(request_receiver);
+                for handle in inbound_workers {
+                    let _ = handle.join();
+                }
+                return Err(AcpTransportError::Spawn(format!(
+                    "启动 stderr 读线程失败：{error}。"
+                )));
+            }
+        };
 
         Ok(Self {
             child,
@@ -450,6 +480,9 @@ impl AcpTransport {
             late_responses: Mutex::new(HashMap::new()),
             request_lock: Mutex::new(()),
             fatal,
+            reader: Some(reader),
+            stderr_reader: Some(stderr_reader),
+            inbound_workers,
         })
     }
 
@@ -593,7 +626,8 @@ impl AcpTransport {
     /// 关闭并回收子进程（幂等）。
     ///
     /// 顺序：关 stdin → 宽限 [`SPAWN_REAP_GRACE`] → **整棵进程树终止**（Unix 进程组 SIGKILL /
-    /// Windows Job Object `TerminateJobObject`）→ `kill()` + `wait()` → 释放纳管句柄。
+    /// Windows Job Object `TerminateJobObject`）→ `kill()` + `wait()` → 释放纳管句柄 →
+    /// **join 三组工作线程**（B177 ADVISORY ②）。
     pub fn close(&mut self) {
         {
             // 中毒不 panic 也不早退：中毒只说明此前有线程在持锁时 panic，
@@ -616,24 +650,54 @@ impl AcpTransport {
         }
 
         let grace_deadline = Instant::now() + SPAWN_REAP_GRACE;
-        while Instant::now() < grace_deadline {
+        let exited_on_its_own = loop {
+            if Instant::now() >= grace_deadline {
+                break false;
+            }
             match self.child.try_wait() {
                 // 直接子进程已退出（`try_wait` 已回收），但 agent 可能留下孙进程：
                 // 仍必须终止整棵树并释放纳管句柄，不能只 return（否则 Windows 上残留孙进程
                 // 要等到 `Drop` 才被 kill-on-close 兜住，Unix 上则完全不回收）。
-                Ok(Some(_)) => {
-                    self.terminate_tree();
-                    return;
-                }
+                Ok(Some(_)) => break true,
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 // 观察失败不折叠为「已退出」：继续走 SIGKILL 兜底（禁止静默放行）。
-                Err(_) => break,
+                Err(_) => break false,
             }
-        }
+        };
 
         self.terminate_tree();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if !exited_on_its_own {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        self.join_worker_threads();
+    }
+
+    /// join 子进程的读线程与入站分发 worker（B177 ADVISORY ②）。
+    ///
+    /// 为什么必须做：旧实现把 `JoinHandle` 直接丢掉，`close()` 只终止子进程。于是
+    /// 「关闭完成」并不等于「没有线程还在跑 handler」——分发线程可能活到 handler 返回之后，
+    /// 期间的日志/错误都记在已死的 transport 上，资源回收时机也不可测。
+    ///
+    /// join 顺序是**语义必需**，不是风格：
+    /// 1. 先 join stdout 读线程——它持有 `request_sender` 的克隆；进程死后 stdout EOF，
+    ///    读线程退出并 drop 该 sender；
+    /// 2. 再 join 入站 worker——它们的循环只在 `recv()` 返回 `Err` 时退出，而 `Err` 要求
+    ///    **所有** sender 都已 drop（含本结构体侧的 `request_sender`：它在 spawn 时被 move 进
+    ///    读线程，故只需等第 1 步）；
+    /// 3. 最后 join stderr 排空线程（同样靠 EOF 自然退出）。
+    ///
+    /// 任一线程 panic 不传播：关闭路径的职责是回收，不是重新抛出别人的 panic。
+    fn join_worker_threads(&mut self) {
+        if let Some(handle) = self.reader.take() {
+            let _ = handle.join();
+        }
+        for handle in self.inbound_workers.drain(..) {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stderr_reader.take() {
+            let _ = handle.join();
+        }
     }
 
     /// 终止整棵进程树并释放纳管句柄（幂等）。
@@ -1111,5 +1175,117 @@ fn push_bounded(tail: &Arc<Mutex<Vec<String>>>, line: String) {
         while tail.len() > STDERR_TAIL_LINES {
             tail.remove(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AcpCapabilitiesHint;
+
+    /// 本模块用例都数「进程级线程数」，彼此并行会互相污染基线 ⇒ 用一把进程内锁串行。
+    fn thread_count_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 统计本进程内名字以 `prefix` 开头的线程数（Linux：`/proc/self/task/<tid>/comm`）。
+    ///
+    /// 只读 `/proc`，不引入额外依赖；非 Linux 返回 `None` 让调用方跳过。
+    fn count_threads_with_prefix(prefix: &str) -> Option<usize> {
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        let mut count = 0usize;
+        for entry in std::fs::read_dir("/proc/self/task").ok()? {
+            let Ok(entry) = entry else { continue };
+            let comm = entry.path().join("comm");
+            let Ok(name) = std::fs::read_to_string(&comm) else {
+                continue;
+            };
+            if name.trim_end().starts_with(prefix) {
+                count += 1;
+            }
+        }
+        Some(count)
+    }
+
+    /// 轮询等到线程数满足 `done`，最多 5s 后返回实测值。
+    ///
+    /// 为什么不能断言瞬时值：线程名由**新线程自身**在启动后写入 `comm`，`spawn()` 返回时
+    /// 它可能还叫父线程的名字 ⇒ 刚 spawn 完立刻数会少（CI 上实测 3/4）。退出侧同理，
+    /// 内核回收 tid 与 `join()` 返回之间有可见性延迟。
+    /// 这里等的是**必然发生的正向事件**，不是「赌它还没发生」；超时仍不满足才判红。
+    fn wait_for_thread_count(prefix: &str, done: impl Fn(usize) -> bool) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let count = count_threads_with_prefix(prefix).unwrap_or(0);
+            if done(count) || std::time::Instant::now() >= deadline {
+                return count;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn sleeper_spec() -> AcpAgentSpec {
+        AcpAgentSpec {
+            id: "sleeper".to_string(),
+            label: "sleeper".to_string(),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 30".to_string()],
+            env: Vec::new(),
+            default_cwd: None,
+            capabilities_hint: AcpCapabilitiesHint::default(),
+            inherit_proxy_env: false,
+            mcp_servers: Some(Vec::new()),
+        }
+    }
+
+    /// B177 ADVISORY ②：`close()` 必须 join 入站分发 worker。
+    ///
+    /// 旧实现把 `JoinHandle` 直接丢弃，于是「子进程已死」不等于「线程已退出」——
+    /// 分发线程可能活到 handler 返回之后。判据取**进程级线程数**而不是时间窗口：
+    /// 线程名是我们自己起的（`acp-inbound-<n>`），数量变化是确定性事实。
+    /// 「达到 N 个」用轮询等（线程名由新线程自身写入，spawn 返回瞬间可能还没写），
+    /// 「回落到基线」也轮询等（join 已同步，等的是内核回收 tid 的可见性）。
+    #[test]
+    fn close_joins_inbound_worker_threads() {
+        let _serial = thread_count_lock();
+        let Some(baseline) = count_threads_with_prefix("acp-inbound-") else {
+            eprintln!("[skip] 非 Linux：本用例依赖 /proc 线程名统计");
+            return;
+        };
+        let cwd = std::env::temp_dir();
+        let mut transport = AcpTransport::spawn(&sleeper_spec(), &cwd, &[])
+            .expect("spawn 一个 sleep 子进程不应失败");
+        let during = wait_for_thread_count("acp-inbound-", |n| {
+            n >= baseline + ACP_INBOUND_WORKERS
+        });
+        assert_eq!(
+            during,
+            baseline + ACP_INBOUND_WORKERS,
+            "spawn 后必须存在 {ACP_INBOUND_WORKERS} 个 acp-inbound worker（实测 {during}，基线 {baseline}）"
+        );
+
+        transport.close();
+
+        let after = wait_for_thread_count("acp-inbound-", |n| n <= baseline);
+        assert_eq!(
+            after, baseline,
+            "close() 之后 worker 必须全部退出（实测 {after}，基线 {baseline}）——句柄被丢弃即为违约"
+        );
+    }
+
+    /// `close()` 幂等：重复调用不得 panic、不得把线程计数越界。
+    #[test]
+    fn close_is_idempotent_after_join() {
+        let _serial = thread_count_lock();
+        let cwd = std::env::temp_dir();
+        let mut transport = AcpTransport::spawn(&sleeper_spec(), &cwd, &[])
+            .expect("spawn 一个 sleep 子进程不应失败");
+        transport.close();
+        transport.close();
+        // Drop 会再调一次 close()：走到这里不 panic 即满足幂等契约。
+        drop(transport);
     }
 }

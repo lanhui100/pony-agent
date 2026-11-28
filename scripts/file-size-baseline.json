@@ -19,7 +19,7 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 10789
+      "value": 10740
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
@@ -33,7 +33,7 @@
       "kind": "fn-lines",
       "name": "history_commands_and_runtime_view_follow_persisted_history_graph",
       "occurrence": 0,
-      "value": 233
+      "value": 230
     },
     {
       "path": "crates/pony-agent-core/src/agent/control_plane/mod.rs",
@@ -57,95 +57,11 @@
       "value": 236
     },
     {
-      "path": "crates/pony-tools/src/dispatcher_composites.rs",
-      "kind": "fn-lines",
-      "name": "gather_single_path",
-      "occurrence": 0,
-      "value": 228
-    },
-    {
-      "path": "crates/pony-tools/src/dispatcher.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 4253
-    },
-    {
-      "path": "crates/pony-tools/src/governed_executor.rs",
-      "kind": "fn-lines",
-      "name": "decide_with_context",
-      "occurrence": 0,
-      "value": 206
-    },
-    {
-      "path": "crates/pony-tools/src/hook_commands.rs",
-      "kind": "fn-lines",
-      "name": "run_hook",
-      "occurrence": 0,
-      "value": 231
-    },
-    {
-      "path": "crates/pony-observability/src/otel/mod.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 4427
-    },
-    {
-      "path": "crates/pony-tools/src/process.rs",
-      "kind": "fn-lines",
-      "name": "start_inner",
-      "occurrence": 0,
-      "value": 278
-    },
-    {
-      "path": "crates/pony-storage/src/projection.rs",
-      "kind": "fn-lines",
-      "name": "apply",
-      "occurrence": 0,
-      "value": 203
-    },
-    {
-      "path": "crates/pony-storage/src/projection.rs",
-      "kind": "fn-lines",
-      "name": "apply",
-      "occurrence": 1,
-      "value": 374
-    },
-    {
-      "path": "crates/pony-storage/src/projection.rs",
-      "kind": "fn-lines",
-      "name": "apply",
-      "occurrence": 2,
-      "value": 233
-    },
-    {
-      "path": "crates/pony-provider/src/provider/mod.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 6907
-    },
-    {
-      "path": "crates/pony-provider/src/provider/mod.rs",
-      "kind": "fn-lines",
-      "name": "collect_anthropic_sse_message_from_response",
-      "occurrence": 0,
-      "value": 311
-    },
-    {
-      "path": "crates/pony-provider/src/provider/responses_api.rs",
-      "kind": "fn-depth",
-      "name": "read_sse_data_lines_core",
-      "occurrence": 0,
-      "value": 9
-    },
-    {
       "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 13813
+      "value": 13811
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/tests.rs",
@@ -201,161 +117,42 @@
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 3465
+      "value": 3404
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
       "kind": "fn-lines",
       "name": "handle_stream_tool_turn",
       "occurrence": 0,
-      "value": 1603
+      "value": 1569
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_stream.rs",
       "kind": "fn-lines",
       "name": "start_turn_stream_with_control_and_facts",
       "occurrence": 0,
-      "value": 1747
+      "value": 1720
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
       "kind": "fn-lines",
       "name": "handle_sync_tool_turn",
       "occurrence": 0,
-      "value": 577
+      "value": 558
     },
     {
       "path": "crates/pony-agent-core/src/agent/runtime/turn_sync.rs",
       "kind": "fn-lines",
       "name": "run_turn_inner",
       "occurrence": 0,
-      "value": 603
-    },
-    {
-      "path": "crates/pony-storage/src/session/store.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 5777
-    },
-    {
-      "path": "crates/pony-storage/src/session/store.rs",
-      "kind": "fn-lines",
-      "name": "append_turn_fallible_with_kind",
-      "occurrence": 0,
-      "value": 204
-    },
-    {
-      "path": "crates/pony-storage/src/session/store.rs",
-      "kind": "fn-lines",
-      "name": "ensure_history_graph",
-      "occurrence": 0,
-      "value": 249
-    },
-    {
-      "path": "crates/pony-storage/src/session/tests.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 6471
-    },
-    {
-      "path": "crates/pony-storage/src/sqlite_session.rs",
-      "kind": "file-lines",
-      "name": null,
-      "occurrence": 0,
-      "value": 6335
-    },
-    {
-      "path": "crates/pony-storage/src/sqlite_session.rs",
-      "kind": "fn-lines",
-      "name": "apply_persist_command_tx",
-      "occurrence": 0,
-      "value": 325
-    },
-    {
-      "path": "crates/pony-storage/src/sqlite_session.rs",
-      "kind": "fn-lines",
-      "name": "ensure_normalized_schema",
-      "occurrence": 0,
-      "value": 247
-    },
-    {
-      "path": "crates/pony-storage/src/sqlite_session.rs",
-      "kind": "fn-lines",
-      "name": "load_store_normalized",
-      "occurrence": 0,
-      "value": 486
-    },
-    {
-      "path": "crates/pony-storage/src/sqlite_session.rs",
-      "kind": "fn-lines",
-      "name": "pa095_ref_only_trace_rows_backfill_and_legacy_reads",
-      "occurrence": 0,
-      "value": 203
-    },
-    {
-      "path": "crates/pony-tools/src/tools/composite.rs",
-      "kind": "fn-lines",
-      "name": "gather_context",
-      "occurrence": 0,
-      "value": 479
-    },
-    {
-      "path": "crates/pony-tools/src/tools/run.rs",
-      "kind": "fn-depth",
-      "name": "run_command",
-      "occurrence": 0,
-      "value": 10
-    },
-    {
-      "path": "crates/pony-tools/src/tools/run.rs",
-      "kind": "fn-lines",
-      "name": "run_command",
-      "occurrence": 0,
-      "value": 631
-    },
-    {
-      "path": "crates/pony-protocol/src/tool_contract/schema.rs",
-      "kind": "fn-depth",
-      "name": "builtin_tools",
-      "occurrence": 0,
-      "value": 10
-    },
-    {
-      "path": "crates/pony-protocol/src/tool_contract/schema.rs",
-      "kind": "fn-lines",
-      "name": "builtin_tools",
-      "occurrence": 0,
-      "value": 1079
-    },
-    {
-      "path": "crates/pony-tools/src/tools/workspace.rs",
-      "kind": "fn-depth",
-      "name": "edit_file",
-      "occurrence": 0,
-      "value": 9
-    },
-    {
-      "path": "crates/pony-tools/src/tools/workspace.rs",
-      "kind": "fn-depth",
-      "name": "write_file",
-      "occurrence": 0,
-      "value": 10
-    },
-    {
-      "path": "crates/pony-tools/src/tools/workspace.rs",
-      "kind": "fn-lines",
-      "name": "write_file",
-      "occurrence": 0,
-      "value": 206
+      "value": 599
     },
     {
       "path": "crates/pony-agent-core/src/agent/turn_flow.rs",
       "kind": "file-lines",
       "name": null,
       "occurrence": 0,
-      "value": 3713
+      "value": 3359
     },
     {
       "path": "crates/pony-agent-core/src/bin/conformance.rs",
@@ -412,6 +209,195 @@
       "name": "decode_spans",
       "occurrence": 0,
       "value": 10
+    },
+    {
+      "path": "crates/pony-observability/src/otel/mod.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 4410
+    },
+    {
+      "path": "crates/pony-protocol/src/tool_contract/schema.rs",
+      "kind": "fn-depth",
+      "name": "builtin_tools",
+      "occurrence": 0,
+      "value": 9
+    },
+    {
+      "path": "crates/pony-protocol/src/tool_contract/schema.rs",
+      "kind": "fn-lines",
+      "name": "builtin_tools",
+      "occurrence": 0,
+      "value": 1036
+    },
+    {
+      "path": "crates/pony-provider/src/provider/mod.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 6699
+    },
+    {
+      "path": "crates/pony-provider/src/provider/mod.rs",
+      "kind": "fn-lines",
+      "name": "collect_anthropic_sse_message_from_response",
+      "occurrence": 0,
+      "value": 311
+    },
+    {
+      "path": "crates/pony-provider/src/provider/responses_api.rs",
+      "kind": "fn-depth",
+      "name": "read_sse_data_lines_core",
+      "occurrence": 0,
+      "value": 9
+    },
+    {
+      "path": "crates/pony-storage/src/projection.rs",
+      "kind": "fn-lines",
+      "name": "apply",
+      "occurrence": 0,
+      "value": 203
+    },
+    {
+      "path": "crates/pony-storage/src/projection.rs",
+      "kind": "fn-lines",
+      "name": "apply",
+      "occurrence": 1,
+      "value": 374
+    },
+    {
+      "path": "crates/pony-storage/src/projection.rs",
+      "kind": "fn-lines",
+      "name": "apply",
+      "occurrence": 2,
+      "value": 233
+    },
+    {
+      "path": "crates/pony-storage/src/session/store.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 5397
+    },
+    {
+      "path": "crates/pony-storage/src/session/store.rs",
+      "kind": "fn-lines",
+      "name": "ensure_history_graph",
+      "occurrence": 0,
+      "value": 240
+    },
+    {
+      "path": "crates/pony-storage/src/session/tests.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 6468
+    },
+    {
+      "path": "crates/pony-storage/src/sqlite_session.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 6324
+    },
+    {
+      "path": "crates/pony-storage/src/sqlite_session.rs",
+      "kind": "fn-lines",
+      "name": "apply_persist_command_tx",
+      "occurrence": 0,
+      "value": 325
+    },
+    {
+      "path": "crates/pony-storage/src/sqlite_session.rs",
+      "kind": "fn-lines",
+      "name": "ensure_normalized_schema",
+      "occurrence": 0,
+      "value": 247
+    },
+    {
+      "path": "crates/pony-storage/src/sqlite_session.rs",
+      "kind": "fn-lines",
+      "name": "load_store_normalized",
+      "occurrence": 0,
+      "value": 475
+    },
+    {
+      "path": "crates/pony-storage/src/sqlite_session.rs",
+      "kind": "fn-lines",
+      "name": "pa095_ref_only_trace_rows_backfill_and_legacy_reads",
+      "occurrence": 0,
+      "value": 203
+    },
+    {
+      "path": "crates/pony-tools/src/dispatcher_composites.rs",
+      "kind": "fn-lines",
+      "name": "gather_single_path",
+      "occurrence": 0,
+      "value": 228
+    },
+    {
+      "path": "crates/pony-tools/src/dispatcher.rs",
+      "kind": "file-lines",
+      "name": null,
+      "occurrence": 0,
+      "value": 4249
+    },
+    {
+      "path": "crates/pony-tools/src/hook_commands.rs",
+      "kind": "fn-lines",
+      "name": "run_hook",
+      "occurrence": 0,
+      "value": 231
+    },
+    {
+      "path": "crates/pony-tools/src/process.rs",
+      "kind": "fn-lines",
+      "name": "start_inner",
+      "occurrence": 0,
+      "value": 278
+    },
+    {
+      "path": "crates/pony-tools/src/tools/composite.rs",
+      "kind": "fn-lines",
+      "name": "gather_context",
+      "occurrence": 0,
+      "value": 479
+    },
+    {
+      "path": "crates/pony-tools/src/tools/run.rs",
+      "kind": "fn-depth",
+      "name": "run_command",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-tools/src/tools/run.rs",
+      "kind": "fn-lines",
+      "name": "run_command",
+      "occurrence": 0,
+      "value": 629
+    },
+    {
+      "path": "crates/pony-tools/src/tools/workspace.rs",
+      "kind": "fn-depth",
+      "name": "edit_file",
+      "occurrence": 0,
+      "value": 9
+    },
+    {
+      "path": "crates/pony-tools/src/tools/workspace.rs",
+      "kind": "fn-depth",
+      "name": "write_file",
+      "occurrence": 0,
+      "value": 10
+    },
+    {
+      "path": "crates/pony-tools/src/tools/workspace.rs",
+      "kind": "fn-lines",
+      "name": "write_file",
+      "occurrence": 0,
+      "value": 206
     }
   ]
 }

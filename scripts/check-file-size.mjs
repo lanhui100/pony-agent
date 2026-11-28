@@ -86,7 +86,7 @@ function printHelp() {
       "  -h, --help            显示本帮助",
       "",
       "退出码：0=通过；1=存在违规；2=脚本自身错误（路径不存在/参数非法）。",
-      "豁免：文件顶部 `// ponylint:file-size-exempt [until YYYY-MM-DD] <理由>`。"
+      "豁免：文件顶部 `// ponylint:file-size-exempt until YYYY-MM-DD <理由>`（方括号写法判红）。"
     ].join("\n") + "\n"
   );
 }
@@ -419,7 +419,7 @@ function scanFunctions(source, masked) {
 
 /**
  * 解析文件顶部豁免围栏。
- * 返回 null（无豁免）或 { status: "ok"|"expired"|"no-reason"|"bad-date", until, reason }。
+ * 返回 null（无豁免）或 { status: "ok"|"expired"|"no-reason"|"bad-date"|"bracket-until", until, reason }。
  */
 function readExemption(source, todayIso) {
   const headLines = source.split("\n", EXEMPT_SCAN_LINES);
@@ -429,6 +429,15 @@ function readExemption(source, todayIso) {
     if (!found) continue;
     const rest = found[1].trim();
     if (rest.length === 0) return { status: "no-reason", until: null, reason: "" };
+
+    // B1795831357716（2026-11-28）：`[until YYYY-MM-DD]` 一律判违规。
+    // 历史事故：帮助文本曾把 `[until YYYY-MM-DD]` 写成示例，而解析只认无方括号形态，
+    // 于是照抄示例的两个巨石文件（pony-tui/src/tui.rs、pony-tools/src/workspace_hotloader.rs）
+    // 被判为「永不过期的永久豁免」——到期日形同虚设。这里把该写法显式判红，
+    // 让「写错语法」不再等价于「永久豁免」，也避免再次依赖帮助文本与解析器同步。
+    if (/^\[/.test(rest)) {
+      return { status: "bracket-until", until: null, reason: rest };
+    }
 
     const untilMatch = rest.match(/^until\s+(\d{4}-\d{2}-\d{2})\b(.*)$/);
     if (untilMatch) {
@@ -639,6 +648,18 @@ function main() {
         value: null,
         limit: null,
         text: `${relPath} 豁免缺少理由`
+      });
+      continue;
+    }
+    if (exemption && exemption.status === "bracket-until") {
+      violations.push({
+        path: relPath,
+        kind: "exempt-bracket-until",
+        line: 0,
+        value: null,
+        limit: null,
+        text: `${relPath} 豁免语法非法：不接受 [until YYYY-MM-DD] 方括号写法，`
+          + `请改为 \`until YYYY-MM-DD <理由>\`（方括号会让到期日失效，等价于永久豁免）`
       });
       continue;
     }

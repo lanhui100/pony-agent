@@ -411,7 +411,17 @@ fn h3_installed_handler_cannot_enable_undeclared_capability() {
 // ───────────────────────── h4 长命令 wait 不得 5s 硬顶 ─────────────────────────
 
 /// h4：`sh -c 'sleep 6; echo done'` 的 `wait_for_exit` 必须在 NFR 派生预算内正常返回
-/// （不得 5s 硬顶成 error），且同轮后续入站请求仍被应答（读线程未饿死）。
+/// （不得 5s 硬顶成 error）。
+///
+/// **口径收窄（B177 ADVISORY ④）**：本用例**不再声称**证明「慢请求不饿死其它请求」。
+/// 夹具 `probe_terminal_long` 是严格同步的（9404 只在 9402 应答之后才发），结构上观测不到
+/// wait 期间的并发——旧注释把「wait 结束后线程还活着」说成「不饿死」，是断言越权。
+/// 「不饿死」这条不变量由 `acp_capabilities_contract::g10_slow_inbound_request_does_not_starve_others`
+/// 承担：那里的夹具 `probe_terminal_interleave` 在 wait 在途时就发出 9404 且不等应答，
+/// 单线程串行分发会立刻让 `fast < slow` 失败。
+///
+/// 本用例保留的断言只有它真正能观测的两类：预算不被 5s 硬顶、wait 后同轮请求仍被应答
+/// （后者是**存活**断言，不是并发断言）。
 #[test]
 fn h4_long_running_terminal_wait_respects_budget_and_stays_responsive() {
     let cwd = temp_dir("long-terminal");

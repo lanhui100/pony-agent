@@ -708,10 +708,15 @@ impl GoalRoundStopReason {
             Self::FirstRoundNotSucceeded => "自动续轮未启动",
             // O1-B（PR #106）：挂起/待作答是**暂停**而不是终止——作答后宿主会重入续轮，措辞必须一致，
             // 否则用户看到「续轮已停止」会以为目标已死，于是不去作答，而作答正是唯一的解锁动作。
-            // 两处用词都是刻意的：① 主语只取「续轮」，不写「目标已暂停」——目标此刻可能仍是
-            // `GoalPhase::Active`，冒认阶段会与 Goal 页签的阶段行打脸（B1795767639536 的回归）；
-            // ② 用「续轮暂停」而非「续轮已暂停」，避开 `GoalPhase::Paused` 的既有译词「已暂停」。
-            Self::TurnSuspended => "续轮暂停：等你作答",
+            //
+            // 2026-11-28：本变体同时覆盖 Ask 与审批（`TurnSuspended` 是两者共用的挂起信号），
+            // 且旧文案把「等什么」说了两遍——headline「续轮暂停：等你作答」+ detail
+            // 「本轮在等你作答/审批」，同一行里「等你作答」出现两次，读起来像一句自我复述。
+            // 现在：①「等什么」只在 headline 说一次，detail 归 `None`（无第二层原因可讲）；
+            // ② 去掉只有实现者才懂的「续轮」一词——用户看到「暂停中」+「等你作答/审批」
+            // +「作答后自动继续」即可自解释；③ 仍**不**写「已暂停」，避开 `GoalPhase::Paused`
+            // 的既有译词（`goal_panel::stopped_reason_never_contradicts_active_phase` 会判红）。
+            Self::TurnSuspended => "暂停中：等你作答/审批",
             _ => "自动续轮已停止",
         }
     }
@@ -726,7 +731,9 @@ impl GoalRoundStopReason {
                 max_rounds,
             } => Some(format!("目标轮次已用尽 {rounds_started}/{max_rounds}")),
             Self::AutoContinueBudget => Some("连续自动推进达上限".to_string()),
-            Self::TurnSuspended => Some("本轮在等你作答/审批".to_string()),
+            // 2026-11-28：旧 detail「本轮在等你作答/审批」与 headline「等你作答」同义重复，
+            // 同一行里把「等什么」说了两遍。归 None —— 本变体没有第二层原因可讲。
+            Self::TurnSuspended => None,
             Self::TurnUnclassified => Some("本轮未产出可用终态".to_string()),
             Self::LoopAlreadyOwned => Some("本线程让位，未推进轮次".to_string()),
             Self::BudgetPersistFailed => Some("本轮预算推进写盘失败".to_string()),
@@ -2397,6 +2404,33 @@ mod b130_event_tests {
             "暂停语义不得复用「已停止」措辞: {line}"
         );
         assert_eq!(GoalRoundStopReason::all_variants().len(), 10);
+    }
+
+    /// 挂起原因的整行文案**逐字冻结**，且同一事实只说一次。
+    ///
+    /// 回归现场（Ctrl+T → Goal 页签，2026-11-28 用户报「完全不知道这句的设计意图」）：
+    /// `续轮暂停：等你作答｜本轮在等你作答/审批｜作答后自动继续` —— 三段里「等你作答」
+    /// 出现两次，用户读到的是自我复述；而「续轮」是只有实现者才懂的内部词。
+    #[test]
+    fn suspended_line_states_each_fact_once() {
+        let line = GoalRoundStopReason::TurnSuspended.visible_line();
+        assert_eq!(
+            line, "暂停中：等你作答/审批｜作答后自动继续",
+            "挂起原因的单行文案被冻结；改文案必须同改本断言与 pa171 契约矩阵"
+        );
+        // 「等什么」只出现一次（旧实现 headline + detail 各说一遍）。
+        assert_eq!(
+            line.matches("等你作答").count(),
+            1,
+            "「等你作答」只允许出现一次（同义复述是噪声）：{line}"
+        );
+        // 用户可见文案不得外泄「续轮」这类实现词（本变体之外的其他变体另行登记）。
+        assert!(
+            !line.contains("续轮"),
+            "挂起原因不得对用户说「续轮」（内部机制词）：{line}"
+        );
+        // 审批与 Ask 共用本信号 ⇒ 「等什么」必须写全，不能只说作答。
+        assert!(line.contains("审批"), "Ask 与审批共用本信号，必须写全：{line}");
     }
 }
 

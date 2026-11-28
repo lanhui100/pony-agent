@@ -183,7 +183,7 @@ fn spawn_goal_auto_rounds(
     state.stopping_turn_id = None;
     state.streaming_turn_id = None;
     goal_round_cancel.reset_for(&state.session_id);
-    state.goal_rounds_stopped = None;
+    // 上一轮的「续轮停止」留痕已由 `begin_turn_usage()`（唯一复位点）清空，此处不再重复赋值。
 
     let mdl_id = state.model.clone();
     let turn_input = build_turn_input(state, String::new(), prov_id, mdl_id);

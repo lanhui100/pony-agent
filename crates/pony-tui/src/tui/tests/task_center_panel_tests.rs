@@ -264,3 +264,65 @@ fn running_subagent_counts_toward_agents_segment() {
     let summary = task_summary(&state).expect("有运行中子代理时智能体段必须出现");
     assert!(summary.contains("⚡ 智能体 1"), "子代理必须计入智能体段：{summary}");
 }
+
+/// 2026-11-28 回归：Ctrl+T → Goal 页签的挂起行必须是**一句自解释的话**。
+///
+/// 现场：用户报「`续轮暂停：等你作答｜本轮在等你作答/审批｜作答后自动继续` 完全不知道
+/// 这句的设计意图」。三处判据：
+/// 1. 同一事实只说一次（「等你作答」只出现一次，旧实现 headline + detail 各一遍）；
+/// 2. 不外泄实现词「续轮」（用户侧无此概念）；
+/// 3. 仍须表达「暂停 ≠ 终止」+ 解锁动作（`等你作答` + `作答后自动继续`），否则用户不会去作答。
+#[test]
+fn goal_tab_suspended_row_is_self_explanatory_once() {
+    use pony_agent_core::agent::goal::GoalRoundStopReason;
+
+    let mut state = drawer_state();
+    state.task_center.as_mut().expect("抽屉已打开").tab = task_center::TaskCenterTab::Goal;
+    state.set_goal(TuiGoal {
+        id: "goal-suspended".to_string(),
+        objective: "把抽屉里的每一句都写成用户读得懂的话".to_string(),
+        phase: GoalPhase::Active,
+        activation: GoalActivation::Armed,
+        round_count: 2,
+        max_rounds: Some(5),
+        revision: 1,
+    });
+    let reason = GoalRoundStopReason::TurnSuspended;
+    state.apply_goal_rounds_stopped(reason.clone(), reason.visible_line());
+
+    let joined = task_center::content_lines(&state)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        joined.contains("等你作答/审批"),
+        "挂起行必须说清在等什么（Ask 与审批共用本信号）：{joined}"
+    );
+    assert!(
+        joined.contains("作答后自动继续"),
+        "必须承诺「作答后自动继续」（否则用户以为目标已死）：{joined}"
+    );
+    assert_eq!(
+        joined.matches("等你作答").count(),
+        1,
+        "「等你作答」只允许出现一次（旧实现 headline + detail 各说一遍）：{joined}"
+    );
+    assert!(
+        !joined.contains("续轮"),
+        "Goal 页签不得对用户说「续轮」这类实现词：{joined}"
+    );
+
+    // 用户作答 ⇒ 新一轮起点（`begin_turn_usage`）⇒ 该行立刻消失，不残留过期结论。
+    state.begin_turn_usage();
+    let after = task_center::content_lines(&state)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !after.contains("等你作答"),
+        "作答后挂起行必须失效（否则面板在谎称还在等人）：{after}"
+    );
+}

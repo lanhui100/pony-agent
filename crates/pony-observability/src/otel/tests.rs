@@ -1331,12 +1331,25 @@ fn begin_turn_trace_with_parent_inherits_trace_id_locally() {
     );
 
     // 非法父头：回落 root（与既有 begin_turn_trace 行为一致，不得因脏头崩溃）。
+    //
+    // 判据口径（ADR 2026-11-23-turn-trace-traceid-semantics，B1795401042949）：`trace_id()`
+    // 是**导出态**——未采样即 `None`，用它做「不得继承」的负向断言会在未采样时**恒真**
+    // （`None != Some(父)` 永远成立），门禁形同虚设。故主判据改用活动 turn 的 span context
+    // （与采样无关）：它必须存在，且不得等于父 trace id。
     let root_scope = begin_turn_trace_with_parent("sess-w3-root", "turn-w3-root", 1, Some("bad"));
+    let root_trace = current_trace_id().expect("W3 trace：非法父头也必须产出可读的 span context");
     assert_ne!(
-        root_scope.trace_id().as_deref(),
-        Some("4bf92f3577b34da6a3ce929d0e0e4736"),
+        root_trace.as_str(),
+        "4bf92f3577b34da6a3ce929d0e0e4736",
         "W3 trace：非法父头必须回落 root trace（不得继承脏 trace id）"
     );
+    // 导出态若存在，必须与本地上下文一致（不引入第二个真源）。
+    if let Some(exported) = root_scope.trace_id() {
+        assert_eq!(
+            exported, root_trace,
+            "W3 trace：导出态 trace id 与本地 span context 必须同源"
+        );
+    }
 }
 
 /// ADR 0055 P0-4：`non_zero_exit` 是命令级语义信号，不得提升为整轮 error。

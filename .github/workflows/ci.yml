@@ -112,9 +112,20 @@ jobs:
         if: needs.changes.outputs.needs_frontend == 'true'
         run: npm run build
 
-      - name: 前端单元测试
+      # B1795831357716：前端步骤改用 test:coverage —— 同一次 run 既判用例红绿又判覆盖率门，
+      # 不额外付一遍全量成本。覆盖率 include 已扩到 src/stores/runtime/**（7176 行主体），
+      # 阈值按新口径重锚（见 vitest.config.ts 注释）。
+      - name: 前端单元测试 + 覆盖率门
         if: needs.changes.outputs.needs_frontend == 'true'
-        run: npm run test:unit
+        run: npm run test:coverage
+
+      # B1795831357586：V10-3「全量里再跑一遍全量」已从默认 test:unit 摘出（默认 skip，
+      # 单例实测 231.6s / 占该文件 244.2s 的 94.8%，且与外层 run 的信号完全重合）。
+      # 判据强度不变，只是把这份成本从「每次本地全量」挪到「CI 付一次」。
+      # 开关走 scripts/v10-freeze.mjs 注入（不写 `VAR=1 cmd` 前缀：Windows cmd.exe 不认）。
+      - name: V10 冻结基线校验（含全量重跑，显式 opt-in）
+        if: needs.changes.outputs.needs_frontend == 'true'
+        run: npm run test:v10-freeze
 
       - name: 前后端及 CLI 契约与扩展点一致性
         run: |
@@ -237,6 +248,21 @@ jobs:
       - name: Clippy 棘轮门（src-tauri 分册；第二份基线，B244 扩面）
         if: runner.os != 'Windows' && needs.changes.outputs.needs_tauri == 'true'
         run: npm run rust:lint:tauri
+      # B1795831357716（2026-11-28）：10-crate 拆分后 pony-tui（linux 分册 3743 条 / 1310 键）与
+      # pony-cli（3056 条 / 1132 键）从未进过 clippy 棘轮——原基线只扫 pony-agent-core，
+      # 拆出去的告警面从拆解那天起就不再被机械看守。两份新基线为**首建**（存量全额冻结，
+      # 非本 PR 引入），此后新增/恶化即红。
+      #
+      # 只挂 Linux 是**已知缺口而非已覆盖**：新基线目前仅有 platforms.linux 分册
+      # （cfg(windows)/cfg(unix) 让违例集合不同，套用别平台口径必然假红，故缺分册时门 exit 2）。
+      # win32/darwin 分册由 lint-baseline-bootstrap 工作流在对应平台生成、review 后合入；
+      # 合入后把本步骤的 if 放宽为 runner.os != 'Windows'（与上面 core/src-tauri 两步同口径）。
+      - name: Clippy 棘轮门（pony-tui / pony-cli 分册；B1795831357716 扩面，Linux-only）
+        if: runner.os == 'Linux' && needs.changes.outputs.needs_rust == 'true'
+        run: |
+          npm run rust:lint:tui
+          npm run rust:lint:cli
+
       - name: 工作区底层及核心 crate lib 单元测试（Linux-only）
         if: runner.os == 'Linux' && needs.changes.outputs.needs_core == 'true'
         env:

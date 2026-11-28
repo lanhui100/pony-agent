@@ -81,12 +81,11 @@ const BLOCKING_FILES = new Set(['history_commands.rs']);
  * 值 = 豁免理由（会被原样打印）。
  */
 const VERIFIED_SAFE = new Map([
-  [
-    'mod.rs|forbidden-call|self.load_execution_checkpoint(|2040',
-    'Lead 机械核实为非死锁：该调用点 query.session_id=None 且 run_id=None → ' +
-      'resolve_graph_run_for_retrieval 短路到 load_active_graph_run_for_session(None)，' +
-      '后者在加锁前 early return（graph_projection.rs:378-382）→ 不会二次加锁',
-  ],
+  // B1795831357716（2026-11-28）：原唯一豁免项 `mod.rs|forbidden-call|self.load_execution_checkpoint(|2040`
+  // 已随 mod.rs 拆解与 goal_round_loop 抽取而失效——行号 2040 处早已不是该调用点，脚本持续报
+  // [P1-SAFE-STALE]。经核实当前两处调用点（mod.rs:2765 / :2817）不在加锁临界区内、门禁本身判绿，
+  // 故删除这条永久蹭用的空豁免，而不是把它重锚到新行号（重锚等于替一个已不存在的风险续命）。
+  // 需要新豁免时按 `${relPath}|${kind}|${detail}|${lockLine}` 精确登记并写明机械核实理由。
 ]);
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -416,9 +415,9 @@ function exemptionKey(entry) {
  * @param {{relPath:string, kind:string, detail:string, lockLine:number}} entry
  * @returns {'ERROR'|'P1-SAFE'}
  */
-function classify(entry) {
+function classify(entry, exemptMap = VERIFIED_SAFE) {
   if (isBlocking(entry.relPath)) return 'ERROR';
-  return VERIFIED_SAFE.has(exemptionKey(entry)) ? 'P1-SAFE' : 'ERROR';
+  return exemptMap.has(exemptionKey(entry)) ? 'P1-SAFE' : 'ERROR';
 }
 
 /**
@@ -640,22 +639,35 @@ fn quiet(&self) {
   if (classify(unannotatedOtherFile) !== 'ERROR') {
     failing.push('unannotated violation in any file must classify as ERROR (gate must not be vacuous)');
   }
+  // B1795831357716：自检必须用**合成豁免表**，不能依赖真实 VERIFIED_SAFE 的内容。
+  // 否则一旦豁免表清空（正是本次处置：删掉已失效的空豁免），这条判定就失去被验证的对象，
+  // 自检变成「因为无豁免所以豁免分类测不到」的假绿。
+  const syntheticExempt = new Map([
+    [
+      'mod.rs|forbidden-call|self.load_execution_checkpoint(|2040',
+      'self-test 合成豁免理由（不指向任何真实代码风险）',
+    ],
+  ]);
   const annotated = {
     relPath: 'mod.rs',
     kind: 'forbidden-call',
     detail: 'self.load_execution_checkpoint(',
     lockLine: 2040,
   };
-  if (classify(annotated) !== 'P1-SAFE') {
+  if (classify(annotated, syntheticExempt) !== 'P1-SAFE') {
     failing.push('Lead-verified-safe violation must classify as P1-SAFE');
   }
   const annotatedWrongLine = { ...annotated, lockLine: 2041 };
-  if (classify(annotatedWrongLine) !== 'ERROR') {
+  if (classify(annotatedWrongLine, syntheticExempt) !== 'ERROR') {
     failing.push('exemption must be pinned to the exact lock line (no blanket file exemption)');
   }
   const annotatedWrongDetail = { ...annotated, detail: 'self.load_graph_run(' };
-  if (classify(annotatedWrongDetail) !== 'ERROR') {
+  if (classify(annotatedWrongDetail, syntheticExempt) !== 'ERROR') {
     failing.push('exemption must be pinned to the exact called method');
+  }
+  // 合成表外的任何违规都必须阻塞（含真实表为空的情形）。
+  if (classify(annotated) !== 'ERROR') {
+    failing.push('empty real exemption table must not exempt anything');
   }
 
   if (failing.length > 0) {
