@@ -1,0 +1,5 @@
+{"kind":"batch.start","model":"backlog-v3","batch_id":"20261128T091110Z-core-architecture-d973","surface":"core-architecture","created_at":"2026-11-28T09:11:10.784Z"}
+{"kind":"annotate","at":"2026-11-28T09:11:17.462Z","id":"B1795831358893","description":"[NEEDS_HUMAN] 阻塞于人工拍板（详见 proposed/ ADR，未批复前按准入规则不得执行；涉及删除与对外行为变更，属红线）。"}
+{"kind":"annotate","at":"2026-11-28T09:11:17.535Z","id":"B1795831359003","description":"[NEEDS_HUMAN] 阻塞于人工拍板（详见 proposed/ ADR，未批复前按准入规则不得执行；涉及删除与对外行为变更，属红线）。"}
+{"kind":"annotate","at":"2026-11-28T09:11:17.604Z","id":"B1795831359205","description":"[NEEDS_HUMAN] 阻塞于人工拍板（详见 proposed/ ADR，未批复前按准入规则不得执行；涉及删除与对外行为变更，属红线）。"}
+{"kind":"annotate","at":"2026-11-28T09:11:17.666Z","id":"B1795831359338","description":"[NEEDS_HUMAN] 阻塞于人工拍板（详见 proposed/ ADR，未批复前按准入规则不得执行；涉及删除与对外行为变更，属红线）。"}
