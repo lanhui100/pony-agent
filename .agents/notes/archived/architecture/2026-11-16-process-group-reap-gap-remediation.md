@@ -1,6 +1,6 @@
 # Agent Note: 子进程组回收缺口补齐（Drop / pipe-missing 分支 / updater 裸 Command / 模块文档失真）
 
-Status: proposed
+Status: archived
 
 工单：B205
 

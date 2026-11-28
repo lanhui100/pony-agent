@@ -1,6 +1,6 @@
 # Agent Note: 轮内增量落盘——按工具步骤边界提交，而不是只在轮末
 
-Status: proposed
+Status: archived
 
 ## Problem
 

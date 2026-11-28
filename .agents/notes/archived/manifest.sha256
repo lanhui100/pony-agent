@@ -116,3 +116,5 @@ a6edc785158107ab94fa3d4d2b4c9ef99d45b92e0f3771a928f220e525a79023  .agents/notes/
 e4b6e72f05e27e98386704ecf353ed4b736ab883e4c5322a25fe90c0435eb096  .agents/notes/archived/simplification/2026-10-18-remove-ponysentry-enabled-switch.md
 091ca41f1791972803d71874288edf992752457cc0915174d1c84bedbde0f5e2  .agents/notes/archived/testing/2026-11-01-decouple-sentry-issues-to-harness.md
 5b8dd4997fee855341b547e667b8766f0655a539b38d17468cc9c1f1edda429b  .agents/notes/archived/testing/2026-11-12-carousel-phase-must-be-pinned.md
+c3f52a9429ce4b0034790c032fb07f8dda0fea22fcf881540e7b134207c3bb52  .agents/notes/archived/architecture/2026-11-16-process-group-reap-gap-remediation.md
+3bdfeb1378bbac722cf7aa7dc9b553382c112cafd3f51f9f1aaa4436c34cff34  .agents/notes/archived/architecture/2026-11-17-turn-incremental-persist.md
