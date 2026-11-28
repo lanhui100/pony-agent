@@ -1210,6 +1210,23 @@ mod tests {
         Some(count)
     }
 
+    /// 轮询等到线程数满足 `done`，最多 5s 后返回实测值。
+    ///
+    /// 为什么不能断言瞬时值：线程名由**新线程自身**在启动后写入 `comm`，`spawn()` 返回时
+    /// 它可能还叫父线程的名字 ⇒ 刚 spawn 完立刻数会少（CI 上实测 3/4）。退出侧同理，
+    /// 内核回收 tid 与 `join()` 返回之间有可见性延迟。
+    /// 这里等的是**必然发生的正向事件**，不是「赌它还没发生」；超时仍不满足才判红。
+    fn wait_for_thread_count(prefix: &str, done: impl Fn(usize) -> bool) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let count = count_threads_with_prefix(prefix).unwrap_or(0);
+            if done(count) || std::time::Instant::now() >= deadline {
+                return count;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     fn sleeper_spec() -> AcpAgentSpec {
         AcpAgentSpec {
             id: "sleeper".to_string(),
@@ -1228,7 +1245,9 @@ mod tests {
     ///
     /// 旧实现把 `JoinHandle` 直接丢弃，于是「子进程已死」不等于「线程已退出」——
     /// 分发线程可能活到 handler 返回之后。判据取**进程级线程数**而不是时间窗口：
-    /// 线程名是我们自己起的（`acp-inbound-<n>`），数量变化是确定性事实，不靠 sleep 抢跑。
+    /// 线程名是我们自己起的（`acp-inbound-<n>`），数量变化是确定性事实。
+    /// 「达到 N 个」用轮询等（线程名由新线程自身写入，spawn 返回瞬间可能还没写），
+    /// 「回落到基线」也轮询等（join 已同步，等的是内核回收 tid 的可见性）。
     #[test]
     fn close_joins_inbound_worker_threads() {
         let _serial = thread_count_lock();
@@ -1239,7 +1258,9 @@ mod tests {
         let cwd = std::env::temp_dir();
         let mut transport = AcpTransport::spawn(&sleeper_spec(), &cwd, &[])
             .expect("spawn 一个 sleep 子进程不应失败");
-        let during = count_threads_with_prefix("acp-inbound-").expect("/proc 可读");
+        let during = wait_for_thread_count("acp-inbound-", |n| {
+            n >= baseline + ACP_INBOUND_WORKERS
+        });
         assert_eq!(
             during,
             baseline + ACP_INBOUND_WORKERS,
@@ -1248,7 +1269,7 @@ mod tests {
 
         transport.close();
 
-        let after = count_threads_with_prefix("acp-inbound-").expect("/proc 可读");
+        let after = wait_for_thread_count("acp-inbound-", |n| n <= baseline);
         assert_eq!(
             after, baseline,
             "close() 之后 worker 必须全部退出（实测 {after}，基线 {baseline}）——句柄被丢弃即为违约"

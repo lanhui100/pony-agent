@@ -42,6 +42,10 @@ Status: implemented
   - `close_joins_inbound_worker_threads`：spawn 后 `acp-inbound-*` 恰为基线 +
     `ACP_INBOUND_WORKERS`，`close()` 后回到基线。**判据是线程数这个确定性事实，不靠 sleep 抢跑**；
   - `close_is_idempotent_after_join`：`close()` 两次 + `Drop` 再调一次不 panic。
+- **判据实现必须轮询而非瞬时取样**（2026-11-28 CI 实测修正）：`std::thread::Builder::name()`
+  的线程名由**新线程自身**在启动后写入 `comm`，`spawn()` 返回瞬间它可能还叫父线程的名字——
+  GitHub runner 上首跑实测 3/4 而红。现用 `wait_for_thread_count` 轮询等待「达到 N」与
+  「回落到基线」这两个**必然发生的正向事件**（上限 5s，超时才判红），既消掉竞态又不放宽判据。
 - 代价：`close()` 的最坏耗时从「宽限期 + kill」变成「宽限期 + kill + 最长 handler 剩余时间」。
   这是**正确的**方向——旧行为只是把这段时间藏起来，让调用方误以为已经关完。
 
@@ -59,7 +63,7 @@ Status: implemented
 
 ## Verification
 
-- `bash scripts/cargo-lane.sh test -p pony-acp --lib transport::` → 2 passed
+- `bash scripts/cargo-lane.sh test -p pony-acp --lib transport::` → 2 passed（连跑 5 次全绿，确认不 flaky）
 - `bash scripts/cargo-lane.sh test -p pony-agent-core --test acp_suite` → 144 passed / 0 failed / 0 ignored
 - `bash scripts/cargo-lane.sh check -p pony-acp --all-targets` → 通过
 
