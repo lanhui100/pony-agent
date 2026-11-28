@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -101,12 +101,27 @@ function probeVersion(binPath) {
       stdio: ["ignore", "pipe", "ignore"]
     });
     const line = out.trim().split("\n")[0].trim();
-    // 取行尾的版本号 token（`pony 0.1.203` / `ponycli 0.1.203`）
-    const token = line.split(/\s+/).pop();
-    return token && /\d/.test(token) ? token : null;
+    return extractVersionToken(line);
   } catch {
     return null;
   }
+}
+
+/**
+ * B1795832157497：从 `--version` 首行提取 semver 形状的版本号。
+ *
+ * 早期实现取「行尾 token」，但 `pony --version` 的首行是
+ * `pony 0.1.179 · linux-x86_64`——行尾是平台三元组（含数字，故被判为合法版本），
+ * 于是 `pony` 被判成 `linux-x86_64`、`ponycli` 被判成 `0.1.179`，
+ * 每次安装收尾都误报「两 bin 版本漂移」。
+ *
+ * 现口径：首行里第一个匹配 `\d+\.\d+\.\d+` 的 token 才是版本号；取不到即视为不支持。
+ * 只认三段式 semver（与 `version:check` 的四处同步口径一致），避免把 `2026-11-28` 之类当版本。
+ */
+export function extractVersionToken(line) {
+  if (typeof line !== "string") return null;
+  const match = line.match(/\d+\.\d+\.\d+/);
+  return match ? match[0] : null;
 }
 
 function reportInstalledVersions(bins, toDir) {
@@ -145,9 +160,16 @@ function main() {
   reportInstalledVersions(opts.bins, opts.to);
 }
 
-try {
-  main();
-} catch (err) {
-  console.error(`[install-cli] 失败：${err.message}`);
-  process.exit(1);
+// 只有被直接执行时才跑 main；被 spec 导入（测 extractVersionToken）时保持纯函数。
+const selfUrl = pathToFileURL(fs.realpathSync(fileURLToPath(import.meta.url))).href;
+const invokedUrl = process.argv[1]
+  ? pathToFileURL(fs.realpathSync(process.argv[1])).href
+  : null;
+if (invokedUrl === selfUrl) {
+  try {
+    main();
+  } catch (err) {
+    console.error(`[install-cli] 失败：${err.message}`);
+    process.exit(1);
+  }
 }

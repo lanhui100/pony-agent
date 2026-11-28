@@ -138,6 +138,14 @@
 # (3) metrics / logs 维持结构性 N-A（同上：无常驻监听地址、无 /metrics）；`acp://delegate` 是
 #     窗口事件，不是遥测出口，不参与四维归属。
 # ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。提交信息须带 [decl-change-approved]。
+# ACP 入站线程生命周期收口（B177 ADVISORY ②，ADR 2026-11-28-acp-inbound-thread-lifecycle）追加说明：
+# (1) 无新增出口：`AcpTransport::close()` 从「丢弃线程句柄」改为「join 三组工作线程」
+#     （`acp-stdout` / `acp-stderr` / `acp-inbound-<n>`），线程仍是进程内既有那三组，
+#     不新建常驻线程、不新增定时器、不新增网络/子进程出口。
+# (2) 无新增 tracing 落点：诊断仍写既有 `stderr_tail` 有界环形缓冲与既有结构化日志行；
+#     issues 落点仍是 `agent/ponysentry/client.rs`。日志字段集不变。
+# (3) metrics / logs 维持结构性 N-A（无常驻监听地址、无 /metrics）。
+# ⇒ 本卡不新增 applicable 判定、不新增 enforcement_point。
 # 上游重试真值面（ADR 2026-11-14-upstream-retry-count-and-status-surface，backlog:B154/B155）与
 # 其桌面端接线（ADR 2026-11-14-desktop-retry-progress-surface）归属说明：
 # (1) 库层：`agent/retry.rs` 新增线程局部观察者（`RetryNotice` / `install_retry_observer` /

@@ -324,8 +324,6 @@ pub enum UiEvent {
     /// `run_id` 缺失时**不投递本事件**（决策侧 fail-closed，绝不静默回落新轮）。
     /// 同样**不得** `add_user_message`：这不是用户发言，不能产生用户气泡。
     ApprovalResumeTurn { prompt: String, run_id: String },
-    /// Plan 模式状态更新通知（模式开关 + 方案正文，不含步骤清单）
-    PlanUpdated(PlanModeState),
     /// 任务看板更新通知
     TaskBoardUpdated(Vec<TuiTask>),
     /// Goal 状态更新通知
@@ -13855,9 +13853,6 @@ fn tui_event_loop(
                         run_id, turn_id_for_log, state.session_id
                     );
                     dirty = true;
-                }
-                UiEvent::PlanUpdated(plan) => {
-                    state.update_plan(plan);
                 }
                 UiEvent::TaskBoardUpdated(tasks) => {
                     state.update_task_board(tasks);

@@ -199,6 +199,14 @@ pub enum TurnEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_activity_id: Option<String>,
     },
+    /// **已退役（retired，B1795824704407）**：Plan 收敛为会话级协作模式后
+    /// （ADR 2026-11-27-plan-mode-dsh-alignment-and-task-count），Plan 状态一律经控制面
+    /// `plan_mode_get` 拉取，本变体**不再有任何 emit 点**。
+    ///
+    /// 保留而不删除的理由是**持久化兼容**：`TurnEvent` 是会话日志的线缆枚举，删掉变体会让
+    /// 含 `plan/update` 的历史日志反序列化失败。故按 additive-retire 处理——变体在、wire 名
+    /// 在、投影仍能读历史日志，但新代码**不得再发**该事件。复活条件见
+    /// `.agents/notes/implemented/simplification/2026-11-28-retire-plan-update-wire-event.md`。
     PlanUpdate {
         plan_state: Value,
     },
