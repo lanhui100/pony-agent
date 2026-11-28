@@ -3,7 +3,7 @@ import { ref } from "vue";
 import { setActivePinia, createPinia } from "pinia";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useProviderStore } from "@/stores/providers";
-import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
+import { useTraceProjection } from "@/composables/useTraceProjection";
 import type { TurnTraceRecord, TraceTimelineEntry } from "@/types/runtime";
 
 describe("useTraceProjection - contextDisplayTokens computation", () => {

@@ -11,6 +11,7 @@ import {
   bindFrontendRecorderTurn,
   initFrontendFlightRecorder,
 } from "@/lib/frontend-flight-recorder";
+import { useAskStore } from "@/stores/ask";
 import { useProviderStore } from "@/stores/providers";
 import { useSettingsStore } from "@/stores/settings";
 import { isRetryableError } from "@/lib/error-utils";
@@ -896,11 +897,11 @@ export const orchestrationActions = {
     bindFrontendRecorderSession(nextSessionId);
     bindFrontendRecorderTurn(null);
 
-    // 切换会话时同步刷新/过滤 pending ask，防止跨会话请求残留导致 CAS 冲突
+    // 切换会话时同步刷新/过滤 pending ask，防止跨会话请求残留导致 CAS 冲突。
+    // 静态导入而非 `await import()`：ask store 只依赖 lib/tauri，与 runtime 无环；
+    // 动态导入一个同时被组件静态导入的模块不会分包，只会产生 INEFFECTIVE_DYNAMIC_IMPORT 噪音。
     try {
-      const { useAskStore } = await import("@/stores/ask");
-      const askStore = useAskStore();
-      void askStore.refresh({ sessionId: nextSessionId });
+      void useAskStore().refresh({ sessionId: nextSessionId });
     } catch {
       // non-fatal
     }

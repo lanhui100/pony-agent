@@ -50,8 +50,8 @@ export const TOOL_ROW_SELECTOR = "[data-pds-tool-row]";
 /** 契约 §7 中点名的、本波会改动动效的源文件（含 SFC `<style>`）。 */
 export const CSS_SOURCES = [
   "src/styles.css",
-  ".agents/skills/streaming-motion/primitives.css",
-  ".agents/skills/streaming-motion/tokens.css",
+  "src/styles/motion/primitives.css",
+  "src/styles/motion/tokens.css",
   "src/components/MarkdownRenderer.vue",
   "src/components/chat/WorkspaceTurnItem.vue",
   "src/components/chat/AgentRuntimeStatusBar.vue",

@@ -8,8 +8,8 @@
 
 ```css
 /* 全局唯一入口，例如 src/styles.css 顶部 */
-@import "../../.agents/skills/streaming-motion/tokens.css";
-@import "../../.agents/skills/streaming-motion/primitives.css";
+@import "./src/styles/motion/tokens.css";
+@import "./src/styles/motion/primitives.css";
 ```
 
 ## 2. 释放节奏（budget）

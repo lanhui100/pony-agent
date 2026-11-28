@@ -34,7 +34,7 @@ import { ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { useRuntimeStore } from "@/stores/runtime";
 import { useProviderStore } from "@/stores/providers";
-import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
+import { useTraceProjection } from "@/composables/useTraceProjection";
 import {
   countTurnProviderCalls,
   resolveCallGenerationSpeed,

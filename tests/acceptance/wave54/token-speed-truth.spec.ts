@@ -22,7 +22,7 @@ import { mount } from "@vue/test-utils";
 import { TooltipProvider } from "reka-ui";
 import HomeStatusPanel from "@/components/HomeStatusPanel.vue";
 import { useRuntimeStore } from "@/stores/runtime";
-import { useTraceProjection } from "@/lib/runtime/useTraceProjection";
+import { useTraceProjection } from "@/composables/useTraceProjection";
 import * as tokenMetricsModule from "@/lib/runtime/token-metrics";
 import type {
   ProviderCallCacheRecord,
