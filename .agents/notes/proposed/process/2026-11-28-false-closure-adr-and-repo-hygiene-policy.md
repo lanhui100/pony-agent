@@ -4,6 +4,9 @@ Status: proposed
 
 > **人工已批准（2026-11-28）**：方案照此执行，阻塞解除；落地进度见 `backlog:B1795831359205 / B1795831359338`。
 > 本文件**仍留在 `proposed/`**直到代码在同一提交里落地——批准 ≠ 实现，提前迁 `implemented/` 即假闭环。
+>
+> **落地进度（仓库卫生部分，B1795831359338）**：删除根目录 12 个一次性报告 JSON、`AGENT.md`（与 `AGENTS.md` 正面冲突）、`playground/rust-hello/{hello.exe,hello.pdb}`、`scripts/file-size-baseline.json.bak`；4 篇散落调研 md 迁入 `docs/archive/root-reports/`（附归档说明）；`docs/INDEX.md` 与 `ci.yml` 注释改指 `AGENTS.md`。新增根目录白名单门 `scripts/check-root-allowlist.mjs` + 5 项正负样本自检（接入 `verify` 与 `ponygo-governance.yml`）：根级新增被跟踪文件必须显式登记，否则 exit 1。
+> **未落地**：`docs/observability.yaml` 17 次重复注记与 `reqwest::Client` 补录、9 个新 crate + `src-tauri` 的 README 覆盖（判据 1.9c）、`docs/` 中 78+238 处退役路径引用、`.dev-team/` 46MB 分期瘦身、B074/B079 二选一裁决 —— 均需独立波次或人工拍板。
 
 ## Problem
 

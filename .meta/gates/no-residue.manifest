@@ -25,3 +25,18 @@ src/lib/event-bus	tests/
 @/components/AskPanel	src/
 @/components/AskPanel	tests/
 data-testid="ask-panel"	tests/
+# B1795831359338：根目录双根冲突文件与一次性报告/二进制产物
+# （AGENT.md 与 AGENTS.md 正面冲突：前者声称事实写 AGENT.md / 使用 OpenSpec / docs/decisions/，
+#  后者是本仓真源。索引与 CI 注释改指向 AGENTS.md；hello.rs 源文件保留，只删其编译产物）
+# 范围收窄到生产树：AGENT.md 在 openspec/ 与 docs/archive/ 的历史快照里按设计仍被引用
+# （历史归档只读区不篡改，见 ADR Risks 节）。
+AGENT.md	src/
+AGENT.md	src-tauri/
+AGENT.md	crates/
+AGENT.md	.github/
+AGENT.md	scripts/
+# 一次性报告 JSON（purity_*/test_report/test_sample/fake_failed_report/red-purity-report）不登记：
+# 它们零代码消费面（引用只在彼此之间自环，已随文件消失），而名字过于通用 ——
+# `purity_report` 同时是 .dev-team 历史回执里的 JSON 字段键，登记只会制造假阳性。
+# 这类文件由根目录白名单门看守（新增游离文件直接拒），不需要零残留门重复看守。
+file-size-baseline.json.bak	scripts/

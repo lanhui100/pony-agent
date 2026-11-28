@@ -78,7 +78,7 @@ jobs:
         with:
           tool: cargo-nextest
 
-      # 缓存必须对齐 AGENT.md 的 target 槽位约定：check 与 test 分别设 prefix-key 隔离缓存
+      # 缓存必须对齐 AGENTS.md 的 target 槽位约定：check 与 test 分别设 prefix-key 隔离缓存
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.outputs.needs_rust == 'true'
         with:

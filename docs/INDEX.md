@@ -2,7 +2,7 @@
 
 ## 1. 总览
 
-- [项目记忆文件](../AGENT.md)
+- [工程治理总则与导航](../AGENTS.md)
 - [重构说明](tauri-rust-refactor.md)
 - [设计基础](design-foundations.md)
 - [仓库对比索引](repo-comparison-index.md)
@@ -162,7 +162,7 @@
 
 ## 12. 文档使用建议
 
-- 想快速理解项目：先看 `AGENT.md`
+- 想快速理解项目：先看 `AGENTS.md`（工程治理总则）与 `README.md`（人读契约）
 - 想理解为什么这样做：看"决策记录"
 - 想理解方向和边界：看"架构"与"路线图"
 - 想开始写代码：看"开发指南"
