@@ -96,6 +96,41 @@ try {
   } else {
     console.log("  - P4 跳过（非 linux 或无 /bin/sleep）");
   }
+
+  // P5：版本 token 提取（B1795832157497 回归守卫）——必须抓 semver，不得把平台三元组当版本
+  const { extractVersionToken } = await import(scriptPath);
+  const p5cases = [
+    ["pony 0.1.179 · linux-x86_64", "0.1.179"],
+    ["ponycli 0.1.179", "0.1.179"],
+    ["pony 0.1.203 · darwin-aarch64", "0.1.203"],
+    ["pony 1.0.0", "1.0.0"],
+    ["ponycli", null],
+    ["", null],
+    ["pony 0.1 · linux-x86_64", null]
+  ];
+  for (const [line, expected] of p5cases) {
+    const actual = extractVersionToken(line);
+    check(
+      `P5 解析「${line}」=> ${expected === null ? "null" : expected}`,
+      actual === expected,
+      `actual=${JSON.stringify(actual)}`
+    );
+  }
+
+  // P6：端到端——两 bin 同版本时不得误报漂移（原缺陷：pony 被判成 linux-x86_64）
+  const fakeBin = (body) => `#!/usr/bin/env node\nconsole.log(${JSON.stringify(body)});\n`;
+  fs.writeFileSync(path.join(from, "pony"), fakeBin("pony 0.1.179 · linux-x86_64"));
+  fs.writeFileSync(path.join(from, "ponycli"), fakeBin("ponycli 0.1.179"));
+  const r6 = runInstall(from, to, ["pony", "ponycli"]);
+  check("P6 同版本安装 exit 0", r6.code === 0, `exit=${r6.code}\n${r6.out}`);
+  check("P6 不误报漂移", !r6.out.includes("版本漂移"), r6.out);
+  check("P6 pony 版本正确", r6.out.includes("pony 0.1.179"), r6.out);
+  check("P6 ponycli 版本正确", r6.out.includes("ponycli 0.1.179"), r6.out);
+
+  // P7：真漂移仍须告警（守卫不能被改宽成「永不告警」）
+  fs.writeFileSync(path.join(from, "ponycli"), fakeBin("ponycli 0.1.178"));
+  const r7 = runInstall(from, to, ["pony", "ponycli"]);
+  check("P7 漂移仍告警", r7.code === 0 && r7.out.includes("版本漂移"), `exit=${r7.code}\n${r7.out}`);
 } catch (err) {
   failures++;
   console.error(`  ✗ 自检异常终止：${err.message}`);

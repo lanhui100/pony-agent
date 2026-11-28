@@ -207,3 +207,44 @@ fn cancelled_turn_keeps_single_row() {
     );
     assert!(state.messages[0].content.starts_with("本轮已停止"));
 }
+
+/// 2026-11-28 回归：作答/审批后，上一轮的「等你作答」留痕必须立刻失效。
+///
+/// 现场：Ctrl+T → Goal 页签在用户已作答、目标已重新开跑之后仍挂着
+/// 「续轮暂停：等你作答｜本轮在等你作答/审批｜作答后自动继续」，底栏图标也停在 `◌`
+/// （续轮未在跑）。根因是这条留痕只由「用户提交消息」与「goal 自动起轮」两处置空，
+/// 而 `UiEvent::AskResumeTurn` / `ApprovalResumeTurn` 两条续轮入口都不经那两处。
+/// 修复后复位收敛到本轮起点唯一锚点 `begin_turn_usage()`，两个续轮入口都会先调它。
+#[test]
+fn new_turn_start_clears_stale_goal_stop_reason() {
+    let mut state = TuiState::default();
+    state.apply_goal_rounds_stopped(
+        GoalRoundStopReason::TurnSuspended,
+        GoalRoundStopReason::TurnSuspended.visible_line(),
+    );
+    assert!(state.goal_rounds_stopped.is_some(), "前置：留痕已写入");
+
+    state.begin_turn_usage();
+
+    assert_eq!(
+        state.goal_rounds_stopped, None,
+        "新一轮起点必须清掉上一轮的续轮停止留痕，否则面板会继续宣称「等你作答」"
+    );
+}
+
+/// 复位点只清「上一轮」的留痕：本轮写入的停止原因必须活到下一次轮次起点。
+#[test]
+fn stop_reason_survives_until_next_turn() {
+    let mut state = TuiState::default();
+    state.begin_turn_usage();
+    let reason = GoalRoundStopReason::BudgetExhausted {
+        rounds_started: 3,
+        max_rounds: 3,
+    };
+    state.apply_goal_rounds_stopped(reason.clone(), reason.visible_line());
+
+    assert!(
+        state.goal_rounds_stopped.is_some(),
+        "本轮写入的停止原因必须活到下一次轮次起点"
+    );
+}
