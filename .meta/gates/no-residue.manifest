@@ -1,0 +1,16 @@
+# no-residue 清单（A8 零残留门）：<被删名字的字面串>\t<检索范围>
+#
+# 范围口径：只登记**生产树**（crates/ src/ src-tauri/），不登记 `.agents/`、`backlog/`、`.dev-team/`——
+# 那些是决策史与账本，按设计会保留被删名字（ADR 的 Problem 段必须能写出"删了什么"）。
+# 全树登记会把"记录删除"与"删除不彻底"混成同一条判据，门就只能逼人改历史。
+#
+# 校验：bash .meta/gates/no-residue.sh（已接入 .meta/gates/ci-verify.sh 第 4 段）
+
+# B1795831358623 一档：Rust 未挂载孤立死文件（无 mod.rs 挂载、全仓零引用）
+ConPtyDriver	crates/
+WindowsPtyDriver	crates/
+SkillWatchdog	crates/
+PonyAgentTestContext	crates/
+
+# B1795831358623 一档：一次性 wave-61 举证 example（证据已归档，232 行超限函数基线同步删除）
+w61_e2e_probe	crates/

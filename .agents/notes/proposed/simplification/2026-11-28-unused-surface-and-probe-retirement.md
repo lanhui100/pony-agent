@@ -4,6 +4,9 @@ Status: proposed
 
 > **人工已批准（2026-11-28）**：方案照此执行，阻塞解除；落地进度见 `backlog:B1795831358623 / B1795831359003`。
 > 本文件**仍留在 `proposed/`**直到代码在同一提交里落地——批准 ≠ 实现，提前迁 `implemented/` 即假闭环。
+>
+> **落地进度（一档已完成，B1795831358623）**：Rust 3 个未挂载孤立死文件（`pty/windows.rs`、`skills/watchdog.rs`、`test_utils/data_isolation.rs`）与 `examples/w61_e2e_probe.rs` 已删除，`file-size-baseline.json` 条目 56→55，`.meta/gates/no-residue.manifest` 首次启用并登记 5 个被删符号（范围限生产树 `crates/`，决策史/账本按设计保留名字）。
+> **未落地**：前端 `AskPanel.vue`（4 个测试共 1,147 行需迁移断言到 `AskUserToolCallCard.vue`）、`event-bus.ts` 见 `backlog:B1795831359003`；二档探针/示例二进制与 `non_tauri_harness` 去留、24 条悬空 IPC 收口仍待二档裁决（本 ADR 的 Proposal 第 2/3 条未获批执行范围）。
 
 ## Problem
 
