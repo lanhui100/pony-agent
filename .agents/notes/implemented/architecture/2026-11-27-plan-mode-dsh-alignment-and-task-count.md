@@ -100,3 +100,5 @@ Status: implemented
 1. `crates/pony-tools/src/plan_state.rs`（1308 行、17 个内部测试）在首轮改造里只下线了调用面，文件本体与其 `pub mod` 导出仍在仓内但零消费者（`grep -rn "plan_state::"` 除自身外为空）。本次整文件删除并清掉 `pony-tools/src/lib.rs` 与 `agent/mod.rs` 的两处导出，兑现本文「一步下线 `PlanStore`」的承诺。
 2. `contract_view_tests` 的两张模型可见名单仍冻结为旧名 `Plan`（与 `names.rs` 的 `ExitPlanMode` 冲突），本次同步为 `ExitPlanMode`——属本文已批准的改名收尾，非新契约。
 3. `PlanExecutionApproval` 线缆字段（166 触点 / 35 文件）确认为**有意留手**并登记账本 `B1795821777375`（P2 Debt）：删除需一次收敛 `DispatchContext`/`TurnInput`/前端 `runtime.ts`/契约快照，不宜与本次主改造同 PR 放大评审面。
+4. `TurnEvent::PlanUpdate`（wire 名 `plan/update`）与 TUI `UiEvent::PlanUpdated` 在 Plan 收敛为模式后**已无生产者**，只剩定义、`pony-storage/projection.rs` 的 whole-value 折叠与少数单测。不能直接删变体（会让含该事件的历史会话日志反序列化失败），故登记账本 `B1795824704407`（P3 Debt），按 additive-retire 策略处理。
+5. 文档与注释层面同步：`docs/guides/rust-agent.md` 模块表把已删的 `plan_state` 行替换为 `plan_mode`/`exit_plan_mode`；`contract_view_tests` 补 `ExitPlanMode` 别名断言；TUI `/approve` 单测模块注释与前端 `plan-goal-refresh.spec.ts` 用例标题中的旧名（`PlanStore`/`plan_list`）一并更正。
